@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const git = @import("git/diff.zig");
 const parser = @import("git/parser.zig");
+const syntax = @import("syntax.zig");
 const DiffSource = git.DiffSource;
 
 const Allocator = std.mem.Allocator;
@@ -13,10 +14,18 @@ const Color = struct {
     const black = .{ .index = 0 };
     const red = .{ .index = 1 };
     const green = .{ .index = 2 };
+    const yellow = .{ .index = 3 };
     const blue = .{ .index = 4 };
+    const magenta = .{ .index = 5 };
     const cyan = .{ .index = 6 };
     const white = .{ .index = 7 };
     const dim = .{ .index = 8 };
+
+    // Muted diff background colors (RGB for better control)
+    const diff_add_bg = .{ .rgb = [3]u8{ 13, 72, 32 } }; // Dark green #0d4820
+    const diff_delete_bg = .{ .rgb = [3]u8{ 72, 13, 13 } }; // Dark red #480d0d
+    const diff_add_fg = .{ .rgb = [3]u8{ 200, 255, 200 } }; // Light green text
+    const diff_delete_fg = .{ .rgb = [3]u8{ 255, 200, 200 } }; // Light red text
 };
 
 // Layout constants
@@ -54,6 +63,7 @@ pub const App = struct {
     header_line_buffers: [Layout.header_height][HEADER_BUFFER_WIDTH]u8,
     frame_text_buffer: []u8,
     frame_text_used: usize,
+    syntax_highlighter: syntax.SyntaxHighlighter,
 
     const Mode = enum {
         normal, // File navigation
@@ -103,6 +113,8 @@ pub const App = struct {
         const frame_buffer = try allocator.alloc(u8, FRAME_TEXT_CAPACITY);
         @memset(frame_buffer, 0);
 
+        const syntax_highlighter = try syntax.SyntaxHighlighter.init(allocator);
+
         return App{
             .allocator = allocator,
             .vx = vx,
@@ -122,6 +134,7 @@ pub const App = struct {
             .header_line_buffers = header_buffers,
             .frame_text_buffer = frame_buffer,
             .frame_text_used = 0,
+            .syntax_highlighter = syntax_highlighter,
         };
     }
 
@@ -131,6 +144,7 @@ pub const App = struct {
         }
         self.allocator.free(self.state.files);
         self.allocator.free(self.frame_text_buffer);
+        self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.anyWriter());
         self.tty.deinit();
     }
@@ -630,6 +644,39 @@ pub const App = struct {
         try self.printHeaderLine(win, 1, file_text, .{ .fg = Color.blue });
     }
 
+    // Ensure syntax highlights are loaded for the given file
+    fn ensureHighlights(self: *App, file: *parser.FileDiff) !void {
+        if (file.highlights != null) return; // Already cached
+
+        // Build the NEW file content from hunks
+        // Skip deletions (old file), include additions and context (new file)
+        var content = std.ArrayList(u8).init(self.allocator);
+        defer content.deinit();
+
+        for (file.hunks) |hunk| {
+            for (hunk.lines) |line| {
+                switch (line.line_type) {
+                    .delete => {}, // Skip deletions - not in new file
+                    .add, .context => {
+                        try content.appendSlice(line.content);
+                        try content.append('\n');
+                    },
+                }
+            }
+        }
+
+        // Get file path (prefer new_path for syntax detection)
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        // Generate highlights
+        const highlights = try self.syntax_highlighter.highlightFile(file_path, content.items);
+
+
+        // Cache them (NOTE: This modifies a "const" pointer, which is a hack for now)
+        const mutable_file = @constCast(file);
+        mutable_file.highlights = highlights;
+    }
+
     fn calculateDiffStats(self: *App, file: *const parser.FileDiff) struct { additions: usize, deletions: usize } {
         _ = self;
         var additions: usize = 0;
@@ -659,6 +706,10 @@ pub const App = struct {
         if (self.state.current_file_idx >= self.state.files.len) return;
 
         const file = &self.state.files[self.state.current_file_idx];
+
+        // Ensure syntax highlights are loaded for this file
+        try self.ensureHighlights(file);
+
         self.state.viewport_height = win.height;
         self.clampScrollOffset();
         self.adjustScrollToKeepCursorVisible(win.height);
@@ -685,7 +736,7 @@ pub const App = struct {
         var row: usize = 0;
         var line_idx: usize = 0;
 
-        for (file.hunks) |hunk| {
+        for (file.hunks, 0..) |hunk, hunk_idx| {
             if (line_idx + hunk.lines.len < self.state.scroll_offset) {
                 line_idx += hunk.lines.len + 1; // +1 for hunk header
                 continue;
@@ -698,14 +749,14 @@ pub const App = struct {
             }
             line_idx += 1;
 
-            for (hunk.lines) |line| {
+            for (hunk.lines, 0..) |line, line_idx_in_hunk| {
                 if (line_idx < self.state.scroll_offset) {
                     line_idx += 1;
                     continue;
                 }
 
                 if (row >= win.height) break;
-                const rows_used = try self.renderDiffLine(win, line, line_idx, row, content_width);
+                const rows_used = try self.renderDiffLine(win, file, hunk_idx, line_idx_in_hunk, line, line_idx, row, content_width);
                 row += rows_used;
                 line_idx += 1;
             }
@@ -1301,6 +1352,9 @@ pub const App = struct {
     fn renderDiffLine(
         self: *App,
         win: vaxis.Window,
+        file: *const parser.FileDiff,
+        hunk_idx: usize,
+        line_idx_in_hunk: usize,
         line: parser.Line,
         line_idx: usize,
         row: usize,
@@ -1320,7 +1374,287 @@ pub const App = struct {
             .add, .context => line.new_lineno,
         };
 
-        return try self.renderWrappedText(win, line.content, line_idx, row, content_width, is_cursor, style, file_lineno);
+        // Apply syntax highlighting to all lines (context, additions, deletions)
+        // Calculate byte offset for syntax highlighting
+        const byte_offset = getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
+
+        return try self.renderWrappedTextWithHighlights(
+            win,
+            line.content,
+            byte_offset,
+            file.highlights,
+            line_idx,
+            row,
+            content_width,
+            is_cursor,
+            style,
+            file_lineno,
+        );
+    }
+
+    // Calculate byte offset of a line in the NEW file content
+    // Used to map line positions to highlight byte offsets
+    // Skips deletions since they're not in the reconstructed file
+    fn getLineByteOffset(file: *const parser.FileDiff, target_hunk_idx: usize, target_line_idx: usize) usize {
+        var offset: usize = 0;
+
+        for (file.hunks, 0..) |hunk, hunk_idx| {
+            for (hunk.lines, 0..) |line, line_idx| {
+                if (hunk_idx == target_hunk_idx and line_idx == target_line_idx) {
+                    return offset;
+                }
+                // Only count additions and context (deletions are not in new file)
+                switch (line.line_type) {
+                    .delete => {}, // Skip - not in reconstructed content
+                    .add, .context => {
+                        offset += line.content.len + 1; // +1 for newline
+                    },
+                }
+            }
+        }
+
+        return offset;
+    }
+
+    // Generate colored segments for a line of text using syntax highlights
+    // Returns array of segments with syntax colors applied as foreground
+    fn createHighlightedSegments(
+        self: *App,
+        text: []const u8,
+        line_byte_offset: usize,
+        highlights: ?[]syntax.Highlight,
+        base_style: vaxis.Style,
+    ) ![]vaxis.Cell.Segment {
+        if (highlights == null or text.len == 0) {
+            // No highlights - return single segment
+            var segments = try self.allocator.alloc(vaxis.Cell.Segment, 1);
+            segments[0] = .{
+                .text = text,
+                .style = base_style,
+            };
+            return segments;
+        }
+
+        const file_highlights = highlights.?;
+
+        // Find highlights that overlap with this line
+        var relevant_highlights = std.ArrayList(syntax.Highlight).init(self.allocator);
+        defer relevant_highlights.deinit();
+
+        const line_start = line_byte_offset;
+        const line_end = line_byte_offset + text.len;
+
+        for (file_highlights) |h| {
+            // Check if highlight overlaps with this line
+            if (h.end_byte > line_start and h.start_byte < line_end) {
+                // Adjust highlight bounds to line-local coordinates
+                const local_start = if (h.start_byte > line_start) h.start_byte - line_start else 0;
+                const local_end = if (h.end_byte < line_end) h.end_byte - line_start else text.len;
+
+                try relevant_highlights.append(.{
+                    .start_byte = local_start,
+                    .end_byte = local_end,
+                    .category = h.category,
+                });
+            }
+        }
+
+        if (relevant_highlights.items.len == 0) {
+            // No relevant highlights - return single segment
+            var segments = try self.allocator.alloc(vaxis.Cell.Segment, 1);
+            segments[0] = .{
+                .text = text,
+                .style = base_style,
+            };
+            return segments;
+        }
+
+        // Build segments by splitting text at highlight boundaries
+        var segments = std.ArrayList(vaxis.Cell.Segment).init(self.allocator);
+        errdefer segments.deinit();
+
+        var pos: usize = 0;
+        while (pos < text.len) {
+            // Find the next highlight that starts at or after pos
+            var next_highlight: ?syntax.Highlight = null;
+            var next_start: usize = text.len;
+
+            for (relevant_highlights.items) |h| {
+                if (h.start_byte <= pos and h.end_byte > pos) {
+                    // We're inside this highlight
+                    next_highlight = h;
+                    next_start = pos;
+                    break;
+                } else if (h.start_byte > pos and h.start_byte < next_start) {
+                    next_start = h.start_byte;
+                }
+            }
+
+            if (next_highlight) |h| {
+                // Render highlighted segment
+                const end = @min(h.end_byte, text.len);
+                const chunk = text[pos..end];
+
+                // Apply GitHub-inspired syntax colors
+                // Use brighter/bolder colors on colored backgrounds for readability
+                const highlight_color = h.getColor();
+                var style = base_style;
+
+                // Check if we're on a colored background (add/delete line)
+                // RGB colors indicate diff backgrounds
+                const has_colored_bg = switch (style.bg) {
+                    .rgb => true,
+                    else => false,
+                };
+
+                switch (highlight_color) {
+                    .red => {
+                        // Keywords - red/orange (GitHub: #d73a49)
+                        // Use bright yellow on colored backgrounds for better contrast
+                        if (has_colored_bg) {
+                            style.fg = Color.yellow;
+                            style.bold = true;
+                        } else {
+                            style.fg = Color.red;
+                            style.bold = true;
+                        }
+                    },
+                    .magenta => {
+                        // Functions - magenta/purple (GitHub: #6f42c1)
+                        style.fg = Color.magenta;
+                        style.bold = has_colored_bg; // Bold on colored backgrounds
+                    },
+                    .yellow => {
+                        // Classes/Types - yellow (GitHub: #e36209)
+                        style.fg = Color.yellow;
+                        style.bold = has_colored_bg;
+                    },
+                    .blue => {
+                        // Strings/Numbers/Constants - blue (GitHub: #032f62, #005cc5)
+                        // Use cyan on colored backgrounds for better visibility
+                        if (has_colored_bg) {
+                            style.fg = Color.cyan;
+                            style.bold = false;
+                        } else {
+                            style.fg = Color.blue;
+                            style.bold = false;
+                        }
+                    },
+                    .cyan => {
+                        // Comments - cyan (GitHub: #6a737d)
+                        style.fg = Color.cyan;
+                        style.dim = !has_colored_bg; // Don't dim on colored backgrounds
+                    },
+                    .green => {
+                        // Unused but keep for completeness
+                        style.fg = Color.green;
+                        style.bold = has_colored_bg;
+                    },
+                    .white, .black => {
+                        // Variables/Default - keep base style foreground
+                        // (which is already light green/red for add/delete)
+                    },
+                }
+
+                try segments.append(.{
+                    .text = chunk,
+                    .style = style,
+                });
+
+                pos = end;
+            } else {
+                // Render unhighlighted segment until next highlight
+                const chunk = text[pos..next_start];
+                try segments.append(.{
+                    .text = chunk,
+                    .style = base_style,
+                });
+
+                pos = next_start;
+            }
+        }
+
+        return segments.toOwnedSlice();
+    }
+
+    // Render wrapped text with syntax highlighting applied
+    fn renderWrappedTextWithHighlights(
+        self: *App,
+        win: vaxis.Window,
+        text: []const u8,
+        byte_offset: usize,
+        highlights: ?[]syntax.Highlight,
+        line_idx: usize,
+        start_row: usize,
+        content_width: usize,
+        is_cursor: bool,
+        style: vaxis.Style,
+        file_lineno: ?u32,
+    ) !usize {
+        if (content_width == 0) return 1;
+
+        // Calculate number of wrapped rows needed
+        const num_rows = if (text.len == 0) 1 else (text.len + content_width - 1) / content_width;
+        if (num_rows == 0) {
+            // Empty line - still render one row
+            try self.renderGutter(win, line_idx, start_row, is_cursor, true, file_lineno);
+            const display_text = try self.padTextForCursor("", content_width, is_cursor);
+            var seg = [_]vaxis.Cell.Segment{.{
+                .text = display_text,
+                .style = style,
+            }};
+            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + Layout.gutter_width });
+            return 1;
+        }
+
+        var rows_rendered: usize = 0;
+        var text_offset: usize = 0;
+
+        while (text_offset < text.len) {
+            const current_row = start_row + rows_rendered;
+            if (current_row >= win.height) break;
+
+            // Only show line number on first row
+            const show_line_number = rows_rendered == 0;
+            try self.renderGutter(win, line_idx, current_row, is_cursor, show_line_number, file_lineno);
+
+            // Get the chunk of text for this row
+            const remaining = text.len - text_offset;
+            const chunk_len = @min(remaining, content_width);
+            const chunk = text[text_offset .. text_offset + chunk_len];
+
+            // Generate syntax-highlighted segments for this chunk
+            const chunk_byte_offset = byte_offset + text_offset;
+            const segments = try self.createHighlightedSegments(chunk, chunk_byte_offset, highlights, style);
+            defer self.allocator.free(segments);
+
+            // If cursor is on this line, we need to pad the segments
+            if (is_cursor and chunk.len < content_width) {
+                // Create a new segments array with padding
+                const padded_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len + 1);
+                defer self.allocator.free(padded_segments);
+
+                @memcpy(padded_segments[0..segments.len], segments);
+
+                // Add padding segment
+                const padding_len = content_width - chunk.len;
+                const padding = try self.frameTextSlice(padding_len);
+                @memset(padding, ' ');
+                padded_segments[segments.len] = .{
+                    .text = padding,
+                    .style = style,
+                };
+
+                _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + Layout.gutter_width });
+            } else {
+                _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = 1 + Layout.gutter_width });
+            }
+
+            text_offset += chunk_len;
+            rows_rendered += 1;
+        }
+
+        return if (rows_rendered == 0) 1 else rows_rendered;
     }
 
     fn renderWrappedText(
@@ -1472,8 +1806,8 @@ pub const App = struct {
     fn getLineStyle(self: *App, line_type: parser.Line.LineType) vaxis.Style {
         _ = self;
         return switch (line_type) {
-            .add => .{ .bg = Color.green, .fg = Color.black },
-            .delete => .{ .bg = Color.red, .fg = Color.black },
+            .add => .{ .bg = Color.diff_add_bg, .fg = Color.diff_add_fg },
+            .delete => .{ .bg = Color.diff_delete_bg, .fg = Color.diff_delete_fg },
             .context => .{},
         };
     }

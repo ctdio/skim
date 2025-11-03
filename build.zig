@@ -11,6 +11,22 @@ pub fn build(b: *std.Build) void {
     });
     const vaxis = vaxis_dep.module("vaxis");
 
+    // Get z-tree-sitter dependency with selected language grammars
+    const zts_dep = b.dependency("zts", .{
+        .target = target,
+        .optimize = optimize,
+        // Enable languages needed for syntax highlighting
+        .javascript = true,
+        .typescript = true,
+        .python = true,
+        .rust = true,
+        .go = true,
+        .zig = true,
+        .c = true,
+        .cpp = true,
+    });
+    const zts = zts_dep.module("zts");
+
     // Build executable
     const exe = b.addExecutable(.{
         .name = "skim",
@@ -20,6 +36,7 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("vaxis", vaxis);
+    exe.root_module.addImport("zts", zts);
 
     // Strip for smaller binary in release modes
     if (optimize == .ReleaseFast or optimize == .ReleaseSmall) {
@@ -27,6 +44,18 @@ pub fn build(b: *std.Build) void {
     }
 
     b.installArtifact(exe);
+
+    // Debug test executable
+    const debug_exe = b.addExecutable(.{
+        .name = "test_syntax_debug",
+        .root_source_file = b.path("test_syntax_debug.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    debug_exe.root_module.addImport("zts", zts);
+    const debug_run = b.addRunArtifact(debug_exe);
+    const debug_step = b.step("debug-syntax", "Run syntax debugging");
+    debug_step.dependOn(&debug_run.step);
 
     // Run command
     const run_cmd = b.addRunArtifact(exe);
@@ -47,6 +76,7 @@ pub fn build(b: *std.Build) void {
     });
 
     unit_tests.root_module.addImport("vaxis", vaxis);
+    unit_tests.root_module.addImport("zts", zts);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");

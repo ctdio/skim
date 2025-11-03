@@ -4,12 +4,14 @@ A lightning-fast, keyboard-driven TUI for code reviews built in Zig. Skim throug
 
 ## Features
 
-- **🚀 Blazing Fast**: Sub-10ms startup time, 60 FPS scrolling
+- **🚀 Blazing Fast**: Sub-10ms startup time, 60 FPS scrolling, ~209KB binary
 - **⌨️ Vim-Style Navigation**: Modal interface with hjkl movements and Ctrl-n/p support
 - **📁 File-Centric**: Navigate diffs file-by-file with intuitive keybindings
-- **🎨 Clean UI**: Unified and side-by-side diff views with syntax highlighting
-- **💬 AI-Ready**: Add comments and export as annotated diff patches
+- **🎨 Clean UI**: Unified and side-by-side diff views with tree-sitter syntax highlighting
+- **🔍 Smart Highlighting**: Context lines get full syntax highlighting; add/delete lines use solid colors
+- **♻️ Live Refresh**: Press 'r' to reload diff while maintaining your position
 - **🔧 Git Integration**: Review working directory changes or compare any two branches/commits
+- **💬 AI-Ready**: Comment system and export coming soon
 
 ## Installation
 
@@ -75,9 +77,10 @@ Navigate files and position cursor with vim-style movements:
 | `k` | Cursor up |
 | `Ctrl-d` | Page down |
 | `Ctrl-u` | Page up |
-| `Enter` | Enter FOCUSED mode (for detailed selection) |
-| `c` | Add comment on cursor line (coming soon) |
+| `Enter` | Enter FOCUSED mode |
 | `s` | Toggle unified/side-by-side view |
+| `r` | Refresh diff (reload from git) |
+| `c` | Add comment on cursor line (coming soon) |
 | `q` | Quit |
 | `Ctrl-C` × 2 | Force exit (double-press within 1 second) |
 | `?` | Help (coming soon) |
@@ -103,56 +106,63 @@ Skim is built with performance and simplicity in mind:
 ```
 src/
 ├── main.zig           # Entry point and CLI arg parsing
-├── app.zig            # Main application state machine
+├── app.zig            # Main application state machine and rendering
+├── syntax.zig         # Tree-sitter syntax highlighting
 ├── git/
 │   ├── diff.zig       # Git command execution
 │   └── parser.zig     # Unified diff parser
-└── ui/
-    └── (coming soon)  # UI components
+└── queries/
+    ├── javascript.scm # JS/JSX highlighting queries
+    ├── typescript.scm # TS/TSX highlighting queries
+    └── zig.scm        # Zig highlighting queries
 ```
 
 ### Design Philosophy
 
 1. **Fast by Default**: Using Zig's zero-cost abstractions and efficient terminal rendering
 2. **Shell Out to Git**: Respects user's git config, always up-to-date
-3. **Streaming Parser**: O(n) single-pass diff parsing
+3. **Streaming Parser**: O(n) single-pass diff parsing with line number tracking
 4. **Modal Interface**: Vim-inspired for keyboard efficiency
+5. **Smart Syntax Highlighting**: Tree-sitter integration with context-aware coloring
 
 ## Development Status
 
 ### Phase 1: MVP ✅
 
 - [x] Zig project setup with libvaxis
-- [x] Git diff execution
-- [x] Unified diff parser
-- [x] File list navigation (j/k, Ctrl-n/p)
+- [x] Git diff execution with support for all git diff patterns
+- [x] Unified diff parser with line number tracking
+- [x] File list navigation (j/k, h/l, Ctrl-n/p)
 - [x] Unified diff view rendering
 - [x] NORMAL mode keybindings
-- [x] Status bar
+- [x] Status bar with mode-specific help
 
-### Phase 2: Core Features (In Progress)
+### Phase 2: Core Features ✅
 
-- [ ] FOCUSED mode vim navigation
-- [ ] Side-by-side diff view
+- [x] FOCUSED mode vim navigation (g/G for top/bottom)
+- [x] Side-by-side diff view with intelligent wrapping
+- [x] Tree-sitter syntax highlighting (JS/TS/Zig)
+- [x] Live refresh functionality ('r' key)
+- [x] Context-aware highlighting (only on unchanged lines)
 - [ ] Comment system
 - [ ] Export to annotated patch
-- [ ] Hunk navigation (h/l keys)
+- [ ] Hunk navigation (n/N keys)
 - [ ] Help overlay
 
-### Phase 3: Polish
+### Phase 3: Polish (Next)
 
-- [ ] Basic syntax highlighting
+- [ ] Expand syntax highlighting to Python, Rust, Go, C, C++
 - [ ] Mouse support
 - [ ] Configuration file
-- [ ] Color schemes
-- [ ] Performance optimization
+- [ ] Color schemes / themes
+- [ ] Performance profiling and optimization
 
 ### Phase 4: Advanced
 
-- [ ] Comment persistence
-- [ ] Delta integration (optional)
-- [ ] Tree-sitter syntax highlighting
+- [ ] Comment persistence and management
+- [ ] Delta integration for enhanced rendering
 - [ ] Fuzzy file search
+- [ ] Git workflow integration (stage hunks, etc.)
 
 ## Performance Targets
 
@@ -169,13 +179,14 @@ Because that's exactly what you do - **skim through diffs** quickly and efficien
 
 ## Contributing
 
-Contributions are welcome! Areas of focus:
+Contributions are welcome! Priority areas:
 
-- [ ] Side-by-side diff rendering
+- [ ] Syntax highlighting query files for Python, Rust, Go, C, C++
 - [ ] Comment system implementation
-- [ ] Syntax highlighting
+- [ ] Hunk navigation
 - [ ] Mouse support
-- [ ] Testing
+- [ ] Help overlay/documentation
+- [ ] Testing coverage
 
 ## License
 
@@ -192,4 +203,4 @@ Skim combines the best of all worlds: fast, focused, and keyboard-driven.
 
 ---
 
-**Status**: Alpha - Core functionality working, actively developing Phase 2 features.
+**Status**: Alpha - Phase 2 core features complete! Side-by-side view ✅ | Syntax highlighting ✅ | Live refresh ✅

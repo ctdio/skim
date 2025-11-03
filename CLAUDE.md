@@ -34,18 +34,21 @@ zig build test
 
 ### Build Configuration
 - Binary output: `./zig-out/bin/skim`
-- Dependencies managed in `build.zig.zon` (only vaxis v0.5.1)
+- Dependencies managed in `build.zig.zon`:
+  - vaxis v0.5.1 (TUI rendering)
+  - z-tree-sitter (syntax highlighting with JavaScript, TypeScript, Python, Rust, Go, Zig, C, C++ support)
 - Release builds automatically strip symbols for minimal size (~209KB target)
 
 ## Architecture
 
 ### High-Level Structure
 
-The codebase follows a clean separation of concerns with three main layers:
+The codebase follows a clean separation of concerns with four main layers:
 
 1. **CLI Layer** (`main.zig`): Argument parsing and initialization
 2. **Application Layer** (`app.zig`): Modal state machine, event handling, and TUI rendering
 3. **Git Integration Layer** (`git/`): Command execution and diff parsing
+4. **Syntax Highlighting** (`syntax.zig`): Tree-sitter integration for code highlighting
 
 ### Key Design Decisions
 
@@ -57,18 +60,31 @@ The codebase follows a clean separation of concerns with three main layers:
 
 **Virtual Scrolling**: Only renders visible content in the terminal viewport. Pre-allocates a 256KB frame text buffer to avoid allocations during render loop.
 
-**Zero Dependencies**: Aside from vaxis (terminal rendering library), the project has no external dependencies. Uses only Zig standard library.
+**Minimal Dependencies**: Only two external dependencies - vaxis for terminal rendering and z-tree-sitter for syntax highlighting. Core logic uses only Zig standard library.
+
+#### syntax.zig - Tree-sitter Integration
+- **SyntaxHighlighter**: Manages syntax highlighting using tree-sitter parsers
+- **Language detection**: Automatic language detection from file extensions
+- **Supported languages**: JavaScript/JSX, TypeScript/TSX, Zig, Python, Rust, Go, C, C++
+- **Highlight struct**: Byte-range based highlighting with semantic categories
+- **Color mapping**: Maps tree-sitter captures to 8-color terminal palette
+- **Query files**: Embedded .scm files for JavaScript, TypeScript, and Zig highlighting
+- **Lazy loading**: Highlights generated on first render and cached in FileDiff struct
+- **Context-only highlighting**: Applied only to context lines for better diff readability
 
 ### Core Components
 
 #### app.zig - State Machine and Rendering
-- **App struct**: Manages all application state including current file, cursor position, scroll offset, mode, and view mode
-- **Mode enum**: NORMAL (file navigation), FOCUSED (in-file scrolling), comment (future)
-- **ViewMode enum**: unified vs. side-by-side diff display (side-by-side in progress)
+- **App struct**: Manages all application state including current file, cursor position, scroll offset, mode, view mode, and syntax highlighter
+- **Mode enum**: NORMAL (file navigation), FOCUSED (in-file scrolling), comment (placeholder for future)
+- **ViewMode enum**: unified vs. side-by-side diff display (both fully implemented)
 - **Event loop**: Processes keyboard input and terminal events using vaxis
-- **Render pipeline**: Header → dividers → content (with gutter) → status bar
-- **Color scheme**: Green (additions), red (deletions), cyan (hunk headers), white (context)
+- **Render pipeline**: Header → dividers → content (with gutter + syntax highlighting) → status bar
+- **Color scheme**:
+  - Diff colors: Dark green/red backgrounds with light text for add/delete lines
+  - Syntax highlighting: Magenta (keywords), blue (functions), green (types), yellow (strings/numbers), cyan (comments/constants)
 - **Ctrl-C handling**: Double-press within 1 second to force exit (prevents accidental quits)
+- **Refresh capability**: Press 'r' to reload diff while preserving current file position
 
 #### git/diff.zig - Git Command Execution
 - **getDiff()**: Executes `git diff` with 3-line context, returns unified diff output
@@ -77,12 +93,13 @@ The codebase follows a clean separation of concerns with three main layers:
 - Uses `--no-color` and `--no-ext-diff` flags for consistent parsing
 
 #### git/parser.zig - Unified Diff Parser
-- **FileDiff struct**: Contains file paths (old/new) and array of hunks
-- **Hunk struct**: Contains header (line ranges) and array of lines
-- **Line struct**: Individual diff line with type (add/delete/context) and content
+- **FileDiff struct**: Contains file paths (old/new), array of hunks, and cached syntax highlights
+- **Hunk struct**: Contains header (line ranges) and array of lines with old/new line numbers
+- **Line struct**: Individual diff line with type (add/delete/context), content, and line numbers for both old and new files
 - **Parser algorithm**: Single-pass tokenization on newlines, handles implicit counts in hunk headers (e.g., `@@ -1 +1 @@`)
 - Strips `a/` and `b/` prefixes from file paths
 - Handles `/dev/null` for new/deleted files
+- Tracks line numbers for accurate gutter display in both unified and side-by-side views
 
 ### Performance Targets
 - Cold startup: <10ms ✅
@@ -114,25 +131,29 @@ The codebase follows a clean separation of concerns with three main layers:
 **Phase 1: MVP** ✅ Complete
 - Git integration, unified diff parser, file navigation, basic rendering
 
-**Phase 2: Core Features** (In Progress)
-- FOCUSED mode vim navigation (g/G for top/bottom)
-- Side-by-side diff view (toggle with 's' key)
-- Comment system (add with 'c' key)
-- Export to annotated patch
-- Hunk navigation
-- Help overlay
+**Phase 2: Core Features** ✅ Complete
+- ✅ FOCUSED mode vim navigation (g/G for top/bottom)
+- ✅ Side-by-side diff view (toggle with 's' key)
+- ✅ Tree-sitter syntax highlighting (JS/TS/Zig with query files)
+- ✅ Refresh functionality ('r' key to reload diff)
+- ✅ Proper line number tracking in gutters
+- ⏳ Comment system (placeholder in place, 'c' key reserved)
+- ⏳ Export to annotated patch
+- ⏳ Hunk navigation
+- ⏳ Help overlay
 
-**Phase 3: Polish**
-- Syntax highlighting
+**Phase 3: Polish** (Next)
+- Expand syntax highlighting to Python, Rust, Go, C, C++ (parsers ready, need query files)
 - Mouse support
 - Configuration file
-- Color schemes
+- Color schemes / themes
+- Performance profiling and optimization
 
 **Phase 4: Advanced**
-- Comment persistence
-- Delta integration
-- Tree-sitter syntax highlighting
+- Comment persistence and management
+- Delta integration for enhanced diff rendering
 - Fuzzy file search
+- Git workflow integration (stage hunks, etc.)
 
 ## Key Implementation Notes
 
@@ -144,10 +165,14 @@ The app uses an enum-based mode system. When adding new modes:
 4. Consider mode transition logic and escape paths
 
 ### Adding New Keybindings
-1. Update appropriate mode case in `handleKeyEvent()` switch
-2. Update status bar help text in `renderStatusBar()`
+1. Update appropriate mode case in `handleKeyEvent()` switch (normal, focused, or comment mode)
+2. Update status bar help text in `renderStatus()` to document the new binding
 3. Add entry to README.md keybindings table
 4. If adding new vim-style keys, follow vim conventions for consistency
+
+**Current keybindings:**
+- NORMAL mode: h/l (file nav), j/k (cursor), Ctrl-n/p (file nav), Ctrl-d/u (page), Enter (focus), s (toggle view), r (refresh), q (quit)
+- FOCUSED mode: j/k (scroll), Ctrl-d/u (page), g/G (top/bottom), Esc (normal)
 
 ### Extending the Diff Parser
 The parser is designed to be strict about unified diff format. If adding support for new diff features:
@@ -159,9 +184,19 @@ The parser is designed to be strict about unified diff format. If adding support
 ### Working with Vaxis (TUI Library)
 - Vaxis handles terminal initialization, raw mode, and event loop
 - Use `vaxis.Window` for drawing in terminal regions
-- Call `vaxis.writeCell()` for positioned text output
-- Colors are set via `vaxis.Cell.style` (see existing color usage in `renderContent()`)
+- Use `window.print()` with segments for styled text output
+- Colors are set via `vaxis.Style` with RGB or indexed colors (see Color constants in app.zig)
+- Segments allow multi-style rendering on single line (used for syntax highlighting)
 - Vaxis automatically handles terminal resizing
+- Frame text buffer (256KB) used for temporary string allocation during rendering
+
+### Working with Tree-sitter (Syntax Highlighting)
+- z-tree-sitter provides Zig bindings to tree-sitter
+- Language grammars loaded via `zts.loadLanguage()`
+- Queries defined in `.scm` files embedded at compile time
+- Query execution returns captures with byte ranges
+- Highlights cached per-file to avoid reparsing
+- Only context lines are highlighted (add/delete keep solid colors)
 
 ## Git Integration
 

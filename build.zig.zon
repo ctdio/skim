@@ -8,6 +8,10 @@
             .url = "https://github.com/rockorager/libvaxis/archive/refs/tags/v0.5.1.tar.gz",
             .hash = "1220de23a3240e503397ea579de4fd85db422f537e10036ef74717c50164475813ce",
         },
+        .zts = .{
+            .url = "git+https://github.com/lfcm64/z-tree-sitter#90c687ce0c00cd9585cda5c529e3675380357029",
+            .hash = "12205e50a5dcc02940500ed84fa03752a5e0e7859fbd16c17db015d8adec1f174b08",
+        },
     },
 
     .paths = .{

@@ -1,4 +1,5 @@
 const std = @import("std");
+const syntax = @import("../syntax.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -6,6 +7,7 @@ pub const FileDiff = struct {
     old_path: []const u8,
     new_path: []const u8,
     hunks: []Hunk,
+    highlights: ?[]syntax.Highlight, // Cached syntax highlights for the file
 
     pub fn deinit(self: *const FileDiff, allocator: Allocator) void {
         allocator.free(self.old_path);
@@ -14,6 +16,13 @@ pub const FileDiff = struct {
             hunk.deinit(allocator);
         }
         allocator.free(self.hunks);
+        if (self.highlights) |highlights| {
+            // Free each category string (they were duplicated during parsing)
+            for (highlights) |h| {
+                allocator.free(h.category);
+            }
+            allocator.free(highlights);
+        }
     }
 };
 
@@ -172,6 +181,7 @@ const PartialFileDiff = struct {
             .old_path = self.old_path orelse try allocator.dupe(u8, ""),
             .new_path = self.new_path orelse try allocator.dupe(u8, ""),
             .hunks = try self.hunks.toOwnedSlice(),
+            .highlights = null, // Will be populated on first render
         };
     }
 };
