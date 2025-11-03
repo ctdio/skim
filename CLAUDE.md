@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Skim is a lightning-fast, keyboard-driven TUI for code reviews built in Zig. It provides vim-style navigation for reviewing git diffs with sub-10ms startup time and 60 FPS scrolling performance.
+Skim is a keyboard-driven TUI for code reviews built in Zig. Vim-style navigation, sub-10ms startup, 60 FPS scrolling.
 
-**Current Status**: Alpha - Phase 1 MVP complete, actively developing Phase 2 core features.
+**Current Status**: Alpha - Phase 2 complete, working on Phase 3.
 
 ## Build System
 
@@ -33,73 +33,67 @@ zig build test
 ```
 
 ### Build Configuration
-- Binary output: `./zig-out/bin/skim`
-- Dependencies managed in `build.zig.zon`:
+- Output: `./zig-out/bin/skim`
+- Dependencies (in `build.zig.zon`):
   - vaxis v0.5.1 (TUI rendering)
-  - z-tree-sitter (syntax highlighting with JavaScript, TypeScript, Python, Rust, Go, Zig, C, C++ support)
-- Release builds automatically strip symbols for minimal size (~209KB target)
+  - z-tree-sitter (syntax highlighting - JS, TS, Zig, Python, Rust, Go, C, C++)
+- Release builds strip symbols (~209KB)
 
 ## Architecture
 
-### High-Level Structure
+Four main layers:
 
-The codebase follows a clean separation of concerns with four main layers:
-
-1. **CLI Layer** (`main.zig`): Argument parsing and initialization
-2. **Application Layer** (`app.zig`): Modal state machine, event handling, and TUI rendering
-3. **Git Integration Layer** (`git/`): Command execution and diff parsing
-4. **Syntax Highlighting** (`syntax.zig`): Tree-sitter integration for code highlighting
+1. **CLI Layer** (`main.zig`): Arg parsing, initialization
+2. **Application Layer** (`app.zig`): Modal state machine, event handling, rendering
+3. **Git Integration** (`git/`): Command execution, diff parsing
+4. **Syntax Highlighting** (`syntax.zig`): Tree-sitter integration
 
 ### Key Design Decisions
 
-**Modal Interface**: Uses vim-inspired modes (NORMAL, FOCUSED, comment) for keyboard-driven navigation. Mode switching and keybindings follow vim conventions.
+**Modal Interface**: Vim-inspired modes (NORMAL, FOCUSED, comment).
 
-**Shell-out to Git**: All git operations execute the system git binary via subprocess. This respects user's git config and ensures compatibility with all git features.
+**Shell-out to Git**: Executes system git binary. Respects user config, always compatible.
 
-**Streaming Parser**: The diff parser (`git/parser.zig`) uses a single-pass O(n) algorithm that can handle large diffs efficiently. It processes unified diff format line-by-line without backtracking.
+**Streaming Parser**: Single-pass O(n) parser in `git/parser.zig`. No backtracking.
 
-**Virtual Scrolling**: Only renders visible content in the terminal viewport. Pre-allocates a 256KB frame text buffer to avoid allocations during render loop.
+**Virtual Scrolling**: Render visible lines only. 256KB pre-allocated frame buffer.
 
-**Minimal Dependencies**: Only two external dependencies - vaxis for terminal rendering and z-tree-sitter for syntax highlighting. Core logic uses only Zig standard library.
+**Minimal Dependencies**: Just vaxis (TUI) and z-tree-sitter (highlighting). Core uses Zig stdlib only.
 
 #### syntax.zig - Tree-sitter Integration
-- **SyntaxHighlighter**: Manages syntax highlighting using tree-sitter parsers
-- **Language detection**: Automatic language detection from file extensions
-- **Supported languages**: JavaScript/JSX, TypeScript/TSX, Zig, Python, Rust, Go, C, C++
-- **Highlight struct**: Byte-range based highlighting with semantic categories
-- **Color mapping**: Maps tree-sitter captures to 8-color terminal palette
-- **Query files**: Embedded .scm files for JavaScript, TypeScript, and Zig highlighting
-- **Lazy loading**: Highlights generated on first render and cached in FileDiff struct
-- **Context-only highlighting**: Applied only to context lines for better diff readability
+- Language detection from file extensions
+- Supported: JS/JSX, TS/TSX, Zig, Python, Rust, Go, C, C++
+- Byte-range based highlights with semantic categories
+- Maps captures to 8-color palette
+- Query files: Embedded .scm files (JS, TS, Zig have full queries)
+- Lazy: Generated on first render, cached per file
+- Context lines only (keeps diff semantics clear)
 
 ### Core Components
 
 #### app.zig - State Machine and Rendering
-- **App struct**: Manages all application state including current file, cursor position, scroll offset, mode, view mode, and syntax highlighter
-- **Mode enum**: NORMAL (file navigation), FOCUSED (in-file scrolling), comment (placeholder for future)
-- **ViewMode enum**: unified vs. side-by-side diff display (both fully implemented)
-- **Event loop**: Processes keyboard input and terminal events using vaxis
-- **Render pipeline**: Header → dividers → content (with gutter + syntax highlighting) → status bar
-- **Color scheme**:
-  - Diff colors: Dark green/red backgrounds with light text for add/delete lines
-  - Syntax highlighting: Magenta (keywords), blue (functions), green (types), yellow (strings/numbers), cyan (comments/constants)
-- **Ctrl-C handling**: Double-press within 1 second to force exit (prevents accidental quits)
-- **Refresh capability**: Press 'r' to reload diff while preserving current file position
+- **App struct**: Current file, cursor, scroll, mode, view mode, syntax highlighter
+- **Mode enum**: NORMAL (file nav), FOCUSED (in-file scroll), comment (placeholder)
+- **ViewMode enum**: unified or side-by-side
+- **Event loop**: Keyboard/terminal events via vaxis
+- **Render pipeline**: Header → content (gutter + syntax) → status bar
+- **Colors**: Green/red backgrounds for add/delete. Syntax: magenta (keywords), blue (functions), green (types), yellow (strings/numbers), cyan (comments)
+- **Ctrl-C**: Double-press within 1s to exit
+- **Refresh**: 'r' key reloads diff, preserves position
 
 #### git/diff.zig - Git Command Execution
-- **getDiff()**: Executes `git diff` with 3-line context, returns unified diff output
-- **getChangedFiles()**: Fast mode that only lists changed files without content
-- **100MB limit**: Protects against accidentally loading massive diffs
-- Uses `--no-color` and `--no-ext-diff` flags for consistent parsing
+- **getDiff()**: Runs `git diff` with 10-line context
+- **getChangedFiles()**: Lists changed files only (no content)
+- 100MB output limit
+- Flags: `--no-color --no-ext-diff`
 
 #### git/parser.zig - Unified Diff Parser
-- **FileDiff struct**: Contains file paths (old/new), array of hunks, and cached syntax highlights
-- **Hunk struct**: Contains header (line ranges) and array of lines with old/new line numbers
-- **Line struct**: Individual diff line with type (add/delete/context), content, and line numbers for both old and new files
-- **Parser algorithm**: Single-pass tokenization on newlines, handles implicit counts in hunk headers (e.g., `@@ -1 +1 @@`)
-- Strips `a/` and `b/` prefixes from file paths
-- Handles `/dev/null` for new/deleted files
-- Tracks line numbers for accurate gutter display in both unified and side-by-side views
+- **FileDiff**: Paths (old/new), hunks, cached highlights
+- **Hunk**: Header (line ranges), lines with old/new numbers
+- **Line**: Type (add/delete/context), content, line numbers
+- Single-pass, handles implicit counts in `@@` headers
+- Strips `a/`/`b/` prefixes, handles `/dev/null`
+- Tracks line numbers for accurate gutters
 
 ### Performance Targets
 - Cold startup: <10ms ✅
@@ -109,22 +103,19 @@ The codebase follows a clean separation of concerns with four main layers:
 
 ## Development Workflow
 
-### Testing Strategy
-- Tests are colocated with implementation code in source files
-- Use `zig build test` to run all unit tests
-- Current coverage: arg parsing (3 tests), diff execution (1 test), parser (3 tests)
-- When adding new features, write tests in the same file after the implementation
+### Testing
+- Tests colocated with implementation
+- Run: `zig build test`
+- Coverage: arg parsing (3), diff execution (1), parser (3)
 
-### Debugging TUI Applications
-- Skim is a full-screen TUI app - stdout is used for rendering
-- To debug, use `std.log` which writes to stderr, or write debug output to a file
-- The terminal is in raw mode during execution, so crashes may leave the terminal in a bad state (run `reset` to fix)
+### Debugging TUI Apps
+- Stdout is for rendering - use `std.log` (stderr) or write to file
+- Terminal in raw mode - crashes may corrupt it (run `reset`)
 
 ### Code Style
-- Follow Zig standard formatting (run `zig fmt` on modified files)
-- Use descriptive variable names consistent with Zig conventions
-- Keep functions focused and testable
-- Prefer explicit error handling over assumptions
+- Run `zig fmt`
+- Descriptive names, focused functions
+- Explicit error handling
 
 ## Development Phases
 
@@ -181,28 +172,25 @@ The parser is designed to be strict about unified diff format. If adding support
 3. Add comprehensive tests covering edge cases
 4. Ensure backward compatibility with existing diff output
 
-### Working with Vaxis (TUI Library)
-- Vaxis handles terminal initialization, raw mode, and event loop
-- Use `vaxis.Window` for drawing in terminal regions
-- Use `window.print()` with segments for styled text output
-- Colors are set via `vaxis.Style` with RGB or indexed colors (see Color constants in app.zig)
-- Segments allow multi-style rendering on single line (used for syntax highlighting)
-- Vaxis automatically handles terminal resizing
-- Frame text buffer (256KB) used for temporary string allocation during rendering
+### Vaxis (TUI Library)
+- Handles terminal init, raw mode, event loop, resizing
+- `vaxis.Window` for drawing regions
+- `window.print()` with segments for multi-style text
+- Colors via `vaxis.Style` (see Color constants in app.zig)
+- 256KB frame text buffer for temp allocations
 
-### Working with Tree-sitter (Syntax Highlighting)
-- z-tree-sitter provides Zig bindings to tree-sitter
-- Language grammars loaded via `zts.loadLanguage()`
-- Queries defined in `.scm` files embedded at compile time
-- Query execution returns captures with byte ranges
-- Highlights cached per-file to avoid reparsing
-- Only context lines are highlighted (add/delete keep solid colors)
+### Tree-sitter (Syntax Highlighting)
+- z-tree-sitter = Zig bindings
+- Grammars via `zts.loadLanguage()`
+- Queries: `.scm` files embedded at compile time
+- Highlights cached per-file
+- Context lines only (add/delete keep solid colors)
 
 ## Git Integration
 
-The app supports three diff modes:
-1. **Working directory**: `skim` (unstaged changes)
-2. **Staged changes**: `skim --staged`
-3. **Ref comparison**: `skim ref1..ref2` (branches, commits, tags)
+Three diff modes:
+1. Working directory: `skim`
+2. Staged: `skim --staged`
+3. Ref comparison: `skim ref1..ref2`
 
-All git commands run in the current working directory and respect user's git configuration.
+Runs git in CWD, respects user config.

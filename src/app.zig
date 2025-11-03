@@ -296,17 +296,27 @@ pub const App = struct {
     }
 
     fn navigateToNextFile(self: *App) void {
+        if (self.state.files.len == 0) return;
+
         if (self.state.current_file_idx + 1 < self.state.files.len) {
             self.state.current_file_idx += 1;
-            self.resetFileState();
+        } else {
+            // Wrap to first file
+            self.state.current_file_idx = 0;
         }
+        self.resetFileState();
     }
 
     fn navigateToPreviousFile(self: *App) void {
+        if (self.state.files.len == 0) return;
+
         if (self.state.current_file_idx > 0) {
             self.state.current_file_idx -= 1;
-            self.resetFileState();
+        } else {
+            // Wrap to last file
+            self.state.current_file_idx = self.state.files.len - 1;
         }
+        self.resetFileState();
     }
 
     fn resetFileState(self: *App) void {

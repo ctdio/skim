@@ -1,17 +1,17 @@
 # Skim
 
-A lightning-fast, keyboard-driven TUI for code reviews built in Zig. Skim through your diffs with vim-style navigation and seamless AI integration.
+A keyboard-driven TUI for code reviews built in Zig. Fast, minimal, and focused on getting out of your way.
 
 ## Features
 
-- **🚀 Blazing Fast**: Sub-10ms startup time, 60 FPS scrolling, ~209KB binary
-- **⌨️ Vim-Style Navigation**: Modal interface with hjkl movements and Ctrl-n/p support
-- **📁 File-Centric**: Navigate diffs file-by-file with intuitive keybindings
-- **🎨 Clean UI**: Unified and side-by-side diff views with tree-sitter syntax highlighting
-- **🔍 Smart Highlighting**: Context lines get full syntax highlighting; add/delete lines use solid colors
-- **♻️ Live Refresh**: Press 'r' to reload diff while maintaining your position
-- **🔧 Git Integration**: Review working directory changes or compare any two branches/commits
-- **💬 AI-Ready**: Comment system and export coming soon
+- Sub-10ms startup, 60 FPS scrolling, ~209KB binary
+- Vim-style modal interface (hjkl, Ctrl-n/p)
+- File-by-file diff navigation
+- Unified and side-by-side views
+- Tree-sitter syntax highlighting (context lines only, keeping diffs readable)
+- Live refresh (press 'r')
+- Full git diff compatibility (working dir, staged, branch comparisons)
+- Comment system (coming soon)
 
 ## Installation
 
@@ -101,29 +101,24 @@ Fine-grained navigation within a file:
 
 ## Architecture
 
-Skim is built with performance and simplicity in mind:
-
 ```
 src/
-├── main.zig           # Entry point and CLI arg parsing
-├── app.zig            # Main application state machine and rendering
-├── syntax.zig         # Tree-sitter syntax highlighting
+├── main.zig           # CLI arg parsing
+├── app.zig            # State machine and rendering
+├── syntax.zig         # Tree-sitter integration
 ├── git/
 │   ├── diff.zig       # Git command execution
 │   └── parser.zig     # Unified diff parser
 └── queries/
-    ├── javascript.scm # JS/JSX highlighting queries
-    ├── typescript.scm # TS/TSX highlighting queries
-    └── zig.scm        # Zig highlighting queries
+    └── *.scm          # Tree-sitter highlighting queries
 ```
 
-### Design Philosophy
-
-1. **Fast by Default**: Using Zig's zero-cost abstractions and efficient terminal rendering
-2. **Shell Out to Git**: Respects user's git config, always up-to-date
-3. **Streaming Parser**: O(n) single-pass diff parsing with line number tracking
-4. **Modal Interface**: Vim-inspired for keyboard efficiency
-5. **Smart Syntax Highlighting**: Tree-sitter integration with context-aware coloring
+Design decisions:
+- Shell out to git (respects user config)
+- Single-pass O(n) diff parsing
+- Modal interface (vim-style)
+- Context-only syntax highlighting
+- Virtual scrolling (render visible lines only)
 
 ## Development Status
 
@@ -173,34 +168,32 @@ src/
 | Memory usage | <50MB | ✅ |
 | Scrolling FPS | 60 | ✅ |
 
-## Why "Skim"?
-
-Because that's exactly what you do - **skim through diffs** quickly and efficiently. No clutter, no friction, just pure speed.
-
 ## Contributing
 
-Contributions are welcome! Priority areas:
+Priority areas:
+- Syntax highlighting query files for Python, Rust, Go, C, C++
+- Comment system implementation
+- Hunk navigation
+- Mouse support
+- Help overlay/documentation
+- Testing coverage
 
-- [ ] Syntax highlighting query files for Python, Rust, Go, C, C++
-- [ ] Comment system implementation
-- [ ] Hunk navigation
-- [ ] Mouse support
-- [ ] Help overlay/documentation
-- [ ] Testing coverage
+## Credits
+
+Built with:
+- [libvaxis](https://github.com/rockorager/libvaxis) - TUI rendering library
+- [z-tree-sitter](https://github.com/lfcm64/z-tree-sitter) - Zig bindings for tree-sitter
+- [tree-sitter](https://tree-sitter.github.io/) - Parser generator for syntax highlighting
+- Language grammars from [tree-sitter-grammars](https://github.com/tree-sitter-grammars):
+  - JavaScript/JSX, TypeScript/TSX
+  - Python, Rust, Go, Zig
+  - C, C++
+  - JSON, YAML, TOML, Markdown, HTML, CSS, Bash
 
 ## License
 
 MIT
 
-## Inspiration
-
-Built to solve the pain points of:
-- gh's limited review interface
-- lazygit's heavy feature set
-- delta's lack of interactivity
-
-Skim combines the best of all worlds: fast, focused, and keyboard-driven.
-
 ---
 
-**Status**: Alpha - Phase 2 core features complete! Side-by-side view ✅ | Syntax highlighting ✅ | Live refresh ✅
+**Status**: Alpha - Phase 2 core features complete

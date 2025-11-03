@@ -2,12 +2,25 @@ const std = @import("std");
 const zts = @import("zts");
 
 // Embed highlight query files at compile time
+// Programming languages
 const JAVASCRIPT_HIGHLIGHTS = @embedFile("queries/javascript.scm");
 const TYPESCRIPT_HIGHLIGHTS = @embedFile("queries/typescript.scm");
+const PYTHON_HIGHLIGHTS = @embedFile("queries/python.scm");
+const RUST_HIGHLIGHTS = @embedFile("queries/rust.scm");
+const GO_HIGHLIGHTS = @embedFile("queries/go.scm");
 const ZIG_HIGHLIGHTS = @embedFile("queries/zig.scm");
+const C_HIGHLIGHTS = @embedFile("queries/c.scm");
+const CPP_HIGHLIGHTS = @embedFile("queries/cpp.scm");
+// Common file formats
+const JSON_HIGHLIGHTS = @embedFile("queries/json.scm");
+const TOML_HIGHLIGHTS = @embedFile("queries/toml.scm");
+const MARKDOWN_HIGHLIGHTS = @embedFile("queries/markdown.scm");
+const CSS_HIGHLIGHTS = @embedFile("queries/css.scm");
+const BASH_HIGHLIGHTS = @embedFile("queries/bash.scm");
 
-// Supported programming languages for syntax highlighting
+// Supported languages and file formats for syntax highlighting
 pub const Language = enum {
+    // Programming languages
     javascript,
     typescript,
     python,
@@ -16,6 +29,12 @@ pub const Language = enum {
     zig,
     c,
     cpp,
+    // Common file formats
+    json,
+    toml,
+    markdown,
+    css,
+    bash,
     unknown,
 
     pub fn fromFilePath(path: []const u8) Language {
@@ -62,15 +81,43 @@ pub const Language = enum {
             .{ ".hh", .cpp },
             .{ ".C", .cpp },
             .{ ".H", .cpp },
+
+            // JSON
+            .{ ".json", .json },
+            .{ ".jsonc", .json },
+            .{ ".json5", .json },
+
+            // TOML
+            .{ ".toml", .toml },
+
+            // Markdown
+            .{ ".md", .markdown },
+            .{ ".markdown", .markdown },
+            .{ ".mdown", .markdown },
+            .{ ".mkd", .markdown },
+            .{ ".mkdn", .markdown },
+
+            // CSS
+            .{ ".css", .css },
+
+            // Bash
+            .{ ".sh", .bash },
+            .{ ".bash", .bash },
+            .{ ".zsh", .bash },
         });
 
         if (ext_map.get(ext)) |lang| {
             return lang;
         }
 
-        // Check for files without extensions (Makefile, Dockerfile, etc.)
+        // Check for files without extensions or special filenames
         const basename = std.fs.path.basename(path);
         if (std.mem.eql(u8, basename, "Makefile")) return .c;
+        if (std.mem.eql(u8, basename, "Dockerfile")) return .bash;
+        if (std.mem.eql(u8, basename, ".bashrc")) return .bash;
+        if (std.mem.eql(u8, basename, ".bash_profile")) return .bash;
+        if (std.mem.eql(u8, basename, ".zshrc")) return .bash;
+        if (std.mem.eql(u8, basename, ".zprofile")) return .bash;
 
         return .unknown;
     }
@@ -85,6 +132,11 @@ pub const Language = enum {
             .zig => "Zig",
             .c => "C",
             .cpp => "C++",
+            .json => "JSON",
+            .toml => "TOML",
+            .markdown => "Markdown",
+            .css => "CSS",
+            .bash => "Bash",
             .unknown => "Unknown",
         };
     }
@@ -240,9 +292,17 @@ pub const SyntaxHighlighter = struct {
         const ts_lang = switch (lang) {
             .javascript => try zts.loadLanguage(.javascript),
             .typescript => try zts.loadLanguage(.typescript),
+            .python => try zts.loadLanguage(.python),
+            .rust => try zts.loadLanguage(.rust),
+            .go => try zts.loadLanguage(.go),
             .zig => try zts.loadLanguage(.zig),
-            // Languages without query files yet - return empty
-            .python, .rust, .go, .c, .cpp => return &[_]Highlight{},
+            .c => try zts.loadLanguage(.c),
+            .cpp => try zts.loadLanguage(.cpp),
+            .json => try zts.loadLanguage(.json),
+            .toml => try zts.loadLanguage(.toml),
+            .markdown => try zts.loadLanguage(.markdown),
+            .css => try zts.loadLanguage(.css),
+            .bash => try zts.loadLanguage(.bash),
             .unknown => unreachable,
         };
 
@@ -263,8 +323,27 @@ pub const SyntaxHighlighter = struct {
                 needs_free = true;
                 break :blk combined;
             },
+            .python => PYTHON_HIGHLIGHTS,
+            .rust => RUST_HIGHLIGHTS,
+            .go => GO_HIGHLIGHTS,
             .zig => ZIG_HIGHLIGHTS,
-            else => unreachable,
+            .c => C_HIGHLIGHTS,
+            .cpp => blk: {
+                // C++ needs both C and C++ queries combined
+                const combined = try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{
+                    C_HIGHLIGHTS,
+                    CPP_HIGHLIGHTS,
+                });
+                combined_query = combined;
+                needs_free = true;
+                break :blk combined;
+            },
+            .json => JSON_HIGHLIGHTS,
+            .toml => TOML_HIGHLIGHTS,
+            .markdown => MARKDOWN_HIGHLIGHTS,
+            .css => CSS_HIGHLIGHTS,
+            .bash => BASH_HIGHLIGHTS,
+            .unknown => unreachable,
         };
         defer if (needs_free) self.allocator.free(combined_query);
 

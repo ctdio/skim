@@ -14,18 +14,14 @@ This document provides an in-depth overview of Skim's architecture, design decis
 
 ## System Overview
 
-Skim is a terminal user interface (TUI) application built in Zig that provides a fast, keyboard-driven interface for reviewing git diffs. The architecture prioritizes:
-
-- **Performance**: Sub-10ms startup, 60 FPS scrolling, minimal memory footprint
-- **Simplicity**: Single-pass algorithms, minimal dependencies, straightforward data structures
-- **Correctness**: Respects git configuration, accurate diff parsing, proper terminal handling
+TUI for reviewing git diffs. Priorities: performance, simplicity, correctness.
 
 ### Technology Stack
 
-- **Language**: Zig 0.13.0+
-- **TUI Library**: libvaxis v0.5.1 (terminal rendering and event handling)
-- **Syntax Highlighting**: z-tree-sitter (tree-sitter bindings for Zig)
-- **Git Integration**: Shell-out to system git binary
+- Zig 0.13.0+
+- libvaxis v0.5.1 (TUI)
+- z-tree-sitter (syntax highlighting)
+- System git binary
 
 ## Module Architecture
 
@@ -62,13 +58,8 @@ The codebase is organized into four main layers:
 
 ### 1. CLI Layer (main.zig)
 
-**Responsibilities:**
-- Parse command-line arguments
-- Configure DiffSource based on git-like patterns
-- Initialize and run the application
-- Memory lifecycle management
+Parse args, configure DiffSource, initialize app, manage memory.
 
-**Key Components:**
 ```zig
 pub const Config = struct {
     allocator: std.mem.Allocator,
@@ -76,17 +67,11 @@ pub const Config = struct {
 };
 ```
 
-**Diff Source Patterns:**
-- `skim` → Working directory changes
-- `skim --staged` → Staged changes
-- `skim ref` → Working dir vs. ref
-- `skim ref1 ref2` → Compare two refs
-- `skim ref1..ref2` → Direct comparison
-- `skim ref1...ref2` → Merge-base comparison
+Diff patterns: `skim`, `skim --staged`, `skim ref`, `skim ref1 ref2`, `skim ref1..ref2`, `skim ref1...ref2`
 
 ### 2. Application Layer (app.zig)
 
-The heart of the application, managing all state and orchestrating rendering.
+Manages state and rendering.
 
 **App Structure:**
 ```zig
@@ -139,25 +124,16 @@ const ViewMode = enum {
 
 #### git/diff.zig - Command Execution
 
-Executes git commands and returns raw output.
-
-**Key Functions:**
 ```zig
 pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8
 pub fn getChangedFiles(allocator: Allocator, source: DiffSource) ![]FileStatus
 ```
 
-**Git Command Construction:**
-- Base: `git diff --no-color --no-ext-diff -U7`
-- Context lines: 7 (configurable via -U flag)
-- Safety: 100MB output limit to prevent memory issues
-- Flags ensure consistent, parseable output
+Command: `git diff --no-color --no-ext-diff -U7` (7 context lines, 100MB limit)
 
 #### git/parser.zig - Unified Diff Parser
 
-Single-pass O(n) parser that converts unified diff format into structured data.
-
-**Data Structures:**
+Single-pass O(n) parser.
 ```zig
 pub const FileDiff = struct {
     old_path: []const u8,
@@ -187,21 +163,9 @@ pub const Line = struct {
 };
 ```
 
-**Parsing Algorithm:**
-1. Tokenize on newlines
-2. State machine for diff sections:
-   - `diff --git` → Start new file
-   - `---` / `+++` → Set file paths
-   - `@@` → Parse hunk header
-   - `+` / `-` / ` ` → Parse diff line
-3. Track line numbers incrementally for accurate gutters
-4. Handle edge cases (implicit counts, /dev/null paths)
+Parser state machine: `diff --git` → new file, `---`/`+++` → paths, `@@` → hunk header, `+`/`-`/` ` → lines. Tracks line numbers, handles edge cases.
 
 ### 4. Syntax Highlighting Layer (syntax.zig)
-
-Tree-sitter integration for semantic code highlighting.
-
-**Architecture:**
 ```zig
 pub const SyntaxHighlighter = struct {
     allocator: std.mem.Allocator,
@@ -216,28 +180,9 @@ pub const Highlight = struct {
 };
 ```
 
-**Language Support:**
-| Language | Status | Query File |
-|----------|--------|------------|
-| JavaScript/JSX | ✅ Implemented | `src/queries/javascript.scm` |
-| TypeScript/TSX | ✅ Implemented | `src/queries/typescript.scm` |
-| Zig | ✅ Implemented | `src/queries/zig.scm` |
-| Python | ⏳ Parser ready | Need query file |
-| Rust | ⏳ Parser ready | Need query file |
-| Go | ⏳ Parser ready | Need query file |
-| C/C++ | ⏳ Parser ready | Need query file |
+Languages: JS/JSX, TS/TSX, Zig (full queries). Python, Rust, Go, C/C++ (parsers ready, need queries).
 
-**Color Mapping:**
-```zig
-pub fn getColor(highlight: Highlight) ColorIndex {
-    // Keyword → Magenta (bold)
-    // Function → Blue (bold)
-    // Type → Green
-    // String/Number → Yellow
-    // Comment/Constant → Cyan (dimmed)
-    // Default → White
-}
-```
+Colors: Keywords (magenta), functions (blue), types (green), strings/numbers (yellow), comments (cyan).
 
 ## Data Flow
 
@@ -336,9 +281,7 @@ refresh()
 
 ## Rendering Pipeline
 
-### Frame Rendering Architecture
-
-Each frame is rendered from scratch (no incremental updates) but optimized to be fast:
+Full frame render each time (optimized for speed):
 
 ```
 render(win: vaxis.Window)
@@ -377,56 +320,17 @@ render(win: vaxis.Window)
 ```
 
 ### Virtual Scrolling
-
-Only visible lines are rendered:
-
-```zig
-// Skip hunks before scroll_offset
-if (line_idx + hunk.lines.len < scroll_offset) {
-    line_idx += hunk.lines.len + 1;
-    continue;
-}
-
-// Stop when viewport full
-if (row >= win.height) break;
-```
+Skip off-screen hunks, render visible lines only.
 
 ### Text Wrapping
-
-Long lines wrap intelligently:
-
-```zig
-// Calculate rows needed
-num_rows = (text.len + content_width - 1) / content_width;
-
-// Render each wrapped row
-for (0..num_rows) |wrap_idx| {
-    chunk = text[wrap_idx * width .. min((wrap_idx + 1) * width, text.len)];
-    // Render chunk with line number only on first row
-}
-```
+Long lines wrap to viewport width, line number on first row only.
 
 ### Cursor Tracking
-
-Cursor position maintained with scroll adjustment:
-
-```zig
-fn adjustScrollToKeepCursorVisible(viewport_height: usize) void {
-    const padding = 3;  // Lines of context around cursor
-
-    if (cursor_line < scroll_offset + padding) {
-        scroll_offset = cursor_line - padding;
-    } else if (cursor_line >= scroll_offset + viewport_height - padding) {
-        scroll_offset = cursor_line - viewport_height + padding + 1;
-    }
-}
-```
+3-line padding around cursor, auto-adjust scroll to keep visible.
 
 ## Syntax Highlighting
 
-### Highlight Generation
-
-Syntax highlights are generated lazily on first render and cached:
+Lazy generation on first render, cached per file:
 
 ```zig
 fn ensureHighlights(file: *FileDiff) !void {
@@ -454,7 +358,7 @@ fn ensureHighlights(file: *FileDiff) !void {
 
 ### Byte Offset Mapping
 
-Highlights use byte offsets in the reconstructed file. When rendering a line, we calculate its offset:
+Calculate byte offset for each line in reconstructed file:
 
 ```zig
 fn getLineByteOffset(file: *FileDiff, hunk_idx: usize, line_idx: usize) usize {
@@ -474,7 +378,7 @@ fn getLineByteOffset(file: *FileDiff, hunk_idx: usize, line_idx: usize) usize {
 
 ### Segment Generation
 
-Highlights are converted to terminal segments with colors:
+Convert highlights to terminal segments:
 
 ```zig
 fn createHighlightedSegments(text: []const u8, byte_offset: usize) ![]Segment {
@@ -493,146 +397,42 @@ fn createHighlightedSegments(text: []const u8, byte_offset: usize) ![]Segment {
 
 ### Context-Only Highlighting
 
-Only context lines receive syntax highlighting. Add/delete lines keep solid background colors:
-
-```zig
-switch (line.line_type) {
-    .context => renderWithHighlights(line, highlights),
-    .add, .delete => renderWithSolidColor(line),  // No syntax
-}
-```
-
-This improves readability by keeping diff semantics clear.
+Context lines get syntax highlighting. Add/delete lines keep solid colors for clarity.
 
 ## Performance Optimizations
 
-### 1. Memory Management
+### Memory Management
+- 256KB pre-allocated frame buffer (reused each frame)
+- 4KB pre-allocated header buffers
 
-**Frame Text Buffer:**
-- Pre-allocated 256KB buffer for temporary strings during rendering
-- Reused every frame, avoiding allocations
-- Overflow protection with clear error handling
+### Lazy Evaluation
+- Syntax highlights: generated once, cached
+- Viewport culling: skip off-screen hunks
 
-```zig
-fn frameTextSlice(len: usize) ![]u8 {
-    if (len > remainingCapacity()) return error.Overflow;
-    const slice = frame_text_buffer[frame_text_used..frame_text_used + len];
-    frame_text_used += len;
-    return slice;
-}
-```
+### Single-Pass Algorithms
+- Diff parser: tokenize once, no backtracking
+- Renderer: one pass top-to-bottom
 
-**Header Buffers:**
-- Pre-allocated 4KB buffers for each header line
-- Avoids allocation on every frame
-
-### 2. Lazy Evaluation
-
-**Syntax Highlights:**
-- Generated on first render of each file
-- Cached in FileDiff struct
-- Never regenerated unless file refreshed
-
-**Viewport Culling:**
-- Only visible lines are processed
-- Hunks completely off-screen are skipped entirely
-
-### 3. Single-Pass Algorithms
-
-**Diff Parser:**
-- Tokenizes input once
-- Builds structures incrementally
-- No backtracking or multi-pass parsing
-
-**Renderer:**
-- Calculates layout once per frame
-- Renders top-to-bottom in single pass
-
-### 4. Compile-Time Optimizations
-
-**Embedded Query Files:**
-```zig
-const JAVASCRIPT_HIGHLIGHTS = @embedFile("queries/javascript.scm");
-```
-- No file I/O at runtime
-- Queries baked into binary
-
-**Static String Maps:**
-```zig
-const ext_map = std.StaticStringMap(Language).initComptime(.{
-    .{ ".js", .javascript },
-    // ...
-});
-```
-- Constant-time language detection
-- Zero runtime initialization cost
+### Compile-Time Optimizations
+- Embedded query files (no runtime I/O)
+- Static string maps (constant-time lookups)
 
 ## Design Patterns
 
-### 1. Modal State Machine
+### Modal State Machine
+Vim-inspired modes: normal (file nav), focused (scroll), comment (future).
 
-Vim-inspired modal interface separates concerns:
+### Lazy Initialization
+Defer expensive ops: syntax highlights, file reconstruction.
 
-```zig
-switch (mode) {
-    .normal => {
-        // File navigation, cursor positioning
-        // j/k: move cursor
-        // h/l: change file
-        // Enter: switch to focused
-    },
-    .focused => {
-        // In-file scrolling
-        // j/k: scroll viewport
-        // g/G: jump to top/bottom
-        // Esc: back to normal
-    },
-    .comment => {
-        // Future: comment editing
-    },
-}
-```
+### Explicit State Updates
+State changes are localized and clear.
 
-### 2. Lazy Initialization
+### Error Handling
+Zig's explicit error propagation with errdefer cleanup.
 
-Expensive operations deferred until needed:
-- Syntax highlights (generated on first render)
-- File content reconstruction (only when highlighting)
-
-### 3. Immutable State Updates
-
-State changes are explicit and localized:
-```zig
-fn navigateToNextFile() void {
-    if (current_file_idx + 1 < files.len) {
-        current_file_idx += 1;
-        resetFileState();  // Clear scroll/cursor
-    }
-}
-```
-
-### 4. Error Handling
-
-Zig's explicit error handling used throughout:
-```zig
-pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
-    // Explicit error propagation
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 100_000_000);
-    errdefer allocator.free(stdout);  // Cleanup on error
-    // ...
-}
-```
-
-### 5. Struct-of-Arrays
-
-Diff data organized for cache-friendly access:
-```zig
-// Lines stored contiguously in hunks
-pub const Hunk = struct {
-    header: HunkHeader,
-    lines: []Line,  // Sequential access during rendering
-};
-```
+### Struct-of-Arrays
+Cache-friendly: lines stored contiguously in hunks.
 
 ## Future Architecture Considerations
 
@@ -686,13 +486,8 @@ Potential instrumentation points:
 - Syntax highlighting time
 - Memory usage tracking
 
-## Conclusion
+## Summary
 
-Skim's architecture prioritizes:
+Architecture priorities: performance, simplicity, correctness, extensibility.
 
-1. **Performance** through pre-allocation, lazy evaluation, and single-pass algorithms
-2. **Simplicity** with minimal dependencies and straightforward data flow
-3. **Correctness** via explicit error handling and respect for git semantics
-4. **Extensibility** through modular design and clear interfaces
-
-The codebase achieves sub-10ms startup and 60 FPS scrolling while maintaining a ~209KB binary size by carefully balancing features with performance constraints.
+Sub-10ms startup, 60 FPS scrolling, ~209KB binary.

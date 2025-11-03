@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     const zts_dep = b.dependency("zts", .{
         .target = target,
         .optimize = optimize,
-        // Enable languages needed for syntax highlighting
+        // Enable programming languages
         .javascript = true,
         .typescript = true,
         .python = true,
@@ -24,6 +24,12 @@ pub fn build(b: *std.Build) void {
         .zig = true,
         .c = true,
         .cpp = true,
+        // Enable common file formats
+        .json = true,
+        .toml = true,
+        .markdown = true,
+        .css = true,
+        .bash = true,
     });
     const zts = zts_dep.module("zts");
 

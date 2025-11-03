@@ -26,7 +26,7 @@ pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
     try args.append("diff");
     try args.append("--no-color");
     try args.append("--no-ext-diff");
-    try args.append("-U7"); // 7 lines of context
+    try args.append("-U10"); // 10 lines of context
 
     switch (source) {
         .working_dir => |wd| {
