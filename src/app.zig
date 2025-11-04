@@ -655,35 +655,38 @@ pub const App = struct {
         const current_file = &self.state.files[self.state.current_file_idx];
         const stats = self.calculateDiffStats(current_file);
 
-        const mode_str = switch (self.mode) {
-            .normal => "[NORMAL]",
-            .focused => "[FOCUSED]",
-            .comment => "[COMMENT]",
-        };
-        const view_str = switch (self.state.view_mode) {
-            .unified => "Unified",
-            .side_by_side => "Side-by-Side",
-        };
-
-        var buf: [1024]u8 = undefined;
-        const header_text = try std.fmt.bufPrint(&buf, "Files ({d}) {s}  {s}", .{
-            self.state.files.len,
-            mode_str,
-            view_str,
-        });
-        try self.printHeaderLine(win, 0, header_text, .{ .bold = true });
-
         const file_path = if (current_file.new_path.len > 0) current_file.new_path else current_file.old_path;
 
-        var buf2: [2048]u8 = undefined;
-        const file_text = try std.fmt.bufPrint(&buf2, "File {d} of {d}  {s}  +{d} -{d}", .{
+        // First line: File info with stats
+        var buf1: [512]u8 = undefined;
+        const file_info = try std.fmt.bufPrint(&buf1, "File {d} of {d}  ", .{
             self.state.current_file_idx + 1,
             self.state.files.len,
-            file_path,
-            stats.additions,
-            stats.deletions,
         });
-        try self.printHeaderLine(win, 1, file_text, .{ .fg = Color.blue });
+
+        var buf2: [64]u8 = undefined;
+        const additions_text = try std.fmt.bufPrint(&buf2, "+{d}", .{stats.additions});
+
+        var buf3: [64]u8 = undefined;
+        const deletions_text = try std.fmt.bufPrint(&buf3, " -{d}", .{stats.deletions});
+
+        // Copy to frame buffer for proper lifetime
+        const file_info_copy = try self.copyFrameText(file_info);
+        const file_path_copy = try self.copyFrameText(file_path);
+        const additions_copy = try self.copyFrameText(additions_text);
+        const deletions_copy = try self.copyFrameText(deletions_text);
+        const spacer = try self.copyFrameText("  ");
+
+        // Create segments with different colors
+        var segments = [_]vaxis.Cell.Segment{
+            .{ .text = file_info_copy, .style = .{ .fg = Color.white } },
+            .{ .text = file_path_copy, .style = .{ .fg = Color.white, .bold = true } },
+            .{ .text = spacer, .style = .{ .fg = Color.white } },
+            .{ .text = additions_copy, .style = .{ .fg = Color.green, .bold = true } },
+            .{ .text = deletions_copy, .style = .{ .fg = Color.red, .bold = true } },
+        };
+
+        _ = try win.print(&segments, .{ .row_offset = 0, .col_offset = 0 });
     }
 
     // Ensure syntax highlights are loaded for the given file
@@ -1933,20 +1936,7 @@ pub const App = struct {
                 };
                 _ = try win.print(&segments, .{ .row_offset = row, .col_offset = 1 });
             } else {
-                // For hunk headers or other lines without file line numbers, show empty gutter
-                if (is_cursor) {
-                    const spaces_slice = try self.frameTextSlice(gutter_width);
-                    @memset(spaces_slice, ' ');
-                    var seg = [_]vaxis.Cell.Segment{.{
-                        .text = spaces_slice,
-                        .style = base_style,
-                    }};
-                    _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 1 });
-                }
-            }
-        } else {
-            // For wrapped continuation lines, show empty gutter with cursor highlight if needed
-            if (is_cursor) {
+                // For hunk headers or other lines without file line numbers, always show empty gutter
                 const spaces_slice = try self.frameTextSlice(gutter_width);
                 @memset(spaces_slice, ' ');
                 var seg = [_]vaxis.Cell.Segment{.{
@@ -1955,6 +1945,15 @@ pub const App = struct {
                 }};
                 _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 1 });
             }
+        } else {
+            // For wrapped continuation lines, always show empty gutter
+            const spaces_slice = try self.frameTextSlice(gutter_width);
+            @memset(spaces_slice, ' ');
+            var seg = [_]vaxis.Cell.Segment{.{
+                .text = spaces_slice,
+                .style = base_style,
+            }};
+            _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 1 });
         }
     }
 
@@ -2012,18 +2011,32 @@ pub const App = struct {
     }
 
     fn renderStatus(self: *App, win: vaxis.Window) !void {
+        win.clear();
+
+        const mode_str = switch (self.mode) {
+            .normal => "-- NORMAL --",
+            .focused => "-- FOCUSED --",
+            .comment => "-- COMMENT --",
+        };
+
+        const view_str = switch (self.state.view_mode) {
+            .unified => "[Unified]",
+            .side_by_side => "[Side-by-Side]",
+        };
+
         const keybindings = switch (self.mode) {
             .normal => "h/l:File  j/k:Cursor  Ctrl-d/u:Page  ?:Focus  c:Comment  s:Toggle  r:Refresh  q:Quit  Ctrl-C?2:Exit",
             .focused => "j/k:Scroll  Ctrl-d/u:Page  g/G:Top/Bottom  ESC:Normal  Ctrl-C?2:Exit",
             .comment => "ESC:Cancel  Ctrl-S:Save  Ctrl-C?2:Exit",
         };
 
+        // Combine mode, view mode, and keybindings into a single string
+        var buf: [512]u8 = undefined;
+        const status_text = try std.fmt.bufPrint(&buf, "{s} {s}  {s}", .{ mode_str, view_str, keybindings });
+
         var seg = [_]vaxis.Cell.Segment{.{
-            .text = keybindings,
-            .style = .{
-                .fg = Color.black,
-                .bg = Color.white,
-            },
+            .text = status_text,
+            .style = .{},
         }};
         _ = try win.print(&seg, .{ .row_offset = 0 });
     }
