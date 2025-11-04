@@ -67,7 +67,7 @@ Four main layers:
 - Maps captures to 8-color palette
 - Query files: Embedded .scm files (JS, TS, Zig have full queries)
 - Lazy: Generated on first render, cached per file
-- Context lines only (keeps diff semantics clear)
+- Applied to all lines (add/delete/context) - syntax colors overlay diff backgrounds
 
 ### Core Components
 
@@ -77,7 +77,7 @@ Four main layers:
 - **ViewMode enum**: unified or side-by-side
 - **Event loop**: Keyboard/terminal events via vaxis
 - **Render pipeline**: Header → content (gutter + syntax) → status bar
-- **Colors**: Green/red backgrounds for add/delete. Syntax: magenta (keywords), blue (functions), green (types), yellow (strings/numbers), cyan (comments)
+- **Colors**: Dark green/red backgrounds for add/delete lines. Syntax highlighting overlays with: red (keywords), magenta (functions), yellow (types), blue (strings/numbers), cyan (comments)
 - **Ctrl-C**: Double-press within 1s to exit
 - **Refresh**: 'r' key reloads diff, preserves position
 
@@ -184,7 +184,7 @@ The parser is designed to be strict about unified diff format. If adding support
 - Grammars via `zts.loadLanguage()`
 - Queries: `.scm` files embedded at compile time
 - Highlights cached per-file
-- Context lines only (add/delete keep solid colors)
+- Applied to all lines - syntax foreground colors overlay diff backgrounds (green for add, red for delete)
 
 ## Git Integration
 

@@ -33,7 +33,7 @@ const Layout = struct {
     const header_height = 2;
     const divider_height = 1;
     const status_height = 1;
-    const gutter_width = 5; // Supports up to 99,999 lines
+    const min_gutter_width = 5; // Minimum gutter width for consistency
     const cursor_padding = 3; // Padding around cursor when scrolling
     const page_scroll_lines = 10;
 };
@@ -377,6 +377,44 @@ pub const App = struct {
         return total;
     }
 
+    // Calculate the maximum line number in a file (for gutter width calculation)
+    fn getMaxLineNumber(file: *const parser.FileDiff) u32 {
+        var max: u32 = 0;
+        for (file.hunks) |hunk| {
+            for (hunk.lines) |line| {
+                if (line.old_lineno) |old| {
+                    max = @max(max, old);
+                }
+                if (line.new_lineno) |new| {
+                    max = @max(max, new);
+                }
+            }
+        }
+        return max;
+    }
+
+    // Count the number of digits in a number
+    fn countDigits(n: u32) usize {
+        if (n == 0) return 1;
+        var count: usize = 0;
+        var num = n;
+        while (num > 0) {
+            count += 1;
+            num /= 10;
+        }
+        return count;
+    }
+
+    // Calculate the gutter width for a file (digits + sign character)
+    fn getGutterWidth(file: *const parser.FileDiff) usize {
+        const max_lineno = getMaxLineNumber(file);
+        const digits = countDigits(max_lineno);
+        // gutter width = number width + sign width (1 char)
+        const calculated = digits + 1;
+        // Ensure minimum width for consistency
+        return @max(calculated, Layout.min_gutter_width);
+    }
+
     fn clampScrollOffset(self: *App) void {
         const total_lines = self.getTotalLinesInCurrentFile();
         const viewport_height = self.state.viewport_height;
@@ -717,6 +755,9 @@ pub const App = struct {
         self.clampScrollOffset();
         self.adjustScrollToKeepCursorVisible(win.height);
 
+        // Calculate gutter width based on maximum line number in file
+        const gutter_width = getGutterWidth(file);
+
         // Render vertical borders
         const border_style = .{ .fg = Color.dim };
         for (0..win.height) |border_row| {
@@ -735,7 +776,7 @@ pub const App = struct {
             }
         }
 
-        const content_width = win.width -| (2 + Layout.gutter_width);
+        const content_width = win.width -| (2 + gutter_width);
         var row: usize = 0;
         var line_idx: usize = 0;
 
@@ -747,7 +788,7 @@ pub const App = struct {
 
             if (line_idx >= self.state.scroll_offset) {
                 if (row >= win.height) break;
-                const rows_used = try self.renderHunkHeader(win, hunk, line_idx, row, content_width);
+                const rows_used = try self.renderHunkHeader(win, hunk, line_idx, row, content_width, gutter_width);
                 row += rows_used;
             }
             line_idx += 1;
@@ -759,7 +800,7 @@ pub const App = struct {
                 }
 
                 if (row >= win.height) break;
-                const rows_used = try self.renderDiffLine(win, file, hunk_idx, line_idx_in_hunk, line, line_idx, row, content_width);
+                const rows_used = try self.renderDiffLine(win, file, hunk_idx, line_idx_in_hunk, line, line_idx, row, content_width, gutter_width);
                 row += rows_used;
                 line_idx += 1;
             }
@@ -774,9 +815,12 @@ pub const App = struct {
         self.clampScrollOffset();
         self.adjustScrollToKeepCursorVisible(win.height);
 
+        // Calculate gutter width based on maximum line number in file
+        const gutter_width = getGutterWidth(file);
+
         // Calculate layout: [border][gutter][left_content][divider][gutter][right_content][border]
         // Total width = 2 (borders) + 2 * gutter_width + 1 (middle divider) + left_content + right_content
-        const total_borders_and_gutters = 2 + (2 * Layout.gutter_width) + 1;
+        const total_borders_and_gutters = 2 + (2 * gutter_width) + 1;
         if (win.width <= total_borders_and_gutters) return; // Not enough space
 
         const available_width = win.width - total_borders_and_gutters;
@@ -803,7 +847,7 @@ pub const App = struct {
             }
 
             // Middle divider
-            const middle_col = 1 + Layout.gutter_width + left_content_width;
+            const middle_col = 1 + gutter_width + left_content_width;
             var middle_seg = [_]vaxis.Cell.Segment{.{
                 .text = FrameChars.vertical,
                 .style = border_style,
@@ -831,6 +875,7 @@ pub const App = struct {
                     row,
                     left_content_width,
                     right_content_width,
+                    gutter_width,
                 );
                 row += rows_used;
             }
@@ -851,6 +896,7 @@ pub const App = struct {
                     row,
                     left_content_width,
                     right_content_width,
+                    gutter_width,
                 );
                 row += rows_used;
                 line_idx += 1;
@@ -866,6 +912,7 @@ pub const App = struct {
         row: usize,
         left_width: usize,
         right_width: usize,
+        gutter_width: usize,
     ) !usize {
         var buf: [256]u8 = undefined;
 
@@ -895,7 +942,7 @@ pub const App = struct {
         // Calculate how many rows this will take (same on both sides)
         const num_rows = if (header_text.len == 0) 1 else (header_text.len + left_width - 1) / left_width;
 
-        const right_col = 1 + Layout.gutter_width + left_width + 1; // +1 for middle divider
+        const right_col = 1 + gutter_width + left_width + 1; // +1 for middle divider
 
         // Render wrapped text on both left and right sides
         const fill_style: vaxis.Style = .{ .bg = Color.dim };
@@ -939,7 +986,7 @@ pub const App = struct {
                 .text = left_display,
                 .style = style,
             }};
-            _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 1 + Layout.gutter_width });
+            _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
 
             // Render right content
             const right_text_start = wrap_idx * right_width;
@@ -962,7 +1009,7 @@ pub const App = struct {
                 .text = right_display,
                 .style = style,
             }};
-            _ = try win.print(&right_seg, .{ .row_offset = current_row, .col_offset = right_col + Layout.gutter_width });
+            _ = try win.print(&right_seg, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
 
             current_row += 1;
         }
@@ -978,6 +1025,7 @@ pub const App = struct {
         row: usize,
         left_width: usize,
         right_width: usize,
+        gutter_width: usize,
     ) !usize {
         const is_cursor = line_idx == self.state.cursor_line;
         const base_style = self.getLineStyle(line.line_type);
@@ -986,7 +1034,7 @@ pub const App = struct {
         else
             base_style;
 
-        const right_col = 1 + Layout.gutter_width + left_width + 1; // +1 for middle divider
+        const right_col = 1 + gutter_width + left_width + 1; // +1 for middle divider
 
         switch (line.line_type) {
             .context => {
@@ -1000,7 +1048,7 @@ pub const App = struct {
                     const show_lineno = wrap_idx == 0;
 
                     // Render left side
-                    try self.renderGutter(win, line_idx, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type);
+                    try self.renderGutter(win, line_idx, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type, gutter_width);
 
                     const left_start = wrap_idx * left_width;
                     const left_end = @min(left_start + left_width, line.content.len);
@@ -1021,10 +1069,10 @@ pub const App = struct {
                         .text = left_display,
                         .style = style,
                     }};
-                    _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 1 + Layout.gutter_width });
+                    _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
 
                     // Render right side (same content)
-                    try self.renderGutterAtColumn(win, line_idx, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type);
+                    try self.renderGutterAtColumn(win, line_idx, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
 
                     const right_start = wrap_idx * right_width;
                     const right_end = @min(right_start + right_width, line.content.len);
@@ -1045,7 +1093,7 @@ pub const App = struct {
                         .text = right_display,
                         .style = style,
                     }};
-                    _ = try win.print(&right_seg, .{ .row_offset = current_row, .col_offset = right_col + Layout.gutter_width });
+                    _ = try win.print(&right_seg, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
 
                     current_row += 1;
                 }
@@ -1063,7 +1111,7 @@ pub const App = struct {
                     const show_lineno = wrap_idx == 0;
 
                     // Render left side
-                    try self.renderGutter(win, line_idx, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type);
+                    try self.renderGutter(win, line_idx, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type, gutter_width);
 
                     const text_start = wrap_idx * left_width;
                     const text_end = @min(text_start + left_width, line.content.len);
@@ -1084,18 +1132,18 @@ pub const App = struct {
                         .text = left_display,
                         .style = style,
                     }};
-                    _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 1 + Layout.gutter_width });
+                    _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
 
                     // Right side empty with cursor highlight if needed
                     if (is_cursor) {
-                        try self.renderGutterAtColumn(win, line_idx, current_row, is_cursor, false, null, right_col, null);
+                        try self.renderGutterAtColumn(win, line_idx, current_row, is_cursor, false, null, right_col, null, gutter_width);
                         const blank = try self.frameTextSlice(right_width);
                         @memset(blank, ' ');
                         var blank_seg = [_]vaxis.Cell.Segment{.{
                             .text = blank,
                             .style = .{ .fg = Color.white, .bg = Color.dim },
                         }};
-                        _ = try win.print(&blank_seg, .{ .row_offset = current_row, .col_offset = right_col + Layout.gutter_width });
+                        _ = try win.print(&blank_seg, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
                     }
 
                     current_row += 1;
@@ -1115,18 +1163,18 @@ pub const App = struct {
 
                     // Left side empty with cursor highlight if needed
                     if (is_cursor) {
-                        try self.renderGutter(win, line_idx, current_row, is_cursor, false, null, null);
+                        try self.renderGutter(win, line_idx, current_row, is_cursor, false, null, null, gutter_width);
                         const blank = try self.frameTextSlice(left_width);
                         @memset(blank, ' ');
                         var blank_seg = [_]vaxis.Cell.Segment{.{
                             .text = blank,
                             .style = .{ .fg = Color.white, .bg = Color.dim },
                         }};
-                        _ = try win.print(&blank_seg, .{ .row_offset = current_row, .col_offset = 1 + Layout.gutter_width });
+                        _ = try win.print(&blank_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
                     }
 
                     // Render right side
-                    try self.renderGutterAtColumn(win, line_idx, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type);
+                    try self.renderGutterAtColumn(win, line_idx, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
 
                     const text_start = wrap_idx * right_width;
                     const text_end = @min(text_start + right_width, line.content.len);
@@ -1147,7 +1195,7 @@ pub const App = struct {
                         .text = right_display,
                         .style = style,
                     }};
-                    _ = try win.print(&right_seg, .{ .row_offset = current_row, .col_offset = right_col + Layout.gutter_width });
+                    _ = try win.print(&right_seg, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
 
                     current_row += 1;
                 }
@@ -1167,6 +1215,7 @@ pub const App = struct {
         file_lineno: ?u32,
         col_offset: usize,
         line_type: ?parser.Line.LineType,
+        gutter_width: usize,
     ) !void {
         _ = line_idx;
 
@@ -1177,16 +1226,30 @@ pub const App = struct {
 
         if (show_number) {
             if (file_lineno) |lineno| {
-                // Show line number and diff sign (GitHub style: number first, sign after)
-                var buf: [16]u8 = undefined;
+                // Show line number and diff sign (GitHub style: number right-justified, sign after)
                 const sign: []const u8 = if (line_type) |lt| switch (lt) {
                     .add => "+",
                     .delete => "-",
                     .context => " ",
                 } else " ";
 
-                const gutter_stack = try std.fmt.bufPrint(&buf, "{d}{s}", .{ lineno, sign });
-                const gutter_text = try self.copyFrameText(gutter_stack);
+                // Format number
+                var num_buf: [16]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{lineno});
+                const num_width = gutter_width - 1; // Reserve 1 char for sign
+                const padding_needed = num_width -| num_str.len;
+
+                // Build gutter with right-justified number and sign
+                var buf: [32]u8 = undefined;
+                var i: usize = 0;
+                while (i < padding_needed) : (i += 1) {
+                    buf[i] = ' ';
+                }
+                @memcpy(buf[padding_needed .. padding_needed + num_str.len], num_str);
+                const sign_pos = padding_needed + num_str.len;
+                @memcpy(buf[sign_pos .. sign_pos + sign.len], sign);
+
+                const gutter_text = try self.copyFrameText(buf[0 .. sign_pos + sign.len]);
 
                 // Color the sign based on line type (with matching background)
                 const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
@@ -1217,9 +1280,10 @@ pub const App = struct {
                 _ = try win.print(&segments, .{ .row_offset = row, .col_offset = col_offset });
             } else {
                 if (is_cursor) {
-                    const spaces = try self.copyFrameText("     ");
+                    const spaces_slice = try self.frameTextSlice(gutter_width);
+                    @memset(spaces_slice, ' ');
                     var seg = [_]vaxis.Cell.Segment{.{
-                        .text = spaces,
+                        .text = spaces_slice,
                         .style = base_style,
                     }};
                     _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
@@ -1227,9 +1291,10 @@ pub const App = struct {
             }
         } else {
             if (is_cursor) {
-                const spaces = try self.copyFrameText("     ");
+                const spaces_slice = try self.frameTextSlice(gutter_width);
+                @memset(spaces_slice, ' ');
                 var seg = [_]vaxis.Cell.Segment{.{
-                    .text = spaces,
+                    .text = spaces_slice,
                     .style = base_style,
                 }};
                 _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
@@ -1259,6 +1324,7 @@ pub const App = struct {
         line_idx: usize,
         row: usize,
         content_width: usize,
+        gutter_width: usize,
     ) !usize {
         var buf: [256]u8 = undefined;
 
@@ -1301,7 +1367,7 @@ pub const App = struct {
         }
 
         // Now render the actual content on top
-        const content_start = 1 + Layout.gutter_width;
+        const content_start = 1 + gutter_width;
         const display_text = blk: {
             const slice = try self.frameTextSlice(content_width);
             const copy_len = @min(header_text_stack.len, slice.len);
@@ -1334,6 +1400,7 @@ pub const App = struct {
         style: vaxis.Style,
         file_lineno: ?u32,
         line_type: ?parser.Line.LineType,
+        gutter_width: usize,
     ) !usize {
         _ = is_cursor; // Unused - we always fill like cursor is on the line
         if (content_width == 0) return 1;
@@ -1342,13 +1409,13 @@ pub const App = struct {
         const num_rows = (text.len + content_width - 1) / content_width;
         if (num_rows == 0) {
             // Empty line - still render one row with full background
-            try self.renderGutter(win, line_idx, start_row, true, true, file_lineno, line_type); // Always fill gutter
+            try self.renderGutter(win, line_idx, start_row, true, true, file_lineno, line_type, gutter_width); // Always fill gutter
             const display_text = try self.padTextForCursor("", content_width, true); // Always pad
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
                 .style = style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + Layout.gutter_width });
+            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width });
             return 1;
         }
 
@@ -1361,7 +1428,7 @@ pub const App = struct {
 
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
-            try self.renderGutter(win, line_idx, current_row, true, show_line_number, file_lineno, line_type); // Always fill gutter
+            try self.renderGutter(win, line_idx, current_row, true, show_line_number, file_lineno, line_type, gutter_width); // Always fill gutter
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
@@ -1374,7 +1441,7 @@ pub const App = struct {
                 .text = display_text,
                 .style = style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = 1 + Layout.gutter_width });
+            _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
 
             text_offset += chunk_len;
             rows_rendered += 1;
@@ -1393,6 +1460,7 @@ pub const App = struct {
         line_idx: usize,
         row: usize,
         content_width: usize,
+        gutter_width: usize,
     ) !usize {
         const is_cursor = line_idx == self.state.cursor_line;
         const base_style = self.getLineStyle(line.line_type);
@@ -1424,6 +1492,7 @@ pub const App = struct {
             style,
             file_lineno,
             line.line_type,
+            gutter_width,
         );
     }
 
@@ -1626,6 +1695,7 @@ pub const App = struct {
         style: vaxis.Style,
         file_lineno: ?u32,
         line_type: ?parser.Line.LineType,
+        gutter_width: usize,
     ) !usize {
         if (content_width == 0) return 1;
 
@@ -1633,13 +1703,13 @@ pub const App = struct {
         const num_rows = if (text.len == 0) 1 else (text.len + content_width - 1) / content_width;
         if (num_rows == 0) {
             // Empty line - still render one row
-            try self.renderGutter(win, line_idx, start_row, is_cursor, true, file_lineno, line_type);
+            try self.renderGutter(win, line_idx, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
             const display_text = try self.padTextForCursor("", content_width, is_cursor);
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
                 .style = style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + Layout.gutter_width });
+            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width });
             return 1;
         }
 
@@ -1652,7 +1722,7 @@ pub const App = struct {
 
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
-            try self.renderGutter(win, line_idx, current_row, is_cursor, show_line_number, file_lineno, line_type);
+            try self.renderGutter(win, line_idx, current_row, is_cursor, show_line_number, file_lineno, line_type, gutter_width);
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
@@ -1681,9 +1751,9 @@ pub const App = struct {
                     .style = style,
                 };
 
-                _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + Layout.gutter_width });
+                _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
             } else {
-                _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = 1 + Layout.gutter_width });
+                _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
             }
 
             text_offset += chunk_len;
@@ -1704,6 +1774,7 @@ pub const App = struct {
         style: vaxis.Style,
         file_lineno: ?u32,
         line_type: ?parser.Line.LineType,
+        gutter_width: usize,
     ) !usize {
         if (content_width == 0) return 1;
 
@@ -1711,13 +1782,13 @@ pub const App = struct {
         const num_rows = (text.len + content_width - 1) / content_width;
         if (num_rows == 0) {
             // Empty line - still render one row
-            try self.renderGutter(win, line_idx, start_row, is_cursor, true, file_lineno, line_type);
+            try self.renderGutter(win, line_idx, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
             const display_text = try self.padTextForCursor("", content_width, is_cursor);
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
                 .style = style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + Layout.gutter_width });
+            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width });
             return 1;
         }
 
@@ -1730,7 +1801,7 @@ pub const App = struct {
 
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
-            try self.renderGutter(win, line_idx, current_row, is_cursor, show_line_number, file_lineno, line_type);
+            try self.renderGutter(win, line_idx, current_row, is_cursor, show_line_number, file_lineno, line_type, gutter_width);
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
@@ -1752,7 +1823,7 @@ pub const App = struct {
         return if (rows_rendered == 0) 1 else rows_rendered;
     }
 
-    fn renderGutter(self: *App, win: vaxis.Window, line_idx: usize, row: usize, is_cursor: bool, show_number: bool, file_lineno: ?u32, line_type: ?parser.Line.LineType) !void {
+    fn renderGutter(self: *App, win: vaxis.Window, line_idx: usize, row: usize, is_cursor: bool, show_number: bool, file_lineno: ?u32, line_type: ?parser.Line.LineType, gutter_width: usize) !void {
         _ = line_idx; // No longer used, but kept for API compatibility
 
         const base_style: vaxis.Style = if (is_cursor)
@@ -1762,16 +1833,30 @@ pub const App = struct {
 
         if (show_number) {
             if (file_lineno) |lineno| {
-                // Show line number and diff sign (GitHub style: number first, sign after)
-                var buf: [16]u8 = undefined;
+                // Show line number and diff sign (GitHub style: number right-justified, sign after)
                 const sign: []const u8 = if (line_type) |lt| switch (lt) {
                     .add => "+",
                     .delete => "-",
                     .context => " ",
                 } else " ";
 
-                const gutter_stack = try std.fmt.bufPrint(&buf, "{d}{s}", .{ lineno, sign });
-                const gutter_text = try self.copyFrameText(gutter_stack);
+                // Format number
+                var num_buf: [16]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{lineno});
+                const num_width = gutter_width - 1; // Reserve 1 char for sign
+                const padding_needed = num_width -| num_str.len;
+
+                // Build gutter with right-justified number and sign
+                var buf: [32]u8 = undefined;
+                var i: usize = 0;
+                while (i < padding_needed) : (i += 1) {
+                    buf[i] = ' ';
+                }
+                @memcpy(buf[padding_needed .. padding_needed + num_str.len], num_str);
+                const sign_pos = padding_needed + num_str.len;
+                @memcpy(buf[sign_pos .. sign_pos + sign.len], sign);
+
+                const gutter_text = try self.copyFrameText(buf[0 .. sign_pos + sign.len]);
 
                 // Color the sign based on line type (with matching background)
                 const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
@@ -1803,9 +1888,10 @@ pub const App = struct {
             } else {
                 // For hunk headers or other lines without file line numbers, show empty gutter
                 if (is_cursor) {
-                    const spaces = try self.copyFrameText("     "); // Match gutter width
+                    const spaces_slice = try self.frameTextSlice(gutter_width);
+                    @memset(spaces_slice, ' ');
                     var seg = [_]vaxis.Cell.Segment{.{
-                        .text = spaces,
+                        .text = spaces_slice,
                         .style = base_style,
                     }};
                     _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 1 });
@@ -1814,9 +1900,10 @@ pub const App = struct {
         } else {
             // For wrapped continuation lines, show empty gutter with cursor highlight if needed
             if (is_cursor) {
-                const spaces = try self.copyFrameText("     "); // Match gutter width
+                const spaces_slice = try self.frameTextSlice(gutter_width);
+                @memset(spaces_slice, ' ');
                 var seg = [_]vaxis.Cell.Segment{.{
-                    .text = spaces,
+                    .text = spaces_slice,
                     .style = base_style,
                 }};
                 _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 1 });
