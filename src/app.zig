@@ -1749,10 +1749,8 @@ pub const App = struct {
     ) !usize {
         if (content_width == 0) return 1;
 
-        // Calculate number of wrapped rows needed
-        const num_rows = if (text.len == 0) 1 else (text.len + content_width - 1) / content_width;
-        if (num_rows == 0) {
-            // Empty line - still render one row
+        // Handle empty lines explicitly
+        if (text.len == 0) {
             try self.renderGutter(win, line_idx, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
             const display_text = try self.padTextForCursor("", content_width, is_cursor);
             var seg = [_]vaxis.Cell.Segment{.{
@@ -1828,10 +1826,8 @@ pub const App = struct {
     ) !usize {
         if (content_width == 0) return 1;
 
-        // Calculate number of wrapped rows needed
-        const num_rows = (text.len + content_width - 1) / content_width;
-        if (num_rows == 0) {
-            // Empty line - still render one row
+        // Handle empty lines explicitly
+        if (text.len == 0) {
             try self.renderGutter(win, line_idx, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
             const display_text = try self.padTextForCursor("", content_width, is_cursor);
             var seg = [_]vaxis.Cell.Segment{.{
@@ -1864,7 +1860,7 @@ pub const App = struct {
                 .text = display_text,
                 .style = style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = 1 + Layout.gutter_width });
+            _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
 
             text_offset += chunk_len;
             rows_rendered += 1;
