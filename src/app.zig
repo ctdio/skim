@@ -811,6 +811,10 @@ pub const App = struct {
         if (self.state.current_file_idx >= self.state.files.len) return;
 
         const file = &self.state.files[self.state.current_file_idx];
+
+        // Ensure syntax highlights are loaded for this file
+        try self.ensureHighlights(file);
+
         self.state.viewport_height = win.height;
         self.clampScrollOffset();
         self.adjustScrollToKeepCursorVisible(win.height);
@@ -858,7 +862,7 @@ pub const App = struct {
         var row: usize = 0;
         var line_idx: usize = 0;
 
-        for (file.hunks) |hunk| {
+        for (file.hunks, 0..) |hunk, hunk_idx| {
             // Skip hunks that are before scroll offset
             if (line_idx + hunk.lines.len < self.state.scroll_offset) {
                 line_idx += hunk.lines.len + 1; // +1 for hunk header
@@ -882,7 +886,7 @@ pub const App = struct {
             line_idx += 1;
 
             // Render diff lines
-            for (hunk.lines) |line| {
+            for (hunk.lines, 0..) |line, line_idx_in_hunk| {
                 if (line_idx < self.state.scroll_offset) {
                     line_idx += 1;
                     continue;
@@ -891,6 +895,9 @@ pub const App = struct {
                 if (row >= win.height) break;
                 const rows_used = try self.renderDiffLineSideBySide(
                     win,
+                    file,
+                    hunk_idx,
+                    line_idx_in_hunk,
                     line,
                     line_idx,
                     row,
@@ -1020,6 +1027,9 @@ pub const App = struct {
     fn renderDiffLineSideBySide(
         self: *App,
         win: vaxis.Window,
+        file: *const parser.FileDiff,
+        hunk_idx: usize,
+        line_idx_in_hunk: usize,
         line: parser.Line,
         line_idx: usize,
         row: usize,
@@ -1035,6 +1045,9 @@ pub const App = struct {
             base_style;
 
         const right_col = 1 + gutter_width + left_width + 1; // +1 for middle divider
+
+        // Calculate byte offset for syntax highlighting
+        const byte_offset = getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
 
         switch (line.line_type) {
             .context => {
@@ -1054,22 +1067,30 @@ pub const App = struct {
                     const left_end = @min(left_start + left_width, line.content.len);
                     const left_chunk = if (left_start < line.content.len) line.content[left_start..left_end] else "";
 
-                    const left_display = if (is_cursor) blk: {
-                        const slice = try self.frameTextSlice(left_width);
-                        if (left_chunk.len > 0) {
-                            @memcpy(slice[0..left_chunk.len], left_chunk);
-                        }
-                        if (left_chunk.len < left_width) {
-                            @memset(slice[left_chunk.len..], ' ');
-                        }
-                        break :blk slice;
-                    } else left_chunk;
+                    // Generate syntax-highlighted segments for left chunk
+                    const left_chunk_byte_offset = byte_offset + left_start;
+                    const left_segments = try self.createHighlightedSegments(left_chunk, left_chunk_byte_offset, file.highlights, style);
+                    defer self.allocator.free(left_segments);
 
-                    var left_seg = [_]vaxis.Cell.Segment{.{
-                        .text = left_display,
-                        .style = style,
-                    }};
-                    _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
+                    // If cursor is on this line, we need to pad the segments
+                    if (is_cursor and left_chunk.len < left_width) {
+                        const padded_segments = try self.allocator.alloc(vaxis.Cell.Segment, left_segments.len + 1);
+                        defer self.allocator.free(padded_segments);
+
+                        @memcpy(padded_segments[0..left_segments.len], left_segments);
+
+                        const padding_len = left_width - left_chunk.len;
+                        const padding = try self.frameTextSlice(padding_len);
+                        @memset(padding, ' ');
+                        padded_segments[left_segments.len] = .{
+                            .text = padding,
+                            .style = style,
+                        };
+
+                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
+                    } else {
+                        _ = try win.print(left_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
+                    }
 
                     // Render right side (same content)
                     try self.renderGutterAtColumn(win, line_idx, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
@@ -1078,22 +1099,30 @@ pub const App = struct {
                     const right_end = @min(right_start + right_width, line.content.len);
                     const right_chunk = if (right_start < line.content.len) line.content[right_start..right_end] else "";
 
-                    const right_display = if (is_cursor) blk: {
-                        const slice = try self.frameTextSlice(right_width);
-                        if (right_chunk.len > 0) {
-                            @memcpy(slice[0..right_chunk.len], right_chunk);
-                        }
-                        if (right_chunk.len < right_width) {
-                            @memset(slice[right_chunk.len..], ' ');
-                        }
-                        break :blk slice;
-                    } else right_chunk;
+                    // Generate syntax-highlighted segments for right chunk
+                    const right_chunk_byte_offset = byte_offset + right_start;
+                    const right_segments = try self.createHighlightedSegments(right_chunk, right_chunk_byte_offset, file.highlights, style);
+                    defer self.allocator.free(right_segments);
 
-                    var right_seg = [_]vaxis.Cell.Segment{.{
-                        .text = right_display,
-                        .style = style,
-                    }};
-                    _ = try win.print(&right_seg, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
+                    // If cursor is on this line, we need to pad the segments
+                    if (is_cursor and right_chunk.len < right_width) {
+                        const padded_segments = try self.allocator.alloc(vaxis.Cell.Segment, right_segments.len + 1);
+                        defer self.allocator.free(padded_segments);
+
+                        @memcpy(padded_segments[0..right_segments.len], right_segments);
+
+                        const padding_len = right_width - right_chunk.len;
+                        const padding = try self.frameTextSlice(padding_len);
+                        @memset(padding, ' ');
+                        padded_segments[right_segments.len] = .{
+                            .text = padding,
+                            .style = style,
+                        };
+
+                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
+                    } else {
+                        _ = try win.print(right_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
+                    }
 
                     current_row += 1;
                 }
@@ -1102,6 +1131,7 @@ pub const App = struct {
             },
             .delete => {
                 // Show on left only, wrap as needed
+                // Note: Delete lines are not in the new file, so syntax highlighting won't apply
                 const num_rows = if (line.content.len == 0) 1 else (line.content.len + left_width - 1) / left_width;
 
                 var current_row = row;
@@ -1117,22 +1147,31 @@ pub const App = struct {
                     const text_end = @min(text_start + left_width, line.content.len);
                     const chunk = if (text_start < line.content.len) line.content[text_start..text_end] else "";
 
-                    const left_display = if (is_cursor) blk: {
-                        const slice = try self.frameTextSlice(left_width);
-                        if (chunk.len > 0) {
-                            @memcpy(slice[0..chunk.len], chunk);
-                        }
-                        if (chunk.len < left_width) {
-                            @memset(slice[chunk.len..], ' ');
-                        }
-                        break :blk slice;
-                    } else chunk;
+                    // Generate syntax-highlighted segments for chunk
+                    // (will fall back to plain text for delete lines since they're not in new file)
+                    const chunk_byte_offset = byte_offset + text_start;
+                    const segments = try self.createHighlightedSegments(chunk, chunk_byte_offset, file.highlights, style);
+                    defer self.allocator.free(segments);
 
-                    var left_seg = [_]vaxis.Cell.Segment{.{
-                        .text = left_display,
-                        .style = style,
-                    }};
-                    _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
+                    // If cursor is on this line, we need to pad the segments
+                    if (is_cursor and chunk.len < left_width) {
+                        const padded_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len + 1);
+                        defer self.allocator.free(padded_segments);
+
+                        @memcpy(padded_segments[0..segments.len], segments);
+
+                        const padding_len = left_width - chunk.len;
+                        const padding = try self.frameTextSlice(padding_len);
+                        @memset(padding, ' ');
+                        padded_segments[segments.len] = .{
+                            .text = padding,
+                            .style = style,
+                        };
+
+                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
+                    } else {
+                        _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
+                    }
 
                     // Right side empty with cursor highlight if needed
                     if (is_cursor) {
@@ -1180,22 +1219,30 @@ pub const App = struct {
                     const text_end = @min(text_start + right_width, line.content.len);
                     const chunk = if (text_start < line.content.len) line.content[text_start..text_end] else "";
 
-                    const right_display = if (is_cursor) blk: {
-                        const slice = try self.frameTextSlice(right_width);
-                        if (chunk.len > 0) {
-                            @memcpy(slice[0..chunk.len], chunk);
-                        }
-                        if (chunk.len < right_width) {
-                            @memset(slice[chunk.len..], ' ');
-                        }
-                        break :blk slice;
-                    } else chunk;
+                    // Generate syntax-highlighted segments for chunk
+                    const chunk_byte_offset = byte_offset + text_start;
+                    const segments = try self.createHighlightedSegments(chunk, chunk_byte_offset, file.highlights, style);
+                    defer self.allocator.free(segments);
 
-                    var right_seg = [_]vaxis.Cell.Segment{.{
-                        .text = right_display,
-                        .style = style,
-                    }};
-                    _ = try win.print(&right_seg, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
+                    // If cursor is on this line, we need to pad the segments
+                    if (is_cursor and chunk.len < right_width) {
+                        const padded_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len + 1);
+                        defer self.allocator.free(padded_segments);
+
+                        @memcpy(padded_segments[0..segments.len], segments);
+
+                        const padding_len = right_width - chunk.len;
+                        const padding = try self.frameTextSlice(padding_len);
+                        @memset(padding, ' ');
+                        padded_segments[segments.len] = .{
+                            .text = padding,
+                            .style = style,
+                        };
+
+                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
+                    } else {
+                        _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
+                    }
 
                     current_row += 1;
                 }
