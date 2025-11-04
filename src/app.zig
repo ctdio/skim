@@ -337,10 +337,7 @@ pub const App = struct {
 
         // Move cursor down by half viewport, clamped to last line
         if (total_lines > 0) {
-            self.state.cursor_line = @min(
-                self.state.cursor_line + scroll_amount,
-                total_lines - 1
-            );
+            self.state.cursor_line = @min(self.state.cursor_line + scroll_amount, total_lines - 1);
         }
 
         // Move viewport down by same amount to maintain screen position
@@ -446,10 +443,7 @@ pub const App = struct {
 
         // Move cursor down by half viewport, clamped to last line
         if (total_lines > 0) {
-            self.state.cursor_line = @min(
-                self.state.cursor_line + scroll_amount,
-                total_lines - 1
-            );
+            self.state.cursor_line = @min(self.state.cursor_line + scroll_amount, total_lines - 1);
         }
 
         // Move viewport down by same amount to maintain screen position
@@ -680,7 +674,6 @@ pub const App = struct {
 
         // Generate highlights
         const highlights = try self.syntax_highlighter.highlightFile(file_path, content.items);
-
 
         // Cache them (NOTE: This modifies a "const" pointer, which is a hack for now)
         const mutable_file = @constCast(file);
@@ -1192,7 +1185,7 @@ pub const App = struct {
                     .context => " ",
                 } else " ";
 
-                const gutter_stack = try std.fmt.bufPrint(&buf, "{d}{s}", .{lineno, sign});
+                const gutter_stack = try std.fmt.bufPrint(&buf, "{d}{s}", .{ lineno, sign });
                 const gutter_text = try self.copyFrameText(gutter_stack);
 
                 // Color the sign based on line type (with matching background)
@@ -1214,8 +1207,8 @@ pub const App = struct {
                 const number_style: vaxis.Style = base_style;
 
                 // Split into number and sign segments for different colors
-                const number_text = gutter_text[0..gutter_text.len - 1];
-                const sign_text = gutter_text[gutter_text.len - 1..];
+                const number_text = gutter_text[0 .. gutter_text.len - 1];
+                const sign_text = gutter_text[gutter_text.len - 1 ..];
 
                 var segments = [_]vaxis.Cell.Segment{
                     .{ .text = number_text, .style = number_style },
@@ -1777,7 +1770,7 @@ pub const App = struct {
                     .context => " ",
                 } else " ";
 
-                const gutter_stack = try std.fmt.bufPrint(&buf, "{d}{s}", .{lineno, sign});
+                const gutter_stack = try std.fmt.bufPrint(&buf, "{d}{s}", .{ lineno, sign });
                 const gutter_text = try self.copyFrameText(gutter_stack);
 
                 // Color the sign based on line type (with matching background)
@@ -1799,8 +1792,8 @@ pub const App = struct {
                 const number_style: vaxis.Style = base_style;
 
                 // Split into number and sign segments for different colors
-                const number_text = gutter_text[0..gutter_text.len - 1];
-                const sign_text = gutter_text[gutter_text.len - 1..];
+                const number_text = gutter_text[0 .. gutter_text.len - 1];
+                const sign_text = gutter_text[gutter_text.len - 1 ..];
 
                 var segments = [_]vaxis.Cell.Segment{
                     .{ .text = number_text, .style = number_style },

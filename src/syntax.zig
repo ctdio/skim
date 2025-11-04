@@ -224,8 +224,7 @@ pub const Highlight = struct {
         }
 
         // Operators (white/default)
-        if (std.mem.eql(u8, cat, "operator"))
-        {
+        if (std.mem.eql(u8, cat, "operator")) {
             return .white;
         }
 
