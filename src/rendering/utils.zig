@@ -138,13 +138,13 @@ pub const RenderUtils = struct {
                 // Apply diff background to number as well for add/delete lines
                 const number_style: vaxis.Style = if (line_type) |lt| switch (lt) {
                     .add => if (is_cursor)
-                        .{ .fg = Color.dim, .bg = Color.cursor_bg }
+                        .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else
-                        .{ .fg = Color.dim, .bg = Color.diff_add_bg },
+                        .{ .fg = Color.diff_sign_add, .bg = Color.diff_add_bg },
                     .delete => if (is_cursor)
-                        .{ .fg = Color.dim, .bg = Color.cursor_bg }
+                        .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else
-                        .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
+                        .{ .fg = Color.diff_sign_delete, .bg = Color.diff_delete_bg },
                     .context => base_style,
                 } else base_style;
 
