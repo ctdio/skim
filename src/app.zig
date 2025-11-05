@@ -19,13 +19,21 @@ const Color = struct {
     const magenta = .{ .index = 5 };
     const cyan = .{ .index = 6 };
     const white = .{ .index = 7 };
-    const dim = .{ .index = 8 };
+    const dim = .{ .rgb = [3]u8{ 40, 40, 40 } }; // Dark gray #282828
 
     // Muted diff background colors (RGB for better control)
     const diff_add_bg = .{ .rgb = [3]u8{ 13, 72, 32 } }; // Dark green #0d4820
     const diff_delete_bg = .{ .rgb = [3]u8{ 72, 13, 13 } }; // Dark red #480d0d
     const diff_add_fg = .{ .rgb = [3]u8{ 200, 255, 200 } }; // Light green text
     const diff_delete_fg = .{ .rgb = [3]u8{ 255, 200, 200 } }; // Light red text
+
+    // Cursor line highlighting - slightly darker gray background
+    const cursor_bg = .{ .rgb = [3]u8{ 80, 80, 80 } }; // Darker gray #505050
+    const cursor_fg = .{ .rgb = [3]u8{ 255, 255, 255 } }; // White text
+
+    // Pure white caret for focused mode - highly visible
+    const caret_bg = .{ .rgb = [3]u8{ 255, 255, 255 } }; // Pure white #ffffff
+    const caret_fg = .{ .rgb = [3]u8{ 0, 0, 0 } }; // Black text
 };
 
 // Layout constants
@@ -77,8 +85,11 @@ pub const App = struct {
         current_file_idx: usize,
         scroll_offset: usize,
         cursor_line: usize,
+        cursor_col: usize, // Horizontal cursor position (for FOCUSED mode)
+        h_scroll_offset: usize, // Horizontal scroll offset (for FOCUSED mode)
         view_mode: ViewMode,
         viewport_height: usize,
+        count_prefix: ?usize, // For vim-style count prefixes (e.g., 5j)
 
         const ViewMode = enum {
             unified,
@@ -126,8 +137,11 @@ pub const App = struct {
                 .current_file_idx = 0,
                 .scroll_offset = 0,
                 .cursor_line = 0,
+                .cursor_col = 0,
+                .h_scroll_offset = 0,
                 .view_mode = .unified,
                 .viewport_height = 0,
+                .count_prefix = null,
             },
             .should_quit = false,
             .last_ctrl_c = 0,
@@ -259,16 +273,41 @@ pub const App = struct {
     }
 
     fn handleNormalMode(self: *App, key: vaxis.Key) !void {
+        // Handle digit keys for count prefix (1-9, not 0 to match vim)
+        if (!key.mods.ctrl and !key.mods.alt and !key.mods.shift) {
+            if (key.codepoint >= '1' and key.codepoint <= '9') {
+                const digit = @as(usize, @intCast(key.codepoint - '0'));
+                if (self.state.count_prefix) |count| {
+                    self.state.count_prefix = count * 10 + digit;
+                } else {
+                    self.state.count_prefix = digit;
+                }
+                return;
+            }
+            // Handle 0 - append to existing count, or go to start of line (not applicable here)
+            if (key.codepoint == '0' and self.state.count_prefix != null) {
+                self.state.count_prefix = self.state.count_prefix.? * 10;
+                return;
+            }
+        }
+
         switch (key.codepoint) {
             'q' => self.should_quit = true,
             'j' => self.moveCursorDown(),
             'k' => self.moveCursorUp(),
             'h' => self.navigateToPreviousFile(),
             'l' => self.navigateToNextFile(),
-            '\r' => self.mode = .focused,
+            '\r' => {
+                self.mode = .focused;
+                self.clampCursorColumn(); // Ensure cursor is at valid position
+            },
             's' => self.toggleViewMode(),
             'r' => try self.refresh(),
-            else => {},
+            'M' => self.centerCursor(),
+            else => {
+                // Reset count prefix on any other key
+                self.state.count_prefix = null;
+            },
         }
 
         if (key.mods.ctrl) {
@@ -283,15 +322,54 @@ pub const App = struct {
     }
 
     fn moveCursorDown(self: *App) void {
+        const count = self.state.count_prefix orelse 1;
+        self.state.count_prefix = null;
+
         const total_lines = self.getTotalLinesInCurrentFile();
-        if (self.state.cursor_line + 1 < total_lines) {
-            self.state.cursor_line += 1;
+        if (total_lines > 0) {
+            const new_line = @min(self.state.cursor_line + count, total_lines - 1);
+            self.state.cursor_line = new_line;
         }
+
+        // Clamp cursor column to new line length (vim-like behavior)
+        self.clampCursorColumn();
     }
 
     fn moveCursorUp(self: *App) void {
-        if (self.state.cursor_line > 0) {
-            self.state.cursor_line -= 1;
+        const count = self.state.count_prefix orelse 1;
+        self.state.count_prefix = null;
+
+        if (self.state.cursor_line >= count) {
+            self.state.cursor_line -= count;
+        } else {
+            self.state.cursor_line = 0;
+        }
+
+        // Clamp cursor column to new line length (vim-like behavior)
+        self.clampCursorColumn();
+    }
+
+    fn moveCursorLeft(self: *App) void {
+        const count = self.state.count_prefix orelse 1;
+        self.state.count_prefix = null;
+
+        if (self.state.cursor_col >= count) {
+            self.state.cursor_col -= count;
+        } else {
+            self.state.cursor_col = 0;
+        }
+    }
+
+    fn moveCursorRight(self: *App) void {
+        const count = self.state.count_prefix orelse 1;
+        self.state.count_prefix = null;
+
+        // Get the current line content to limit horizontal movement
+        const line_content = self.getCurrentLineContent();
+        if (line_content) |content| {
+            const max_col = if (content.len > 0) content.len - 1 else 0;
+            const new_col = self.state.cursor_col + count;
+            self.state.cursor_col = @min(new_col, max_col);
         }
     }
 
@@ -322,6 +400,8 @@ pub const App = struct {
     fn resetFileState(self: *App) void {
         self.state.scroll_offset = 0;
         self.state.cursor_line = 0;
+        self.state.cursor_col = 0;
+        self.state.h_scroll_offset = 0;
     }
 
     fn toggleViewMode(self: *App) void {
@@ -343,6 +423,9 @@ pub const App = struct {
         // Move viewport down by same amount to maintain screen position
         self.state.scroll_offset += scroll_amount;
         self.clampScrollOffset();
+
+        // Clamp cursor column to new line length
+        self.clampCursorColumn();
     }
 
     fn pageUp(self: *App) void {
@@ -361,6 +444,9 @@ pub const App = struct {
         } else {
             self.state.scroll_offset = 0;
         }
+
+        // Clamp cursor column to new line length
+        self.clampCursorColumn();
     }
 
     fn getTotalLinesInCurrentFile(self: *App) usize {
@@ -375,6 +461,69 @@ pub const App = struct {
         }
 
         return total;
+    }
+
+    // Get the content of the line at the current cursor position
+    fn getCurrentLineContent(self: *App) ?[]const u8 {
+        if (self.state.current_file_idx >= self.state.files.len) return null;
+
+        const file = &self.state.files[self.state.current_file_idx];
+        var line_idx: usize = 0;
+
+        for (file.hunks) |hunk| {
+            // Hunk header line
+            if (line_idx == self.state.cursor_line) {
+                return null; // Hunk headers don't have editable content
+            }
+            line_idx += 1;
+
+            // Hunk content lines
+            for (hunk.lines) |line| {
+                if (line_idx == self.state.cursor_line) {
+                    return line.content;
+                }
+                line_idx += 1;
+            }
+        }
+
+        return null;
+    }
+
+    // Clamp cursor column to the current line length (vim-like behavior)
+    fn clampCursorColumn(self: *App) void {
+        const line_content = self.getCurrentLineContent();
+        if (line_content) |content| {
+            if (content.len > 0) {
+                // In vim, cursor can be on any character, so max is len-1
+                const max_col = content.len - 1;
+                if (self.state.cursor_col > max_col) {
+                    self.state.cursor_col = max_col;
+                }
+            } else {
+                // Empty line - cursor at column 0
+                self.state.cursor_col = 0;
+            }
+        } else {
+            // No content (e.g., hunk header) - reset to column 0
+            self.state.cursor_col = 0;
+        }
+    }
+
+    // Adjust horizontal scroll offset to keep cursor visible (vim-like behavior)
+    fn adjustHorizontalScroll(self: *App, content_width: usize) void {
+        if (content_width == 0) return;
+
+        const cursor_col = self.state.cursor_col;
+        const h_scroll = self.state.h_scroll_offset;
+
+        // If cursor is off the left edge, scroll left
+        if (cursor_col < h_scroll) {
+            self.state.h_scroll_offset = cursor_col;
+        }
+        // If cursor is off the right edge, scroll right
+        else if (cursor_col >= h_scroll + content_width) {
+            self.state.h_scroll_offset = cursor_col - content_width + 1;
+        }
     }
 
     // Calculate the maximum line number in a file (for gutter width calculation)
@@ -431,48 +580,126 @@ pub const App = struct {
     }
 
     fn handleFocusedMode(self: *App, key: vaxis.Key) !void {
+        // Handle digit keys for count prefix (1-9, not 0 to match vim)
+        if (!key.mods.ctrl and !key.mods.alt and !key.mods.shift) {
+            if (key.codepoint >= '1' and key.codepoint <= '9') {
+                const digit = @as(usize, @intCast(key.codepoint - '0'));
+                if (self.state.count_prefix) |count| {
+                    self.state.count_prefix = count * 10 + digit;
+                } else {
+                    self.state.count_prefix = digit;
+                }
+                return;
+            }
+            // Handle 0 - append to existing count
+            if (key.codepoint == '0' and self.state.count_prefix != null) {
+                self.state.count_prefix = self.state.count_prefix.? * 10;
+                return;
+            }
+        }
+
         switch (key.codepoint) {
             27 => self.mode = .normal, // ESC
-            'j' => self.scrollDown(),
-            'k' => self.scrollUp(),
+            'j' => self.moveCursorDown(),
+            'k' => self.moveCursorUp(),
+            'h' => self.moveCursorLeft(),
+            'l' => self.moveCursorRight(),
             'g' => self.scrollToTop(),
             'G' => self.scrollToBottom(),
-            else => {},
+            'M' => self.centerCursor(),
+            else => {
+                // Reset count prefix on any other key
+                self.state.count_prefix = null;
+            },
         }
 
         if (key.mods.ctrl) {
             switch (key.codepoint) {
-                'n' => self.scrollDown(),
-                'p' => self.scrollUp(),
-                'd' => self.scrollPageDown(),
-                'u' => self.scrollPageUp(),
+                'd' => self.pageDown(),
+                'u' => self.pageUp(),
                 else => {},
             }
         }
     }
 
     fn scrollDown(self: *App) void {
-        self.state.scroll_offset += 1;
+        const count = self.state.count_prefix orelse 1;
+        self.state.count_prefix = null;
+
+        const total_lines = self.getTotalLinesInCurrentFile();
+
+        // Move cursor down, clamped to last line
+        if (total_lines > 0) {
+            self.state.cursor_line = @min(self.state.cursor_line + count, total_lines - 1);
+        }
+
+        // Move viewport down by same amount
+        self.state.scroll_offset += count;
         self.clampScrollOffset();
+        self.clampCursorColumn();
     }
 
     fn scrollUp(self: *App) void {
-        if (self.state.scroll_offset > 0) {
-            self.state.scroll_offset -= 1;
+        const count = self.state.count_prefix orelse 1;
+        self.state.count_prefix = null;
+
+        // Move cursor up, clamped to 0
+        if (self.state.cursor_line >= count) {
+            self.state.cursor_line -= count;
+        } else {
+            self.state.cursor_line = 0;
         }
+
+        // Move viewport up by same amount
+        if (self.state.scroll_offset >= count) {
+            self.state.scroll_offset -= count;
+        } else {
+            self.state.scroll_offset = 0;
+        }
+
+        self.clampCursorColumn();
     }
 
     fn scrollToTop(self: *App) void {
+        self.state.cursor_line = 0;
         self.state.scroll_offset = 0;
+        self.clampCursorColumn();
     }
 
     fn scrollToBottom(self: *App) void {
         const total_lines = self.getTotalLinesInCurrentFile();
         const viewport_height = self.state.viewport_height;
+
+        // Move cursor to last line
+        if (total_lines > 0) {
+            self.state.cursor_line = total_lines - 1;
+        }
+
+        // Move viewport to show last page
         self.state.scroll_offset = if (total_lines > viewport_height)
             total_lines - viewport_height
         else
             0;
+
+        self.clampCursorColumn();
+    }
+
+    fn centerCursor(self: *App) void {
+        // Move cursor to the middle line of the current viewport (like vim's 'M')
+        const viewport_height = self.state.viewport_height;
+        const scroll_offset = self.state.scroll_offset;
+
+        if (viewport_height > 0) {
+            const half_viewport = viewport_height / 2;
+            const middle_line = scroll_offset + half_viewport;
+
+            const total_lines = self.getTotalLinesInCurrentFile();
+            if (total_lines > 0) {
+                self.state.cursor_line = @min(middle_line, total_lines - 1);
+            }
+        }
+
+        self.clampCursorColumn();
     }
 
     fn scrollPageDown(self: *App) void {
@@ -487,6 +714,7 @@ pub const App = struct {
         // Move viewport down by same amount to maintain screen position
         self.state.scroll_offset += scroll_amount;
         self.clampScrollOffset();
+        self.clampCursorColumn();
     }
 
     fn scrollPageUp(self: *App) void {
@@ -505,6 +733,8 @@ pub const App = struct {
         } else {
             self.state.scroll_offset = 0;
         }
+
+        self.clampCursorColumn();
     }
 
     fn handleCommentMode(self: *App, key: vaxis.Key) !void {
@@ -780,6 +1010,12 @@ pub const App = struct {
         }
 
         const content_width = win.width -| (2 + gutter_width);
+
+        // Adjust horizontal scroll to keep cursor visible (vim-like behavior)
+        if (self.mode == .focused) {
+            self.adjustHorizontalScroll(content_width);
+        }
+
         var row: usize = 0;
         var line_idx: usize = 0;
 
@@ -945,7 +1181,7 @@ pub const App = struct {
         const header_text = try self.copyFrameText(header_text_stack);
         const is_cursor = line_idx == self.state.cursor_line;
         const style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.white, .bg = Color.dim }
+            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
         else
             .{ .fg = Color.cyan, .bg = Color.dim };
 
@@ -1043,7 +1279,7 @@ pub const App = struct {
         const is_cursor = line_idx == self.state.cursor_line;
         const base_style = self.getLineStyle(line.line_type);
         const style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.white, .bg = Color.dim }
+            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
         else
             base_style;
 
@@ -1183,7 +1419,7 @@ pub const App = struct {
                         @memset(blank, ' ');
                         var blank_seg = [_]vaxis.Cell.Segment{.{
                             .text = blank,
-                            .style = .{ .fg = Color.white, .bg = Color.dim },
+                            .style = .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg },
                         }};
                         _ = try win.print(&blank_seg, .{ .row_offset = current_row, .col_offset = right_col + gutter_width });
                     }
@@ -1210,7 +1446,7 @@ pub const App = struct {
                         @memset(blank, ' ');
                         var blank_seg = [_]vaxis.Cell.Segment{.{
                             .text = blank,
-                            .style = .{ .fg = Color.white, .bg = Color.dim },
+                            .style = .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg },
                         }};
                         _ = try win.print(&blank_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
                     }
@@ -1270,7 +1506,7 @@ pub const App = struct {
         _ = line_idx;
 
         const base_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.white, .bg = Color.dim }
+            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
         else
             .{ .fg = Color.dim };
 
@@ -1304,15 +1540,15 @@ pub const App = struct {
                 // Color the sign based on line type (with matching background)
                 const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
                     .add => if (is_cursor)
-                        .{ .fg = Color.green, .bg = Color.dim, .bold = true }
+                        .{ .fg = Color.green, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.green, .bg = Color.diff_add_bg, .bold = true },
                     .delete => if (is_cursor)
-                        .{ .fg = Color.red, .bg = Color.dim, .bold = true }
+                        .{ .fg = Color.red, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.red, .bg = Color.diff_delete_bg, .bold = true },
                     .context => if (is_cursor)
-                        .{ .fg = Color.white, .bg = Color.dim }
+                        .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.dim },
                 } else base_style;
@@ -1396,7 +1632,7 @@ pub const App = struct {
 
         const is_cursor = line_idx == self.state.cursor_line;
         const style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.white, .bg = Color.dim }
+            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
         else
             .{ .fg = Color.cyan, .bg = Color.dim };
 
@@ -1515,7 +1751,7 @@ pub const App = struct {
         const is_cursor = line_idx == self.state.cursor_line;
         const base_style = self.getLineStyle(line.line_type);
         const style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.white, .bg = Color.dim }
+            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
         else
             base_style;
 
@@ -1543,6 +1779,7 @@ pub const App = struct {
             file_lineno,
             line.line_type,
             gutter_width,
+            self.mode == .focused, // show_caret
         );
     }
 
@@ -1746,6 +1983,7 @@ pub const App = struct {
         file_lineno: ?u32,
         line_type: ?parser.Line.LineType,
         gutter_width: usize,
+        show_caret: bool,
     ) !usize {
         if (content_width == 0) return 1;
 
@@ -1758,11 +1996,30 @@ pub const App = struct {
                 .style = style,
             }};
             _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width });
+
+            // Render caret for empty line in FOCUSED mode
+            const visible_cursor_col = if (self.state.cursor_col >= self.state.h_scroll_offset)
+                self.state.cursor_col - self.state.h_scroll_offset
+            else
+                0;
+            if (show_caret and is_cursor and visible_cursor_col < content_width) {
+                const caret_text = try self.copyFrameText(" ");
+                var caret_seg = [_]vaxis.Cell.Segment{.{
+                    .text = caret_text,
+                    .style = .{ .fg = Color.caret_fg, .bg = Color.caret_bg, .bold = true },
+                }};
+                _ = try win.print(&caret_seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width + visible_cursor_col });
+            }
+
             return 1;
         }
 
+        // Apply horizontal scrolling - start rendering from h_scroll_offset
+        const h_scroll = self.state.h_scroll_offset;
+        const start_offset = @min(h_scroll, text.len);
+
         var rows_rendered: usize = 0;
-        var text_offset: usize = 0;
+        var text_offset: usize = start_offset;
 
         while (text_offset < text.len) {
             const current_row = start_row + rows_rendered;
@@ -1802,6 +2059,31 @@ pub const App = struct {
                 _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
             } else {
                 _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
+            }
+
+            // Render caret in FOCUSED mode
+            if (show_caret and is_cursor) {
+                const cursor_col = self.state.cursor_col;
+                const h_scroll_off = self.state.h_scroll_offset;
+
+                // Calculate visible cursor position (accounting for horizontal scroll)
+                if (cursor_col >= h_scroll_off and cursor_col < h_scroll_off + content_width) {
+                    const visible_col = cursor_col - h_scroll_off;
+
+                    // Check if cursor_col falls within this chunk
+                    if (cursor_col >= text_offset and cursor_col < text_offset + chunk_len) {
+                        const col_in_chunk = cursor_col - text_offset;
+                        const caret_char = if (col_in_chunk < chunk.len) chunk[col_in_chunk .. col_in_chunk + 1] else " ";
+
+                        // Render caret with bright yellow background at visible position
+                        const caret_text = try self.copyFrameText(caret_char);
+                        var caret_seg = [_]vaxis.Cell.Segment{.{
+                            .text = caret_text,
+                            .style = .{ .fg = Color.caret_fg, .bg = Color.caret_bg, .bold = true },
+                        }};
+                        _ = try win.print(&caret_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + visible_col });
+                    }
+                }
             }
 
             text_offset += chunk_len;
@@ -1907,15 +2189,15 @@ pub const App = struct {
                 // Color the sign based on line type (with matching background)
                 const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
                     .add => if (is_cursor)
-                        .{ .fg = Color.green, .bg = Color.dim, .bold = true }
+                        .{ .fg = Color.green, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.green, .bg = Color.diff_add_bg, .bold = true },
                     .delete => if (is_cursor)
-                        .{ .fg = Color.red, .bg = Color.dim, .bold = true }
+                        .{ .fg = Color.red, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.red, .bg = Color.diff_delete_bg, .bold = true },
                     .context => if (is_cursor)
-                        .{ .fg = Color.white, .bg = Color.dim }
+                        .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.dim },
                 } else base_style;
@@ -2021,14 +2303,17 @@ pub const App = struct {
         };
 
         const keybindings = switch (self.mode) {
-            .normal => "h/l:File  j/k:Cursor  Ctrl-d/u:Page  ?:Focus  c:Comment  s:Toggle  r:Refresh  q:Quit  Ctrl-C?2:Exit",
-            .focused => "j/k:Scroll  Ctrl-d/u:Page  g/G:Top/Bottom  ESC:Normal  Ctrl-C?2:Exit",
+            .normal => "h/l:File  j/k:Cursor  Ctrl-d/u:Page  Shift+M:Center  ?:Focus  c:Comment  s:Toggle  r:Refresh  q:Quit  Ctrl-C?2:Exit",
+            .focused => "h/l:Horizontal  j/k:Cursor  Ctrl-d/u:Page  g/G:Top/Bottom  Shift+M:Center  ESC:Normal  Ctrl-C?2:Exit",
             .comment => "ESC:Cancel  Ctrl-S:Save  Ctrl-C?2:Exit",
         };
 
-        // Combine mode, view mode, and keybindings into a single string
+        // Combine mode, view mode, count prefix (if any), and keybindings into a single string
         var buf: [512]u8 = undefined;
-        const status_text = try std.fmt.bufPrint(&buf, "{s} {s}  {s}", .{ mode_str, view_str, keybindings });
+        const status_text = if (self.state.count_prefix) |count|
+            try std.fmt.bufPrint(&buf, "{s} {s} [{d}]  {s}", .{ mode_str, view_str, count, keybindings })
+        else
+            try std.fmt.bufPrint(&buf, "{s} {s}  {s}", .{ mode_str, view_str, keybindings });
 
         var seg = [_]vaxis.Cell.Segment{.{
             .text = status_text,
