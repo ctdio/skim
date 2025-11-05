@@ -4,8 +4,15 @@ const git = @import("git/diff.zig");
 const parser = @import("git/parser.zig");
 const syntax = @import("syntax.zig");
 const navigation = @import("navigation.zig");
+const render_utils = @import("rendering/utils.zig");
+const state_helpers = @import("state.zig");
+const ui_components = @import("ui.zig");
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
+const RenderUtils = render_utils.RenderUtils;
+const StateHelpers = state_helpers.StateHelpers;
+const UI = ui_components.UI;
+const DividerPosition = ui_components.DividerPosition;
 
 const Allocator = std.mem.Allocator;
 const Vaxis = vaxis.Vaxis;
@@ -370,44 +377,6 @@ pub const App = struct {
         return null;
     }
 
-    // Calculate the maximum line number in a file (for gutter width calculation)
-    fn getMaxLineNumber(file: *const parser.FileDiff) u32 {
-        var max: u32 = 0;
-        for (file.hunks) |hunk| {
-            for (hunk.lines) |line| {
-                if (line.old_lineno) |old| {
-                    max = @max(max, old);
-                }
-                if (line.new_lineno) |new| {
-                    max = @max(max, new);
-                }
-            }
-        }
-        return max;
-    }
-
-    // Count the number of digits in a number
-    fn countDigits(n: u32) usize {
-        if (n == 0) return 1;
-        var count: usize = 0;
-        var num = n;
-        while (num > 0) {
-            count += 1;
-            num /= 10;
-        }
-        return count;
-    }
-
-    // Calculate the gutter width for a file (digits + sign character)
-    fn getGutterWidth(file: *const parser.FileDiff) usize {
-        const max_lineno = getMaxLineNumber(file);
-        const digits = countDigits(max_lineno);
-        // gutter width = number width + sign width (1 char)
-        const calculated = digits + 1;
-        // Ensure minimum width for consistency
-        return @max(calculated, Layout.min_gutter_width);
-    }
-
     fn handleFocusedMode(self: *App, key: vaxis.Key) !void {
         // Handle digit keys for count prefix (1-9, not 0 to match vim)
         if (!key.mods.ctrl and !key.mods.alt and !key.mods.shift) {
@@ -461,10 +430,10 @@ pub const App = struct {
 
     fn render(self: *App, win: vaxis.Window) !void {
         win.clear();
-        self.resetFrameTextBuffer();
+        RenderUtils.resetFrameTextBuffer(self);
 
         if (self.state.files.len == 0) {
-            try self.renderEmpty(win);
+            try UI.renderEmpty(self,win);
             return;
         }
 
@@ -476,7 +445,7 @@ pub const App = struct {
             .width = .{ .limit = win.width },
             .height = .{ .limit = Layout.header_height },
         });
-        try self.renderHeader(header_win);
+        try UI.renderHeader(self,header_win);
 
         const divider_top_win = win.child(.{
             .x_off = 0,
@@ -484,7 +453,7 @@ pub const App = struct {
             .width = .{ .limit = win.width },
             .height = .{ .limit = Layout.divider_height },
         });
-        try self.renderDivider(divider_top_win, .top);
+        try UI.renderDivider(self,divider_top_win, .top);
 
         const content_win = win.child(.{
             .x_off = 0,
@@ -500,7 +469,7 @@ pub const App = struct {
             .width = .{ .limit = win.width },
             .height = .{ .limit = 1 },
         });
-        try self.renderDivider(divider_bottom_win, .bottom);
+        try UI.renderDivider(self,divider_bottom_win, .bottom);
 
         const status_win = win.child(.{
             .x_off = 0,
@@ -508,179 +477,7 @@ pub const App = struct {
             .width = .{ .limit = win.width },
             .height = .{ .limit = Layout.status_height },
         });
-        try self.renderStatus(status_win);
-    }
-
-    const DividerPosition = enum {
-        top,
-        middle,
-        bottom,
-    };
-
-    fn renderDivider(self: *App, win: vaxis.Window, position: DividerPosition) !void {
-        if (win.width == 0) return;
-
-        const width = win.width;
-        const left_char = switch (position) {
-            .top => FrameChars.top_left,
-            .middle => FrameChars.middle_left,
-            .bottom => FrameChars.bottom_left,
-        };
-        const right_char = switch (position) {
-            .top => FrameChars.top_right,
-            .middle => FrameChars.middle_right,
-            .bottom => FrameChars.bottom_right,
-        };
-
-        // Build the divider line
-        const left_corner = try self.copyFrameText(left_char);
-        const right_corner = try self.copyFrameText(right_char);
-
-        // Calculate number of horizontal characters needed (width in cells minus 2 for corners)
-        const num_h_chars = if (width > 2) width - 2 else 0;
-
-        // Calculate byte length needed (each horizontal char is 3 bytes in UTF-8)
-        const h_line_len = num_h_chars * FrameChars.horizontal.len;
-
-        const h_line = if (h_line_len > 0) blk: {
-            const line = try self.frameTextSlice(h_line_len);
-            // Fill with horizontal characters
-            var i: usize = 0;
-            while (i < num_h_chars) : (i += 1) {
-                const pos = i * FrameChars.horizontal.len;
-                @memcpy(line[pos .. pos + FrameChars.horizontal.len], FrameChars.horizontal);
-            }
-            break :blk line;
-        } else "";
-
-        // Print left corner
-        var left_seg = [_]vaxis.Cell.Segment{.{
-            .text = left_corner,
-            .style = .{ .fg = Color.dim },
-        }};
-        _ = try win.print(&left_seg, .{ .row_offset = 0 });
-
-        // Print horizontal line
-        if (h_line.len > 0) {
-            var h_seg = [_]vaxis.Cell.Segment{.{
-                .text = h_line,
-                .style = .{ .fg = Color.dim },
-            }};
-            _ = try win.print(&h_seg, .{ .row_offset = 0, .col_offset = 1 });
-        }
-
-        // Print right corner
-        var right_seg = [_]vaxis.Cell.Segment{.{
-            .text = right_corner,
-            .style = .{ .fg = Color.dim },
-        }};
-        _ = try win.print(&right_seg, .{ .row_offset = 0, .col_offset = win.width -| 1 });
-    }
-
-    fn renderEmpty(self: *App, win: vaxis.Window) !void {
-        _ = self;
-        const msg = "No changes to review";
-        const row = win.height / 2;
-        const col = (win.width -| msg.len) / 2;
-
-        var seg = [_]vaxis.Cell.Segment{.{
-            .text = msg,
-            .style = .{ .fg = Color.dim },
-        }};
-        _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col });
-    }
-
-    fn renderHeader(self: *App, win: vaxis.Window) !void {
-        if (win.height == 0 or win.width == 0) return;
-        win.clear();
-
-        if (self.state.current_file_idx >= self.state.files.len) return;
-
-        const current_file = &self.state.files[self.state.current_file_idx];
-        const stats = self.calculateDiffStats(current_file);
-
-        const file_path = if (current_file.new_path.len > 0) current_file.new_path else current_file.old_path;
-
-        // First line: File info with stats
-        var buf1: [512]u8 = undefined;
-        const file_info = try std.fmt.bufPrint(&buf1, "File {d} of {d}  ", .{
-            self.state.current_file_idx + 1,
-            self.state.files.len,
-        });
-
-        var buf2: [64]u8 = undefined;
-        const additions_text = try std.fmt.bufPrint(&buf2, "+{d}", .{stats.additions});
-
-        var buf3: [64]u8 = undefined;
-        const deletions_text = try std.fmt.bufPrint(&buf3, " -{d}", .{stats.deletions});
-
-        // Copy to frame buffer for proper lifetime
-        const file_info_copy = try self.copyFrameText(file_info);
-        const file_path_copy = try self.copyFrameText(file_path);
-        const additions_copy = try self.copyFrameText(additions_text);
-        const deletions_copy = try self.copyFrameText(deletions_text);
-        const spacer = try self.copyFrameText("  ");
-
-        // Create segments with different colors
-        var segments = [_]vaxis.Cell.Segment{
-            .{ .text = file_info_copy, .style = .{ .fg = Color.white } },
-            .{ .text = file_path_copy, .style = .{ .fg = Color.white, .bold = true } },
-            .{ .text = spacer, .style = .{ .fg = Color.white } },
-            .{ .text = additions_copy, .style = .{ .fg = Color.green, .bold = true } },
-            .{ .text = deletions_copy, .style = .{ .fg = Color.red, .bold = true } },
-        };
-
-        _ = try win.print(&segments, .{ .row_offset = 0, .col_offset = 0 });
-    }
-
-    // Ensure syntax highlights are loaded for the given file
-    fn ensureHighlights(self: *App, file: *parser.FileDiff) !void {
-        if (file.highlights != null) return; // Already cached
-
-        // Build the NEW file content from hunks
-        // Skip deletions (old file), include additions and context (new file)
-        var content = std.ArrayList(u8).init(self.allocator);
-        defer content.deinit();
-
-        for (file.hunks) |hunk| {
-            for (hunk.lines) |line| {
-                switch (line.line_type) {
-                    .delete => {}, // Skip deletions - not in new file
-                    .add, .context => {
-                        try content.appendSlice(line.content);
-                        try content.append('\n');
-                    },
-                }
-            }
-        }
-
-        // Get file path (prefer new_path for syntax detection)
-        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-        // Generate highlights
-        const highlights = try self.syntax_highlighter.highlightFile(file_path, content.items);
-
-        // Cache them (NOTE: This modifies a "const" pointer, which is a hack for now)
-        const mutable_file = @constCast(file);
-        mutable_file.highlights = highlights;
-    }
-
-    fn calculateDiffStats(self: *App, file: *const parser.FileDiff) struct { additions: usize, deletions: usize } {
-        _ = self;
-        var additions: usize = 0;
-        var deletions: usize = 0;
-
-        for (file.hunks) |hunk| {
-            for (hunk.lines) |line| {
-                switch (line.line_type) {
-                    .add => additions += 1,
-                    .delete => deletions += 1,
-                    .context => {},
-                }
-            }
-        }
-
-        return .{ .additions = additions, .deletions = deletions };
+        try UI.renderStatus(self,status_win);
     }
 
     fn renderContent(self: *App, win: vaxis.Window) !void {
@@ -696,14 +493,14 @@ pub const App = struct {
         const file = &self.state.files[self.state.current_file_idx];
 
         // Ensure syntax highlights are loaded for this file
-        try self.ensureHighlights(file);
+        try StateHelpers.ensureHighlights(self,file);
 
         self.state.viewport_height = win.height;
         Navigation.clampScrollOffset(self);
         Navigation.adjustScrollToKeepCursorVisible(self, win.height);
 
         // Calculate gutter width based on maximum line number in file
-        const gutter_width = getGutterWidth(file);
+        const gutter_width = StateHelpers.getGutterWidth(file);
 
         // Render vertical borders
         const border_style = .{ .fg = Color.dim };
@@ -766,14 +563,14 @@ pub const App = struct {
         const file = &self.state.files[self.state.current_file_idx];
 
         // Ensure syntax highlights are loaded for this file
-        try self.ensureHighlights(file);
+        try StateHelpers.ensureHighlights(self,file);
 
         self.state.viewport_height = win.height;
         Navigation.clampScrollOffset(self);
         Navigation.adjustScrollToKeepCursorVisible(self, win.height);
 
         // Calculate gutter width based on maximum line number in file
-        const gutter_width = getGutterWidth(file);
+        const gutter_width = StateHelpers.getGutterWidth(file);
 
         // Calculate layout: [border][gutter][left_content][divider][gutter][right_content][border]
         // Total width = 2 (borders) + 2 * gutter_width + 1 (middle divider) + left_content + right_content
@@ -892,7 +689,7 @@ pub const App = struct {
             },
         );
 
-        const header_text = try self.copyFrameText(header_text_stack);
+        const header_text = try RenderUtils.copyFrameText(self,header_text_stack);
         const is_cursor = line_idx == self.state.cursor_line;
         const style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
@@ -916,7 +713,7 @@ pub const App = struct {
             const fill_width = if (fill_end > fill_start) fill_end - fill_start else 0;
 
             if (fill_width > 0) {
-                const fill_text = try self.frameTextSlice(fill_width);
+                const fill_text = try RenderUtils.frameTextSlice(self,fill_width);
                 @memset(fill_text, ' ');
                 var fill_seg = [_]vaxis.Cell.Segment{.{
                     .text = fill_text,
@@ -931,7 +728,7 @@ pub const App = struct {
             const chunk = if (text_start < header_text.len) header_text[text_start..text_end] else "";
 
             const left_display = blk: {
-                const slice = try self.frameTextSlice(left_width);
+                const slice = try RenderUtils.frameTextSlice(self,left_width);
                 const copy_len = @min(chunk.len, slice.len);
                 if (copy_len > 0) {
                     @memcpy(slice[0..copy_len], chunk);
@@ -954,7 +751,7 @@ pub const App = struct {
             const right_chunk = if (right_text_start < header_text.len) header_text[right_text_start..right_text_end] else "";
 
             const right_display = blk: {
-                const slice = try self.frameTextSlice(right_width);
+                const slice = try RenderUtils.frameTextSlice(self,right_width);
                 const copy_len = @min(right_chunk.len, slice.len);
                 if (copy_len > 0) {
                     @memcpy(slice[0..copy_len], right_chunk);
@@ -991,7 +788,7 @@ pub const App = struct {
         gutter_width: usize,
     ) !usize {
         const is_cursor = line_idx == self.state.cursor_line;
-        const base_style = self.getLineStyle(line.line_type);
+        const base_style = RenderUtils.getLineStyle(self,line.line_type);
         const style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
         else
@@ -1000,7 +797,7 @@ pub const App = struct {
         const right_col = 1 + gutter_width + left_width + 1; // +1 for middle divider
 
         // Calculate byte offset for syntax highlighting
-        const byte_offset = getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
+        const byte_offset = StateHelpers.getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
 
         switch (line.line_type) {
             .context => {
@@ -1014,7 +811,7 @@ pub const App = struct {
                     const show_lineno = wrap_idx == 0;
 
                     // Render left side
-                    try self.renderGutter(win, line_idx, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type, gutter_width);
+                    try RenderUtils.renderGutter(self,win, line_idx, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type, gutter_width);
 
                     const left_start = wrap_idx * left_width;
                     const left_end = @min(left_start + left_width, line.content.len);
@@ -1033,7 +830,7 @@ pub const App = struct {
                         @memcpy(padded_segments[0..left_segments.len], left_segments);
 
                         const padding_len = left_width - left_chunk.len;
-                        const padding = try self.frameTextSlice(padding_len);
+                        const padding = try RenderUtils.frameTextSlice(self,padding_len);
                         @memset(padding, ' ');
                         padded_segments[left_segments.len] = .{
                             .text = padding,
@@ -1065,7 +862,7 @@ pub const App = struct {
                         @memcpy(padded_segments[0..right_segments.len], right_segments);
 
                         const padding_len = right_width - right_chunk.len;
-                        const padding = try self.frameTextSlice(padding_len);
+                        const padding = try RenderUtils.frameTextSlice(self,padding_len);
                         @memset(padding, ' ');
                         padded_segments[right_segments.len] = .{
                             .text = padding,
@@ -1094,7 +891,7 @@ pub const App = struct {
                     const show_lineno = wrap_idx == 0;
 
                     // Render left side
-                    try self.renderGutter(win, line_idx, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type, gutter_width);
+                    try RenderUtils.renderGutter(self,win, line_idx, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type, gutter_width);
 
                     const text_start = wrap_idx * left_width;
                     const text_end = @min(text_start + left_width, line.content.len);
@@ -1114,7 +911,7 @@ pub const App = struct {
                         @memcpy(padded_segments[0..segments.len], segments);
 
                         const padding_len = left_width - chunk.len;
-                        const padding = try self.frameTextSlice(padding_len);
+                        const padding = try RenderUtils.frameTextSlice(self,padding_len);
                         @memset(padding, ' ');
                         padded_segments[segments.len] = .{
                             .text = padding,
@@ -1129,7 +926,7 @@ pub const App = struct {
                     // Right side empty with cursor highlight if needed
                     if (is_cursor) {
                         try self.renderGutterAtColumn(win, line_idx, current_row, is_cursor, false, null, right_col, null, gutter_width);
-                        const blank = try self.frameTextSlice(right_width);
+                        const blank = try RenderUtils.frameTextSlice(self,right_width);
                         @memset(blank, ' ');
                         var blank_seg = [_]vaxis.Cell.Segment{.{
                             .text = blank,
@@ -1155,8 +952,8 @@ pub const App = struct {
 
                     // Left side empty with cursor highlight if needed
                     if (is_cursor) {
-                        try self.renderGutter(win, line_idx, current_row, is_cursor, false, null, null, gutter_width);
-                        const blank = try self.frameTextSlice(left_width);
+                        try RenderUtils.renderGutter(self,win, line_idx, current_row, is_cursor, false, null, null, gutter_width);
+                        const blank = try RenderUtils.frameTextSlice(self,left_width);
                         @memset(blank, ' ');
                         var blank_seg = [_]vaxis.Cell.Segment{.{
                             .text = blank,
@@ -1185,7 +982,7 @@ pub const App = struct {
                         @memcpy(padded_segments[0..segments.len], segments);
 
                         const padding_len = right_width - chunk.len;
-                        const padding = try self.frameTextSlice(padding_len);
+                        const padding = try RenderUtils.frameTextSlice(self,padding_len);
                         @memset(padding, ' ');
                         padded_segments[segments.len] = .{
                             .text = padding,
@@ -1249,7 +1046,7 @@ pub const App = struct {
                 const sign_pos = padding_needed + num_str.len;
                 @memcpy(buf[sign_pos .. sign_pos + sign.len], sign);
 
-                const gutter_text = try self.copyFrameText(buf[0 .. sign_pos + sign.len]);
+                const gutter_text = try RenderUtils.copyFrameText(self,buf[0 .. sign_pos + sign.len]);
 
                 // Color the sign based on line type (with matching background)
                 const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
@@ -1280,7 +1077,7 @@ pub const App = struct {
                 _ = try win.print(&segments, .{ .row_offset = row, .col_offset = col_offset });
             } else {
                 if (is_cursor) {
-                    const spaces_slice = try self.frameTextSlice(gutter_width);
+                    const spaces_slice = try RenderUtils.frameTextSlice(self,gutter_width);
                     @memset(spaces_slice, ' ');
                     var seg = [_]vaxis.Cell.Segment{.{
                         .text = spaces_slice,
@@ -1291,7 +1088,7 @@ pub const App = struct {
             }
         } else {
             if (is_cursor) {
-                const spaces_slice = try self.frameTextSlice(gutter_width);
+                const spaces_slice = try RenderUtils.frameTextSlice(self,gutter_width);
                 @memset(spaces_slice, ' ');
                 var seg = [_]vaxis.Cell.Segment{.{
                     .text = spaces_slice,
@@ -1342,7 +1139,7 @@ pub const App = struct {
         const fill_style: vaxis.Style = .{ .bg = Color.dim };
 
         if (fill_width > 0) {
-            const fill_text = try self.frameTextSlice(fill_width);
+            const fill_text = try RenderUtils.frameTextSlice(self,fill_width);
             @memset(fill_text, ' ');
             var fill_seg = [_]vaxis.Cell.Segment{.{
                 .text = fill_text,
@@ -1354,7 +1151,7 @@ pub const App = struct {
         // Now render the actual content on top
         const content_start = 1 + gutter_width;
         const display_text = blk: {
-            const slice = try self.frameTextSlice(content_width);
+            const slice = try RenderUtils.frameTextSlice(self,content_width);
             const copy_len = @min(header_text_stack.len, slice.len);
             if (copy_len > 0) {
                 @memcpy(slice[0..copy_len], header_text_stack[0..copy_len]);
@@ -1394,8 +1191,8 @@ pub const App = struct {
         const num_rows = (text.len + content_width - 1) / content_width;
         if (num_rows == 0) {
             // Empty line - still render one row with full background
-            try self.renderGutter(win, line_idx, start_row, true, true, file_lineno, line_type, gutter_width); // Always fill gutter
-            const display_text = try self.padTextForCursor("", content_width, true); // Always pad
+            try RenderUtils.renderGutter(self,win, line_idx, start_row, true, true, file_lineno, line_type, gutter_width); // Always fill gutter
+            const display_text = try RenderUtils.padTextForCursor(self,"", content_width, true); // Always pad
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
                 .style = style,
@@ -1413,7 +1210,7 @@ pub const App = struct {
 
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
-            try self.renderGutter(win, line_idx, current_row, true, show_line_number, file_lineno, line_type, gutter_width); // Always fill gutter
+            try RenderUtils.renderGutter(self,win, line_idx, current_row, true, show_line_number, file_lineno, line_type, gutter_width); // Always fill gutter
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
@@ -1421,7 +1218,7 @@ pub const App = struct {
             const chunk = text[text_offset .. text_offset + chunk_len];
 
             // Render the chunk - always pad
-            const display_text = try self.padTextForCursor(chunk, content_width, true); // Always pad
+            const display_text = try RenderUtils.padTextForCursor(self,chunk, content_width, true); // Always pad
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
                 .style = style,
@@ -1448,7 +1245,7 @@ pub const App = struct {
         gutter_width: usize,
     ) !usize {
         const is_cursor = line_idx == self.state.cursor_line;
-        const base_style = self.getLineStyle(line.line_type);
+        const base_style = RenderUtils.getLineStyle(self,line.line_type);
         const style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
         else
@@ -1463,7 +1260,7 @@ pub const App = struct {
 
         // Apply syntax highlighting to all lines (context, additions, deletions)
         // Calculate byte offset for syntax highlighting
-        const byte_offset = getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
+        const byte_offset = StateHelpers.getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
 
         return try self.renderWrappedTextWithHighlights(
             win,
@@ -1480,30 +1277,6 @@ pub const App = struct {
             gutter_width,
             self.mode == .focused, // show_caret
         );
-    }
-
-    // Calculate byte offset of a line in the NEW file content
-    // Used to map line positions to highlight byte offsets
-    // Skips deletions since they're not in the reconstructed file
-    fn getLineByteOffset(file: *const parser.FileDiff, target_hunk_idx: usize, target_line_idx: usize) usize {
-        var offset: usize = 0;
-
-        for (file.hunks, 0..) |hunk, hunk_idx| {
-            for (hunk.lines, 0..) |line, line_idx| {
-                if (hunk_idx == target_hunk_idx and line_idx == target_line_idx) {
-                    return offset;
-                }
-                // Only count additions and context (deletions are not in new file)
-                switch (line.line_type) {
-                    .delete => {}, // Skip - not in reconstructed content
-                    .add, .context => {
-                        offset += line.content.len + 1; // +1 for newline
-                    },
-                }
-            }
-        }
-
-        return offset;
     }
 
     // Generate colored segments for a line of text using syntax highlights
@@ -1688,8 +1461,8 @@ pub const App = struct {
 
         // Handle empty lines explicitly
         if (text.len == 0) {
-            try self.renderGutter(win, line_idx, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
-            const display_text = try self.padTextForCursor("", content_width, is_cursor);
+            try RenderUtils.renderGutter(self,win, line_idx, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
+            const display_text = try RenderUtils.padTextForCursor(self,"", content_width, is_cursor);
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
                 .style = style,
@@ -1702,7 +1475,7 @@ pub const App = struct {
             else
                 0;
             if (show_caret and is_cursor and visible_cursor_col < content_width) {
-                const caret_text = try self.copyFrameText(" ");
+                const caret_text = try RenderUtils.copyFrameText(self," ");
                 var caret_seg = [_]vaxis.Cell.Segment{.{
                     .text = caret_text,
                     .style = .{ .fg = Color.caret_fg, .bg = Color.caret_bg, .bold = true },
@@ -1726,7 +1499,7 @@ pub const App = struct {
 
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
-            try self.renderGutter(win, line_idx, current_row, is_cursor, show_line_number, file_lineno, line_type, gutter_width);
+            try RenderUtils.renderGutter(self,win, line_idx, current_row, is_cursor, show_line_number, file_lineno, line_type, gutter_width);
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
@@ -1748,7 +1521,7 @@ pub const App = struct {
 
                 // Add padding segment
                 const padding_len = content_width - chunk.len;
-                const padding = try self.frameTextSlice(padding_len);
+                const padding = try RenderUtils.frameTextSlice(self,padding_len);
                 @memset(padding, ' ');
                 padded_segments[segments.len] = .{
                     .text = padding,
@@ -1775,7 +1548,7 @@ pub const App = struct {
                         const caret_char = if (col_in_chunk < chunk.len) chunk[col_in_chunk .. col_in_chunk + 1] else " ";
 
                         // Render caret with bright yellow background at visible position
-                        const caret_text = try self.copyFrameText(caret_char);
+                        const caret_text = try RenderUtils.copyFrameText(self,caret_char);
                         var caret_seg = [_]vaxis.Cell.Segment{.{
                             .text = caret_text,
                             .style = .{ .fg = Color.caret_fg, .bg = Color.caret_bg, .bold = true },
@@ -1809,8 +1582,8 @@ pub const App = struct {
 
         // Handle empty lines explicitly
         if (text.len == 0) {
-            try self.renderGutter(win, line_idx, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
-            const display_text = try self.padTextForCursor("", content_width, is_cursor);
+            try RenderUtils.renderGutter(self,win, line_idx, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
+            const display_text = try RenderUtils.padTextForCursor(self,"", content_width, is_cursor);
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
                 .style = style,
@@ -1828,7 +1601,7 @@ pub const App = struct {
 
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
-            try self.renderGutter(win, line_idx, current_row, is_cursor, show_line_number, file_lineno, line_type, gutter_width);
+            try RenderUtils.renderGutter(self,win, line_idx, current_row, is_cursor, show_line_number, file_lineno, line_type, gutter_width);
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
@@ -1836,7 +1609,7 @@ pub const App = struct {
             const chunk = text[text_offset .. text_offset + chunk_len];
 
             // Render the chunk
-            const display_text = try self.padTextForCursor(chunk, content_width, is_cursor);
+            const display_text = try RenderUtils.padTextForCursor(self,chunk, content_width, is_cursor);
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
                 .style = style,
@@ -1883,7 +1656,7 @@ pub const App = struct {
                 const sign_pos = padding_needed + num_str.len;
                 @memcpy(buf[sign_pos .. sign_pos + sign.len], sign);
 
-                const gutter_text = try self.copyFrameText(buf[0 .. sign_pos + sign.len]);
+                const gutter_text = try RenderUtils.copyFrameText(self,buf[0 .. sign_pos + sign.len]);
 
                 // Color the sign based on line type (with matching background)
                 const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
@@ -1914,7 +1687,7 @@ pub const App = struct {
                 _ = try win.print(&segments, .{ .row_offset = row, .col_offset = 1 });
             } else {
                 // For hunk headers or other lines without file line numbers, always show empty gutter
-                const spaces_slice = try self.frameTextSlice(gutter_width);
+                const spaces_slice = try RenderUtils.frameTextSlice(self,gutter_width);
                 @memset(spaces_slice, ' ');
                 var seg = [_]vaxis.Cell.Segment{.{
                     .text = spaces_slice,
@@ -1924,7 +1697,7 @@ pub const App = struct {
             }
         } else {
             // For wrapped continuation lines, always show empty gutter
-            const spaces_slice = try self.frameTextSlice(gutter_width);
+            const spaces_slice = try RenderUtils.frameTextSlice(self,gutter_width);
             @memset(spaces_slice, ' ');
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = spaces_slice,
@@ -1937,9 +1710,9 @@ pub const App = struct {
     fn padTextForCursor(self: *App, text: []const u8, width: usize, is_cursor: bool) ![]const u8 {
         if (!is_cursor) return text;
 
-        if (width > self.remainingFrameTextCapacity()) return error.FrameTextBufferOverflow;
+        if (width > RenderUtils.remainingFrameTextCapacity(self)) return error.FrameTextBufferOverflow;
 
-        const slice = try self.frameTextSlice(width);
+        const slice = try RenderUtils.frameTextSlice(self,width);
         const copy_len = @min(text.len, slice.len);
 
         if (copy_len > 0) {
@@ -1962,7 +1735,7 @@ pub const App = struct {
 
     fn frameTextSlice(self: *App, len: usize) ![]u8 {
         if (len == 0) return self.frame_text_buffer[0..0];
-        if (len > self.remainingFrameTextCapacity()) return error.FrameTextBufferOverflow;
+        if (len > RenderUtils.remainingFrameTextCapacity(self)) return error.FrameTextBufferOverflow;
 
         const start = self.frame_text_used;
         const end = start + len;
@@ -1971,7 +1744,7 @@ pub const App = struct {
     }
 
     fn copyFrameText(self: *App, text: []const u8) ![]const u8 {
-        const slice = try self.frameTextSlice(text.len);
+        const slice = try RenderUtils.frameTextSlice(self,text.len);
         if (text.len > 0) {
             @memcpy(slice, text);
         }
@@ -1985,62 +1758,5 @@ pub const App = struct {
             .delete => .{ .bg = Color.diff_delete_bg, .fg = Color.diff_delete_fg },
             .context => .{},
         };
-    }
-
-    fn renderStatus(self: *App, win: vaxis.Window) !void {
-        win.clear();
-
-        const mode_str = switch (self.mode) {
-            .normal => "-- NORMAL --",
-            .focused => "-- FOCUSED --",
-            .comment => "-- COMMENT --",
-        };
-
-        const view_str = switch (self.state.view_mode) {
-            .unified => "[Unified]",
-            .side_by_side => "[Side-by-Side]",
-        };
-
-        const keybindings = switch (self.mode) {
-            .normal => "h/l:File  j/k:Cursor  Ctrl-d/u:Page  Shift+M:Center  ?:Focus  c:Comment  s:Toggle  r:Refresh  q:Quit  Ctrl-C?2:Exit",
-            .focused => "h/l:Horizontal  j/k:Cursor  Ctrl-d/u:Page  g/G:Top/Bottom  Shift+M:Center  ESC:Normal  Ctrl-C?2:Exit",
-            .comment => "ESC:Cancel  Ctrl-S:Save  Ctrl-C?2:Exit",
-        };
-
-        // Combine mode, view mode, count prefix (if any), and keybindings into a single string
-        var buf: [512]u8 = undefined;
-        const status_text = if (self.state.count_prefix) |count|
-            try std.fmt.bufPrint(&buf, "{s} {s} [{d}]  {s}", .{ mode_str, view_str, count, keybindings })
-        else
-            try std.fmt.bufPrint(&buf, "{s} {s}  {s}", .{ mode_str, view_str, keybindings });
-
-        var seg = [_]vaxis.Cell.Segment{.{
-            .text = status_text,
-            .style = .{},
-        }};
-        _ = try win.print(&seg, .{ .row_offset = 0 });
-    }
-
-    fn printHeaderLine(self: *App, win: vaxis.Window, row: usize, text: []const u8, style: vaxis.Style) !void {
-        if (row >= Layout.header_height) return;
-        if (row >= win.height or win.width == 0) return;
-
-        var buffer = &self.header_line_buffers[row];
-        const width = @min(win.width, buffer.len);
-
-        if (width == 0) return;
-
-        @memset(buffer[0..width], ' ');
-
-        const copy_len = @min(text.len, width);
-        if (copy_len > 0) {
-            @memcpy(buffer[0..copy_len], text[0..copy_len]);
-        }
-
-        var seg = [_]vaxis.Cell.Segment{.{
-            .text = buffer[0..width],
-            .style = style,
-        }};
-        _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 0 });
     }
 };
