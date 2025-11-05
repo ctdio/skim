@@ -437,7 +437,7 @@ pub const App = struct {
         RenderUtils.resetFrameTextBuffer(self);
 
         if (self.state.files.len == 0) {
-            try UI.renderEmpty(self,win);
+            try UI.renderEmpty(self, win);
             return;
         }
 
@@ -449,7 +449,7 @@ pub const App = struct {
             .width = .{ .limit = win.width },
             .height = .{ .limit = Layout.header_height },
         });
-        try UI.renderHeader(self,header_win);
+        try UI.renderHeader(self, header_win);
 
         const divider_top_win = win.child(.{
             .x_off = 0,
@@ -457,7 +457,7 @@ pub const App = struct {
             .width = .{ .limit = win.width },
             .height = .{ .limit = Layout.divider_height },
         });
-        try UI.renderDivider(self,divider_top_win, .top);
+        try UI.renderDivider(self, divider_top_win, .top);
 
         const content_win = win.child(.{
             .x_off = 0,
@@ -473,7 +473,7 @@ pub const App = struct {
             .width = .{ .limit = win.width },
             .height = .{ .limit = 1 },
         });
-        try UI.renderDivider(self,divider_bottom_win, .bottom);
+        try UI.renderDivider(self, divider_bottom_win, .bottom);
 
         const status_win = win.child(.{
             .x_off = 0,
@@ -481,7 +481,7 @@ pub const App = struct {
             .width = .{ .limit = win.width },
             .height = .{ .limit = Layout.status_height },
         });
-        try UI.renderStatus(self,status_win);
+        try UI.renderStatus(self, status_win);
     }
 
     fn renderContent(self: *App, win: vaxis.Window) !void {
@@ -490,7 +490,6 @@ pub const App = struct {
             .side_by_side => try SideBySideRenderer.renderContent(self, win),
         }
     }
-
 
     // Generate colored segments for a line of text using syntax highlights
     // Returns array of segments with syntax colors applied as foreground
