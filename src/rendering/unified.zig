@@ -49,7 +49,7 @@ pub const UnifiedRenderer = struct {
             }
         }
 
-        const content_width = win.width -| (2 + gutter_width);
+        const content_width = win.width -| (2 + gutter_width + Layout.gutter_spacing);
 
         // Adjust horizontal scroll to keep cursor visible (vim-like behavior)
         if (app.mode == .focused) {
@@ -135,8 +135,11 @@ pub const UnifiedRenderer = struct {
             _ = try win.print(&fill_seg, .{ .row_offset = row, .col_offset = fill_start });
         }
 
+        // Render spacing after gutter (hunk headers have no line_type, so use null)
+        try RenderUtils.renderGutterSpacing(app, win, row, 1 + gutter_width, is_cursor, null);
+
         // Now render the actual content on top
-        const content_start = 1 + gutter_width;
+        const content_start = 1 + gutter_width + Layout.gutter_spacing;
         const display_text = blk: {
             const slice = try RenderUtils.frameTextSlice(app, content_width);
             const copy_len = @min(header_text_stack.len, slice.len);
@@ -227,12 +230,15 @@ pub const UnifiedRenderer = struct {
         // Handle empty lines explicitly
         if (text.len == 0) {
             try RenderUtils.renderGutter(app, win, line_idx, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
-            const display_text = try RenderUtils.padTextForCursor(app, "", content_width, is_cursor);
+            try RenderUtils.renderGutterSpacing(app, win, start_row, 1 + gutter_width, is_cursor, line_type);
+            // Pad empty lines for cursor or diff lines (add/delete)
+            const should_pad = is_cursor or (line_type != null and line_type.? != .context);
+            const display_text = try RenderUtils.padTextForCursor(app, "", content_width, should_pad);
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
                 .style = style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width });
+            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
 
             // Render caret for empty line in FOCUSED mode
             const visible_cursor_col = if (app.state.cursor_col >= app.state.h_scroll_offset)
@@ -245,7 +251,7 @@ pub const UnifiedRenderer = struct {
                     .text = caret_text,
                     .style = .{ .fg = Color.caret_fg, .bg = Color.caret_bg, .bold = true },
                 }};
-                _ = try win.print(&caret_seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width + visible_cursor_col });
+                _ = try win.print(&caret_seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing + visible_cursor_col });
             }
 
             return 1;
@@ -265,6 +271,7 @@ pub const UnifiedRenderer = struct {
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
             try RenderUtils.renderGutter(app, win, line_idx, current_row, is_cursor, show_line_number, file_lineno, line_type, gutter_width);
+            try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, line_type);
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
@@ -276,8 +283,9 @@ pub const UnifiedRenderer = struct {
             const segments = try app.createHighlightedSegments(chunk, chunk_byte_offset, highlights, style);
             defer app.allocator.free(segments);
 
-            // If cursor is on this line, we need to pad the segments
-            if (is_cursor and chunk.len < content_width) {
+            // Pad segments to full width for cursor or diff lines (add/delete)
+            const should_pad = is_cursor or (line_type != null and line_type.? != .context);
+            if (should_pad and chunk.len < content_width) {
                 // Create a new segments array with padding
                 const padded_segments = try app.allocator.alloc(vaxis.Cell.Segment, segments.len + 1);
                 defer app.allocator.free(padded_segments);
@@ -293,9 +301,9 @@ pub const UnifiedRenderer = struct {
                     .style = style,
                 };
 
-                _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
+                _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
             } else {
-                _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
+                _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
             }
 
             // Render caret in FOCUSED mode
@@ -318,7 +326,7 @@ pub const UnifiedRenderer = struct {
                             .text = caret_text,
                             .style = .{ .fg = Color.caret_fg, .bg = Color.caret_bg, .bold = true },
                         }};
-                        _ = try win.print(&caret_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + visible_col });
+                        _ = try win.print(&caret_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing + visible_col });
                     }
                 }
             }
@@ -380,12 +388,13 @@ pub const UnifiedRenderer = struct {
         if (num_rows == 0) {
             // Empty line - still render one row with full background
             try RenderUtils.renderGutter(app, win, line_idx, start_row, true, true, file_lineno, line_type, gutter_width); // Always fill gutter
+            try RenderUtils.renderGutterSpacing(app, win, start_row, 1 + gutter_width, true, line_type);
             const display_text = try RenderUtils.padTextForCursor(app, "", content_width, true); // Always pad
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
                 .style = style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width });
+            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
             return 1;
         }
 
@@ -399,6 +408,7 @@ pub const UnifiedRenderer = struct {
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
             try RenderUtils.renderGutter(app, win, line_idx, current_row, true, show_line_number, file_lineno, line_type, gutter_width); // Always fill gutter
+            try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, true, line_type);
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
@@ -411,7 +421,7 @@ pub const UnifiedRenderer = struct {
                 .text = display_text,
                 .style = style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width });
+            _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
 
             text_offset += chunk_len;
             rows_rendered += 1;

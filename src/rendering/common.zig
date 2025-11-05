@@ -14,8 +14,8 @@ pub const Color = struct {
     pub const dim = .{ .rgb = [3]u8{ 40, 40, 40 } }; // Dark gray #282828
 
     // Muted diff background colors (RGB for better control)
-    pub const diff_add_bg = .{ .rgb = [3]u8{ 13, 72, 32 } }; // Dark green #0d4820
-    pub const diff_delete_bg = .{ .rgb = [3]u8{ 72, 13, 13 } }; // Dark red #480d0d
+    pub const diff_add_bg = .{ .rgb = [3]u8{ 18, 80, 40 } }; // Dark green #125028
+    pub const diff_delete_bg = .{ .rgb = [3]u8{ 80, 18, 18 } }; // Dark red #501212
     pub const diff_add_fg = .{ .rgb = [3]u8{ 200, 255, 200 } }; // Light green text
     pub const diff_delete_fg = .{ .rgb = [3]u8{ 255, 200, 200 } }; // Light red text
 
@@ -26,6 +26,10 @@ pub const Color = struct {
     // Pure white caret for focused mode - highly visible
     pub const caret_bg = .{ .rgb = [3]u8{ 255, 255, 255 } }; // Pure white #ffffff
     pub const caret_fg = .{ .rgb = [3]u8{ 0, 0, 0 } }; // Black text
+
+    // Darker colors for +/- diff signs
+    pub const diff_sign_add = .{ .rgb = [3]u8{ 0, 160, 0 } }; // Darker green #00a000
+    pub const diff_sign_delete = .{ .rgb = [3]u8{ 160, 0, 0 } }; // Darker red #a00000
 };
 
 // Layout constants
@@ -36,6 +40,7 @@ pub const Layout = struct {
     pub const min_gutter_width = 5; // Minimum gutter width for consistency
     pub const cursor_padding = 3; // Padding around cursor when scrolling
     pub const page_scroll_lines = 10;
+    pub const gutter_spacing = 2; // Spacing between gutter and content
 };
 
 // Frame drawing characters

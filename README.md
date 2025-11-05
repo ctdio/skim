@@ -30,6 +30,19 @@ zig build -Doptimize=ReleaseFast
 
 The binary will be available at `./zig-out/bin/skim`.
 
+## Quick Start
+
+```bash
+# Build and run
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/skim
+
+# Review your changes
+./zig-out/bin/skim --staged
+```
+
+Navigate with `j`/`k` to move the cursor, `h`/`l` to switch files. Press `Enter` to focus on a file for detailed review. Press `s` to toggle between unified and side-by-side views.
+
 ## Usage
 
 Skim follows git diff conventions for specifying what to review:

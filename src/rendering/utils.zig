@@ -79,6 +79,19 @@ pub const RenderUtils = struct {
         else
             .{ .fg = Color.dim };
 
+        // Style for empty gutter (applies diff background for wrapped lines)
+        const empty_gutter_style: vaxis.Style = if (line_type) |lt| switch (lt) {
+            .add => if (is_cursor)
+                .{ .fg = Color.dim, .bg = Color.cursor_bg }
+            else
+                .{ .fg = Color.dim, .bg = Color.diff_add_bg },
+            .delete => if (is_cursor)
+                .{ .fg = Color.dim, .bg = Color.cursor_bg }
+            else
+                .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
+            .context => base_style,
+        } else base_style;
+
         if (show_number) {
             if (file_lineno) |lineno| {
                 // Show line number and diff sign (GitHub style: number right-justified, sign after)
@@ -106,23 +119,34 @@ pub const RenderUtils = struct {
 
                 const gutter_text = try copyFrameText(app, buf[0 .. sign_pos + sign.len]);
 
-                // Color the sign based on line type (with matching background)
+                // Color the sign and number based on line type (with matching background)
                 const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
                     .add => if (is_cursor)
-                        .{ .fg = Color.green, .bg = Color.cursor_bg, .bold = true }
+                        .{ .fg = Color.diff_sign_add, .bg = Color.cursor_bg, .bold = true }
                     else
-                        .{ .fg = Color.green, .bg = Color.diff_add_bg, .bold = true },
+                        .{ .fg = Color.diff_sign_add, .bg = Color.diff_add_bg, .bold = true },
                     .delete => if (is_cursor)
-                        .{ .fg = Color.red, .bg = Color.cursor_bg, .bold = true }
+                        .{ .fg = Color.diff_sign_delete, .bg = Color.cursor_bg, .bold = true }
                     else
-                        .{ .fg = Color.red, .bg = Color.diff_delete_bg, .bold = true },
+                        .{ .fg = Color.diff_sign_delete, .bg = Color.diff_delete_bg, .bold = true },
                     .context => if (is_cursor)
                         .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.dim },
                 } else base_style;
 
-                const number_style: vaxis.Style = base_style;
+                // Apply diff background to number as well for add/delete lines
+                const number_style: vaxis.Style = if (line_type) |lt| switch (lt) {
+                    .add => if (is_cursor)
+                        .{ .fg = Color.dim, .bg = Color.cursor_bg }
+                    else
+                        .{ .fg = Color.dim, .bg = Color.diff_add_bg },
+                    .delete => if (is_cursor)
+                        .{ .fg = Color.dim, .bg = Color.cursor_bg }
+                    else
+                        .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
+                    .context => base_style,
+                } else base_style;
 
                 // Split into number and sign segments for different colors
                 const number_text = gutter_text[0 .. gutter_text.len - 1];
@@ -144,14 +168,40 @@ pub const RenderUtils = struct {
                 _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 1 });
             }
         } else {
-            // For wrapped continuation lines, always show empty gutter
+            // For wrapped continuation lines, show empty gutter with diff background
             const spaces_slice = try frameTextSlice(app, gutter_width);
             @memset(spaces_slice, ' ');
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = spaces_slice,
-                .style = base_style,
+                .style = empty_gutter_style,
             }};
             _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 1 });
         }
+    }
+
+    pub fn renderGutterSpacing(
+        app: *App,
+        win: vaxis.Window,
+        row: usize,
+        col_offset: usize,
+        is_cursor: bool,
+        line_type: ?parser.Line.LineType,
+    ) !void {
+        // Render spacing with the appropriate diff background color
+        const spacing_style: vaxis.Style = if (is_cursor)
+            .{ .bg = Color.cursor_bg }
+        else if (line_type) |lt| switch (lt) {
+            .add => .{ .bg = Color.diff_add_bg },
+            .delete => .{ .bg = Color.diff_delete_bg },
+            .context => .{},
+        } else .{};
+
+        const spacing = try frameTextSlice(app, rendering_common.Layout.gutter_spacing);
+        @memset(spacing, ' ');
+        var spacing_seg = [_]vaxis.Cell.Segment{.{
+            .text = spacing,
+            .style = spacing_style,
+        }};
+        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = col_offset });
     }
 };
