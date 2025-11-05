@@ -279,7 +279,6 @@ pub const SideBySideRenderer = struct {
 
                     // Render left side
                     try RenderUtils.renderGutter(app, win, line_idx, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type, gutter_width);
-                    try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, line.line_type);
 
                     const left_start = wrap_idx * left_width;
                     const left_end = @min(left_start + left_width, line.content.len);
@@ -312,7 +311,6 @@ pub const SideBySideRenderer = struct {
 
                     // Render right side (same content)
                     try renderGutterAtColumn(app, win, line_idx, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
-                    try RenderUtils.renderGutterSpacing(app, win, current_row, right_col + gutter_width, is_cursor, line.line_type);
 
                     const right_start = wrap_idx * right_width;
                     const right_end = @min(right_start + right_width, line.content.len);
@@ -361,7 +359,6 @@ pub const SideBySideRenderer = struct {
 
                     // Render left side
                     try RenderUtils.renderGutter(app, win, line_idx, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type, gutter_width);
-                    try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, line.line_type);
 
                     const text_start = wrap_idx * left_width;
                     const text_end = @min(text_start + left_width, line.content.len);
@@ -396,7 +393,6 @@ pub const SideBySideRenderer = struct {
                     // Right side empty with cursor highlight if needed
                     if (is_cursor) {
                         try renderGutterAtColumn(app, win, line_idx, current_row, is_cursor, false, null, right_col, null, gutter_width);
-                        try RenderUtils.renderGutterSpacing(app, win, current_row, right_col + gutter_width, is_cursor, null);
                         const blank = try RenderUtils.frameTextSlice(app, right_width);
                         @memset(blank, ' ');
                         var blank_seg = [_]vaxis.Cell.Segment{.{
@@ -424,7 +420,6 @@ pub const SideBySideRenderer = struct {
                     // Left side empty with cursor highlight if needed
                     if (is_cursor) {
                         try RenderUtils.renderGutter(app, win, line_idx, current_row, is_cursor, false, null, null, gutter_width);
-                        try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, null);
                         const blank = try RenderUtils.frameTextSlice(app, left_width);
                         @memset(blank, ' ');
                         var blank_seg = [_]vaxis.Cell.Segment{.{
@@ -436,7 +431,6 @@ pub const SideBySideRenderer = struct {
 
                     // Render right side
                     try renderGutterAtColumn(app, win, line_idx, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
-                    try RenderUtils.renderGutterSpacing(app, win, current_row, right_col + gutter_width, is_cursor, line.line_type);
 
                     const text_start = wrap_idx * right_width;
                     const text_end = @min(text_start + right_width, line.content.len);
@@ -593,5 +587,22 @@ pub const SideBySideRenderer = struct {
             }};
             _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
         }
+
+        // Render spacing after gutter with appropriate diff background color
+        const spacing_style: vaxis.Style = if (is_cursor)
+            .{ .bg = Color.cursor_bg }
+        else if (line_type) |lt| switch (lt) {
+            .add => .{ .bg = Color.diff_add_bg },
+            .delete => .{ .bg = Color.diff_delete_bg },
+            .context => .{},
+        } else .{};
+
+        const spacing = try RenderUtils.frameTextSlice(app, rendering_common.Layout.gutter_spacing);
+        @memset(spacing, ' ');
+        var spacing_seg = [_]vaxis.Cell.Segment{.{
+            .text = spacing,
+            .style = spacing_style,
+        }};
+        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = col_offset + gutter_width });
     }
 };

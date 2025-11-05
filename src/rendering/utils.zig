@@ -177,6 +177,23 @@ pub const RenderUtils = struct {
             }};
             _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 1 });
         }
+
+        // Render spacing after gutter with appropriate diff background color
+        const spacing_style: vaxis.Style = if (is_cursor)
+            .{ .bg = Color.cursor_bg }
+        else if (line_type) |lt| switch (lt) {
+            .add => .{ .bg = Color.diff_add_bg },
+            .delete => .{ .bg = Color.diff_delete_bg },
+            .context => .{},
+        } else .{};
+
+        const spacing = try frameTextSlice(app, rendering_common.Layout.gutter_spacing);
+        @memset(spacing, ' ');
+        var spacing_seg = [_]vaxis.Cell.Segment{.{
+            .text = spacing,
+            .style = spacing_style,
+        }};
+        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = 1 + gutter_width });
     }
 
     pub fn renderGutterSpacing(

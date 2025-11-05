@@ -230,7 +230,6 @@ pub const UnifiedRenderer = struct {
         // Handle empty lines explicitly
         if (text.len == 0) {
             try RenderUtils.renderGutter(app, win, line_idx, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
-            try RenderUtils.renderGutterSpacing(app, win, start_row, 1 + gutter_width, is_cursor, line_type);
             // Pad empty lines for cursor or diff lines (add/delete)
             const should_pad = is_cursor or (line_type != null and line_type.? != .context);
             const display_text = try RenderUtils.padTextForCursor(app, "", content_width, should_pad);
@@ -271,7 +270,6 @@ pub const UnifiedRenderer = struct {
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
             try RenderUtils.renderGutter(app, win, line_idx, current_row, is_cursor, show_line_number, file_lineno, line_type, gutter_width);
-            try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, line_type);
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
@@ -388,7 +386,6 @@ pub const UnifiedRenderer = struct {
         if (num_rows == 0) {
             // Empty line - still render one row with full background
             try RenderUtils.renderGutter(app, win, line_idx, start_row, true, true, file_lineno, line_type, gutter_width); // Always fill gutter
-            try RenderUtils.renderGutterSpacing(app, win, start_row, 1 + gutter_width, true, line_type);
             const display_text = try RenderUtils.padTextForCursor(app, "", content_width, true); // Always pad
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
@@ -408,7 +405,6 @@ pub const UnifiedRenderer = struct {
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
             try RenderUtils.renderGutter(app, win, line_idx, current_row, true, show_line_number, file_lineno, line_type, gutter_width); // Always fill gutter
-            try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, true, line_type);
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
