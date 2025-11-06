@@ -35,10 +35,10 @@ const Color = struct {
     const dim = .{ .rgb = [3]u8{ 40, 40, 40 } }; // Dark gray #282828
 
     // Muted diff background colors (RGB for better control)
-    const diff_add_bg = .{ .rgb = [3]u8{ 13, 72, 32 } }; // Dark green #0d4820
+    const diff_add_bg = .{ .rgb = [3]u8{ 3, 25, 10 } }; // Darker green #03190a
     const diff_delete_bg = .{ .rgb = [3]u8{ 72, 13, 13 } }; // Dark red #480d0d
-    const diff_add_fg = .{ .rgb = [3]u8{ 200, 255, 200 } }; // Light green text
-    const diff_delete_fg = .{ .rgb = [3]u8{ 255, 200, 200 } }; // Light red text
+    const diff_add_fg = .{ .rgb = [3]u8{ 240, 255, 240 } }; // Light green text
+    const diff_delete_fg = .{ .rgb = [3]u8{ 255, 240, 240 } }; // Light red text
 
     // Cursor line highlighting - slightly darker gray background
     const cursor_bg = .{ .rgb = [3]u8{ 80, 80, 80 } }; // Darker gray #505050
