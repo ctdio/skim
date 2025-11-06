@@ -51,7 +51,7 @@ const Color = struct {
 
 // Layout constants
 const Layout = struct {
-    const header_height = 2;
+    const header_height = 1;
     const divider_height = 1;
     const status_height = 1;
     const min_gutter_width = 5; // Minimum gutter width for consistency
