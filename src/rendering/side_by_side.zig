@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const parser = @import("../git/parser.zig");
 const syntax = @import("../syntax.zig");
+const comments = @import("../comments.zig");
 const rendering_common = @import("common.zig");
 const render_utils = @import("utils.zig");
 const state_helpers = @import("../state.zig");
@@ -117,7 +118,61 @@ pub const SideBySideRenderer = struct {
                     gutter_width,
                 );
                 row += rows_used;
-                line_idx += 1;
+                line_idx += 1; // Increment for the code line
+
+                // Check if there's a comment for this code line
+                const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+                if (RenderUtils.getCommentAt(app, file_path, hunk_idx, line_idx_in_hunk)) |comment| {
+                    if (row < win.height) {
+                        // Check if cursor is on this comment line
+                        const is_cursor_on_comment = line_idx == app.state.cursor_line;
+
+                        // Render comment based on line type
+                        if (app.mode == .comment and is_cursor_on_comment) {
+                            const comment_rows = try renderSideBySideCommentInput(
+                                app,
+                                win,
+                                row,
+                                left_content_width,
+                                right_content_width,
+                                gutter_width,
+                                line.line_type,
+                            );
+                            row += comment_rows;
+                        } else {
+                            const comment_rows = try renderSideBySideComment(
+                                app,
+                                win,
+                                comment,
+                                row,
+                                left_content_width,
+                                right_content_width,
+                                gutter_width,
+                                line.line_type,
+                                is_cursor_on_comment,
+                            );
+                            row += comment_rows;
+                        }
+                        line_idx += 1; // Increment for the comment line
+                    }
+                } else {
+                    // No saved comment, but check if we're creating one
+                    if (app.mode == .comment and line_idx - 1 == app.state.cursor_line) {
+                        // User is creating a comment on the previous code line
+                        if (row < win.height) {
+                            const comment_rows = try renderSideBySideCommentInput(
+                                app,
+                                win,
+                                row,
+                                left_content_width,
+                                right_content_width,
+                                gutter_width,
+                                line.line_type,
+                            );
+                            row += comment_rows;
+                        }
+                    }
+                }
             }
         }
     }
@@ -602,5 +657,247 @@ pub const SideBySideRenderer = struct {
             .style = spacing_style,
         }};
         _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = col_offset + gutter_width });
+    }
+
+    /// Render comment input box in side-by-side mode
+    fn renderSideBySideCommentInput(
+        app: *App,
+        win: vaxis.Window,
+        row: usize,
+        left_width: usize,
+        right_width: usize,
+        gutter_width: usize,
+        line_type: parser.Line.LineType,
+    ) !usize {
+        if (app.state.active_comment_input == null) return 0;
+        if (row + 2 >= win.height) return 0; // Need at least 3 rows
+
+        const input = app.state.active_comment_input.?;
+
+        // Determine positioning based on line type
+        const PaneLayout = struct {
+            start_col: usize,
+            width: usize,
+        };
+
+        const layout: PaneLayout = switch (line_type) {
+            .delete => .{
+                // Left pane only
+                .start_col = 1 + gutter_width + Layout.gutter_spacing,
+                .width = left_width,
+            },
+            .add => .{
+                // Right pane only
+                .start_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1 + gutter_width + Layout.gutter_spacing,
+                .width = right_width,
+            },
+            .context => .{
+                // Across both panes
+                .start_col = 1 + gutter_width + Layout.gutter_spacing,
+                .width = left_width + 1 + gutter_width + Layout.gutter_spacing + right_width, // Include middle divider and right gutter
+            },
+        };
+
+        if (layout.width < 20) return 0; // Box too narrow
+
+        const box_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.dim, .bold = true };
+        const text_style: vaxis.Style = .{ .fg = Color.white, .bg = Color.dim };
+
+        var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
+        defer segments.deinit();
+
+        // Top border: ╭─ Comment ─────╮
+        const label = " Comment ";
+        const top_h_count = layout.width - 3 - label.len;
+
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.top_left), .style = box_style });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, label), .style = box_style });
+
+        var i: usize = 0;
+        while (i < top_h_count) : (i += 1) {
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
+        }
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.top_right), .style = box_style });
+
+        _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = layout.start_col });
+
+        // Content line: │ text │
+        segments.clearRetainingCapacity();
+
+        const input_text = input.text_buffer[0..input.text_len];
+        const first_line_end = std.mem.indexOfScalar(u8, input_text, '\n') orelse input_text.len;
+        const first_line = input_text[0..first_line_end];
+
+        const content_width = layout.width - 2; // -2 for left and right borders
+        const display_text = blk: {
+            var buf = try RenderUtils.frameTextSlice(app, content_width);
+            buf[0] = ' '; // Left padding
+            const text_len = content_width - 2; // -2 for left and right padding
+            const copy_len = @min(first_line.len, text_len);
+            if (copy_len > 0) {
+                @memcpy(buf[1 .. 1 + copy_len], first_line[0..copy_len]);
+            }
+            if (1 + copy_len < buf.len) {
+                @memset(buf[1 + copy_len ..], ' ');
+            }
+            break :blk buf;
+        };
+
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.vertical), .style = box_style });
+        try segments.append(.{ .text = display_text, .style = text_style });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.vertical), .style = box_style });
+
+        _ = try win.print(segments.items, .{ .row_offset = row + 1, .col_offset = layout.start_col });
+
+        // Draw cursor
+        const cursor_visible_pos = if (input.cursor_pos <= first_line_end) input.cursor_pos else first_line_end;
+        const text_area_max = content_width - 2;
+        if (cursor_visible_pos < text_area_max) {
+            const cursor_col = layout.start_col + 2 + cursor_visible_pos;
+            const cursor_char = if (cursor_visible_pos < first_line.len) first_line[cursor_visible_pos .. cursor_visible_pos + 1] else " ";
+            var cursor_seg = [_]vaxis.Cell.Segment{.{
+                .text = try RenderUtils.copyFrameText(app, cursor_char),
+                .style = .{ .fg = Color.black, .bg = Color.white },
+            }};
+            _ = try win.print(&cursor_seg, .{ .row_offset = row + 1, .col_offset = cursor_col });
+        }
+
+        // Bottom border: ╰─ Enter:Save  ESC:Cancel ─╯
+        segments.clearRetainingCapacity();
+
+        const help_text = " Enter:Save  ESC:Cancel ";
+        const bottom_h_count = layout.width - 3 - help_text.len;
+
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.bottom_left), .style = box_style });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, help_text), .style = box_style });
+
+        i = 0;
+        while (i < bottom_h_count) : (i += 1) {
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
+        }
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.bottom_right), .style = box_style });
+
+        _ = try win.print(segments.items, .{ .row_offset = row + 2, .col_offset = layout.start_col });
+
+        return 3; // Used 3 rows
+    }
+
+    /// Render saved comment display in side-by-side mode
+    fn renderSideBySideComment(
+        app: *App,
+        win: vaxis.Window,
+        comment: *const comments.Comment,
+        row: usize,
+        left_width: usize,
+        right_width: usize,
+        gutter_width: usize,
+        line_type: parser.Line.LineType,
+        is_cursor: bool,
+    ) !usize {
+        // Determine positioning based on line type
+        const PaneLayout = struct {
+            start_col: usize,
+            width: usize,
+        };
+
+        const layout: PaneLayout = switch (line_type) {
+            .delete => .{
+                // Left pane only
+                .start_col = 1 + gutter_width + Layout.gutter_spacing,
+                .width = left_width,
+            },
+            .add => .{
+                // Right pane only
+                .start_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1 + gutter_width + Layout.gutter_spacing,
+                .width = right_width,
+            },
+            .context => .{
+                // Across both panes
+                .start_col = 1 + gutter_width + Layout.gutter_spacing,
+                .width = left_width + 1 + gutter_width + Layout.gutter_spacing + right_width,
+            },
+        };
+
+        if (layout.width < 20) return 0;
+
+        const box_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.yellow, .bg = Color.cursor_bg, .bold = true }
+        else
+            .{ .fg = Color.cyan, .bg = Color.dim, .bold = true };
+
+        const text_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg }
+        else
+            .{ .fg = Color.white, .bg = Color.dim };
+
+        var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
+        defer segments.deinit();
+
+        // Top border: ╭─ Comment ─────╮
+        const label = " Comment ";
+        const top_h_count = layout.width - 3 - label.len;
+
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.top_left), .style = box_style });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, label), .style = box_style });
+
+        var i: usize = 0;
+        while (i < top_h_count) : (i += 1) {
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
+        }
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.top_right), .style = box_style });
+
+        _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = layout.start_col });
+
+        // Render comment text lines
+        var lines_used: usize = 1;
+        const content_width = layout.width - 2; // -2 for borders
+        var line_iter = std.mem.splitScalar(u8, comment.text, '\n');
+
+        while (line_iter.next()) |text_line| {
+            if (row + lines_used >= win.height) break;
+
+            segments.clearRetainingCapacity();
+
+            const display_text = blk: {
+                var buf = try RenderUtils.frameTextSlice(app, content_width);
+                buf[0] = ' '; // Left padding
+                const text_len = content_width - 2; // -2 for left and right padding
+                const copy_len = @min(text_line.len, text_len);
+                if (copy_len > 0) {
+                    @memcpy(buf[1 .. 1 + copy_len], text_line[0..copy_len]);
+                }
+                if (1 + copy_len < buf.len) {
+                    @memset(buf[1 + copy_len ..], ' ');
+                }
+                break :blk buf;
+            };
+
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.vertical), .style = box_style });
+            try segments.append(.{ .text = display_text, .style = text_style });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.vertical), .style = box_style });
+
+            _ = try win.print(segments.items, .{ .row_offset = row + lines_used, .col_offset = layout.start_col });
+            lines_used += 1;
+        }
+
+        // Bottom border: ╰───────────╯
+        if (row + lines_used < win.height) {
+            segments.clearRetainingCapacity();
+
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.bottom_left), .style = box_style });
+            i = 0;
+            while (i < layout.width - 2) : (i += 1) {
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
+            }
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.bottom_right), .style = box_style });
+
+            _ = try win.print(segments.items, .{ .row_offset = row + lines_used, .col_offset = layout.start_col });
+            lines_used += 1;
+        }
+
+        return lines_used;
     }
 };
