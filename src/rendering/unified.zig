@@ -51,11 +51,6 @@ pub const UnifiedRenderer = struct {
 
         const content_width = win.width -| (2 + gutter_width + Layout.gutter_spacing);
 
-        // Adjust horizontal scroll to keep cursor visible (vim-like behavior)
-        if (app.mode == .focused) {
-            Navigation.adjustHorizontalScroll(app, content_width);
-        }
-
         var row: usize = 0;
         var line_idx: usize = 0;
 
@@ -81,26 +76,36 @@ pub const UnifiedRenderer = struct {
                 if (row >= win.height) break;
                 const rows_used = try renderDiffLine(app, win, file, hunk_idx, line_idx_in_hunk, line, line_idx, row, content_width, gutter_width);
                 row += rows_used;
+                line_idx += 1; // Increment for the code line
 
-                // Render comment input box if in comment mode on this line
-                if (app.mode == .comment and line_idx == app.state.cursor_line) {
+                // Check if there's a comment for this code line
+                const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+                if (RenderUtils.getCommentAt(app, file_path, hunk_idx, line_idx_in_hunk)) |comment| {
                     if (row < win.height) {
-                        const comment_rows = try RenderUtils.renderCommentInputBox(app, win, row, gutter_width);
-                        row += comment_rows;
+                        // Check if cursor is on this comment line
+                        const is_cursor_on_comment = line_idx == app.state.cursor_line;
+
+                        // Render comment input box if in comment mode on this comment line
+                        if (app.mode == .comment and is_cursor_on_comment) {
+                            const comment_rows = try RenderUtils.renderCommentInputBox(app, win, row, gutter_width);
+                            row += comment_rows;
+                        } else {
+                            // Render saved comment display (with cursor highlight if applicable)
+                            const comment_rows = try RenderUtils.renderCommentDisplay(app, win, comment, row, gutter_width, is_cursor_on_comment);
+                            row += comment_rows;
+                        }
+                        line_idx += 1; // Increment for the comment line
                     }
-                }
-                // Render saved comment if one exists
-                else {
-                    const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-                    if (RenderUtils.getCommentAt(app, file_path, hunk_idx, line_idx_in_hunk)) |comment| {
+                } else {
+                    // No saved comment, but check if we're creating one
+                    if (app.mode == .comment and line_idx - 1 == app.state.cursor_line) {
+                        // User is creating a comment on the previous code line
                         if (row < win.height) {
-                            const comment_rows = try RenderUtils.renderCommentDisplay(app, win, comment, row, gutter_width);
+                            const comment_rows = try RenderUtils.renderCommentInputBox(app, win, row, gutter_width);
                             row += comment_rows;
                         }
                     }
                 }
-
-                line_idx += 1;
             }
         }
     }
@@ -224,7 +229,7 @@ pub const UnifiedRenderer = struct {
             file_lineno,
             line.line_type,
             gutter_width,
-            app.mode == .focused, // show_caret
+            false, // show_caret (removed with FOCUSED mode)
         );
     }
 
@@ -258,29 +263,15 @@ pub const UnifiedRenderer = struct {
             }};
             _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
 
-            // Render caret for empty line in FOCUSED mode
-            const visible_cursor_col = if (app.state.cursor_col >= app.state.h_scroll_offset)
-                app.state.cursor_col - app.state.h_scroll_offset
-            else
-                0;
-            if (show_caret and is_cursor and visible_cursor_col < content_width) {
-                const caret_text = try RenderUtils.copyFrameText(app, " ");
-                var caret_seg = [_]vaxis.Cell.Segment{.{
-                    .text = caret_text,
-                    .style = .{ .fg = Color.caret_fg, .bg = Color.caret_bg, .bold = true },
-                }};
-                _ = try win.print(&caret_seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing + visible_cursor_col });
-            }
+            // Caret rendering removed with FOCUSED mode
+            _ = show_caret;
 
             return 1;
         }
 
-        // Apply horizontal scrolling - start rendering from h_scroll_offset
-        const h_scroll = app.state.h_scroll_offset;
-        const start_offset = @min(h_scroll, text.len);
-
+        // No horizontal scrolling (removed with FOCUSED mode)
         var rows_rendered: usize = 0;
-        var text_offset: usize = start_offset;
+        var text_offset: usize = 0;
 
         while (text_offset < text.len) {
             const current_row = start_row + rows_rendered;
@@ -323,30 +314,7 @@ pub const UnifiedRenderer = struct {
                 _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
             }
 
-            // Render caret in FOCUSED mode
-            if (show_caret and is_cursor) {
-                const cursor_col = app.state.cursor_col;
-                const h_scroll_off = app.state.h_scroll_offset;
-
-                // Calculate visible cursor position (accounting for horizontal scroll)
-                if (cursor_col >= h_scroll_off and cursor_col < h_scroll_off + content_width) {
-                    const visible_col = cursor_col - h_scroll_off;
-
-                    // Check if cursor_col falls within this chunk
-                    if (cursor_col >= text_offset and cursor_col < text_offset + chunk_len) {
-                        const col_in_chunk = cursor_col - text_offset;
-                        const caret_char = if (col_in_chunk < chunk.len) chunk[col_in_chunk .. col_in_chunk + 1] else " ";
-
-                        // Render caret with bright yellow background at visible position
-                        const caret_text = try RenderUtils.copyFrameText(app, caret_char);
-                        var caret_seg = [_]vaxis.Cell.Segment{.{
-                            .text = caret_text,
-                            .style = .{ .fg = Color.caret_fg, .bg = Color.caret_bg, .bold = true },
-                        }};
-                        _ = try win.print(&caret_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing + visible_col });
-                    }
-                }
-            }
+            // Caret rendering removed with FOCUSED mode (show_caret is always false)
 
             text_offset += chunk_len;
             rows_rendered += 1;

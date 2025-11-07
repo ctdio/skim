@@ -50,7 +50,7 @@ Four main layers:
 
 ### Key Design Decisions
 
-**Modal Interface**: Vim-inspired modes (NORMAL, FOCUSED, comment).
+**Modal Interface**: Vim-inspired modes (NORMAL, comment).
 
 **Shell-out to Git**: Executes system git binary. Respects user config, always compatible.
 
@@ -72,11 +72,11 @@ Four main layers:
 ### Core Components
 
 #### app.zig - State Machine and Rendering
-- **App struct**: Current file, cursor, scroll, mode, view mode, syntax highlighter
-- **Mode enum**: NORMAL (file nav), FOCUSED (in-file scroll), comment (placeholder)
+- **App struct**: Current file, cursor, scroll, mode, view mode, syntax highlighter, comment store
+- **Mode enum**: NORMAL (navigation and viewing), comment (editing comments)
 - **ViewMode enum**: unified or side-by-side
 - **Event loop**: Keyboard/terminal events via vaxis
-- **Render pipeline**: Header → content (gutter + syntax) → status bar
+- **Render pipeline**: Header → content (gutter + syntax + comments) → status bar
 - **Colors**: Dark green/red backgrounds for add/delete lines. Syntax highlighting overlays with: red (keywords), magenta (functions), yellow (types), blue (strings/numbers), cyan (comments)
 - **Ctrl-C**: Double-press within 1s to exit
 - **Refresh**: 'r' key reloads diff, preserves position
@@ -123,13 +123,13 @@ Four main layers:
 - Git integration, unified diff parser, file navigation, basic rendering
 
 **Phase 2: Core Features** ✅ Complete
-- ✅ FOCUSED mode vim navigation (g/G for top/bottom)
+- ✅ Vim navigation (j/k, g/G for top/bottom)
 - ✅ Side-by-side diff view (toggle with 's' key)
 - ✅ Tree-sitter syntax highlighting (JS/TS/Zig with query files)
 - ✅ Refresh functionality ('r' key to reload diff)
 - ✅ Proper line number tracking in gutters
-- ⏳ Comment system (placeholder in place, 'c' key reserved)
-- ⏳ Export to annotated patch
+- ✅ Comment system (Enter to create/edit, integrated as display lines)
+- ✅ Export comments with context ('y' to yank to clipboard)
 - ⏳ Hunk navigation
 - ⏳ Help overlay
 
@@ -156,14 +156,14 @@ The app uses an enum-based mode system. When adding new modes:
 4. Consider mode transition logic and escape paths
 
 ### Adding New Keybindings
-1. Update appropriate mode case in `handleKeyEvent()` switch (normal, focused, or comment mode)
+1. Update appropriate mode case in `handleKeyEvent()` switch (normal or comment mode)
 2. Update status bar help text in `renderStatus()` to document the new binding
 3. Add entry to README.md keybindings table
 4. If adding new vim-style keys, follow vim conventions for consistency
 
 **Current keybindings:**
-- NORMAL mode: h/l (file nav), j/k (cursor), Ctrl-n/p (file nav), Ctrl-d/u (page), Enter (focus), s (toggle view), r (refresh), q (quit)
-- FOCUSED mode: j/k (scroll), Ctrl-d/u (page), g/G (top/bottom), Esc (normal)
+- NORMAL mode: h/l (file nav), j/k (cursor), g/G (top/bottom), Ctrl-n/p (file nav), Ctrl-d/u (page), Shift+M (center), Enter (comment), y (yank), s (toggle view), r (refresh), q (quit)
+- comment mode: Enter (save), Shift+Enter (newline), ESC (cancel), regular typing
 
 ### Extending the Diff Parser
 The parser is designed to be strict about unified diff format. If adding support for new diff features:

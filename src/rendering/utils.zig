@@ -213,7 +213,7 @@ pub const RenderUtils = struct {
             .add => .{ .bg = Color.diff_add_bg },
             .delete => .{ .bg = Color.diff_delete_bg },
             .context => .{},
-        } else .{};
+        } else .{ .bg = Color.dim }; // Default to dim background for comment/hunk lines
 
         const spacing = try frameTextSlice(app, rendering_common.Layout.gutter_spacing);
         @memset(spacing, ' ');
@@ -235,6 +235,10 @@ pub const RenderUtils = struct {
         if (row + 2 >= win.height) return 0; // Need at least 3 rows
 
         const input = app.state.active_comment_input.?;
+
+        // Render gutter for top row (always highlighted since we're editing)
+        try renderCommentGutter(app, win, row, true, gutter_width);
+
         const content_start = 1 + gutter_width + Layout.gutter_spacing;
         const box_cell_width = (win.width -| content_start) -| 2; // Width in cells (-2 for right border)
 
@@ -263,6 +267,9 @@ pub const RenderUtils = struct {
         try segments.append(.{ .text = try copyFrameText(app, FrameChars.top_right), .style = box_style });
 
         _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = content_start });
+
+        // Render gutter for content line
+        try renderEmptyCommentGutter(app, win, row + 1, true, gutter_width);
 
         // Content line: │ text │
         segments.clearRetainingCapacity();
@@ -306,6 +313,9 @@ pub const RenderUtils = struct {
             _ = try win.print(&cursor_seg, .{ .row_offset = row + 1, .col_offset = cursor_col });
         }
 
+        // Render gutter for bottom border
+        try renderEmptyCommentGutter(app, win, row + 2, true, gutter_width);
+
         // Bottom border: ╰─ Enter:Save  ESC:Cancel ─╯
         segments.clearRetainingCapacity();
 
@@ -334,14 +344,26 @@ pub const RenderUtils = struct {
         comment: *const comments.Comment,
         row: usize,
         gutter_width: usize,
+        is_cursor: bool,
     ) !usize {
+        // Render gutter for first row (with bullet indicator)
+        try renderCommentGutter(app, win, row, is_cursor, gutter_width);
+
         const content_start = 1 + gutter_width + Layout.gutter_spacing;
         const box_cell_width = (win.width -| content_start) -| 2; // -2 for right border
 
         if (box_cell_width < 20) return 0;
 
-        const box_style: vaxis.Style = .{ .fg = Color.cyan, .bg = Color.dim, .bold = true };
-        const text_style: vaxis.Style = .{ .fg = Color.white, .bg = Color.dim };
+        // Use cursor colors if cursor is on this comment line
+        const box_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.yellow, .bg = Color.cursor_bg, .bold = true }
+        else
+            .{ .fg = Color.cyan, .bg = Color.dim, .bold = true };
+
+        const text_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg }
+        else
+            .{ .fg = Color.white, .bg = Color.dim };
 
         var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
         defer segments.deinit();
@@ -370,6 +392,9 @@ pub const RenderUtils = struct {
         while (line_iter.next()) |text_line| {
             if (row + lines_used >= win.height) break;
 
+            // Render gutter for content line (empty, no indicator)
+            try renderEmptyCommentGutter(app, win, row + lines_used, is_cursor, gutter_width);
+
             segments.clearRetainingCapacity();
 
             const display_text = blk: {
@@ -397,6 +422,9 @@ pub const RenderUtils = struct {
 
         if (row + lines_used >= win.height) return lines_used;
 
+        // Render gutter for bottom border
+        try renderEmptyCommentGutter(app, win, row + lines_used, is_cursor, gutter_width);
+
         // Bottom border: ╰─────────────╯
         segments.clearRetainingCapacity();
 
@@ -413,6 +441,68 @@ pub const RenderUtils = struct {
         _ = try win.print(segments.items, .{ .row_offset = row + lines_used, .col_offset = content_start });
 
         return lines_used + 1;
+    }
+
+    /// Render gutter for a comment line (shows comment indicator)
+    fn renderCommentGutter(
+        app: *App,
+        win: vaxis.Window,
+        row: usize,
+        is_cursor: bool,
+        gutter_width: usize,
+    ) !void {
+        // Gutter style based on cursor
+        const gutter_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.cyan, .bg = Color.cursor_bg, .bold = true }
+        else
+            .{ .fg = Color.cyan, .bg = Color.dim };
+
+        // Build gutter text: right-aligned comment indicator
+        var buf: [16]u8 = undefined;
+        const indicator = "●"; // Comment indicator
+
+        // Right-align the indicator in the gutter
+        const gutter_text = blk: {
+            const text = try std.fmt.bufPrint(&buf, "{s: >[1]}", .{ indicator, gutter_width });
+            break :blk try copyFrameText(app, text);
+        };
+
+        var gutter_seg = [_]vaxis.Cell.Segment{.{
+            .text = gutter_text,
+            .style = gutter_style,
+        }};
+        _ = try win.print(&gutter_seg, .{ .row_offset = row, .col_offset = 1 });
+
+        // Render gutter spacing (space between gutter and content)
+        try renderGutterSpacing(app, win, row, 1 + gutter_width, is_cursor, null);
+    }
+
+    /// Render empty gutter for continuation lines of comment boxes
+    fn renderEmptyCommentGutter(
+        app: *App,
+        win: vaxis.Window,
+        row: usize,
+        is_cursor: bool,
+        gutter_width: usize,
+    ) !void {
+        // Gutter style based on cursor (same as comment gutter but no text)
+        const gutter_style: vaxis.Style = if (is_cursor)
+            .{ .bg = Color.cursor_bg }
+        else
+            .{ .bg = Color.dim };
+
+        // Empty gutter (just spaces)
+        const gutter_spaces = try frameTextSlice(app, gutter_width);
+        @memset(gutter_spaces, ' ');
+
+        var gutter_seg = [_]vaxis.Cell.Segment{.{
+            .text = gutter_spaces,
+            .style = gutter_style,
+        }};
+        _ = try win.print(&gutter_seg, .{ .row_offset = row, .col_offset = 1 });
+
+        // Render gutter spacing (space between gutter and content)
+        try renderGutterSpacing(app, win, row, 1 + gutter_width, is_cursor, null);
     }
 
     /// Check if there's a comment at this file/hunk/line location

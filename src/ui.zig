@@ -138,7 +138,6 @@ pub const UI = struct {
 
         const mode_str = switch (app.mode) {
             .normal => "-- NORMAL --",
-            .focused => "-- FOCUSED --",
             .comment => "-- COMMENT --",
         };
 
@@ -148,8 +147,7 @@ pub const UI = struct {
         };
 
         const keybindings = switch (app.mode) {
-            .normal => "h/l:File  j/k:Cursor  Ctrl-d/u:Page  Shift+M:Center  ?:Focus  c:Comment  y:Yank  s:Toggle  r:Refresh  q:Quit",
-            .focused => "h/l:Horizontal  j/k:Cursor  Ctrl-d/u:Page  g/G:Top/Bottom  c:Comment  y:Yank  Shift+M:Center  ESC:Normal",
+            .normal => "h/l:File  j/k:Cursor  g/G:Top/Bottom  Ctrl-d/u:Page  Shift+M:Center  Enter:Comment  y:Yank  s:Toggle  r:Refresh  q:Quit",
             .comment => "Enter:Save  Shift+Enter:Newline  ESC:Cancel",
         };
 

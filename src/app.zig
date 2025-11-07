@@ -4,6 +4,7 @@ const git = @import("git/diff.zig");
 const parser = @import("git/parser.zig");
 const syntax = @import("syntax.zig");
 const comments = @import("comments.zig");
+const display_lines = @import("display_lines.zig");
 const navigation = @import("navigation.zig");
 const render_utils = @import("rendering/utils.zig");
 const render_unified = @import("rendering/unified.zig");
@@ -88,8 +89,7 @@ pub const App = struct {
     syntax_highlighter: syntax.SyntaxHighlighter,
 
     const Mode = enum {
-        normal, // File navigation
-        focused, // Detailed in-file navigation
+        normal, // Normal navigation and viewing
         comment, // Comment editing
     };
 
@@ -99,8 +99,6 @@ pub const App = struct {
         current_file_idx: usize,
         scroll_offset: usize,
         cursor_line: usize,
-        cursor_col: usize, // Horizontal cursor position (for FOCUSED mode)
-        h_scroll_offset: usize, // Horizontal scroll offset (for FOCUSED mode)
         view_mode: ViewMode,
         viewport_height: usize,
         count_prefix: ?usize, // For vim-style count prefixes (e.g., 5j)
@@ -163,8 +161,6 @@ pub const App = struct {
                 .current_file_idx = 0,
                 .scroll_offset = 0,
                 .cursor_line = 0,
-                .cursor_col = 0,
-                .h_scroll_offset = 0,
                 .view_mode = .unified,
                 .viewport_height = 0,
                 .count_prefix = null,
@@ -296,7 +292,6 @@ pub const App = struct {
 
         switch (self.mode) {
             .normal => try self.handleNormalMode(key),
-            .focused => try self.handleFocusedMode(key),
             .comment => try self.handleCommentMode(key),
         }
     }
@@ -326,13 +321,11 @@ pub const App = struct {
             'k' => Navigation.moveCursorUp(self),
             'h' => Navigation.navigateToPreviousFile(self),
             'l' => Navigation.navigateToNextFile(self),
-            '\r' => {
-                self.mode = .focused;
-                Navigation.clampCursorColumn(self); // Ensure cursor is at valid position
-            },
+            'g' => Navigation.scrollToTop(self),
+            'G' => Navigation.scrollToBottom(self),
+            '\r' => try self.startCommentInput(), // Enter to create/edit comment
             's' => self.toggleViewMode(),
             'r' => try self.refresh(),
-            'c' => try self.startCommentInput(),
             'y' => try self.yankCommentsToClipboard(),
             'M' => Navigation.centerCursor(self),
             else => {
@@ -363,14 +356,9 @@ pub const App = struct {
         if (self.state.current_file_idx >= self.state.files.len) return 0;
 
         const file = &self.state.files[self.state.current_file_idx];
-        var total: usize = 0;
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
-        for (file.hunks) |hunk| {
-            total += 1; // hunk header
-            total += hunk.lines.len;
-        }
-
-        return total;
+        return display_lines.getTotalDisplayLines(file, &self.state.comment_store, file_path);
     }
 
     // Get the content of the line at the current cursor position
@@ -397,51 +385,6 @@ pub const App = struct {
         }
 
         return null;
-    }
-
-    fn handleFocusedMode(self: *App, key: vaxis.Key) !void {
-        // Handle digit keys for count prefix (1-9, not 0 to match vim)
-        if (!key.mods.ctrl and !key.mods.alt and !key.mods.shift) {
-            if (key.codepoint >= '1' and key.codepoint <= '9') {
-                const digit = @as(usize, @intCast(key.codepoint - '0'));
-                if (self.state.count_prefix) |count| {
-                    self.state.count_prefix = count * 10 + digit;
-                } else {
-                    self.state.count_prefix = digit;
-                }
-                return;
-            }
-            // Handle 0 - append to existing count
-            if (key.codepoint == '0' and self.state.count_prefix != null) {
-                self.state.count_prefix = self.state.count_prefix.? * 10;
-                return;
-            }
-        }
-
-        switch (key.codepoint) {
-            27 => self.mode = .normal, // ESC
-            'j' => Navigation.moveCursorDown(self),
-            'k' => Navigation.moveCursorUp(self),
-            'h' => Navigation.moveCursorLeft(self),
-            'l' => Navigation.moveCursorRight(self),
-            'g' => Navigation.scrollToTop(self),
-            'G' => Navigation.scrollToBottom(self),
-            'c' => try self.startCommentInput(),
-            'y' => try self.yankCommentsToClipboard(),
-            'M' => Navigation.centerCursor(self),
-            else => {
-                // Reset count prefix on any other key
-                self.state.count_prefix = null;
-            },
-        }
-
-        if (key.mods.ctrl) {
-            switch (key.codepoint) {
-                'd' => Navigation.pageDown(self),
-                'u' => Navigation.pageUp(self),
-                else => {},
-            }
-        }
     }
 
     fn handleCommentMode(self: *App, key: vaxis.Key) !void {
@@ -471,7 +414,7 @@ pub const App = struct {
             // Ctrl+S or Ctrl+Enter - save comment
             if (key.codepoint == 's' or key.codepoint == '\r') {
                 try self.saveCurrentComment();
-                self.mode = .focused;
+                self.mode = .normal;
                 self.state.active_comment_input = null;
                 return;
             }
@@ -480,12 +423,12 @@ pub const App = struct {
 
         switch (key.codepoint) {
             27 => { // ESC - cancel
-                self.mode = .focused;
+                self.mode = .normal;
                 self.state.active_comment_input = null;
             },
             '\r' => { // Enter - save comment
                 try self.saveCurrentComment();
-                self.mode = .focused;
+                self.mode = .normal;
                 self.state.active_comment_input = null;
             },
             127, 8 => { // Backspace / Delete
@@ -528,45 +471,46 @@ pub const App = struct {
         const file = &self.state.files[self.state.current_file_idx];
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
-        // Find which hunk and line the cursor is on
-        var line_idx: usize = 0;
-        var found_hunk_idx: ?usize = null;
-        var found_line_idx: ?usize = null;
-
-        for (file.hunks, 0..) |hunk, hunk_idx| {
-            // Skip hunk header
-            if (line_idx == self.state.cursor_line) {
-                // Can't comment on hunk header
-                return;
-            }
-            line_idx += 1;
-
-            // Check hunk lines
-            for (hunk.lines, 0..) |_, local_line_idx| {
-                if (line_idx == self.state.cursor_line) {
-                    found_hunk_idx = hunk_idx;
-                    found_line_idx = local_line_idx;
-                    break;
-                }
-                line_idx += 1;
-            }
-            if (found_hunk_idx != null) break;
-        }
-
-        if (found_hunk_idx == null or found_line_idx == null) return;
-
-        // Check if there's already a comment at this location
-        const existing_comment_idx = self.state.comment_store.findCommentAt(
+        // Determine what type of line the cursor is on
+        const line_type = display_lines.getDisplayLineType(
+            self.state.cursor_line,
+            file,
+            &self.state.comment_store,
             file_path,
-            found_hunk_idx.?,
-            found_line_idx.?,
-        );
+        ) orelse return;
+
+        var target_hunk_idx: usize = undefined;
+        var target_line_idx: usize = undefined;
+        var existing_comment_idx: ?usize = null;
+
+        switch (line_type) {
+            .hunk_header => {
+                // Can't comment on hunk headers
+                return;
+            },
+            .code_line => |code| {
+                // Creating or editing comment on a code line
+                target_hunk_idx = code.hunk_idx;
+                target_line_idx = code.line_idx_in_hunk;
+                existing_comment_idx = self.state.comment_store.findCommentAt(
+                    file_path,
+                    target_hunk_idx,
+                    target_line_idx,
+                );
+            },
+            .comment_line => |comment_info| {
+                // Editing an existing comment
+                target_hunk_idx = comment_info.parent_hunk_idx;
+                target_line_idx = comment_info.parent_line_idx;
+                existing_comment_idx = comment_info.comment_idx;
+            },
+        }
 
         // Initialize input buffer
         var input = ActiveCommentInput{
             .target_file_path = file_path,
-            .target_hunk_idx = found_hunk_idx.?,
-            .target_line_idx = found_line_idx.?,
+            .target_hunk_idx = target_hunk_idx,
+            .target_line_idx = target_line_idx,
             .editing_comment_idx = existing_comment_idx,
             .text_buffer = undefined,
             .text_len = 0,
