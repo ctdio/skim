@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const git = @import("git/diff.zig");
 const parser = @import("git/parser.zig");
 const syntax = @import("syntax.zig");
+const comments = @import("comments.zig");
 const navigation = @import("navigation.zig");
 const render_utils = @import("rendering/utils.zig");
 const render_unified = @import("rendering/unified.zig");
@@ -103,11 +104,23 @@ pub const App = struct {
         view_mode: ViewMode,
         viewport_height: usize,
         count_prefix: ?usize, // For vim-style count prefixes (e.g., 5j)
+        comment_store: comments.CommentStore,
+        active_comment_input: ?ActiveCommentInput,
 
         const ViewMode = enum {
             unified,
             side_by_side,
         };
+    };
+
+    const ActiveCommentInput = struct {
+        target_file_path: []const u8, // Which file
+        target_hunk_idx: usize, // Which hunk
+        target_line_idx: usize, // Which line (relative to hunk)
+        editing_comment_idx: ?usize, // If editing existing comment, its index
+        text_buffer: [4096]u8, // Input buffer
+        text_len: usize, // Current text length
+        cursor_pos: usize, // Cursor position in buffer
     };
 
     const CTRL_C_TIMEOUT_NS = 1 * std.time.ns_per_s; // 1 second window
@@ -155,6 +168,8 @@ pub const App = struct {
                 .view_mode = .unified,
                 .viewport_height = 0,
                 .count_prefix = null,
+                .comment_store = comments.CommentStore.init(allocator),
+                .active_comment_input = null,
             },
             .should_quit = false,
             .last_ctrl_c = 0,
@@ -171,6 +186,7 @@ pub const App = struct {
         }
         self.allocator.free(self.state.files);
         self.allocator.free(self.frame_text_buffer);
+        self.state.comment_store.deinit();
         self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.anyWriter());
         self.tty.deinit();
@@ -316,6 +332,8 @@ pub const App = struct {
             },
             's' => self.toggleViewMode(),
             'r' => try self.refresh(),
+            'c' => try self.startCommentInput(),
+            'y' => try self.yankCommentsToClipboard(),
             'M' => Navigation.centerCursor(self),
             else => {
                 // Reset count prefix on any other key
@@ -408,6 +426,8 @@ pub const App = struct {
             'l' => Navigation.moveCursorRight(self),
             'g' => Navigation.scrollToTop(self),
             'G' => Navigation.scrollToBottom(self),
+            'c' => try self.startCommentInput(),
+            'y' => try self.yankCommentsToClipboard(),
             'M' => Navigation.centerCursor(self),
             else => {
                 // Reset count prefix on any other key
@@ -425,11 +445,212 @@ pub const App = struct {
     }
 
     fn handleCommentMode(self: *App, key: vaxis.Key) !void {
-        _ = self;
-        switch (key.codepoint) {
-            27 => {}, // ESC - back to normal (to be implemented)
-            else => {},
+        var input = &self.state.active_comment_input.?;
+
+        // Handle special keys
+        if (key.mods.shift and key.codepoint == '\r') {
+            // Shift+Enter - insert newline
+            if (input.text_len < input.text_buffer.len) {
+                // Insert newline at cursor position
+                const remaining = input.text_len - input.cursor_pos;
+                if (remaining > 0) {
+                    std.mem.copyBackwards(
+                        u8,
+                        input.text_buffer[input.cursor_pos + 1 .. input.text_len + 1],
+                        input.text_buffer[input.cursor_pos..input.text_len],
+                    );
+                }
+                input.text_buffer[input.cursor_pos] = '\n';
+                input.text_len += 1;
+                input.cursor_pos += 1;
+            }
+            return;
         }
+
+        if (key.mods.ctrl) {
+            // Ctrl+S or Ctrl+Enter - save comment
+            if (key.codepoint == 's' or key.codepoint == '\r') {
+                try self.saveCurrentComment();
+                self.mode = .focused;
+                self.state.active_comment_input = null;
+                return;
+            }
+            return;
+        }
+
+        switch (key.codepoint) {
+            27 => { // ESC - cancel
+                self.mode = .focused;
+                self.state.active_comment_input = null;
+            },
+            '\r' => { // Enter - save comment
+                try self.saveCurrentComment();
+                self.mode = .focused;
+                self.state.active_comment_input = null;
+            },
+            127, 8 => { // Backspace / Delete
+                if (input.cursor_pos > 0) {
+                    const remaining = input.text_len - input.cursor_pos;
+                    if (remaining > 0) {
+                        std.mem.copyForwards(
+                            u8,
+                            input.text_buffer[input.cursor_pos - 1 .. input.text_len - 1],
+                            input.text_buffer[input.cursor_pos..input.text_len],
+                        );
+                    }
+                    input.text_len -= 1;
+                    input.cursor_pos -= 1;
+                }
+            },
+            else => {
+                // Regular character input
+                if (key.codepoint >= 32 and key.codepoint < 127 and input.text_len < input.text_buffer.len) {
+                    // Insert character at cursor position
+                    const remaining = input.text_len - input.cursor_pos;
+                    if (remaining > 0) {
+                        std.mem.copyBackwards(
+                            u8,
+                            input.text_buffer[input.cursor_pos + 1 .. input.text_len + 1],
+                            input.text_buffer[input.cursor_pos..input.text_len],
+                        );
+                    }
+                    input.text_buffer[input.cursor_pos] = @intCast(key.codepoint);
+                    input.text_len += 1;
+                    input.cursor_pos += 1;
+                }
+            },
+        }
+    }
+
+    fn startCommentInput(self: *App) !void {
+        if (self.state.current_file_idx >= self.state.files.len) return;
+
+        const file = &self.state.files[self.state.current_file_idx];
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        // Find which hunk and line the cursor is on
+        var line_idx: usize = 0;
+        var found_hunk_idx: ?usize = null;
+        var found_line_idx: ?usize = null;
+
+        for (file.hunks, 0..) |hunk, hunk_idx| {
+            // Skip hunk header
+            if (line_idx == self.state.cursor_line) {
+                // Can't comment on hunk header
+                return;
+            }
+            line_idx += 1;
+
+            // Check hunk lines
+            for (hunk.lines, 0..) |_, local_line_idx| {
+                if (line_idx == self.state.cursor_line) {
+                    found_hunk_idx = hunk_idx;
+                    found_line_idx = local_line_idx;
+                    break;
+                }
+                line_idx += 1;
+            }
+            if (found_hunk_idx != null) break;
+        }
+
+        if (found_hunk_idx == null or found_line_idx == null) return;
+
+        // Check if there's already a comment at this location
+        const existing_comment_idx = self.state.comment_store.findCommentAt(
+            file_path,
+            found_hunk_idx.?,
+            found_line_idx.?,
+        );
+
+        // Initialize input buffer
+        var input = ActiveCommentInput{
+            .target_file_path = file_path,
+            .target_hunk_idx = found_hunk_idx.?,
+            .target_line_idx = found_line_idx.?,
+            .editing_comment_idx = existing_comment_idx,
+            .text_buffer = undefined,
+            .text_len = 0,
+            .cursor_pos = 0,
+        };
+        @memset(&input.text_buffer, 0);
+
+        // If editing existing comment, load its text
+        if (existing_comment_idx) |idx| {
+            if (self.state.comment_store.getComment(idx)) |comment| {
+                const copy_len = @min(comment.text.len, input.text_buffer.len);
+                @memcpy(input.text_buffer[0..copy_len], comment.text[0..copy_len]);
+                input.text_len = copy_len;
+                input.cursor_pos = copy_len; // Start cursor at end
+            }
+        }
+
+        self.state.active_comment_input = input;
+        self.mode = .comment;
+    }
+
+    fn saveCurrentComment(self: *App) !void {
+        if (self.state.active_comment_input == null) return;
+
+        const input = self.state.active_comment_input.?;
+        if (input.text_len == 0) {
+            // Empty comment - delete if editing existing, otherwise do nothing
+            if (input.editing_comment_idx) |idx| {
+                try self.state.comment_store.deleteComment(idx);
+            }
+            return;
+        }
+
+        const comment_text = input.text_buffer[0..input.text_len];
+
+        // Get line context for the comment
+        const file = &self.state.files[self.state.current_file_idx];
+        const hunk = &file.hunks[input.target_hunk_idx];
+        const line = &hunk.lines[input.target_line_idx];
+
+        if (input.editing_comment_idx) |idx| {
+            // Update existing comment
+            try self.state.comment_store.updateComment(idx, comment_text);
+        } else {
+            // Add new comment
+            try self.state.comment_store.addComment(
+                input.target_file_path,
+                input.target_hunk_idx,
+                input.target_line_idx,
+                comment_text,
+                line.line_type,
+                line.content,
+                line.old_lineno,
+                line.new_lineno,
+            );
+        }
+    }
+
+    fn yankCommentsToClipboard(self: *App) !void {
+        // Generate export with context (5 lines before, 3 lines after)
+        const output = try self.state.comment_store.exportWithContext(
+            self.allocator,
+            self.state.files,
+            5, // lines before
+            3, // lines after
+        );
+        defer self.allocator.free(output);
+
+        // Copy to clipboard using pbcopy on macOS
+        const argv = [_][]const u8{"pbcopy"};
+        var child = std.process.Child.init(&argv, self.allocator);
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+
+        try child.spawn();
+
+        if (child.stdin) |stdin| {
+            try stdin.writeAll(output);
+            stdin.close();
+            child.stdin = null;
+        }
+
+        _ = try child.wait();
     }
 
     fn render(self: *App, win: vaxis.Window) !void {

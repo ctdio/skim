@@ -148,9 +148,9 @@ pub const UI = struct {
         };
 
         const keybindings = switch (app.mode) {
-            .normal => "h/l:File  j/k:Cursor  Ctrl-d/u:Page  Shift+M:Center  ?:Focus  c:Comment  s:Toggle  r:Refresh  q:Quit  Ctrl-C?2:Exit",
-            .focused => "h/l:Horizontal  j/k:Cursor  Ctrl-d/u:Page  g/G:Top/Bottom  Shift+M:Center  ESC:Normal  Ctrl-C?2:Exit",
-            .comment => "ESC:Cancel  Ctrl-S:Save  Ctrl-C?2:Exit",
+            .normal => "h/l:File  j/k:Cursor  Ctrl-d/u:Page  Shift+M:Center  ?:Focus  c:Comment  y:Yank  s:Toggle  r:Refresh  q:Quit",
+            .focused => "h/l:Horizontal  j/k:Cursor  Ctrl-d/u:Page  g/G:Top/Bottom  c:Comment  y:Yank  Shift+M:Center  ESC:Normal",
+            .comment => "Enter:Save  Shift+Enter:Newline  ESC:Cancel",
         };
 
         // Combine mode, view mode, count prefix (if any), and keybindings into a single string

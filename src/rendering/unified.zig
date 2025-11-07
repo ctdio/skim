@@ -81,6 +81,25 @@ pub const UnifiedRenderer = struct {
                 if (row >= win.height) break;
                 const rows_used = try renderDiffLine(app, win, file, hunk_idx, line_idx_in_hunk, line, line_idx, row, content_width, gutter_width);
                 row += rows_used;
+
+                // Render comment input box if in comment mode on this line
+                if (app.mode == .comment and line_idx == app.state.cursor_line) {
+                    if (row < win.height) {
+                        const comment_rows = try RenderUtils.renderCommentInputBox(app, win, row, gutter_width);
+                        row += comment_rows;
+                    }
+                }
+                // Render saved comment if one exists
+                else {
+                    const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+                    if (RenderUtils.getCommentAt(app, file_path, hunk_idx, line_idx_in_hunk)) |comment| {
+                        if (row < win.height) {
+                            const comment_rows = try RenderUtils.renderCommentDisplay(app, win, comment, row, gutter_width);
+                            row += comment_rows;
+                        }
+                    }
+                }
+
                 line_idx += 1;
             }
         }
