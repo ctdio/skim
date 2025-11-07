@@ -187,15 +187,17 @@ pub const SideBySideRenderer = struct {
         right_width: usize,
         gutter_width: usize,
     ) !usize {
-        var buf: [256]u8 = undefined;
+        _ = right_width; // Same text on both sides, so right_width not needed
+        const is_cursor = line_idx == app.state.cursor_line;
 
-        // Calculate end line numbers for clearer range display
+        // Build header text: range and context
+        var buf: [256]u8 = undefined;
         const old_end = hunk.header.old_start + hunk.header.old_count -| 1;
         const new_end = hunk.header.new_start + hunk.header.new_count -| 1;
 
-        const header_text_stack = try std.fmt.bufPrint(
+        const header_text = try std.fmt.bufPrint(
             &buf,
-            "━━ ↕ {d}-{d} → {d}-{d} ━━ {s}",
+            "↕ {d}-{d} → {d}-{d}  {s}",
             .{
                 hunk.header.old_start,
                 old_end,
@@ -205,20 +207,35 @@ pub const SideBySideRenderer = struct {
             },
         );
 
-        const header_text = try RenderUtils.copyFrameText(app, header_text_stack);
-        const is_cursor = line_idx == app.state.cursor_line;
-        const style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
-        else
-            .{ .fg = Color.cyan, .bg = Color.dim };
-
-        // Calculate how many rows this will take (same on both sides)
+        // Calculate number of rows needed for wrapping (based on left width)
         const num_rows = if (header_text.len == 0) 1 else (header_text.len + left_width - 1) / left_width;
 
-        const right_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1; // +1 for middle divider
+        const fill_style: vaxis.Style = if (is_cursor)
+            .{ .bg = Color.cursor_bg }
+        else
+            .{ .bg = Color.dim };
 
-        // Render wrapped text on both left and right sides
-        const fill_style: vaxis.Style = .{ .bg = Color.dim };
+        // Find where context starts (after the range info and spacing)
+        const range_end_marker = "  ";
+        const range_end_pos = std.mem.indexOf(u8, header_text, range_end_marker);
+        const range_len = if (range_end_pos) |pos| pos + range_end_marker.len else header_text.len;
+
+        // Styles
+        const range_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.white, .bg = Color.cursor_bg, .bold = true }
+        else
+            .{ .fg = Color.white, .bg = Color.dim, .bold = true };
+
+        const context_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg }
+        else
+            .{ .fg = Color.white, .bg = Color.dim };
+
+        const bar_char = "━";
+        const char_bytes = bar_char.len; // 3 bytes
+        const right_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1;
+
+        // Render each wrapped row
         var current_row = row;
         for (0..num_rows) |wrap_idx| {
             if (current_row >= win.height) break;
@@ -238,57 +255,169 @@ pub const SideBySideRenderer = struct {
                 _ = try win.print(&fill_seg, .{ .row_offset = current_row, .col_offset = fill_start });
             }
 
+            // Render left gutter (bar on first row, empty on continuation rows)
+            // Bar only fills the line number area, not the diff sign column
+            if (wrap_idx == 0) {
+                const bar_width = gutter_width - 1; // Don't fill the sign column
+                const left_gutter_bar = try RenderUtils.frameTextSlice(app, bar_width * char_bytes + 1); // +1 for space
+                var left_byte_pos: usize = 0;
+                for (0..bar_width) |_| {
+                    if (left_byte_pos + char_bytes <= left_gutter_bar.len - 1) {
+                        @memcpy(left_gutter_bar[left_byte_pos .. left_byte_pos + char_bytes], bar_char);
+                        left_byte_pos += char_bytes;
+                    }
+                }
+                // Add trailing space for the sign column
+                if (left_byte_pos < left_gutter_bar.len) {
+                    left_gutter_bar[left_byte_pos] = ' ';
+                    left_byte_pos += 1;
+                }
+
+                const gutter_style: vaxis.Style = if (is_cursor)
+                    .{ .fg = Color.white, .bg = Color.cursor_bg }
+                else
+                    .{ .fg = Color.white, .bg = Color.dim };
+
+                var left_gutter_seg = [_]vaxis.Cell.Segment{.{
+                    .text = left_gutter_bar[0..left_byte_pos],
+                    .style = gutter_style,
+                }};
+                _ = try win.print(&left_gutter_seg, .{ .row_offset = current_row, .col_offset = 1 });
+            } else {
+                const gutter_spaces = try RenderUtils.frameTextSlice(app, gutter_width);
+                @memset(gutter_spaces, ' ');
+                const empty_gutter_style: vaxis.Style = if (is_cursor)
+                    .{ .bg = Color.cursor_bg }
+                else
+                    .{ .bg = Color.dim };
+                var empty_gutter_seg = [_]vaxis.Cell.Segment{.{
+                    .text = gutter_spaces,
+                    .style = empty_gutter_style,
+                }};
+                _ = try win.print(&empty_gutter_seg, .{ .row_offset = current_row, .col_offset = 1 });
+            }
+
+            // Render spacing after left gutter
+            try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, null);
+
             // Render left content
             const text_start = wrap_idx * left_width;
             const text_end = @min(text_start + left_width, header_text.len);
             const chunk = if (text_start < header_text.len) header_text[text_start..text_end] else "";
 
-            const left_display = blk: {
-                const slice = try RenderUtils.frameTextSlice(app, left_width);
-                const copy_len = @min(chunk.len, slice.len);
-                if (copy_len > 0) {
-                    @memcpy(slice[0..copy_len], chunk);
+            const left_content_start = 1 + gutter_width + Layout.gutter_spacing;
+            if (chunk.len > 0) {
+                if (text_start < range_len) {
+                    const range_chunk_end = @min(text_end, range_len);
+                    const range_chunk = chunk[0 .. range_chunk_end - text_start];
+
+                    if (range_chunk_end < text_end) {
+                        const context_chunk = chunk[range_chunk_end - text_start ..];
+                        const range_text = try RenderUtils.copyFrameText(app, range_chunk);
+                        const context_text = try RenderUtils.copyFrameText(app, context_chunk);
+
+                        var segments = [_]vaxis.Cell.Segment{
+                            .{ .text = range_text, .style = range_style },
+                            .{ .text = context_text, .style = context_style },
+                        };
+                        _ = try win.print(&segments, .{ .row_offset = current_row, .col_offset = left_content_start });
+                    } else {
+                        const range_text = try RenderUtils.copyFrameText(app, range_chunk);
+                        var seg = [_]vaxis.Cell.Segment{.{
+                            .text = range_text,
+                            .style = range_style,
+                        }};
+                        _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = left_content_start });
+                    }
+                } else {
+                    const context_text = try RenderUtils.copyFrameText(app, chunk);
+                    var seg = [_]vaxis.Cell.Segment{.{
+                        .text = context_text,
+                        .style = context_style,
+                    }};
+                    _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = left_content_start });
                 }
-                if (copy_len < slice.len) {
-                    @memset(slice[copy_len..], ' ');
+            }
+
+            // Render right gutter (bar on first row, empty on continuation rows)
+            // Bar only fills the line number area, not the diff sign column
+            if (wrap_idx == 0) {
+                const bar_width = gutter_width - 1; // Don't fill the sign column
+                const right_gutter_bar = try RenderUtils.frameTextSlice(app, bar_width * char_bytes + 1); // +1 for space
+                var right_byte_pos: usize = 0;
+                for (0..bar_width) |_| {
+                    if (right_byte_pos + char_bytes <= right_gutter_bar.len - 1) {
+                        @memcpy(right_gutter_bar[right_byte_pos .. right_byte_pos + char_bytes], bar_char);
+                        right_byte_pos += char_bytes;
+                    }
                 }
-                break :blk slice;
-            };
-
-            // Render spacing after left gutter (hunk headers have no line_type)
-            try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, null);
-
-            var left_seg = [_]vaxis.Cell.Segment{.{
-                .text = left_display,
-                .style = style,
-            }};
-            _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
-
-            // Render right content
-            const right_text_start = wrap_idx * right_width;
-            const right_text_end = @min(right_text_start + right_width, header_text.len);
-            const right_chunk = if (right_text_start < header_text.len) header_text[right_text_start..right_text_end] else "";
-
-            const right_display = blk: {
-                const slice = try RenderUtils.frameTextSlice(app, right_width);
-                const copy_len = @min(right_chunk.len, slice.len);
-                if (copy_len > 0) {
-                    @memcpy(slice[0..copy_len], right_chunk);
+                // Add trailing space for the sign column
+                if (right_byte_pos < right_gutter_bar.len) {
+                    right_gutter_bar[right_byte_pos] = ' ';
+                    right_byte_pos += 1;
                 }
-                if (copy_len < slice.len) {
-                    @memset(slice[copy_len..], ' ');
-                }
-                break :blk slice;
-            };
 
-            // Render spacing after right gutter (hunk headers have no line_type)
+                const gutter_style: vaxis.Style = if (is_cursor)
+                    .{ .fg = Color.white, .bg = Color.cursor_bg }
+                else
+                    .{ .fg = Color.white, .bg = Color.dim };
+
+                var right_gutter_seg = [_]vaxis.Cell.Segment{.{
+                    .text = right_gutter_bar[0..right_byte_pos],
+                    .style = gutter_style,
+                }};
+                _ = try win.print(&right_gutter_seg, .{ .row_offset = current_row, .col_offset = right_col });
+            } else {
+                const gutter_spaces = try RenderUtils.frameTextSlice(app, gutter_width);
+                @memset(gutter_spaces, ' ');
+                const empty_gutter_style: vaxis.Style = if (is_cursor)
+                    .{ .bg = Color.cursor_bg }
+                else
+                    .{ .bg = Color.dim };
+                var empty_gutter_seg = [_]vaxis.Cell.Segment{.{
+                    .text = gutter_spaces,
+                    .style = empty_gutter_style,
+                }};
+                _ = try win.print(&empty_gutter_seg, .{ .row_offset = current_row, .col_offset = right_col });
+            }
+
+            // Render spacing after right gutter
             try RenderUtils.renderGutterSpacing(app, win, current_row, right_col + gutter_width, is_cursor, null);
 
-            var right_seg = [_]vaxis.Cell.Segment{.{
-                .text = right_display,
-                .style = style,
-            }};
-            _ = try win.print(&right_seg, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
+            // Render right content (same as left)
+            const right_content_start = right_col + gutter_width + Layout.gutter_spacing;
+            if (chunk.len > 0) {
+                if (text_start < range_len) {
+                    const range_chunk_end = @min(text_end, range_len);
+                    const range_chunk = chunk[0 .. range_chunk_end - text_start];
+
+                    if (range_chunk_end < text_end) {
+                        const context_chunk = chunk[range_chunk_end - text_start ..];
+                        const range_text = try RenderUtils.copyFrameText(app, range_chunk);
+                        const context_text = try RenderUtils.copyFrameText(app, context_chunk);
+
+                        var segments = [_]vaxis.Cell.Segment{
+                            .{ .text = range_text, .style = range_style },
+                            .{ .text = context_text, .style = context_style },
+                        };
+                        _ = try win.print(&segments, .{ .row_offset = current_row, .col_offset = right_content_start });
+                    } else {
+                        const range_text = try RenderUtils.copyFrameText(app, range_chunk);
+                        var seg = [_]vaxis.Cell.Segment{.{
+                            .text = range_text,
+                            .style = range_style,
+                        }};
+                        _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = right_content_start });
+                    }
+                } else {
+                    const context_text = try RenderUtils.copyFrameText(app, chunk);
+                    var seg = [_]vaxis.Cell.Segment{.{
+                        .text = context_text,
+                        .style = context_style,
+                    }};
+                    _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = right_content_start });
+                }
+            }
 
             current_row += 1;
         }
@@ -535,7 +664,6 @@ pub const SideBySideRenderer = struct {
         line_type: ?parser.Line.LineType,
         gutter_width: usize,
     ) !void {
-
         const base_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
         else

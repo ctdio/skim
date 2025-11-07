@@ -17,7 +17,10 @@ Skim is a keyboard-driven TUI for code reviews built in Zig. Vim-style navigatio
 ### Common Commands
 
 ```bash
-# Build optimized release binary
+# Build debug binary (default - use for development and debugging)
+zig build
+
+# Build optimized release binary (for production use)
 zig build -Doptimize=ReleaseFast
 
 # Build and run (passes args to the app)
@@ -30,7 +33,16 @@ zig build test
 ./zig-out/bin/skim
 ./zig-out/bin/skim --staged
 ./zig-out/bin/skim main..feature-branch
+
+# Debug with stderr logging
+./zig-out/bin/skim 2>debug.log
 ```
+
+**IMPORTANT for debugging**: Always use `zig build` (debug mode) when debugging. Debug builds have:
+- Better stack traces
+- Assertions enabled
+- No optimizations that interfere with debugging
+- std.log.debug() messages enabled
 
 ### Build Configuration
 - Output: `./zig-out/bin/skim`

@@ -1,0 +1,95 @@
+debug(vaxis): resizing screen: width=93 height=58
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 0 -> 1 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 1 -> 2 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 2 -> 3 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 3 -> 4 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 4 -> 5 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 5 -> 6 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 6 -> 7 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 7 -> 8 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 8 -> 9 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 9 -> 10 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 10 -> 11 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 11 -> 12 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 12 -> 13 (total_lines=49)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 13 -> 14 (total_lines=49)
+debug: handleNormalMode: key.codepoint=108 ('l'), ctrl=false
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 0 -> 1 (total_lines=37)
+debug: handleNormalMode: key.codepoint=108 ('l'), ctrl=false
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 0 -> 1 (total_lines=20)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 1 -> 2 (total_lines=20)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 2 -> 3 (total_lines=20)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 3 -> 4 (total_lines=20)
+debug: handleNormalMode: key.codepoint=108 ('l'), ctrl=false
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 0 -> 1 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 1 -> 2 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 2 -> 3 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 3 -> 4 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 4 -> 5 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 5 -> 6 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 6 -> 7 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 7 -> 8 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 8 -> 9 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 9 -> 10 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 10 -> 11 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 11 -> 12 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 12 -> 13 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 13 -> 14 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 14 -> 15 (total_lines=194)
+debug: handleNormalMode: key.codepoint=106 ('j'), ctrl=false
+debug: moveCursorDown: 15 -> 16 (total_lines=194)
+debug: handleNormalMode: key.codepoint=103 ('g'), ctrl=true
+debug: === OPEN IN EDITOR ===
+debug: cursor_line (display index) = 16
+debug: file_path = src/app.zig
+debug: LINE TYPE: code_line
+debug:   hunk_idx = 0
+debug:   line_idx_in_hunk = 15
+debug:   hunk.header.new_start = 233
+debug:   line.old_lineno = null
+debug:   line.new_lineno = 247
+debug:   line.line_type = add
+debug:   → Using new_lineno = 247
+debug: Opening editor at line 247: src/app.zig
+debug: Full command: 
+debug:   args[0] = 'nvim'
+debug:   args[1] = '+247'
+debug:   args[2] = 'src/app.zig'
+]11;?P+q4D73\debug(vaxis): resizing screen: width=93 height=58
+debug: handleNormalMode: key.codepoint=113 ('q'), ctrl=false
+debug(vaxis): total renders = 42
+debug(vaxis): microseconds per render = 524

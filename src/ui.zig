@@ -147,7 +147,7 @@ pub const UI = struct {
         };
 
         const keybindings = switch (app.mode) {
-            .normal => "h/l:File  j/k:Cursor  g/G:Top/Bottom  Ctrl-d/u:Page  Shift+M:Center  Enter:Comment  y:Yank  s:Toggle  r:Refresh  q:Quit",
+            .normal => "h/l:File  j/k:Line  g/G:Top/Bottom  Ctrl-g:Editor  q:Quit",
             .comment => "Enter:Save  Shift+Enter:Newline  ESC:Cancel",
         };
 

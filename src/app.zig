@@ -11,6 +11,7 @@ const render_unified = @import("rendering/unified.zig");
 const render_side_by_side = @import("rendering/side_by_side.zig");
 const state_helpers = @import("state.zig");
 const ui_components = @import("ui.zig");
+const editor = @import("editor.zig");
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
 const RenderUtils = render_utils.RenderUtils;
@@ -82,6 +83,9 @@ pub const App = struct {
     mode: Mode,
     state: State,
     should_quit: bool,
+    should_suspend_for_editor: bool,
+    editor_file_path: ?[]const u8,
+    editor_line_number: ?usize,
     last_ctrl_c: i64,
     header_line_buffers: [Layout.header_height][HEADER_BUFFER_WIDTH]u8,
     frame_text_buffer: []u8,
@@ -168,6 +172,9 @@ pub const App = struct {
                 .active_comment_input = null,
             },
             .should_quit = false,
+            .should_suspend_for_editor = false,
+            .editor_file_path = null,
+            .editor_line_number = null,
             .last_ctrl_c = 0,
             .header_line_buffers = header_buffers,
             .frame_text_buffer = frame_buffer,
@@ -233,7 +240,13 @@ pub const App = struct {
         // Update state with new files
         self.state.files = new_files;
         self.state.current_file_idx = new_file_idx;
-        Navigation.resetFileState(self);
+
+        // Clamp cursor to new file's line count (don't reset to 0)
+        const total_lines = self.getTotalLinesInCurrentFile();
+        if (total_lines > 0 and self.state.cursor_line >= total_lines) {
+            self.state.cursor_line = total_lines - 1;
+        }
+        Navigation.clampScrollOffset(self);
     }
 
     pub fn run(self: *App) !void {
@@ -253,6 +266,38 @@ pub const App = struct {
 
         // Main event loop
         while (!self.should_quit) {
+            // Check if we need to suspend for editor
+            if (self.should_suspend_for_editor) {
+                // Stop the event loop to release TTY
+                loop.stop();
+
+                // Exit alt screen
+                try self.vx.exitAltScreen(buffered_writer.writer().any());
+                try buffered_writer.flush();
+
+                // Open editor (blocks until editor exits)
+                if (self.editor_file_path) |file_path| {
+                    editor.openInEditor(self.allocator, file_path, self.editor_line_number) catch |err| {
+                        std.log.err("Failed to open editor: {}", .{err});
+                    };
+                }
+
+                // Re-enter alt screen
+                try self.vx.enterAltScreen(buffered_writer.writer().any());
+                try buffered_writer.flush();
+
+                // Restart the event loop
+                try loop.start();
+
+                // Refresh diff after returning from editor
+                try self.refresh();
+
+                // Clear the suspend flag
+                self.should_suspend_for_editor = false;
+                self.editor_file_path = null;
+                self.editor_line_number = null;
+            }
+
             loop.pollEvent();
 
             while (loop.tryEvent()) |event| {
@@ -297,8 +342,21 @@ pub const App = struct {
     }
 
     fn handleNormalMode(self: *App, key: vaxis.Key) !void {
+        // Handle Ctrl+key combinations first (before regular key handling)
+        if (key.mods.ctrl) {
+            switch (key.codepoint) {
+                'n' => Navigation.navigateToNextFile(self),
+                'p' => Navigation.navigateToPreviousFile(self),
+                'd' => Navigation.pageDown(self),
+                'u' => Navigation.pageUp(self),
+                'g' => try self.openInEditor(),
+                else => {},
+            }
+            return;
+        }
+
         // Handle digit keys for count prefix (1-9, not 0 to match vim)
-        if (!key.mods.ctrl and !key.mods.alt and !key.mods.shift) {
+        if (!key.mods.alt and !key.mods.shift) {
             if (key.codepoint >= '1' and key.codepoint <= '9') {
                 const digit = @as(usize, @intCast(key.codepoint - '0'));
                 if (self.state.count_prefix) |count| {
@@ -332,16 +390,6 @@ pub const App = struct {
                 // Reset count prefix on any other key
                 self.state.count_prefix = null;
             },
-        }
-
-        if (key.mods.ctrl) {
-            switch (key.codepoint) {
-                'n' => Navigation.navigateToNextFile(self),
-                'p' => Navigation.navigateToPreviousFile(self),
-                'd' => Navigation.pageDown(self),
-                'u' => Navigation.pageUp(self),
-                else => {},
-            }
         }
     }
 
@@ -595,6 +643,72 @@ pub const App = struct {
         }
 
         _ = try child.wait();
+    }
+
+    fn openInEditor(self: *App) !void {
+        if (self.state.current_file_idx >= self.state.files.len) return;
+
+        const file = &self.state.files[self.state.current_file_idx];
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        // Skip if it's a deleted file or /dev/null
+        if (file.new_path.len == 0 or std.mem.eql(u8, file_path, "/dev/null")) {
+            return;
+        }
+
+        // Get the line number from the current cursor position
+        var line_number: ?usize = null;
+        const line_type = display_lines.getDisplayLineType(
+            self.state.cursor_line,
+            file,
+            &self.state.comment_store,
+            file_path,
+        );
+
+        if (line_type) |lt| {
+            switch (lt) {
+                .code_line => |code| {
+                    const hunk = &file.hunks[code.hunk_idx];
+                    const line = &hunk.lines[code.line_idx_in_hunk];
+                    // Prefer new line number for added/context lines, old for deleted
+                    if (line.new_lineno) |new_line| {
+                        line_number = new_line;
+                    } else if (line.old_lineno) |old_line| {
+                        line_number = old_line;
+                    }
+                },
+                .hunk_header => |header| {
+                    // When on a hunk header, jump to the start of the hunk
+                    const hunk = &file.hunks[header.hunk_idx];
+                    line_number = hunk.header.new_start;
+                },
+                .comment_line => |comment| {
+                    // When on a comment, jump to the parent code line
+                    const hunk = &file.hunks[comment.parent_hunk_idx];
+                    const line = &hunk.lines[comment.parent_line_idx];
+                    if (line.new_lineno) |new_line| {
+                        line_number = new_line;
+                    } else if (line.old_lineno) |old_line| {
+                        line_number = old_line;
+                    }
+                },
+            }
+        }
+
+        // Check if editor is terminal-based
+        const is_terminal = try editor.isCurrentEditorTerminal(self.allocator);
+
+        if (is_terminal) {
+            // Terminal editor: suspend TUI and wait for editor to complete
+            self.should_suspend_for_editor = true;
+            self.editor_file_path = file_path;
+            self.editor_line_number = line_number;
+        } else {
+            // GUI editor: just spawn it without suspending TUI
+            editor.openInEditor(self.allocator, file_path, line_number) catch |err| {
+                std.log.err("Failed to open editor: {}", .{err});
+            };
+        }
     }
 
     fn render(self: *App, win: vaxis.Window) !void {

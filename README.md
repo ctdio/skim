@@ -25,6 +25,11 @@ A keyboard-driven TUI for code reviews built in Zig. Fast, minimal, and focused 
 ```bash
 git clone https://github.com/yourusername/skim.git
 cd skim
+
+# Debug build (for development)
+zig build
+
+# OR release build (optimized)
 zig build -Doptimize=ReleaseFast
 ```
 
@@ -34,7 +39,7 @@ The binary will be available at `./zig-out/bin/skim`.
 
 ```bash
 # Build and run
-zig build -Doptimize=ReleaseFast
+zig build
 ./zig-out/bin/skim
 
 # Review your changes
@@ -88,29 +93,29 @@ Navigate files and position cursor with vim-style movements:
 | `Ctrl-p` | Previous file (alternative) |
 | `j` | Cursor down |
 | `k` | Cursor up |
+| `g` | Jump to top of file |
+| `G` | Jump to bottom of file |
 | `Ctrl-d` | Page down |
 | `Ctrl-u` | Page up |
-| `Enter` | Enter FOCUSED mode |
+| `Shift-M` | Center cursor in viewport |
+| `Enter` | Add/edit comment on cursor line |
+| `Ctrl-g` | Open current file in $EDITOR |
+| `y` | Yank (copy) comments to clipboard |
 | `s` | Toggle unified/side-by-side view |
 | `r` | Refresh diff (reload from git) |
-| `c` | Add comment on cursor line (coming soon) |
 | `q` | Quit |
 | `Ctrl-C` × 2 | Force exit (double-press within 1 second) |
-| `?` | Help (coming soon) |
 
-### FOCUSED Mode
+### COMMENT Mode
 
-Fine-grained navigation within a file:
+Edit comments on specific lines:
 
 | Key | Action |
 |-----|--------|
-| `j` or `Ctrl-n` | Scroll down one line |
-| `k` or `Ctrl-p` | Scroll up one line |
-| `Ctrl-d` | Half page down |
-| `Ctrl-u` | Half page up |
-| `g` | Jump to top |
-| `G` | Jump to bottom |
-| `ESC` | Return to NORMAL mode |
+| `Enter` | Save comment and return to NORMAL mode |
+| `Shift-Enter` | Insert newline in comment |
+| `ESC` | Cancel and return to NORMAL mode |
+| `Backspace` | Delete character before cursor |
 
 ## Architecture
 

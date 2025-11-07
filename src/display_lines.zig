@@ -85,3 +85,53 @@ pub fn getTotalDisplayLines(
 
     return total;
 }
+
+test "getDisplayLineType maps to diff line numbers" {
+    const allocator = std.testing.allocator;
+    const diff =
+        \\diff --git a/sample.txt b/sample.txt
+        \\--- a/sample.txt
+        \\+++ b/sample.txt
+        \\@@ -10,2 +100,3 @@
+        \\ context line
+        \\-removed line
+        \\+added line
+        \\+another addition
+    ;
+
+    const files = try parser.parse(allocator, diff);
+    defer {
+        for (files) |*file| {
+            file.deinit(allocator);
+        }
+        allocator.free(files);
+    }
+
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    const file = &files[0];
+    const path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+    // Hunk header at display line 0
+    const header_type = getDisplayLineType(0, file, &store, path).?;
+    try std.testing.expect(header_type == .hunk_header);
+
+    // First code line (context) should map to new line 100
+    const context_type = getDisplayLineType(1, file, &store, path).?;
+    try std.testing.expect(context_type == .code_line);
+    const context_line = file.hunks[context_type.code_line.hunk_idx].lines[context_type.code_line.line_idx_in_hunk];
+    try std.testing.expectEqual(@as(?u32, 100), context_line.new_lineno);
+
+    // Second code line (deletion) should use old line numbers
+    const delete_type = getDisplayLineType(2, file, &store, path).?;
+    try std.testing.expect(delete_type == .code_line);
+    const delete_line = file.hunks[delete_type.code_line.hunk_idx].lines[delete_type.code_line.line_idx_in_hunk];
+    try std.testing.expectEqual(@as(?u32, 11), delete_line.old_lineno);
+
+    // Third code line (addition) should map to new line 101
+    const add_type = getDisplayLineType(3, file, &store, path).?;
+    try std.testing.expect(add_type == .code_line);
+    const add_line = file.hunks[add_type.code_line.hunk_idx].lines[add_type.code_line.line_idx_in_hunk];
+    try std.testing.expectEqual(@as(?u32, 101), add_line.new_lineno);
+}

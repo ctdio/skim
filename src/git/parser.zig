@@ -337,6 +337,38 @@ test "parse diff with implicit counts" {
     try std.testing.expectEqual(@as(u32, 1), header.new_count);
 }
 
+test "line numbers preserve new file positions" {
+    const allocator = std.testing.allocator;
+
+    const diff =
+        \\diff --git a/sample.txt b/sample.txt
+        \\--- a/sample.txt
+        \\+++ b/sample.txt
+        \\@@ -650,2 +650,3 @@
+        \\ context line
+        \\-removed line
+        \\+added line
+        \\+another addition
+    ;
+
+    const files = try parse(allocator, diff);
+    defer {
+        for (files) |*file| {
+            file.deinit(allocator);
+        }
+        allocator.free(files);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), files.len);
+    const hunk = files[0].hunks[0];
+    try std.testing.expectEqual(@as(u32, 650), hunk.header.new_start);
+
+    try std.testing.expectEqual(@as(usize, 4), hunk.lines.len);
+    try std.testing.expectEqual(@as(?u32, 650), hunk.lines[0].new_lineno); // context line
+    try std.testing.expectEqual(@as(?u32, 651), hunk.lines[2].new_lineno); // first added line
+    try std.testing.expectEqual(@as(?u32, 652), hunk.lines[3].new_lineno); // second added line
+}
+
 test "parse path with prefix" {
     try std.testing.expectEqualStrings("foo/bar.txt", parsePath("a/foo/bar.txt"));
     try std.testing.expectEqualStrings("foo/bar.txt", parsePath("b/foo/bar.txt"));
