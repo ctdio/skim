@@ -207,13 +207,11 @@ pub const RenderUtils = struct {
         line_type: ?parser.Line.LineType,
     ) !void {
         // Render spacing with the appropriate diff background color
-        const spacing_style: vaxis.Style = if (is_cursor)
-            .{ .bg = Color.cursor_bg }
-        else if (line_type) |lt| switch (lt) {
+        const spacing_style: vaxis.Style = if (line_type) |lt| switch (lt) {
             .add => .{ .bg = Color.diff_add_bg },
             .delete => .{ .bg = Color.diff_delete_bg },
             .context => .{},
-        } else .{ .bg = Color.dim }; // Default to dim background for comment/hunk lines
+        } else if (is_cursor) .{ .bg = Color.comment_hover_bg } else .{}; // Hover background for comment lines when cursor is on them
 
         const spacing = try frameTextSlice(app, rendering_common.Layout.gutter_spacing);
         @memset(spacing, ' ');
@@ -244,8 +242,8 @@ pub const RenderUtils = struct {
 
         if (box_cell_width < 20) return 0; // Box too narrow
 
-        const box_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.dim, .bold = true };
-        const text_style: vaxis.Style = .{ .fg = Color.white, .bg = Color.dim };
+        const box_style: vaxis.Style = .{ .fg = Color.comment_border_focus, .bg = Color.comment_hover_bg };
+        const text_style: vaxis.Style = .{ .fg = Color.white, .bg = Color.comment_hover_bg };
 
         // Top border: ╭─ Comment ─────╮
         // Build it as segments for proper rendering
@@ -354,16 +352,16 @@ pub const RenderUtils = struct {
 
         if (box_cell_width < 20) return 0;
 
-        // Use cursor colors if cursor is on this comment line
+        // Use neutral colors - slightly lighter border and dark background when focused
         const box_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.yellow, .bg = Color.cursor_bg, .bold = true }
+            .{ .fg = Color.comment_border_focus, .bg = Color.comment_hover_bg }
         else
-            .{ .fg = Color.cyan, .bg = Color.dim, .bold = true };
+            .{ .fg = Color.comment_border };
 
         const text_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg }
+            .{ .fg = Color.white, .bg = Color.comment_hover_bg }
         else
-            .{ .fg = Color.white, .bg = Color.dim };
+            .{ .fg = Color.white };
 
         var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
         defer segments.deinit();
@@ -425,18 +423,36 @@ pub const RenderUtils = struct {
         // Render gutter for bottom border
         try renderEmptyCommentGutter(app, win, row + lines_used, is_cursor, gutter_width);
 
-        // Bottom border: ╰─────────────╯
+        // Bottom border: ╰─ Enter:Edit  d:Delete ─╯ (when cursor is on comment)
+        // or just: ╰─────────────╯ (when cursor is elsewhere)
         segments.clearRetainingCapacity();
 
-        const bottom_h_count = box_cell_width - 2; // -2 for corners
+        if (is_cursor) {
+            // Show action hints when cursor is on this comment
+            const help_text = " Enter:Edit  d:Delete ";
+            const bottom_h_count = box_cell_width - 3 - help_text.len; // -3 for corners+1 horiz, -help_text
 
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_left), .style = box_style });
-
-        i = 0;
-        while (i < bottom_h_count) : (i += 1) {
+            try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_left), .style = box_style });
             try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
+            try segments.append(.{ .text = try copyFrameText(app, help_text), .style = box_style });
+
+            i = 0;
+            while (i < bottom_h_count) : (i += 1) {
+                try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
+            }
+            try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_right), .style = box_style });
+        } else {
+            // Plain bottom border when cursor is not on this comment
+            const bottom_h_count = box_cell_width - 2; // -2 for corners
+
+            try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_left), .style = box_style });
+
+            i = 0;
+            while (i < bottom_h_count) : (i += 1) {
+                try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
+            }
+            try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_right), .style = box_style });
         }
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_right), .style = box_style });
 
         _ = try win.print(segments.items, .{ .row_offset = row + lines_used, .col_offset = content_start });
 
@@ -451,11 +467,11 @@ pub const RenderUtils = struct {
         is_cursor: bool,
         gutter_width: usize,
     ) !void {
-        // Gutter style based on cursor
+        // Gutter style - neutral gray marker with hover background
         const gutter_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.cyan, .bg = Color.cursor_bg, .bold = true }
+            .{ .fg = Color.comment_marker, .bg = Color.comment_hover_bg, .bold = true }
         else
-            .{ .fg = Color.cyan, .bg = Color.dim };
+            .{ .fg = Color.comment_marker };
 
         // Build gutter text: right-aligned comment indicator
         var buf: [16]u8 = undefined;
@@ -485,11 +501,11 @@ pub const RenderUtils = struct {
         is_cursor: bool,
         gutter_width: usize,
     ) !void {
-        // Gutter style based on cursor (same as comment gutter but no text)
+        // Apply hover background when cursor is on comment
         const gutter_style: vaxis.Style = if (is_cursor)
-            .{ .bg = Color.cursor_bg }
+            .{ .bg = Color.comment_hover_bg }
         else
-            .{ .bg = Color.dim };
+            .{};
 
         // Empty gutter (just spaces)
         const gutter_spaces = try frameTextSlice(app, gutter_width);

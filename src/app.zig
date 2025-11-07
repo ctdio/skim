@@ -385,6 +385,8 @@ pub const App = struct {
             's' => self.toggleViewMode(),
             'r' => try self.refresh(),
             'y' => try self.yankCommentsToClipboard(),
+            'd' => try self.deleteCommentUnderCursor(),
+            'D' => self.clearAllComments(),
             'M' => Navigation.centerCursor(self),
             else => {
                 // Reset count prefix on any other key
@@ -643,6 +645,43 @@ pub const App = struct {
         }
 
         _ = try child.wait();
+    }
+
+    fn deleteCommentUnderCursor(self: *App) !void {
+        if (self.state.current_file_idx >= self.state.files.len) return;
+
+        const file = &self.state.files[self.state.current_file_idx];
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        // Check if cursor is on a comment line
+        const line_type = display_lines.getDisplayLineType(
+            self.state.cursor_line,
+            file,
+            &self.state.comment_store,
+            file_path,
+        ) orelse return;
+
+        switch (line_type) {
+            .comment_line => |comment_info| {
+                // Delete the comment
+                try self.state.comment_store.deleteComment(comment_info.comment_idx);
+
+                // After deletion, move cursor to the parent code line
+                // (since the comment line no longer exists)
+                if (self.state.cursor_line > 0) {
+                    self.state.cursor_line -= 1;
+                }
+                Navigation.clampScrollOffset(self);
+            },
+            else => {
+                // Not on a comment line - do nothing
+                return;
+            },
+        }
+    }
+
+    fn clearAllComments(self: *App) void {
+        self.state.comment_store.clearAll();
     }
 
     fn openInEditor(self: *App) !void {

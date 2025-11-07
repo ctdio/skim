@@ -19,6 +19,12 @@ pub const Color = struct {
     pub const diff_add_fg = .{ .rgb = [3]u8{ 200, 255, 200 } }; // Light green text
     pub const diff_delete_fg = .{ .rgb = [3]u8{ 255, 200, 200 } }; // Light red text
 
+    // Comment colors - brighter neutral grays
+    pub const comment_border = .{ .rgb = [3]u8{ 160, 160, 160 } }; // Light gray #a0a0a0
+    pub const comment_border_focus = .{ .rgb = [3]u8{ 200, 200, 200 } }; // Bright gray when focused #c8c8c8
+    pub const comment_marker = .{ .rgb = [3]u8{ 180, 180, 180 } }; // Bright gray #b4b4b4
+    pub const comment_hover_bg = .{ .rgb = [3]u8{ 30, 30, 30 } }; // Very dark gray for hover state #1e1e1e
+
     // Cursor line highlighting - slightly darker gray background
     pub const cursor_bg = .{ .rgb = [3]u8{ 80, 80, 80 } }; // Darker gray #505050
     pub const cursor_fg = .{ .rgb = [3]u8{ 255, 255, 255 } }; // White text

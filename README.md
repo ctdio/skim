@@ -99,6 +99,8 @@ Navigate files and position cursor with vim-style movements:
 | `Ctrl-u` | Page up |
 | `Shift-M` | Center cursor in viewport |
 | `Enter` | Add/edit comment on cursor line |
+| `d` | Delete comment under cursor |
+| `D` | Clear all comments |
 | `Ctrl-g` | Open current file in $EDITOR |
 | `y` | Yank (copy) comments to clipboard |
 | `s` | Toggle unified/side-by-side view |

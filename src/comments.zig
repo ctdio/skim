@@ -84,6 +84,14 @@ pub const CommentStore = struct {
         comment.deinit(self.allocator);
     }
 
+    /// Clear all comments
+    pub fn clearAll(self: *CommentStore) void {
+        for (self.comments.items) |*comment| {
+            comment.deinit(self.allocator);
+        }
+        self.comments.clearRetainingCapacity();
+    }
+
     /// Find comment at specific location (returns index or null)
     pub fn findCommentAt(self: *const CommentStore, file_path: []const u8, hunk_idx: usize, line_idx: usize) ?usize {
         for (self.comments.items, 0..) |*comment, idx| {
@@ -341,4 +349,51 @@ test "export to markdown" {
     try std.testing.expect(std.mem.containsAtLeast(u8, markdown, 1, "<code_review>"));
     try std.testing.expect(std.mem.containsAtLeast(u8, markdown, 1, "src/app.zig"));
     try std.testing.expect(std.mem.containsAtLeast(u8, markdown, 1, "This should check for null"));
+}
+
+test "clear all comments" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    // Add multiple comments
+    try store.addComment(
+        "file1.zig",
+        0,
+        5,
+        "Comment 1",
+        .add,
+        "line 1",
+        null,
+        10,
+    );
+
+    try store.addComment(
+        "file2.zig",
+        1,
+        10,
+        "Comment 2",
+        .delete,
+        "line 2",
+        20,
+        null,
+    );
+
+    try store.addComment(
+        "file3.zig",
+        2,
+        15,
+        "Comment 3",
+        .context,
+        "line 3",
+        30,
+        30,
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), store.comments.items.len);
+
+    // Clear all comments
+    store.clearAll();
+    try std.testing.expectEqual(@as(usize, 0), store.comments.items.len);
 }
