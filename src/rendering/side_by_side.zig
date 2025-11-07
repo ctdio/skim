@@ -310,7 +310,7 @@ pub const SideBySideRenderer = struct {
                     }
 
                     // Render right side (same content)
-                    try renderGutterAtColumn(app, win, line_idx, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
+                    try renderGutterAtColumn(app, win, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
 
                     const right_start = wrap_idx * right_width;
                     const right_end = @min(right_start + right_width, line.content.len);
@@ -392,7 +392,7 @@ pub const SideBySideRenderer = struct {
 
                     // Right side empty with cursor highlight if needed
                     if (is_cursor) {
-                        try renderGutterAtColumn(app, win, line_idx, current_row, is_cursor, false, null, right_col, null, gutter_width);
+                        try renderGutterAtColumn(app, win, current_row, is_cursor, false, null, right_col, null, gutter_width);
                         const blank = try RenderUtils.frameTextSlice(app, right_width);
                         @memset(blank, ' ');
                         var blank_seg = [_]vaxis.Cell.Segment{.{
@@ -430,7 +430,7 @@ pub const SideBySideRenderer = struct {
                     }
 
                     // Render right side
-                    try renderGutterAtColumn(app, win, line_idx, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
+                    try renderGutterAtColumn(app, win, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
 
                     const text_start = wrap_idx * right_width;
                     const text_end = @min(text_start + right_width, line.content.len);
@@ -472,7 +472,6 @@ pub const SideBySideRenderer = struct {
     fn renderGutterAtColumn(
         app: *App,
         win: vaxis.Window,
-        line_idx: usize,
         row: usize,
         is_cursor: bool,
         show_number: bool,
@@ -481,7 +480,6 @@ pub const SideBySideRenderer = struct {
         line_type: ?parser.Line.LineType,
         gutter_width: usize,
     ) !void {
-        _ = line_idx;
 
         const base_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }

@@ -229,7 +229,6 @@ pub const UnifiedRenderer = struct {
             file_lineno,
             line.line_type,
             gutter_width,
-            false, // show_caret (removed with FOCUSED mode)
         );
     }
 
@@ -247,7 +246,6 @@ pub const UnifiedRenderer = struct {
         file_lineno: ?u32,
         line_type: ?parser.Line.LineType,
         gutter_width: usize,
-        show_caret: bool,
     ) !usize {
         if (content_width == 0) return 1;
 
@@ -262,9 +260,6 @@ pub const UnifiedRenderer = struct {
                 .style = style,
             }};
             _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
-
-            // Caret rendering removed with FOCUSED mode
-            _ = show_caret;
 
             return 1;
         }
@@ -315,96 +310,6 @@ pub const UnifiedRenderer = struct {
             }
 
             // Caret rendering removed with FOCUSED mode (show_caret is always false)
-
-            text_offset += chunk_len;
-            rows_rendered += 1;
-        }
-
-        return if (rows_rendered == 0) 1 else rows_rendered;
-    }
-
-    fn renderWrappedText(
-        app: *App,
-        win: vaxis.Window,
-        text: []const u8,
-        line_idx: usize,
-        start_row: usize,
-        content_width: usize,
-        is_cursor: bool,
-        style: vaxis.Style,
-        file_lineno: ?u32,
-        line_type: ?parser.Line.LineType,
-        gutter_width: usize,
-    ) !usize {
-        _ = win;
-        _ = text;
-        _ = line_idx;
-        _ = start_row;
-        _ = content_width;
-        _ = is_cursor;
-        _ = style;
-        _ = file_lineno;
-        _ = line_type;
-        _ = gutter_width;
-        _ = app;
-
-        // This function is not currently used but kept for potential future use
-        return 1;
-    }
-
-    fn renderWrappedTextAlwaysFilled(
-        app: *App,
-        win: vaxis.Window,
-        text: []const u8,
-        line_idx: usize,
-        start_row: usize,
-        content_width: usize,
-        is_cursor: bool,
-        style: vaxis.Style,
-        file_lineno: ?u32,
-        line_type: ?parser.Line.LineType,
-        gutter_width: usize,
-    ) !usize {
-        _ = is_cursor; // Unused - we always fill like cursor is on the line
-        if (content_width == 0) return 1;
-
-        // Calculate number of wrapped rows needed
-        const num_rows = (text.len + content_width - 1) / content_width;
-        if (num_rows == 0) {
-            // Empty line - still render one row with full background
-            try RenderUtils.renderGutter(app, win, line_idx, start_row, true, true, file_lineno, line_type, gutter_width); // Always fill gutter
-            const display_text = try RenderUtils.padTextForCursor(app, "", content_width, true); // Always pad
-            var seg = [_]vaxis.Cell.Segment{.{
-                .text = display_text,
-                .style = style,
-            }};
-            _ = try win.print(&seg, .{ .row_offset = start_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
-            return 1;
-        }
-
-        var rows_rendered: usize = 0;
-        var text_offset: usize = 0;
-
-        while (text_offset < text.len) {
-            const current_row = start_row + rows_rendered;
-            if (current_row >= win.height) break;
-
-            // Only show line number on first row
-            const show_line_number = rows_rendered == 0;
-            try RenderUtils.renderGutter(app, win, line_idx, current_row, true, show_line_number, file_lineno, line_type, gutter_width); // Always fill gutter
-
-            // Get the chunk of text for this row
-            const remaining = text.len - text_offset;
-            const chunk_len = @min(remaining, content_width);
-            const chunk = text[text_offset .. text_offset + chunk_len];
-
-            // Render the chunk - always pad
-            const display_text = try RenderUtils.padTextForCursor(app, chunk, content_width, true); // Always pad
-            var seg = [_]vaxis.Cell.Segment{.{
-                .text = display_text,
-                .style = style,
-            }};
-            _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
 
             text_offset += chunk_len;
             rows_rendered += 1;
