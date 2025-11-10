@@ -1,6 +1,9 @@
+const std = @import("std");
 const App = @import("app.zig").App;
 const rendering = @import("rendering/common.zig");
+const state_helpers = @import("state.zig");
 const Layout = rendering.Layout;
+const StateHelpers = state_helpers.StateHelpers;
 
 pub const Navigation = struct {
     pub fn moveCursorDown(app: *App) void {
@@ -42,6 +45,7 @@ pub const Navigation = struct {
             app.state.current_file_idx = 0;
         }
         resetFileState(app);
+        triggerAsyncHighlight(app);
     }
 
     pub fn navigateToPreviousFile(app: *App) void {
@@ -54,6 +58,24 @@ pub const Navigation = struct {
             app.state.current_file_idx = app.state.files.len - 1;
         }
         resetFileState(app);
+        triggerAsyncHighlight(app);
+    }
+
+    // Trigger async highlighting for current file (non-blocking)
+    fn triggerAsyncHighlight(app: *App) void {
+        if (app.state.current_file_idx >= app.state.files.len) return;
+        const file = &app.state.files[app.state.current_file_idx];
+
+        // Try to highlight immediately if parser is cached (fast)
+        StateHelpers.startAsyncHighlight(app, file) catch {};
+
+        // If we just added highlights, request a re-render
+        if (file.highlights != null) {
+            app.needs_render = true;
+        } else {
+            // Parser not cached - flag that we need async highlighting
+            app.needs_async_highlight = true;
+        }
     }
 
     pub fn resetFileState(app: *App) void {

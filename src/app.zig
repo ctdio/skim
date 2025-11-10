@@ -18,6 +18,7 @@ const RenderUtils = render_utils.RenderUtils;
 const UnifiedRenderer = render_unified.UnifiedRenderer;
 const SideBySideRenderer = render_side_by_side.SideBySideRenderer;
 const StateHelpers = state_helpers.StateHelpers;
+const AsyncHighlightJob = state_helpers.AsyncHighlightJob;
 const UI = ui_components.UI;
 const DividerPosition = ui_components.DividerPosition;
 
@@ -91,6 +92,9 @@ pub const App = struct {
     frame_text_buffer: []u8,
     frame_text_used: usize,
     syntax_highlighter: syntax.SyntaxHighlighter,
+    needs_render: bool, // Flag to force re-render (e.g., after async highlighting)
+    needs_async_highlight: bool, // Flag to trigger async highlighting for current file
+    active_highlight_job: ?*AsyncHighlightJob, // Currently running async highlight job
 
     const Mode = enum {
         normal, // Normal navigation and viewing
@@ -180,10 +184,20 @@ pub const App = struct {
             .frame_text_buffer = frame_buffer,
             .frame_text_used = 0,
             .syntax_highlighter = syntax_highlighter,
+            .needs_render = false,
+            .needs_async_highlight = true, // Start with highlighting needed for first file
+            .active_highlight_job = null,
         };
     }
 
     pub fn deinit(self: *App) void {
+        // Clean up any active highlight job
+        if (self.active_highlight_job) |job| {
+            // Note: Thread might still be running, but it has its own copy of data
+            // so it's safe to free the job struct after it completes
+            job.deinit();
+        }
+
         for (self.state.files) |*file| {
             file.deinit(self.allocator);
         }
@@ -252,8 +266,13 @@ pub const App = struct {
     pub fn run(self: *App) !void {
         // Set up the terminal
         var buffered_writer = self.tty.bufferedWriter();
+
         try self.vx.enterAltScreen(buffered_writer.writer().any());
-        try self.vx.queryTerminal(buffered_writer.writer().any(), 1 * std.time.ns_per_s);
+
+        // Reduced timeout from 1s to 100ms for faster startup
+        // Terminal capabilities are nice-to-have, not critical
+        try self.vx.queryTerminal(buffered_writer.writer().any(), 100 * std.time.ns_per_ms);
+
         try buffered_writer.flush();
 
         var loop: vaxis.Loop(Event) = .{
@@ -264,8 +283,21 @@ pub const App = struct {
         try loop.start();
         defer loop.stop();
 
+        var first_render = true;
+
         // Main event loop
         while (!self.should_quit) {
+            // Only block on pollEvent if we don't need to render AND no async job is running
+            // This allows async operations to trigger immediate renders
+            const should_poll = !self.needs_render and self.active_highlight_job == null;
+            if (should_poll) {
+                loop.pollEvent();
+            } else {
+                // If we need to render or have an active job, check for events without blocking
+                // Then sleep briefly to avoid busy-looping
+                std.time.sleep(1 * std.time.ns_per_ms); // 1ms delay
+            }
+
             // Check if we need to suspend for editor
             if (self.should_suspend_for_editor) {
                 // Stop the event loop to release TTY
@@ -298,17 +330,66 @@ pub const App = struct {
                 self.editor_line_number = null;
             }
 
-            loop.pollEvent();
-
+            // Process all pending events
+            var had_events = false;
             while (loop.tryEvent()) |event| {
                 try self.handleEvent(event);
+                had_events = true;
             }
 
-            // Render
-            const win = self.vx.window();
-            try self.render(win);
-            try self.vx.render(buffered_writer.writer().any());
-            try buffered_writer.flush();
+            // Render if we had events, need to update, or first render
+            if (had_events or self.needs_render or first_render) {
+                const win = self.vx.window();
+                try self.render(win);
+                try self.vx.render(buffered_writer.writer().any());
+                try buffered_writer.flush();
+                self.needs_render = false; // Clear the flag after rendering
+            }
+
+            if (first_render) {
+                first_render = false;
+            }
+
+            // Check if active highlight job is complete
+            if (self.active_highlight_job) |job| {
+                if (job.isDone()) {
+                    // Get results and apply them
+                    if (job.takeResults()) |highlights| {
+                        const file_idx = job.file_idx;
+                        if (file_idx < self.state.files.len) {
+                            const file = &self.state.files[file_idx];
+                            // Transfer ownership of highlights to file
+                            const mutable_file = @constCast(file);
+                            mutable_file.highlights = highlights;
+                            // Trigger re-render to show colors
+                            self.needs_render = true;
+                        } else {
+                            // File no longer exists (refresh happened), free highlights
+                            self.syntax_highlighter.freeHighlights(highlights);
+                        }
+                    }
+                    // Clean up job
+                    job.deinit();
+                    self.active_highlight_job = null;
+                }
+            }
+
+            // Spawn async highlighting if needed (only if no job is active)
+            if (self.needs_async_highlight and self.active_highlight_job == null and self.state.files.len > 0) {
+                self.needs_async_highlight = false;
+
+                const file = &self.state.files[self.state.current_file_idx];
+
+                // Only trigger if file doesn't have highlights and parser isn't cached
+                if (file.highlights == null) {
+                    const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+                    // If parser not cached, spawn background thread
+                    if (!self.syntax_highlighter.isCached(file_path)) {
+                        self.active_highlight_job = StateHelpers.spawnAsyncHighlight(self, self.state.current_file_idx) catch null;
+                    }
+                }
+            }
         }
     }
 

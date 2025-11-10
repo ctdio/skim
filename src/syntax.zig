@@ -242,18 +242,33 @@ pub const Highlight = struct {
     }
 };
 
+// Cached parser and query for a language
+const LanguageCache = struct {
+    parser: *zts.Parser,
+    query: *zts.Query,
+};
+
 // Manages syntax highlighting for multiple files
 pub const SyntaxHighlighter = struct {
     allocator: std.mem.Allocator,
+    // Cache parsers and queries by language for performance
+    cache: std.AutoHashMap(Language, LanguageCache),
 
     pub fn init(allocator: std.mem.Allocator) !SyntaxHighlighter {
         return .{
             .allocator = allocator,
+            .cache = std.AutoHashMap(Language, LanguageCache).init(allocator),
         };
     }
 
     pub fn deinit(self: *SyntaxHighlighter) void {
-        _ = self;
+        // Free all cached parsers and queries
+        var iter = self.cache.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.parser.deinit();
+            entry.value_ptr.query.deinit();
+        }
+        self.cache.deinit();
     }
 
     // Free highlights returned by highlightFile/highlightContent
@@ -263,6 +278,13 @@ pub const SyntaxHighlighter = struct {
             self.allocator.free(h.category);
         }
         self.allocator.free(highlights);
+    }
+
+    // Check if a language's parser/query is already cached (fast path available)
+    pub fn isCached(self: *SyntaxHighlighter, file_path: []const u8) bool {
+        const lang = Language.fromFilePath(file_path);
+        if (lang == .unknown) return false;
+        return self.cache.contains(lang);
     }
 
     // Highlights a file's content and returns array of highlight ranges
@@ -281,13 +303,14 @@ pub const SyntaxHighlighter = struct {
         return try self.highlightContent(lang, content);
     }
 
-    // Highlights content for a specific language
-    fn highlightContent(
-        self: *SyntaxHighlighter,
-        lang: Language,
-        content: []const u8,
-    ) ![]Highlight {
-        // Get language grammar
+    // Get or create cached parser and query for a language
+    fn getOrCreateCache(self: *SyntaxHighlighter, lang: Language) !*LanguageCache {
+        // Check if already cached
+        if (self.cache.getPtr(lang)) |cached| {
+            return cached;
+        }
+
+        // Not cached - create new parser and query
         const ts_lang = switch (lang) {
             .javascript => try zts.loadLanguage(.javascript),
             .typescript => try zts.loadLanguage(.typescript),
@@ -344,38 +367,61 @@ pub const SyntaxHighlighter = struct {
             .bash => BASH_HIGHLIGHTS,
             .unknown => unreachable,
         };
+
         defer if (needs_free) self.allocator.free(combined_query);
 
-        // Create parser
-        var parser = zts.Parser.init() catch {
-            return &[_]Highlight{};
+        // Create parser (init already returns a pointer)
+        const parser = zts.Parser.init() catch {
+            return error.ParserInitFailed;
         };
-        defer parser.deinit();
+        errdefer parser.deinit();
 
         parser.setLanguage(ts_lang) catch {
+            parser.deinit();
+            return error.LanguageSetFailed;
+        };
+
+        // Create query (init already returns a pointer)
+        const query = zts.Query.init(ts_lang, query_str) catch {
+            parser.deinit();
+            return error.QueryInitFailed;
+        };
+
+        // Store in cache
+        try self.cache.put(lang, .{
+            .parser = parser,
+            .query = query,
+        });
+
+        // Return pointer to cached entry
+        return self.cache.getPtr(lang).?;
+    }
+
+    // Highlights content for a specific language
+    fn highlightContent(
+        self: *SyntaxHighlighter,
+        lang: Language,
+        content: []const u8,
+    ) ![]Highlight {
+        // Get cached parser and query (or create if first time)
+        const cache = self.getOrCreateCache(lang) catch {
             return &[_]Highlight{};
         };
 
-        // Parse the content
-        const tree = parser.parseString(null, content) catch {
+        // Parse the content using cached parser
+        const tree = cache.parser.parseString(null, content) catch {
             return &[_]Highlight{};
         };
         defer tree.deinit();
 
-        // Create query from the highlights.scm file
-        const query = zts.Query.init(ts_lang, query_str) catch {
-            return &[_]Highlight{};
-        };
-        defer query.deinit();
-
-        // Execute query
+        // Execute query using cached query
         var cursor = zts.QueryCursor.init() catch {
             return &[_]Highlight{};
         };
         defer cursor.deinit();
 
         const root = tree.rootNode();
-        cursor.exec(query, root);
+        cursor.exec(cache.query, root);
 
         // Collect all captures into highlights
         var highlights = std.ArrayList(Highlight).init(self.allocator);
@@ -391,7 +437,7 @@ pub const SyntaxHighlighter = struct {
 
                 // captureNameForId needs a length pointer
                 var length: u32 = 0;
-                const capture_name_opt = query.captureNameForId(capture.index, &length);
+                const capture_name_opt = cache.query.captureNameForId(capture.index, &length);
                 if (capture_name_opt == null) continue;
 
                 const capture_name = capture_name_opt.?;
@@ -400,7 +446,7 @@ pub const SyntaxHighlighter = struct {
 
                 // IMPORTANT: duplicate the category string!
                 // capture_name points to memory inside the Query object,
-                // which will be freed when query.deinit() is called
+                // which is now cached and persists for the lifetime of SyntaxHighlighter
                 const category_copy = try self.allocator.dupe(u8, capture_name);
 
                 try highlights.append(.{

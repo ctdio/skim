@@ -22,7 +22,8 @@ pub const UnifiedRenderer = struct {
         const file = &app.state.files[app.state.current_file_idx];
 
         // Ensure syntax highlights are loaded for this file
-        try StateHelpers.ensureHighlights(app, file);
+        // Use async mode (non-blocking) to show UI immediately
+        try StateHelpers.ensureHighlights(app, file, false);
 
         app.state.viewport_height = win.height;
         Navigation.clampScrollOffset(app);

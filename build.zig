@@ -63,6 +63,41 @@ pub fn build(b: *std.Build) void {
     const debug_step = b.step("debug-syntax", "Run syntax debugging");
     debug_step.dependOn(&debug_run.step);
 
+    // Startup benchmark executable
+    const bench_exe = b.addExecutable(.{
+        .name = "bench_startup",
+        .root_source_file = b.path("src/bench_startup.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_exe.root_module.addImport("zts", zts);
+    const bench_run = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run startup benchmark");
+    bench_step.dependOn(&bench_run.step);
+
+    // First render benchmark executable
+    const first_render_exe = b.addExecutable(.{
+        .name = "bench_first_render",
+        .root_source_file = b.path("src/bench_first_render.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    first_render_exe.root_module.addImport("zts", zts);
+    const first_render_run = b.addRunArtifact(first_render_exe);
+    const first_render_step = b.step("bench-render", "Run first render benchmark");
+    first_render_step.dependOn(&first_render_run.step);
+
+    // Async benchmark executable
+    const async_exe = b.addExecutable(.{
+        .name = "bench_async",
+        .root_source_file = b.path("src/bench_async.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const async_run = b.addRunArtifact(async_exe);
+    const async_step = b.step("bench-async", "Run async startup benchmark");
+    async_step.dependOn(&async_run.step);
+
     // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
