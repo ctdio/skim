@@ -287,6 +287,15 @@ pub const SyntaxHighlighter = struct {
         return self.cache.contains(lang);
     }
 
+    // Ensure parser/query is cached for a language (doesn't generate highlights)
+    pub fn ensureCached(self: *SyntaxHighlighter, file_path: []const u8) void {
+        const lang = Language.fromFilePath(file_path);
+        if (lang == .unknown) return;
+
+        // This will create and cache the parser if not already cached
+        _ = self.getOrCreateCache(lang) catch return;
+    }
+
     // Highlights a file's content and returns array of highlight ranges
     pub fn highlightFile(
         self: *SyntaxHighlighter,

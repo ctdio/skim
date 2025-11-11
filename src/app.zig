@@ -158,7 +158,7 @@ pub const App = struct {
 
         const syntax_highlighter = try syntax.SyntaxHighlighter.init(allocator);
 
-        return App{
+        var app = App{
             .allocator = allocator,
             .vx = vx,
             .tty = tty,
@@ -188,6 +188,18 @@ pub const App = struct {
             .needs_async_highlight = true, // Start with highlighting needed for first file
             .active_highlight_job = null,
         };
+
+        // Eagerly apply highlights for initial file if parser is cached
+        if (files.len > 0) {
+            const initial_file = &app.state.files[0];
+            StateHelpers.startAsyncHighlight(&app, initial_file) catch {};
+            // If highlights were applied, no need for async later
+            if (initial_file.highlights != null) {
+                app.needs_async_highlight = false;
+            }
+        }
+
+        return app;
     }
 
     pub fn deinit(self: *App) void {
@@ -353,6 +365,11 @@ pub const App = struct {
             // Check if active highlight job is complete
             if (self.active_highlight_job) |job| {
                 if (job.isDone()) {
+                    // Cache the parser in main app's highlighter for future use
+                    // The worker thread created its own highlighter which was destroyed
+                    // So we need to ensure the main app's cache is populated
+                    self.syntax_highlighter.ensureCached(job.file_path);
+
                     // Get results and apply them
                     if (job.takeResults()) |highlights| {
                         const file_idx = job.file_idx;
@@ -380,12 +397,19 @@ pub const App = struct {
 
                 const file = &self.state.files[self.state.current_file_idx];
 
-                // Only trigger if file doesn't have highlights and parser isn't cached
+                // Only trigger if file doesn't have highlights
                 if (file.highlights == null) {
                     const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
-                    // If parser not cached, spawn background thread
-                    if (!self.syntax_highlighter.isCached(file_path)) {
+                    // If parser is cached, apply highlights immediately (fast ~7ms)
+                    if (self.syntax_highlighter.isCached(file_path)) {
+                        StateHelpers.startAsyncHighlight(self, file) catch {};
+                        // Trigger re-render if highlights were added
+                        if (file.highlights != null) {
+                            self.needs_render = true;
+                        }
+                    } else {
+                        // Parser not cached - spawn background thread
                         self.active_highlight_job = StateHelpers.spawnAsyncHighlight(self, self.state.current_file_idx) catch null;
                     }
                 }
