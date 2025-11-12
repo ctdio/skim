@@ -9,6 +9,7 @@ A keyboard-driven TUI for code reviews built in Zig. Fast, minimal, and focused 
 - File-by-file diff navigation
 - Unified and side-by-side views
 - Tree-sitter syntax highlighting with async processing (JS/TS/Zig full support)
+- **Search with `/` - smart case matching across all files**
 - Live refresh (press 'r')
 - Full git diff compatibility (working dir, staged, branch comparisons)
 - Comment system with export to clipboard ('y' to yank)
@@ -99,6 +100,9 @@ Navigate files and position cursor with vim-style movements:
 | `Ctrl-d` | Page down |
 | `Ctrl-u` | Page up |
 | `Shift-M` | Center cursor in viewport |
+| `/` | Enter search mode |
+| `n` | Jump to next search match |
+| `N` | Jump to previous search match |
 | `Enter` | Add/edit comment on cursor line |
 | `d` | Delete comment under cursor |
 | `D` | Clear all comments |
@@ -108,6 +112,23 @@ Navigate files and position cursor with vim-style movements:
 | `r` | Refresh diff (reload from git) |
 | `q` | Quit |
 | `Ctrl-C` × 2 | Force exit (double-press within 1 second) |
+
+### SEARCH Mode
+
+Search through diff content:
+
+| Key | Action |
+|-----|--------|
+| Type | Enter search query (smart case: lowercase=ignore case, uppercase=exact) |
+| `Enter` | Execute search and jump to first match |
+| `ESC` | Cancel and return to NORMAL mode |
+| `Backspace` | Delete character from query |
+
+**Search behavior:**
+- **Smart case**: Search is case-insensitive unless query contains uppercase letters
+- **Global**: Searches across all files in the diff
+- **Code lines only**: Searches through diff content (add/delete/context lines)
+- Use `n`/`N` in NORMAL mode to navigate between matches
 
 ### COMMENT Mode
 
@@ -176,15 +197,17 @@ Design decisions:
 - [x] Comment system (Enter to add/edit, d/D to delete/clear)
 - [x] Export comments to clipboard ('y' to yank with context)
 - [x] Editor integration (Ctrl-g opens file at line in $EDITOR)
-- [ ] Hunk navigation (n/N keys)
+- [x] Search functionality with `/` (smart case, global across files)
+- [ ] Hunk navigation
 - [ ] Help overlay
 
 ### Phase 3: Polish (Current)
 
 - [x] LineMap system for accurate positioning
 - [x] Async highlighting for non-blocking syntax processing
+- [x] Search functionality with visual highlighting (/ for search, n/N for next/previous)
 - [ ] Expand syntax highlighting to Python, Rust, Go, C, C++ (parsers ready, need query files)
-- [ ] Hunk navigation (n/N keys)
+- [ ] Hunk navigation
 - [ ] Help overlay
 - [ ] Mouse support
 - [ ] Configuration file

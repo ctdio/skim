@@ -36,6 +36,10 @@ pub const Color = struct {
     // Darker colors for +/- diff signs
     pub const diff_sign_add = .{ .rgb = [3]u8{ 0, 160, 0 } }; // Darker green #00a000
     pub const diff_sign_delete = .{ .rgb = [3]u8{ 160, 0, 0 } }; // Darker red #a00000
+
+    // Search highlight - bright yellow background for visibility
+    pub const search_match_bg = .{ .rgb = [3]u8{ 180, 150, 0 } }; // Bright yellow-orange #b49600
+    pub const search_match_fg = .{ .rgb = [3]u8{ 0, 0, 0 } }; // Black text for contrast
 };
 
 // Layout constants

@@ -228,6 +228,53 @@ Five main layers:
 
 ## Key Implementation Notes
 
+### Global Line Coordinate System
+
+**Definition**: A global line is a zero-based sequential index (0, 1, 2, ...) that uniquely identifies every renderable line in the entire diff view. It serves as the absolute coordinate system for positioning and navigation throughout Skim.
+
+**Purpose**:
+- **Single source of truth** for all positioning decisions (cursor, scroll, lookups)
+- **Prevents sync issues** between navigation and rendering logic that occurred with independent position calculations
+- **Makes calculations simple** - cursor and scroll are just global line numbers
+- **Consistent references** - any line can be referenced unambiguously regardless of type
+
+**What counts as a global line**:
+Every visible element in the rendered diff gets a global line number:
+- **File headers** - "diff --git a/file.txt b/file.txt" style headers
+- **Hunk headers** - "@@ -1,3 +1,4 @@" range indicators
+- **Code lines** - add/delete/context lines from the actual diff content
+- **Comment lines** - review comments attached to specific code lines
+- **Spacer lines** - blank lines between files (3 spacers per file boundary)
+
+**Concrete Example**:
+```
+Global Line | Line Type      | Content
+------------|----------------|----------------------------------
+0           | file_header    | diff --git a/foo.txt b/foo.txt
+1           | hunk_header    | @@ -1,2 +1,3 @@
+2           | code_line      |  context line
+3           | code_line      | -deleted line
+4           | comment_line   | "This deletion looks wrong"
+5           | code_line      | +added line
+6           | spacer         | (blank)
+7           | spacer         | (blank)
+8           | spacer         | (blank)
+9           | file_header    | diff --git a/bar.txt b/bar.txt
+10          | hunk_header    | @@ -1,1 +1,1 @@
+11          | code_line      | -old content
+12          | code_line      | +new content
+```
+
+**Usage in the codebase**:
+- `app.state.global_cursor_line` - Cursor's current absolute position in the diff
+- `app.state.global_scroll_offset` - First visible line in the viewport (top of screen)
+- `LineMap.getLineRecord(global_line)` - Look up any line's metadata by its global position
+- **Navigation**: Updates `global_cursor_line` to target position (e.g., file header, next line)
+- **Rendering**: Starts at `global_scroll_offset`, renders records sequentially until viewport full
+- **Bounds checking**: Total lines = `LineMap.getTotalLines()`, valid range is `[0, total_lines)`
+
+**Key invariant**: Global line numbers are always sequential with no gaps. When LineMap is rebuilt (e.g., after adding/deleting comments), all global line numbers are recalculated to maintain this invariant.
+
 ### LineMap-Based Rendering Architecture
 
 **Core Principle**: All line positioning comes from a pre-computed LineMap. No on-the-fly position calculations.

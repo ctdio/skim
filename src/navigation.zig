@@ -17,7 +17,7 @@ pub const Navigation = struct {
         }
 
         // Ensure cursor stays visible
-        ensureCursorVisible(app);
+        ensureCursorVisible(app, true);
         clampCursorColumn(app);
     }
 
@@ -32,7 +32,7 @@ pub const Navigation = struct {
         }
 
         // Ensure cursor stays visible
-        ensureCursorVisible(app);
+        ensureCursorVisible(app, true);
         clampCursorColumn(app);
     }
 
@@ -282,8 +282,8 @@ pub const Navigation = struct {
 
     // Adjust scroll to ensure cursor is visible with padding
     // Only called after explicit cursor movement (j/k), not during file navigation
-    fn ensureCursorVisible(app: *App) void {
-        const padding = Layout.cursor_padding;
+    pub fn ensureCursorVisible(app: *App, with_padding: bool) void {
+        const padding: usize = if (with_padding) Layout.cursor_padding else 0;
         const cursor_line = app.state.global_cursor_line;
         const scroll_offset = app.state.global_scroll_offset;
         const window_height = app.state.viewport_height;
@@ -301,6 +301,6 @@ pub const Navigation = struct {
     // Keep old function name for backwards compatibility (deprecated)
     pub fn adjustScrollToKeepCursorVisible(app: *App, window_height: usize) void {
         _ = window_height; // Use viewport_height from app.state instead
-        ensureCursorVisible(app);
+        ensureCursorVisible(app, true);
     }
 };

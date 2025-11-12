@@ -335,7 +335,7 @@ pub const UnifiedRenderer = struct {
         hunk_idx: usize,
         line_idx_in_hunk: usize,
         line: parser.Line,
-        _: usize, // line_idx kept for compatibility but cursor passed directly
+        global_line: usize,
         row: usize,
         content_width: usize,
         gutter_width: usize,
@@ -371,6 +371,7 @@ pub const UnifiedRenderer = struct {
             file_lineno,
             line.line_type,
             gutter_width,
+            global_line,
         );
     }
 
@@ -387,6 +388,7 @@ pub const UnifiedRenderer = struct {
         file_lineno: ?u32,
         line_type: ?parser.Line.LineType,
         gutter_width: usize,
+        global_line: usize,
     ) !usize {
         if (content_width == 0) return 1;
 
@@ -434,7 +436,7 @@ pub const UnifiedRenderer = struct {
 
             // Generate syntax-highlighted segments for this chunk
             const chunk_byte_offset = byte_offset + text_offset;
-            const segments = try app.createHighlightedSegments(chunk, chunk_byte_offset, highlights, style);
+            const segments = try app.createHighlightedSegments(chunk, text, text_offset, chunk_byte_offset, highlights, style, global_line);
             defer app.allocator.free(segments);
 
             // Pad segments to full width for cursor or diff lines (add/delete)

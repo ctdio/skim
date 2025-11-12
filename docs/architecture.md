@@ -103,12 +103,14 @@ const Mode = enum {
 ```zig
 const State = struct {
     diff_source: DiffSource,
-    files: []parser.FileDiff,     // Parsed diff files
-    current_file_idx: usize,
-    scroll_offset: usize,         // Viewport scroll position
-    cursor_line: usize,           // Cursor position in current file
-    view_mode: ViewMode,          // unified vs. side-by-side
-    viewport_height: usize,       // For scroll calculations
+    files: []parser.FileDiff,           // Parsed diff files
+    line_map: LineMap,                  // Pre-computed line positions
+    global_cursor_line: usize,          // Cursor position (global line number)
+    global_scroll_offset: usize,        // Viewport scroll position (global line number)
+    view_mode: ViewMode,                // unified vs. side-by-side
+    viewport_height: usize,             // For scroll calculations
+    comment_store: CommentStore,        // In-memory comment storage
+    syntax_highlighter: SyntaxHighlighter,
 };
 ```
 
@@ -119,6 +121,136 @@ const ViewMode = enum {
     side_by_side,  // Split view with old/new side-by-side
 };
 ```
+
+### 2.5. Line Map Layer (line_map.zig)
+
+The LineMap system provides a **global line coordinate system** - a pre-computed registry of all renderable lines that serves as the single source of truth for positioning.
+
+#### Global Line Coordinate System
+
+**Definition**: A global line is a zero-based sequential index (0, 1, 2, ...) that uniquely identifies every renderable line in the entire diff view.
+
+**Why it exists**:
+- Eliminates sync issues between navigation and rendering logic
+- Simplifies cursor and scroll calculations (both are just global line numbers)
+- Provides consistent, unambiguous references to any line
+- Built once, used everywhere - no duplicate position calculations
+
+**What gets a global line number**:
+- File headers (e.g., "diff --git a/file.txt b/file.txt")
+- Hunk headers (e.g., "@@ -1,3 +1,4 @@")
+- Code lines (add/delete/context from diff)
+- Comment lines (review comments attached to code lines)
+- Spacer lines (3 blank lines between each file)
+
+**Example layout**:
+```
+Global 0: file_header    "diff --git a/foo.txt b/foo.txt"
+Global 1: hunk_header    "@@ -1,2 +1,3 @@"
+Global 2: code_line      " context line"
+Global 3: code_line      "-deleted line"
+Global 4: comment_line   "This deletion looks wrong"
+Global 5: code_line      "+added line"
+Global 6: spacer         (blank)
+Global 7: spacer         (blank)
+Global 8: spacer         (blank)
+Global 9: file_header    "diff --git a/bar.txt b/bar.txt"
+...
+```
+
+#### LineMap Structure
+
+```zig
+pub const LineRecord = struct {
+    global_line: usize,      // Sequential position (0, 1, 2, ...)
+    file_idx: usize,         // Which file this line belongs to
+    line_type: LineType,     // Union enum with type-specific metadata
+};
+
+pub const LineType = union(enum) {
+    file_header,
+    hunk_header: struct { hunk_idx: usize },
+    code_line: struct {
+        hunk_idx: usize,
+        line_idx_in_hunk: usize,
+    },
+    comment_line: struct {
+        parent_hunk_idx: usize,
+        parent_line_idx: usize,
+        comment_idx: usize,
+    },
+    spacer: struct {
+        after_file_idx: usize,
+        spacer_line_num: usize,
+    },
+};
+
+pub const LineMap = struct {
+    records: []LineRecord,   // All lines in sequential order
+    allocator: Allocator,
+
+    pub fn build(allocator, files, comment_store) !LineMap
+    pub fn getLineRecord(global_line: usize) ?*const LineRecord
+    pub fn getFileHeaderLine(file_idx: usize) ?usize
+    pub fn getTotalLines() usize
+    // ... other helper methods
+};
+```
+
+#### Building the LineMap
+
+LineMap is built during initialization and rebuilt when structure changes:
+1. Iterate through all files sequentially
+2. For each file: add file header, then iterate hunks
+3. For each hunk: add hunk header, then iterate lines
+4. For each code line: add code line record, check for attached comment
+5. If comment exists: add comment line record
+6. Between files: add 3 spacer records
+7. Assign sequential global line numbers (no gaps)
+
+**Rebuild triggers**:
+- Application init
+- Diff refresh ('r' key)
+- Comment added/saved
+- Comment deleted
+
+#### Usage in Navigation & Rendering
+
+**Navigation**:
+```zig
+// Move cursor down
+state.global_cursor_line += 1;
+
+// Jump to file
+state.global_cursor_line = line_map.getFileHeaderLine(file_idx);
+state.global_scroll_offset = state.global_cursor_line;
+
+// Bounds checking
+if (state.global_cursor_line >= line_map.getTotalLines()) {
+    state.global_cursor_line = line_map.getTotalLines() - 1;
+}
+```
+
+**Rendering**:
+```zig
+// Start from scroll offset, render until viewport full
+for (line_map.records) |*record| {
+    if (record.global_line < state.global_scroll_offset) continue;
+    if (row >= viewport_height) break;
+
+    // Render based on line type
+    switch (record.line_type) {
+        .file_header => renderFileHeader(),
+        .hunk_header => renderHunkHeader(),
+        .code_line => renderCodeLine(),
+        .comment_line => renderComment(),
+        .spacer => renderBlankLine(),
+    }
+    row += 1;
+}
+```
+
+**Key invariant**: Global line numbers are always sequential with no gaps (0, 1, 2, ..., N-1).
 
 ### 3. Git Integration Layer (git/)
 

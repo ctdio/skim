@@ -6,6 +6,7 @@ const syntax = @import("syntax.zig");
 const comments = @import("comments.zig");
 const line_map = @import("line_map.zig");
 const navigation = @import("navigation.zig");
+const rendering_common = @import("rendering/common.zig");
 const render_utils = @import("rendering/utils.zig");
 const render_unified = @import("rendering/unified.zig");
 const render_side_by_side = @import("rendering/side_by_side.zig");
@@ -99,6 +100,7 @@ pub const App = struct {
     const Mode = enum {
         normal, // Normal navigation and viewing
         comment, // Comment editing
+        search, // Search input
     };
 
     const State = struct {
@@ -115,11 +117,53 @@ pub const App = struct {
         count_prefix: ?usize, // For vim-style count prefixes (e.g., 5j)
         comment_store: comments.CommentStore,
         active_comment_input: ?ActiveCommentInput,
+        search_state: SearchState,
 
         const ViewMode = enum {
             unified,
             side_by_side,
         };
+    };
+
+    const SearchState = struct {
+        query_buffer: [256]u8, // Search query input buffer
+        query_len: usize, // Current query length
+        matches: std.ArrayList(usize), // Global line indices of matches
+        current_match_idx: ?usize, // Index in matches array (not global line)
+        allocator: Allocator, // For matches ArrayList
+
+        fn init(allocator: Allocator) SearchState {
+            return .{
+                .query_buffer = undefined,
+                .query_len = 0,
+                .matches = std.ArrayList(usize).init(allocator),
+                .current_match_idx = null,
+                .allocator = allocator,
+            };
+        }
+
+        fn deinit(self: *SearchState) void {
+            self.matches.deinit();
+        }
+
+        fn reset(self: *SearchState) void {
+            self.query_len = 0;
+            self.matches.clearRetainingCapacity();
+            self.current_match_idx = null;
+        }
+
+        pub fn hasMatches(self: *const SearchState) bool {
+            return self.matches.items.len > 0;
+        }
+
+        fn getCurrentMatchLine(self: *const SearchState) ?usize {
+            if (self.current_match_idx) |idx| {
+                if (idx < self.matches.items.len) {
+                    return self.matches.items[idx];
+                }
+            }
+            return null;
+        }
     };
 
     const ActiveCommentInput = struct {
@@ -187,6 +231,7 @@ pub const App = struct {
                 .count_prefix = null,
                 .comment_store = comment_store,
                 .active_comment_input = null,
+                .search_state = SearchState.init(allocator),
             },
             .should_quit = false,
             .should_suspend_for_editor = false,
@@ -230,6 +275,7 @@ pub const App = struct {
         self.allocator.free(self.frame_text_buffer);
         self.state.line_map.deinit();
         self.state.comment_store.deinit();
+        self.state.search_state.deinit();
         self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.anyWriter());
         self.tty.deinit();
@@ -462,6 +508,7 @@ pub const App = struct {
         switch (self.mode) {
             .normal => try self.handleNormalMode(key),
             .comment => try self.handleCommentMode(key),
+            .search => try self.handleSearchMode(key),
         }
     }
 
@@ -512,6 +559,9 @@ pub const App = struct {
             'd' => try self.deleteCommentUnderCursor(),
             'D' => self.clearAllComments(),
             'M' => Navigation.centerCursor(self),
+            '/' => self.startSearch(),
+            'n' => self.searchNext(),
+            'N' => self.searchPrevious(),
             else => {
                 // Reset count prefix on any other key
                 self.state.count_prefix = null;
@@ -847,6 +897,198 @@ pub const App = struct {
         }
     }
 
+    // Search functions
+    fn startSearch(self: *App) void {
+        self.state.search_state.reset();
+        self.mode = .search;
+    }
+
+    fn handleSearchMode(self: *App, key: vaxis.Key) !void {
+        var search_state = &self.state.search_state;
+
+        // Handle special keys
+        if (key.mods.ctrl) {
+            return;
+        }
+
+        switch (key.codepoint) {
+            27 => { // ESC - cancel search
+                self.mode = .normal;
+                search_state.reset();
+            },
+            '\r' => { // Enter - execute search
+                if (search_state.query_len > 0) {
+                    try self.performSearch();
+                    self.mode = .normal;
+                    // Jump to first match at or after cursor, or wrap to first match
+                    if (search_state.hasMatches()) {
+                        const cursor = self.state.global_cursor_line;
+                        var found = false;
+
+                        // Find first match at or after cursor
+                        for (search_state.matches.items, 0..) |match_line, idx| {
+                            if (match_line >= cursor) {
+                                search_state.current_match_idx = idx;
+                                self.state.global_cursor_line = match_line;
+                                found = true;
+                                break;
+                            }
+                        }
+
+                        // If no match after cursor, wrap to first match
+                        if (!found and search_state.matches.items.len > 0) {
+                            search_state.current_match_idx = 0;
+                            self.state.global_cursor_line = search_state.matches.items[0];
+                        }
+
+                        Navigation.ensureCursorVisible(self, false); // no padding for search jumps
+                    }
+                } else {
+                    self.mode = .normal;
+                }
+            },
+            127, 8 => { // Backspace / Delete
+                if (search_state.query_len > 0) {
+                    search_state.query_len -= 1;
+                    // Update search results as user types
+                    try self.performSearch();
+                }
+            },
+            else => {
+                // Regular character input
+                if (key.codepoint >= 32 and key.codepoint < 127 and search_state.query_len < search_state.query_buffer.len) {
+                    search_state.query_buffer[search_state.query_len] = @intCast(key.codepoint);
+                    search_state.query_len += 1;
+                    // Update search results as user types (live highlighting)
+                    try self.performSearch();
+                }
+            },
+        }
+    }
+
+    fn performSearch(self: *App) !void {
+        var search_state = &self.state.search_state;
+        search_state.matches.clearRetainingCapacity();
+
+        if (search_state.query_len == 0) return;
+
+        const query = search_state.query_buffer[0..search_state.query_len];
+
+        // Smart case: case-insensitive if query is all lowercase, sensitive otherwise
+        const is_case_sensitive = blk: {
+            for (query) |c| {
+                if (c >= 'A' and c <= 'Z') break :blk true;
+            }
+            break :blk false;
+        };
+
+        // Search through all lines in LineMap
+        const total_lines = self.state.line_map.getTotalLines();
+        var line_idx: usize = 0;
+        while (line_idx < total_lines) : (line_idx += 1) {
+            const record = self.state.line_map.getLineRecord(line_idx) orelse continue;
+
+            // Only search code lines (add, delete, context)
+            if (record.line_type != .code_line) continue;
+
+            const file = &self.state.files[record.file_idx];
+            const code = record.line_type.code_line;
+            const line_content = file.hunks[code.hunk_idx].lines[code.line_idx_in_hunk].content;
+
+            // Search for query in line content
+            if (searchInLine(line_content, query, is_case_sensitive)) {
+                try search_state.matches.append(line_idx);
+            }
+        }
+    }
+
+    fn searchInLine(haystack: []const u8, needle: []const u8, case_sensitive: bool) bool {
+        if (needle.len > haystack.len) return false;
+
+        var i: usize = 0;
+        while (i <= haystack.len - needle.len) : (i += 1) {
+            const slice = haystack[i..i + needle.len];
+            if (case_sensitive) {
+                if (std.mem.eql(u8, slice, needle)) return true;
+            } else {
+                if (std.ascii.eqlIgnoreCase(slice, needle)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn searchNext(self: *App) void {
+        var search_state = &self.state.search_state;
+
+        if (!search_state.hasMatches()) return;
+
+        if (search_state.current_match_idx) |current_idx| {
+            // Move to next match
+            const next_idx = (current_idx + 1) % search_state.matches.items.len;
+            search_state.current_match_idx = next_idx;
+        } else {
+            // No current match - find first match after cursor
+            const cursor = self.state.global_cursor_line;
+            var found = false;
+            for (search_state.matches.items, 0..) |match_line, idx| {
+                if (match_line > cursor) {
+                    search_state.current_match_idx = idx;
+                    found = true;
+                    break;
+                }
+            }
+            // If no match after cursor, wrap to first
+            if (!found and search_state.matches.items.len > 0) {
+                search_state.current_match_idx = 0;
+            }
+        }
+
+        // Jump to the match
+        if (search_state.getCurrentMatchLine()) |line| {
+            self.state.global_cursor_line = line;
+            Navigation.ensureCursorVisible(self, false); // no padding for search jumps
+        }
+    }
+
+    fn searchPrevious(self: *App) void {
+        var search_state = &self.state.search_state;
+
+        if (!search_state.hasMatches()) return;
+
+        if (search_state.current_match_idx) |current_idx| {
+            // Move to previous match (with wraparound)
+            const prev_idx = if (current_idx == 0)
+                search_state.matches.items.len - 1
+            else
+                current_idx - 1;
+            search_state.current_match_idx = prev_idx;
+        } else {
+            // No current match - find last match before cursor
+            const cursor = self.state.global_cursor_line;
+            var found = false;
+            var idx = search_state.matches.items.len;
+            while (idx > 0) {
+                idx -= 1;
+                const match_line = search_state.matches.items[idx];
+                if (match_line < cursor) {
+                    search_state.current_match_idx = idx;
+                    found = true;
+                    break;
+                }
+            }
+            // If no match before cursor, wrap to last
+            if (!found and search_state.matches.items.len > 0) {
+                search_state.current_match_idx = search_state.matches.items.len - 1;
+            }
+        }
+
+        // Jump to the match
+        if (search_state.getCurrentMatchLine()) |line| {
+            self.state.global_cursor_line = line;
+            Navigation.ensureCursorVisible(self, false); // no padding for search jumps
+        }
+    }
+
     fn render(self: *App, win: vaxis.Window) !void {
         win.clear();
         RenderUtils.resetFrameTextBuffer(self);
@@ -893,12 +1135,19 @@ pub const App = struct {
 
     // Generate colored segments for a line of text using syntax highlights
     // Returns array of segments with syntax colors applied as foreground
+    // text: the text chunk to render (may be part of a wrapped line)
+    // full_line_text: the complete line text (for search highlighting)
+    // text_offset: offset of this chunk within the full line
+    // line_byte_offset: byte offset for syntax highlighting
     pub fn createHighlightedSegments(
         self: *App,
         text: []const u8,
+        full_line_text: []const u8,
+        text_offset: usize,
         line_byte_offset: usize,
         highlights: ?[]syntax.Highlight,
         base_style: vaxis.Style,
+        global_line: usize,
     ) ![]vaxis.Cell.Segment {
         if (highlights == null or text.len == 0) {
             // No highlights - return single segment
@@ -907,7 +1156,8 @@ pub const App = struct {
                 .text = text,
                 .style = base_style,
             };
-            return segments;
+            // Still apply search highlighting even without syntax highlights
+            return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
         }
 
         const file_highlights = highlights.?;
@@ -941,7 +1191,8 @@ pub const App = struct {
                 .text = text,
                 .style = base_style,
             };
-            return segments;
+            // Still apply search highlighting even without syntax highlights
+            return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
         }
 
         // Build segments by splitting text at highlight boundaries
@@ -1049,6 +1300,414 @@ pub const App = struct {
             }
         }
 
-        return segments.toOwnedSlice();
+        const owned_segments = try segments.toOwnedSlice();
+        return try self.applySearchHighlighting(owned_segments, text, full_line_text, text_offset, global_line);
+    }
+
+    // Apply search highlighting on top of existing segments
+    // Uses the search_state.matches as the source of truth for which lines should be highlighted
+    fn applySearchHighlighting(
+        self: *App,
+        segments: []vaxis.Cell.Segment,
+        chunk_text: []const u8,
+        full_line_text: []const u8,
+        chunk_offset: usize,
+        global_line: usize,
+    ) ![]vaxis.Cell.Segment {
+        _ = full_line_text;
+        _ = chunk_offset;
+        defer self.allocator.free(segments);
+
+        // Check if search is active
+        const search_state = &self.state.search_state;
+        if (search_state.query_len == 0) {
+            const new_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len);
+            @memcpy(new_segments, segments);
+            return new_segments;
+        }
+
+        // KEY OPTIMIZATION: Check if this line is in the matches list
+        // If not, no need to search or highlight - just return segments as-is
+        const is_match_line = blk: {
+            for (search_state.matches.items) |match_line| {
+                if (match_line == global_line) break :blk true;
+            }
+            break :blk false;
+        };
+
+        if (!is_match_line) {
+            // This line doesn't match - return segments unchanged
+            const new_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len);
+            @memcpy(new_segments, segments);
+            return new_segments;
+        }
+
+        const query = search_state.query_buffer[0..search_state.query_len];
+
+        if (query.len > chunk_text.len) {
+            const new_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len);
+            @memcpy(new_segments, segments);
+            return new_segments;
+        }
+
+        // Determine case sensitivity (smart case)
+        const is_case_sensitive = blk: {
+            for (query) |c| {
+                if (c >= 'A' and c <= 'Z') break :blk true;
+            }
+            break :blk false;
+        };
+
+        // Find all matches in the chunk_text (this is the actual text to render)
+        var chunk_matches = std.ArrayList(struct { start: usize, end: usize }).init(self.allocator);
+        defer chunk_matches.deinit();
+
+        var search_pos: usize = 0;
+        while (search_pos <= chunk_text.len - query.len) {
+            const slice = chunk_text[search_pos .. search_pos + query.len];
+            const is_match = if (is_case_sensitive)
+                std.mem.eql(u8, slice, query)
+            else
+                std.ascii.eqlIgnoreCase(slice, query);
+
+            if (is_match) {
+                try chunk_matches.append(.{ .start = search_pos, .end = search_pos + query.len });
+                search_pos += query.len;
+            } else {
+                search_pos += 1;
+            }
+        }
+
+        if (chunk_matches.items.len == 0) {
+            const new_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len);
+            @memcpy(new_segments, segments);
+            return new_segments;
+        }
+
+        // Now map the matches from chunk_text coordinates to segment coordinates
+        var result_segments = std.ArrayList(vaxis.Cell.Segment).init(self.allocator);
+        errdefer result_segments.deinit();
+
+        var text_pos: usize = 0; // Current position in chunk_text
+        for (segments) |seg| {
+            const seg_start = text_pos;
+            const seg_end = text_pos + seg.text.len;
+
+            // Find matches that overlap with this segment
+            var seg_matches = std.ArrayList(struct { start: usize, end: usize }).init(self.allocator);
+            defer seg_matches.deinit();
+
+            for (chunk_matches.items) |match| {
+                if (match.end > seg_start and match.start < seg_end) {
+                    // Match overlaps this segment - convert to segment-local coordinates
+                    const local_start = if (match.start > seg_start) match.start - seg_start else 0;
+                    const local_end = @min(match.end, seg_end) - seg_start;
+                    try seg_matches.append(.{ .start = local_start, .end = local_end });
+                }
+            }
+
+            if (seg_matches.items.len == 0) {
+                // No matches in this segment - add as-is
+                try result_segments.append(seg);
+            } else {
+                // Split segment at match boundaries
+                var pos: usize = 0;
+                for (seg_matches.items) |match| {
+                    // Add text before match (if any)
+                    if (match.start > pos) {
+                        const before_text = seg.text[pos..match.start];
+                        try result_segments.append(.{
+                            .text = before_text,
+                            .style = seg.style,
+                        });
+                    }
+
+                    // Add highlighted match
+                    const match_text = seg.text[match.start..match.end];
+                    var match_style = seg.style;
+                    match_style.bg = rendering_common.Color.search_match_bg;
+                    match_style.fg = rendering_common.Color.search_match_fg;
+                    match_style.bold = true;
+                    try result_segments.append(.{
+                        .text = match_text,
+                        .style = match_style,
+                    });
+
+                    pos = match.end;
+                }
+
+                // Add text after last match (if any)
+                if (pos < seg.text.len) {
+                    const after_text = seg.text[pos..];
+                    try result_segments.append(.{
+                        .text = after_text,
+                        .style = seg.style,
+                    });
+                }
+            }
+
+            text_pos += seg.text.len;
+        }
+
+        const result = try result_segments.toOwnedSlice();
+        return result;
     }
 };
+
+// ===== Tests =====
+
+test "searchInLine - case sensitive" {
+    try std.testing.expect(App.searchInLine("Hello World", "World", true));
+    try std.testing.expect(!App.searchInLine("Hello World", "world", true));
+    try std.testing.expect(!App.searchInLine("Hello World", "WORLD", true));
+}
+
+test "searchInLine - case insensitive" {
+    try std.testing.expect(App.searchInLine("Hello World", "world", false));
+    try std.testing.expect(App.searchInLine("Hello World", "WORLD", false));
+    try std.testing.expect(App.searchInLine("Hello World", "WoRlD", false));
+}
+
+test "searchInLine - edge cases" {
+    // Empty strings
+    try std.testing.expect(!App.searchInLine("", "test", false));
+    try std.testing.expect(!App.searchInLine("test", "", false));
+
+    // Needle longer than haystack
+    try std.testing.expect(!App.searchInLine("hi", "hello", false));
+
+    // Multiple occurrences
+    try std.testing.expect(App.searchInLine("test test test", "test", false));
+
+    // Partial match
+    try std.testing.expect(!App.searchInLine("testing", "tin", false));
+    try std.testing.expect(App.searchInLine("testing", "test", false));
+}
+
+test "search highlighting - basic match" {
+    const allocator = std.testing.allocator;
+
+    // Create a mock App with search state
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .should_quit = false,
+        .last_ctrl_c_time = 0,
+        .mode = .normal,
+        .state = undefined,
+    };
+
+    // Initialize search state
+    app.state.search_state = App.SearchState.init(allocator);
+    defer app.state.search_state.deinit();
+
+    // Set search query
+    const query = "test";
+    @memcpy(app.state.search_state.query_buffer[0..query.len], query);
+    app.state.search_state.query_len = query.len;
+
+    // Add line 100 to matches (simulate that performSearch found it)
+    try app.state.search_state.matches.append(100);
+
+    // Create input segments (single segment with plain text)
+    const chunk_text = "this is a test string";
+    var input_segments = [_]vaxis.Cell.Segment{
+        .{
+            .text = chunk_text,
+            .style = .{},
+        },
+    };
+
+    const input_copy = try allocator.alloc(vaxis.Cell.Segment, input_segments.len);
+    @memcpy(input_copy, &input_segments);
+
+    // Apply highlighting (pretend we're on global line 100)
+    const result = try app.applySearchHighlighting(
+        input_copy,
+        chunk_text,
+        chunk_text,
+        0,
+        100,
+    );
+    defer allocator.free(result);
+
+    // Verify: should have 3 segments (before, match, after)
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expectEqualStrings("this is a ", result[0].text);
+    try std.testing.expectEqualStrings("test", result[1].text);
+    try std.testing.expectEqualStrings(" string", result[2].text);
+
+    // Verify the match has search highlight style
+    try std.testing.expect(result[1].style.bold);
+}
+
+test "search highlighting - multiple matches" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .should_quit = false,
+        .last_ctrl_c_time = 0,
+        .mode = .normal,
+        .state = undefined,
+    };
+
+    app.state.search_state = App.SearchState.init(allocator);
+    defer app.state.search_state.deinit();
+
+    const query = "the";
+    @memcpy(app.state.search_state.query_buffer[0..query.len], query);
+    app.state.search_state.query_len = query.len;
+
+    // Add line 200 to matches
+    try app.state.search_state.matches.append(200);
+
+    const chunk_text = "the quick brown fox jumps over the lazy dog";
+    var input_segments = [_]vaxis.Cell.Segment{
+        .{
+            .text = chunk_text,
+            .style = .{},
+        },
+    };
+
+    const input_copy = try allocator.alloc(vaxis.Cell.Segment, input_segments.len);
+    @memcpy(input_copy, &input_segments);
+
+    const result = try app.applySearchHighlighting(
+        input_copy,
+        chunk_text,
+        chunk_text,
+        0,
+        200,
+    );
+    defer allocator.free(result);
+
+    // Should have 5 segments: match1, text, match2, text
+    try std.testing.expectEqual(@as(usize, 5), result.len);
+    try std.testing.expectEqualStrings("the", result[0].text);
+    try std.testing.expectEqualStrings(" quick brown fox jumps over ", result[1].text);
+    try std.testing.expectEqualStrings("the", result[2].text);
+    try std.testing.expectEqualStrings(" lazy dog", result[3].text);
+}
+
+test "search highlighting - case insensitive" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .should_quit = false,
+        .last_ctrl_c_time = 0,
+        .mode = .normal,
+        .state = undefined,
+    };
+
+    app.state.search_state = App.SearchState.init(allocator);
+    defer app.state.search_state.deinit();
+
+    // Lowercase query (should match any case)
+    const query = "test";
+    @memcpy(app.state.search_state.query_buffer[0..query.len], query);
+    app.state.search_state.query_len = query.len;
+
+    // Add line 300 to matches
+    try app.state.search_state.matches.append(300);
+
+    const chunk_text = "Test TEST test";
+    var input_segments = [_]vaxis.Cell.Segment{
+        .{
+            .text = chunk_text,
+            .style = .{},
+        },
+    };
+
+    const input_copy = try allocator.alloc(vaxis.Cell.Segment, input_segments.len);
+    @memcpy(input_copy, &input_segments);
+
+    const result = try app.applySearchHighlighting(
+        input_copy,
+        chunk_text,
+        chunk_text,
+        0,
+        300,
+    );
+    defer allocator.free(result);
+
+    // Should match all 3 occurrences
+    try std.testing.expectEqual(@as(usize, 5), result.len);
+    try std.testing.expectEqualStrings("Test", result[0].text);
+    try std.testing.expect(result[0].style.bold);
+    try std.testing.expectEqualStrings(" ", result[1].text);
+    try std.testing.expectEqualStrings("TEST", result[2].text);
+    try std.testing.expect(result[2].style.bold);
+    try std.testing.expectEqualStrings(" ", result[3].text);
+    try std.testing.expectEqualStrings("test", result[4].text);
+    try std.testing.expect(result[4].style.bold);
+}
+
+test "search highlighting - across syntax segments" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .should_quit = false,
+        .last_ctrl_c_time = 0,
+        .mode = .normal,
+        .state = undefined,
+    };
+
+    app.state.search_state = App.SearchState.init(allocator);
+    defer app.state.search_state.deinit();
+
+    const query = "function";
+    @memcpy(app.state.search_state.query_buffer[0..query.len], query);
+    app.state.search_state.query_len = query.len;
+
+    // Add line 400 to matches
+    try app.state.search_state.matches.append(400);
+
+    // Simulate syntax-highlighted segments
+    const chunk_text = "function test() {}";
+    var input_segments = [_]vaxis.Cell.Segment{
+        .{ // keyword
+            .text = "function",
+            .style = .{ .fg = .{ .rgb = [3]u8{ 255, 0, 0 } }, .bold = true },
+        },
+        .{ // space
+            .text = " ",
+            .style = .{},
+        },
+        .{ // function name
+            .text = "test",
+            .style = .{ .fg = .{ .rgb = [3]u8{ 255, 0, 255 } } },
+        },
+        .{ // rest
+            .text = "() {}",
+            .style = .{},
+        },
+    };
+
+    const input_copy = try allocator.alloc(vaxis.Cell.Segment, input_segments.len);
+    @memcpy(input_copy, &input_segments);
+
+    const result = try app.applySearchHighlighting(
+        input_copy,
+        chunk_text,
+        chunk_text,
+        0,
+        400,
+    );
+    defer allocator.free(result);
+
+    // First segment should be highlighted with search colors (not syntax colors)
+    try std.testing.expect(result.len > 0);
+    try std.testing.expectEqualStrings("function", result[0].text);
+    try std.testing.expect(result[0].style.bold);
+    // Search highlight should override syntax highlighting
+}

@@ -83,7 +83,7 @@ pub const SideBySideRenderer = struct {
                 .code_line => |code_info| {
                     const hunk = &file.hunks[code_info.hunk_idx];
                     const line = &hunk.lines[code_info.line_idx_in_hunk];
-                    const rows_used = try renderDiffLine(app, win, file, code_info.hunk_idx, code_info.line_idx_in_hunk, line.*, row, left_content_width, right_content_width, gutter_width, is_cursor);
+                    const rows_used = try renderDiffLine(app, win, file, code_info.hunk_idx, code_info.line_idx_in_hunk, line.*, global_line, row, left_content_width, right_content_width, gutter_width, is_cursor);
                     row += rows_used;
 
                     // Check if we're creating/editing a comment on this code line
@@ -454,6 +454,7 @@ pub const SideBySideRenderer = struct {
         hunk_idx: usize,
         line_idx_in_hunk: usize,
         line: parser.Line,
+        global_line: usize,
         row: usize,
         left_width: usize,
         right_width: usize,
@@ -507,7 +508,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for left chunk
                     const left_chunk_byte_offset = byte_offset + left_start;
-                    const left_segments = try app.createHighlightedSegments(left_chunk, left_chunk_byte_offset, file.highlights, style);
+                    const left_segments = try app.createHighlightedSegments(left_chunk, line.content, left_start, left_chunk_byte_offset, file.highlights, style, global_line);
                     defer app.allocator.free(left_segments);
 
                     // Pad context lines only when cursor is on them
@@ -539,7 +540,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for right chunk
                     const right_chunk_byte_offset = byte_offset + right_start;
-                    const right_segments = try app.createHighlightedSegments(right_chunk, right_chunk_byte_offset, file.highlights, style);
+                    const right_segments = try app.createHighlightedSegments(right_chunk, line.content, right_start, right_chunk_byte_offset, file.highlights, style, global_line);
                     defer app.allocator.free(right_segments);
 
                     // Pad context lines only when cursor is on them
@@ -602,7 +603,7 @@ pub const SideBySideRenderer = struct {
                     // Generate syntax-highlighted segments for chunk
                     // (will fall back to plain text for delete lines since they're not in new file)
                     const chunk_byte_offset = byte_offset + text_start;
-                    const segments = try app.createHighlightedSegments(chunk, chunk_byte_offset, file.highlights, style);
+                    const segments = try app.createHighlightedSegments(chunk, line.content, text_start, chunk_byte_offset, file.highlights, style, global_line);
                     defer app.allocator.free(segments);
 
                     // Always pad delete lines to show full-width background
@@ -687,7 +688,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for chunk
                     const chunk_byte_offset = byte_offset + text_start;
-                    const segments = try app.createHighlightedSegments(chunk, chunk_byte_offset, file.highlights, style);
+                    const segments = try app.createHighlightedSegments(chunk, line.content, text_start, chunk_byte_offset, file.highlights, style, global_line);
                     defer app.allocator.free(segments);
 
                     // Always pad add lines to show full-width background

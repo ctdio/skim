@@ -139,6 +139,7 @@ pub const UI = struct {
         const mode_str = switch (app.mode) {
             .normal => "-- NORMAL --",
             .comment => "-- COMMENT --",
+            .search => "-- SEARCH --",
         };
 
         const view_str = switch (app.state.view_mode) {
@@ -146,7 +147,7 @@ pub const UI = struct {
             .side_by_side => "[Side-by-Side]",
         };
 
-        // Context-aware keybindings based on cursor position
+        // Context-aware keybindings based on cursor position and mode
         const keybindings = switch (app.mode) {
             .normal => blk: {
                 // Get line record from LineMap
@@ -159,36 +160,37 @@ pub const UI = struct {
 
                         switch (rec.line_type) {
                             .file_header => {
-                                break :blk "h/l:File  j/k:Line  g/G:Top/Bottom  q:Quit";
+                                break :blk "h/l:File  j/k:Line  /:Search  g/G:Top/Bottom  q:Quit";
                             },
                             .comment_line => {
                                 // Cursor is on a comment - show edit/delete options prominently
-                                break :blk "Enter:Edit Comment  d:Delete Comment  D:Clear All  h/l:File  q:Quit";
+                                break :blk "Enter:Edit Comment  d:Delete Comment  /:Search  h/l:File  q:Quit";
                             },
                             .code_line => |code| {
                                 // Check if this code line has a comment
                                 if (app.state.comment_store.hasCommentAt(file_path, code.hunk_idx, code.line_idx_in_hunk)) {
                                     // Code line with comment - show edit option
-                                    break :blk "Enter:Edit Comment  d:Delete (move to comment)  Ctrl-g:Editor  q:Quit";
+                                    break :blk "Enter:Edit Comment  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
                                 } else {
                                     // Code line without comment - show add option
-                                    break :blk "Enter:Add Comment  h/l:File  j/k:Line  Ctrl-g:Editor  q:Quit";
+                                    break :blk "Enter:Add Comment  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
                                 }
                             },
                             .hunk_header => {
                                 // On hunk header - show navigation
-                                break :blk "h/l:File  j/k:Line  g/G:Top/Bottom  Ctrl-g:Editor  q:Quit";
+                                break :blk "h/l:File  j/k:Line  /:Search  g/G:Top/Bottom  Ctrl-g:Editor  q:Quit";
                             },
                             .spacer => {
-                                break :blk "h/l:File  j/k:Line  g/G:Top/Bottom  q:Quit";
+                                break :blk "h/l:File  j/k:Line  /:Search  g/G:Top/Bottom  q:Quit";
                             },
                         }
                     }
                 }
                 // Default keybindings
-                break :blk "h/l:File  j/k:Line  Enter:Add Comment  D:Clear All  Ctrl-g:Editor  q:Quit";
+                break :blk "h/l:File  j/k:Line  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
             },
             .comment => "Enter:Save  Shift+Enter:Newline  ESC:Cancel",
+            .search => "Enter:Search  ESC:Cancel  (Smart case: lowercase=ignore case, uppercase=exact)",
         };
 
         // Get global position info
@@ -199,10 +201,33 @@ pub const UI = struct {
 
         // Combine mode, view mode, position, count prefix (if any), and keybindings into a single string
         var buf: [512]u8 = undefined;
-        const status_text = if (app.state.count_prefix) |count|
-            try std.fmt.bufPrint(&buf, "{s} {s} [{d}]  Line {d}/{d} (File {d}/{d})  {s}", .{ mode_str, view_str, count, current_line, total_lines, current_file, total_files, keybindings })
-        else
-            try std.fmt.bufPrint(&buf, "{s} {s}  Line {d}/{d} (File {d}/{d})  {s}", .{ mode_str, view_str, current_line, total_lines, current_file, total_files, keybindings });
+        const status_text = if (app.mode == .search) blk: {
+            // In search mode, show search prompt with current query
+            const query = app.state.search_state.query_buffer[0..app.state.search_state.query_len];
+            const match_count = app.state.search_state.matches.items.len;
+
+            if (match_count > 0) {
+                const current_match = if (app.state.search_state.current_match_idx) |idx| idx + 1 else 0;
+                break :blk try std.fmt.bufPrint(&buf, "{s}  /{s}  ({d} of {d} matches)  {s}", .{ mode_str, query, current_match, match_count, keybindings });
+            } else if (app.state.search_state.query_len > 0) {
+                // Query entered but search not executed yet
+                break :blk try std.fmt.bufPrint(&buf, "{s}  /{s}_  {s}", .{ mode_str, query, keybindings });
+            } else {
+                // No query yet
+                break :blk try std.fmt.bufPrint(&buf, "{s}  /_  {s}", .{ mode_str, keybindings });
+            }
+        } else if (app.state.count_prefix) |count| blk: {
+            break :blk try std.fmt.bufPrint(&buf, "{s} {s} [{d}]  Line {d}/{d} (File {d}/{d})  {s}", .{ mode_str, view_str, count, current_line, total_lines, current_file, total_files, keybindings });
+        } else blk: {
+            // Show search info if there are active matches in normal mode
+            if (app.state.search_state.hasMatches()) {
+                const match_count = app.state.search_state.matches.items.len;
+                const current_match = if (app.state.search_state.current_match_idx) |idx| idx + 1 else 0;
+                break :blk try std.fmt.bufPrint(&buf, "{s} {s}  Line {d}/{d} (File {d}/{d})  [{d}/{d} matches]  {s}", .{ mode_str, view_str, current_line, total_lines, current_file, total_files, current_match, match_count, keybindings });
+            } else {
+                break :blk try std.fmt.bufPrint(&buf, "{s} {s}  Line {d}/{d} (File {d}/{d})  {s}", .{ mode_str, view_str, current_line, total_lines, current_file, total_files, keybindings });
+            }
+        };
 
         var seg = [_]vaxis.Cell.Segment{.{
             .text = status_text,
