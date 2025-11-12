@@ -2,7 +2,6 @@ const std = @import("std");
 const App = @import("app.zig").App;
 const rendering = @import("rendering/common.zig");
 const state_helpers = @import("state.zig");
-const global_lines = @import("global_lines.zig");
 const Layout = rendering.Layout;
 const StateHelpers = state_helpers.StateHelpers;
 
@@ -42,11 +41,7 @@ pub const Navigation = struct {
         if (app.state.files.len == 0) return;
 
         // Find which file cursor is currently in
-        const current_file = global_lines.getCurrentFileFromCursor(
-            app.state.global_cursor_line,
-            app.state.files,
-            &app.state.comment_store,
-        );
+        const current_file = app.state.line_map.getFileIndexForLine(app.state.global_cursor_line) orelse 0;
 
         // Jump to start of next file (or wrap to first)
         const next_file = if (current_file + 1 < app.state.files.len)
@@ -54,10 +49,13 @@ pub const Navigation = struct {
         else
             0;
 
-        if (global_lines.getFileStartLine(next_file, app.state.files, &app.state.comment_store)) |start_line| {
+        if (app.state.line_map.getFileHeaderLine(next_file)) |start_line| {
             app.state.current_file_idx = next_file;
             app.state.global_cursor_line = start_line;
             app.state.global_scroll_offset = start_line;
+
+            // Force a full re-render when jumping files
+            app.needs_render = true;
         }
 
         triggerAsyncHighlight(app);
@@ -67,11 +65,7 @@ pub const Navigation = struct {
         if (app.state.files.len == 0) return;
 
         // Find which file cursor is currently in
-        const current_file = global_lines.getCurrentFileFromCursor(
-            app.state.global_cursor_line,
-            app.state.files,
-            &app.state.comment_store,
-        );
+        const current_file = app.state.line_map.getFileIndexForLine(app.state.global_cursor_line) orelse 0;
 
         // Jump to start of previous file (or wrap to last)
         const prev_file = if (current_file > 0)
@@ -79,10 +73,13 @@ pub const Navigation = struct {
         else
             app.state.files.len - 1;
 
-        if (global_lines.getFileStartLine(prev_file, app.state.files, &app.state.comment_store)) |start_line| {
+        if (app.state.line_map.getFileHeaderLine(prev_file)) |start_line| {
             app.state.current_file_idx = prev_file;
             app.state.global_cursor_line = start_line;
             app.state.global_scroll_offset = start_line;
+
+            // Force a full re-render when jumping files
+            app.needs_render = true;
         }
 
         triggerAsyncHighlight(app);

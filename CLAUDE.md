@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Skim is a keyboard-driven TUI for code reviews built in Zig. Vim-style navigation, sub-10ms startup, 60 FPS scrolling.
 
-**Current Status**: Alpha - Phase 2 complete, working on Phase 3.
+**Current Status**: Alpha - Phase 2 complete, Phase 3 in progress (LineMap system, async highlighting, and editor integration complete).
 
 ## Build System
 
@@ -53,12 +53,13 @@ zig build test
 
 ## Architecture
 
-Four main layers:
+Five main layers:
 
 1. **CLI Layer** (`main.zig`): Arg parsing, initialization
-2. **Application Layer** (`app.zig`): Modal state machine, event handling, rendering
-3. **Git Integration** (`git/`): Command execution, diff parsing
-4. **Syntax Highlighting** (`syntax.zig`): Tree-sitter integration
+2. **Application Layer** (`app.zig`): Modal state machine, event handling, rendering coordination
+3. **Line Tracking** (`line_map.zig`): Pre-computed position registry for all renderable lines
+4. **Git Integration** (`git/`): Command execution, diff parsing
+5. **Syntax Highlighting** (`syntax.zig`): Tree-sitter integration
 
 ### Key Design Decisions
 
@@ -70,6 +71,8 @@ Four main layers:
 
 **Virtual Scrolling**: Render visible lines only. 256KB pre-allocated frame buffer.
 
+**LineMap System**: Pre-compute all line positions once during initialization. Single source of truth for positioning prevents sync issues between navigation and rendering.
+
 **Minimal Dependencies**: Just vaxis (TUI) and z-tree-sitter (highlighting). Core uses Zig stdlib only.
 
 #### syntax.zig - Tree-sitter Integration
@@ -78,20 +81,79 @@ Four main layers:
 - Byte-range based highlights with semantic categories
 - Maps captures to 8-color palette
 - Query files: Embedded .scm files (JS, TS, Zig have full queries)
-- Lazy: Generated on first render, cached per file
-- Applied to all lines (add/delete/context) - syntax colors overlay diff backgrounds
+- Async: Generated in background thread (non-blocking), cached per file, parser instances cached per language
+- Applied to all lines (add/delete/context) - syntax foreground colors overlay diff backgrounds
 
 ### Core Components
 
-#### app.zig - State Machine and Rendering
-- **App struct**: Current file, cursor, scroll, mode, view mode, syntax highlighter, comment store
+#### comments.zig - Comment Storage and Management
+- **CommentStore**: In-memory storage for review comments
+- **Comment**: Attached to specific hunk/line with captured context (line type, content, line numbers)
+- **Operations**: Add, update, delete, find, export with context
+- **Integration**: Comments trigger LineMap rebuild when added/deleted
+- **Export**: 'y' key yanks comments to clipboard with full context
+
+#### navigation.zig - Navigation Logic
+- **Cursor movement**: moveCursorUp/Down with count prefix support (j/k)
+- **File navigation**: navigateToNextFile/navigateToPreviousFile (h/l, Ctrl-n/p)
+- **Scrolling**: pageUp/Down, scrollToTop/Bottom, centerCursor
+- **Visibility**: ensureCursorVisible adds 3-line padding for j/k (not file nav)
+- **File snapping**: File navigation sets both cursor and scroll to header line
+
+#### state.zig - State Helpers and Async Highlighting
+- **StateHelpers**: Diff stats calculation, async highlighting management
+- **AsyncHighlightJob**: Thread-safe background syntax highlighting
+- **Non-blocking**: Highlighting happens in background, UI stays responsive
+- **Parser caching**: Tree-sitter parsers cached per language for fast highlighting
+
+#### ui.zig - UI Rendering Components
+- **renderHeader()**: File info with additions/deletions stats
+- **renderStatus()**: Mode indicator, position, context-aware keybindings
+- **renderDivider()**: Box-drawing dividers (top/middle/bottom)
+- **renderEmpty()**: "No changes to review" message
+- **Context-aware**: Status bar changes based on cursor position (file header, code line, comment line, etc.)
+
+#### editor.zig - External Editor Integration
+- **Ctrl-g**: Open current file at line in external editor
+- **Editor detection**: Checks $VISUAL, $EDITOR env vars
+- **Terminal editors**: vim, nvim, nano, emacs, helix, etc. - suspends TUI, restores after
+- **GUI editors**: VSCode, Sublime, etc. - spawns in background
+- **Line argument**: Handles different line number formats (+line, --goto, embedded :line)
+
+#### rendering/ - Rendering Subsystem
+- **common.zig**: Shared types (Color palette, Layout constants, FrameChars box-drawing)
+- **utils.zig**: Frame buffer management, text allocation for vaxis
+- **file_header.zig**: File header rendering with stats
+- **unified.zig**: Unified diff view renderer (single column)
+- **side_by_side.zig**: Side-by-side diff view renderer (split columns with divider)
+- **All renderers**: Iterate through LineMap records, render based on line type
+
+#### line_map.zig - Line Position Registry
+- **LineMap**: Pre-computed registry of all renderable lines built once during init/refresh
+- **LineRecord**: Each line has explicit global position, file index, and type-specific metadata
+- **LineType union enum**:
+  - `file_header`: File header line (e.g., "diff --git a/file.txt b/file.txt")
+  - `hunk_header`: Hunk header with hunk index (e.g., "@@ -1,3 +1,4 @@")
+  - `code_line`: Diff line (add/delete/context) with hunk and line indices
+  - `comment_line`: Comment attached to code line with parent references
+  - `spacer`: Blank line between files (3 spacers total per file boundary)
+- **Purpose**: Single source of truth for all positioning decisions
+- **Rebuilt**: When comments added/deleted or diff refreshed
+- **API**: Direct lookups via `getLineRecord()`, `getFileHeaderLine()`, `getFileIndexForLine()`
+
+#### app.zig - State Machine and Rendering Coordination
+- **App struct**: Current file, cursor, scroll, mode, view mode, line_map, syntax highlighter, comment store
 - **Mode enum**: NORMAL (navigation and viewing), comment (editing comments)
 - **ViewMode enum**: unified or side-by-side
 - **Event loop**: Keyboard/terminal events via vaxis
-- **Render pipeline**: Header → content (gutter + syntax + comments) → status bar
+- **Render pipeline**:
+  1. Header (file info, stats)
+  2. Content (iterate through LineMap records, render based on type)
+  3. Status bar (mode, position, context-aware keybindings)
+- **Rendering**: Both unified and side-by-side renderers iterate through LineMap records, rendering each line based on its type
 - **Colors**: Dark green/red backgrounds for add/delete lines. Syntax highlighting overlays with: red (keywords), magenta (functions), yellow (types), blue (strings/numbers), cyan (comments)
 - **Ctrl-C**: Double-press within 1s to exit
-- **Refresh**: 'r' key reloads diff, preserves position
+- **Refresh**: 'r' key reloads diff, rebuilds LineMap, preserves position
 
 #### git/diff.zig - Git Command Execution
 - **getDiff()**: Runs `git diff` with 10-line context
@@ -118,7 +180,7 @@ Four main layers:
 ### Testing
 - Tests colocated with implementation
 - Run: `zig build test`
-- Coverage: arg parsing (3), diff execution (1), parser (3)
+- Coverage: arg parsing (3), diff execution (1), parser (3), line_map (2), comments (multiple), editor (line argument modes)
 
 ### Debugging TUI Apps
 - Stdout is for rendering - use `std.log` (stderr) or write to file
@@ -140,17 +202,23 @@ Four main layers:
 - ✅ Tree-sitter syntax highlighting (JS/TS/Zig with query files)
 - ✅ Refresh functionality ('r' key to reload diff)
 - ✅ Proper line number tracking in gutters
-- ✅ Comment system (Enter to create/edit, integrated as display lines)
+- ✅ Comment system (Enter to create/edit, tracked via LineMap, delete with d/D)
 - ✅ Export comments with context ('y' to yank to clipboard)
+- ✅ Editor integration (Ctrl-g opens file at line in $EDITOR)
 - ⏳ Hunk navigation
 - ⏳ Help overlay
 
-**Phase 3: Polish** (Next)
+**Phase 3: Polish** (Current)
 - Expand syntax highlighting to Python, Rust, Go, C, C++ (parsers ready, need query files)
+- ✅ LineMap system for accurate positioning (completed)
+- ✅ Async highlighting for non-blocking syntax processing (completed)
+- ✅ Editor integration with Ctrl-g (completed)
 - Mouse support
 - Configuration file
 - Color schemes / themes
 - Performance profiling and optimization
+- Hunk navigation
+- Help overlay
 
 **Phase 4: Advanced**
 - Comment persistence and management
@@ -159,6 +227,37 @@ Four main layers:
 - Git workflow integration (stage hunks, etc.)
 
 ## Key Implementation Notes
+
+### LineMap-Based Rendering Architecture
+
+**Core Principle**: All line positioning comes from a pre-computed LineMap. No on-the-fly position calculations.
+
+**Why LineMap?**: Previously, navigation and rendering calculated positions independently, leading to sync issues especially with comments and spacers. LineMap ensures consistency by computing positions once.
+
+**Rendering Flow**:
+1. LineMap built during init (also rebuilt on refresh or when comments change)
+2. Renderers (unified/side-by-side) iterate through LineMap records
+3. Each record contains: global_line, file_idx, and line_type (union enum with type-specific data)
+4. Renderer switches on line_type to render appropriate content
+5. Active comment input (before saving) rendered as special case after code lines
+
+**Navigation Flow**:
+1. File navigation (h/l): Uses `getFileHeaderLine()` to find exact header position
+2. Sets both cursor and scroll_offset to header line (snaps to top)
+3. Triggers full re-render with `needs_render = true`
+4. Line navigation (j/k): Updates cursor, `ensureCursorVisible()` adds padding
+
+**When to Rebuild LineMap**:
+- During init (`app.init()`)
+- After refresh (`app.refresh()`)
+- After saving comment (`saveCurrentComment()`)
+- After deleting comment (`deleteCommentUnderCursor()`)
+
+**Adding New Line Types**:
+1. Add variant to `LineType` union enum with required metadata
+2. Update `LineMap.build()` to create records for new type
+3. Update renderers (unified/side-by-side) to handle new type in switch
+4. Add helper functions to LineMap for common queries (e.g., `isFileHeader()`)
 
 ### Modal State Management
 The app uses an enum-based mode system. When adding new modes:
@@ -174,7 +273,12 @@ The app uses an enum-based mode system. When adding new modes:
 4. If adding new vim-style keys, follow vim conventions for consistency
 
 **Current keybindings:**
-- NORMAL mode: h/l (file nav), j/k (cursor), g/G (top/bottom), Ctrl-n/p (file nav), Ctrl-d/u (page), Shift+M (center), Enter (comment), y (yank), s (toggle view), r (refresh), q (quit)
+- NORMAL mode:
+  - Navigation: h/l (prev/next file), j/k (cursor up/down with count prefix), g/G (top/bottom), Ctrl-n/p (file nav), Ctrl-d/u (page), Shift+M (center)
+  - Comments: Enter (add/edit comment), d (delete comment under cursor), D (clear all comments), y (yank comments to clipboard)
+  - View: s (toggle unified/side-by-side), r (refresh diff)
+  - Integration: Ctrl-g (open in $EDITOR at line)
+  - Exit: q (quit), Ctrl-C twice (force quit)
 - comment mode: Enter (save), Shift+Enter (newline), ESC (cancel), regular typing
 
 ### Extending the Diff Parser

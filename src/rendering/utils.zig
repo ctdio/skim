@@ -206,12 +206,12 @@ pub const RenderUtils = struct {
         is_cursor: bool,
         line_type: ?parser.Line.LineType,
     ) !void {
-        // Render spacing with the appropriate diff background color
+        // Render spacing with the appropriate background color
         const spacing_style: vaxis.Style = if (line_type) |lt| switch (lt) {
             .add => .{ .bg = Color.diff_add_bg },
             .delete => .{ .bg = Color.diff_delete_bg },
             .context => .{},
-        } else if (is_cursor) .{ .bg = Color.comment_hover_bg } else .{}; // Hover background for comment lines when cursor is on them
+        } else if (is_cursor) .{ .bg = Color.cursor_bg } else .{ .bg = Color.dim }; // Hunk headers and comment lines
 
         const spacing = try frameTextSlice(app, rendering_common.Layout.gutter_spacing);
         @memset(spacing, ' ');

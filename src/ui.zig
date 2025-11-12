@@ -3,8 +3,6 @@ const vaxis = @import("vaxis");
 const rendering_common = @import("rendering/common.zig");
 const render_utils = @import("rendering/utils.zig");
 const state_helpers = @import("state.zig");
-const display_lines = @import("display_lines.zig");
-const global_lines = @import("global_lines.zig");
 
 const App = @import("app.zig").App;
 const Color = rendering_common.Color;
@@ -151,52 +149,39 @@ pub const UI = struct {
         // Context-aware keybindings based on cursor position
         const keybindings = switch (app.mode) {
             .normal => blk: {
-                // Check what type of line the cursor is on
-                // Map global cursor to file position
-                const global_pos = global_lines.globalLineToFilePosition(
-                    app.state.global_cursor_line,
-                    app.state.files,
-                    &app.state.comment_store,
-                );
+                // Get line record from LineMap
+                const record = app.state.line_map.getLineRecord(app.state.global_cursor_line);
 
-                if (global_pos) |pos| {
-                    if (pos.file_idx < app.state.files.len) {
-                        const file = &app.state.files[pos.file_idx];
+                if (record) |rec| {
+                    if (rec.file_idx < app.state.files.len) {
+                        const file = &app.state.files[rec.file_idx];
                         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
-                        // Check if we're on file header
-                        if (pos.local_line == 0) {
-                            break :blk "h/l:File  j/k:Line  g/G:Top/Bottom  q:Quit";
-                        }
-
-                        const line_type = display_lines.getDisplayLineType(
-                            pos.local_line - 1, // Subtract 1 for file header
-                            file,
-                            &app.state.comment_store,
-                            file_path,
-                        );
-
-                        if (line_type) |lt| {
-                            switch (lt) {
-                                .comment_line => {
-                                    // Cursor is on a comment - show edit/delete options prominently
-                                    break :blk "Enter:Edit Comment  d:Delete Comment  D:Clear All  h/l:File  q:Quit";
-                                },
-                                .code_line => |code| {
-                                    // Check if this code line has a comment
-                                    if (app.state.comment_store.hasCommentAt(file_path, code.hunk_idx, code.line_idx_in_hunk)) {
-                                        // Code line with comment - show edit option
-                                        break :blk "Enter:Edit Comment  d:Delete (move to comment)  Ctrl-g:Editor  q:Quit";
-                                    } else {
-                                        // Code line without comment - show add option
-                                        break :blk "Enter:Add Comment  h/l:File  j/k:Line  Ctrl-g:Editor  q:Quit";
-                                    }
-                                },
-                                .hunk_header => {
-                                    // On hunk header - show navigation
-                                    break :blk "h/l:File  j/k:Line  g/G:Top/Bottom  Ctrl-g:Editor  q:Quit";
-                                },
-                            }
+                        switch (rec.line_type) {
+                            .file_header => {
+                                break :blk "h/l:File  j/k:Line  g/G:Top/Bottom  q:Quit";
+                            },
+                            .comment_line => {
+                                // Cursor is on a comment - show edit/delete options prominently
+                                break :blk "Enter:Edit Comment  d:Delete Comment  D:Clear All  h/l:File  q:Quit";
+                            },
+                            .code_line => |code| {
+                                // Check if this code line has a comment
+                                if (app.state.comment_store.hasCommentAt(file_path, code.hunk_idx, code.line_idx_in_hunk)) {
+                                    // Code line with comment - show edit option
+                                    break :blk "Enter:Edit Comment  d:Delete (move to comment)  Ctrl-g:Editor  q:Quit";
+                                } else {
+                                    // Code line without comment - show add option
+                                    break :blk "Enter:Add Comment  h/l:File  j/k:Line  Ctrl-g:Editor  q:Quit";
+                                }
+                            },
+                            .hunk_header => {
+                                // On hunk header - show navigation
+                                break :blk "h/l:File  j/k:Line  g/G:Top/Bottom  Ctrl-g:Editor  q:Quit";
+                            },
+                            .spacer => {
+                                break :blk "h/l:File  j/k:Line  g/G:Top/Bottom  q:Quit";
+                            },
                         }
                     }
                 }

@@ -4,8 +4,7 @@ const git = @import("git/diff.zig");
 const parser = @import("git/parser.zig");
 const syntax = @import("syntax.zig");
 const comments = @import("comments.zig");
-const display_lines = @import("display_lines.zig");
-const global_lines = @import("global_lines.zig");
+const line_map = @import("line_map.zig");
 const navigation = @import("navigation.zig");
 const render_utils = @import("rendering/utils.zig");
 const render_unified = @import("rendering/unified.zig");
@@ -105,6 +104,7 @@ pub const App = struct {
     const State = struct {
         diff_source: DiffSource,
         files: []parser.FileDiff,
+        line_map: line_map.LineMap, // Complete map of all lines
         current_file_idx: usize, // Tracks which file is visible in sticky header
         scroll_offset: usize, // Deprecated: use global_scroll_offset
         cursor_line: usize, // Deprecated: use global_cursor_line
@@ -161,6 +161,13 @@ pub const App = struct {
 
         const syntax_highlighter = try syntax.SyntaxHighlighter.init(allocator);
 
+        var comment_store = comments.CommentStore.init(allocator);
+        errdefer comment_store.deinit();
+
+        // Build the line map
+        const built_line_map = try line_map.LineMap.build(allocator, files, &comment_store);
+        errdefer built_line_map.deinit();
+
         var app = App{
             .allocator = allocator,
             .vx = vx,
@@ -169,6 +176,7 @@ pub const App = struct {
             .state = State{
                 .diff_source = config.diff_source,
                 .files = files,
+                .line_map = built_line_map,
                 .current_file_idx = 0,
                 .scroll_offset = 0,
                 .cursor_line = 0,
@@ -177,7 +185,7 @@ pub const App = struct {
                 .view_mode = .unified,
                 .viewport_height = 0,
                 .count_prefix = null,
-                .comment_store = comments.CommentStore.init(allocator),
+                .comment_store = comment_store,
                 .active_comment_input = null,
             },
             .should_quit = false,
@@ -220,6 +228,7 @@ pub const App = struct {
         }
         self.allocator.free(self.state.files);
         self.allocator.free(self.frame_text_buffer);
+        self.state.line_map.deinit();
         self.state.comment_store.deinit();
         self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.anyWriter());
@@ -262,14 +271,19 @@ pub const App = struct {
             }
         }
 
-        // Free old files
+        // Free old files and line map
         for (self.state.files) |*file| {
             file.deinit(self.allocator);
         }
         self.allocator.free(self.state.files);
+        self.state.line_map.deinit();
 
-        // Update state with new files
+        // Rebuild line map with new files
+        const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store);
+
+        // Update state with new files and line map
         self.state.files = new_files;
+        self.state.line_map = new_line_map;
         self.state.current_file_idx = new_file_idx;
 
         // Clamp global cursor to total line count (don't reset to 0)
@@ -512,47 +526,21 @@ pub const App = struct {
         };
     }
 
-    pub fn getTotalLinesInCurrentFile(self: *App) usize {
-        if (self.state.current_file_idx >= self.state.files.len) return 0;
-
-        const file = &self.state.files[self.state.current_file_idx];
-        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-        return display_lines.getTotalDisplayLines(file, &self.state.comment_store, file_path);
-    }
-
     pub fn getTotalGlobalLines(self: *App) usize {
-        return global_lines.getTotalGlobalLines(self.state.files, &self.state.comment_store);
+        return self.state.line_map.getTotalLines();
     }
 
     // Get the content of the line at the current cursor position
     pub fn getCurrentLineContent(self: *App) ?[]const u8 {
-        // Convert global cursor to file position
-        const pos = global_lines.globalLineToFilePosition(
-            self.state.global_cursor_line,
-            self.state.files,
-            &self.state.comment_store,
-        ) orelse return null;
+        // Get line record from LineMap
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return null;
 
-        if (pos.file_idx >= self.state.files.len) return null;
-        const file = &self.state.files[pos.file_idx];
-        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+        if (record.file_idx >= self.state.files.len) return null;
+        const file = &self.state.files[record.file_idx];
 
-        // local_line includes file header at 0
-        if (pos.local_line == 0) return null; // File header has no content
-
-        const display_line_idx = pos.local_line - 1;
-        const line_type = display_lines.getDisplayLineType(
-            display_line_idx,
-            file,
-            &self.state.comment_store,
-            file_path,
-        ) orelse return null;
-
-        return switch (line_type) {
+        return switch (record.line_type) {
             .code_line => |code| file.hunks[code.hunk_idx].lines[code.line_idx_in_hunk].content,
-            .hunk_header => null,
-            .comment_line => null,
+            .file_header, .hunk_header, .comment_line, .spacer => null,
         };
     }
 
@@ -635,37 +623,20 @@ pub const App = struct {
     }
 
     fn startCommentInput(self: *App) !void {
-        // Convert global cursor to file position
-        const pos = global_lines.globalLineToFilePosition(
-            self.state.global_cursor_line,
-            self.state.files,
-            &self.state.comment_store,
-        ) orelse return; // Not on a valid line (maybe spacer)
+        // Get line record from LineMap
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
 
-        if (pos.file_idx >= self.state.files.len) return;
-        const file = &self.state.files[pos.file_idx];
+        if (record.file_idx >= self.state.files.len) return;
+        const file = &self.state.files[record.file_idx];
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-        // local_line includes file header at 0, so subtract 1 for display line index
-        if (pos.local_line == 0) return; // Can't comment on file header
-
-        const display_line_idx = pos.local_line - 1;
-
-        // Determine what type of line the cursor is on
-        const line_type = display_lines.getDisplayLineType(
-            display_line_idx,
-            file,
-            &self.state.comment_store,
-            file_path,
-        ) orelse return;
 
         var target_hunk_idx: usize = undefined;
         var target_line_idx: usize = undefined;
         var existing_comment_idx: ?usize = null;
 
-        switch (line_type) {
-            .hunk_header => {
-                // Can't comment on hunk headers
+        switch (record.line_type) {
+            .file_header, .hunk_header, .spacer => {
+                // Can't comment on these line types
                 return;
             },
             .code_line => |code| {
@@ -747,6 +718,10 @@ pub const App = struct {
                 line.new_lineno,
             );
         }
+
+        // Rebuild LineMap since comment count changed
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store);
     }
 
     fn yankCommentsToClipboard(self: *App) !void {
@@ -778,34 +753,17 @@ pub const App = struct {
     }
 
     fn deleteCommentUnderCursor(self: *App) !void {
-        // Convert global cursor to file position
-        const pos = global_lines.globalLineToFilePosition(
-            self.state.global_cursor_line,
-            self.state.files,
-            &self.state.comment_store,
-        ) orelse return; // Not on a valid line
+        // Get line record from LineMap
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
 
-        if (pos.file_idx >= self.state.files.len) return;
-        const file = &self.state.files[pos.file_idx];
-        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-        // local_line includes file header at 0, so subtract 1 for display line index
-        if (pos.local_line == 0) return; // Not on a comment-able line
-
-        const display_line_idx = pos.local_line - 1;
-
-        // Check if cursor is on a comment line
-        const line_type = display_lines.getDisplayLineType(
-            display_line_idx,
-            file,
-            &self.state.comment_store,
-            file_path,
-        ) orelse return;
-
-        switch (line_type) {
+        switch (record.line_type) {
             .comment_line => |comment_info| {
                 // Delete the comment
                 try self.state.comment_store.deleteComment(comment_info.comment_idx);
+
+                // Rebuild LineMap since comment count changed
+                self.state.line_map.deinit();
+                self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store);
 
                 // After deletion, move cursor up one line (to the parent code line)
                 // since the comment line no longer exists
@@ -826,15 +784,11 @@ pub const App = struct {
     }
 
     fn openInEditor(self: *App) !void {
-        // Convert global cursor to file position
-        const pos = global_lines.globalLineToFilePosition(
-            self.state.global_cursor_line,
-            self.state.files,
-            &self.state.comment_store,
-        ) orelse return; // Not on a valid line
+        // Get line record from LineMap
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
 
-        if (pos.file_idx >= self.state.files.len) return;
-        const file = &self.state.files[pos.file_idx];
+        if (record.file_idx >= self.state.files.len) return;
+        const file = &self.state.files[record.file_idx];
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
         // Skip if it's a deleted file or /dev/null
@@ -842,48 +796,39 @@ pub const App = struct {
             return;
         }
 
-        // Get the line number from the current cursor position
+        // Get the line number from the line type
         var line_number: ?usize = null;
 
-        // local_line includes file header at 0
-        const line_type = if (pos.local_line > 0)
-            display_lines.getDisplayLineType(
-                pos.local_line - 1, // Subtract 1 for display line index
-                file,
-                &self.state.comment_store,
-                file_path,
-            )
-        else
-            null;
-
-        if (line_type) |lt| {
-            switch (lt) {
-                .code_line => |code| {
-                    const hunk = &file.hunks[code.hunk_idx];
-                    const line = &hunk.lines[code.line_idx_in_hunk];
-                    // Prefer new line number for added/context lines, old for deleted
-                    if (line.new_lineno) |new_line| {
-                        line_number = new_line;
-                    } else if (line.old_lineno) |old_line| {
-                        line_number = old_line;
-                    }
-                },
-                .hunk_header => |header| {
-                    // When on a hunk header, jump to the start of the hunk
-                    const hunk = &file.hunks[header.hunk_idx];
-                    line_number = hunk.header.new_start;
-                },
-                .comment_line => |comment| {
-                    // When on a comment, jump to the parent code line
-                    const hunk = &file.hunks[comment.parent_hunk_idx];
-                    const line = &hunk.lines[comment.parent_line_idx];
-                    if (line.new_lineno) |new_line| {
-                        line_number = new_line;
-                    } else if (line.old_lineno) |old_line| {
-                        line_number = old_line;
-                    }
-                },
-            }
+        switch (record.line_type) {
+            .code_line => |code| {
+                const hunk = &file.hunks[code.hunk_idx];
+                const line = &hunk.lines[code.line_idx_in_hunk];
+                // Prefer new line number for added/context lines, old for deleted
+                if (line.new_lineno) |new_line| {
+                    line_number = new_line;
+                } else if (line.old_lineno) |old_line| {
+                    line_number = old_line;
+                }
+            },
+            .hunk_header => |hunk_info| {
+                // When on a hunk header, jump to the start of the hunk
+                const hunk = &file.hunks[hunk_info.hunk_idx];
+                line_number = hunk.header.new_start;
+            },
+            .comment_line => |comment_info| {
+                // When on a comment, jump to the parent code line
+                const hunk = &file.hunks[comment_info.parent_hunk_idx];
+                const line = &hunk.lines[comment_info.parent_line_idx];
+                if (line.new_lineno) |new_line| {
+                    line_number = new_line;
+                } else if (line.old_lineno) |old_line| {
+                    line_number = old_line;
+                }
+            },
+            .file_header, .spacer => {
+                // No specific line number for these
+                line_number = null;
+            },
         }
 
         // Check if editor is terminal-based

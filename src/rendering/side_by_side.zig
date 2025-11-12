@@ -7,8 +7,6 @@ const rendering_common = @import("common.zig");
 const render_utils = @import("utils.zig");
 const state_helpers = @import("../state.zig");
 const navigation = @import("../navigation.zig");
-const display_lines = @import("../display_lines.zig");
-const global_lines = @import("../global_lines.zig");
 const file_header = @import("file_header.zig");
 
 const App = @import("../app.zig").App;
@@ -43,257 +41,140 @@ pub const SideBySideRenderer = struct {
         const middle_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing + left_content_width;
 
         var row: usize = 0;
-        var global_line: usize = 0;
 
-        // Loop through all files for continuous scrolling
-        for (app.state.files, 0..) |*file, file_idx| {
-            // Ensure syntax highlights are loaded (non-blocking)
+        // Iterate through LineMap records (single source of truth for line positions)
+        for (app.state.line_map.records) |*record| {
+            const global_line = record.global_line;
+            const file_idx = record.file_idx;
+
+            // Skip lines before scroll offset
+            if (global_line < app.state.global_scroll_offset) continue;
+            if (row >= win.height) break;
+
+            const file = &app.state.files[file_idx];
             try StateHelpers.ensureHighlights(app, file, false);
-
             const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-            const file_display_lines = display_lines.getTotalDisplayLines(file, &app.state.comment_store, file_path);
 
-            // File header line
-            if (global_line >= app.state.global_scroll_offset) {
-                if (row >= win.height) break;
-                // Render sidebar and middle divider for file header
-                var left_seg = [_]vaxis.Cell.Segment{.{
-                    .text = "┃",
-                    .style = sidebar_style,
-                }};
-                _ = try win.print(&left_seg, .{ .row_offset = row, .col_offset = 0 });
-                var middle_seg = [_]vaxis.Cell.Segment{.{
-                    .text = FrameChars.vertical,
-                    .style = sidebar_style,
-                }};
-                _ = try win.print(&middle_seg, .{ .row_offset = row, .col_offset = middle_col });
+            // Render sidebar and middle divider for all line types
+            var left_seg = [_]vaxis.Cell.Segment{.{
+                .text = "┃",
+                .style = sidebar_style,
+            }};
+            _ = try win.print(&left_seg, .{ .row_offset = row, .col_offset = 0 });
+            var middle_seg = [_]vaxis.Cell.Segment{.{
+                .text = FrameChars.vertical,
+                .style = sidebar_style,
+            }};
+            _ = try win.print(&middle_seg, .{ .row_offset = row, .col_offset = middle_col });
 
-                const is_cursor = global_line == app.state.global_cursor_line;
-                const rows_used = try renderFileHeader(app, win, file, row, left_content_width, right_content_width, gutter_width, is_cursor);
-                row += rows_used;
-            }
-            global_line += 1;
+            const is_cursor = global_line == app.state.global_cursor_line;
 
-            // Skip entire file if it's before scroll offset and after header
-            if (global_line + file_display_lines < app.state.global_scroll_offset) {
-                global_line += file_display_lines;
-                continue;
-            }
-
-            // Render file content (hunks and lines)
-            for (file.hunks, 0..) |hunk, hunk_idx| {
-                // Skip hunk header if before scroll offset
-                if (global_line < app.state.global_scroll_offset) {
-                    global_line += 1;
-                } else {
-                    if (row >= win.height) break;
-                    // Render sidebar and middle divider for hunk header
-                    var left_seg = [_]vaxis.Cell.Segment{.{
-                        .text = "┃",
-                        .style = sidebar_style,
-                    }};
-                    _ = try win.print(&left_seg, .{ .row_offset = row, .col_offset = 0 });
-                    var middle_seg = [_]vaxis.Cell.Segment{.{
-                        .text = FrameChars.vertical,
-                        .style = sidebar_style,
-                    }};
-                    _ = try win.print(&middle_seg, .{ .row_offset = row, .col_offset = middle_col });
-
-                    const is_cursor = global_line == app.state.global_cursor_line;
-                    const rows_used = try renderHunkHeader(
-                        app,
-                        win,
-                        hunk,
-                        row,
-                        left_content_width,
-                        right_content_width,
-                        gutter_width,
-                        is_cursor,
-                    );
+            // Render based on line type
+            switch (record.line_type) {
+                .file_header => {
+                    const rows_used = try renderFileHeader(app, win, file, row, left_content_width, right_content_width, gutter_width, is_cursor);
                     row += rows_used;
-                    global_line += 1;
-                }
-
-                // Render hunk lines
-                for (hunk.lines, 0..) |line, line_idx_in_hunk| {
-                    if (global_line < app.state.global_scroll_offset) {
-                        global_line += 1;
-                        // Skip comment check if line is before scroll
-                        if (app.state.comment_store.hasCommentAt(file_path, hunk_idx, line_idx_in_hunk)) {
-                            global_line += 1;
-                        }
-                        continue;
-                    }
-
-                    if (row >= win.height) break;
-
-                    // Render sidebar and middle divider for diff line
-                    var left_seg = [_]vaxis.Cell.Segment{.{
-                        .text = "┃",
-                        .style = sidebar_style,
-                    }};
-                    _ = try win.print(&left_seg, .{ .row_offset = row, .col_offset = 0 });
-                    var middle_seg = [_]vaxis.Cell.Segment{.{
-                        .text = FrameChars.vertical,
-                        .style = sidebar_style,
-                    }};
-                    _ = try win.print(&middle_seg, .{ .row_offset = row, .col_offset = middle_col });
-
-                    // Render code line
-                    const is_cursor = global_line == app.state.global_cursor_line;
-                    const rows_used = try renderDiffLine(
-                        app,
-                        win,
-                        file,
-                        hunk_idx,
-                        line_idx_in_hunk,
-                        line,
-                        row,
-                        left_content_width,
-                        right_content_width,
-                        gutter_width,
-                        is_cursor,
-                    );
+                },
+                .hunk_header => |hunk_info| {
+                    const hunk = &file.hunks[hunk_info.hunk_idx];
+                    const rows_used = try renderHunkHeader(app, win, hunk.*, row, left_content_width, right_content_width, gutter_width, is_cursor);
                     row += rows_used;
-                    global_line += 1;
+                },
+                .code_line => |code_info| {
+                    const hunk = &file.hunks[code_info.hunk_idx];
+                    const line = &hunk.lines[code_info.line_idx_in_hunk];
+                    const rows_used = try renderDiffLine(app, win, file, code_info.hunk_idx, code_info.line_idx_in_hunk, line.*, row, left_content_width, right_content_width, gutter_width, is_cursor);
+                    row += rows_used;
 
-                    // Check for comments
-                    if (RenderUtils.getCommentAt(app, file_path, hunk_idx, line_idx_in_hunk)) |comment| {
-                        if (row < win.height) {
-                            const is_cursor_on_comment = global_line == app.state.global_cursor_line;
+                    // Check if we're creating/editing a comment on this code line
+                    if (app.mode == .comment and is_cursor) {
+                        if (app.state.active_comment_input) |input| {
+                            // Check if the active comment is for this line
+                            if (std.mem.eql(u8, input.target_file_path, file_path) and
+                                input.target_hunk_idx == code_info.hunk_idx and
+                                input.target_line_idx == code_info.line_idx_in_hunk)
+                            {
+                                if (row < win.height) {
+                                    const comment_start_row = row;
+                                    const comment_rows = try renderSideBySideCommentInput(app, win, row, left_content_width, right_content_width, gutter_width, line.line_type);
 
-                            // Render comment
-                            const comment_start_row = row;
-                            const comment_rows = if (app.mode == .comment and is_cursor_on_comment)
-                                try renderSideBySideCommentInput(
-                                    app,
-                                    win,
-                                    row,
-                                    left_content_width,
-                                    right_content_width,
-                                    gutter_width,
-                                    line.line_type,
-                                )
-                            else
-                                try renderSideBySideComment(
-                                    app,
-                                    win,
-                                    comment,
-                                    row,
-                                    left_content_width,
-                                    right_content_width,
-                                    gutter_width,
-                                    line.line_type,
-                                    is_cursor_on_comment,
-                                );
-
-                            // Render sidebar and middle divider for all comment rows
-                            var comment_row_idx: usize = 0;
-                            while (comment_row_idx < comment_rows and comment_start_row + comment_row_idx < win.height) : (comment_row_idx += 1) {
-                                var left_seg_cmt = [_]vaxis.Cell.Segment{.{
-                                    .text = "┃",
-                                    .style = sidebar_style,
-                                }};
-                                _ = try win.print(&left_seg_cmt, .{ .row_offset = comment_start_row + comment_row_idx, .col_offset = 0 });
-                                var middle_seg_cmt = [_]vaxis.Cell.Segment{.{
-                                    .text = FrameChars.vertical,
-                                    .style = sidebar_style,
-                                }};
-                                _ = try win.print(&middle_seg_cmt, .{ .row_offset = comment_start_row + comment_row_idx, .col_offset = middle_col });
-                            }
-
-                            row += comment_rows;
-                            global_line += 1;
-                        }
-                    } else {
-                        // Check if creating a new comment
-                        if (app.mode == .comment and global_line - 1 == app.state.global_cursor_line) {
-                            if (row < win.height) {
-                                const comment_start_row = row;
-                                const comment_rows = try renderSideBySideCommentInput(
-                                    app,
-                                    win,
-                                    row,
-                                    left_content_width,
-                                    right_content_width,
-                                    gutter_width,
-                                    line.line_type,
-                                );
-
-                                // Render sidebar and middle divider for all comment rows
-                                var comment_row_idx: usize = 0;
-                                while (comment_row_idx < comment_rows and comment_start_row + comment_row_idx < win.height) : (comment_row_idx += 1) {
-                                    var left_seg_cmt = [_]vaxis.Cell.Segment{.{
-                                        .text = "┃",
-                                        .style = sidebar_style,
-                                    }};
-                                    _ = try win.print(&left_seg_cmt, .{ .row_offset = comment_start_row + comment_row_idx, .col_offset = 0 });
-                                    var middle_seg_cmt = [_]vaxis.Cell.Segment{.{
-                                        .text = FrameChars.vertical,
-                                        .style = sidebar_style,
-                                    }};
-                                    _ = try win.print(&middle_seg_cmt, .{ .row_offset = comment_start_row + comment_row_idx, .col_offset = middle_col });
+                                    // Render sidebar and middle divider for all comment input rows
+                                    var comment_row_idx: usize = 0;
+                                    while (comment_row_idx < comment_rows and comment_start_row + comment_row_idx < win.height) : (comment_row_idx += 1) {
+                                        var left_seg_cmt = [_]vaxis.Cell.Segment{.{
+                                            .text = "┃",
+                                            .style = sidebar_style,
+                                        }};
+                                        _ = try win.print(&left_seg_cmt, .{ .row_offset = comment_start_row + comment_row_idx, .col_offset = 0 });
+                                        // No middle divider for comment boxes - they span full width
+                                    }
+                                    row += comment_rows;
                                 }
-
-                                row += comment_rows;
                             }
                         }
                     }
-                }
-            }
+                },
+                .comment_line => |comment_info| {
+                    if (app.state.comment_store.getComment(comment_info.comment_idx)) |comment| {
+                        // Get parent line type for positioning the comment
+                        const hunk = &file.hunks[comment_info.parent_hunk_idx];
+                        const line = &hunk.lines[comment_info.parent_line_idx];
 
-            // Add spacing after file (except for last file)
-            if (file_idx < app.state.files.len - 1) {
-                var spacer_idx: usize = 0;
-                while (spacer_idx < global_lines.file_spacing) : (spacer_idx += 1) {
-                    if (global_line >= app.state.global_scroll_offset) {
-                        if (row >= win.height) break;
+                        const comment_start_row = row;
+                        const comment_rows = if (app.mode == .comment and is_cursor)
+                            try renderSideBySideCommentInput(app, win, row, left_content_width, right_content_width, gutter_width, line.line_type)
+                        else
+                            try renderSideBySideComment(app, win, comment, row, left_content_width, right_content_width, gutter_width, line.line_type, is_cursor);
 
-                        // Render sidebar for spacer line
-                        var left_seg = [_]vaxis.Cell.Segment{.{
-                            .text = "┃",
-                            .style = sidebar_style,
-                        }};
-                        _ = try win.print(&left_seg, .{ .row_offset = row, .col_offset = 0 });
-
-                        // Render middle divider for spacer line
-                        var middle_seg = [_]vaxis.Cell.Segment{.{
-                            .text = FrameChars.vertical,
-                            .style = sidebar_style,
-                        }};
-                        _ = try win.print(&middle_seg, .{ .row_offset = row, .col_offset = middle_col });
-
-                        // Check if cursor is on this spacer line
-                        const is_cursor = global_line == app.state.global_cursor_line;
-                        if (is_cursor) {
-                            // Render cursor line across the spacer
-                            const fill_start = 1; // After sidebar
-                            const fill_width = win.width -| 1; // Before right border
-                            if (fill_width > 0) {
-                                const fill_text = try RenderUtils.frameTextSlice(app, fill_width);
-                                @memset(fill_text, ' ');
-                                var fill_seg = [_]vaxis.Cell.Segment{.{
-                                    .text = fill_text,
-                                    .style = .{ .bg = Color.cursor_bg },
-                                }};
-                                _ = try win.print(&fill_seg, .{ .row_offset = row, .col_offset = fill_start });
-                            }
+                        // Render sidebar for all comment rows (no middle divider - spans full width)
+                        var comment_row_idx: usize = 1; // First sidebar already rendered above
+                        while (comment_row_idx < comment_rows and comment_start_row + comment_row_idx < win.height) : (comment_row_idx += 1) {
+                            var comment_sidebar = [_]vaxis.Cell.Segment{.{
+                                .text = "┃",
+                                .style = sidebar_style,
+                            }};
+                            _ = try win.print(&comment_sidebar, .{ .row_offset = comment_start_row + comment_row_idx, .col_offset = 0 });
                         }
-
-                        row += 1;
+                        row += comment_rows;
                     }
-                    global_line += 1;
-                }
+                },
+                .spacer => {
+                    // Render spacer - just empty line with cursor highlight if needed
+                    if (is_cursor) {
+                        const fill_start = 1; // After sidebar
+                        const fill_width = win.width -| 1;
+                        if (fill_width > 0) {
+                            const fill_text = try RenderUtils.frameTextSlice(app, fill_width);
+                            @memset(fill_text, ' ');
+                            var fill_seg = [_]vaxis.Cell.Segment{.{
+                                .text = fill_text,
+                                .style = .{ .bg = Color.cursor_bg },
+                            }};
+                            _ = try win.print(&fill_seg, .{ .row_offset = row, .col_offset = fill_start });
+                        }
+                    }
+                    row += 1;
+                },
             }
+        }
+
+        // Clear any remaining rows at the bottom of the screen
+        while (row < win.height) : (row += 1) {
+            var left_seg = [_]vaxis.Cell.Segment{.{
+                .text = "┃",
+                .style = sidebar_style,
+            }};
+            _ = try win.print(&left_seg, .{ .row_offset = row, .col_offset = 0 });
+            var middle_seg = [_]vaxis.Cell.Segment{.{
+                .text = FrameChars.vertical,
+                .style = sidebar_style,
+            }};
+            _ = try win.print(&middle_seg, .{ .row_offset = row, .col_offset = middle_col });
         }
 
         // Update current_file_idx based on what's at the top of viewport (for sticky header)
         // Use scroll offset instead of cursor position for more accurate header display
-        app.state.current_file_idx = global_lines.getCurrentFileFromCursor(
-            app.state.global_scroll_offset,
-            app.state.files,
-            &app.state.comment_store,
-        );
+        app.state.current_file_idx = app.state.line_map.getFileIndexForLine(app.state.global_scroll_offset) orelse 0;
     }
 
     fn renderFileHeader(
@@ -371,8 +252,25 @@ pub const SideBySideRenderer = struct {
 
         // Render each wrapped row
         var current_row = row;
+        const sidebar_style = .{ .fg = Color.dim };
+        const middle_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing + left_width;
+
         for (0..num_rows) |wrap_idx| {
             if (current_row >= win.height) break;
+
+            // Render sidebar and middle divider for continuation rows
+            if (wrap_idx > 0) {
+                var left_seg = [_]vaxis.Cell.Segment{.{
+                    .text = "┃",
+                    .style = sidebar_style,
+                }};
+                _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 0 });
+                var middle_seg = [_]vaxis.Cell.Segment{.{
+                    .text = FrameChars.vertical,
+                    .style = sidebar_style,
+                }};
+                _ = try win.print(&middle_seg, .{ .row_offset = current_row, .col_offset = middle_col });
+            }
 
             // Fill the entire row with dim background first
             const fill_start = 1; // After left border
@@ -390,21 +288,16 @@ pub const SideBySideRenderer = struct {
             }
 
             // Render left gutter (bar on first row, empty on continuation rows)
-            // Bar only fills the line number area, not the diff sign column
+            // Fill entire gutter width with bars (no sign column for hunk headers)
             if (wrap_idx == 0) {
-                const bar_width = gutter_width - 1; // Don't fill the sign column
-                const left_gutter_bar = try RenderUtils.frameTextSlice(app, bar_width * char_bytes + 1); // +1 for space
+                const bar_width = gutter_width; // Fill entire gutter
+                const left_gutter_bar = try RenderUtils.frameTextSlice(app, bar_width * char_bytes);
                 var left_byte_pos: usize = 0;
                 for (0..bar_width) |_| {
-                    if (left_byte_pos + char_bytes <= left_gutter_bar.len - 1) {
+                    if (left_byte_pos + char_bytes <= left_gutter_bar.len) {
                         @memcpy(left_gutter_bar[left_byte_pos .. left_byte_pos + char_bytes], bar_char);
                         left_byte_pos += char_bytes;
                     }
-                }
-                // Add trailing space for the sign column
-                if (left_byte_pos < left_gutter_bar.len) {
-                    left_gutter_bar[left_byte_pos] = ' ';
-                    left_byte_pos += 1;
                 }
 
                 const gutter_style: vaxis.Style = if (is_cursor)
@@ -474,21 +367,16 @@ pub const SideBySideRenderer = struct {
             }
 
             // Render right gutter (bar on first row, empty on continuation rows)
-            // Bar only fills the line number area, not the diff sign column
+            // Fill entire gutter width with bars (no sign column for hunk headers)
             if (wrap_idx == 0) {
-                const bar_width = gutter_width - 1; // Don't fill the sign column
-                const right_gutter_bar = try RenderUtils.frameTextSlice(app, bar_width * char_bytes + 1); // +1 for space
+                const bar_width = gutter_width; // Fill entire gutter
+                const right_gutter_bar = try RenderUtils.frameTextSlice(app, bar_width * char_bytes);
                 var right_byte_pos: usize = 0;
                 for (0..bar_width) |_| {
-                    if (right_byte_pos + char_bytes <= right_gutter_bar.len - 1) {
+                    if (right_byte_pos + char_bytes <= right_gutter_bar.len) {
                         @memcpy(right_gutter_bar[right_byte_pos .. right_byte_pos + char_bytes], bar_char);
                         right_byte_pos += char_bytes;
                     }
-                }
-                // Add trailing space for the sign column
-                if (right_byte_pos < right_gutter_bar.len) {
-                    right_gutter_bar[right_byte_pos] = ' ';
-                    right_byte_pos += 1;
                 }
 
                 const gutter_style: vaxis.Style = if (is_cursor)
@@ -578,6 +466,8 @@ pub const SideBySideRenderer = struct {
         else
             base_style;
 
+        const sidebar_style = .{ .fg = Color.dim };
+        const middle_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing + left_width;
         const right_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1; // +1 for middle divider
 
         // Calculate byte offset for syntax highlighting
@@ -591,6 +481,20 @@ pub const SideBySideRenderer = struct {
                 var current_row = row;
                 for (0..num_rows) |wrap_idx| {
                     if (current_row >= win.height) break;
+
+                    // Render sidebar and middle divider for continuation rows
+                    if (wrap_idx > 0) {
+                        var left_seg = [_]vaxis.Cell.Segment{.{
+                            .text = "┃",
+                            .style = sidebar_style,
+                        }};
+                        _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 0 });
+                        var middle_seg = [_]vaxis.Cell.Segment{.{
+                            .text = FrameChars.vertical,
+                            .style = sidebar_style,
+                        }};
+                        _ = try win.print(&middle_seg, .{ .row_offset = current_row, .col_offset = middle_col });
+                    }
 
                     const show_lineno = wrap_idx == 0;
 
@@ -672,6 +576,20 @@ pub const SideBySideRenderer = struct {
                 for (0..num_rows) |wrap_idx| {
                     if (current_row >= win.height) break;
 
+                    // Render sidebar and middle divider for continuation rows
+                    if (wrap_idx > 0) {
+                        var left_seg = [_]vaxis.Cell.Segment{.{
+                            .text = "┃",
+                            .style = sidebar_style,
+                        }};
+                        _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 0 });
+                        var middle_seg = [_]vaxis.Cell.Segment{.{
+                            .text = FrameChars.vertical,
+                            .style = sidebar_style,
+                        }};
+                        _ = try win.print(&middle_seg, .{ .row_offset = current_row, .col_offset = middle_col });
+                    }
+
                     const show_lineno = wrap_idx == 0;
 
                     // Render left side
@@ -731,6 +649,20 @@ pub const SideBySideRenderer = struct {
                 var current_row = row;
                 for (0..num_rows) |wrap_idx| {
                     if (current_row >= win.height) break;
+
+                    // Render sidebar and middle divider for continuation rows
+                    if (wrap_idx > 0) {
+                        var left_seg = [_]vaxis.Cell.Segment{.{
+                            .text = "┃",
+                            .style = sidebar_style,
+                        }};
+                        _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 0 });
+                        var middle_seg = [_]vaxis.Cell.Segment{.{
+                            .text = FrameChars.vertical,
+                            .style = sidebar_style,
+                        }};
+                        _ = try win.print(&middle_seg, .{ .row_offset = current_row, .col_offset = middle_col });
+                    }
 
                     const show_lineno = wrap_idx == 0;
 

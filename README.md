@@ -8,10 +8,11 @@ A keyboard-driven TUI for code reviews built in Zig. Fast, minimal, and focused 
 - Vim-style modal interface (hjkl, Ctrl-n/p)
 - File-by-file diff navigation
 - Unified and side-by-side views
-- Tree-sitter syntax highlighting (context lines only, keeping diffs readable)
+- Tree-sitter syntax highlighting with async processing (JS/TS/Zig full support)
 - Live refresh (press 'r')
 - Full git diff compatibility (working dir, staged, branch comparisons)
-- Comment system (coming soon)
+- Comment system with export to clipboard ('y' to yank)
+- Editor integration (Ctrl-g opens file at line in $EDITOR)
 
 ## Installation
 
@@ -123,21 +124,34 @@ Edit comments on specific lines:
 
 ```
 src/
-├── main.zig           # CLI arg parsing
-├── app.zig            # State machine and rendering
-├── syntax.zig         # Tree-sitter integration
+├── main.zig              # CLI arg parsing and initialization
+├── app.zig               # State machine, event handling, rendering coordination
+├── line_map.zig          # Pre-computed position registry (single source of truth)
+├── comments.zig          # Comment storage and management
+├── navigation.zig        # Cursor and file navigation logic
+├── state.zig             # State helpers and async highlighting
+├── ui.zig                # UI components (header, status, dividers)
+├── editor.zig            # External editor integration (Ctrl-g)
+├── syntax.zig            # Tree-sitter integration
 ├── git/
-│   ├── diff.zig       # Git command execution
-│   └── parser.zig     # Unified diff parser
+│   ├── diff.zig          # Git command execution
+│   └── parser.zig        # Unified diff parser (single-pass O(n))
+├── rendering/
+│   ├── common.zig        # Shared types (Color, Layout, FrameChars)
+│   ├── utils.zig         # Frame buffer management
+│   ├── file_header.zig   # File header rendering
+│   ├── unified.zig       # Unified diff view
+│   └── side_by_side.zig  # Side-by-side diff view
 └── queries/
-    └── *.scm          # Tree-sitter highlighting queries
+    └── *.scm             # Tree-sitter highlighting queries
 ```
 
 Design decisions:
 - Shell out to git (respects user config)
 - Single-pass O(n) diff parsing
 - Modal interface (vim-style)
-- Context-only syntax highlighting
+- LineMap system for accurate positioning
+- Async syntax highlighting (non-blocking)
 - Virtual scrolling (render visible lines only)
 
 ## Development Status
@@ -158,15 +172,20 @@ Design decisions:
 - [x] Side-by-side diff view with intelligent wrapping
 - [x] Tree-sitter syntax highlighting (JS/TS/Zig)
 - [x] Live refresh functionality ('r' key)
-- [x] Context-aware highlighting (only on unchanged lines)
-- [ ] Comment system
-- [ ] Export to annotated patch
+- [x] Context-aware highlighting (all lines with syntax overlay on diff colors)
+- [x] Comment system (Enter to add/edit, d/D to delete/clear)
+- [x] Export comments to clipboard ('y' to yank with context)
+- [x] Editor integration (Ctrl-g opens file at line in $EDITOR)
 - [ ] Hunk navigation (n/N keys)
 - [ ] Help overlay
 
-### Phase 3: Polish (Next)
+### Phase 3: Polish (Current)
 
-- [ ] Expand syntax highlighting to Python, Rust, Go, C, C++
+- [x] LineMap system for accurate positioning
+- [x] Async highlighting for non-blocking syntax processing
+- [ ] Expand syntax highlighting to Python, Rust, Go, C, C++ (parsers ready, need query files)
+- [ ] Hunk navigation (n/N keys)
+- [ ] Help overlay
 - [ ] Mouse support
 - [ ] Configuration file
 - [ ] Color schemes / themes
@@ -191,12 +210,12 @@ Design decisions:
 ## Contributing
 
 Priority areas:
-- Syntax highlighting query files for Python, Rust, Go, C, C++
-- Comment system implementation
-- Hunk navigation
-- Mouse support
-- Help overlay/documentation
-- Testing coverage
+- Syntax highlighting query files for Python, Rust, Go, C, C++ (parsers ready, need .scm files)
+- Hunk navigation (n/N keys to jump between hunks)
+- Help overlay/documentation (show keybindings in-app)
+- Mouse support (click to position cursor, scroll to navigate)
+- Comment persistence (save/load comments between sessions)
+- Testing coverage (especially for new features)
 
 ## Credits
 
@@ -216,4 +235,4 @@ MIT
 
 ---
 
-**Status**: Alpha - Phase 2 core features complete
+**Status**: Alpha - Phase 2 complete, Phase 3 in progress (LineMap system, async highlighting, and editor integration complete)
