@@ -5,6 +5,7 @@ const parser = @import("git/parser.zig");
 const syntax = @import("syntax.zig");
 const comments = @import("comments.zig");
 const display_lines = @import("display_lines.zig");
+const global_lines = @import("global_lines.zig");
 const navigation = @import("navigation.zig");
 const render_utils = @import("rendering/utils.zig");
 const render_unified = @import("rendering/unified.zig");
@@ -104,9 +105,11 @@ pub const App = struct {
     const State = struct {
         diff_source: DiffSource,
         files: []parser.FileDiff,
-        current_file_idx: usize,
-        scroll_offset: usize,
-        cursor_line: usize,
+        current_file_idx: usize, // Tracks which file is visible in sticky header
+        scroll_offset: usize, // Deprecated: use global_scroll_offset
+        cursor_line: usize, // Deprecated: use global_cursor_line
+        global_scroll_offset: usize, // Scroll position across all files
+        global_cursor_line: usize, // Cursor position across all files
         view_mode: ViewMode,
         viewport_height: usize,
         count_prefix: ?usize, // For vim-style count prefixes (e.g., 5j)
@@ -169,6 +172,8 @@ pub const App = struct {
                 .current_file_idx = 0,
                 .scroll_offset = 0,
                 .cursor_line = 0,
+                .global_scroll_offset = 0,
+                .global_cursor_line = 0,
                 .view_mode = .unified,
                 .viewport_height = 0,
                 .count_prefix = null,
@@ -267,10 +272,10 @@ pub const App = struct {
         self.state.files = new_files;
         self.state.current_file_idx = new_file_idx;
 
-        // Clamp cursor to new file's line count (don't reset to 0)
-        const total_lines = self.getTotalLinesInCurrentFile();
-        if (total_lines > 0 and self.state.cursor_line >= total_lines) {
-            self.state.cursor_line = total_lines - 1;
+        // Clamp global cursor to total line count (don't reset to 0)
+        const total_lines = self.getTotalGlobalLines();
+        if (total_lines > 0 and self.state.global_cursor_line >= total_lines) {
+            self.state.global_cursor_line = total_lines - 1;
         }
         Navigation.clampScrollOffset(self);
     }
@@ -516,30 +521,39 @@ pub const App = struct {
         return display_lines.getTotalDisplayLines(file, &self.state.comment_store, file_path);
     }
 
+    pub fn getTotalGlobalLines(self: *App) usize {
+        return global_lines.getTotalGlobalLines(self.state.files, &self.state.comment_store);
+    }
+
     // Get the content of the line at the current cursor position
     pub fn getCurrentLineContent(self: *App) ?[]const u8 {
-        if (self.state.current_file_idx >= self.state.files.len) return null;
+        // Convert global cursor to file position
+        const pos = global_lines.globalLineToFilePosition(
+            self.state.global_cursor_line,
+            self.state.files,
+            &self.state.comment_store,
+        ) orelse return null;
 
-        const file = &self.state.files[self.state.current_file_idx];
-        var line_idx: usize = 0;
+        if (pos.file_idx >= self.state.files.len) return null;
+        const file = &self.state.files[pos.file_idx];
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
-        for (file.hunks) |hunk| {
-            // Hunk header line
-            if (line_idx == self.state.cursor_line) {
-                return null; // Hunk headers don't have editable content
-            }
-            line_idx += 1;
+        // local_line includes file header at 0
+        if (pos.local_line == 0) return null; // File header has no content
 
-            // Hunk content lines
-            for (hunk.lines) |line| {
-                if (line_idx == self.state.cursor_line) {
-                    return line.content;
-                }
-                line_idx += 1;
-            }
-        }
+        const display_line_idx = pos.local_line - 1;
+        const line_type = display_lines.getDisplayLineType(
+            display_line_idx,
+            file,
+            &self.state.comment_store,
+            file_path,
+        ) orelse return null;
 
-        return null;
+        return switch (line_type) {
+            .code_line => |code| file.hunks[code.hunk_idx].lines[code.line_idx_in_hunk].content,
+            .hunk_header => null,
+            .comment_line => null,
+        };
     }
 
     fn handleCommentMode(self: *App, key: vaxis.Key) !void {
@@ -621,14 +635,25 @@ pub const App = struct {
     }
 
     fn startCommentInput(self: *App) !void {
-        if (self.state.current_file_idx >= self.state.files.len) return;
+        // Convert global cursor to file position
+        const pos = global_lines.globalLineToFilePosition(
+            self.state.global_cursor_line,
+            self.state.files,
+            &self.state.comment_store,
+        ) orelse return; // Not on a valid line (maybe spacer)
 
-        const file = &self.state.files[self.state.current_file_idx];
+        if (pos.file_idx >= self.state.files.len) return;
+        const file = &self.state.files[pos.file_idx];
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        // local_line includes file header at 0, so subtract 1 for display line index
+        if (pos.local_line == 0) return; // Can't comment on file header
+
+        const display_line_idx = pos.local_line - 1;
 
         // Determine what type of line the cursor is on
         const line_type = display_lines.getDisplayLineType(
-            self.state.cursor_line,
+            display_line_idx,
             file,
             &self.state.comment_store,
             file_path,
@@ -753,14 +778,25 @@ pub const App = struct {
     }
 
     fn deleteCommentUnderCursor(self: *App) !void {
-        if (self.state.current_file_idx >= self.state.files.len) return;
+        // Convert global cursor to file position
+        const pos = global_lines.globalLineToFilePosition(
+            self.state.global_cursor_line,
+            self.state.files,
+            &self.state.comment_store,
+        ) orelse return; // Not on a valid line
 
-        const file = &self.state.files[self.state.current_file_idx];
+        if (pos.file_idx >= self.state.files.len) return;
+        const file = &self.state.files[pos.file_idx];
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        // local_line includes file header at 0, so subtract 1 for display line index
+        if (pos.local_line == 0) return; // Not on a comment-able line
+
+        const display_line_idx = pos.local_line - 1;
 
         // Check if cursor is on a comment line
         const line_type = display_lines.getDisplayLineType(
-            self.state.cursor_line,
+            display_line_idx,
             file,
             &self.state.comment_store,
             file_path,
@@ -771,10 +807,10 @@ pub const App = struct {
                 // Delete the comment
                 try self.state.comment_store.deleteComment(comment_info.comment_idx);
 
-                // After deletion, move cursor to the parent code line
-                // (since the comment line no longer exists)
-                if (self.state.cursor_line > 0) {
-                    self.state.cursor_line -= 1;
+                // After deletion, move cursor up one line (to the parent code line)
+                // since the comment line no longer exists
+                if (self.state.global_cursor_line > 0) {
+                    self.state.global_cursor_line -= 1;
                 }
                 Navigation.clampScrollOffset(self);
             },
@@ -790,9 +826,15 @@ pub const App = struct {
     }
 
     fn openInEditor(self: *App) !void {
-        if (self.state.current_file_idx >= self.state.files.len) return;
+        // Convert global cursor to file position
+        const pos = global_lines.globalLineToFilePosition(
+            self.state.global_cursor_line,
+            self.state.files,
+            &self.state.comment_store,
+        ) orelse return; // Not on a valid line
 
-        const file = &self.state.files[self.state.current_file_idx];
+        if (pos.file_idx >= self.state.files.len) return;
+        const file = &self.state.files[pos.file_idx];
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
         // Skip if it's a deleted file or /dev/null
@@ -802,12 +844,17 @@ pub const App = struct {
 
         // Get the line number from the current cursor position
         var line_number: ?usize = null;
-        const line_type = display_lines.getDisplayLineType(
-            self.state.cursor_line,
-            file,
-            &self.state.comment_store,
-            file_path,
-        );
+
+        // local_line includes file header at 0
+        const line_type = if (pos.local_line > 0)
+            display_lines.getDisplayLineType(
+                pos.local_line - 1, // Subtract 1 for display line index
+                file,
+                &self.state.comment_store,
+                file_path,
+            )
+        else
+            null;
 
         if (line_type) |lt| {
             switch (lt) {
@@ -864,7 +911,8 @@ pub const App = struct {
             return;
         }
 
-        const content_height = win.height - Layout.header_height - Layout.divider_height - Layout.status_height - 1;
+        // Content height without dividers (continuous mode)
+        const content_height = win.height - Layout.header_height - Layout.status_height;
 
         const header_win = win.child(.{
             .x_off = 0,
@@ -874,29 +922,13 @@ pub const App = struct {
         });
         try UI.renderHeader(self, header_win);
 
-        const divider_top_win = win.child(.{
-            .x_off = 0,
-            .y_off = Layout.header_height,
-            .width = .{ .limit = win.width },
-            .height = .{ .limit = Layout.divider_height },
-        });
-        try UI.renderDivider(self, divider_top_win, .top);
-
         const content_win = win.child(.{
             .x_off = 0,
-            .y_off = Layout.header_height + Layout.divider_height,
+            .y_off = Layout.header_height,
             .width = .{ .limit = win.width },
             .height = .{ .limit = content_height },
         });
         try self.renderContent(content_win);
-
-        const divider_bottom_win = win.child(.{
-            .x_off = 0,
-            .y_off = win.height - Layout.status_height - 1,
-            .width = .{ .limit = win.width },
-            .height = .{ .limit = 1 },
-        });
-        try UI.renderDivider(self, divider_bottom_win, .bottom);
 
         const status_win = win.child(.{
             .x_off = 0,

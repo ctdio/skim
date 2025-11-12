@@ -41,10 +41,11 @@ pub const Color = struct {
 // Layout constants
 pub const Layout = struct {
     pub const header_height = 2;
-    pub const divider_height = 1;
+    pub const divider_height = 1; // Deprecated: no longer used in continuous mode
     pub const status_height = 1;
+    pub const sidebar_width = 1; // Sidebar (┃)
     pub const min_gutter_width = 5; // Minimum gutter width for consistency
-    pub const cursor_padding = 3; // Padding around cursor when scrolling
+    pub const cursor_padding = 0; // No padding - vim-like scrolling (scroll only when cursor goes off screen)
     pub const page_scroll_lines = 10;
     pub const gutter_spacing = 2; // Spacing between gutter and content
 };

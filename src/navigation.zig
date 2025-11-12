@@ -2,6 +2,7 @@ const std = @import("std");
 const App = @import("app.zig").App;
 const rendering = @import("rendering/common.zig");
 const state_helpers = @import("state.zig");
+const global_lines = @import("global_lines.zig");
 const Layout = rendering.Layout;
 const StateHelpers = state_helpers.StateHelpers;
 
@@ -10,13 +11,14 @@ pub const Navigation = struct {
         const count = app.state.count_prefix orelse 1;
         app.state.count_prefix = null;
 
-        const total_lines = app.getTotalLinesInCurrentFile();
+        const total_lines = app.getTotalGlobalLines();
         if (total_lines > 0) {
-            const new_line = @min(app.state.cursor_line + count, total_lines - 1);
-            app.state.cursor_line = new_line;
+            const new_line = @min(app.state.global_cursor_line + count, total_lines - 1);
+            app.state.global_cursor_line = new_line;
         }
 
-        // Clamp cursor column to new line length (vim-like behavior)
+        // Ensure cursor stays visible
+        ensureCursorVisible(app);
         clampCursorColumn(app);
     }
 
@@ -24,13 +26,14 @@ pub const Navigation = struct {
         const count = app.state.count_prefix orelse 1;
         app.state.count_prefix = null;
 
-        if (app.state.cursor_line >= count) {
-            app.state.cursor_line -= count;
+        if (app.state.global_cursor_line >= count) {
+            app.state.global_cursor_line -= count;
         } else {
-            app.state.cursor_line = 0;
+            app.state.global_cursor_line = 0;
         }
 
-        // Clamp cursor column to new line length (vim-like behavior)
+        // Ensure cursor stays visible
+        ensureCursorVisible(app);
         clampCursorColumn(app);
     }
 
@@ -38,26 +41,50 @@ pub const Navigation = struct {
     pub fn navigateToNextFile(app: *App) void {
         if (app.state.files.len == 0) return;
 
-        if (app.state.current_file_idx + 1 < app.state.files.len) {
-            app.state.current_file_idx += 1;
-        } else {
-            // Wrap to first file
-            app.state.current_file_idx = 0;
+        // Find which file cursor is currently in
+        const current_file = global_lines.getCurrentFileFromCursor(
+            app.state.global_cursor_line,
+            app.state.files,
+            &app.state.comment_store,
+        );
+
+        // Jump to start of next file (or wrap to first)
+        const next_file = if (current_file + 1 < app.state.files.len)
+            current_file + 1
+        else
+            0;
+
+        if (global_lines.getFileStartLine(next_file, app.state.files, &app.state.comment_store)) |start_line| {
+            app.state.current_file_idx = next_file;
+            app.state.global_cursor_line = start_line;
+            app.state.global_scroll_offset = start_line;
         }
-        resetFileState(app);
+
         triggerAsyncHighlight(app);
     }
 
     pub fn navigateToPreviousFile(app: *App) void {
         if (app.state.files.len == 0) return;
 
-        if (app.state.current_file_idx > 0) {
-            app.state.current_file_idx -= 1;
-        } else {
-            // Wrap to last file
-            app.state.current_file_idx = app.state.files.len - 1;
+        // Find which file cursor is currently in
+        const current_file = global_lines.getCurrentFileFromCursor(
+            app.state.global_cursor_line,
+            app.state.files,
+            &app.state.comment_store,
+        );
+
+        // Jump to start of previous file (or wrap to last)
+        const prev_file = if (current_file > 0)
+            current_file - 1
+        else
+            app.state.files.len - 1;
+
+        if (global_lines.getFileStartLine(prev_file, app.state.files, &app.state.comment_store)) |start_line| {
+            app.state.current_file_idx = prev_file;
+            app.state.global_cursor_line = start_line;
+            app.state.global_scroll_offset = start_line;
         }
-        resetFileState(app);
+
         triggerAsyncHighlight(app);
     }
 
@@ -79,21 +106,22 @@ pub const Navigation = struct {
     }
 
     pub fn resetFileState(app: *App) void {
-        app.state.scroll_offset = 0;
-        app.state.cursor_line = 0;
+        // Deprecated: In continuous mode, we use global coordinates
+        // Keep for backwards compatibility but make it a no-op
+        _ = app;
     }
 
     pub fn pageDown(app: *App) void {
         const scroll_amount = app.state.viewport_height / 2;
-        const total_lines = app.getTotalLinesInCurrentFile();
+        const total_lines = app.getTotalGlobalLines();
 
         // Move cursor down by half viewport, clamped to last line
         if (total_lines > 0) {
-            app.state.cursor_line = @min(app.state.cursor_line + scroll_amount, total_lines - 1);
+            app.state.global_cursor_line = @min(app.state.global_cursor_line + scroll_amount, total_lines - 1);
         }
 
         // Move viewport down by same amount to maintain screen position
-        app.state.scroll_offset += scroll_amount;
+        app.state.global_scroll_offset += scroll_amount;
         clampScrollOffset(app);
 
         // Clamp cursor column to new line length
@@ -104,17 +132,17 @@ pub const Navigation = struct {
         const scroll_amount = app.state.viewport_height / 2;
 
         // Move cursor up by half viewport, clamped to 0
-        if (app.state.cursor_line >= scroll_amount) {
-            app.state.cursor_line -= scroll_amount;
+        if (app.state.global_cursor_line >= scroll_amount) {
+            app.state.global_cursor_line -= scroll_amount;
         } else {
-            app.state.cursor_line = 0;
+            app.state.global_cursor_line = 0;
         }
 
         // Move viewport up by same amount to maintain screen position
-        if (app.state.scroll_offset >= scroll_amount) {
-            app.state.scroll_offset -= scroll_amount;
+        if (app.state.global_scroll_offset >= scroll_amount) {
+            app.state.global_scroll_offset -= scroll_amount;
         } else {
-            app.state.scroll_offset = 0;
+            app.state.global_scroll_offset = 0;
         }
 
         // Clamp cursor column to new line length
@@ -125,15 +153,15 @@ pub const Navigation = struct {
         const count = app.state.count_prefix orelse 1;
         app.state.count_prefix = null;
 
-        const total_lines = app.getTotalLinesInCurrentFile();
+        const total_lines = app.getTotalGlobalLines();
 
         // Move cursor down, clamped to last line
         if (total_lines > 0) {
-            app.state.cursor_line = @min(app.state.cursor_line + count, total_lines - 1);
+            app.state.global_cursor_line = @min(app.state.global_cursor_line + count, total_lines - 1);
         }
 
         // Move viewport down by same amount
-        app.state.scroll_offset += count;
+        app.state.global_scroll_offset += count;
         clampScrollOffset(app);
         clampCursorColumn(app);
     }
@@ -143,39 +171,39 @@ pub const Navigation = struct {
         app.state.count_prefix = null;
 
         // Move cursor up, clamped to 0
-        if (app.state.cursor_line >= count) {
-            app.state.cursor_line -= count;
+        if (app.state.global_cursor_line >= count) {
+            app.state.global_cursor_line -= count;
         } else {
-            app.state.cursor_line = 0;
+            app.state.global_cursor_line = 0;
         }
 
         // Move viewport up by same amount
-        if (app.state.scroll_offset >= count) {
-            app.state.scroll_offset -= count;
+        if (app.state.global_scroll_offset >= count) {
+            app.state.global_scroll_offset -= count;
         } else {
-            app.state.scroll_offset = 0;
+            app.state.global_scroll_offset = 0;
         }
 
         clampCursorColumn(app);
     }
 
     pub fn scrollToTop(app: *App) void {
-        app.state.cursor_line = 0;
-        app.state.scroll_offset = 0;
+        app.state.global_cursor_line = 0;
+        app.state.global_scroll_offset = 0;
         clampCursorColumn(app);
     }
 
     pub fn scrollToBottom(app: *App) void {
-        const total_lines = app.getTotalLinesInCurrentFile();
+        const total_lines = app.getTotalGlobalLines();
         const viewport_height = app.state.viewport_height;
 
         // Move cursor to last line
         if (total_lines > 0) {
-            app.state.cursor_line = total_lines - 1;
+            app.state.global_cursor_line = total_lines - 1;
         }
 
         // Move viewport to show last page
-        app.state.scroll_offset = if (total_lines > viewport_height)
+        app.state.global_scroll_offset = if (total_lines > viewport_height)
             total_lines - viewport_height
         else
             0;
@@ -186,15 +214,15 @@ pub const Navigation = struct {
     pub fn centerCursor(app: *App) void {
         // Move cursor to the middle line of the current viewport (like vim's 'M')
         const viewport_height = app.state.viewport_height;
-        const scroll_offset = app.state.scroll_offset;
+        const scroll_offset = app.state.global_scroll_offset;
 
         if (viewport_height > 0) {
             const half_viewport = viewport_height / 2;
             const middle_line = scroll_offset + half_viewport;
 
-            const total_lines = app.getTotalLinesInCurrentFile();
+            const total_lines = app.getTotalGlobalLines();
             if (total_lines > 0) {
-                app.state.cursor_line = @min(middle_line, total_lines - 1);
+                app.state.global_cursor_line = @min(middle_line, total_lines - 1);
             }
         }
 
@@ -203,15 +231,15 @@ pub const Navigation = struct {
 
     pub fn scrollPageDown(app: *App) void {
         const scroll_amount = app.state.viewport_height / 2;
-        const total_lines = app.getTotalLinesInCurrentFile();
+        const total_lines = app.getTotalGlobalLines();
 
         // Move cursor down by half viewport, clamped to last line
         if (total_lines > 0) {
-            app.state.cursor_line = @min(app.state.cursor_line + scroll_amount, total_lines - 1);
+            app.state.global_cursor_line = @min(app.state.global_cursor_line + scroll_amount, total_lines - 1);
         }
 
         // Move viewport down by same amount to maintain screen position
-        app.state.scroll_offset += scroll_amount;
+        app.state.global_scroll_offset += scroll_amount;
         clampScrollOffset(app);
         clampCursorColumn(app);
     }
@@ -220,17 +248,17 @@ pub const Navigation = struct {
         const scroll_amount = app.state.viewport_height / 2;
 
         // Move cursor up by half viewport, clamped to 0
-        if (app.state.cursor_line >= scroll_amount) {
-            app.state.cursor_line -= scroll_amount;
+        if (app.state.global_cursor_line >= scroll_amount) {
+            app.state.global_cursor_line -= scroll_amount;
         } else {
-            app.state.cursor_line = 0;
+            app.state.global_cursor_line = 0;
         }
 
         // Move viewport up by same amount to maintain screen position
-        if (app.state.scroll_offset >= scroll_amount) {
-            app.state.scroll_offset -= scroll_amount;
+        if (app.state.global_scroll_offset >= scroll_amount) {
+            app.state.global_scroll_offset -= scroll_amount;
         } else {
-            app.state.scroll_offset = 0;
+            app.state.global_scroll_offset = 0;
         }
 
         clampCursorColumn(app);
@@ -241,32 +269,41 @@ pub const Navigation = struct {
     pub fn clampCursorColumn(_: *App) void {}
 
     pub fn clampScrollOffset(app: *App) void {
-        const total_lines = app.getTotalLinesInCurrentFile();
-        const viewport_height = app.state.viewport_height;
+        const total_lines = app.getTotalGlobalLines();
 
-        // Calculate max scroll offset (vim-style: can't scroll past end)
-        const max_scroll = if (total_lines > viewport_height)
-            total_lines - viewport_height
+        // Allow over-scrolling at the end so last file can be at top of screen
+        // This creates a natural "padding" at the bottom for small files
+        const max_scroll = if (total_lines > 0)
+            total_lines - 1  // Any line can be at top of viewport
         else
             0;
 
-        if (app.state.scroll_offset > max_scroll) {
-            app.state.scroll_offset = max_scroll;
+        if (app.state.global_scroll_offset > max_scroll) {
+            app.state.global_scroll_offset = max_scroll;
         }
     }
 
-    pub fn adjustScrollToKeepCursorVisible(app: *App, window_height: usize) void {
+    // Adjust scroll to ensure cursor is visible with padding
+    // Only called after explicit cursor movement (j/k), not during file navigation
+    fn ensureCursorVisible(app: *App) void {
         const padding = Layout.cursor_padding;
-        const cursor_line = app.state.cursor_line;
-        const scroll_offset = app.state.scroll_offset;
+        const cursor_line = app.state.global_cursor_line;
+        const scroll_offset = app.state.global_scroll_offset;
+        const window_height = app.state.viewport_height;
 
         if (cursor_line < scroll_offset + padding) {
-            app.state.scroll_offset = if (cursor_line >= padding)
+            app.state.global_scroll_offset = if (cursor_line >= padding)
                 cursor_line - padding
             else
                 0;
         } else if (cursor_line >= scroll_offset + window_height -| (padding + 1)) {
-            app.state.scroll_offset = cursor_line -| (window_height -| (padding + 2));
+            app.state.global_scroll_offset = cursor_line -| (window_height -| (padding + 2));
         }
+    }
+
+    // Keep old function name for backwards compatibility (deprecated)
+    pub fn adjustScrollToKeepCursorVisible(app: *App, window_height: usize) void {
+        _ = window_height; // Use viewport_height from app.state instead
+        ensureCursorVisible(app);
     }
 };

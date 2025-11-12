@@ -125,6 +125,18 @@ pub const StateHelpers = struct {
         return @max(calculated, Layout.min_gutter_width);
     }
 
+    // Calculate the gutter width across all files (for consistent width in continuous view)
+    pub fn getGlobalGutterWidth(files: []const parser.FileDiff) usize {
+        var max_lineno: u32 = 0;
+        for (files) |*file| {
+            const file_max = getMaxLineNumber(file);
+            max_lineno = @max(max_lineno, file_max);
+        }
+        const digits = countDigits(max_lineno);
+        const calculated = digits + 1;
+        return @max(calculated, Layout.min_gutter_width);
+    }
+
     // Calculate additions and deletions in a file
     pub fn calculateDiffStats(_: *App, file: *const parser.FileDiff) struct { additions: usize, deletions: usize } {
         var additions: usize = 0;
