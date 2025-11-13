@@ -209,63 +209,22 @@ pub const SideBySideRenderer = struct {
     ) !usize {
         _ = right_width; // Same text on both sides, so right_width not needed
 
-        // Build header text: range and context
+        // Build header text using shared utility
         var buf: [256]u8 = undefined;
-        const old_end = hunk.header.old_start + hunk.header.old_count -| 1;
-        const new_end = hunk.header.new_start + hunk.header.new_count -| 1;
-
-        const header_text = try std.fmt.bufPrint(
-            &buf,
-            "↕ {d}-{d} → {d}-{d}  {s}",
-            .{
-                hunk.header.old_start,
-                old_end,
-                hunk.header.new_start,
-                new_end,
-                hunk.header.context,
-            },
-        );
+        const header_text = try RenderUtils.buildHunkHeaderText(hunk, &buf);
 
         // Calculate number of rows needed for wrapping (based on left width)
         const num_rows = if (header_text.len == 0) 1 else (header_text.len + left_width - 1) / left_width;
 
-        const fill_style: vaxis.Style = if (is_cursor and app.mode == .visual)
-            .{ .bg = Color.visual_select_bg }
-        else if (is_cursor)
-            .{ .bg = Color.cursor_bg }
-        else if (is_in_visual)
-            .{ .bg = Color.visual_select_bg }
-        else
-            .{};
-
-        // Find where context starts (after the range info and spacing)
-        const range_end_marker = "  ";
-        const range_end_pos = std.mem.indexOf(u8, header_text, range_end_marker);
-        const range_len = if (range_end_pos) |pos| pos + range_end_marker.len else header_text.len;
-
-        // Styles
-        const range_style: vaxis.Style = if (is_cursor and app.mode == .visual)
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
-        else if (is_cursor)
-            .{ .fg = Color.white, .bg = Color.cursor_bg, .bold = true }
-        else if (is_in_visual)
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
-        else
-            .{ .fg = Color.dim };
-
-        const context_style: vaxis.Style = if (is_cursor and app.mode == .visual)
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
-        else if (is_cursor)
-            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg }
-        else if (is_in_visual)
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
-        else
-            .{ .fg = Color.dim };
+        // Get styles using shared utilities
+        const fill_style = RenderUtils.getFillStyle(app, is_cursor, is_in_visual);
+        const range_len = RenderUtils.findHunkHeaderRangeEnd(header_text);
+        const range_style = RenderUtils.getHunkRangeStyle(app, is_cursor, is_in_visual);
+        const context_style = RenderUtils.getHunkContextStyle(app, is_cursor, is_in_visual);
         const right_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1;
 
         // Render each wrapped row
         var current_row = row;
-        const sidebar_style = .{ .fg = Color.dim };
         const middle_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing + left_width;
 
         for (0..num_rows) |wrap_idx| {
@@ -273,16 +232,7 @@ pub const SideBySideRenderer = struct {
 
             // Render sidebar and middle divider for continuation rows
             if (wrap_idx > 0) {
-                var left_seg = [_]vaxis.Cell.Segment{.{
-                    .text = "┃",
-                    .style = sidebar_style,
-                }};
-                _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 0 });
-                var middle_seg = [_]vaxis.Cell.Segment{.{
-                    .text = FrameChars.vertical,
-                    .style = sidebar_style,
-                }};
-                _ = try win.print(&middle_seg, .{ .row_offset = current_row, .col_offset = middle_col });
+                try RenderUtils.renderContinuationBorders(win, current_row, middle_col);
             }
 
             // Fill the entire row with dim background first
@@ -428,19 +378,8 @@ pub const SideBySideRenderer = struct {
     ) !usize {
         const base_style = RenderUtils.getLineStyle(app, line.line_type);
         const is_in_visual = app.isLineInVisualSelection(global_line);
-        const style: vaxis.Style = if (is_cursor and app.mode == .visual)
-            // Cursor in visual mode uses visual selection colors
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
-        else if (is_cursor)
-            // Normal cursor
-            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
-        else if (is_in_visual)
-            // Visual selection (non-cursor lines)
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = false }
-        else
-            base_style;
+        const style = RenderUtils.getDisplayStyle(app, is_cursor, is_in_visual, base_style);
 
-        const sidebar_style = .{ .fg = Color.dim };
         const middle_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing + left_width;
         const right_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1; // +1 for middle divider
 
@@ -460,16 +399,7 @@ pub const SideBySideRenderer = struct {
 
                     // Render sidebar and middle divider for continuation rows
                     if (wrap_idx > 0) {
-                        var left_seg = [_]vaxis.Cell.Segment{.{
-                            .text = "┃",
-                            .style = sidebar_style,
-                        }};
-                        _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 0 });
-                        var middle_seg = [_]vaxis.Cell.Segment{.{
-                            .text = FrameChars.vertical,
-                            .style = sidebar_style,
-                        }};
-                        _ = try win.print(&middle_seg, .{ .row_offset = current_row, .col_offset = middle_col });
+                        try RenderUtils.renderContinuationBorders(win, current_row, middle_col);
                     }
 
                     const show_lineno = wrap_idx == 0;
@@ -488,26 +418,15 @@ pub const SideBySideRenderer = struct {
 
                     // Pad context lines only when cursor is on them
                     if (is_cursor and left_chunk.len < left_width) {
-                        const padded_segments = try app.allocator.alloc(vaxis.Cell.Segment, left_segments.len + 1);
+                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, left_segments, left_chunk.len, left_width, style);
                         defer app.allocator.free(padded_segments);
-
-                        @memcpy(padded_segments[0..left_segments.len], left_segments);
-
-                        const padding_len = left_width - left_chunk.len;
-                        const padding = try RenderUtils.frameTextSlice(app, padding_len);
-                        @memset(padding, ' ');
-                        padded_segments[left_segments.len] = .{
-                            .text = padding,
-                            .style = style,
-                        };
-
                         _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
                     } else {
                         _ = try win.print(left_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
                     }
 
                     // Render right side (same content)
-                    try renderGutterAtColumn(app, win, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
+                    try RenderUtils.renderGutterAtColumn(app, win, current_row, right_col, is_cursor, is_in_visual, show_lineno, line.new_lineno, line.line_type, gutter_width);
 
                     const right_start = wrap_idx * right_width;
                     const right_end = @min(right_start + right_width, line.content.len);
@@ -520,19 +439,8 @@ pub const SideBySideRenderer = struct {
 
                     // Pad context lines only when cursor is on them
                     if (is_cursor and right_chunk.len < right_width) {
-                        const padded_segments = try app.allocator.alloc(vaxis.Cell.Segment, right_segments.len + 1);
+                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, right_segments, right_chunk.len, right_width, style);
                         defer app.allocator.free(padded_segments);
-
-                        @memcpy(padded_segments[0..right_segments.len], right_segments);
-
-                        const padding_len = right_width - right_chunk.len;
-                        const padding = try RenderUtils.frameTextSlice(app, padding_len);
-                        @memset(padding, ' ');
-                        padded_segments[right_segments.len] = .{
-                            .text = padding,
-                            .style = style,
-                        };
-
                         _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
                     } else {
                         _ = try win.print(right_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
@@ -554,16 +462,7 @@ pub const SideBySideRenderer = struct {
 
                     // Render sidebar and middle divider for continuation rows
                     if (wrap_idx > 0) {
-                        var left_seg = [_]vaxis.Cell.Segment{.{
-                            .text = "┃",
-                            .style = sidebar_style,
-                        }};
-                        _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 0 });
-                        var middle_seg = [_]vaxis.Cell.Segment{.{
-                            .text = FrameChars.vertical,
-                            .style = sidebar_style,
-                        }};
-                        _ = try win.print(&middle_seg, .{ .row_offset = current_row, .col_offset = middle_col });
+                        try RenderUtils.renderContinuationBorders(win, current_row, middle_col);
                     }
 
                     const show_lineno = wrap_idx == 0;
@@ -583,19 +482,8 @@ pub const SideBySideRenderer = struct {
 
                     // Always pad delete lines to show full-width background
                     if (chunk.len < left_width) {
-                        const padded_segments = try app.allocator.alloc(vaxis.Cell.Segment, segments.len + 1);
+                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, chunk.len, left_width, style);
                         defer app.allocator.free(padded_segments);
-
-                        @memcpy(padded_segments[0..segments.len], segments);
-
-                        const padding_len = left_width - chunk.len;
-                        const padding = try RenderUtils.frameTextSlice(app, padding_len);
-                        @memset(padding, ' ');
-                        padded_segments[segments.len] = .{
-                            .text = padding,
-                            .style = style,
-                        };
-
                         _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
                     } else {
                         _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
@@ -603,7 +491,7 @@ pub const SideBySideRenderer = struct {
 
                     // Right side empty with cursor highlight if needed
                     if (is_cursor) {
-                        try renderGutterAtColumn(app, win, current_row, is_cursor, false, null, right_col, null, gutter_width);
+                        try RenderUtils.renderGutterAtColumn(app, win, current_row, right_col, is_cursor, is_in_visual, false, null, null, gutter_width);
                         const blank = try RenderUtils.frameTextSlice(app, right_width);
                         @memset(blank, ' ');
                         var blank_seg = [_]vaxis.Cell.Segment{.{
@@ -628,16 +516,7 @@ pub const SideBySideRenderer = struct {
 
                     // Render sidebar and middle divider for continuation rows
                     if (wrap_idx > 0) {
-                        var left_seg = [_]vaxis.Cell.Segment{.{
-                            .text = "┃",
-                            .style = sidebar_style,
-                        }};
-                        _ = try win.print(&left_seg, .{ .row_offset = current_row, .col_offset = 0 });
-                        var middle_seg = [_]vaxis.Cell.Segment{.{
-                            .text = FrameChars.vertical,
-                            .style = sidebar_style,
-                        }};
-                        _ = try win.print(&middle_seg, .{ .row_offset = current_row, .col_offset = middle_col });
+                        try RenderUtils.renderContinuationBorders(win, current_row, middle_col);
                     }
 
                     const show_lineno = wrap_idx == 0;
@@ -655,7 +534,7 @@ pub const SideBySideRenderer = struct {
                     }
 
                     // Render right side
-                    try renderGutterAtColumn(app, win, current_row, is_cursor, show_lineno, line.new_lineno, right_col, line.line_type, gutter_width);
+                    try RenderUtils.renderGutterAtColumn(app, win, current_row, right_col, is_cursor, is_in_visual, show_lineno, line.new_lineno, line.line_type, gutter_width);
 
                     const text_start = wrap_idx * right_width;
                     const text_end = @min(text_start + right_width, line.content.len);
@@ -668,19 +547,8 @@ pub const SideBySideRenderer = struct {
 
                     // Always pad add lines to show full-width background
                     if (chunk.len < right_width) {
-                        const padded_segments = try app.allocator.alloc(vaxis.Cell.Segment, segments.len + 1);
+                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, chunk.len, right_width, style);
                         defer app.allocator.free(padded_segments);
-
-                        @memcpy(padded_segments[0..segments.len], segments);
-
-                        const padding_len = right_width - chunk.len;
-                        const padding = try RenderUtils.frameTextSlice(app, padding_len);
-                        @memset(padding, ' ');
-                        padded_segments[segments.len] = .{
-                            .text = padding,
-                            .style = style,
-                        };
-
                         _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
                     } else {
                         _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
@@ -694,139 +562,6 @@ pub const SideBySideRenderer = struct {
         }
     }
 
-    fn renderGutterAtColumn(
-        app: *App,
-        win: vaxis.Window,
-        row: usize,
-        is_cursor: bool,
-        show_number: bool,
-        file_lineno: ?u32,
-        col_offset: usize,
-        line_type: ?parser.Line.LineType,
-        gutter_width: usize,
-    ) !void {
-        const base_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
-        else
-            .{ .fg = Color.dim };
-
-        // Style for empty gutter (applies diff background for wrapped lines)
-        const empty_gutter_style: vaxis.Style = if (line_type) |lt| switch (lt) {
-            .add => if (is_cursor)
-                .{ .fg = Color.dim, .bg = Color.cursor_bg }
-            else
-                .{ .fg = Color.dim, .bg = Color.diff_add_bg },
-            .delete => if (is_cursor)
-                .{ .fg = Color.dim, .bg = Color.cursor_bg }
-            else
-                .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
-            .context => base_style,
-        } else base_style;
-
-        if (show_number) {
-            if (file_lineno) |lineno| {
-                // Show line number and diff sign (GitHub style: number right-justified, sign after)
-                const sign: []const u8 = if (line_type) |lt| switch (lt) {
-                    .add => "+",
-                    .delete => "-",
-                    .context => " ",
-                } else " ";
-
-                // Format number
-                var num_buf: [16]u8 = undefined;
-                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{lineno});
-                const num_width = gutter_width - 1; // Reserve 1 char for sign
-                const padding_needed = num_width -| num_str.len;
-
-                // Build gutter with right-justified number and sign
-                var buf: [32]u8 = undefined;
-                var i: usize = 0;
-                while (i < padding_needed) : (i += 1) {
-                    buf[i] = ' ';
-                }
-                @memcpy(buf[padding_needed .. padding_needed + num_str.len], num_str);
-                const sign_pos = padding_needed + num_str.len;
-                @memcpy(buf[sign_pos .. sign_pos + sign.len], sign);
-
-                const gutter_text = try RenderUtils.copyFrameText(app, buf[0 .. sign_pos + sign.len]);
-
-                // Color the sign and number based on line type (with matching background)
-                const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
-                    .add => if (is_cursor)
-                        .{ .fg = Color.green, .bg = Color.cursor_bg, .bold = true }
-                    else
-                        .{ .fg = Color.green, .bg = Color.diff_add_bg, .bold = true },
-                    .delete => if (is_cursor)
-                        .{ .fg = Color.red, .bg = Color.cursor_bg, .bold = true }
-                    else
-                        .{ .fg = Color.red, .bg = Color.diff_delete_bg, .bold = true },
-                    .context => if (is_cursor)
-                        .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
-                    else
-                        .{ .fg = Color.dim },
-                } else base_style;
-
-                // Apply diff background to number as well for add/delete lines
-                const number_style: vaxis.Style = if (line_type) |lt| switch (lt) {
-                    .add => if (is_cursor)
-                        .{ .fg = Color.dim, .bg = Color.cursor_bg }
-                    else
-                        .{ .fg = Color.dim, .bg = Color.diff_add_bg },
-                    .delete => if (is_cursor)
-                        .{ .fg = Color.dim, .bg = Color.cursor_bg }
-                    else
-                        .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
-                    .context => base_style,
-                } else base_style;
-
-                // Split into number and sign segments for different colors
-                const number_text = gutter_text[0 .. gutter_text.len - 1];
-                const sign_text = gutter_text[gutter_text.len - 1 ..];
-
-                var segments = [_]vaxis.Cell.Segment{
-                    .{ .text = number_text, .style = number_style },
-                    .{ .text = sign_text, .style = sign_style },
-                };
-                _ = try win.print(&segments, .{ .row_offset = row, .col_offset = col_offset });
-            } else {
-                if (is_cursor) {
-                    const spaces_slice = try RenderUtils.frameTextSlice(app, gutter_width);
-                    @memset(spaces_slice, ' ');
-                    var seg = [_]vaxis.Cell.Segment{.{
-                        .text = spaces_slice,
-                        .style = base_style,
-                    }};
-                    _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
-                }
-            }
-        } else {
-            // For wrapped continuation lines, show empty gutter with diff background
-            const spaces_slice = try RenderUtils.frameTextSlice(app, gutter_width);
-            @memset(spaces_slice, ' ');
-            var seg = [_]vaxis.Cell.Segment{.{
-                .text = spaces_slice,
-                .style = empty_gutter_style,
-            }};
-            _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
-        }
-
-        // Render spacing after gutter with appropriate diff background color
-        const spacing_style: vaxis.Style = if (is_cursor)
-            .{ .bg = Color.cursor_bg }
-        else if (line_type) |lt| switch (lt) {
-            .add => .{ .bg = Color.diff_add_bg },
-            .delete => .{ .bg = Color.diff_delete_bg },
-            .context => .{},
-        } else .{};
-
-        const spacing = try RenderUtils.frameTextSlice(app, rendering_common.Layout.gutter_spacing);
-        @memset(spacing, ' ');
-        var spacing_seg = [_]vaxis.Cell.Segment{.{
-            .text = spacing,
-            .style = spacing_style,
-        }};
-        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = col_offset + gutter_width });
-    }
 
     /// Render comment input box in side-by-side mode
     fn renderSideBySideCommentInput(

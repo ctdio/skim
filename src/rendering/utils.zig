@@ -10,6 +10,309 @@ const FrameChars = rendering_common.FrameChars;
 const Layout = rendering_common.Layout;
 
 pub const RenderUtils = struct {
+    // Style calculation utilities
+
+    /// Get style for a line based on cursor, visual selection, and line type
+    pub fn getDisplayStyle(
+        app: *App,
+        is_cursor: bool,
+        is_in_visual: bool,
+        base_style: vaxis.Style,
+    ) vaxis.Style {
+        if (is_cursor and app.mode == .visual) {
+            return .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true };
+        } else if (is_cursor) {
+            return .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true };
+        } else if (is_in_visual) {
+            return .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = false };
+        } else {
+            return base_style;
+        }
+    }
+
+    /// Get fill style for backgrounds (e.g., hunk headers)
+    pub fn getFillStyle(app: *App, is_cursor: bool, is_in_visual: bool) vaxis.Style {
+        if (is_cursor and app.mode == .visual) {
+            return .{ .bg = Color.visual_select_bg };
+        } else if (is_cursor) {
+            return .{ .bg = Color.cursor_bg };
+        } else if (is_in_visual) {
+            return .{ .bg = Color.visual_select_bg };
+        } else {
+            return .{};
+        }
+    }
+
+    /// Get range style for hunk headers (bold text with icons)
+    pub fn getHunkRangeStyle(app: *App, is_cursor: bool, is_in_visual: bool) vaxis.Style {
+        if (is_cursor and app.mode == .visual) {
+            return .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true };
+        } else if (is_cursor) {
+            return .{ .fg = Color.white, .bg = Color.cursor_bg, .bold = true };
+        } else if (is_in_visual) {
+            return .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true };
+        } else {
+            return .{ .fg = Color.dim };
+        }
+    }
+
+    /// Get context style for hunk headers (dimmer text)
+    pub fn getHunkContextStyle(app: *App, is_cursor: bool, is_in_visual: bool) vaxis.Style {
+        if (is_cursor and app.mode == .visual) {
+            return .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg };
+        } else if (is_cursor) {
+            return .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg };
+        } else if (is_in_visual) {
+            return .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg };
+        } else {
+            return .{ .fg = Color.dim };
+        }
+    }
+
+    // Segment manipulation utilities
+
+    /// Pad segments to full width with trailing spaces
+    pub fn padSegments(
+        app: *App,
+        allocator: std.mem.Allocator,
+        segments: []const vaxis.Cell.Segment,
+        current_width: usize,
+        target_width: usize,
+        style: vaxis.Style,
+    ) ![]vaxis.Cell.Segment {
+        if (current_width >= target_width) return try allocator.dupe(vaxis.Cell.Segment, segments);
+
+        const padded = try allocator.alloc(vaxis.Cell.Segment, segments.len + 1);
+        @memcpy(padded[0..segments.len], segments);
+
+        const padding_len = target_width - current_width;
+        const padding = try frameTextSlice(app, padding_len);
+        @memset(padding, ' ');
+        padded[segments.len] = .{
+            .text = padding,
+            .style = style,
+        };
+
+        return padded;
+    }
+
+    // Border rendering utilities
+
+    /// Render sidebar border
+    pub fn renderSidebar(win: vaxis.Window, row: usize) !void {
+        const sidebar_style = .{ .fg = Color.dim };
+        var sidebar_seg = [_]vaxis.Cell.Segment{.{
+            .text = "┃",
+            .style = sidebar_style,
+        }};
+        _ = try win.print(&sidebar_seg, .{ .row_offset = row, .col_offset = 0 });
+    }
+
+    /// Render middle divider for side-by-side view
+    pub fn renderMiddleDivider(win: vaxis.Window, row: usize, col: usize) !void {
+        const divider_style = .{ .fg = Color.dim };
+        var divider_seg = [_]vaxis.Cell.Segment{.{
+            .text = FrameChars.vertical,
+            .style = divider_style,
+        }};
+        _ = try win.print(&divider_seg, .{ .row_offset = row, .col_offset = col });
+    }
+
+    /// Render continuation row borders (sidebar + optional middle divider)
+    pub fn renderContinuationBorders(
+        win: vaxis.Window,
+        row: usize,
+        middle_col: ?usize,
+    ) !void {
+        try renderSidebar(win, row);
+        if (middle_col) |col| {
+            try renderMiddleDivider(win, row, col);
+        }
+    }
+
+    // Hunk header utilities
+
+    /// Build hunk header text
+    pub fn buildHunkHeaderText(hunk: parser.Hunk, buf: []u8) ![]const u8 {
+        const old_end = hunk.header.old_start + hunk.header.old_count -| 1;
+        const new_end = hunk.header.new_start + hunk.header.new_count -| 1;
+
+        return try std.fmt.bufPrint(
+            buf,
+            "↕ {d}-{d} → {d}-{d}  {s}",
+            .{
+                hunk.header.old_start,
+                old_end,
+                hunk.header.new_start,
+                new_end,
+                hunk.header.context,
+            },
+        );
+    }
+
+    /// Find where the context starts in the hunk header text
+    pub fn findHunkHeaderRangeEnd(header_text: []const u8) usize {
+        const range_end_marker = "  ";
+        const range_end_pos = std.mem.indexOf(u8, header_text, range_end_marker);
+        return if (range_end_pos) |pos| pos + range_end_marker.len else header_text.len;
+    }
+
+    // Gutter rendering with column offset
+
+    /// Render gutter at a specific column (for side-by-side view)
+    pub fn renderGutterAtColumn(
+        app: *App,
+        win: vaxis.Window,
+        row: usize,
+        col_offset: usize,
+        is_cursor: bool,
+        is_in_visual: bool,
+        show_number: bool,
+        file_lineno: ?u32,
+        line_type: ?parser.Line.LineType,
+        gutter_width: usize,
+    ) !void {
+        const base_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
+        else if (is_in_visual)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
+        else
+            .{ .fg = Color.dim };
+
+        // Style for empty gutter (applies diff background for wrapped lines)
+        const empty_gutter_style: vaxis.Style = if (line_type) |lt| switch (lt) {
+            .add => if (is_cursor)
+                .{ .fg = Color.dim, .bg = Color.cursor_bg }
+            else if (is_in_visual)
+                .{ .fg = Color.dim, .bg = Color.visual_select_bg }
+            else
+                .{ .fg = Color.dim, .bg = Color.diff_add_bg },
+            .delete => if (is_cursor)
+                .{ .fg = Color.dim, .bg = Color.cursor_bg }
+            else if (is_in_visual)
+                .{ .fg = Color.dim, .bg = Color.visual_select_bg }
+            else
+                .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
+            .context => base_style,
+        } else base_style;
+
+        if (show_number) {
+            if (file_lineno) |lineno| {
+                // Show line number and diff sign (GitHub style: number right-justified, sign after)
+                const sign: []const u8 = if (line_type) |lt| switch (lt) {
+                    .add => "+",
+                    .delete => "-",
+                    .context => " ",
+                } else " ";
+
+                // Format number
+                var num_buf: [16]u8 = undefined;
+                const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{lineno});
+                const num_width = gutter_width - 1; // Reserve 1 char for sign
+                const padding_needed = num_width -| num_str.len;
+
+                // Build gutter with right-justified number and sign
+                var buf: [32]u8 = undefined;
+                var i: usize = 0;
+                while (i < padding_needed) : (i += 1) {
+                    buf[i] = ' ';
+                }
+                @memcpy(buf[padding_needed .. padding_needed + num_str.len], num_str);
+                const sign_pos = padding_needed + num_str.len;
+                @memcpy(buf[sign_pos .. sign_pos + sign.len], sign);
+
+                const gutter_text = try copyFrameText(app, buf[0 .. sign_pos + sign.len]);
+
+                // Color the sign and number based on line type (with matching background)
+                const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
+                    .add => if (is_cursor)
+                        .{ .fg = Color.green, .bg = Color.cursor_bg, .bold = true }
+                    else if (is_in_visual)
+                        .{ .fg = Color.green, .bg = Color.visual_select_bg, .bold = true }
+                    else
+                        .{ .fg = Color.green, .bg = Color.diff_add_bg, .bold = true },
+                    .delete => if (is_cursor)
+                        .{ .fg = Color.red, .bg = Color.cursor_bg, .bold = true }
+                    else if (is_in_visual)
+                        .{ .fg = Color.red, .bg = Color.visual_select_bg, .bold = true }
+                    else
+                        .{ .fg = Color.red, .bg = Color.diff_delete_bg, .bold = true },
+                    .context => if (is_cursor)
+                        .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
+                    else if (is_in_visual)
+                        .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
+                    else
+                        .{ .fg = Color.dim },
+                } else base_style;
+
+                // Apply diff background to number as well for add/delete lines
+                const number_style: vaxis.Style = if (line_type) |lt| switch (lt) {
+                    .add => if (is_cursor)
+                        .{ .fg = Color.dim, .bg = Color.cursor_bg }
+                    else if (is_in_visual)
+                        .{ .fg = Color.dim, .bg = Color.visual_select_bg }
+                    else
+                        .{ .fg = Color.dim, .bg = Color.diff_add_bg },
+                    .delete => if (is_cursor)
+                        .{ .fg = Color.dim, .bg = Color.cursor_bg }
+                    else if (is_in_visual)
+                        .{ .fg = Color.dim, .bg = Color.visual_select_bg }
+                    else
+                        .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
+                    .context => base_style,
+                } else base_style;
+
+                // Split into number and sign segments for different colors
+                const number_text = gutter_text[0 .. gutter_text.len - 1];
+                const sign_text = gutter_text[gutter_text.len - 1 ..];
+
+                var segments = [_]vaxis.Cell.Segment{
+                    .{ .text = number_text, .style = number_style },
+                    .{ .text = sign_text, .style = sign_style },
+                };
+                _ = try win.print(&segments, .{ .row_offset = row, .col_offset = col_offset });
+            } else {
+                if (is_cursor or is_in_visual) {
+                    const spaces_slice = try frameTextSlice(app, gutter_width);
+                    @memset(spaces_slice, ' ');
+                    var seg = [_]vaxis.Cell.Segment{.{
+                        .text = spaces_slice,
+                        .style = base_style,
+                    }};
+                    _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
+                }
+            }
+        } else {
+            // For wrapped continuation lines, show empty gutter with diff background
+            const spaces_slice = try frameTextSlice(app, gutter_width);
+            @memset(spaces_slice, ' ');
+            var seg = [_]vaxis.Cell.Segment{.{
+                .text = spaces_slice,
+                .style = empty_gutter_style,
+            }};
+            _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
+        }
+
+        // Render spacing after gutter with appropriate diff background color
+        const spacing_style: vaxis.Style = if (is_cursor)
+            .{ .bg = Color.cursor_bg }
+        else if (is_in_visual)
+            .{ .bg = Color.visual_select_bg }
+        else if (line_type) |lt| switch (lt) {
+            .add => .{ .bg = Color.diff_add_bg },
+            .delete => .{ .bg = Color.diff_delete_bg },
+            .context => .{},
+        } else .{};
+
+        const spacing = try frameTextSlice(app, rendering_common.Layout.gutter_spacing);
+        @memset(spacing, ' ');
+        var spacing_seg = [_]vaxis.Cell.Segment{.{
+            .text = spacing,
+            .style = spacing_style,
+        }};
+        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = col_offset + gutter_width });
+    }
+
     // Frame buffer management
     pub fn resetFrameTextBuffer(app: *App) void {
         app.frame_text_used = 0;

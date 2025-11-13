@@ -166,60 +166,20 @@ pub const UnifiedRenderer = struct {
         is_cursor: bool,
         is_in_visual: bool,
     ) !usize {
-
-        // Build header text: range and context
+        // Build header text using shared utility
         var buf: [256]u8 = undefined;
-        const old_end = hunk.header.old_start + hunk.header.old_count -| 1;
-        const new_end = hunk.header.new_start + hunk.header.new_count -| 1;
-
-        const header_text = try std.fmt.bufPrint(
-            &buf,
-            "↕ {d}-{d} → {d}-{d}  {s}",
-            .{
-                hunk.header.old_start,
-                old_end,
-                hunk.header.new_start,
-                new_end,
-                hunk.header.context,
-            },
-        );
+        const header_text = try RenderUtils.buildHunkHeaderText(hunk, &buf);
 
         // Calculate number of rows needed for wrapping
         const num_rows = if (header_text.len == 0) 1 else (header_text.len + content_width - 1) / content_width;
 
         const content_start = 1 + gutter_width + Layout.gutter_spacing;
-        const fill_style: vaxis.Style = if (is_cursor and app.mode == .visual)
-            .{ .bg = Color.visual_select_bg }
-        else if (is_cursor)
-            .{ .bg = Color.cursor_bg }
-        else if (is_in_visual)
-            .{ .bg = Color.visual_select_bg }
-        else
-            .{};
 
-        // Find where context starts (after the range info and spacing)
-        const range_end_marker = "  ";
-        const range_end_pos = std.mem.indexOf(u8, header_text, range_end_marker);
-        const range_len = if (range_end_pos) |pos| pos + range_end_marker.len else header_text.len;
-
-        // Styles
-        const range_style: vaxis.Style = if (is_cursor and app.mode == .visual)
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
-        else if (is_cursor)
-            .{ .fg = Color.white, .bg = Color.cursor_bg, .bold = true }
-        else if (is_in_visual)
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
-        else
-            .{ .fg = Color.dim };
-
-        const context_style: vaxis.Style = if (is_cursor and app.mode == .visual)
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
-        else if (is_cursor)
-            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg }
-        else if (is_in_visual)
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
-        else
-            .{ .fg = Color.dim };
+        // Get styles using shared utilities
+        const fill_style = RenderUtils.getFillStyle(app, is_cursor, is_in_visual);
+        const range_len = RenderUtils.findHunkHeaderRangeEnd(header_text);
+        const range_style = RenderUtils.getHunkRangeStyle(app, is_cursor, is_in_visual);
+        const context_style = RenderUtils.getHunkContextStyle(app, is_cursor, is_in_visual);
 
         // Render each wrapped row
         var current_row = row;
@@ -228,12 +188,7 @@ pub const UnifiedRenderer = struct {
 
             // Render sidebar for continuation rows (first row already has sidebar from main loop)
             if (wrap_idx > 0) {
-                const sidebar_style = .{ .fg = Color.dim };
-                var sidebar_seg = [_]vaxis.Cell.Segment{.{
-                    .text = "┃",
-                    .style = sidebar_style,
-                }};
-                _ = try win.print(&sidebar_seg, .{ .row_offset = current_row, .col_offset = 0 });
+                try RenderUtils.renderContinuationBorders(win, current_row, null);
             }
 
             // Fill the entire row with dim background first
@@ -331,17 +286,7 @@ pub const UnifiedRenderer = struct {
     ) !usize {
         const base_style = RenderUtils.getLineStyle(app, line.line_type);
         const is_in_visual = app.isLineInVisualSelection(global_line);
-        const style: vaxis.Style = if (is_cursor and app.mode == .visual)
-            // Cursor in visual mode uses visual selection colors
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
-        else if (is_cursor)
-            // Normal cursor
-            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
-        else if (is_in_visual)
-            // Visual selection (non-cursor lines)
-            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = false }
-        else
-            base_style;
+        const style = RenderUtils.getDisplayStyle(app, is_cursor, is_in_visual, base_style);
 
         // Use actual file line number from the diff
         // For deletions, show old line number; for additions and context, show new line number
@@ -416,12 +361,7 @@ pub const UnifiedRenderer = struct {
 
             // Render sidebar for continuation rows (first row already has sidebar from main loop)
             if (rows_rendered > 0) {
-                const sidebar_style = .{ .fg = Color.dim };
-                var sidebar_seg = [_]vaxis.Cell.Segment{.{
-                    .text = "┃",
-                    .style = sidebar_style,
-                }};
-                _ = try win.print(&sidebar_seg, .{ .row_offset = current_row, .col_offset = 0 });
+                try RenderUtils.renderContinuationBorders(win, current_row, null);
             }
 
             // Only show line number on first row
@@ -441,21 +381,8 @@ pub const UnifiedRenderer = struct {
             // Pad segments to full width for cursor, visual selection, or diff lines (add/delete)
             const should_pad = is_cursor or is_in_visual or (line_type != null and line_type.? != .context);
             if (should_pad and chunk.len < content_width) {
-                // Create a new segments array with padding
-                const padded_segments = try app.allocator.alloc(vaxis.Cell.Segment, segments.len + 1);
+                const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, chunk.len, content_width, style);
                 defer app.allocator.free(padded_segments);
-
-                @memcpy(padded_segments[0..segments.len], segments);
-
-                // Add padding segment
-                const padding_len = content_width - chunk.len;
-                const padding = try RenderUtils.frameTextSlice(app, padding_len);
-                @memset(padding, ' ');
-                padded_segments[segments.len] = .{
-                    .text = padding,
-                    .style = style,
-                };
-
                 _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = Layout.sidebar_width + gutter_width + Layout.gutter_spacing });
             } else {
                 _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = Layout.sidebar_width + gutter_width + Layout.gutter_spacing });
