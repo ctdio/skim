@@ -101,6 +101,7 @@ pub const App = struct {
         normal, // Normal navigation and viewing
         comment, // Comment editing
         search, // Search input
+        visual, // Visual selection mode
     };
 
     const State = struct {
@@ -118,6 +119,7 @@ pub const App = struct {
         comment_store: comments.CommentStore,
         active_comment_input: ?ActiveCommentInput,
         search_state: SearchState,
+        visual_anchor: ?usize, // Visual mode: anchor line (where selection started)
 
         const ViewMode = enum {
             unified,
@@ -232,6 +234,7 @@ pub const App = struct {
                 .comment_store = comment_store,
                 .active_comment_input = null,
                 .search_state = SearchState.init(allocator),
+                .visual_anchor = null,
             },
             .should_quit = false,
             .should_suspend_for_editor = false,
@@ -491,8 +494,16 @@ pub const App = struct {
     }
 
     fn handleKey(self: *App, key: vaxis.Key) !void {
-        // Handle Ctrl-C for double-press exit
+        // Handle Ctrl-C for double-press exit (or single press in visual mode)
         if (key.mods.ctrl and key.codepoint == 'c') {
+            // In visual mode, single Ctrl-C exits visual mode
+            if (self.mode == .visual) {
+                self.mode = .normal;
+                self.state.visual_anchor = null;
+                return;
+            }
+
+            // In other modes, double-press to quit
             const now: i64 = @intCast(std.time.nanoTimestamp());
             if (now - self.last_ctrl_c < App.CTRL_C_TIMEOUT_NS) {
                 self.should_quit = true;
@@ -509,6 +520,7 @@ pub const App = struct {
             .normal => try self.handleNormalMode(key),
             .comment => try self.handleCommentMode(key),
             .search => try self.handleSearchMode(key),
+            .visual => try self.handleVisualMode(key),
         }
     }
 
@@ -562,6 +574,7 @@ pub const App = struct {
             '/' => self.startSearch(),
             'n' => self.searchNext(),
             'N' => self.searchPrevious(),
+            'v' => self.startVisualMode(),
             else => {
                 // Reset count prefix on any other key
                 self.state.count_prefix = null;
@@ -1087,6 +1100,151 @@ pub const App = struct {
             self.state.global_cursor_line = line;
             Navigation.ensureCursorVisible(self, false); // no padding for search jumps
         }
+    }
+
+    // Visual mode functions
+    fn startVisualMode(self: *App) void {
+        self.state.visual_anchor = self.state.global_cursor_line;
+        self.mode = .visual;
+    }
+
+    fn handleVisualMode(self: *App, key: vaxis.Key) !void {
+        // Handle Ctrl+key combinations
+        if (key.mods.ctrl) {
+            switch (key.codepoint) {
+                'n' => Navigation.navigateToNextFile(self),
+                'p' => Navigation.navigateToPreviousFile(self),
+                'd' => Navigation.pageDown(self),
+                'u' => Navigation.pageUp(self),
+                else => {},
+            }
+            return;
+        }
+
+        switch (key.codepoint) {
+            27 => { // ESC - exit visual mode
+                self.mode = .normal;
+                self.state.visual_anchor = null;
+            },
+            'v' => { // v again - exit visual mode (toggle)
+                self.mode = .normal;
+                self.state.visual_anchor = null;
+            },
+            'j' => Navigation.moveCursorDown(self),
+            'k' => Navigation.moveCursorUp(self),
+            'h' => Navigation.navigateToPreviousFile(self),
+            'l' => Navigation.navigateToNextFile(self),
+            'g' => Navigation.scrollToTop(self),
+            'G' => Navigation.scrollToBottom(self),
+            'M' => Navigation.centerCursor(self),
+            'y' => {
+                try self.yankVisualSelection();
+                // Exit visual mode after yanking
+                self.mode = .normal;
+                self.state.visual_anchor = null;
+            },
+            else => {},
+        }
+    }
+
+    // Get the visual selection range (start_line, end_line) inclusive
+    fn getVisualSelection(self: *App) ?struct { start: usize, end: usize } {
+        const anchor = self.state.visual_anchor orelse return null;
+        const cursor = self.state.global_cursor_line;
+
+        const start = @min(anchor, cursor);
+        const end = @max(anchor, cursor);
+
+        return .{ .start = start, .end = end };
+    }
+
+    // Check if a line is in the visual selection
+    pub fn isLineInVisualSelection(self: *App, global_line: usize) bool {
+        if (self.mode != .visual) return false;
+
+        const selection = self.getVisualSelection() orelse return false;
+        return global_line >= selection.start and global_line <= selection.end;
+    }
+
+    fn yankVisualSelection(self: *App) !void {
+        const selection = self.getVisualSelection() orelse return;
+
+        // Build text from selected lines
+        var buffer = std.ArrayList(u8).init(self.allocator);
+        defer buffer.deinit();
+
+        var line_idx = selection.start;
+        while (line_idx <= selection.end) : (line_idx += 1) {
+            const record = self.state.line_map.getLineRecord(line_idx) orelse continue;
+
+            if (record.file_idx >= self.state.files.len) continue;
+            const file = &self.state.files[record.file_idx];
+
+            // Add line content based on type
+            switch (record.line_type) {
+                .file_header => {
+                    const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+                    try buffer.appendSlice("File: ");
+                    try buffer.appendSlice(file_path);
+                    try buffer.append('\n');
+                },
+                .hunk_header => |hunk_info| {
+                    const hunk = &file.hunks[hunk_info.hunk_idx];
+                    try buffer.appendSlice("@@ -");
+                    var num_buf: [32]u8 = undefined;
+                    const old_start_str = try std.fmt.bufPrint(&num_buf, "{d}", .{hunk.header.old_start});
+                    try buffer.appendSlice(old_start_str);
+                    try buffer.append(',');
+                    const old_count_str = try std.fmt.bufPrint(&num_buf, "{d}", .{hunk.header.old_count});
+                    try buffer.appendSlice(old_count_str);
+                    try buffer.appendSlice(" +");
+                    const new_start_str = try std.fmt.bufPrint(&num_buf, "{d}", .{hunk.header.new_start});
+                    try buffer.appendSlice(new_start_str);
+                    try buffer.append(',');
+                    const new_count_str = try std.fmt.bufPrint(&num_buf, "{d}", .{hunk.header.new_count});
+                    try buffer.appendSlice(new_count_str);
+                    try buffer.appendSlice(" @@\n");
+                },
+                .code_line => |code| {
+                    const line = &file.hunks[code.hunk_idx].lines[code.line_idx_in_hunk];
+                    // Add line type prefix
+                    switch (line.line_type) {
+                        .add => try buffer.append('+'),
+                        .delete => try buffer.append('-'),
+                        .context => try buffer.append(' '),
+                    }
+                    try buffer.appendSlice(line.content);
+                    try buffer.append('\n');
+                },
+                .comment_line => |comment_info| {
+                    if (self.state.comment_store.getComment(comment_info.comment_idx)) |comment| {
+                        try buffer.appendSlice("Comment: ");
+                        try buffer.appendSlice(comment.text);
+                        try buffer.append('\n');
+                    }
+                },
+                .spacer => {
+                    // Skip spacer lines
+                },
+            }
+        }
+
+        // Copy to clipboard using pbcopy on macOS
+        const argv = [_][]const u8{"pbcopy"};
+        var child = std.process.Child.init(&argv, self.allocator);
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+
+        try child.spawn();
+
+        if (child.stdin) |stdin| {
+            try stdin.writeAll(buffer.items);
+            stdin.close();
+            child.stdin = null;
+        }
+
+        _ = try child.wait();
     }
 
     fn render(self: *App, win: vaxis.Window) !void {

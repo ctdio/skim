@@ -140,6 +140,7 @@ pub const UI = struct {
             .normal => "-- NORMAL --",
             .comment => "-- COMMENT --",
             .search => "-- SEARCH --",
+            .visual => "-- VISUAL --",
         };
 
         const view_str = switch (app.state.view_mode) {
@@ -160,37 +161,38 @@ pub const UI = struct {
 
                         switch (rec.line_type) {
                             .file_header => {
-                                break :blk "h/l:File  j/k:Line  /:Search  g/G:Top/Bottom  q:Quit";
+                                break :blk "h/l:File  j/k:Line  v:Visual  /:Search  g/G:Top/Bottom  q:Quit";
                             },
                             .comment_line => {
                                 // Cursor is on a comment - show edit/delete options prominently
-                                break :blk "Enter:Edit Comment  d:Delete Comment  /:Search  h/l:File  q:Quit";
+                                break :blk "Enter:Edit Comment  d:Delete Comment  v:Visual  /:Search  h/l:File  q:Quit";
                             },
                             .code_line => |code| {
                                 // Check if this code line has a comment
                                 if (app.state.comment_store.hasCommentAt(file_path, code.hunk_idx, code.line_idx_in_hunk)) {
                                     // Code line with comment - show edit option
-                                    break :blk "Enter:Edit Comment  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
+                                    break :blk "Enter:Edit Comment  v:Visual  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
                                 } else {
                                     // Code line without comment - show add option
-                                    break :blk "Enter:Add Comment  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
+                                    break :blk "Enter:Add Comment  v:Visual  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
                                 }
                             },
                             .hunk_header => {
                                 // On hunk header - show navigation
-                                break :blk "h/l:File  j/k:Line  /:Search  g/G:Top/Bottom  Ctrl-g:Editor  q:Quit";
+                                break :blk "h/l:File  j/k:Line  v:Visual  /:Search  g/G:Top/Bottom  Ctrl-g:Editor  q:Quit";
                             },
                             .spacer => {
-                                break :blk "h/l:File  j/k:Line  /:Search  g/G:Top/Bottom  q:Quit";
+                                break :blk "h/l:File  j/k:Line  v:Visual  /:Search  g/G:Top/Bottom  q:Quit";
                             },
                         }
                     }
                 }
                 // Default keybindings
-                break :blk "h/l:File  j/k:Line  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
+                break :blk "h/l:File  j/k:Line  v:Visual  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
             },
             .comment => "Enter:Save  Shift+Enter:Newline  ESC:Cancel",
             .search => "Enter:Search  ESC:Cancel  (Smart case: lowercase=ignore case, uppercase=exact)",
+            .visual => "j/k:Move  y:Yank  v/ESC/Ctrl-C:Exit Visual",
         };
 
         // Get global position info

@@ -77,7 +77,8 @@ pub const SideBySideRenderer = struct {
                 },
                 .hunk_header => |hunk_info| {
                     const hunk = &file.hunks[hunk_info.hunk_idx];
-                    const rows_used = try renderHunkHeader(app, win, hunk.*, row, left_content_width, right_content_width, gutter_width, is_cursor);
+                    const is_in_visual = app.isLineInVisualSelection(global_line);
+                    const rows_used = try renderHunkHeader(app, win, hunk.*, row, left_content_width, right_content_width, gutter_width, is_cursor, is_in_visual);
                     row += rows_used;
                 },
                 .code_line => |code_info| {
@@ -202,6 +203,7 @@ pub const SideBySideRenderer = struct {
         right_width: usize,
         gutter_width: usize,
         is_cursor: bool,
+        is_in_visual: bool,
     ) !usize {
         _ = right_width; // Same text on both sides, so right_width not needed
 
@@ -225,8 +227,12 @@ pub const SideBySideRenderer = struct {
         // Calculate number of rows needed for wrapping (based on left width)
         const num_rows = if (header_text.len == 0) 1 else (header_text.len + left_width - 1) / left_width;
 
-        const fill_style: vaxis.Style = if (is_cursor)
+        const fill_style: vaxis.Style = if (is_cursor and app.mode == .visual)
+            .{ .bg = Color.visual_select_bg }
+        else if (is_cursor)
             .{ .bg = Color.cursor_bg }
+        else if (is_in_visual)
+            .{ .bg = Color.visual_select_bg }
         else
             .{ .bg = Color.dim };
 
@@ -236,13 +242,21 @@ pub const SideBySideRenderer = struct {
         const range_len = if (range_end_pos) |pos| pos + range_end_marker.len else header_text.len;
 
         // Styles
-        const range_style: vaxis.Style = if (is_cursor)
+        const range_style: vaxis.Style = if (is_cursor and app.mode == .visual)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
+        else if (is_cursor)
             .{ .fg = Color.white, .bg = Color.cursor_bg, .bold = true }
+        else if (is_in_visual)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
         else
             .{ .fg = Color.white, .bg = Color.dim, .bold = true };
 
-        const context_style: vaxis.Style = if (is_cursor)
+        const context_style: vaxis.Style = if (is_cursor and app.mode == .visual)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
+        else if (is_cursor)
             .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg }
+        else if (is_in_visual)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
         else
             .{ .fg = Color.white, .bg = Color.dim };
 
@@ -462,8 +476,16 @@ pub const SideBySideRenderer = struct {
         is_cursor: bool,
     ) !usize {
         const base_style = RenderUtils.getLineStyle(app, line.line_type);
-        const style: vaxis.Style = if (is_cursor)
+        const is_in_visual = app.isLineInVisualSelection(global_line);
+        const style: vaxis.Style = if (is_cursor and app.mode == .visual)
+            // Cursor in visual mode uses visual selection colors
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
+        else if (is_cursor)
+            // Normal cursor
             .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
+        else if (is_in_visual)
+            // Visual selection (non-cursor lines)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = false }
         else
             base_style;
 

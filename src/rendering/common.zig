@@ -40,6 +40,10 @@ pub const Color = struct {
     // Search highlight - bright yellow background for visibility
     pub const search_match_bg = .{ .rgb = [3]u8{ 180, 150, 0 } }; // Bright yellow-orange #b49600
     pub const search_match_fg = .{ .rgb = [3]u8{ 0, 0, 0 } }; // Black text for contrast
+
+    // Visual selection - blue background like vim
+    pub const visual_select_bg = .{ .rgb = [3]u8{ 50, 70, 100 } }; // Dark blue #324664
+    pub const visual_select_fg = .{ .rgb = [3]u8{ 255, 255, 255 } }; // White text
 };
 
 // Layout constants

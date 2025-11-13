@@ -68,7 +68,7 @@ pub const RenderUtils = struct {
         win: vaxis.Window,
         line_idx: usize,
         row: usize,
-        is_cursor: bool,
+        is_cursor_or_visual: bool,
         show_number: bool,
         file_lineno: ?u32,
         line_type: ?parser.Line.LineType,
@@ -76,18 +76,28 @@ pub const RenderUtils = struct {
     ) !void {
         _ = line_idx; // No longer used, but kept for API compatibility
 
-        const base_style: vaxis.Style = if (is_cursor)
+        // Check if we're in visual mode to use visual colors
+        const is_visual = app.mode == .visual and is_cursor_or_visual;
+        const is_cursor = !is_visual and is_cursor_or_visual;
+
+        const base_style: vaxis.Style = if (is_visual)
+            .{ .fg = Color.white, .bg = Color.visual_select_bg }
+        else if (is_cursor)
             .{ .fg = Color.white, .bg = Color.dim }
         else
             .{ .fg = Color.dim };
 
         // Style for empty gutter (applies diff background for wrapped lines)
         const empty_gutter_style: vaxis.Style = if (line_type) |lt| switch (lt) {
-            .add => if (is_cursor)
+            .add => if (is_visual)
+                .{ .fg = Color.dim, .bg = Color.visual_select_bg }
+            else if (is_cursor)
                 .{ .fg = Color.dim, .bg = Color.cursor_bg }
             else
                 .{ .fg = Color.dim, .bg = Color.diff_add_bg },
-            .delete => if (is_cursor)
+            .delete => if (is_visual)
+                .{ .fg = Color.dim, .bg = Color.visual_select_bg }
+            else if (is_cursor)
                 .{ .fg = Color.dim, .bg = Color.cursor_bg }
             else
                 .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
@@ -123,15 +133,21 @@ pub const RenderUtils = struct {
 
                 // Color the sign and number based on line type (with matching background)
                 const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
-                    .add => if (is_cursor)
+                    .add => if (is_visual)
+                        .{ .fg = Color.diff_sign_add, .bg = Color.visual_select_bg, .bold = true }
+                    else if (is_cursor)
                         .{ .fg = Color.diff_sign_add, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.diff_sign_add, .bg = Color.diff_add_bg, .bold = true },
-                    .delete => if (is_cursor)
+                    .delete => if (is_visual)
+                        .{ .fg = Color.diff_sign_delete, .bg = Color.visual_select_bg, .bold = true }
+                    else if (is_cursor)
                         .{ .fg = Color.diff_sign_delete, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.diff_sign_delete, .bg = Color.diff_delete_bg, .bold = true },
-                    .context => if (is_cursor)
+                    .context => if (is_visual)
+                        .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
+                    else if (is_cursor)
                         .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.dim },
@@ -139,11 +155,15 @@ pub const RenderUtils = struct {
 
                 // Apply diff background to number as well for add/delete lines
                 const number_style: vaxis.Style = if (line_type) |lt| switch (lt) {
-                    .add => if (is_cursor)
+                    .add => if (is_visual)
+                        .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
+                    else if (is_cursor)
                         .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.diff_sign_add, .bg = Color.diff_add_bg },
-                    .delete => if (is_cursor)
+                    .delete => if (is_visual)
+                        .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
+                    else if (is_cursor)
                         .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else
                         .{ .fg = Color.diff_sign_delete, .bg = Color.diff_delete_bg },
@@ -181,7 +201,9 @@ pub const RenderUtils = struct {
         }
 
         // Render spacing after gutter with appropriate diff background color
-        const spacing_style: vaxis.Style = if (is_cursor)
+        const spacing_style: vaxis.Style = if (is_visual)
+            .{ .bg = Color.visual_select_bg }
+        else if (is_cursor)
             .{ .bg = Color.cursor_bg }
         else if (line_type) |lt| switch (lt) {
             .add => .{ .bg = Color.diff_add_bg },

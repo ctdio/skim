@@ -60,7 +60,8 @@ pub const UnifiedRenderer = struct {
                 },
                 .hunk_header => |hunk_info| {
                     const hunk = &file.hunks[hunk_info.hunk_idx];
-                    const rows_used = try renderHunkHeader(app, win, hunk.*, global_line, row, content_width, gutter_width, is_cursor);
+                    const is_in_visual = app.isLineInVisualSelection(global_line);
+                    const rows_used = try renderHunkHeader(app, win, hunk.*, global_line, row, content_width, gutter_width, is_cursor, is_in_visual);
                     row += rows_used;
                 },
                 .code_line => |code_info| {
@@ -161,6 +162,7 @@ pub const UnifiedRenderer = struct {
         content_width: usize,
         gutter_width: usize,
         is_cursor: bool,
+        is_in_visual: bool,
     ) !usize {
 
         // Build header text: range and context
@@ -184,8 +186,12 @@ pub const UnifiedRenderer = struct {
         const num_rows = if (header_text.len == 0) 1 else (header_text.len + content_width - 1) / content_width;
 
         const content_start = 1 + gutter_width + Layout.gutter_spacing;
-        const fill_style: vaxis.Style = if (is_cursor)
+        const fill_style: vaxis.Style = if (is_cursor and app.mode == .visual)
+            .{ .bg = Color.visual_select_bg }
+        else if (is_cursor)
             .{ .bg = Color.cursor_bg }
+        else if (is_in_visual)
+            .{ .bg = Color.visual_select_bg }
         else
             .{ .bg = Color.dim };
 
@@ -195,13 +201,21 @@ pub const UnifiedRenderer = struct {
         const range_len = if (range_end_pos) |pos| pos + range_end_marker.len else header_text.len;
 
         // Styles
-        const range_style: vaxis.Style = if (is_cursor)
+        const range_style: vaxis.Style = if (is_cursor and app.mode == .visual)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
+        else if (is_cursor)
             .{ .fg = Color.white, .bg = Color.cursor_bg, .bold = true }
+        else if (is_in_visual)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
         else
             .{ .fg = Color.white, .bg = Color.dim, .bold = true };
 
-        const context_style: vaxis.Style = if (is_cursor)
+        const context_style: vaxis.Style = if (is_cursor and app.mode == .visual)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
+        else if (is_cursor)
             .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg }
+        else if (is_in_visual)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
         else
             .{ .fg = Color.white, .bg = Color.dim };
 
@@ -342,8 +356,16 @@ pub const UnifiedRenderer = struct {
         is_cursor: bool,
     ) !usize {
         const base_style = RenderUtils.getLineStyle(app, line.line_type);
-        const style: vaxis.Style = if (is_cursor)
+        const is_in_visual = app.isLineInVisualSelection(global_line);
+        const style: vaxis.Style = if (is_cursor and app.mode == .visual)
+            // Cursor in visual mode uses visual selection colors
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
+        else if (is_cursor)
+            // Normal cursor
             .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
+        else if (is_in_visual)
+            // Visual selection (non-cursor lines)
+            .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = false }
         else
             base_style;
 
@@ -367,6 +389,7 @@ pub const UnifiedRenderer = struct {
             row,
             content_width,
             is_cursor,
+            is_in_visual,
             style,
             file_lineno,
             line.line_type,
@@ -384,6 +407,7 @@ pub const UnifiedRenderer = struct {
         start_row: usize,
         content_width: usize,
         is_cursor: bool,
+        is_in_visual: bool,
         style: vaxis.Style,
         file_lineno: ?u32,
         line_type: ?parser.Line.LineType,
@@ -394,9 +418,9 @@ pub const UnifiedRenderer = struct {
 
         // Handle empty lines explicitly
         if (text.len == 0) {
-            try RenderUtils.renderGutter(app, win, 0, start_row, is_cursor, true, file_lineno, line_type, gutter_width);
-            // Pad empty lines for cursor or diff lines (add/delete)
-            const should_pad = is_cursor or (line_type != null and line_type.? != .context);
+            try RenderUtils.renderGutter(app, win, 0, start_row, is_cursor or is_in_visual, true, file_lineno, line_type, gutter_width);
+            // Pad empty lines for cursor, visual selection, or diff lines (add/delete)
+            const should_pad = is_cursor or is_in_visual or (line_type != null and line_type.? != .context);
             const display_text = try RenderUtils.padTextForCursor(app, "", content_width, should_pad);
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = display_text,
@@ -427,7 +451,7 @@ pub const UnifiedRenderer = struct {
 
             // Only show line number on first row
             const show_line_number = rows_rendered == 0;
-            try RenderUtils.renderGutter(app, win, 0, current_row, is_cursor, show_line_number, file_lineno, line_type, gutter_width);
+            try RenderUtils.renderGutter(app, win, 0, current_row, is_cursor or is_in_visual, show_line_number, file_lineno, line_type, gutter_width);
 
             // Get the chunk of text for this row
             const remaining = text.len - text_offset;
@@ -439,8 +463,8 @@ pub const UnifiedRenderer = struct {
             const segments = try app.createHighlightedSegments(chunk, text, text_offset, chunk_byte_offset, highlights, style, global_line);
             defer app.allocator.free(segments);
 
-            // Pad segments to full width for cursor or diff lines (add/delete)
-            const should_pad = is_cursor or (line_type != null and line_type.? != .context);
+            // Pad segments to full width for cursor, visual selection, or diff lines (add/delete)
+            const should_pad = is_cursor or is_in_visual or (line_type != null and line_type.? != .context);
             if (should_pad and chunk.len < content_width) {
                 // Create a new segments array with padding
                 const padded_segments = try app.allocator.alloc(vaxis.Cell.Segment, segments.len + 1);
