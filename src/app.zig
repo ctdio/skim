@@ -37,7 +37,7 @@ const Color = struct {
     const magenta = .{ .index = 5 };
     const cyan = .{ .index = 6 };
     const white = .{ .index = 7 };
-    const dim = .{ .rgb = [3]u8{ 40, 40, 40 } }; // Dark gray #282828
+    const dim = .{ .rgb = [3]u8{ 100, 100, 100 } }; // Medium gray #646464
 
     // Muted diff background colors (RGB for better control)
     const diff_add_bg = .{ .rgb = [3]u8{ 3, 25, 10 } }; // Darker green #03190a
@@ -1424,19 +1424,27 @@ pub const App = struct {
                             style.bold = false;
                         }
                     },
-                    .cyan => {
-                        // Comments - cyan (GitHub: #6a737d)
-                        style.fg = Color.cyan;
-                        style.dim = !has_colored_bg; // Don't dim on colored backgrounds
+                    .black => {
+                        // Comments - medium gray (GitHub: #6a737d)
+                        // Brighten on colored backgrounds for better readability
+                        if (has_colored_bg) {
+                            style.fg = .{ .rgb = [3]u8{ 140, 140, 140 } }; // Lighter gray #8c8c8c
+                        } else {
+                            style.fg = Color.dim;
+                        }
                     },
                     .green => {
                         // Unused but keep for completeness
                         style.fg = Color.green;
                         style.bold = has_colored_bg;
                     },
-                    .white, .black => {
+                    .white => {
                         // Variables/Default - keep base style foreground
                         // (which is already light green/red for add/delete)
+                    },
+                    .cyan => {
+                        // Cyan color (unused currently)
+                        style.fg = Color.cyan;
                     },
                 }
 

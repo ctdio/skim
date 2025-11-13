@@ -32,7 +32,7 @@ pub const FileHeader = struct {
         var buf_add: [64]u8 = undefined;
         var buf_del: [64]u8 = undefined;
 
-        const path_text = try std.fmt.bufPrint(&buf_path, "  {s}  ", .{file_path});
+        const path_text = try std.fmt.bufPrint(&buf_path, "{s}  ", .{file_path});
         const add_text = try std.fmt.bufPrint(&buf_add, "+{d} ", .{stats.additions});
         const del_text = try std.fmt.bufPrint(&buf_del, "-{d}", .{stats.deletions});
 
@@ -65,7 +65,7 @@ pub const FileHeader = struct {
 
         _ = try win.print(&segments, .{
             .row_offset = row,
-            .col_offset = Layout.sidebar_width,
+            .col_offset = 0,
         });
 
         return 1; // Always uses 1 row

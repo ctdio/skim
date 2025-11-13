@@ -207,12 +207,12 @@ pub const Highlight = struct {
             return .blue;
         }
 
-        // Comments - Cyan/Gray (GitHub style: #6a737d)
+        // Comments - Dark gray (GitHub style: #6a737d)
         if (std.mem.eql(u8, cat, "comment") or
             std.mem.eql(u8, cat, "comment.line") or
             std.mem.eql(u8, cat, "comment.block"))
         {
-            return .cyan;
+            return .black;
         }
 
         // Constants - Blue (GitHub style: #005cc5)

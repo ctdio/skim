@@ -55,19 +55,21 @@ pub const SideBySideRenderer = struct {
             try StateHelpers.ensureHighlights(app, file, false);
             const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
-            // Render sidebar and middle divider for all line types
-            var left_seg = [_]vaxis.Cell.Segment{.{
-                .text = "┃",
-                .style = sidebar_style,
-            }};
-            _ = try win.print(&left_seg, .{ .row_offset = row, .col_offset = 0 });
-            var middle_seg = [_]vaxis.Cell.Segment{.{
-                .text = FrameChars.vertical,
-                .style = sidebar_style,
-            }};
-            _ = try win.print(&middle_seg, .{ .row_offset = row, .col_offset = middle_col });
-
             const is_cursor = global_line == app.state.global_cursor_line;
+
+            // Render sidebar and middle divider for all line types except spacers and file headers
+            if (record.line_type != .spacer and record.line_type != .file_header) {
+                var left_seg = [_]vaxis.Cell.Segment{.{
+                    .text = "┃",
+                    .style = sidebar_style,
+                }};
+                _ = try win.print(&left_seg, .{ .row_offset = row, .col_offset = 0 });
+                var middle_seg = [_]vaxis.Cell.Segment{.{
+                    .text = FrameChars.vertical,
+                    .style = sidebar_style,
+                }};
+                _ = try win.print(&middle_seg, .{ .row_offset = row, .col_offset = middle_col });
+            }
 
             // Render based on line type
             switch (record.line_type) {
@@ -140,10 +142,10 @@ pub const SideBySideRenderer = struct {
                     }
                 },
                 .spacer => {
-                    // Render spacer - just empty line with cursor highlight if needed
+                    // Render spacer - just empty line with cursor highlight if needed (no borders)
                     if (is_cursor) {
-                        const fill_start = 1; // After sidebar
-                        const fill_width = win.width -| 1;
+                        const fill_start = 0; // No sidebar for spacers
+                        const fill_width = win.width;
                         if (fill_width > 0) {
                             const fill_text = try RenderUtils.frameTextSlice(app, fill_width);
                             @memset(fill_text, ' ');
@@ -234,7 +236,7 @@ pub const SideBySideRenderer = struct {
         else if (is_in_visual)
             .{ .bg = Color.visual_select_bg }
         else
-            .{ .bg = Color.dim };
+            .{};
 
         // Find where context starts (after the range info and spacing)
         const range_end_marker = "  ";
@@ -249,7 +251,7 @@ pub const SideBySideRenderer = struct {
         else if (is_in_visual)
             .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
         else
-            .{ .fg = Color.white, .bg = Color.dim, .bold = true };
+            .{ .fg = Color.dim };
 
         const context_style: vaxis.Style = if (is_cursor and app.mode == .visual)
             .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
@@ -258,10 +260,7 @@ pub const SideBySideRenderer = struct {
         else if (is_in_visual)
             .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
         else
-            .{ .fg = Color.white, .bg = Color.dim };
-
-        const bar_char = "━";
-        const char_bytes = bar_char.len; // 3 bytes
+            .{ .fg = Color.dim };
         const right_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1;
 
         // Render each wrapped row
@@ -301,42 +300,18 @@ pub const SideBySideRenderer = struct {
                 _ = try win.print(&fill_seg, .{ .row_offset = current_row, .col_offset = fill_start });
             }
 
-            // Render left gutter (bar on first row, empty on continuation rows)
-            // Fill entire gutter width with bars (no sign column for hunk headers)
-            if (wrap_idx == 0) {
-                const bar_width = gutter_width; // Fill entire gutter
-                const left_gutter_bar = try RenderUtils.frameTextSlice(app, bar_width * char_bytes);
-                var left_byte_pos: usize = 0;
-                for (0..bar_width) |_| {
-                    if (left_byte_pos + char_bytes <= left_gutter_bar.len) {
-                        @memcpy(left_gutter_bar[left_byte_pos .. left_byte_pos + char_bytes], bar_char);
-                        left_byte_pos += char_bytes;
-                    }
-                }
-
-                const gutter_style: vaxis.Style = if (is_cursor)
-                    .{ .fg = Color.white, .bg = Color.cursor_bg }
-                else
-                    .{ .fg = Color.white, .bg = Color.dim };
-
-                var left_gutter_seg = [_]vaxis.Cell.Segment{.{
-                    .text = left_gutter_bar[0..left_byte_pos],
-                    .style = gutter_style,
-                }};
-                _ = try win.print(&left_gutter_seg, .{ .row_offset = current_row, .col_offset = 1 });
-            } else {
-                const gutter_spaces = try RenderUtils.frameTextSlice(app, gutter_width);
-                @memset(gutter_spaces, ' ');
-                const empty_gutter_style: vaxis.Style = if (is_cursor)
-                    .{ .bg = Color.cursor_bg }
-                else
-                    .{ .bg = Color.dim };
-                var empty_gutter_seg = [_]vaxis.Cell.Segment{.{
-                    .text = gutter_spaces,
-                    .style = empty_gutter_style,
-                }};
-                _ = try win.print(&empty_gutter_seg, .{ .row_offset = current_row, .col_offset = 1 });
-            }
+            // Render left gutter with spaces (no bar)
+            const left_gutter_spaces = try RenderUtils.frameTextSlice(app, gutter_width);
+            @memset(left_gutter_spaces, ' ');
+            const left_gutter_style: vaxis.Style = if (is_cursor)
+                .{ .bg = Color.cursor_bg }
+            else
+                .{};
+            var left_gutter_seg = [_]vaxis.Cell.Segment{.{
+                .text = left_gutter_spaces,
+                .style = left_gutter_style,
+            }};
+            _ = try win.print(&left_gutter_seg, .{ .row_offset = current_row, .col_offset = 1 });
 
             // Render spacing after left gutter
             try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, null);
@@ -380,42 +355,18 @@ pub const SideBySideRenderer = struct {
                 }
             }
 
-            // Render right gutter (bar on first row, empty on continuation rows)
-            // Fill entire gutter width with bars (no sign column for hunk headers)
-            if (wrap_idx == 0) {
-                const bar_width = gutter_width; // Fill entire gutter
-                const right_gutter_bar = try RenderUtils.frameTextSlice(app, bar_width * char_bytes);
-                var right_byte_pos: usize = 0;
-                for (0..bar_width) |_| {
-                    if (right_byte_pos + char_bytes <= right_gutter_bar.len) {
-                        @memcpy(right_gutter_bar[right_byte_pos .. right_byte_pos + char_bytes], bar_char);
-                        right_byte_pos += char_bytes;
-                    }
-                }
-
-                const gutter_style: vaxis.Style = if (is_cursor)
-                    .{ .fg = Color.white, .bg = Color.cursor_bg }
-                else
-                    .{ .fg = Color.white, .bg = Color.dim };
-
-                var right_gutter_seg = [_]vaxis.Cell.Segment{.{
-                    .text = right_gutter_bar[0..right_byte_pos],
-                    .style = gutter_style,
-                }};
-                _ = try win.print(&right_gutter_seg, .{ .row_offset = current_row, .col_offset = right_col });
-            } else {
-                const gutter_spaces = try RenderUtils.frameTextSlice(app, gutter_width);
-                @memset(gutter_spaces, ' ');
-                const empty_gutter_style: vaxis.Style = if (is_cursor)
-                    .{ .bg = Color.cursor_bg }
-                else
-                    .{ .bg = Color.dim };
-                var empty_gutter_seg = [_]vaxis.Cell.Segment{.{
-                    .text = gutter_spaces,
-                    .style = empty_gutter_style,
-                }};
-                _ = try win.print(&empty_gutter_seg, .{ .row_offset = current_row, .col_offset = right_col });
-            }
+            // Render right gutter with spaces (no bar)
+            const right_gutter_spaces = try RenderUtils.frameTextSlice(app, gutter_width);
+            @memset(right_gutter_spaces, ' ');
+            const right_gutter_style: vaxis.Style = if (is_cursor)
+                .{ .bg = Color.cursor_bg }
+            else
+                .{};
+            var right_gutter_seg = [_]vaxis.Cell.Segment{.{
+                .text = right_gutter_spaces,
+                .style = right_gutter_style,
+            }};
+            _ = try win.print(&right_gutter_seg, .{ .row_offset = current_row, .col_offset = right_col });
 
             // Render spacing after right gutter
             try RenderUtils.renderGutterSpacing(app, win, current_row, right_col + gutter_width, is_cursor, null);
@@ -494,7 +445,9 @@ pub const SideBySideRenderer = struct {
         const right_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1; // +1 for middle divider
 
         // Calculate byte offset for syntax highlighting
+        // Note: Only applies to lines in the NEW file (context and additions)
         const byte_offset = StateHelpers.getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
+        const highlights = if (line.line_type == .delete) null else file.highlights;
 
         switch (line.line_type) {
             .context => {
@@ -530,7 +483,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for left chunk
                     const left_chunk_byte_offset = byte_offset + left_start;
-                    const left_segments = try app.createHighlightedSegments(left_chunk, line.content, left_start, left_chunk_byte_offset, file.highlights, style, global_line);
+                    const left_segments = try app.createHighlightedSegments(left_chunk, line.content, left_start, left_chunk_byte_offset, highlights, style, global_line);
                     defer app.allocator.free(left_segments);
 
                     // Pad context lines only when cursor is on them
@@ -562,7 +515,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for right chunk
                     const right_chunk_byte_offset = byte_offset + right_start;
-                    const right_segments = try app.createHighlightedSegments(right_chunk, line.content, right_start, right_chunk_byte_offset, file.highlights, style, global_line);
+                    const right_segments = try app.createHighlightedSegments(right_chunk, line.content, right_start, right_chunk_byte_offset, highlights, style, global_line);
                     defer app.allocator.free(right_segments);
 
                     // Pad context lines only when cursor is on them
@@ -623,9 +576,9 @@ pub const SideBySideRenderer = struct {
                     const chunk = if (text_start < line.content.len) line.content[text_start..text_end] else "";
 
                     // Generate syntax-highlighted segments for chunk
-                    // (will fall back to plain text for delete lines since they're not in new file)
+                    // (will fall back to plain text for delete lines since highlights is null)
                     const chunk_byte_offset = byte_offset + text_start;
-                    const segments = try app.createHighlightedSegments(chunk, line.content, text_start, chunk_byte_offset, file.highlights, style, global_line);
+                    const segments = try app.createHighlightedSegments(chunk, line.content, text_start, chunk_byte_offset, highlights, style, global_line);
                     defer app.allocator.free(segments);
 
                     // Always pad delete lines to show full-width background
@@ -710,7 +663,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for chunk
                     const chunk_byte_offset = byte_offset + text_start;
-                    const segments = try app.createHighlightedSegments(chunk, line.content, text_start, chunk_byte_offset, file.highlights, style, global_line);
+                    const segments = try app.createHighlightedSegments(chunk, line.content, text_start, chunk_byte_offset, highlights, style, global_line);
                     defer app.allocator.free(segments);
 
                     // Always pad add lines to show full-width background

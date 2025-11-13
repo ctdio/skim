@@ -43,14 +43,16 @@ pub const UnifiedRenderer = struct {
             const file = &app.state.files[file_idx];
             try StateHelpers.ensureHighlights(app, file, false);
 
-            // Render sidebar for all line types
-            var sidebar_seg = [_]vaxis.Cell.Segment{.{
-                .text = "┃",
-                .style = sidebar_style,
-            }};
-            _ = try win.print(&sidebar_seg, .{ .row_offset = row, .col_offset = 0 });
-
             const is_cursor = global_line == app.state.global_cursor_line;
+
+            // Render sidebar for all line types except spacers and file headers
+            if (record.line_type != .spacer and record.line_type != .file_header) {
+                var sidebar_seg = [_]vaxis.Cell.Segment{.{
+                    .text = "┃",
+                    .style = sidebar_style,
+                }};
+                _ = try win.print(&sidebar_seg, .{ .row_offset = row, .col_offset = 0 });
+            }
 
             // Render based on line type
             switch (record.line_type) {
@@ -119,10 +121,10 @@ pub const UnifiedRenderer = struct {
                     }
                 },
                 .spacer => {
-                    // Render spacer - just empty line with cursor highlight if needed
+                    // Render spacer - just empty line with cursor highlight if needed (no left border)
                     if (is_cursor) {
-                        const fill_start = 1; // After sidebar
-                        const fill_width = win.width -| 1;
+                        const fill_start = 0; // No sidebar for spacers
+                        const fill_width = win.width;
                         if (fill_width > 0) {
                             const fill_text = try RenderUtils.frameTextSlice(app, fill_width);
                             @memset(fill_text, ' ');
@@ -193,7 +195,7 @@ pub const UnifiedRenderer = struct {
         else if (is_in_visual)
             .{ .bg = Color.visual_select_bg }
         else
-            .{ .bg = Color.dim };
+            .{};
 
         // Find where context starts (after the range info and spacing)
         const range_end_marker = "  ";
@@ -208,7 +210,7 @@ pub const UnifiedRenderer = struct {
         else if (is_in_visual)
             .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
         else
-            .{ .fg = Color.white, .bg = Color.dim, .bold = true };
+            .{ .fg = Color.dim };
 
         const context_style: vaxis.Style = if (is_cursor and app.mode == .visual)
             .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
@@ -217,10 +219,7 @@ pub const UnifiedRenderer = struct {
         else if (is_in_visual)
             .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg }
         else
-            .{ .fg = Color.white, .bg = Color.dim };
-
-        const bar_char = "━";
-        const char_bytes = bar_char.len; // 3 bytes
+            .{ .fg = Color.dim };
 
         // Render each wrapped row
         var current_row = row;
@@ -252,43 +251,18 @@ pub const UnifiedRenderer = struct {
                 _ = try win.print(&fill_seg, .{ .row_offset = current_row, .col_offset = fill_start });
             }
 
-            // Render solid bar in gutter (only on first row)
-            // Fill entire gutter width with bars (no sign column for hunk headers)
-            if (wrap_idx == 0) {
-                const bar_width = gutter_width; // Fill entire gutter
-                const gutter_bar = try RenderUtils.frameTextSlice(app, bar_width * char_bytes);
-                var byte_pos: usize = 0;
-                for (0..bar_width) |_| {
-                    if (byte_pos + char_bytes <= gutter_bar.len) {
-                        @memcpy(gutter_bar[byte_pos .. byte_pos + char_bytes], bar_char);
-                        byte_pos += char_bytes;
-                    }
-                }
-
-                const gutter_style: vaxis.Style = if (is_cursor)
-                    .{ .fg = Color.white, .bg = Color.cursor_bg }
-                else
-                    .{ .fg = Color.white, .bg = Color.dim };
-
-                var gutter_seg = [_]vaxis.Cell.Segment{.{
-                    .text = gutter_bar[0..byte_pos],
-                    .style = gutter_style,
-                }};
-                _ = try win.print(&gutter_seg, .{ .row_offset = current_row, .col_offset = Layout.sidebar_width });
-            } else {
-                // Empty gutter for continuation rows
-                const gutter_spaces = try RenderUtils.frameTextSlice(app, gutter_width);
-                @memset(gutter_spaces, ' ');
-                const empty_gutter_style: vaxis.Style = if (is_cursor)
-                    .{ .bg = Color.cursor_bg }
-                else
-                    .{ .bg = Color.dim };
-                var empty_gutter_seg = [_]vaxis.Cell.Segment{.{
-                    .text = gutter_spaces,
-                    .style = empty_gutter_style,
-                }};
-                _ = try win.print(&empty_gutter_seg, .{ .row_offset = current_row, .col_offset = Layout.sidebar_width });
-            }
+            // Render spaces in gutter (no bar)
+            const gutter_spaces = try RenderUtils.frameTextSlice(app, gutter_width);
+            @memset(gutter_spaces, ' ');
+            const gutter_style: vaxis.Style = if (is_cursor)
+                .{ .bg = Color.cursor_bg }
+            else
+                .{};
+            var gutter_seg = [_]vaxis.Cell.Segment{.{
+                .text = gutter_spaces,
+                .style = gutter_style,
+            }};
+            _ = try win.print(&gutter_seg, .{ .row_offset = current_row, .col_offset = Layout.sidebar_width });
 
             // Render spacing after gutter
             try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, null);
@@ -376,16 +350,17 @@ pub const UnifiedRenderer = struct {
             .add, .context => line.new_lineno,
         };
 
-        // Apply syntax highlighting to all lines (context, additions, deletions)
-        // Calculate byte offset for syntax highlighting
+        // Apply syntax highlighting only to lines in the NEW file (context and additions)
+        // Deletion lines are not in the new file, so highlights don't apply
         const byte_offset = StateHelpers.getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
+        const highlights = if (line.line_type == .delete) null else file.highlights;
 
         return try renderWrappedTextWithHighlights(
             app,
             win,
             line.content,
             byte_offset,
-            file.highlights,
+            highlights,
             row,
             content_width,
             is_cursor,

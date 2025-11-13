@@ -30,10 +30,11 @@ pub const LineType = union(enum) {
         comment_idx: usize,
     },
 
-    /// Blank spacer line between files
+    /// Blank spacer line (between files or after file header)
     spacer: struct {
         after_file_idx: usize,
         spacer_line_num: usize, // 0, 1, or 2 (for 3 total)
+        is_header_spacer: bool, // true if spacer after file header, false if between files
     },
 };
 
@@ -68,6 +69,20 @@ pub const LineMap = struct {
                 .global_line = global_line,
                 .file_idx = file_idx,
                 .line_type = .file_header,
+            });
+            global_line += 1;
+
+            // Add a single spacer after file header
+            try records.append(.{
+                .global_line = global_line,
+                .file_idx = file_idx,
+                .line_type = .{
+                    .spacer = .{
+                        .after_file_idx = file_idx,
+                        .spacer_line_num = 0,
+                        .is_header_spacer = true,
+                    },
+                },
             });
             global_line += 1;
 
@@ -125,6 +140,7 @@ pub const LineMap = struct {
                             .spacer = .{
                                 .after_file_idx = file_idx,
                                 .spacer_line_num = spacer_num,
+                                .is_header_spacer = false,
                             },
                         },
                     });
@@ -236,29 +252,32 @@ test "line map basic construction" {
     var line_map = try LineMap.build(allocator, files, &store);
     defer line_map.deinit();
 
-    // File 1: header(0) + hunk_header(1) + 2 lines(2,3) + spacers(4,5,6) = 7 lines
-    // File 2: header(7) + hunk_header(8) + 2 lines(9,10) = 4 lines
-    // Total: 11 lines
-    try std.testing.expectEqual(@as(usize, 11), line_map.getTotalLines());
+    // File 1: header(0) + header_spacer(1) + hunk_header(2) + 2 lines(3,4) + file_spacers(5,6,7) = 8 lines
+    // File 2: header(8) + header_spacer(9) + hunk_header(10) + 2 lines(11,12) = 5 lines
+    // Total: 13 lines
+    try std.testing.expectEqual(@as(usize, 13), line_map.getTotalLines());
 
     // Check file 1 header is at line 0
     try std.testing.expectEqual(@as(usize, 0), line_map.getFileHeaderLine(0).?);
 
-    // Check file 2 header is at line 7
-    try std.testing.expectEqual(@as(usize, 7), line_map.getFileHeaderLine(1).?);
+    // Check file 2 header is at line 8
+    try std.testing.expectEqual(@as(usize, 8), line_map.getFileHeaderLine(1).?);
 
     // Check line 0 is file header
     try std.testing.expect(line_map.isFileHeader(0));
 
-    // Check lines 4-6 are spacers
-    try std.testing.expect(line_map.isSpacer(4));
+    // Check line 1 is header spacer
+    try std.testing.expect(line_map.isSpacer(1));
+
+    // Check lines 5-7 are file spacers
     try std.testing.expect(line_map.isSpacer(5));
     try std.testing.expect(line_map.isSpacer(6));
+    try std.testing.expect(line_map.isSpacer(7));
 
-    // Check line 1 is hunk header
-    const record1 = line_map.getLineRecord(1).?;
-    try std.testing.expect(record1.line_type == .hunk_header);
-    try std.testing.expectEqual(@as(usize, 0), record1.line_type.hunk_header.hunk_idx);
+    // Check line 2 is hunk header
+    const record2 = line_map.getLineRecord(2).?;
+    try std.testing.expect(record2.line_type == .hunk_header);
+    try std.testing.expectEqual(@as(usize, 0), record2.line_type.hunk_header.hunk_idx);
 }
 
 test "line map with comments" {
@@ -298,12 +317,12 @@ test "line map with comments" {
     var line_map = try LineMap.build(allocator, files, &store);
     defer line_map.deinit();
 
-    // header(0) + hunk_header(1) + delete_line(2) + comment(3) + add_line(4) = 5 lines
-    try std.testing.expectEqual(@as(usize, 5), line_map.getTotalLines());
+    // header(0) + header_spacer(1) + hunk_header(2) + delete_line(3) + comment(4) + add_line(5) = 6 lines
+    try std.testing.expectEqual(@as(usize, 6), line_map.getTotalLines());
 
-    // Line 3 should be a comment line
-    const record3 = line_map.getLineRecord(3).?;
-    try std.testing.expect(record3.line_type == .comment_line);
-    try std.testing.expectEqual(@as(usize, 0), record3.line_type.comment_line.parent_hunk_idx);
-    try std.testing.expectEqual(@as(usize, 0), record3.line_type.comment_line.parent_line_idx);
+    // Line 4 should be a comment line
+    const record4 = line_map.getLineRecord(4).?;
+    try std.testing.expect(record4.line_type == .comment_line);
+    try std.testing.expectEqual(@as(usize, 0), record4.line_type.comment_line.parent_hunk_idx);
+    try std.testing.expectEqual(@as(usize, 0), record4.line_type.comment_line.parent_line_idx);
 }

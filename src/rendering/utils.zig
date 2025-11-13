@@ -57,8 +57,8 @@ pub const RenderUtils = struct {
 
     pub fn getLineStyle(_: *App, line_type: parser.Line.LineType) vaxis.Style {
         return switch (line_type) {
-            .add => .{ .bg = Color.diff_add_bg, .fg = Color.diff_add_fg },
-            .delete => .{ .bg = Color.diff_delete_bg, .fg = Color.diff_delete_fg },
+            .add => .{ .bg = Color.diff_add_bg },
+            .delete => .{ .bg = Color.diff_delete_bg },
             .context => .{},
         };
     }
@@ -233,7 +233,7 @@ pub const RenderUtils = struct {
             .add => .{ .bg = Color.diff_add_bg },
             .delete => .{ .bg = Color.diff_delete_bg },
             .context => .{},
-        } else if (is_cursor) .{ .bg = Color.cursor_bg } else .{ .bg = Color.dim }; // Hunk headers and comment lines
+        } else if (is_cursor) .{ .bg = Color.cursor_bg } else .{}; // Hunk headers and comment lines - no background
 
         const spacing = try frameTextSlice(app, rendering_common.Layout.gutter_spacing);
         @memset(spacing, ' ');

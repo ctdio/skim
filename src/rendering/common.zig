@@ -11,19 +11,19 @@ pub const Color = struct {
     pub const magenta = .{ .index = 5 };
     pub const cyan = .{ .index = 6 };
     pub const white = .{ .index = 7 };
-    pub const dim = .{ .rgb = [3]u8{ 40, 40, 40 } }; // Dark gray #282828
+    pub const dim = .{ .rgb = [3]u8{ 100, 100, 100 } }; // Medium gray #646464
 
     // Muted diff background colors (RGB for better control)
-    pub const diff_add_bg = .{ .rgb = [3]u8{ 18, 80, 40 } }; // Dark green #125028
-    pub const diff_delete_bg = .{ .rgb = [3]u8{ 80, 18, 18 } }; // Dark red #501212
-    pub const diff_add_fg = .{ .rgb = [3]u8{ 200, 255, 200 } }; // Light green text
-    pub const diff_delete_fg = .{ .rgb = [3]u8{ 255, 200, 200 } }; // Light red text
+    pub const diff_add_bg = .{ .rgb = [3]u8{ 43, 62, 43 } }; // Darker green #2B3E2B
+    pub const diff_delete_bg = .{ .rgb = [3]u8{ 63, 38, 38 } }; // Darker red #3F2626
+    pub const diff_add_fg = .{ .rgb = [3]u8{ 63, 185, 80 } }; // Green text #3FB950
+    pub const diff_delete_fg = .{ .rgb = [3]u8{ 247, 81, 73 } }; // Red text #F75149
 
-    // Comment colors - brighter neutral grays
-    pub const comment_border = .{ .rgb = [3]u8{ 160, 160, 160 } }; // Light gray #a0a0a0
-    pub const comment_border_focus = .{ .rgb = [3]u8{ 200, 200, 200 } }; // Bright gray when focused #c8c8c8
-    pub const comment_marker = .{ .rgb = [3]u8{ 180, 180, 180 } }; // Bright gray #b4b4b4
-    pub const comment_hover_bg = .{ .rgb = [3]u8{ 30, 30, 30 } }; // Very dark gray for hover state #1e1e1e
+    // Comment colors - darker, subdued grays
+    pub const comment_border = .{ .rgb = [3]u8{ 80, 80, 80 } }; // Dark gray #505050
+    pub const comment_border_focus = .{ .rgb = [3]u8{ 100, 100, 100 } }; // Medium gray when focused #646464
+    pub const comment_marker = .{ .rgb = [3]u8{ 90, 90, 90 } }; // Dark gray #5a5a5a
+    pub const comment_hover_bg = .{ .rgb = [3]u8{ 25, 25, 25 } }; // Very dark gray for hover state #191919
 
     // Cursor line highlighting - slightly darker gray background
     pub const cursor_bg = .{ .rgb = [3]u8{ 80, 80, 80 } }; // Darker gray #505050
