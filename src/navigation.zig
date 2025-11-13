@@ -18,7 +18,6 @@ pub const Navigation = struct {
 
         // Ensure cursor stays visible
         ensureCursorVisible(app, true);
-        clampCursorColumn(app);
     }
 
     pub fn moveCursorUp(app: *App) void {
@@ -33,7 +32,6 @@ pub const Navigation = struct {
 
         // Ensure cursor stays visible
         ensureCursorVisible(app, true);
-        clampCursorColumn(app);
     }
 
 
@@ -102,12 +100,6 @@ pub const Navigation = struct {
         }
     }
 
-    pub fn resetFileState(app: *App) void {
-        // Deprecated: In continuous mode, we use global coordinates
-        // Keep for backwards compatibility but make it a no-op
-        _ = app;
-    }
-
     pub fn pageDown(app: *App) void {
         const scroll_amount = app.state.viewport_height / 2;
         const total_lines = app.getTotalGlobalLines();
@@ -122,7 +114,6 @@ pub const Navigation = struct {
         clampScrollOffset(app);
 
         // Clamp cursor column to new line length
-        clampCursorColumn(app);
     }
 
     pub fn pageUp(app: *App) void {
@@ -143,7 +134,6 @@ pub const Navigation = struct {
         }
 
         // Clamp cursor column to new line length
-        clampCursorColumn(app);
     }
 
     pub fn scrollDown(app: *App) void {
@@ -160,7 +150,6 @@ pub const Navigation = struct {
         // Move viewport down by same amount
         app.state.global_scroll_offset += count;
         clampScrollOffset(app);
-        clampCursorColumn(app);
     }
 
     pub fn scrollUp(app: *App) void {
@@ -181,13 +170,11 @@ pub const Navigation = struct {
             app.state.global_scroll_offset = 0;
         }
 
-        clampCursorColumn(app);
     }
 
     pub fn scrollToTop(app: *App) void {
         app.state.global_cursor_line = 0;
         app.state.global_scroll_offset = 0;
-        clampCursorColumn(app);
     }
 
     pub fn scrollToBottom(app: *App) void {
@@ -205,7 +192,6 @@ pub const Navigation = struct {
         else
             0;
 
-        clampCursorColumn(app);
     }
 
     pub fn centerCursor(app: *App) void {
@@ -223,7 +209,6 @@ pub const Navigation = struct {
             }
         }
 
-        clampCursorColumn(app);
     }
 
     pub fn scrollPageDown(app: *App) void {
@@ -238,7 +223,6 @@ pub const Navigation = struct {
         // Move viewport down by same amount to maintain screen position
         app.state.global_scroll_offset += scroll_amount;
         clampScrollOffset(app);
-        clampCursorColumn(app);
     }
 
     pub fn scrollPageUp(app: *App) void {
@@ -258,12 +242,7 @@ pub const Navigation = struct {
             app.state.global_scroll_offset = 0;
         }
 
-        clampCursorColumn(app);
     }
-
-    // No-op function - kept for backward compatibility
-    // (horizontal cursor movement removed with FOCUSED mode)
-    pub fn clampCursorColumn(_: *App) void {}
 
     pub fn clampScrollOffset(app: *App) void {
         const total_lines = app.getTotalGlobalLines();
@@ -296,11 +275,5 @@ pub const Navigation = struct {
         } else if (cursor_line >= scroll_offset + window_height -| (padding + 1)) {
             app.state.global_scroll_offset = cursor_line -| (window_height -| (padding + 2));
         }
-    }
-
-    // Keep old function name for backwards compatibility (deprecated)
-    pub fn adjustScrollToKeepCursorVisible(app: *App, window_height: usize) void {
-        _ = window_height; // Use viewport_height from app.state instead
-        ensureCursorVisible(app, true);
     }
 };

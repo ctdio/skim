@@ -57,7 +57,6 @@ const Color = struct {
 // Layout constants
 const Layout = struct {
     const header_height = 1;
-    const divider_height = 1;
     const status_height = 1;
     const min_gutter_width = 5; // Minimum gutter width for consistency
     const cursor_padding = 3; // Padding around cursor when scrolling
@@ -109,8 +108,6 @@ pub const App = struct {
         files: []parser.FileDiff,
         line_map: line_map.LineMap, // Complete map of all lines
         current_file_idx: usize, // Tracks which file is visible in sticky header
-        scroll_offset: usize, // Deprecated: use global_scroll_offset
-        cursor_line: usize, // Deprecated: use global_cursor_line
         global_scroll_offset: usize, // Scroll position across all files
         global_cursor_line: usize, // Cursor position across all files
         view_mode: ViewMode,
@@ -264,8 +261,6 @@ pub const App = struct {
                 .files = files,
                 .line_map = built_line_map,
                 .current_file_idx = 0,
-                .scroll_offset = 0,
-                .cursor_line = 0,
                 .global_scroll_offset = 0,
                 .global_cursor_line = 0,
                 .view_mode = .unified,
