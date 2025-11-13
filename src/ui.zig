@@ -148,6 +148,9 @@ pub const UI = struct {
             .side_by_side => "[Side-by-Side]",
         };
 
+        // Hunk view mode with symbol
+        const hunk_view_symbol = app.state.hunk_view_mode.toSymbol();
+
         // Context-aware keybindings based on cursor position and mode
         const keybindings = switch (app.mode) {
             .normal => blk: {
@@ -201,41 +204,83 @@ pub const UI = struct {
         const total_files = app.state.files.len;
         const current_file = app.state.current_file_idx + 1; // Display 1-indexed
 
-        // Combine mode, view mode, position, count prefix (if any), and keybindings into a single string
-        var buf: [512]u8 = undefined;
-        const status_text = if (app.mode == .search) blk: {
+        // Build status bar using segments with colors
+        var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
+        defer segments.deinit();
+
+        if (app.mode == .search) {
             // In search mode, show search prompt with current query
             const query = app.state.search_state.query_buffer[0..app.state.search_state.query_len];
             const match_count = app.state.search_state.matches.items.len;
 
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "  /"), .style = .{} });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, query), .style = .{} });
+
             if (match_count > 0) {
                 const current_match = if (app.state.search_state.current_match_idx) |idx| idx + 1 else 0;
-                break :blk try std.fmt.bufPrint(&buf, "{s}  /{s}  ({d} of {d} matches)  {s}", .{ mode_str, query, current_match, match_count, keybindings });
+                var buf: [64]u8 = undefined;
+                const match_info = try std.fmt.bufPrint(&buf, "  ({d} of {d} matches)  ", .{ current_match, match_count });
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
             } else if (app.state.search_state.query_len > 0) {
-                // Query entered but search not executed yet
-                break :blk try std.fmt.bufPrint(&buf, "{s}  /{s}_  {s}", .{ mode_str, query, keybindings });
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "_  "), .style = .{} });
             } else {
-                // No query yet
-                break :blk try std.fmt.bufPrint(&buf, "{s}  /_  {s}", .{ mode_str, keybindings });
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "_  "), .style = .{} });
             }
-        } else if (app.state.count_prefix) |count| blk: {
-            break :blk try std.fmt.bufPrint(&buf, "{s} {s} [{d}]  Line {d}/{d} (File {d}/{d})  {s}", .{ mode_str, view_str, count, current_line, total_lines, current_file, total_files, keybindings });
-        } else blk: {
+
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+        } else {
+            // Normal mode status bar with colored hunk view mode
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, view_str), .style = .{} });
+
+            // Only show hunk view mode indicator in unified view (where filtering applies)
+            if (app.state.view_mode == .unified) {
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " ["), .style = .{} });
+
+                // Add colored hunk view symbol
+                if (app.state.hunk_view_mode == .all) {
+                    // For "+/-" mode, color + green and - red
+                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "+"), .style = .{ .fg = Color.green, .bold = true } });
+                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "/"), .style = .{ .bold = true } });
+                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "-"), .style = .{ .fg = Color.red, .bold = true } });
+                } else {
+                    // For single mode, use appropriate color
+                    const hunk_view_style: vaxis.Style = switch (app.state.hunk_view_mode) {
+                        .all => unreachable, // Already handled above
+                        .old => .{ .fg = Color.red, .bold = true },
+                        .new => .{ .fg = Color.green, .bold = true },
+                    };
+                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, hunk_view_symbol), .style = hunk_view_style });
+                }
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "]"), .style = .{} });
+            }
+
+            if (app.state.count_prefix) |count| {
+                var buf: [64]u8 = undefined;
+                const count_str = try std.fmt.bufPrint(&buf, " [{d}]", .{count});
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, count_str), .style = .{} });
+            }
+
+            var buf: [128]u8 = undefined;
+            const pos_info = try std.fmt.bufPrint(&buf, "  Line {d}/{d} (File {d}/{d})", .{ current_line, total_lines, current_file, total_files });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, pos_info), .style = .{} });
+
             // Show search info if there are active matches in normal mode
             if (app.state.search_state.hasMatches()) {
                 const match_count = app.state.search_state.matches.items.len;
                 const current_match = if (app.state.search_state.current_match_idx) |idx| idx + 1 else 0;
-                break :blk try std.fmt.bufPrint(&buf, "{s} {s}  Line {d}/{d} (File {d}/{d})  [{d}/{d} matches]  {s}", .{ mode_str, view_str, current_line, total_lines, current_file, total_files, current_match, match_count, keybindings });
-            } else {
-                break :blk try std.fmt.bufPrint(&buf, "{s} {s}  Line {d}/{d} (File {d}/{d})  {s}", .{ mode_str, view_str, current_line, total_lines, current_file, total_files, keybindings });
+                var match_buf: [64]u8 = undefined;
+                const match_info = try std.fmt.bufPrint(&match_buf, "  [{d}/{d} matches]", .{ current_match, match_count });
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
             }
-        };
 
-        var seg = [_]vaxis.Cell.Segment{.{
-            .text = status_text,
-            .style = .{},
-        }};
-        _ = try win.print(&seg, .{ .row_offset = 0 });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+        }
+
+        _ = try win.print(segments.items, .{ .row_offset = 0 });
     }
 
     pub fn printHeaderLine(app: *App, win: vaxis.Window, row: usize, text: []const u8, style: vaxis.Style) !void {

@@ -50,11 +50,29 @@ pub const LineMap = struct {
     records: []LineRecord,
     allocator: Allocator,
 
+    /// Hunk view mode for filtering lines
+    pub const HunkViewMode = enum {
+        all, // Show all lines (add, delete, context)
+        old, // Show old code only (delete, context)
+        new, // Show new code only (add, context)
+
+        // Check if a line type should be visible in this mode
+        pub fn shouldShowLine(self: HunkViewMode, line_type: parser.Line.LineType) bool {
+            return switch (self) {
+                .all => true,
+                .old => line_type == .delete or line_type == .context,
+                .new => line_type == .add or line_type == .context,
+            };
+        }
+    };
+
     /// Build a line map from files and comments
     pub fn build(
         allocator: Allocator,
         files: []const parser.FileDiff,
         comment_store: *comments.CommentStore,
+        hunk_view_mode: HunkViewMode,
+        apply_filtering: bool, // Only apply filtering in unified view
     ) !LineMap {
         var records = std.ArrayList(LineRecord).init(allocator);
         errdefer records.deinit();
@@ -96,8 +114,13 @@ pub const LineMap = struct {
                 });
                 global_line += 1;
 
-                // Add code lines (and any attached comments)
-                for (hunk.lines, 0..) |_, line_idx_in_hunk| {
+                // Add code lines (and any attached comments) - filter based on hunk_view_mode if enabled
+                for (hunk.lines, 0..) |line, line_idx_in_hunk| {
+                    // Skip lines that don't match the current view mode (only in unified view)
+                    if (apply_filtering and !hunk_view_mode.shouldShowLine(line.line_type)) {
+                        continue;
+                    }
+
                     // Add the code line
                     try records.append(.{
                         .global_line = global_line,
@@ -249,7 +272,7 @@ test "line map basic construction" {
     var store = comments.CommentStore.init(allocator);
     defer store.deinit();
 
-    var line_map = try LineMap.build(allocator, files, &store);
+    var line_map = try LineMap.build(allocator, files, &store, .all, true);
     defer line_map.deinit();
 
     // File 1: header(0) + header_spacer(1) + hunk_header(2) + 2 lines(3,4) + file_spacers(5,6,7) = 8 lines
@@ -314,7 +337,7 @@ test "line map with comments" {
         null,
     );
 
-    var line_map = try LineMap.build(allocator, files, &store);
+    var line_map = try LineMap.build(allocator, files, &store, .all, true);
     defer line_map.deinit();
 
     // header(0) + header_spacer(1) + hunk_header(2) + delete_line(3) + comment(4) + add_line(5) = 6 lines

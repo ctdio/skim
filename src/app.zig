@@ -114,6 +114,7 @@ pub const App = struct {
         global_scroll_offset: usize, // Scroll position across all files
         global_cursor_line: usize, // Cursor position across all files
         view_mode: ViewMode,
+        hunk_view_mode: HunkViewMode,
         viewport_height: usize,
         count_prefix: ?usize, // For vim-style count prefixes (e.g., 5j)
         comment_store: comments.CommentStore,
@@ -124,6 +125,45 @@ pub const App = struct {
         const ViewMode = enum {
             unified,
             side_by_side,
+        };
+
+        const HunkViewMode = enum {
+            all, // Show all lines (add, delete, context) - displayed as "+/-"
+            old, // Show old code only (delete, context) - displayed as "-"
+            new, // Show new code only (add, context) - displayed as "+"
+
+            pub fn next(self: HunkViewMode) HunkViewMode {
+                return switch (self) {
+                    .all => .old,
+                    .old => .new,
+                    .new => .all,
+                };
+            }
+
+            pub fn prev(self: HunkViewMode) HunkViewMode {
+                return switch (self) {
+                    .all => .new,
+                    .old => .all,
+                    .new => .old,
+                };
+            }
+
+            pub fn toSymbol(self: HunkViewMode) []const u8 {
+                return switch (self) {
+                    .all => "+/-",
+                    .old => "-",
+                    .new => "+",
+                };
+            }
+
+            // Check if a line type should be visible in this mode
+            pub fn shouldShowLine(self: HunkViewMode, line_type: parser.Line.LineType) bool {
+                return switch (self) {
+                    .all => true,
+                    .old => line_type == .delete or line_type == .context,
+                    .new => line_type == .add or line_type == .context,
+                };
+            }
         };
     };
 
@@ -210,8 +250,8 @@ pub const App = struct {
         var comment_store = comments.CommentStore.init(allocator);
         errdefer comment_store.deinit();
 
-        // Build the line map
-        const built_line_map = try line_map.LineMap.build(allocator, files, &comment_store);
+        // Build the line map (default to showing all lines, filtering enabled for unified view)
+        const built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true);
         errdefer built_line_map.deinit();
 
         var app = App{
@@ -229,6 +269,7 @@ pub const App = struct {
                 .global_scroll_offset = 0,
                 .global_cursor_line = 0,
                 .view_mode = .unified,
+                .hunk_view_mode = .all,
                 .viewport_height = 0,
                 .count_prefix = null,
                 .comment_store = comment_store,
@@ -327,8 +368,8 @@ pub const App = struct {
         self.allocator.free(self.state.files);
         self.state.line_map.deinit();
 
-        // Rebuild line map with new files
-        const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store);
+        // Rebuild line map with new files (preserve hunk view mode)
+        const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
 
         // Update state with new files and line map
         self.state.files = new_files;
@@ -556,6 +597,12 @@ pub const App = struct {
             }
         }
 
+        // Handle Shift+Tab before the main switch
+        if (key.mods.shift and key.codepoint == '\t') {
+            try self.cycleHunkViewModePrev();
+            return;
+        }
+
         switch (key.codepoint) {
             'q' => self.should_quit = true,
             'j' => Navigation.moveCursorDown(self),
@@ -566,6 +613,7 @@ pub const App = struct {
             'G' => Navigation.scrollToBottom(self),
             '\r' => try self.startCommentInput(), // Enter to create/edit comment
             's' => self.toggleViewMode(),
+            '\t' => try self.cycleHunkViewMode(), // Tab to cycle hunk view mode forward
             'r' => try self.refresh(),
             'y' => try self.yankCommentsToClipboard(),
             'd' => try self.deleteCommentUnderCursor(),
@@ -583,10 +631,284 @@ pub const App = struct {
     }
 
     fn toggleViewMode(self: *App) void {
+        // Capture current position for anchoring
+        const old_cursor = self.state.global_cursor_line;
+        const old_scroll = self.state.global_scroll_offset;
+
+        // Toggle view mode
         self.state.view_mode = switch (self.state.view_mode) {
             .unified => .side_by_side,
             .side_by_side => .unified,
         };
+
+        // Rebuild LineMap because filtering rules changed
+        // Side-by-side: always show all lines (filtering=false)
+        // Unified: apply current hunk view mode (filtering=true)
+        self.state.line_map.deinit();
+        self.state.line_map = line_map.LineMap.build(
+            self.allocator,
+            self.state.files,
+            &self.state.comment_store,
+            self.convertHunkViewMode(),
+            self.shouldApplyHunkFiltering(),
+        ) catch |err| {
+            std.log.err("Failed to rebuild LineMap on view toggle: {}", .{err});
+            return;
+        };
+
+        // Restore cursor and scroll positions (simple preservation since line count may have changed)
+        const total_lines = self.getTotalGlobalLines();
+        if (total_lines > 0) {
+            self.state.global_cursor_line = @min(old_cursor, total_lines - 1);
+            self.state.global_scroll_offset = @min(old_scroll, total_lines - 1);
+        } else {
+            self.state.global_cursor_line = 0;
+            self.state.global_scroll_offset = 0;
+        }
+        Navigation.clampScrollOffset(self);
+    }
+
+    fn cycleHunkViewModePrev(self: *App) !void {
+        // Only apply in unified mode
+        if (!self.shouldApplyHunkFiltering()) return;
+
+        // Same logic as cycleHunkViewMode but cycles backwards
+        const old_record = self.state.line_map.getLineRecord(self.state.global_cursor_line);
+
+        var anchor: ?struct {
+            file_idx: usize,
+            hunk_idx: ?usize,
+            cursor_offset: isize,
+            scroll_offset: isize,
+        } = null;
+
+        if (old_record) |rec| {
+            var anchor_line: ?usize = null;
+            var anchor_file: usize = rec.file_idx;
+            var anchor_hunk: ?usize = null;
+
+            switch (rec.line_type) {
+                .file_header => {
+                    anchor_line = self.state.global_cursor_line;
+                    anchor_hunk = null;
+                },
+                .hunk_header => |hunk_info| {
+                    anchor_line = self.state.global_cursor_line;
+                    anchor_hunk = hunk_info.hunk_idx;
+                },
+                .code_line => |code_info| {
+                    anchor_line = self.findHunkHeaderLine(rec.file_idx, code_info.hunk_idx);
+                    anchor_hunk = code_info.hunk_idx;
+                },
+                .comment_line => |comment_info| {
+                    anchor_line = self.findHunkHeaderLine(rec.file_idx, comment_info.parent_hunk_idx);
+                    anchor_hunk = comment_info.parent_hunk_idx;
+                },
+                .spacer => |spacer_info| {
+                    const next_file_idx = if (spacer_info.is_header_spacer)
+                        spacer_info.after_file_idx
+                    else
+                        spacer_info.after_file_idx + 1;
+
+                    anchor_file = next_file_idx;
+                    anchor_line = self.state.line_map.getFileHeaderLine(next_file_idx);
+                    anchor_hunk = null;
+                },
+            }
+
+            if (anchor_line) |anc_line| {
+                anchor = .{
+                    .file_idx = anchor_file,
+                    .hunk_idx = anchor_hunk,
+                    .cursor_offset = @as(isize, @intCast(self.state.global_cursor_line)) - @as(isize, @intCast(anc_line)),
+                    .scroll_offset = @as(isize, @intCast(self.state.global_scroll_offset)) - @as(isize, @intCast(anc_line)),
+                };
+            }
+        }
+
+        // Cycle to previous mode
+        self.state.hunk_view_mode = self.state.hunk_view_mode.prev();
+
+        // Rebuild LineMap
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+
+        // Restore positions
+        if (anchor) |anc| {
+            if (anc.file_idx < self.state.files.len) {
+                const new_anchor_line = if (anc.hunk_idx) |hunk_idx|
+                    self.findHunkHeaderLine(anc.file_idx, hunk_idx)
+                else
+                    self.state.line_map.getFileHeaderLine(anc.file_idx);
+
+                if (new_anchor_line) |anchor_line| {
+                    const total_lines = self.getTotalGlobalLines();
+                    if (total_lines == 0) {
+                        self.state.global_cursor_line = 0;
+                        self.state.global_scroll_offset = 0;
+                        return;
+                    }
+
+                    const target_cursor_signed = @as(isize, @intCast(anchor_line)) + anc.cursor_offset;
+                    const target_cursor = if (target_cursor_signed < 0) 0 else @as(usize, @intCast(target_cursor_signed));
+                    self.state.global_cursor_line = @min(target_cursor, total_lines - 1);
+
+                    const target_scroll_signed = @as(isize, @intCast(anchor_line)) + anc.scroll_offset;
+                    const target_scroll = if (target_scroll_signed < 0) 0 else @as(usize, @intCast(target_scroll_signed));
+                    self.state.global_scroll_offset = target_scroll;
+
+                    Navigation.clampScrollOffset(self);
+                    return;
+                }
+            }
+        }
+
+        const total_lines = self.getTotalGlobalLines();
+        if (total_lines > 0 and self.state.global_cursor_line >= total_lines) {
+            self.state.global_cursor_line = total_lines - 1;
+        }
+        Navigation.clampScrollOffset(self);
+    }
+
+    fn cycleHunkViewMode(self: *App) !void {
+        // Only apply in unified mode
+        if (!self.shouldApplyHunkFiltering()) return;
+
+        // Before rebuilding, capture anchor information to preserve BOTH cursor and scroll positions
+        // This prevents the viewport from jumping around
+        const old_record = self.state.line_map.getLineRecord(self.state.global_cursor_line);
+
+        var anchor: ?struct {
+            file_idx: usize,
+            hunk_idx: ?usize, // null means anchor to file header
+            cursor_offset: isize, // signed offset of cursor from anchor line
+            scroll_offset: isize, // signed offset of scroll from anchor line
+        } = null;
+
+        if (old_record) |rec| {
+            // Find the anchor line for this record
+            var anchor_line: ?usize = null;
+            var anchor_file: usize = rec.file_idx;
+            var anchor_hunk: ?usize = null;
+
+            switch (rec.line_type) {
+                .file_header => {
+                    // Cursor is on file header - anchor to it
+                    anchor_line = self.state.global_cursor_line;
+                    anchor_hunk = null;
+                },
+                .hunk_header => |hunk_info| {
+                    // Cursor is on hunk header - anchor to it
+                    anchor_line = self.state.global_cursor_line;
+                    anchor_hunk = hunk_info.hunk_idx;
+                },
+                .code_line => |code_info| {
+                    // Cursor is on code line - anchor to the hunk header
+                    anchor_line = self.findHunkHeaderLine(rec.file_idx, code_info.hunk_idx);
+                    anchor_hunk = code_info.hunk_idx;
+                },
+                .comment_line => |comment_info| {
+                    // Cursor is on comment - anchor to the hunk header
+                    anchor_line = self.findHunkHeaderLine(rec.file_idx, comment_info.parent_hunk_idx);
+                    anchor_hunk = comment_info.parent_hunk_idx;
+                },
+                .spacer => |spacer_info| {
+                    // Cursor is on spacer - anchor to the file header
+                    const next_file_idx = if (spacer_info.is_header_spacer)
+                        spacer_info.after_file_idx
+                    else
+                        spacer_info.after_file_idx + 1;
+
+                    anchor_file = next_file_idx;
+                    anchor_line = self.state.line_map.getFileHeaderLine(next_file_idx);
+                    anchor_hunk = null;
+                },
+            }
+
+            // If we found an anchor, calculate offsets
+            if (anchor_line) |anc_line| {
+                anchor = .{
+                    .file_idx = anchor_file,
+                    .hunk_idx = anchor_hunk,
+                    .cursor_offset = @as(isize, @intCast(self.state.global_cursor_line)) - @as(isize, @intCast(anc_line)),
+                    .scroll_offset = @as(isize, @intCast(self.state.global_scroll_offset)) - @as(isize, @intCast(anc_line)),
+                };
+            }
+        }
+
+        // Cycle to next mode
+        self.state.hunk_view_mode = self.state.hunk_view_mode.next();
+
+        // Rebuild LineMap to reflect new filtering
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+
+        // Restore both cursor and scroll positions using anchor
+        if (anchor) |anc| {
+            if (anc.file_idx < self.state.files.len) {
+                // Find the anchor line in the new LineMap
+                const new_anchor_line = if (anc.hunk_idx) |hunk_idx|
+                    self.findHunkHeaderLine(anc.file_idx, hunk_idx)
+                else
+                    self.state.line_map.getFileHeaderLine(anc.file_idx);
+
+                if (new_anchor_line) |anchor_line| {
+                    const total_lines = self.getTotalGlobalLines();
+                    if (total_lines == 0) {
+                        self.state.global_cursor_line = 0;
+                        self.state.global_scroll_offset = 0;
+                        return;
+                    }
+
+                    // Restore cursor: anchor + offset
+                    const target_cursor_signed = @as(isize, @intCast(anchor_line)) + anc.cursor_offset;
+                    const target_cursor = if (target_cursor_signed < 0) 0 else @as(usize, @intCast(target_cursor_signed));
+                    self.state.global_cursor_line = @min(target_cursor, total_lines - 1);
+
+                    // Restore scroll: anchor + offset
+                    const target_scroll_signed = @as(isize, @intCast(anchor_line)) + anc.scroll_offset;
+                    const target_scroll = if (target_scroll_signed < 0) 0 else @as(usize, @intCast(target_scroll_signed));
+                    self.state.global_scroll_offset = target_scroll;
+
+                    // Only clamp scroll if it's out of bounds (minimal adjustment)
+                    Navigation.clampScrollOffset(self);
+                    return;
+                }
+            }
+        }
+
+        // Fallback: if anchor restoration failed, just clamp cursor and scroll
+        const total_lines = self.getTotalGlobalLines();
+        if (total_lines > 0 and self.state.global_cursor_line >= total_lines) {
+            self.state.global_cursor_line = total_lines - 1;
+        }
+        Navigation.clampScrollOffset(self);
+    }
+
+    // Helper: Find the global line number of a hunk header
+    fn findHunkHeaderLine(self: *App, file_idx: usize, hunk_idx: usize) ?usize {
+        for (self.state.line_map.records) |*record| {
+            if (record.file_idx == file_idx and record.line_type == .hunk_header) {
+                if (record.line_type.hunk_header.hunk_idx == hunk_idx) {
+                    return record.global_line;
+                }
+            }
+        }
+        return null;
+    }
+
+    // Convert App.State.HunkViewMode to LineMap.HunkViewMode
+    fn convertHunkViewMode(self: *App) line_map.LineMap.HunkViewMode {
+        return switch (self.state.hunk_view_mode) {
+            .all => .all,
+            .old => .old,
+            .new => .new,
+        };
+    }
+
+    // Check if hunk view mode filtering should be applied (only in unified view)
+    fn shouldApplyHunkFiltering(self: *App) bool {
+        return self.state.view_mode == .unified;
     }
 
     pub fn getTotalGlobalLines(self: *App) usize {
@@ -784,7 +1106,7 @@ pub const App = struct {
 
         // Rebuild LineMap since comment count changed
         self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store);
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
     }
 
     fn yankCommentsToClipboard(self: *App) !void {
@@ -826,7 +1148,7 @@ pub const App = struct {
 
                 // Rebuild LineMap since comment count changed
                 self.state.line_map.deinit();
-                self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store);
+                self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
 
                 // After deletion, move cursor up one line (to the parent code line)
                 // since the comment line no longer exists
