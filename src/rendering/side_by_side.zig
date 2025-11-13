@@ -562,7 +562,6 @@ pub const SideBySideRenderer = struct {
         }
     }
 
-
     /// Render comment input box in side-by-side mode
     fn renderSideBySideCommentInput(
         app: *App,

@@ -34,7 +34,6 @@ pub const Navigation = struct {
         ensureCursorVisible(app, true);
     }
 
-
     pub fn navigateToNextFile(app: *App) void {
         if (app.state.files.len == 0) return;
 
@@ -169,7 +168,6 @@ pub const Navigation = struct {
         } else {
             app.state.global_scroll_offset = 0;
         }
-
     }
 
     pub fn scrollToTop(app: *App) void {
@@ -191,7 +189,6 @@ pub const Navigation = struct {
             total_lines - viewport_height
         else
             0;
-
     }
 
     pub fn centerCursor(app: *App) void {
@@ -208,7 +205,6 @@ pub const Navigation = struct {
                 app.state.global_cursor_line = @min(middle_line, total_lines - 1);
             }
         }
-
     }
 
     pub fn scrollPageDown(app: *App) void {
@@ -241,7 +237,6 @@ pub const Navigation = struct {
         } else {
             app.state.global_scroll_offset = 0;
         }
-
     }
 
     pub fn clampScrollOffset(app: *App) void {
@@ -250,7 +245,7 @@ pub const Navigation = struct {
         // Allow over-scrolling at the end so last file can be at top of screen
         // This creates a natural "padding" at the bottom for small files
         const max_scroll = if (total_lines > 0)
-            total_lines - 1  // Any line can be at top of viewport
+            total_lines - 1 // Any line can be at top of viewport
         else
             0;
 

@@ -28,7 +28,7 @@ pub fn main() !void {
         allocator.free(files);
     }
     const parse_time = std.time.nanoTimestamp();
-    std.log.info("[{d}ms] Diff parsed ({d} files)", .{@divTrunc(parse_time - start_time, std.time.ns_per_ms), files.len});
+    std.log.info("[{d}ms] Diff parsed ({d} files)", .{ @divTrunc(parse_time - start_time, std.time.ns_per_ms), files.len });
 
     // 3. Terminal setup (simulated - reduced from 1000ms to 100ms)
     const terminal_time = std.time.nanoTimestamp();

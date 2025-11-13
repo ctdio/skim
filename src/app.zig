@@ -1337,7 +1337,7 @@ pub const App = struct {
 
         var i: usize = 0;
         while (i <= haystack.len - needle.len) : (i += 1) {
-            const slice = haystack[i..i + needle.len];
+            const slice = haystack[i .. i + needle.len];
             if (case_sensitive) {
                 if (std.mem.eql(u8, slice, needle)) return true;
             } else {
