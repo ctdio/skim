@@ -6,13 +6,138 @@ const syntax = @import("syntax.zig");
 const App = @import("app.zig").App;
 const Layout = rendering_common.Layout;
 
-// Thread-safe async highlighting system
+// Highlighting job - lightweight request struct
+pub const HighlightJob = struct {
+    file_path: []const u8, // Borrowed reference
+    content: []const u8, // Borrowed reference
+    file_idx: usize,
+};
+
+// Completed highlighting result
+pub const HighlightResult = struct {
+    file_idx: usize,
+    highlights: ?[]syntax.Highlight,
+    failed: bool,
+};
+
+// Long-lived worker thread that maintains cached parsers
+pub const HighlightWorker = struct {
+    allocator: std.mem.Allocator,
+    thread: std.Thread,
+    job_queue: std.ArrayList(HighlightJob),
+    result_queue: std.ArrayList(HighlightResult),
+    mutex: std.Thread.Mutex,
+    should_stop: bool,
+    highlighter: syntax.SyntaxHighlighter,
+
+    pub fn init(allocator: std.mem.Allocator) !*HighlightWorker {
+        const worker = try allocator.create(HighlightWorker);
+        errdefer allocator.destroy(worker);
+
+        worker.* = .{
+            .allocator = allocator,
+            .thread = undefined, // Will be set below
+            .job_queue = std.ArrayList(HighlightJob).init(allocator),
+            .result_queue = std.ArrayList(HighlightResult).init(allocator),
+            .mutex = std.Thread.Mutex{},
+            .should_stop = false,
+            .highlighter = try syntax.SyntaxHighlighter.init(allocator),
+        };
+        errdefer worker.highlighter.deinit();
+
+        // Spawn the worker thread
+        worker.thread = try std.Thread.spawn(.{}, workerThreadMain, .{worker});
+
+        return worker;
+    }
+
+    pub fn deinit(self: *HighlightWorker) void {
+        // Signal worker to stop
+        self.mutex.lock();
+        self.should_stop = true;
+        self.mutex.unlock();
+
+        // Wait for thread to finish
+        self.thread.join();
+
+        // Clean up queues
+        self.job_queue.deinit();
+
+        // Free any remaining results
+        for (self.result_queue.items) |result| {
+            if (result.highlights) |highlights| {
+                self.highlighter.freeHighlights(highlights);
+            }
+        }
+        self.result_queue.deinit();
+
+        self.highlighter.deinit();
+        self.allocator.destroy(self);
+    }
+
+    // Submit a job (non-blocking, just adds to queue)
+    pub fn submitJob(self: *HighlightWorker, job: HighlightJob) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.job_queue.append(job);
+    }
+
+    // Check for completed results (non-blocking)
+    pub fn pollResults(self: *HighlightWorker, out_results: *std.ArrayList(HighlightResult)) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Transfer all completed results to caller
+        for (self.result_queue.items) |result| {
+            try out_results.append(result);
+        }
+        self.result_queue.clearRetainingCapacity();
+    }
+
+    // Worker thread main loop
+    fn workerThreadMain(self: *HighlightWorker) void {
+        while (true) {
+            // Check if we should stop
+            self.mutex.lock();
+            if (self.should_stop) {
+                self.mutex.unlock();
+                return;
+            }
+
+            // Get next job if available
+            const job_opt = if (self.job_queue.items.len > 0)
+                self.job_queue.orderedRemove(0)
+            else
+                null;
+            self.mutex.unlock();
+
+            if (job_opt) |job| {
+                // Process the job (outside the lock for parallel work)
+                const highlights = self.highlighter.highlightFile(job.file_path, job.content) catch null;
+
+                // Store result
+                self.mutex.lock();
+                self.result_queue.append(.{
+                    .file_idx = job.file_idx,
+                    .highlights = highlights,
+                    .failed = highlights == null,
+                }) catch {};
+                self.mutex.unlock();
+            } else {
+                // No jobs available, sleep briefly to avoid busy-wait
+                std.time.sleep(1 * std.time.ns_per_ms);
+            }
+        }
+    }
+};
+
+// Legacy struct for compatibility (deprecated)
 pub const AsyncHighlightJob = struct {
     mutex: std.Thread.Mutex,
     allocator: std.mem.Allocator,
     // Input data (set before spawning thread)
     file_path: []u8, // Owned copy
-    content: []u8, // Owned copy
+    content: []u8, // Owned copy of file content (built on main thread, fast single-pass)
     file_idx: usize,
     // Output data (written by thread, read by main)
     highlights: ?[]syntax.Highlight,
@@ -70,7 +195,7 @@ fn highlightWorker(job: *AsyncHighlightJob) void {
     };
     defer highlighter.deinit();
 
-    // Do the highlighting work
+    // Do the highlighting work (content already built on main thread)
     const highlights = highlighter.highlightFile(job.file_path, job.content) catch {
         job.mutex.lock();
         job.failed = true;
@@ -180,27 +305,14 @@ pub const StateHelpers = struct {
     }
 
     // Ensure syntax highlights are loaded for the given file
-    // Smart caching: If parser is already loaded, apply immediately (fast ~7ms)
-    // If parser not cached and allow_async=false, skip (will be applied async later)
+    // Non-blocking: Only applies highlights if already computed
+    // Never blocks to compute new highlights during rendering
     pub fn ensureHighlights(app: *App, file: *parser.FileDiff, allow_async: bool) !void {
-        if (file.highlights != null) return; // Already cached
-
-        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-        // Check if parser/query is already cached - if so, use it immediately
-        if (app.syntax_highlighter.isCached(file_path)) {
-            // Parser is cached - highlighting is fast (~7ms), do it now
-            try highlightFileSync(app, file);
-            return;
-        }
-
-        // Parser not cached - this would be slow (~400ms)
-        if (!allow_async) {
-            return; // Render without syntax colors for now
-        }
-
-        // Synchronous highlighting (fallback or explicit request)
-        try highlightFileSync(app, file);
+        _ = app;
+        _ = allow_async;
+        // Do nothing - only use highlights that are already computed
+        // New highlights will be computed by background thread in main loop
+        _ = file;
     }
 
     // Synchronous highlighting - blocks until complete
@@ -234,22 +346,56 @@ pub const StateHelpers = struct {
         mutable_file.highlights = highlights;
     }
 
-    // Start async highlighting for a specific file
-    // Smart: If parser cached, apply immediately (~7ms). If not cached, skip (will load async later)
+    // Request async highlighting for a specific file
+    // Non-blocking: Just flags that highlighting is needed, doesn't compute it
     pub fn startAsyncHighlight(app: *App, file: *parser.FileDiff) !void {
-        if (file.highlights != null) return; // Already highlighted
+        _ = file;
+        // Don't block - just flag that we need highlighting
+        // The main loop will spawn a background thread to do the work
+        app.needs_async_highlight = true;
+    }
 
-        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-        // Only highlight if parser is already cached (fast path)
-        if (app.syntax_highlighter.isCached(file_path)) {
-            try highlightFileSync(app, file);
+    // Build file content efficiently (single allocation, fast)
+    pub fn buildFileContent(allocator: std.mem.Allocator, file: *const parser.FileDiff) ![]u8 {
+        // Step 1: Calculate exact size needed
+        var total_size: usize = 0;
+        for (file.hunks) |hunk| {
+            for (hunk.lines) |line| {
+                switch (line.line_type) {
+                    .delete => {},
+                    .add, .context => {
+                        total_size += line.content.len + 1; // +1 for newline
+                    },
+                }
+            }
         }
-        // If parser not cached, skip - don't block navigation
-        // The main loop will trigger highlighting after first render
+
+        // Step 2: Single allocation with exact size
+        const content = try allocator.alloc(u8, total_size);
+        errdefer allocator.free(content);
+
+        // Step 3: Copy data in single pass (very fast memcpy operations)
+        var offset: usize = 0;
+        for (file.hunks) |hunk| {
+            for (hunk.lines) |line| {
+                switch (line.line_type) {
+                    .delete => {},
+                    .add, .context => {
+                        @memcpy(content[offset .. offset + line.content.len], line.content);
+                        offset += line.content.len;
+                        content[offset] = '\n';
+                        offset += 1;
+                    },
+                }
+            }
+        }
+
+        return content;
     }
 
     // Spawn a background thread to highlight a file (truly async)
+    // Optimized: Build content on main thread with single allocation (fast)
+    // Only parser loading/highlighting happens in background (slow part)
     pub fn spawnAsyncHighlight(app: *App, file_idx: usize) !*AsyncHighlightJob {
         if (file_idx >= app.state.files.len) return error.InvalidFileIndex;
         const file = &app.state.files[file_idx];
@@ -258,17 +404,35 @@ pub const StateHelpers = struct {
 
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
-        // Build file content
-        var content = std.ArrayList(u8).init(app.allocator);
-        defer content.deinit();
-
+        // Build file content efficiently on main thread
+        // Step 1: Calculate exact size needed (single pass, no reallocs)
+        var total_size: usize = 0;
         for (file.hunks) |hunk| {
             for (hunk.lines) |line| {
                 switch (line.line_type) {
                     .delete => {}, // Skip deletions
                     .add, .context => {
-                        try content.appendSlice(line.content);
-                        try content.append('\n');
+                        total_size += line.content.len + 1; // +1 for newline
+                    },
+                }
+            }
+        }
+
+        // Step 2: Single allocation with exact size
+        const content = try app.allocator.alloc(u8, total_size);
+        errdefer app.allocator.free(content);
+
+        // Step 3: Copy data in single pass (very fast, just memcpy operations)
+        var offset: usize = 0;
+        for (file.hunks) |hunk| {
+            for (hunk.lines) |line| {
+                switch (line.line_type) {
+                    .delete => {},
+                    .add, .context => {
+                        @memcpy(content[offset .. offset + line.content.len], line.content);
+                        offset += line.content.len;
+                        content[offset] = '\n';
+                        offset += 1;
                     },
                 }
             }
@@ -279,7 +443,7 @@ pub const StateHelpers = struct {
         errdefer job.deinit();
 
         job.file_path = try app.allocator.dupe(u8, file_path);
-        job.content = try app.allocator.dupe(u8, content.items);
+        job.content = content;
         job.file_idx = file_idx;
 
         // Spawn worker thread

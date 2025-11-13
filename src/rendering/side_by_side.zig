@@ -41,6 +41,7 @@ pub const SideBySideRenderer = struct {
         const middle_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing + left_content_width;
 
         var row: usize = 0;
+        var last_highlighted_file_idx: ?usize = null;
 
         // Iterate through LineMap records (single source of truth for line positions)
         for (app.state.line_map.records) |*record| {
@@ -52,7 +53,12 @@ pub const SideBySideRenderer = struct {
             if (row >= win.height) break;
 
             const file = &app.state.files[file_idx];
-            try StateHelpers.ensureHighlights(app, file, false);
+
+            // Only highlight once per file (not once per line!)
+            if (last_highlighted_file_idx == null or last_highlighted_file_idx.? != file_idx) {
+                try StateHelpers.ensureHighlights(app, file, false);
+                last_highlighted_file_idx = file_idx;
+            }
             const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
             const is_cursor = global_line == app.state.global_cursor_line;

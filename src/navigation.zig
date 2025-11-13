@@ -55,7 +55,9 @@ pub const Navigation = struct {
             app.needs_render = true;
         }
 
-        triggerAsyncHighlight(app);
+        // Request async highlighting after navigation
+        // Don't block - main loop will handle it
+        app.needs_async_highlight = true;
     }
 
     pub fn navigateToPreviousFile(app: *App) void {
@@ -79,24 +81,9 @@ pub const Navigation = struct {
             app.needs_render = true;
         }
 
-        triggerAsyncHighlight(app);
-    }
-
-    // Trigger async highlighting for current file (non-blocking)
-    fn triggerAsyncHighlight(app: *App) void {
-        if (app.state.current_file_idx >= app.state.files.len) return;
-        const file = &app.state.files[app.state.current_file_idx];
-
-        // Try to highlight immediately if parser is cached (fast)
-        StateHelpers.startAsyncHighlight(app, file) catch {};
-
-        // If we just added highlights, request a re-render
-        if (file.highlights != null) {
-            app.needs_render = true;
-        } else {
-            // Parser not cached - flag that we need async highlighting
-            app.needs_async_highlight = true;
-        }
+        // Request async highlighting after navigation
+        // Don't block - main loop will handle it
+        app.needs_async_highlight = true;
     }
 
     pub fn pageDown(app: *App) void {
