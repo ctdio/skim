@@ -96,7 +96,7 @@ Five main layers:
 #### navigation.zig - Navigation Logic
 - **Cursor movement**: moveCursorUp/Down with count prefix support (j/k)
 - **File navigation**: navigateToNextFile/navigateToPreviousFile (h/l, Ctrl-n/p)
-- **Scrolling**: pageUp/Down, scrollToTop/Bottom, centerCursor
+- **Scrolling**: pageUp/Down, scrollToTop/Bottom, centerCursor (M key), centerViewportOnCursor (zz keys)
 - **Visibility**: ensureCursorVisible adds 3-line padding for j/k (not file nav)
 - **File snapping**: File navigation sets both cursor and scroll to header line
 
@@ -321,7 +321,7 @@ The app uses an enum-based mode system. When adding new modes:
 
 **Current keybindings:**
 - NORMAL mode:
-  - Navigation: h/l (prev/next file), j/k (cursor up/down with count prefix), g/G (top/bottom), Ctrl-n/p (file nav), Ctrl-d/u (page), Shift+M (center)
+  - Navigation: h/l (prev/next file), j/k (cursor up/down with count prefix), g/G (top/bottom), Ctrl-n/p (file nav), Ctrl-d/u (page), zz (center viewport on cursor), Shift+M (move cursor to middle of viewport)
   - Comments: Enter (add/edit comment), d (delete comment under cursor), D (clear all comments), y (yank comments to clipboard)
   - View: s (toggle unified/side-by-side), r (refresh diff)
   - Integration: Ctrl-g (open in $EDITOR at line)

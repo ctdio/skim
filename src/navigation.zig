@@ -194,6 +194,27 @@ pub const Navigation = struct {
         }
     }
 
+    pub fn centerViewportOnCursor(app: *App) void {
+        // Center the viewport around the current cursor line (like vim's 'zz')
+        const viewport_height = app.state.viewport_height;
+        const cursor_line = app.state.global_cursor_line;
+        const total_lines = app.getTotalGlobalLines();
+
+        if (viewport_height > 0 and total_lines > 0) {
+            const half_viewport = viewport_height / 2;
+
+            // Calculate desired scroll offset to center cursor
+            if (cursor_line >= half_viewport) {
+                app.state.global_scroll_offset = cursor_line - half_viewport;
+            } else {
+                app.state.global_scroll_offset = 0;
+            }
+
+            // Ensure scroll offset doesn't go past the end
+            clampScrollOffset(app);
+        }
+    }
+
     pub fn scrollPageDown(app: *App) void {
         const scroll_amount = app.state.viewport_height / 2;
         const total_lines = app.getTotalGlobalLines();

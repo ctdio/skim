@@ -136,6 +136,7 @@ pub const App = struct {
         visual_anchor: ?usize, // Visual mode: anchor line (where selection started)
         pending_find: ?FindCommand, // Waiting for character for f/t/F/T
         last_find: ?NormalModeLastFind, // Last f/t/F/T command for ; and , repeat
+        pending_z: bool, // Waiting for second z for zz (center cursor)
 
         const ViewMode = enum {
             unified,
@@ -236,6 +237,7 @@ pub const App = struct {
         pending_find: ?PendingFind, // Waiting for character for f/t/F/T
         pending_operator: ?PendingOperator, // Waiting for motion after operator (d, y, c)
         pending_replace: bool, // Waiting for character for 'r' command
+        pending_z: bool, // Waiting for second z for zz (center cursor)
         pending_text_object: ?TextObject, // Waiting for text object (iw, aw, etc.)
         yank_buffer: [4096]u8, // Yank/copy buffer
         yank_len: usize, // Length of yanked text
@@ -358,6 +360,7 @@ pub const App = struct {
                 .visual_anchor = null,
                 .pending_find = null,
                 .last_find = null,
+                .pending_z = false,
             },
             .should_quit = false,
             .should_suspend_for_editor = false,
@@ -675,6 +678,23 @@ pub const App = struct {
     }
 
     fn handleNormalMode(self: *App, key: vaxis.Key) !void {
+        // If waiting for second z for zz (center cursor)
+        if (self.state.pending_z) {
+            self.state.pending_z = false;
+            // ESC cancels pending z
+            if (key.codepoint == 27) { // ESC
+                return;
+            }
+            // If second z, center the viewport on cursor (like vim's zz)
+            if (key.codepoint == 'z') {
+                Navigation.centerViewportOnCursor(self);
+                self.state.cursor_column = 0;
+                self.updateCurrentFileAndTriggerHighlighting();
+                return;
+            }
+            // Any other key cancels the pending z, but still processes the key below
+        }
+
         // If waiting for character for f/t/F/T, execute the find
         if (self.state.pending_find) |cmd| {
             self.state.pending_find = null;
@@ -815,6 +835,7 @@ pub const App = struct {
                     self.executeFindInLine(opposite_cmd, last.char);
                 }
             },
+            'z' => self.state.pending_z = true, // Wait for second z for zz (center cursor)
             else => {
                 // Reset count prefix on any other key
                 self.state.count_prefix = null;
@@ -2604,6 +2625,7 @@ pub const App = struct {
             .pending_find = null,
             .pending_operator = null,
             .pending_replace = false,
+            .pending_z = false,
             .pending_text_object = null,
             .yank_buffer = undefined,
             .yank_len = 0,
