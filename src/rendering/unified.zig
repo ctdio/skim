@@ -78,12 +78,14 @@ pub const UnifiedRenderer = struct {
                     const rows_used = try renderDiffLine(app, win, file, code_info.hunk_idx, code_info.line_idx_in_hunk, line.*, global_line, row, content_width, gutter_width, is_cursor);
                     row += rows_used;
 
-                    // Check if we're creating/editing a comment on this code line
+                    // Check if we're creating a NEW comment on this code line
+                    // (If editing an existing comment, it will be rendered in place of the comment_line below)
                     if (app.mode == .comment and is_cursor) {
                         if (app.state.active_comment_input) |input| {
                             const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-                            // Check if the active comment is for this line
-                            if (std.mem.eql(u8, input.target_file_path, file_path) and
+                            // Check if the active comment is for this line AND it's a new comment (not editing existing)
+                            if (input.editing_comment_idx == null and
+                                std.mem.eql(u8, input.target_file_path, file_path) and
                                 input.target_hunk_idx == code_info.hunk_idx and
                                 input.target_line_idx == code_info.line_idx_in_hunk)
                             {
@@ -109,7 +111,20 @@ pub const UnifiedRenderer = struct {
                 .comment_line => |comment_info| {
                     if (app.state.comment_store.getComment(comment_info.comment_idx)) |comment| {
                         const comment_start_row = row;
-                        const comment_rows = if (app.mode == .comment and is_cursor)
+
+                        // Check if we're editing THIS specific comment
+                        const is_editing_this_comment = blk: {
+                            if (app.mode == .comment and is_cursor) {
+                                if (app.state.active_comment_input) |input| {
+                                    if (input.editing_comment_idx) |editing_idx| {
+                                        break :blk editing_idx == comment_info.comment_idx;
+                                    }
+                                }
+                            }
+                            break :blk false;
+                        };
+
+                        const comment_rows = if (is_editing_this_comment)
                             try RenderUtils.renderCommentInputBox(app, win, row, gutter_width)
                         else
                             try RenderUtils.renderCommentDisplay(app, win, comment, row, gutter_width, is_cursor);

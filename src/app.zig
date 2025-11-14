@@ -104,6 +104,20 @@ pub const App = struct {
         visual, // Visual selection mode
     };
 
+    // Character find commands for NORMAL mode (f/t/F/T)
+    const FindCommand = enum {
+        f, // Find character forward (move to char)
+        t, // Till character forward (move before char)
+        F, // Find character backward
+        T, // Till character backward
+    };
+
+    // Last find operation for ; and , repeat in NORMAL mode
+    const NormalModeLastFind = struct {
+        command: FindCommand,
+        char: u8,
+    };
+
     const State = struct {
         diff_source: DiffSource,
         files: []parser.FileDiff,
@@ -111,6 +125,7 @@ pub const App = struct {
         current_file_idx: usize, // Tracks which file is visible in sticky header
         global_scroll_offset: usize, // Scroll position across all files
         global_cursor_line: usize, // Cursor position across all files
+        cursor_column: usize, // Horizontal cursor position within current line (0-based)
         view_mode: ViewMode,
         hunk_view_mode: HunkViewMode,
         viewport_height: usize,
@@ -119,6 +134,8 @@ pub const App = struct {
         active_comment_input: ?ActiveCommentInput,
         search_state: SearchState,
         visual_anchor: ?usize, // Visual mode: anchor line (where selection started)
+        pending_find: ?FindCommand, // Waiting for character for f/t/F/T
+        last_find: ?NormalModeLastFind, // Last f/t/F/T command for ; and , repeat
 
         const ViewMode = enum {
             unified,
@@ -214,6 +231,72 @@ pub const App = struct {
         text_buffer: [4096]u8, // Input buffer
         text_len: usize, // Current text length
         cursor_pos: usize, // Cursor position in buffer
+        vim_mode: VimMode, // Current vim mode (normal, insert, or visual)
+        visual_anchor: ?usize, // Visual mode: position where selection started
+        pending_find: ?PendingFind, // Waiting for character for f/t/F/T
+        pending_operator: ?PendingOperator, // Waiting for motion after operator (d, y, c)
+        pending_replace: bool, // Waiting for character for 'r' command
+        pending_text_object: ?TextObject, // Waiting for text object (iw, aw, etc.)
+        yank_buffer: [4096]u8, // Yank/copy buffer
+        yank_len: usize, // Length of yanked text
+        count_prefix: ?usize, // Count prefix for operations (e.g., 3 in 3dd)
+        undo_stack: [32]UndoState, // Undo history
+        undo_count: usize, // Number of undo states
+        undo_index: usize, // Current position in undo stack
+        last_find: ?LastFind, // Last f/t/F/T command for ; and ,
+        last_change: ?LastChange, // Last change for . repeat
+        command_buffer: [256]u8, // Command-line buffer (for :w, :q, etc.)
+        command_len: usize, // Length of command
+
+        const VimMode = enum {
+            normal,
+            insert,
+            visual,
+            command, // Ex command mode (:w, :q, etc.)
+        };
+
+        const PendingFind = enum {
+            f, // Find character forward (move to char)
+            t, // Till character forward (move before char)
+            F, // Find character backward
+            T, // Till character backward
+        };
+
+        const PendingOperator = enum {
+            d, // Delete
+            y, // Yank
+            c, // Change
+        };
+
+        const TextObject = enum {
+            iw, // inner word
+            aw, // around word
+            i_quote, // inside quotes
+            a_quote, // around quotes
+            i_paren, // inside parentheses
+            a_paren, // around parentheses
+            i_bracket, // inside brackets
+            a_bracket, // around brackets
+            i_brace, // inside braces
+            a_brace, // around braces
+        };
+
+        const UndoState = struct {
+            text: [4096]u8,
+            text_len: usize,
+            cursor_pos: usize,
+        };
+
+        const LastFind = struct {
+            command: PendingFind,
+            char: u8,
+        };
+
+        const LastChange = struct {
+            operator: PendingOperator,
+            motion: ?u8, // Key for motion (w, e, b, etc.)
+            count: ?usize,
+        };
     };
 
     const CTRL_C_TIMEOUT_NS = 1 * std.time.ns_per_s; // 1 second window
@@ -264,6 +347,7 @@ pub const App = struct {
                 .current_file_idx = 0,
                 .global_scroll_offset = 0,
                 .global_cursor_line = 0,
+                .cursor_column = 0,
                 .view_mode = .unified,
                 .hunk_view_mode = .all,
                 .viewport_height = 0,
@@ -272,6 +356,8 @@ pub const App = struct {
                 .active_comment_input = null,
                 .search_state = SearchState.init(allocator),
                 .visual_anchor = null,
+                .pending_find = null,
+                .last_find = null,
             },
             .should_quit = false,
             .should_suspend_for_editor = false,
@@ -589,17 +675,40 @@ pub const App = struct {
     }
 
     fn handleNormalMode(self: *App, key: vaxis.Key) !void {
+        // If waiting for character for f/t/F/T, execute the find
+        if (self.state.pending_find) |cmd| {
+            self.state.pending_find = null;
+            // ESC cancels pending find
+            if (key.codepoint == 27) { // ESC
+                return;
+            }
+            // Convert key to u8 if it's a printable character
+            if (key.codepoint >= 0 and key.codepoint <= 127) {
+                const target_char: u8 = @intCast(key.codepoint);
+                self.executeFindInLine(cmd, target_char);
+            }
+            return;
+        }
+
         // Handle Ctrl+key combinations first (before regular key handling)
         if (key.mods.ctrl) {
             switch (key.codepoint) {
-                'n' => Navigation.navigateToNextFile(self),
-                'p' => Navigation.navigateToPreviousFile(self),
+                'n' => {
+                    Navigation.navigateToNextFile(self);
+                    self.state.cursor_column = 0; // Reset column on file change
+                },
+                'p' => {
+                    Navigation.navigateToPreviousFile(self);
+                    self.state.cursor_column = 0; // Reset column on file change
+                },
                 'd' => {
                     Navigation.pageDown(self);
+                    self.state.cursor_column = 0; // Reset column on page navigation
                     self.updateCurrentFileAndTriggerHighlighting();
                 },
                 'u' => {
                     Navigation.pageUp(self);
+                    self.state.cursor_column = 0; // Reset column on page navigation
                     self.updateCurrentFileAndTriggerHighlighting();
                 },
                 'g' => try self.openInEditor(),
@@ -636,20 +745,30 @@ pub const App = struct {
             'q' => self.should_quit = true,
             'j' => {
                 Navigation.moveCursorDown(self);
+                self.state.cursor_column = 0; // Reset column on vertical movement
                 self.updateCurrentFileAndTriggerHighlighting();
             },
             'k' => {
                 Navigation.moveCursorUp(self);
+                self.state.cursor_column = 0; // Reset column on vertical movement
                 self.updateCurrentFileAndTriggerHighlighting();
             },
-            'h' => Navigation.navigateToPreviousFile(self),
-            'l' => Navigation.navigateToNextFile(self),
+            'h' => {
+                Navigation.navigateToPreviousFile(self);
+                self.state.cursor_column = 0; // Reset column on file change
+            },
+            'l' => {
+                Navigation.navigateToNextFile(self);
+                self.state.cursor_column = 0; // Reset column on file change
+            },
             'g' => {
                 Navigation.scrollToTop(self);
+                self.state.cursor_column = 0; // Reset column on jump
                 self.updateCurrentFileAndTriggerHighlighting();
             },
             'G' => {
                 Navigation.scrollToBottom(self);
+                self.state.cursor_column = 0; // Reset column on jump
                 self.updateCurrentFileAndTriggerHighlighting();
             },
             '\r' => try self.startCommentInput(), // Enter to create/edit comment
@@ -661,18 +780,41 @@ pub const App = struct {
             'D' => self.clearAllComments(),
             'M' => {
                 Navigation.centerCursor(self);
+                self.state.cursor_column = 0; // Reset column on center
                 self.updateCurrentFileAndTriggerHighlighting();
             },
             '/' => self.startSearch(),
             'n' => {
                 self.searchNext();
+                self.state.cursor_column = 0; // Reset column on search jump
                 self.updateCurrentFileAndTriggerHighlighting();
             },
             'N' => {
                 self.searchPrevious();
+                self.state.cursor_column = 0; // Reset column on search jump
                 self.updateCurrentFileAndTriggerHighlighting();
             },
             'v' => self.startVisualMode(),
+            'f' => self.state.pending_find = .f, // Wait for character to find forward
+            't' => self.state.pending_find = .t, // Wait for character to move till forward
+            'F' => self.state.pending_find = .F, // Wait for character to find backward
+            'T' => self.state.pending_find = .T, // Wait for character to move till backward
+            ';' => { // Repeat last find in same direction
+                if (self.state.last_find) |last| {
+                    self.executeFindInLine(last.command, last.char);
+                }
+            },
+            ',' => { // Repeat last find in opposite direction
+                if (self.state.last_find) |last| {
+                    const opposite_cmd = switch (last.command) {
+                        .f => FindCommand.F,
+                        .F => FindCommand.f,
+                        .t => FindCommand.T,
+                        .T => FindCommand.t,
+                    };
+                    self.executeFindInLine(opposite_cmd, last.char);
+                }
+            },
             else => {
                 // Reset count prefix on any other key
                 self.state.count_prefix = null;
@@ -979,10 +1121,83 @@ pub const App = struct {
         };
     }
 
-    fn handleCommentMode(self: *App, key: vaxis.Key) !void {
-        var input = &self.state.active_comment_input.?;
+    // Execute a find command (f/t/F/T) in NORMAL mode
+    fn executeFindInLine(self: *App, cmd: FindCommand, target_char: u8) void {
+        const line_content = self.getCurrentLineContent() orelse return;
+        const count = self.state.count_prefix orelse 1;
+        self.state.count_prefix = null; // Clear count prefix
 
-        // Ctrl+S - save comment
+        const line_len = line_content.len;
+        var found_count: usize = 0;
+
+        switch (cmd) {
+            .f => { // Find forward - move to character
+                var pos = self.state.cursor_column + 1;
+                while (pos < line_len) : (pos += 1) {
+                    if (line_content[pos] == target_char) {
+                        found_count += 1;
+                        if (found_count == count) {
+                            self.state.cursor_column = pos;
+                            self.state.last_find = .{ .command = cmd, .char = target_char };
+                            return;
+                        }
+                    }
+                }
+            },
+            .t => { // Till forward - move before character
+                var pos = self.state.cursor_column + 1;
+                while (pos < line_len) : (pos += 1) {
+                    if (line_content[pos] == target_char) {
+                        found_count += 1;
+                        if (found_count == count) {
+                            self.state.cursor_column = if (pos > 0) pos - 1 else 0;
+                            self.state.last_find = .{ .command = cmd, .char = target_char };
+                            return;
+                        }
+                    }
+                }
+            },
+            .F => { // Find backward - move to character
+                if (self.state.cursor_column > 0) {
+                    var pos = self.state.cursor_column - 1;
+                    while (true) {
+                        if (line_content[pos] == target_char) {
+                            found_count += 1;
+                            if (found_count == count) {
+                                self.state.cursor_column = pos;
+                                self.state.last_find = .{ .command = cmd, .char = target_char };
+                                return;
+                            }
+                        }
+                        if (pos == 0) break;
+                        pos -= 1;
+                    }
+                }
+            },
+            .T => { // Till backward - move after character
+                if (self.state.cursor_column > 0) {
+                    var pos = self.state.cursor_column - 1;
+                    while (true) {
+                        if (line_content[pos] == target_char) {
+                            found_count += 1;
+                            if (found_count == count) {
+                                self.state.cursor_column = @min(pos + 1, line_len - 1);
+                                self.state.last_find = .{ .command = cmd, .char = target_char };
+                                return;
+                            }
+                        }
+                        if (pos == 0) break;
+                        pos -= 1;
+                    }
+                }
+            },
+        }
+    }
+
+    fn handleCommentMode(self: *App, key: vaxis.Key) !void {
+        const input = &self.state.active_comment_input.?;
+
+        // Ctrl+S - save comment (works in both modes)
         if (key.mods.ctrl and key.codepoint == 's') {
             try self.saveCurrentComment();
             self.mode = .normal;
@@ -990,62 +1205,1330 @@ pub const App = struct {
             return;
         }
 
-        // Enter - insert newline (much more intuitive for multi-line input)
-        if (key.matches(vaxis.Key.enter, .{})) {
-            if (input.text_len < input.text_buffer.len) {
-                // Insert newline at cursor position
-                const remaining = input.text_len - input.cursor_pos;
-                if (remaining > 0) {
-                    std.mem.copyBackwards(
-                        u8,
-                        input.text_buffer[input.cursor_pos + 1 .. input.text_len + 1],
-                        input.text_buffer[input.cursor_pos..input.text_len],
-                    );
+        // Dispatch based on vim mode
+        switch (input.vim_mode) {
+            .normal => try self.handleCommentModeNormal(key),
+            .insert => try self.handleCommentModeInsert(key),
+            .visual => try self.handleCommentModeVisual(key),
+            .command => try self.handleCommentModeCommand(key),
+        }
+    }
+
+    fn handleCommentModeNormal(self: *App, key: vaxis.Key) !void {
+        var input = &self.state.active_comment_input.?;
+
+        // Handle Ctrl+R for redo
+        if (key.mods.ctrl and key.codepoint == 'r') {
+            self.performRedo(input);
+            return;
+        }
+
+        // Handle Ctrl+D for page down
+        if (key.mods.ctrl and key.codepoint == 'd') {
+            const count = input.count_prefix orelse 1;
+            var i: usize = 0;
+            while (i < count * 10) : (i += 1) { // Move down 10 lines per page
+                self.moveCursorDown(input);
+            }
+            input.count_prefix = null;
+            return;
+        }
+
+        // Handle Ctrl+U for page up
+        if (key.mods.ctrl and key.codepoint == 'u') {
+            const count = input.count_prefix orelse 1;
+            var i: usize = 0;
+            while (i < count * 10) : (i += 1) { // Move up 10 lines per page
+                self.moveCursorUp(input);
+            }
+            input.count_prefix = null;
+            return;
+        }
+
+        // Handle Ctrl+W to exit (like closing a tab in VS Code/browsers)
+        if (key.mods.ctrl and key.codepoint == 'w') {
+            self.mode = .normal;
+            self.state.active_comment_input = null;
+            return;
+        }
+
+        // Handle pending replace (r command)
+        if (input.pending_replace) {
+            if (key.codepoint >= 32 and key.codepoint < 127) {
+                self.pushUndo(input);
+                if (input.cursor_pos < input.text_len) {
+                    input.text_buffer[input.cursor_pos] = @intCast(key.codepoint);
                 }
-                input.text_buffer[input.cursor_pos] = '\n';
-                input.text_len += 1;
-                input.cursor_pos += 1;
+                input.pending_replace = false;
             }
             return;
         }
 
+        // Handle pending find commands (f/t/F/T)
+        if (input.pending_find) |find_cmd| {
+            if (key.codepoint >= 32 and key.codepoint < 127) {
+                const target_char: u8 = @intCast(key.codepoint);
+                input.last_find = .{ .command = find_cmd, .char = target_char };
+                try self.executeFind(input, find_cmd, target_char);
+                input.pending_find = null;
+            }
+            return;
+        }
+
+        // Handle count prefix (0-9)
+        if (key.codepoint >= '0' and key.codepoint <= '9') {
+            const digit = key.codepoint - '0';
+            if (input.count_prefix) |current| {
+                input.count_prefix = current * 10 + digit;
+            } else if (digit != 0) { // 0 is a motion, not a count prefix
+                input.count_prefix = digit;
+            } else {
+                // 0 is "go to start of line"
+                input.cursor_pos = self.findLineStart(input.*);
+            }
+            return;
+        }
+
+        // Handle pending operator + motion (dw, yw, etc.) or line operation (dd, yy, cc)
+        if (input.pending_operator) |operator| {
+            const count = input.count_prefix orelse 1;
+
+            // Check for double operator (dd, yy, cc) - operate on whole lines
+            const is_line_operation = switch (operator) {
+                .d => key.codepoint == 'd',
+                .y => key.codepoint == 'y',
+                .c => key.codepoint == 'c',
+            };
+
+            if (is_line_operation) {
+                self.pushUndo(input);
+                // Operate on count lines
+                const line_start = self.findLineStart(input.*);
+                var line_end = self.findLineEnd(input.*);
+
+                // Extend to count lines
+                var lines: usize = 1;
+                while (lines < count and line_end < input.text_len) : (lines += 1) {
+                    if (input.text_buffer[line_end] == '\n') line_end += 1;
+                    while (line_end < input.text_len and input.text_buffer[line_end] != '\n') {
+                        line_end += 1;
+                    }
+                }
+
+                // Include final newline if there is one
+                if (line_end < input.text_len and input.text_buffer[line_end] == '\n') {
+                    line_end += 1;
+                }
+
+                try self.executeOperator(input, operator, line_start, line_end);
+                input.pending_operator = null;
+                input.count_prefix = null;
+                return;
+            }
+
+            // Handle line-wise motions (j/k)
+            if (key.codepoint == 'j' or key.codepoint == 'k') {
+                self.pushUndo(input);
+                const line_start = self.findLineStart(input.*);
+                var line_end = self.findLineEnd(input.*);
+
+                // Extend by count lines in the direction
+                var lines: usize = 0;
+                while (lines < count) : (lines += 1) {
+                    if (key.codepoint == 'j') {
+                        // Down
+                        if (line_end < input.text_len) {
+                            if (input.text_buffer[line_end] == '\n') line_end += 1;
+                            while (line_end < input.text_len and input.text_buffer[line_end] != '\n') {
+                                line_end += 1;
+                            }
+                        }
+                    } else {
+                        // Up - would need to implement going backwards
+                        // For now just handle current line
+                    }
+                }
+
+                // Include newline
+                if (line_end < input.text_len and input.text_buffer[line_end] == '\n') {
+                    line_end += 1;
+                }
+
+                try self.executeOperator(input, operator, line_start, line_end);
+                input.pending_operator = null;
+                input.count_prefix = null;
+                return;
+            }
+
+            // Execute motion to get end position (with count)
+            self.pushUndo(input);
+            const start_pos = input.cursor_pos;
+            var end_pos: usize = start_pos;
+
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                end_pos = switch (key.codepoint) {
+                    'w' => self.findNextWordStart(input.*),
+                    'e' => self.findWordEnd(input.*),
+                    'b' => self.findPrevWordStart(input.*),
+                    '$' => self.findLineEnd(input.*),
+                    '^' => blk: {
+                        var pos = self.findLineStart(input.*);
+                        while (pos < input.text_len and (input.text_buffer[pos] == ' ' or input.text_buffer[pos] == '\t')) {
+                            pos += 1;
+                        }
+                        break :blk pos;
+                    },
+                    '{' => self.findPrevParagraph(input.*),
+                    '}' => self.findNextParagraph(input.*),
+                    else => {
+                        // Invalid motion - cancel operator
+                        input.pending_operator = null;
+                        input.count_prefix = null;
+                        return;
+                    },
+                };
+            }
+
+            // Execute operator on range
+            try self.executeOperator(input, operator, start_pos, end_pos);
+            input.pending_operator = null;
+            input.count_prefix = null;
+            return;
+        }
+
+        const count = input.count_prefix orelse 1;
+
         switch (key.codepoint) {
-            27 => { // ESC - cancel
-                self.mode = .normal;
-                self.state.active_comment_input = null;
+            // Undo/Redo
+            'u' => {
+                self.performUndo(input);
+                input.count_prefix = null;
             },
+
+            // Mode transitions
+            'i' => {
+                input.vim_mode = .insert;
+                input.count_prefix = null;
+            },
+            'a' => {
+                input.cursor_pos = @min(input.cursor_pos + 1, input.text_len);
+                input.vim_mode = .insert;
+                input.count_prefix = null;
+            },
+            'I' => {
+                input.cursor_pos = self.findLineStart(input.*);
+                input.vim_mode = .insert;
+                input.count_prefix = null;
+            },
+            'A' => {
+                input.cursor_pos = self.findLineEnd(input.*);
+                input.vim_mode = .insert;
+                input.count_prefix = null;
+            },
+            'o' => {
+                self.pushUndo(input);
+                input.cursor_pos = self.findLineEnd(input.*);
+                try self.insertChar(input, '\n');
+                input.vim_mode = .insert;
+                input.count_prefix = null;
+            },
+            'O' => {
+                self.pushUndo(input);
+                const line_start = self.findLineStart(input.*);
+                input.cursor_pos = line_start;
+                try self.insertChar(input, '\n');
+                input.cursor_pos = line_start;
+                input.vim_mode = .insert;
+                input.count_prefix = null;
+            },
+            's' => { // Substitute character (delete + insert)
+                self.pushUndo(input);
+                if (input.cursor_pos < input.text_len) {
+                    try self.deleteChar(input, input.cursor_pos);
+                }
+                input.vim_mode = .insert;
+                input.count_prefix = null;
+            },
+
+            // Navigation with count support
+            'h' => {
+                var i: usize = 0;
+                while (i < count and input.cursor_pos > 0) : (i += 1) {
+                    input.cursor_pos -= 1;
+                }
+                input.count_prefix = null;
+            },
+            'l' => {
+                var i: usize = 0;
+                while (i < count and input.cursor_pos < input.text_len) : (i += 1) {
+                    input.cursor_pos += 1;
+                }
+                input.count_prefix = null;
+            },
+            'j' => {
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    self.moveCursorDown(input);
+                }
+                input.count_prefix = null;
+            },
+            'k' => {
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    self.moveCursorUp(input);
+                }
+                input.count_prefix = null;
+            },
+            'w' => {
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    input.cursor_pos = self.findNextWordStart(input.*);
+                }
+                input.count_prefix = null;
+            },
+            'e' => {
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    input.cursor_pos = self.findWordEnd(input.*);
+                }
+                input.count_prefix = null;
+            },
+            'b' => {
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    input.cursor_pos = self.findPrevWordStart(input.*);
+                }
+                input.count_prefix = null;
+            },
+            '$' => {
+                input.cursor_pos = self.findLineEnd(input.*);
+                input.count_prefix = null;
+            },
+            '^' => { // First non-blank of line
+                var pos = self.findLineStart(input.*);
+                while (pos < input.text_len and (input.text_buffer[pos] == ' ' or input.text_buffer[pos] == '\t')) {
+                    pos += 1;
+                }
+                input.cursor_pos = pos;
+                input.count_prefix = null;
+            },
+            'g' => { // gg - go to start of buffer
+                if (input.count_prefix == null) {
+                    // Waiting for second 'g'
+                    input.count_prefix = 999; // Use as a flag for 'g' pressed
+                } else {
+                    input.cursor_pos = 0;
+                    input.count_prefix = null;
+                }
+            },
+            'G' => {
+                input.cursor_pos = input.text_len;
+                input.count_prefix = null;
+            },
+            '{' => { // Previous paragraph
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    input.cursor_pos = self.findPrevParagraph(input.*);
+                }
+                input.count_prefix = null;
+            },
+            '}' => { // Next paragraph
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    input.cursor_pos = self.findNextParagraph(input.*);
+                }
+                input.count_prefix = null;
+            },
+
+            // Visual mode
+            'v' => {
+                input.visual_anchor = input.cursor_pos;
+                input.vim_mode = .visual;
+                input.count_prefix = null;
+            },
+
+            // Command mode
+            ':' => {
+                input.command_len = 0;
+                input.vim_mode = .command;
+                input.count_prefix = null;
+            },
+
+            // Find commands
+            'f' => {
+                input.pending_find = .f;
+                // count_prefix preserved for repeat
+            },
+            't' => {
+                input.pending_find = .t;
+                // count_prefix preserved for repeat
+            },
+            'F' => {
+                input.pending_find = .F;
+                // count_prefix preserved for repeat
+            },
+            'T' => {
+                input.pending_find = .T;
+                // count_prefix preserved for repeat
+            },
+            ';' => { // Repeat last find
+                if (input.last_find) |last| {
+                    var i: usize = 0;
+                    while (i < count) : (i += 1) {
+                        try self.executeFind(input, last.command, last.char);
+                    }
+                }
+                input.count_prefix = null;
+            },
+            ',' => { // Repeat last find in opposite direction
+                if (input.last_find) |last| {
+                    const opposite = switch (last.command) {
+                        .f => ActiveCommentInput.PendingFind.F,
+                        .F => ActiveCommentInput.PendingFind.f,
+                        .t => ActiveCommentInput.PendingFind.T,
+                        .T => ActiveCommentInput.PendingFind.t,
+                    };
+                    var i: usize = 0;
+                    while (i < count) : (i += 1) {
+                        try self.executeFind(input, opposite, last.char);
+                    }
+                }
+                input.count_prefix = null;
+            },
+
+            // Editing
+            'r' => {
+                input.pending_replace = true;
+                input.count_prefix = null;
+            },
+            'x' => { // Delete character under cursor
+                self.pushUndo(input);
+                var i: usize = 0;
+                while (i < count and input.cursor_pos < input.text_len) : (i += 1) {
+                    try self.deleteChar(input, input.cursor_pos);
+                }
+                input.count_prefix = null;
+            },
+            'd' => input.pending_operator = .d,
+            'y' => input.pending_operator = .y,
+            'c' => input.pending_operator = .c,
+            'C' => { // Change to end of line
+                self.pushUndo(input);
+                const line_end = self.findLineEnd(input.*);
+                while (input.cursor_pos < line_end) {
+                    try self.deleteChar(input, input.cursor_pos);
+                }
+                input.vim_mode = .insert;
+                input.count_prefix = null;
+            },
+            'D' => { // Delete to end of line
+                self.pushUndo(input);
+                const line_end = self.findLineEnd(input.*);
+                while (input.cursor_pos < line_end) {
+                    try self.deleteChar(input, input.cursor_pos);
+                }
+                input.count_prefix = null;
+            },
+            'Y' => { // Yank line (like yy)
+                const line_start = self.findLineStart(input.*);
+                var line_end = self.findLineEnd(input.*);
+                if (line_end < input.text_len and input.text_buffer[line_end] == '\n') {
+                    line_end += 1;
+                }
+                const yank_size = line_end - line_start;
+                if (yank_size > 0 and yank_size <= input.yank_buffer.len) {
+                    @memcpy(input.yank_buffer[0..yank_size], input.text_buffer[line_start..line_end]);
+                    input.yank_len = yank_size;
+                }
+                input.count_prefix = null;
+            },
+            'p' => { // Paste after cursor
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    try self.pasteAfterCursor(input);
+                }
+                input.count_prefix = null;
+            },
+            'P' => { // Paste before cursor
+                self.pushUndo(input);
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    // Insert yanked text at cursor position
+                    for (0..input.yank_len) |j| {
+                        if (input.text_len >= input.text_buffer.len) break;
+                        try self.insertChar(input, input.yank_buffer[j]);
+                    }
+                    // Move cursor back to start of pasted text
+                    if (input.yank_len > 0 and input.cursor_pos >= input.yank_len) {
+                        input.cursor_pos -= input.yank_len;
+                    }
+                }
+                input.count_prefix = null;
+            },
+            'J' => { // Join lines
+                self.pushUndo(input);
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    const line_end = self.findLineEnd(input.*);
+                    // If there's a newline, replace it with a space
+                    if (line_end < input.text_len and input.text_buffer[line_end] == '\n') {
+                        input.text_buffer[line_end] = ' ';
+                    }
+                }
+                input.count_prefix = null;
+            },
+            'M' => { // Move to middle line (vim-style)
+                self.centerCommentCursor(input);
+            },
+
+            27 => { // ESC - Clear pending state (use :q or Ctrl-S to exit)
+                // Clear any pending state
+                input.pending_find = null;
+                input.pending_operator = null;
+                input.pending_replace = false;
+                input.count_prefix = null;
+                // Don't exit - use :q or Ctrl-S to save/exit
+            },
+
+            else => {
+                // Unknown key - clear count prefix
+                input.count_prefix = null;
+            },
+        }
+    }
+
+    fn handleCommentModeInsert(self: *App, key: vaxis.Key) !void {
+        var input = &self.state.active_comment_input.?;
+
+        // Ctrl+W - exit comment editor (modern app behavior)
+        if (key.mods.ctrl and key.codepoint == 'w') {
+            self.mode = .normal;
+            self.state.active_comment_input = null;
+            return;
+        }
+
+        // ESC or Ctrl+C - return to normal mode
+        if (key.codepoint == 27 or (key.codepoint == 'c' and key.mods.ctrl)) {
+            input.vim_mode = .normal;
+            // Move cursor left by 1 if not at start (vim behavior)
+            if (input.cursor_pos > 0) {
+                input.cursor_pos -= 1;
+            }
+            return;
+        }
+
+        // Enter - insert newline
+        if (key.matches(vaxis.Key.enter, .{})) {
+            try self.insertChar(input, '\n');
+            return;
+        }
+
+        switch (key.codepoint) {
             127, 8 => { // Backspace / Delete
                 if (input.cursor_pos > 0) {
-                    const remaining = input.text_len - input.cursor_pos;
-                    if (remaining > 0) {
-                        std.mem.copyForwards(
-                            u8,
-                            input.text_buffer[input.cursor_pos - 1 .. input.text_len - 1],
-                            input.text_buffer[input.cursor_pos..input.text_len],
-                        );
-                    }
-                    input.text_len -= 1;
+                    try self.deleteChar(input, input.cursor_pos - 1);
                     input.cursor_pos -= 1;
                 }
             },
             else => {
                 // Regular character input
-                if (key.codepoint >= 32 and key.codepoint < 127 and input.text_len < input.text_buffer.len) {
-                    // Insert character at cursor position
-                    const remaining = input.text_len - input.cursor_pos;
-                    if (remaining > 0) {
-                        std.mem.copyBackwards(
-                            u8,
-                            input.text_buffer[input.cursor_pos + 1 .. input.text_len + 1],
-                            input.text_buffer[input.cursor_pos..input.text_len],
-                        );
-                    }
-                    input.text_buffer[input.cursor_pos] = @intCast(key.codepoint);
-                    input.text_len += 1;
-                    input.cursor_pos += 1;
+                if (key.codepoint >= 32 and key.codepoint < 127) {
+                    try self.insertChar(input, @intCast(key.codepoint));
                 }
             },
         }
+    }
+
+    fn handleCommentModeVisual(self: *App, key: vaxis.Key) !void {
+        var input = &self.state.active_comment_input.?;
+
+        // Ctrl+W - exit comment editor (modern app behavior)
+        if (key.mods.ctrl and key.codepoint == 'w') {
+            self.mode = .normal;
+            self.state.active_comment_input = null;
+            return;
+        }
+
+        // Handle pending find commands (f/t/F/T) in visual mode
+        if (input.pending_find) |find_cmd| {
+            if (key.codepoint >= 32 and key.codepoint < 127) {
+                const target_char: u8 = @intCast(key.codepoint);
+                input.last_find = .{ .command = find_cmd, .char = target_char };
+                try self.executeFind(input, find_cmd, target_char);
+                input.pending_find = null;
+            } else if (key.codepoint == 27) { // ESC cancels pending find
+                input.pending_find = null;
+            }
+            return;
+        }
+
+        // Handle count prefix (0-9) - allows things like 2ft in visual mode
+        if (key.codepoint >= '0' and key.codepoint <= '9') {
+            const digit = key.codepoint - '0';
+            if (input.count_prefix) |current| {
+                input.count_prefix = current * 10 + digit;
+            } else if (digit != 0) {
+                input.count_prefix = digit;
+            } else {
+                // 0 is "go to start of line"
+                input.cursor_pos = self.findLineStart(input.*);
+            }
+            return;
+        }
+
+        switch (key.codepoint) {
+            // Exit visual mode
+            27 => { // ESC
+                input.vim_mode = .normal;
+                input.visual_anchor = null;
+            },
+            'v' => { // Toggle visual mode off
+                input.vim_mode = .normal;
+                input.visual_anchor = null;
+            },
+
+            // Navigation (extends selection)
+            'h' => if (input.cursor_pos > 0) {
+                input.cursor_pos -= 1;
+            },
+            'l' => if (input.cursor_pos < input.text_len) {
+                input.cursor_pos += 1;
+            },
+            'j' => self.moveCursorDown(input),
+            'k' => self.moveCursorUp(input),
+            'w' => {
+                const count = input.count_prefix orelse 1;
+                input.count_prefix = null;
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    input.cursor_pos = self.findNextWordStart(input.*);
+                }
+            },
+            'e' => {
+                const count = input.count_prefix orelse 1;
+                input.count_prefix = null;
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    input.cursor_pos = self.findWordEnd(input.*);
+                }
+            },
+            'b' => {
+                const count = input.count_prefix orelse 1;
+                input.count_prefix = null;
+                var i: usize = 0;
+                while (i < count) : (i += 1) {
+                    input.cursor_pos = self.findPrevWordStart(input.*);
+                }
+            },
+            '0' => {
+                input.count_prefix = null;
+                input.cursor_pos = self.findLineStart(input.*);
+            },
+            '$' => {
+                input.count_prefix = null;
+                input.cursor_pos = self.findLineEnd(input.*);
+            },
+            'G' => {
+                input.count_prefix = null;
+                input.cursor_pos = input.text_len;
+            },
+            // Character find motions
+            'f' => input.pending_find = .f,
+            't' => input.pending_find = .t,
+            'F' => input.pending_find = .F,
+            'T' => input.pending_find = .T,
+            ';' => { // Repeat last find (respects count: 3; repeats find 3 times)
+                if (input.last_find) |last| {
+                    const repeat_count = input.count_prefix orelse 1;
+                    var i: usize = 0;
+                    while (i < repeat_count) : (i += 1) {
+                        input.count_prefix = 1; // Each iteration finds 1 occurrence
+                        try self.executeFind(input, last.command, last.char);
+                    }
+                }
+            },
+            ',' => { // Repeat last find in opposite direction (respects count)
+                if (input.last_find) |last| {
+                    const repeat_count = input.count_prefix orelse 1;
+                    const opposite = switch (last.command) {
+                        .f => ActiveCommentInput.PendingFind.F,
+                        .F => ActiveCommentInput.PendingFind.f,
+                        .t => ActiveCommentInput.PendingFind.T,
+                        .T => ActiveCommentInput.PendingFind.t,
+                    };
+                    var i: usize = 0;
+                    while (i < repeat_count) : (i += 1) {
+                        input.count_prefix = 1; // Each iteration finds 1 occurrence
+                        try self.executeFind(input, opposite, last.char);
+                    }
+                }
+            },
+
+            // Operations on selection
+            'y' => { // Yank (copy) selection
+                input.count_prefix = null; // Clear count
+                const selection = self.getCommentVisualSelection(input.*) orelse return;
+                const start = selection.start;
+                const end = selection.end;
+
+                // Copy selection to yank buffer
+                const yank_size = end - start;
+                if (yank_size > 0 and yank_size <= input.yank_buffer.len) {
+                    @memcpy(input.yank_buffer[0..yank_size], input.text_buffer[start..end]);
+                    input.yank_len = yank_size;
+
+                    // Also copy to system clipboard
+                    self.copyToSystemClipboard(input.text_buffer[start..end]) catch |err| {
+                        std.log.err("Failed to copy to system clipboard: {}", .{err});
+                    };
+                }
+
+                input.vim_mode = .normal;
+                input.visual_anchor = null;
+            },
+            'd' => { // Delete selection
+                input.count_prefix = null; // Clear count
+                const selection = self.getCommentVisualSelection(input.*) orelse return;
+                const start = selection.start;
+                const end = selection.end;
+
+                // Delete from end to start to maintain positions
+                var pos = end;
+                while (pos > start) {
+                    pos -= 1;
+                    try self.deleteChar(input, pos);
+                }
+
+                // Place cursor at start of deletion
+                input.cursor_pos = start;
+                input.vim_mode = .normal;
+                input.visual_anchor = null;
+            },
+
+            else => {
+                // Clear count prefix for unrecognized keys
+                input.count_prefix = null;
+            }
+        }
+    }
+
+    fn handleCommentModeCommand(self: *App, key: vaxis.Key) !void {
+        var input = &self.state.active_comment_input.?;
+
+        // ESC - return to normal mode
+        if (key.codepoint == 27) {
+            input.vim_mode = .normal;
+            input.command_len = 0;
+            return;
+        }
+
+        // Enter - execute command
+        if (key.matches(vaxis.Key.enter, .{})) {
+            const command = input.command_buffer[0..input.command_len];
+
+            // Parse and execute command
+            if (std.mem.eql(u8, command, "w")) {
+                // :w - save comment
+                try self.saveCurrentComment();
+                // Rebuild LineMap since comment count changed
+                self.state.line_map.deinit();
+                self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+                self.mode = .normal;
+                self.state.active_comment_input = null;
+            } else if (std.mem.eql(u8, command, "q")) {
+                // :q - quit without saving
+                self.mode = .normal;
+                self.state.active_comment_input = null;
+            } else if (std.mem.eql(u8, command, "wq")) {
+                // :wq - save and quit
+                try self.saveCurrentComment();
+                // Rebuild LineMap since comment count changed
+                self.state.line_map.deinit();
+                self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+                self.mode = .normal;
+                self.state.active_comment_input = null;
+            } else {
+                // Unknown command - just return to normal mode
+                input.vim_mode = .normal;
+                input.command_len = 0;
+            }
+            return;
+        }
+
+        // Backspace - delete character from command
+        if (key.codepoint == 127 or key.codepoint == 8) {
+            if (input.command_len > 0) {
+                input.command_len -= 1;
+            }
+            return;
+        }
+
+        // Regular character input - add to command buffer
+        if (key.codepoint >= 32 and key.codepoint < 127) {
+            if (input.command_len < input.command_buffer.len) {
+                input.command_buffer[input.command_len] = @intCast(key.codepoint);
+                input.command_len += 1;
+            }
+        }
+    }
+
+    // Execute a find command (f/t/F/T) with count support
+    fn executeFind(self: *App, input: *ActiveCommentInput, cmd: ActiveCommentInput.PendingFind, target_char: u8) !void {
+        const line_start = self.findLineStart(input.*);
+        const line_end = self.findLineEnd(input.*);
+        const count = input.count_prefix orelse 1;
+        input.count_prefix = null; // Clear count after use
+
+        var found_count: usize = 0;
+
+        switch (cmd) {
+            .f => { // Find forward - move to character
+                var pos = input.cursor_pos + 1;
+                while (pos < line_end) : (pos += 1) {
+                    if (input.text_buffer[pos] == target_char) {
+                        found_count += 1;
+                        if (found_count == count) {
+                            input.cursor_pos = pos;
+                            return;
+                        }
+                    }
+                }
+            },
+            .t => { // Till forward - move before character
+                var pos = input.cursor_pos + 1;
+                while (pos < line_end) : (pos += 1) {
+                    if (input.text_buffer[pos] == target_char) {
+                        found_count += 1;
+                        if (found_count == count) {
+                            input.cursor_pos = pos - 1;
+                            return;
+                        }
+                    }
+                }
+            },
+            .F => { // Find backward - move to character
+                if (input.cursor_pos > line_start) {
+                    var pos = input.cursor_pos - 1;
+                    while (pos >= line_start) {
+                        if (input.text_buffer[pos] == target_char) {
+                            found_count += 1;
+                            if (found_count == count) {
+                                input.cursor_pos = pos;
+                                return;
+                            }
+                        }
+                        if (pos == line_start) break;
+                        pos -= 1;
+                    }
+                }
+            },
+            .T => { // Till backward - move after character
+                if (input.cursor_pos > line_start) {
+                    var pos = input.cursor_pos - 1;
+                    while (pos >= line_start) {
+                        if (input.text_buffer[pos] == target_char) {
+                            found_count += 1;
+                            if (found_count == count) {
+                                input.cursor_pos = pos + 1;
+                                return;
+                            }
+                        }
+                        if (pos == line_start) break;
+                        pos -= 1;
+                    }
+                }
+            },
+        }
+    }
+
+    // Get visual selection range for comment input
+    fn getCommentVisualSelection(self: *App, input: ActiveCommentInput) ?struct { start: usize, end: usize } {
+        _ = self;
+        const anchor = input.visual_anchor orelse return null;
+        const cursor = input.cursor_pos;
+
+        const start = @min(anchor, cursor);
+        var end = @max(anchor, cursor);
+
+        // Visual mode is inclusive - include character under cursor
+        if (end < input.text_len) {
+            end += 1;
+        }
+
+        return .{ .start = start, .end = end };
+    }
+
+    // Helper: Insert character at cursor position
+    fn insertChar(self: *App, input: *ActiveCommentInput, char: u8) !void {
+        _ = self;
+        if (input.text_len >= input.text_buffer.len) return;
+
+        const remaining = input.text_len - input.cursor_pos;
+        if (remaining > 0) {
+            std.mem.copyBackwards(
+                u8,
+                input.text_buffer[input.cursor_pos + 1 .. input.text_len + 1],
+                input.text_buffer[input.cursor_pos..input.text_len],
+            );
+        }
+        input.text_buffer[input.cursor_pos] = char;
+        input.text_len += 1;
+        input.cursor_pos += 1;
+    }
+
+    // Helper: Delete character at position
+    fn deleteChar(self: *App, input: *ActiveCommentInput, pos: usize) !void {
+        _ = self;
+        if (pos >= input.text_len) return;
+
+        const remaining = input.text_len - pos - 1;
+        if (remaining > 0) {
+            std.mem.copyForwards(
+                u8,
+                input.text_buffer[pos .. input.text_len - 1],
+                input.text_buffer[pos + 1 .. input.text_len],
+            );
+        }
+        input.text_len -= 1;
+    }
+
+    // Helper: Find start of current line
+    fn findLineStart(self: *App, input: ActiveCommentInput) usize {
+        _ = self;
+        var pos = input.cursor_pos;
+        while (pos > 0 and input.text_buffer[pos - 1] != '\n') {
+            pos -= 1;
+        }
+        return pos;
+    }
+
+    // Helper: Find end of current line
+    fn findLineEnd(self: *App, input: ActiveCommentInput) usize {
+        _ = self;
+        var pos = input.cursor_pos;
+        while (pos < input.text_len and input.text_buffer[pos] != '\n') {
+            pos += 1;
+        }
+        return pos;
+    }
+
+    // Helper: Move cursor down one line
+    fn moveCursorDown(self: *App, input: *ActiveCommentInput) void {
+        const current_line_start = self.findLineStart(input.*);
+        const current_line_end = self.findLineEnd(input.*);
+        const col_offset = input.cursor_pos - current_line_start;
+
+        // Move to start of next line
+        if (current_line_end < input.text_len) {
+            const next_line_start = current_line_end + 1;
+            var next_line_end = next_line_start;
+            while (next_line_end < input.text_len and input.text_buffer[next_line_end] != '\n') {
+                next_line_end += 1;
+            }
+
+            // Try to preserve column position
+            const next_line_len = next_line_end - next_line_start;
+            input.cursor_pos = next_line_start + @min(col_offset, next_line_len);
+        }
+    }
+
+    // Helper: Move cursor up one line
+    fn moveCursorUp(self: *App, input: *ActiveCommentInput) void {
+        const current_line_start = self.findLineStart(input.*);
+        const col_offset = input.cursor_pos - current_line_start;
+
+        // Move to start of previous line
+        if (current_line_start > 0) {
+            const prev_line_end = current_line_start - 1; // Skip the newline
+            var prev_line_start = prev_line_end;
+            while (prev_line_start > 0 and input.text_buffer[prev_line_start - 1] != '\n') {
+                prev_line_start -= 1;
+            }
+
+            // Try to preserve column position
+            const prev_line_len = prev_line_end - prev_line_start;
+            input.cursor_pos = prev_line_start + @min(col_offset, prev_line_len);
+        }
+    }
+
+    // Helper: Center cursor in comment text (move to middle line)
+    fn centerCommentCursor(self: *App, input: *ActiveCommentInput) void {
+        _ = self;
+        if (input.text_len == 0) return;
+
+        // Count total lines in the text
+        var line_count: usize = 1;
+        var i: usize = 0;
+        while (i < input.text_len) : (i += 1) {
+            if (input.text_buffer[i] == '\n') {
+                line_count += 1;
+            }
+        }
+
+        // Find the middle line
+        const middle_line = line_count / 2;
+
+        // Navigate to the middle line
+        var current_line: usize = 0;
+        var pos: usize = 0;
+        while (pos < input.text_len and current_line < middle_line) {
+            if (input.text_buffer[pos] == '\n') {
+                current_line += 1;
+            }
+            pos += 1;
+        }
+
+        // Position cursor at the start of the middle line
+        input.cursor_pos = pos;
+    }
+
+    // Helper: Find next word start
+    fn findNextWordStart(self: *App, input: ActiveCommentInput) usize {
+        _ = self;
+        var pos = input.cursor_pos;
+
+        // Skip current word
+        while (pos < input.text_len and !isWordBoundary(input.text_buffer[pos])) {
+            pos += 1;
+        }
+
+        // Skip whitespace
+        while (pos < input.text_len and isWordBoundary(input.text_buffer[pos])) {
+            pos += 1;
+        }
+
+        return pos;
+    }
+
+    // Helper: Find previous word start
+    fn findPrevWordStart(self: *App, input: ActiveCommentInput) usize {
+        _ = self;
+        if (input.cursor_pos == 0) return 0;
+
+        var pos = input.cursor_pos - 1;
+
+        // Skip whitespace backwards
+        while (pos > 0 and isWordBoundary(input.text_buffer[pos])) {
+            pos -= 1;
+        }
+
+        // Skip word backwards
+        while (pos > 0 and !isWordBoundary(input.text_buffer[pos - 1])) {
+            pos -= 1;
+        }
+
+        return pos;
+    }
+
+    // Helper: Find end of current word
+    fn findWordEnd(self: *App, input: ActiveCommentInput) usize {
+        _ = self;
+        var pos = input.cursor_pos;
+
+        // If we're on whitespace, skip to next word first
+        if (pos < input.text_len and isWordBoundary(input.text_buffer[pos])) {
+            while (pos < input.text_len and isWordBoundary(input.text_buffer[pos])) {
+                pos += 1;
+            }
+        }
+
+        // Move to end of word
+        while (pos < input.text_len and !isWordBoundary(input.text_buffer[pos])) {
+            pos += 1;
+        }
+
+        // Back up one if we ended on the boundary (to land on last char of word)
+        if (pos > input.cursor_pos) {
+            pos -= 1;
+        }
+
+        return pos;
+    }
+
+    // Execute an operator (d/y/c) on a range
+    fn executeOperator(self: *App, input: *ActiveCommentInput, operator: ActiveCommentInput.PendingOperator, start_pos: usize, end_pos: usize) !void {
+        const range_start = @min(start_pos, end_pos);
+        const range_end = @max(start_pos, end_pos);
+
+        switch (operator) {
+            .y => { // Yank
+                const yank_size = range_end - range_start;
+                if (yank_size > 0 and yank_size <= input.yank_buffer.len) {
+                    @memcpy(input.yank_buffer[0..yank_size], input.text_buffer[range_start..range_end]);
+                    input.yank_len = yank_size;
+
+                    // Also copy to system clipboard
+                    self.copyToSystemClipboard(input.text_buffer[range_start..range_end]) catch |err| {
+                        std.log.err("Failed to copy to system clipboard: {}", .{err});
+                    };
+                }
+            },
+            .d => { // Delete
+                // Yank before deleting (vim behavior)
+                const yank_size = range_end - range_start;
+                if (yank_size > 0 and yank_size <= input.yank_buffer.len) {
+                    @memcpy(input.yank_buffer[0..yank_size], input.text_buffer[range_start..range_end]);
+                    input.yank_len = yank_size;
+
+                    // Also copy to system clipboard
+                    self.copyToSystemClipboard(input.text_buffer[range_start..range_end]) catch |err| {
+                        std.log.err("Failed to copy to system clipboard: {}", .{err});
+                    };
+                }
+
+                // Delete from end to start to maintain positions
+                var pos = range_end;
+                while (pos > range_start) {
+                    pos -= 1;
+                    try self.deleteChar(input, pos);
+                }
+
+                // Place cursor at start of deletion
+                input.cursor_pos = range_start;
+            },
+            .c => { // Change (delete and enter insert mode)
+                // Yank before deleting
+                const yank_size = range_end - range_start;
+                if (yank_size > 0 and yank_size <= input.yank_buffer.len) {
+                    @memcpy(input.yank_buffer[0..yank_size], input.text_buffer[range_start..range_end]);
+                    input.yank_len = yank_size;
+
+                    // Also copy to system clipboard
+                    self.copyToSystemClipboard(input.text_buffer[range_start..range_end]) catch |err| {
+                        std.log.err("Failed to copy to system clipboard: {}", .{err});
+                    };
+                }
+
+                // Delete from end to start
+                var pos = range_end;
+                while (pos > range_start) {
+                    pos -= 1;
+                    try self.deleteChar(input, pos);
+                }
+
+                // Enter insert mode at deletion point
+                input.cursor_pos = range_start;
+                input.vim_mode = .insert;
+            },
+        }
+    }
+
+    // Copy text to system clipboard
+    fn copyToSystemClipboard(self: *App, text: []const u8) !void {
+        const argv = [_][]const u8{"pbcopy"};
+        var child = std.process.Child.init(&argv, self.allocator);
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+
+        try child.spawn();
+
+        if (child.stdin) |stdin| {
+            try stdin.writeAll(text);
+            stdin.close();
+            child.stdin = null;
+        }
+
+        _ = try child.wait();
+    }
+
+    // Read text from system clipboard
+    fn readFromSystemClipboard(self: *App) ![]const u8 {
+        const argv = [_][]const u8{"pbpaste"};
+        var child = std.process.Child.init(&argv, self.allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+
+        try child.spawn();
+
+        const stdout = child.stdout.?;
+        const output = try stdout.readToEndAlloc(self.allocator, 1024 * 1024); // 1MB max
+
+        _ = try child.wait();
+
+        return output;
+    }
+
+    // Paste yanked text after cursor (tries system clipboard first, falls back to yank buffer)
+    fn pasteAfterCursor(self: *App, input: *ActiveCommentInput) !void {
+        // Try to paste from system clipboard first
+        const clipboard_text = self.readFromSystemClipboard() catch null;
+        defer if (clipboard_text) |text| self.allocator.free(text);
+
+        // Move cursor forward by 1 to paste after
+        if (input.cursor_pos < input.text_len) {
+            input.cursor_pos += 1;
+        }
+
+        if (clipboard_text) |text| {
+            // Paste from system clipboard
+            for (text) |char| {
+                if (input.text_len >= input.text_buffer.len) break;
+                try self.insertChar(input, char);
+            }
+        } else if (input.yank_len > 0) {
+            // Fall back to yank buffer
+            for (0..input.yank_len) |i| {
+                if (input.text_len >= input.text_buffer.len) break;
+                try self.insertChar(input, input.yank_buffer[i]);
+            }
+        } else {
+            // Nothing to paste - move cursor back
+            if (input.cursor_pos > 0) {
+                input.cursor_pos -= 1;
+            }
+            return;
+        }
+
+        // Leave cursor at end of pasted text
+        if (input.cursor_pos > 0) {
+            input.cursor_pos -= 1;
+        }
+    }
+
+    // Helper: Check if character is a word boundary
+    fn isWordBoundary(char: u8) bool {
+        return char == ' ' or char == '\n' or char == '\t' or char == '.' or char == ',' or char == ';';
+    }
+
+    // Helper: Save current state to undo stack
+    fn pushUndo(self: *App, input: *ActiveCommentInput) void {
+        _ = self;
+        if (input.undo_count >= input.undo_stack.len) {
+            // Stack full - shift everything down
+            var i: usize = 1;
+            while (i < input.undo_stack.len) : (i += 1) {
+                input.undo_stack[i - 1] = input.undo_stack[i];
+            }
+            input.undo_count = input.undo_stack.len - 1;
+        }
+
+        // Truncate redo history if we're not at the end
+        if (input.undo_index < input.undo_count) {
+            input.undo_count = input.undo_index;
+        }
+
+        // Save current state
+        const undo_state = &input.undo_stack[input.undo_count];
+        @memcpy(undo_state.text[0..input.text_len], input.text_buffer[0..input.text_len]);
+        undo_state.text_len = input.text_len;
+        undo_state.cursor_pos = input.cursor_pos;
+
+        input.undo_count += 1;
+        input.undo_index = input.undo_count;
+    }
+
+    // Helper: Undo last change
+    fn performUndo(self: *App, input: *ActiveCommentInput) void {
+        _ = self;
+        if (input.undo_index == 0) return; // Nothing to undo
+
+        input.undo_index -= 1;
+        const undo_state = &input.undo_stack[input.undo_index];
+
+        @memcpy(input.text_buffer[0..undo_state.text_len], undo_state.text[0..undo_state.text_len]);
+        input.text_len = undo_state.text_len;
+        input.cursor_pos = undo_state.cursor_pos;
+    }
+
+    // Helper: Redo last undone change
+    fn performRedo(self: *App, input: *ActiveCommentInput) void {
+        _ = self;
+        if (input.undo_index >= input.undo_count) return; // Nothing to redo
+
+        const undo_state = &input.undo_stack[input.undo_index];
+
+        @memcpy(input.text_buffer[0..undo_state.text_len], undo_state.text[0..undo_state.text_len]);
+        input.text_len = undo_state.text_len;
+        input.cursor_pos = undo_state.cursor_pos;
+
+        input.undo_index += 1;
+    }
+
+    // Helper: Find next blank line (paragraph movement)
+    fn findNextParagraph(self: *App, input: ActiveCommentInput) usize {
+        _ = self;
+        var pos = input.cursor_pos;
+        var found_content = false;
+
+        // Skip current line
+        while (pos < input.text_len and input.text_buffer[pos] != '\n') {
+            pos += 1;
+        }
+        if (pos < input.text_len) pos += 1; // Skip the newline
+
+        // Find next blank line or end
+        while (pos < input.text_len) {
+            const line_start = pos;
+            var is_blank = true;
+
+            // Check if line is blank
+            while (pos < input.text_len and input.text_buffer[pos] != '\n') {
+                if (input.text_buffer[pos] != ' ' and input.text_buffer[pos] != '\t') {
+                    is_blank = false;
+                    found_content = true;
+                }
+                pos += 1;
+            }
+
+            if (is_blank and found_content) {
+                return line_start;
+            }
+
+            if (pos < input.text_len) pos += 1; // Skip newline
+        }
+
+        return input.text_len;
+    }
+
+    // Helper: Find previous blank line (paragraph movement)
+    fn findPrevParagraph(self: *App, input: ActiveCommentInput) usize {
+        _ = self;
+        if (input.cursor_pos == 0) return 0;
+
+        var pos = input.cursor_pos;
+        var found_content = false;
+
+        // Move to start of current line
+        while (pos > 0 and input.text_buffer[pos - 1] != '\n') {
+            pos -= 1;
+        }
+
+        // Move up one line
+        if (pos > 0) pos -= 1;
+        while (pos > 0 and input.text_buffer[pos - 1] != '\n') {
+            pos -= 1;
+        }
+
+        // Find previous blank line
+        while (pos > 0) {
+            const line_start = pos;
+            var is_blank = true;
+            var line_end = pos;
+
+            // Check if line is blank
+            while (line_end < input.text_len and input.text_buffer[line_end] != '\n') {
+                if (input.text_buffer[line_end] != ' ' and input.text_buffer[line_end] != '\t') {
+                    is_blank = false;
+                    found_content = true;
+                }
+                line_end += 1;
+            }
+
+            if (is_blank and found_content) {
+                return line_start;
+            }
+
+            // Move to previous line
+            if (pos == 0) break;
+            pos -= 1;
+            while (pos > 0 and input.text_buffer[pos - 1] != '\n') {
+                pos -= 1;
+            }
+        }
+
+        return 0;
     }
 
     fn startCommentInput(self: *App) !void {
@@ -1066,17 +2549,41 @@ pub const App = struct {
                 return;
             },
             .code_line => |code| {
-                // Creating or editing comment on a code line
+                // Check if there's already a comment on this code line
                 target_hunk_idx = code.hunk_idx;
                 target_line_idx = code.line_idx_in_hunk;
+
+                // First check if there's an existing comment in the store
                 existing_comment_idx = self.state.comment_store.findCommentAt(
                     file_path,
                     target_hunk_idx,
                     target_line_idx,
                 );
+
+                // If we found an existing comment, move cursor to the comment line
+                if (existing_comment_idx != null) {
+                    // Find the comment line in the LineMap (it should be right after this code line)
+                    const total_lines = self.state.line_map.getTotalLines();
+                    var search_line = self.state.global_cursor_line + 1;
+                    while (search_line < total_lines) : (search_line += 1) {
+                        if (self.state.line_map.getLineRecord(search_line)) |search_record| {
+                            if (search_record.line_type == .comment_line) {
+                                const comment_info = search_record.line_type.comment_line;
+                                if (comment_info.comment_idx == existing_comment_idx.?) {
+                                    // Found the comment line - move cursor to it
+                                    self.state.global_cursor_line = search_line;
+                                    break;
+                                }
+                            } else if (search_record.line_type != .spacer) {
+                                // Reached a non-spacer, non-comment line - stop searching
+                                break;
+                            }
+                        }
+                    }
+                }
             },
             .comment_line => |comment_info| {
-                // Editing an existing comment
+                // User pressed Enter on the comment line itself - edit that comment
                 target_hunk_idx = comment_info.parent_hunk_idx;
                 target_line_idx = comment_info.parent_line_idx;
                 existing_comment_idx = comment_info.comment_idx;
@@ -1092,6 +2599,22 @@ pub const App = struct {
             .text_buffer = undefined,
             .text_len = 0,
             .cursor_pos = 0,
+            .vim_mode = .insert, // Start in insert mode for user-friendliness
+            .visual_anchor = null,
+            .pending_find = null,
+            .pending_operator = null,
+            .pending_replace = false,
+            .pending_text_object = null,
+            .yank_buffer = undefined,
+            .yank_len = 0,
+            .count_prefix = null,
+            .undo_stack = undefined,
+            .undo_count = 0,
+            .undo_index = 0,
+            .last_find = null,
+            .last_change = null,
+            .command_buffer = undefined,
+            .command_len = 0,
         };
         @memset(&input.text_buffer, 0);
 
@@ -1613,6 +3136,9 @@ pub const App = struct {
     fn render(self: *App, win: vaxis.Window) !void {
         win.clear();
         RenderUtils.resetFrameTextBuffer(self);
+
+        // Hide cursor by default - comment input will show it when needed
+        win.hideCursor();
 
         if (self.state.files.len == 0) {
             try UI.renderEmpty(self, win);

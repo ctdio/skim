@@ -137,8 +137,52 @@ pub const UI = struct {
         win.clear();
 
         const mode_str = switch (app.mode) {
-            .normal => "-- NORMAL --",
-            .comment => "-- COMMENT --",
+            .normal => blk: {
+                // Check if waiting for find character in normal mode
+                if (app.state.pending_find) |find_cmd| {
+                    const find_str = switch (find_cmd) {
+                        .f => "-- f? --",
+                        .t => "-- t? --",
+                        .F => "-- F? --",
+                        .T => "-- T? --",
+                    };
+                    break :blk find_str;
+                }
+                break :blk "-- NORMAL --";
+            },
+            .comment => blk: {
+                // Show vim mode when in comment mode
+                if (app.state.active_comment_input) |input| {
+                    // Check if waiting for find character
+                    if (input.pending_find) |find_cmd| {
+                        const find_str = switch (find_cmd) {
+                            .f => "-- f? --",
+                            .t => "-- t? --",
+                            .F => "-- F? --",
+                            .T => "-- T? --",
+                        };
+                        break :blk find_str;
+                    }
+
+                    // Check if waiting for motion after operator
+                    if (input.pending_operator) |operator| {
+                        const operator_str = switch (operator) {
+                            .d => "-- d (motion) --",
+                            .y => "-- y (motion) --",
+                            .c => "-- c (motion) --",
+                        };
+                        break :blk operator_str;
+                    }
+
+                    break :blk switch (input.vim_mode) {
+                        .normal => "-- NORMAL (comment) --",
+                        .insert => "-- INSERT (comment) --",
+                        .visual => "-- VISUAL (comment) --",
+                        .command => "-- COMMAND --",
+                    };
+                }
+                break :blk "-- COMMENT --";
+            },
             .search => "-- SEARCH --",
             .visual => "-- VISUAL --",
         };
@@ -154,6 +198,11 @@ pub const UI = struct {
         // Context-aware keybindings based on cursor position and mode
         const keybindings = switch (app.mode) {
             .normal => blk: {
+                // Check if waiting for find character
+                if (app.state.pending_find) |_| {
+                    break :blk "Press character to find (ESC cancels)";
+                }
+
                 // Get line record from LineMap
                 const record = app.state.line_map.getLineRecord(app.state.global_cursor_line);
 
@@ -193,7 +242,22 @@ pub const UI = struct {
                 // Default keybindings
                 break :blk "h/l:File  j/k:Line  v:Visual  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
             },
-            .comment => "Enter:Save  Shift+Enter:Newline  ESC:Cancel",
+            .comment => blk: {
+                if (app.state.active_comment_input) |input| {
+                    // Show appropriate help based on pending state
+                    if (input.pending_find) |_| {
+                        break :blk "Press character to find (ESC to cancel)";
+                    }
+
+                    break :blk switch (input.vim_mode) {
+                        .normal => "i/a/I/A:Insert  v:Visual  hjkl:Move  w/e/b:Word  f/t/F/T:Find  M:Center  dd/yy/cc:Line  p:Paste  :q/:wq:Quit  Ctrl-W:Close",
+                        .insert => "ESC:Normal Mode  Ctrl-C:Normal  Enter:Newline  Ctrl-W:Close",
+                        .visual => "hjkl:Extend  y:Yank  d:Delete  v/ESC:Exit Visual  Ctrl-W:Close",
+                        .command => ":w (save)  :q (quit)  :wq (save & quit)  Enter:Execute  ESC:Cancel",
+                    };
+                }
+                break :blk "Ctrl-S:Save  ESC:Cancel";
+            },
             .search => "Enter:Search  ESC:Cancel  (Smart case: lowercase=ignore case, uppercase=exact)",
             .visual => "j/k:Move  y:Yank  v/ESC/Ctrl-C:Exit Visual",
         };
@@ -208,7 +272,19 @@ pub const UI = struct {
         var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
         defer segments.deinit();
 
-        if (app.mode == .search) {
+        if (app.mode == .comment and app.state.active_comment_input != null and
+            app.state.active_comment_input.?.vim_mode == .command)
+        {
+            // In command mode, show command line like vim
+            const input = app.state.active_comment_input.?;
+            const command = input.command_buffer[0..input.command_len];
+
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, ":"), .style = .{ .bold = true } });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, command), .style = .{} });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "_"), .style = .{} });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+        } else if (app.mode == .search) {
             // In search mode, show search prompt with current query
             const query = app.state.search_state.query_buffer[0..app.state.search_state.query_len];
             const match_count = app.state.search_state.matches.items.len;

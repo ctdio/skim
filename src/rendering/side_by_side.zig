@@ -95,11 +95,13 @@ pub const SideBySideRenderer = struct {
                     const rows_used = try renderDiffLine(app, win, file, code_info.hunk_idx, code_info.line_idx_in_hunk, line.*, global_line, row, left_content_width, right_content_width, gutter_width, is_cursor);
                     row += rows_used;
 
-                    // Check if we're creating/editing a comment on this code line
+                    // Check if we're creating a NEW comment on this code line
+                    // (If editing an existing comment, it will be rendered in place of the comment_line below)
                     if (app.mode == .comment and is_cursor) {
                         if (app.state.active_comment_input) |input| {
-                            // Check if the active comment is for this line
-                            if (std.mem.eql(u8, input.target_file_path, file_path) and
+                            // Check if the active comment is for this line AND it's a new comment (not editing existing)
+                            if (input.editing_comment_idx == null and
+                                std.mem.eql(u8, input.target_file_path, file_path) and
                                 input.target_hunk_idx == code_info.hunk_idx and
                                 input.target_line_idx == code_info.line_idx_in_hunk)
                             {
@@ -130,7 +132,20 @@ pub const SideBySideRenderer = struct {
                         const line = &hunk.lines[comment_info.parent_line_idx];
 
                         const comment_start_row = row;
-                        const comment_rows = if (app.mode == .comment and is_cursor)
+
+                        // Check if we're editing THIS specific comment
+                        const is_editing_this_comment = blk: {
+                            if (app.mode == .comment and is_cursor) {
+                                if (app.state.active_comment_input) |input| {
+                                    if (input.editing_comment_idx) |editing_idx| {
+                                        break :blk editing_idx == comment_info.comment_idx;
+                                    }
+                                }
+                            }
+                            break :blk false;
+                        };
+
+                        const comment_rows = if (is_editing_this_comment)
                             try renderSideBySideCommentInput(app, win, row, left_content_width, right_content_width, gutter_width, line.line_type)
                         else
                             try renderSideBySideComment(app, win, comment, row, left_content_width, right_content_width, gutter_width, line.line_type, is_cursor);
@@ -688,22 +703,66 @@ pub const SideBySideRenderer = struct {
                 try segments.append(.{ .text = display_text, .style = text_style });
                 _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
 
-                // Draw cursor if it's in this wrapped segment
+                // Draw cursor and visual selection if in this wrapped segment
                 const segment_start = char_offset + segment_offset;
                 const segment_end = segment_start + wrapped_segment.len;
+
+                // Handle visual mode selection highlighting
+                if (input.vim_mode == .visual and input.visual_anchor != null) {
+                    const anchor = input.visual_anchor.?;
+                    const selection_start = @min(anchor, input.cursor_pos);
+                    const selection_end = @max(anchor, input.cursor_pos);
+
+                    // Highlight any part of selection in this segment
+                    if (selection_start < segment_end and selection_end >= segment_start) {
+                        const highlight_start_in_seg = if (selection_start > segment_start)
+                            selection_start - segment_start
+                        else
+                            0;
+                        const highlight_end_in_seg = if (selection_end < segment_end)
+                            selection_end - segment_start
+                        else
+                            wrapped_segment.len;
+
+                        if (highlight_start_in_seg < text_area_width and highlight_end_in_seg > highlight_start_in_seg) {
+                            const highlight_col_start = layout.start_col + 4 + highlight_start_in_seg;
+                            const highlight_len = @min(highlight_end_in_seg - highlight_start_in_seg, text_area_width - highlight_start_in_seg);
+
+                            if (highlight_len > 0) {
+                                const highlight_text = wrapped_segment[highlight_start_in_seg..][0..highlight_len];
+                                var highlight_seg = [_]vaxis.Cell.Segment{.{
+                                    .text = try RenderUtils.copyFrameText(app, highlight_text),
+                                    .style = .{ .fg = Color.white, .bg = Color.blue },
+                                }};
+                                _ = try win.print(&highlight_seg, .{ .row_offset = current_row, .col_offset = highlight_col_start });
+                            }
+                        }
+                    }
+                }
+
+                // Draw cursor if it's in this wrapped segment
                 if (input.cursor_pos >= segment_start and input.cursor_pos <= segment_end) {
                     const cursor_pos_in_segment = input.cursor_pos - segment_start;
                     if (cursor_pos_in_segment < text_area_width) {
                         const cursor_col = layout.start_col + 4 + cursor_pos_in_segment; // +4 for "┃ > " or "┃   "
-                        const cursor_char = if (cursor_pos_in_segment < wrapped_segment.len)
-                            wrapped_segment[cursor_pos_in_segment .. cursor_pos_in_segment + 1]
-                        else
-                            " ";
-                        var cursor_seg = [_]vaxis.Cell.Segment{.{
-                            .text = try RenderUtils.copyFrameText(app, cursor_char),
-                            .style = .{ .fg = Color.black, .bg = Color.white },
-                        }};
-                        _ = try win.print(&cursor_seg, .{ .row_offset = current_row, .col_offset = cursor_col });
+
+                        // Set the terminal cursor position and shape
+                        win.showCursor(cursor_col, current_row);
+
+                        switch (input.vim_mode) {
+                            .normal, .visual => {
+                                // Block cursor for normal/visual mode
+                                win.setCursorShape(.block);
+                            },
+                            .insert => {
+                                // Beam/line cursor for insert mode
+                                win.setCursorShape(.beam);
+                            },
+                            .command => {
+                                // Command mode - hide cursor here (it's shown in status bar)
+                                win.hideCursor();
+                            },
+                        }
                     }
                 }
 

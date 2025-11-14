@@ -23,6 +23,7 @@ pub const Color = struct {
     pub const comment_border = .{ .rgb = [3]u8{ 80, 80, 80 } }; // Dark gray #505050
     pub const comment_border_focus = .{ .rgb = [3]u8{ 100, 100, 100 } }; // Medium gray when focused #646464
     pub const comment_marker = .{ .rgb = [3]u8{ 90, 90, 90 } }; // Dark gray #5a5a5a
+    pub const comment_bg = .{ .rgb = [3]u8{ 35, 35, 35 } }; // Dark gray background for comments #232323
     pub const comment_hover_bg = .{ .rgb = [3]u8{ 25, 25, 25 } }; // Very dark gray for hover state #191919
 
     // Cursor line highlighting - slightly darker gray background

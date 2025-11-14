@@ -719,22 +719,66 @@ pub const RenderUtils = struct {
                 try segments.append(.{ .text = display_text, .style = text_style });
                 _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
 
-                // Draw cursor if it's in this wrapped segment
+                // Draw cursor and visual selection if in this wrapped segment
                 const segment_start = char_offset + segment_offset;
                 const segment_end = segment_start + wrapped_segment.len;
+
+                // Handle visual mode selection highlighting
+                if (input.vim_mode == .visual and input.visual_anchor != null) {
+                    const anchor = input.visual_anchor.?;
+                    const selection_start = @min(anchor, input.cursor_pos);
+                    const selection_end = @max(anchor, input.cursor_pos);
+
+                    // Highlight any part of selection in this segment
+                    if (selection_start < segment_end and selection_end >= segment_start) {
+                        const highlight_start_in_seg = if (selection_start > segment_start)
+                            selection_start - segment_start
+                        else
+                            0;
+                        const highlight_end_in_seg = if (selection_end < segment_end)
+                            selection_end - segment_start
+                        else
+                            wrapped_segment.len;
+
+                        if (highlight_start_in_seg < text_area_width and highlight_end_in_seg > highlight_start_in_seg) {
+                            const highlight_col_start = content_start + 4 + highlight_start_in_seg;
+                            const highlight_len = @min(highlight_end_in_seg - highlight_start_in_seg, text_area_width - highlight_start_in_seg);
+
+                            if (highlight_len > 0) {
+                                const highlight_text = wrapped_segment[highlight_start_in_seg..][0..highlight_len];
+                                var highlight_seg = [_]vaxis.Cell.Segment{.{
+                                    .text = try copyFrameText(app, highlight_text),
+                                    .style = .{ .fg = Color.white, .bg = Color.blue },
+                                }};
+                                _ = try win.print(&highlight_seg, .{ .row_offset = current_row, .col_offset = highlight_col_start });
+                            }
+                        }
+                    }
+                }
+
+                // Draw cursor if it's in this wrapped segment
                 if (input.cursor_pos >= segment_start and input.cursor_pos <= segment_end) {
                     const cursor_pos_in_segment = input.cursor_pos - segment_start;
                     if (cursor_pos_in_segment < text_area_width) {
                         const cursor_col = content_start + 4 + cursor_pos_in_segment; // +4 for "┃ > " or "┃   "
-                        const cursor_char = if (cursor_pos_in_segment < wrapped_segment.len)
-                            wrapped_segment[cursor_pos_in_segment .. cursor_pos_in_segment + 1]
-                        else
-                            " ";
-                        var cursor_seg = [_]vaxis.Cell.Segment{.{
-                            .text = try copyFrameText(app, cursor_char),
-                            .style = .{ .fg = Color.black, .bg = Color.white },
-                        }};
-                        _ = try win.print(&cursor_seg, .{ .row_offset = current_row, .col_offset = cursor_col });
+
+                        // Set the terminal cursor position and shape
+                        win.showCursor(cursor_col, current_row);
+
+                        switch (input.vim_mode) {
+                            .normal, .visual => {
+                                // Block cursor for normal/visual mode
+                                win.setCursorShape(.block);
+                            },
+                            .insert => {
+                                // Beam/line cursor for insert mode
+                                win.setCursorShape(.beam);
+                            },
+                            .command => {
+                                // Command mode - hide cursor here (it's shown in status bar)
+                                win.hideCursor();
+                            },
+                        }
                     }
                 }
 
@@ -785,30 +829,31 @@ pub const RenderUtils = struct {
         if (content_width < 20) return 0;
 
         // Use cyan for regular comments, yellow when focused
+        // Always use background - comment_bg for normal, comment_hover_bg when cursor is on it
         const border_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
         else
-            .{ .fg = Color.cyan, .bold = true };
+            .{ .fg = Color.cyan, .bg = Color.comment_bg, .bold = true };
 
         const text_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.white, .bg = Color.comment_hover_bg }
         else
-            .{ .fg = Color.white };
+            .{ .fg = Color.white, .bg = Color.comment_bg };
 
         const label_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
         else
-            .{ .fg = Color.cyan, .bold = true };
+            .{ .fg = Color.cyan, .bg = Color.comment_bg, .bold = true };
 
         const hints_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true }
         else
-            .{};
+            .{ .fg = Color.cyan, .bg = Color.comment_bg, .dim = true };
 
         const bg_style: vaxis.Style = if (is_cursor)
             .{ .bg = Color.comment_hover_bg }
         else
-            .{};
+            .{ .bg = Color.comment_bg };
 
         var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
         defer segments.deinit();
