@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const parser = @import("git/parser.zig");
 const line_map = @import("line_map.zig");
+const DiffSource = @import("git/diff.zig").DiffSource;
 
 const Allocator = std.mem.Allocator;
 
@@ -13,6 +14,13 @@ pub const Category = enum {
     view,
     file,
     help,
+    diff,
+};
+
+pub const DiffMode = enum {
+    working,
+    staged,
+    main,
 };
 
 pub const CommandAction = union(enum) {
@@ -21,6 +29,7 @@ pub const CommandAction = union(enum) {
     refresh_diff: void,
     show_help: void,
     quit: void,
+    switch_diff_mode: DiffMode,
 };
 
 pub const Command = struct {
@@ -136,6 +145,34 @@ pub const CommandPaletteState = struct {
             .description = "Exit Skim",
             .action = .quit,
             .category = .navigation,
+            .owns_display_name = false,
+        });
+
+        // Diff mode switching commands
+        try self.commands.append(.{
+            .name = "diff:working",
+            .display_name = "diff:working",
+            .description = "Switch to working directory changes",
+            .action = .{ .switch_diff_mode = .working },
+            .category = .diff,
+            .owns_display_name = false,
+        });
+
+        try self.commands.append(.{
+            .name = "diff:staged",
+            .display_name = "diff:staged",
+            .description = "Switch to staged changes",
+            .action = .{ .switch_diff_mode = .staged },
+            .category = .diff,
+            .owns_display_name = false,
+        });
+
+        try self.commands.append(.{
+            .name = "diff:main",
+            .display_name = "diff:main",
+            .description = "Compare against main branch",
+            .action = .{ .switch_diff_mode = .main },
+            .category = .diff,
             .owns_display_name = false,
         });
 

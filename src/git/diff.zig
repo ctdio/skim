@@ -184,6 +184,40 @@ fn parseFileStatus(allocator: Allocator, output: []const u8) ![]FileStatus {
     return files.toOwnedSlice();
 }
 
+/// Detect the default branch (main or master) by checking which exists
+pub fn detectDefaultBranch(allocator: Allocator) ![]const u8 {
+    // Try main first
+    const main_check = checkBranchExists(allocator, "main") catch false;
+    if (main_check) {
+        return try allocator.dupe(u8, "main");
+    }
+
+    // Fall back to master
+    const master_check = checkBranchExists(allocator, "master") catch false;
+    if (master_check) {
+        return try allocator.dupe(u8, "master");
+    }
+
+    // If neither exists, default to main
+    return try allocator.dupe(u8, "main");
+}
+
+fn checkBranchExists(allocator: Allocator, branch: []const u8) !bool {
+    const args = &[_][]const u8{ "git", "rev-parse", "--verify", branch };
+
+    var child = std.process.Child.init(args, allocator);
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    try child.spawn();
+    const term = try child.wait();
+
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+}
+
 test "getDiff working directory" {
     const allocator = std.testing.allocator;
 

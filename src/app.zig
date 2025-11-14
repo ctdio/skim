@@ -30,52 +30,10 @@ const Allocator = std.mem.Allocator;
 const Vaxis = vaxis.Vaxis;
 const Event = vaxis.Event;
 
-// Color constants for terminal output
-const Color = struct {
-    const black = .{ .index = 0 };
-    const red = .{ .index = 1 };
-    const green = .{ .index = 2 };
-    const yellow = .{ .index = 3 };
-    const blue = .{ .index = 4 };
-    const magenta = .{ .index = 5 };
-    const cyan = .{ .index = 6 };
-    const white = .{ .index = 7 };
-    const dim = .{ .rgb = [3]u8{ 100, 100, 100 } }; // Medium gray #646464
-
-    // Muted diff background colors (RGB for better control)
-    const diff_add_bg = .{ .rgb = [3]u8{ 3, 25, 10 } }; // Darker green #03190a
-    const diff_delete_bg = .{ .rgb = [3]u8{ 72, 13, 13 } }; // Dark red #480d0d
-    const diff_add_fg = .{ .rgb = [3]u8{ 240, 255, 240 } }; // Light green text
-    const diff_delete_fg = .{ .rgb = [3]u8{ 255, 240, 240 } }; // Light red text
-
-    // Cursor line highlighting - slightly darker gray background
-    const cursor_bg = .{ .rgb = [3]u8{ 80, 80, 80 } }; // Darker gray #505050
-    const cursor_fg = .{ .rgb = [3]u8{ 255, 255, 255 } }; // White text
-
-    // Pure white caret for focused mode - highly visible
-    const caret_bg = .{ .rgb = [3]u8{ 255, 255, 255 } }; // Pure white #ffffff
-    const caret_fg = .{ .rgb = [3]u8{ 0, 0, 0 } }; // Black text
-};
-
-// Layout constants
-const Layout = struct {
-    const header_height = 1;
-    const status_height = 1;
-    const min_gutter_width = 5; // Minimum gutter width for consistency
-    const cursor_padding = 3; // Padding around cursor when scrolling
-    const page_scroll_lines = 10;
-};
-
-const FrameChars = struct {
-    const vertical = "│";
-    const horizontal = "─";
-    const top_left = "╭";
-    const top_right = "╮";
-    const bottom_left = "╰";
-    const bottom_right = "╯";
-    const middle_left = "├";
-    const middle_right = "┤";
-};
+// Use centralized definitions from rendering/common.zig
+const Color = rendering_common.Color;
+const Layout = rendering_common.Layout;
+const FrameChars = rendering_common.FrameChars;
 
 const HEADER_BUFFER_WIDTH = 4096;
 const FRAME_TEXT_CAPACITY = 262144; // 256 KiB per frame scratch space
@@ -1702,7 +1660,43 @@ pub const App = struct {
             .quit => {
                 self.should_quit = true;
             },
+            .switch_diff_mode => |mode| {
+                try self.switchDiffMode(mode);
+            },
         }
+    }
+
+    fn switchDiffMode(self: *App, mode: command_palette.DiffMode) !void {
+        // Free old diff_source if needed
+        switch (self.state.diff_source) {
+            .working_dir => {},
+            .single_ref => |sr| {
+                self.allocator.free(sr.ref);
+            },
+            .two_refs => |tr| {
+                self.allocator.free(tr.ref1);
+                self.allocator.free(tr.ref2);
+            },
+        }
+
+        // Update diff_source based on mode
+        self.state.diff_source = switch (mode) {
+            .working => DiffSource{ .working_dir = .{ .staged = false } },
+            .staged => DiffSource{ .working_dir = .{ .staged = true } },
+            .main => blk: {
+                const default_branch = try git.detectDefaultBranch(self.allocator);
+                errdefer self.allocator.free(default_branch);
+                const head = try self.allocator.dupe(u8, "HEAD");
+                break :blk DiffSource{ .two_refs = .{
+                    .ref1 = default_branch,
+                    .ref2 = head,
+                    .use_merge_base = true,
+                } };
+            },
+        };
+
+        // Refresh to load new diff
+        try self.refresh();
     }
 
     fn searchNext(self: *App) void {
@@ -2025,9 +2019,16 @@ pub const App = struct {
                 const local_start = if (h.start_byte > line_start) h.start_byte - line_start else 0;
                 const local_end = if (h.end_byte < line_end) h.end_byte - line_start else text.len;
 
+                // Safety: ensure bounds are valid and within text length
+                const safe_start = @min(local_start, text.len);
+                const safe_end = @min(@max(local_end, safe_start), text.len);
+
+                // Skip empty or invalid highlights
+                if (safe_start >= safe_end) continue;
+
                 try relevant_highlights.append(.{
-                    .start_byte = local_start,
-                    .end_byte = local_end,
+                    .start_byte = safe_start,
+                    .end_byte = safe_end,
                     .category = h.category,
                 });
             }
@@ -2061,81 +2062,55 @@ pub const App = struct {
                     next_start = pos;
                     break;
                 } else if (h.start_byte > pos and h.start_byte < next_start) {
-                    next_start = h.start_byte;
+                    // Clamp to text length to prevent out of bounds
+                    next_start = @min(h.start_byte, text.len);
                 }
             }
 
             if (next_highlight) |h| {
                 // Render highlighted segment
                 const end = @min(h.end_byte, text.len);
+                // Safety check: ensure we don't go beyond text bounds
+                if (pos >= text.len) break;
                 const chunk = text[pos..end];
 
-                // Apply GitHub-inspired syntax colors
-                // Use brighter/bolder colors on colored backgrounds for readability
-                const highlight_color = h.getColor();
+                // Apply GitHub-inspired syntax colors with improved harmony and contrast
+                const color_category = h.getColorCategory();
                 var style = base_style;
 
-                // Check if we're on a colored background (add/delete line)
-                // RGB colors indicate diff backgrounds
-                const has_colored_bg = switch (style.bg) {
-                    .rgb => true,
-                    else => false,
-                };
-
-                switch (highlight_color) {
-                    .red => {
-                        // Keywords - red/orange (GitHub: #d73a49)
-                        // Use bright yellow on colored backgrounds for better contrast
-                        if (has_colored_bg) {
-                            style.fg = Color.yellow;
-                            style.bold = true;
-                        } else {
-                            style.fg = Color.red;
-                            style.bold = true;
-                        }
+                // Map semantic categories to our optimized color palette
+                // These colors work well on both plain and diff backgrounds
+                switch (color_category) {
+                    .keyword => {
+                        // Soft coral/salmon - less harsh than bold red
+                        style.fg = Color.syntax_keyword;
                     },
-                    .magenta => {
-                        // Functions - magenta/purple (GitHub: #6f42c1)
-                        style.fg = Color.magenta;
-                        style.bold = has_colored_bg; // Bold on colored backgrounds
+                    .function => {
+                        // Light purple - stands out well
+                        style.fg = Color.syntax_function;
                     },
-                    .yellow => {
-                        // Classes/Types - yellow (GitHub: #e36209)
-                        style.fg = Color.yellow;
-                        style.bold = has_colored_bg;
+                    .type => {
+                        // Warm yellow - good contrast on all backgrounds
+                        style.fg = Color.syntax_type;
                     },
-                    .blue => {
-                        // Strings/Numbers/Constants - blue (GitHub: #032f62, #005cc5)
-                        // Use cyan on colored backgrounds for better visibility
-                        if (has_colored_bg) {
-                            style.fg = Color.cyan;
-                            style.bold = false;
-                        } else {
-                            style.fg = Color.blue;
-                            style.bold = false;
-                        }
+                    .string => {
+                        // Light blue - easy to read
+                        style.fg = Color.syntax_string;
                     },
-                    .black => {
-                        // Comments - medium gray (GitHub: #6a737d)
-                        // Brighten on colored backgrounds for better readability
-                        if (has_colored_bg) {
-                            style.fg = .{ .rgb = [3]u8{ 140, 140, 140 } }; // Lighter gray #8c8c8c
-                        } else {
-                            style.fg = Color.dim;
-                        }
+                    .number, .constant => {
+                        // Bright blue - distinct from strings
+                        style.fg = Color.syntax_number;
                     },
-                    .green => {
-                        // Unused but keep for completeness
-                        style.fg = Color.green;
-                        style.bold = has_colored_bg;
+                    .comment => {
+                        // Medium gray - finally visible!
+                        style.fg = Color.syntax_comment;
                     },
-                    .white => {
-                        // Variables/Default - keep base style foreground
-                        // (which is already light green/red for add/delete)
+                    .operator => {
+                        // Same as keywords for consistency
+                        style.fg = Color.syntax_operator;
                     },
-                    .cyan => {
-                        // Cyan color (unused currently)
-                        style.fg = Color.cyan;
+                    .default => {
+                        // Keep base style (diff colors for add/delete, white otherwise)
                     },
                 }
 
@@ -2147,13 +2122,16 @@ pub const App = struct {
                 pos = end;
             } else {
                 // Render unhighlighted segment until next highlight
-                const chunk = text[pos..next_start];
+                // Safety check: ensure next_start doesn't exceed text bounds
+                if (pos >= text.len) break;
+                const safe_next_start = @min(next_start, text.len);
+                const chunk = text[pos..safe_next_start];
                 try segments.append(.{
                     .text = chunk,
                     .style = base_style,
                 });
 
-                pos = next_start;
+                pos = safe_next_start;
             }
         }
 

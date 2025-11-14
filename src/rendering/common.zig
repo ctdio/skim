@@ -13,11 +13,13 @@ pub const Color = struct {
     pub const white = .{ .index = 7 };
     pub const dim = .{ .rgb = [3]u8{ 100, 100, 100 } }; // Medium gray #646464
 
-    // Muted diff background colors (RGB for better control)
-    pub const diff_add_bg = .{ .rgb = [3]u8{ 43, 62, 43 } }; // Darker green #2B3E2B
-    pub const diff_delete_bg = .{ .rgb = [3]u8{ 63, 38, 38 } }; // Darker red #3F2626
-    pub const diff_add_fg = .{ .rgb = [3]u8{ 63, 185, 80 } }; // Green text #3FB950
-    pub const diff_delete_fg = .{ .rgb = [3]u8{ 247, 81, 73 } }; // Red text #F75149
+    // Diff background colors - slightly darkened for subtle depth
+    pub const diff_add_bg = .{ .rgb = [3]u8{ 37, 53, 37 } }; // Darker green #253525
+    pub const diff_delete_bg = .{ .rgb = [3]u8{ 54, 32, 32 } }; // Darker red #362020
+
+    // Diff foreground colors for +/- signs and header stats
+    pub const diff_sign_add = .{ .rgb = [3]u8{ 63, 185, 80 } }; // Bright green #3FB950
+    pub const diff_sign_delete = .{ .rgb = [3]u8{ 247, 81, 73 } }; // Bright red #F75149
 
     // Comment colors - darker, subdued grays
     pub const comment_border = .{ .rgb = [3]u8{ 80, 80, 80 } }; // Dark gray #505050
@@ -34,10 +36,6 @@ pub const Color = struct {
     pub const caret_bg = .{ .rgb = [3]u8{ 255, 255, 255 } }; // Pure white #ffffff
     pub const caret_fg = .{ .rgb = [3]u8{ 0, 0, 0 } }; // Black text
 
-    // Darker colors for +/- diff signs
-    pub const diff_sign_add = .{ .rgb = [3]u8{ 0, 160, 0 } }; // Darker green #00a000
-    pub const diff_sign_delete = .{ .rgb = [3]u8{ 160, 0, 0 } }; // Darker red #a00000
-
     // Search highlight - bright yellow background for visibility
     pub const search_match_bg = .{ .rgb = [3]u8{ 180, 150, 0 } }; // Bright yellow-orange #b49600
     pub const search_match_fg = .{ .rgb = [3]u8{ 0, 0, 0 } }; // Black text for contrast
@@ -45,15 +43,26 @@ pub const Color = struct {
     // Visual selection - blue background like vim
     pub const visual_select_bg = .{ .rgb = [3]u8{ 50, 70, 100 } }; // Dark blue #324664
     pub const visual_select_fg = .{ .rgb = [3]u8{ 255, 255, 255 } }; // White text
+
+    // Syntax highlighting colors - GitHub Dark theme
+    // Official GitHub Primer colors for syntax highlighting
+    pub const syntax_keyword = .{ .rgb = [3]u8{ 255, 123, 114 } }; // Coral red #FF7B72
+    pub const syntax_function = .{ .rgb = [3]u8{ 210, 168, 255 } }; // Purple #D2A8FF
+    pub const syntax_type = .{ .rgb = [3]u8{ 255, 166, 87 } }; // Orange #FFA657
+    pub const syntax_string = .{ .rgb = [3]u8{ 165, 214, 255 } }; // Light blue #A5D6FF
+    pub const syntax_number = .{ .rgb = [3]u8{ 121, 192, 255 } }; // Bright blue #79C0FF
+    pub const syntax_comment = .{ .rgb = [3]u8{ 139, 148, 158 } }; // Gray #8B949E
+    pub const syntax_constant = .{ .rgb = [3]u8{ 121, 192, 255 } }; // Bright blue #79C0FF
+    pub const syntax_operator = .{ .rgb = [3]u8{ 255, 123, 114 } }; // Coral red (same as keywords) #FF7B72
 };
 
 // Layout constants
 pub const Layout = struct {
-    pub const header_height = 2;
+    pub const header_height = 1;
     pub const status_height = 1;
     pub const sidebar_width = 1; // Sidebar (┃)
     pub const min_gutter_width = 5; // Minimum gutter width for consistency
-    pub const cursor_padding = 0; // No padding - vim-like scrolling (scroll only when cursor goes off screen)
+    pub const cursor_padding = 3; // Padding around cursor when scrolling
     pub const page_scroll_lines = 10;
     pub const gutter_spacing = 2; // Spacing between gutter and content
 };

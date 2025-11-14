@@ -148,97 +148,115 @@ pub const Highlight = struct {
     end_byte: usize,
     category: []const u8, // e.g., "@keyword", "@function", "@string"
 
-    // Color index for 8-color terminal palette
-    pub const ColorIndex = enum(u8) {
-        black = 0,
-        red = 1,
-        green = 2,
-        yellow = 3,
-        blue = 4,
-        magenta = 5,
-        cyan = 6,
-        white = 7,
+    // Semantic color categories for syntax highlighting
+    pub const ColorCategory = enum {
+        keyword,
+        function,
+        type,
+        string,
+        number,
+        comment,
+        constant,
+        operator,
+        default,
     };
 
-    // Map tree-sitter capture category to a terminal color
-    // GitHub-inspired color scheme
-    pub fn getColor(self: Highlight) ColorIndex {
+    // Map tree-sitter capture category to a semantic color category
+    // GitHub-inspired color scheme with improved readability
+    // Handles all capture types from our query files comprehensively
+    pub fn getColorCategory(self: Highlight) ColorCategory {
         const cat = self.category;
 
-        // Keywords - Orange (GitHub style: #d73a49)
-        if (std.mem.eql(u8, cat, "keyword") or
-            std.mem.eql(u8, cat, "keyword.control") or
-            std.mem.eql(u8, cat, "keyword.function") or
-            std.mem.eql(u8, cat, "keyword.return") or
-            std.mem.eql(u8, cat, "keyword.operator"))
-        {
-            return .red; // Use red for orange-ish appearance
+        // Use prefix matching for efficiency with hierarchical captures
+        // E.g., "keyword.conditional" matches "keyword"
+        if (std.mem.startsWith(u8, cat, "keyword")) {
+            // All keyword variants: keyword, keyword.control, keyword.function, keyword.return,
+            // keyword.operator, keyword.conditional, keyword.exception, keyword.repeat,
+            // keyword.modifier, keyword.type, keyword.import
+            return .keyword;
         }
 
-        // Functions and methods - Magenta/Purple (GitHub style: #6f42c1)
-        if (std.mem.eql(u8, cat, "function") or
-            std.mem.eql(u8, cat, "function.call") or
-            std.mem.eql(u8, cat, "function.method") or
-            std.mem.eql(u8, cat, "function.builtin"))
-        {
-            return .magenta;
+        if (std.mem.startsWith(u8, cat, "function")) {
+            // All function variants: function, function.call, function.method,
+            // function.builtin, function.macro, function.special
+            return .function;
         }
 
-        // Types/Classes - Yellow (GitHub style: #e36209)
-        if (std.mem.eql(u8, cat, "type") or
-            std.mem.eql(u8, cat, "type.builtin") or
-            std.mem.eql(u8, cat, "type.definition") or
-            std.mem.eql(u8, cat, "constructor"))
-        {
-            return .yellow;
+        if (std.mem.startsWith(u8, cat, "comment")) {
+            // All comment variants: comment, comment.line, comment.block, comment.documentation
+            return .comment;
         }
 
-        // Strings - Blue (GitHub style: #032f62)
-        if (std.mem.eql(u8, cat, "string") or
-            std.mem.eql(u8, cat, "string.special"))
-        {
-            return .blue;
+        if (std.mem.startsWith(u8, cat, "string")) {
+            // All string variants: string, string.special, string.escape, string.special.key
+            return .string;
         }
 
-        // Numbers - Blue (GitHub style: #005cc5)
-        if (std.mem.eql(u8, cat, "number") or
-            std.mem.eql(u8, cat, "constant.numeric"))
-        {
-            return .blue;
+        if (std.mem.startsWith(u8, cat, "number")) {
+            // All number variants: number, number.float
+            return .number;
         }
 
-        // Comments - Dark gray (GitHub style: #6a737d)
-        if (std.mem.eql(u8, cat, "comment") or
-            std.mem.eql(u8, cat, "comment.line") or
-            std.mem.eql(u8, cat, "comment.block"))
-        {
-            return .black;
+        if (std.mem.startsWith(u8, cat, "type")) {
+            // All type variants: type, type.builtin, type.definition
+            return .type;
         }
 
-        // Constants - Blue (GitHub style: #005cc5)
+        if (std.mem.startsWith(u8, cat, "variable")) {
+            // All variable variants: variable, variable.parameter, variable.builtin, variable.member
+            return .default;
+        }
+
+        // Exact matches for specific categories
+        if (std.mem.eql(u8, cat, "constructor") or
+            std.mem.eql(u8, cat, "namespace") or
+            std.mem.eql(u8, cat, "module"))
+        {
+            // Constructors, namespaces, modules - treat as types
+            return .type;
+        }
+
         if (std.mem.eql(u8, cat, "constant") or
             std.mem.eql(u8, cat, "constant.builtin") or
+            std.mem.eql(u8, cat, "constant.numeric") or
             std.mem.eql(u8, cat, "boolean"))
         {
-            return .blue;
+            // Constants and booleans
+            return .constant;
         }
 
-        // Operators (white/default)
         if (std.mem.eql(u8, cat, "operator")) {
-            return .white;
+            return .operator;
         }
 
-        // Variables and parameters (white/default)
-        if (std.mem.eql(u8, cat, "variable") or
-            std.mem.eql(u8, cat, "variable.parameter") or
-            std.mem.eql(u8, cat, "variable.builtin") or
-            std.mem.eql(u8, cat, "property"))
+        if (std.mem.eql(u8, cat, "property")) {
+            // Object properties - default color
+            return .default;
+        }
+
+        if (std.mem.eql(u8, cat, "character") or
+            std.mem.eql(u8, cat, "escape"))
         {
-            return .white;
+            // Character literals and escape sequences - treat as strings
+            return .string;
         }
 
-        // Default for unknown categories
-        return .white;
+        if (std.mem.eql(u8, cat, "label")) {
+            // Labels (e.g., goto labels) - treat as keywords
+            return .keyword;
+        }
+
+        if (std.mem.eql(u8, cat, "attribute")) {
+            // Attributes (e.g., @attribute in Zig, decorators) - treat as functions
+            return .function;
+        }
+
+        // Markup/markdown specific (tag, text.*, etc.) - use default
+        // Punctuation and delimiters - use default
+        // These are typically structural and don't need special coloring
+
+        // Default for unknown or structural categories
+        return .default;
     }
 };
 

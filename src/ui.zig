@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const rendering_common = @import("rendering/common.zig");
 const render_utils = @import("rendering/utils.zig");
 const state_helpers = @import("state.zig");
+const git = @import("git/diff.zig");
 
 const App = @import("app.zig").App;
 const Color = rendering_common.Color;
@@ -10,12 +11,36 @@ const Layout = rendering_common.Layout;
 const FrameChars = rendering_common.FrameChars;
 const RenderUtils = render_utils.RenderUtils;
 const StateHelpers = state_helpers.StateHelpers;
+const DiffSource = git.DiffSource;
 
 pub const DividerPosition = enum {
     top,
     middle,
     bottom,
 };
+
+fn formatDiffSource(allocator: std.mem.Allocator, diff_source: DiffSource) ![]const u8 {
+    return switch (diff_source) {
+        .working_dir => |wd| if (wd.staged)
+            try allocator.dupe(u8, "[Staged]")
+        else
+            try allocator.dupe(u8, "[Working]"),
+        .single_ref => |sr| blk: {
+            if (sr.staged) {
+                break :blk try std.fmt.allocPrint(allocator, "[Staged vs {s}]", .{sr.ref});
+            } else {
+                break :blk try std.fmt.allocPrint(allocator, "[Working vs {s}]", .{sr.ref});
+            }
+        },
+        .two_refs => |tr| blk: {
+            if (tr.use_merge_base) {
+                break :blk try std.fmt.allocPrint(allocator, "[{s}...{s}]", .{ tr.ref1, tr.ref2 });
+            } else {
+                break :blk try std.fmt.allocPrint(allocator, "[{s}..{s}]", .{ tr.ref1, tr.ref2 });
+            }
+        },
+    };
+}
 
 pub const UI = struct {
     pub fn renderDivider(app: *App, win: vaxis.Window, position: DividerPosition) !void {
@@ -126,8 +151,8 @@ pub const UI = struct {
             .{ .text = file_info_copy, .style = .{ .fg = Color.white } },
             .{ .text = file_path_copy, .style = .{ .fg = Color.white, .bold = true } },
             .{ .text = spacer, .style = .{ .fg = Color.white } },
-            .{ .text = additions_copy, .style = .{ .fg = Color.green, .bold = true } },
-            .{ .text = deletions_copy, .style = .{ .fg = Color.red, .bold = true } },
+            .{ .text = additions_copy, .style = .{ .fg = Color.diff_sign_add, .bold = true } },
+            .{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } },
         };
 
         _ = try win.print(&segments, .{ .row_offset = 0, .col_offset = 0 });
@@ -265,6 +290,13 @@ pub const UI = struct {
             try segments.append(.{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
             try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
             try segments.append(.{ .text = try RenderUtils.copyFrameText(app, view_str), .style = .{} });
+
+            // Show diff source mode
+            const diff_str = try formatDiffSource(app.allocator, app.state.diff_source);
+            defer app.allocator.free(diff_str);
+            const diff_str_copy = try RenderUtils.copyFrameText(app, diff_str);
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
+            try segments.append(.{ .text = diff_str_copy, .style = .{ .fg = Color.cyan } });
 
             // Only show hunk view mode indicator in unified view (where filtering applies)
             if (app.state.view_mode == .unified) {
