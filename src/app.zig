@@ -394,9 +394,8 @@ pub const App = struct {
 
         try self.vx.enterAltScreen(buffered_writer.writer().any());
 
-        // Reduced timeout from 1s to 100ms for faster startup
-        // Terminal capabilities are nice-to-have, not critical
-        try self.vx.queryTerminal(buffered_writer.writer().any(), 100 * std.time.ns_per_ms);
+        // Query terminal capabilities
+        try self.vx.queryTerminal(buffered_writer.writer().any(), 1 * std.time.ns_per_s);
 
         try buffered_writer.flush();
 
@@ -983,9 +982,16 @@ pub const App = struct {
     fn handleCommentMode(self: *App, key: vaxis.Key) !void {
         var input = &self.state.active_comment_input.?;
 
-        // Handle special keys
-        if (key.mods.shift and key.codepoint == '\r') {
-            // Shift+Enter - insert newline
+        // Ctrl+S - save comment
+        if (key.mods.ctrl and key.codepoint == 's') {
+            try self.saveCurrentComment();
+            self.mode = .normal;
+            self.state.active_comment_input = null;
+            return;
+        }
+
+        // Enter - insert newline (much more intuitive for multi-line input)
+        if (key.matches(vaxis.Key.enter, .{})) {
             if (input.text_len < input.text_buffer.len) {
                 // Insert newline at cursor position
                 const remaining = input.text_len - input.cursor_pos;
@@ -1003,24 +1009,8 @@ pub const App = struct {
             return;
         }
 
-        if (key.mods.ctrl) {
-            // Ctrl+S or Ctrl+Enter - save comment
-            if (key.codepoint == 's' or key.codepoint == '\r') {
-                try self.saveCurrentComment();
-                self.mode = .normal;
-                self.state.active_comment_input = null;
-                return;
-            }
-            return;
-        }
-
         switch (key.codepoint) {
             27 => { // ESC - cancel
-                self.mode = .normal;
-                self.state.active_comment_input = null;
-            },
-            '\r' => { // Enter - save comment
-                try self.saveCurrentComment();
                 self.mode = .normal;
                 self.state.active_comment_input = null;
             },

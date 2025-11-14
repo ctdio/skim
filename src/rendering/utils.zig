@@ -547,6 +547,64 @@ pub const RenderUtils = struct {
         _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = col_offset });
     }
 
+    /// Wrap text to fit within max_width, breaking at word boundaries when possible
+    pub fn wrapText(allocator: std.mem.Allocator, text: []const u8, max_width: usize) !std.ArrayList([]const u8) {
+        var lines = std.ArrayList([]const u8).init(allocator);
+        errdefer lines.deinit();
+
+        if (max_width == 0) return lines;
+
+        // Handle empty text - still return one empty line
+        if (text.len == 0) {
+            try lines.append(text);
+            return lines;
+        }
+
+        var start: usize = 0;
+        while (start < text.len) {
+            const remaining = text[start..];
+
+            // If remaining text fits, add it as-is
+            if (remaining.len <= max_width) {
+                try lines.append(remaining);
+                break;
+            }
+
+            // Find the last space within max_width
+            var break_point = max_width;
+            var found_space = false;
+
+            // Look backwards from max_width to find a space
+            var i: usize = max_width;
+            while (i > 0) : (i -= 1) {
+                if (remaining[i - 1] == ' ') {
+                    break_point = i - 1; // Break before the space
+                    found_space = true;
+                    break;
+                }
+            }
+
+            // If no space found, hard break at max_width
+            if (!found_space) {
+                break_point = max_width;
+            }
+
+            // Add this segment
+            try lines.append(remaining[0..break_point]);
+
+            // Move past the break point and any spaces
+            start += break_point;
+            if (found_space) {
+                // Skip the space(s) we broke on
+                while (start < text.len and text[start] == ' ') {
+                    start += 1;
+                }
+            }
+        }
+
+        return lines;
+    }
+
     /// Render inline comment input box (when in comment mode)
     pub fn renderCommentInputBox(
         app: *App,
@@ -555,109 +613,158 @@ pub const RenderUtils = struct {
         gutter_width: usize,
     ) !usize {
         if (app.state.active_comment_input == null) return 0;
-        if (row + 2 >= win.height) return 0; // Need at least 3 rows
+        if (row + 3 >= win.height) return 0; // Need at least 4 rows
 
         const input = app.state.active_comment_input.?;
 
-        // Render gutter for top row (always highlighted since we're editing)
+        // Render gutter for top spacer
         try renderCommentGutter(app, win, row, true, gutter_width);
 
         const content_start = 1 + gutter_width + Layout.gutter_spacing;
-        const box_cell_width = (win.width -| content_start) -| 2; // Width in cells (-2 for right border)
+        const content_width = win.width -| content_start;
 
-        if (box_cell_width < 20) return 0; // Box too narrow
+        if (content_width < 20) return 0; // Too narrow
 
-        const box_style: vaxis.Style = .{ .fg = Color.comment_border_focus, .bg = Color.comment_hover_bg };
+        const border_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true };
         const text_style: vaxis.Style = .{ .fg = Color.white, .bg = Color.comment_hover_bg };
-
-        // Top border: ╭─ Comment ─────╮
-        // Build it as segments for proper rendering
-        const label = " Comment ";
-        const top_h_count = box_cell_width - 3 - label.len; // -3 for corners+1 horiz, -label
+        const label_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true };
+        const hints_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true };
 
         var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
         defer segments.deinit();
 
-        // Top line segments
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.top_left), .style = box_style });
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        try segments.append(.{ .text = try copyFrameText(app, label), .style = box_style });
+        var current_row = row;
 
-        var i: usize = 0;
-        while (i < top_h_count) : (i += 1) {
-            try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        }
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.top_right), .style = box_style });
+        // Line 1: ┃ (top spacer)
+        try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+        const top_spacer = try frameTextSlice(app, content_width - 1);
+        @memset(top_spacer, ' ');
+        try segments.append(.{ .text = top_spacer, .style = .{ .bg = Color.comment_hover_bg } });
+        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        current_row += 1;
 
-        _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = content_start });
+        // Render gutter for label line
+        try renderEmptyCommentGutter(app, win, current_row, true, gutter_width);
 
-        // Render gutter for content line
-        try renderEmptyCommentGutter(app, win, row + 1, true, gutter_width);
-
-        // Content line: │ text │
+        // Line 2: ┃ Comment                              Ctrl+S:Save  Enter:Newline  ESC:Cancel
         segments.clearRetainingCapacity();
+        const hints = "Ctrl+S:Save  Enter:Newline  ESC:Cancel";
+        const border_and_label = "┃ Comment";
+        const spacing = "  ";
+        const total_fixed = border_and_label.len + spacing.len + hints.len; // Total chars we're rendering
+        const available_for_spacer = content_width -| total_fixed;
 
+        try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+        try segments.append(.{ .text = try copyFrameText(app, " Comment"), .style = label_style });
+
+        // Spacer between label and hints
+        if (available_for_spacer > 0) {
+            const spacer = try frameTextSlice(app, available_for_spacer);
+            @memset(spacer, ' ');
+            try segments.append(.{ .text = spacer, .style = .{ .bg = Color.comment_hover_bg } });
+        }
+
+        try segments.append(.{ .text = try copyFrameText(app, spacing), .style = .{ .bg = Color.comment_hover_bg } });
+        try segments.append(.{ .text = try copyFrameText(app, hints), .style = hints_style });
+
+        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        current_row += 1;
+
+        // Line 3+: ┃ > [text] (multiple lines if newlines present)
         const input_text = input.text_buffer[0..input.text_len];
-        const first_line_end = std.mem.indexOfScalar(u8, input_text, '\n') orelse input_text.len;
-        const first_line = input_text[0..first_line_end];
+        const text_area_width = content_width - 4; // -4 for "┃ > " or "┃   "
 
-        // Build content with padding included (total width = box_cell_width - 2 for borders)
-        const content_width = box_cell_width - 2; // -2 for left and right borders
-        const display_text = blk: {
-            var buf = try frameTextSlice(app, content_width);
-            buf[0] = ' '; // Left padding
-            const text_len = content_width - 2; // -2 for left and right padding
-            const copy_len = @min(first_line.len, text_len);
-            if (copy_len > 0) {
-                @memcpy(buf[1 .. 1 + copy_len], first_line[0..copy_len]);
+        var line_iter = std.mem.splitScalar(u8, input_text, '\n');
+        var is_first_line = true;
+        var char_offset: usize = 0; // Track position in buffer for cursor
+
+        while (line_iter.next()) |text_line| {
+            if (current_row >= win.height) break;
+
+            // Wrap this line if it's too long
+            var wrapped_lines = try wrapText(app.allocator, text_line, text_area_width);
+            defer wrapped_lines.deinit();
+
+            // Track offset within the current text_line for wrapped segments
+            var segment_offset: usize = 0;
+
+            // Render each wrapped segment
+            for (wrapped_lines.items) |wrapped_segment| {
+                if (current_row >= win.height) break;
+
+                // Render gutter for this text line
+                try renderEmptyCommentGutter(app, win, current_row, true, gutter_width);
+
+                segments.clearRetainingCapacity();
+                try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+
+                if (is_first_line) {
+                    try segments.append(.{ .text = try copyFrameText(app, " > "), .style = text_style });
+                } else {
+                    try segments.append(.{ .text = try copyFrameText(app, "   "), .style = text_style });
+                }
+
+                const display_text = blk: {
+                    var buf = try frameTextSlice(app, text_area_width);
+                    const copy_len = @min(wrapped_segment.len, text_area_width);
+                    if (copy_len > 0) {
+                        @memcpy(buf[0..copy_len], wrapped_segment[0..copy_len]);
+                    }
+                    if (copy_len < buf.len) {
+                        @memset(buf[copy_len..], ' ');
+                    }
+                    break :blk buf;
+                };
+
+                try segments.append(.{ .text = display_text, .style = text_style });
+                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+
+                // Draw cursor if it's in this wrapped segment
+                const segment_start = char_offset + segment_offset;
+                const segment_end = segment_start + wrapped_segment.len;
+                if (input.cursor_pos >= segment_start and input.cursor_pos <= segment_end) {
+                    const cursor_pos_in_segment = input.cursor_pos - segment_start;
+                    if (cursor_pos_in_segment < text_area_width) {
+                        const cursor_col = content_start + 4 + cursor_pos_in_segment; // +4 for "┃ > " or "┃   "
+                        const cursor_char = if (cursor_pos_in_segment < wrapped_segment.len)
+                            wrapped_segment[cursor_pos_in_segment .. cursor_pos_in_segment + 1]
+                        else
+                            " ";
+                        var cursor_seg = [_]vaxis.Cell.Segment{.{
+                            .text = try copyFrameText(app, cursor_char),
+                            .style = .{ .fg = Color.black, .bg = Color.white },
+                        }};
+                        _ = try win.print(&cursor_seg, .{ .row_offset = current_row, .col_offset = cursor_col });
+                    }
+                }
+
+                current_row += 1;
+                is_first_line = false;
+                segment_offset += wrapped_segment.len;
+
+                // Account for spaces that were skipped during wrapping
+                // Find how many spaces were between this segment and the next in the original
+                while (segment_offset < text_line.len and text_line[segment_offset] == ' ') {
+                    segment_offset += 1;
+                }
             }
-            if (1 + copy_len < buf.len) {
-                @memset(buf[1 + copy_len ..], ' ');
-            }
-            break :blk buf;
-        };
 
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.vertical), .style = box_style });
-        try segments.append(.{ .text = display_text, .style = text_style });
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.vertical), .style = box_style });
-
-        _ = try win.print(segments.items, .{ .row_offset = row + 1, .col_offset = content_start });
-
-        // Draw cursor on top
-        const cursor_visible_pos = if (input.cursor_pos <= first_line_end) input.cursor_pos else first_line_end;
-        const text_area_max = content_width - 2; // Max text without padding
-        if (cursor_visible_pos < text_area_max) {
-            const cursor_col = content_start + 2 + cursor_visible_pos; // +1 for border, +1 for padding
-            const cursor_char = if (cursor_visible_pos < first_line.len) first_line[cursor_visible_pos .. cursor_visible_pos + 1] else " ";
-            var cursor_seg = [_]vaxis.Cell.Segment{.{
-                .text = try copyFrameText(app, cursor_char),
-                .style = .{ .fg = Color.black, .bg = Color.white },
-            }};
-            _ = try win.print(&cursor_seg, .{ .row_offset = row + 1, .col_offset = cursor_col });
+            char_offset += text_line.len + 1; // +1 for the newline character
         }
 
-        // Render gutter for bottom border
-        try renderEmptyCommentGutter(app, win, row + 2, true, gutter_width);
+        // Render gutter for bottom spacer
+        try renderEmptyCommentGutter(app, win, current_row, true, gutter_width);
 
-        // Bottom border: ╰─ Enter:Save  ESC:Cancel ─╯
+        // Last line: ┃ (bottom spacer)
         segments.clearRetainingCapacity();
+        try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+        const bottom_spacer = try frameTextSlice(app, content_width - 1);
+        @memset(bottom_spacer, ' ');
+        try segments.append(.{ .text = bottom_spacer, .style = .{ .bg = Color.comment_hover_bg } });
+        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        current_row += 1;
 
-        const help_text = " Enter:Save  ESC:Cancel ";
-        const bottom_h_count = box_cell_width - 3 - help_text.len; // -3 for corners+1 horiz, -help_text
-
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_left), .style = box_style });
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        try segments.append(.{ .text = try copyFrameText(app, help_text), .style = box_style });
-
-        i = 0;
-        while (i < bottom_h_count) : (i += 1) {
-            try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        }
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_right), .style = box_style });
-
-        _ = try win.print(segments.items, .{ .row_offset = row + 2, .col_offset = content_start });
-
-        return 3; // Used 3 rows
+        return current_row - row; // Return actual number of rows used
     }
 
     /// Render saved comment display box (expanded view)
@@ -669,122 +776,154 @@ pub const RenderUtils = struct {
         gutter_width: usize,
         is_cursor: bool,
     ) !usize {
-        // Render gutter for first row (with bullet indicator)
+        // Render gutter for top spacer
         try renderCommentGutter(app, win, row, is_cursor, gutter_width);
 
         const content_start = 1 + gutter_width + Layout.gutter_spacing;
-        const box_cell_width = (win.width -| content_start) -| 2; // -2 for right border
+        const content_width = win.width -| content_start;
 
-        if (box_cell_width < 20) return 0;
+        if (content_width < 20) return 0;
 
-        // Use neutral colors - slightly lighter border and dark background when focused
-        const box_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.comment_border_focus, .bg = Color.comment_hover_bg }
+        // Use cyan for regular comments, yellow when focused
+        const border_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
         else
-            .{ .fg = Color.comment_border };
+            .{ .fg = Color.cyan, .bold = true };
 
         const text_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.white, .bg = Color.comment_hover_bg }
         else
             .{ .fg = Color.white };
 
+        const label_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
+        else
+            .{ .fg = Color.cyan, .bold = true };
+
+        const hints_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true }
+        else
+            .{};
+
+        const bg_style: vaxis.Style = if (is_cursor)
+            .{ .bg = Color.comment_hover_bg }
+        else
+            .{};
+
         var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
         defer segments.deinit();
 
-        // Top border: ╭─ Comment ─────╮
-        const label = " Comment ";
-        const top_h_count = box_cell_width - 3 - label.len; // -3 for corners+1 horiz, -label
+        var current_row = row;
 
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.top_left), .style = box_style });
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        try segments.append(.{ .text = try copyFrameText(app, label), .style = box_style });
+        // Line 1: ┃ (top spacer)
+        try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+        const top_spacer = try frameTextSlice(app, content_width - 1);
+        @memset(top_spacer, ' ');
+        try segments.append(.{ .text = top_spacer, .style = bg_style });
+        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        current_row += 1;
 
-        var i: usize = 0;
-        while (i < top_h_count) : (i += 1) {
-            try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        }
-        try segments.append(.{ .text = try copyFrameText(app, FrameChars.top_right), .style = box_style });
+        // Render gutter for label line
+        try renderEmptyCommentGutter(app, win, current_row, is_cursor, gutter_width);
 
-        _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = content_start });
-
-        // Split comment text by newlines and render each
-        var lines_used: usize = 1;
-        const content_width = box_cell_width - 2; // -2 for borders
-        var line_iter = std.mem.splitScalar(u8, comment.text, '\n');
-
-        while (line_iter.next()) |text_line| {
-            if (row + lines_used >= win.height) break;
-
-            // Render gutter for content line (empty, no indicator)
-            try renderEmptyCommentGutter(app, win, row + lines_used, is_cursor, gutter_width);
-
-            segments.clearRetainingCapacity();
-
-            const display_text = blk: {
-                var buf = try frameTextSlice(app, content_width);
-                buf[0] = ' '; // Left padding
-                const text_len = content_width - 2; // -2 for left and right padding
-                const copy_len = @min(text_line.len, text_len);
-                if (copy_len > 0) {
-                    @memcpy(buf[1 .. 1 + copy_len], text_line[0..copy_len]);
-                }
-                if (1 + copy_len < buf.len) {
-                    @memset(buf[1 + copy_len ..], ' ');
-                }
-                break :blk buf;
-            };
-
-            try segments.append(.{ .text = try copyFrameText(app, FrameChars.vertical), .style = box_style });
-            try segments.append(.{ .text = display_text, .style = text_style });
-            try segments.append(.{ .text = try copyFrameText(app, FrameChars.vertical), .style = box_style });
-
-            _ = try win.print(segments.items, .{ .row_offset = row + lines_used, .col_offset = content_start });
-
-            lines_used += 1;
-        }
-
-        if (row + lines_used >= win.height) return lines_used;
-
-        // Render gutter for bottom border
-        try renderEmptyCommentGutter(app, win, row + lines_used, is_cursor, gutter_width);
-
-        // Bottom border: ╰─ Enter:Edit  d:Delete ─╯ (when cursor is on comment)
-        // or just: ╰─────────────╯ (when cursor is elsewhere)
+        // Line 2: ┃ Comment                              Enter:Edit  d:Delete
         segments.clearRetainingCapacity();
-
         if (is_cursor) {
-            // Show action hints when cursor is on this comment
-            const help_text = " Enter:Edit  d:Delete ";
-            const bottom_h_count = box_cell_width - 3 - help_text.len; // -3 for corners+1 horiz, -help_text
+            const hints = "Enter:Edit  d:Delete";
+            const border_and_label = "┃ Comment";
+            const spacing = "  ";
+            const total_fixed = border_and_label.len + spacing.len + hints.len; // Total chars we're rendering
+            const available_for_spacer = content_width -| total_fixed;
 
-            try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_left), .style = box_style });
-            try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
-            try segments.append(.{ .text = try copyFrameText(app, help_text), .style = box_style });
+            try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+            try segments.append(.{ .text = try copyFrameText(app, " Comment"), .style = label_style });
 
-            i = 0;
-            while (i < bottom_h_count) : (i += 1) {
-                try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
+            // Spacer between label and hints
+            if (available_for_spacer > 0) {
+                const spacer = try frameTextSlice(app, available_for_spacer);
+                @memset(spacer, ' ');
+                try segments.append(.{ .text = spacer, .style = bg_style });
             }
-            try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_right), .style = box_style });
+
+            try segments.append(.{ .text = try copyFrameText(app, spacing), .style = bg_style });
+            try segments.append(.{ .text = try copyFrameText(app, hints), .style = hints_style });
         } else {
-            // Plain bottom border when cursor is not on this comment
-            const bottom_h_count = box_cell_width - 2; // -2 for corners
-
-            try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_left), .style = box_style });
-
-            i = 0;
-            while (i < bottom_h_count) : (i += 1) {
-                try segments.append(.{ .text = try copyFrameText(app, FrameChars.horizontal), .style = box_style });
-            }
-            try segments.append(.{ .text = try copyFrameText(app, FrameChars.bottom_right), .style = box_style });
+            // Just label when not focused
+            try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+            try segments.append(.{ .text = try copyFrameText(app, " Comment"), .style = label_style });
+            const label_spacer = try frameTextSlice(app, content_width - 9); // -9 for "┃ Comment"
+            @memset(label_spacer, ' ');
+            try segments.append(.{ .text = label_spacer, .style = bg_style });
         }
 
-        _ = try win.print(segments.items, .{ .row_offset = row + lines_used, .col_offset = content_start });
+        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        current_row += 1;
 
-        return lines_used + 1;
+        // Render comment text lines with word wrapping
+        const text_area_width = content_width - 4; // -4 for "┃ > " or "┃   "
+        var line_iter = std.mem.splitScalar(u8, comment.text, '\n');
+        var is_first_line = true;
+        while (line_iter.next()) |text_line| {
+            if (current_row >= win.height) break;
+
+            // Wrap this line if it's too long
+            var wrapped_lines = try wrapText(app.allocator, text_line, text_area_width);
+            defer wrapped_lines.deinit();
+
+            // Render each wrapped segment
+            for (wrapped_lines.items) |wrapped_segment| {
+                if (current_row >= win.height) break;
+
+                // Render gutter for text line
+                try renderEmptyCommentGutter(app, win, current_row, is_cursor, gutter_width);
+
+                segments.clearRetainingCapacity();
+                try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+                if (is_first_line) {
+                    try segments.append(.{ .text = try copyFrameText(app, " > "), .style = text_style });
+                } else {
+                    try segments.append(.{ .text = try copyFrameText(app, "   "), .style = text_style });
+                }
+
+                const display_text = blk: {
+                    var buf = try frameTextSlice(app, text_area_width);
+                    const copy_len = @min(wrapped_segment.len, text_area_width);
+                    if (copy_len > 0) {
+                        @memcpy(buf[0..copy_len], wrapped_segment[0..copy_len]);
+                    }
+                    if (copy_len < buf.len) {
+                        @memset(buf[copy_len..], ' ');
+                    }
+                    break :blk buf;
+                };
+
+                try segments.append(.{ .text = display_text, .style = text_style });
+                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+                current_row += 1;
+                is_first_line = false;
+            }
+        }
+
+        if (current_row >= win.height) {
+            return current_row - row;
+        }
+
+        // Render gutter for bottom spacer
+        try renderEmptyCommentGutter(app, win, current_row, is_cursor, gutter_width);
+
+        // Line N: ┃ (bottom spacer)
+        segments.clearRetainingCapacity();
+        try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+        const bottom_spacer = try frameTextSlice(app, content_width - 1);
+        @memset(bottom_spacer, ' ');
+        try segments.append(.{ .text = bottom_spacer, .style = bg_style });
+        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        current_row += 1;
+
+        return current_row - row;
     }
 
-    /// Render gutter for a comment line (shows comment indicator)
+    /// Render gutter for a comment line (no indicator, just background)
     fn renderCommentGutter(
         app: *App,
         win: vaxis.Window,
@@ -792,30 +931,34 @@ pub const RenderUtils = struct {
         is_cursor: bool,
         gutter_width: usize,
     ) !void {
-        // Gutter style - neutral gray marker with hover background
+        // Apply hover background when cursor is on comment
         const gutter_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.comment_marker, .bg = Color.comment_hover_bg, .bold = true }
+            .{ .bg = Color.comment_hover_bg }
         else
-            .{ .fg = Color.comment_marker };
+            .{};
 
-        // Build gutter text: right-aligned comment indicator
-        var buf: [16]u8 = undefined;
-        const indicator = "●"; // Comment indicator
-
-        // Right-align the indicator in the gutter
-        const gutter_text = blk: {
-            const text = try std.fmt.bufPrint(&buf, "{s: >[1]}", .{ indicator, gutter_width });
-            break :blk try copyFrameText(app, text);
-        };
+        // Empty gutter (just spaces)
+        const gutter_spaces = try frameTextSlice(app, gutter_width);
+        @memset(gutter_spaces, ' ');
 
         var gutter_seg = [_]vaxis.Cell.Segment{.{
-            .text = gutter_text,
+            .text = gutter_spaces,
             .style = gutter_style,
         }};
         _ = try win.print(&gutter_seg, .{ .row_offset = row, .col_offset = 1 });
 
-        // Render gutter spacing (space between gutter and content)
-        try renderGutterSpacing(app, win, row, 1 + gutter_width, is_cursor, null);
+        // Render gutter spacing with comment hover background
+        const spacing_style: vaxis.Style = if (is_cursor)
+            .{ .bg = Color.comment_hover_bg }
+        else
+            .{};
+        const spacing = try frameTextSlice(app, rendering_common.Layout.gutter_spacing);
+        @memset(spacing, ' ');
+        var spacing_seg = [_]vaxis.Cell.Segment{.{
+            .text = spacing,
+            .style = spacing_style,
+        }};
+        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = 1 + gutter_width });
     }
 
     /// Render empty gutter for continuation lines of comment boxes
@@ -842,8 +985,18 @@ pub const RenderUtils = struct {
         }};
         _ = try win.print(&gutter_seg, .{ .row_offset = row, .col_offset = 1 });
 
-        // Render gutter spacing (space between gutter and content)
-        try renderGutterSpacing(app, win, row, 1 + gutter_width, is_cursor, null);
+        // Render gutter spacing with comment hover background
+        const spacing_style: vaxis.Style = if (is_cursor)
+            .{ .bg = Color.comment_hover_bg }
+        else
+            .{};
+        const spacing = try frameTextSlice(app, rendering_common.Layout.gutter_spacing);
+        @memset(spacing, ' ');
+        var spacing_seg = [_]vaxis.Cell.Segment{.{
+            .text = spacing,
+            .style = spacing_style,
+        }};
+        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = 1 + gutter_width });
     }
 
     /// Check if there's a comment at this file/hunk/line location

@@ -607,90 +607,129 @@ pub const SideBySideRenderer = struct {
             },
         };
 
-        if (layout.width < 20) return 0; // Box too narrow
+        if (layout.width < 20) return 0; // Too narrow
 
-        const box_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.dim, .bold = true };
-        const text_style: vaxis.Style = .{ .fg = Color.white, .bg = Color.dim };
+        const border_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true };
+        const text_style: vaxis.Style = .{ .fg = Color.white, .bg = Color.comment_hover_bg };
+        const label_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true };
+        const hints_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true };
 
         var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
         defer segments.deinit();
 
-        // Top border: ╭─ Comment ─────╮
-        const label = " Comment ";
-        const top_h_count = layout.width - 3 - label.len;
+        var current_row = row;
 
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.top_left), .style = box_style });
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, label), .style = box_style });
+        // Line 1: ┃ Comment                              Ctrl+S:Save  Enter:Newline  ESC:Cancel
+        const hints = "Ctrl+S:Save  Enter:Newline  ESC:Cancel";
+        const border_and_label = "┃ Comment";
+        const spacing = "  ";
+        const total_fixed = border_and_label.len + spacing.len + hints.len; // Total chars we're rendering
+        const available_for_spacer = layout.width -| total_fixed;
 
-        var i: usize = 0;
-        while (i < top_h_count) : (i += 1) {
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
+
+        // Spacer between label and hints
+        if (available_for_spacer > 0) {
+            const spacer = try RenderUtils.frameTextSlice(app, available_for_spacer);
+            @memset(spacer, ' ');
+            try segments.append(.{ .text = spacer, .style = .{ .bg = Color.comment_hover_bg } });
         }
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.top_right), .style = box_style });
 
-        _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = layout.start_col });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, spacing), .style = .{ .bg = Color.comment_hover_bg } });
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, hints), .style = hints_style });
 
-        // Content line: │ text │
-        segments.clearRetainingCapacity();
+        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+        current_row += 1;
 
+        // Line 2+: ┃ > [text] (multiple lines if newlines present)
         const input_text = input.text_buffer[0..input.text_len];
-        const first_line_end = std.mem.indexOfScalar(u8, input_text, '\n') orelse input_text.len;
-        const first_line = input_text[0..first_line_end];
+        const text_area_width = layout.width - 4; // -4 for "┃ > " or "┃   "
 
-        const content_width = layout.width - 2; // -2 for left and right borders
-        const display_text = blk: {
-            var buf = try RenderUtils.frameTextSlice(app, content_width);
-            buf[0] = ' '; // Left padding
-            const text_len = content_width - 2; // -2 for left and right padding
-            const copy_len = @min(first_line.len, text_len);
-            if (copy_len > 0) {
-                @memcpy(buf[1 .. 1 + copy_len], first_line[0..copy_len]);
+        var line_iter = std.mem.splitScalar(u8, input_text, '\n');
+        var is_first_line = true;
+        var char_offset: usize = 0; // Track position in buffer for cursor
+
+        while (line_iter.next()) |text_line| {
+            if (current_row >= win.height) break;
+
+            // Wrap this line if it's too long
+            var wrapped_lines = try RenderUtils.wrapText(app.allocator, text_line, text_area_width);
+            defer wrapped_lines.deinit();
+
+            // Track offset within the current text_line for wrapped segments
+            var segment_offset: usize = 0;
+
+            // Render each wrapped segment
+            for (wrapped_lines.items) |wrapped_segment| {
+                if (current_row >= win.height) break;
+
+                segments.clearRetainingCapacity();
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+
+                if (is_first_line) {
+                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " > "), .style = text_style });
+                } else {
+                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "   "), .style = text_style });
+                }
+
+                const display_text = blk: {
+                    var buf = try RenderUtils.frameTextSlice(app, text_area_width);
+                    const copy_len = @min(wrapped_segment.len, text_area_width);
+                    if (copy_len > 0) {
+                        @memcpy(buf[0..copy_len], wrapped_segment[0..copy_len]);
+                    }
+                    if (copy_len < buf.len) {
+                        @memset(buf[copy_len..], ' ');
+                    }
+                    break :blk buf;
+                };
+
+                try segments.append(.{ .text = display_text, .style = text_style });
+                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+
+                // Draw cursor if it's in this wrapped segment
+                const segment_start = char_offset + segment_offset;
+                const segment_end = segment_start + wrapped_segment.len;
+                if (input.cursor_pos >= segment_start and input.cursor_pos <= segment_end) {
+                    const cursor_pos_in_segment = input.cursor_pos - segment_start;
+                    if (cursor_pos_in_segment < text_area_width) {
+                        const cursor_col = layout.start_col + 4 + cursor_pos_in_segment; // +4 for "┃ > " or "┃   "
+                        const cursor_char = if (cursor_pos_in_segment < wrapped_segment.len)
+                            wrapped_segment[cursor_pos_in_segment .. cursor_pos_in_segment + 1]
+                        else
+                            " ";
+                        var cursor_seg = [_]vaxis.Cell.Segment{.{
+                            .text = try RenderUtils.copyFrameText(app, cursor_char),
+                            .style = .{ .fg = Color.black, .bg = Color.white },
+                        }};
+                        _ = try win.print(&cursor_seg, .{ .row_offset = current_row, .col_offset = cursor_col });
+                    }
+                }
+
+                current_row += 1;
+                is_first_line = false;
+                segment_offset += wrapped_segment.len;
+
+                // Account for spaces that were skipped during wrapping
+                while (segment_offset < text_line.len and text_line[segment_offset] == ' ') {
+                    segment_offset += 1;
+                }
             }
-            if (1 + copy_len < buf.len) {
-                @memset(buf[1 + copy_len ..], ' ');
-            }
-            break :blk buf;
-        };
 
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.vertical), .style = box_style });
-        try segments.append(.{ .text = display_text, .style = text_style });
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.vertical), .style = box_style });
-
-        _ = try win.print(segments.items, .{ .row_offset = row + 1, .col_offset = layout.start_col });
-
-        // Draw cursor
-        const cursor_visible_pos = if (input.cursor_pos <= first_line_end) input.cursor_pos else first_line_end;
-        const text_area_max = content_width - 2;
-        if (cursor_visible_pos < text_area_max) {
-            const cursor_col = layout.start_col + 2 + cursor_visible_pos;
-            const cursor_char = if (cursor_visible_pos < first_line.len) first_line[cursor_visible_pos .. cursor_visible_pos + 1] else " ";
-            var cursor_seg = [_]vaxis.Cell.Segment{.{
-                .text = try RenderUtils.copyFrameText(app, cursor_char),
-                .style = .{ .fg = Color.black, .bg = Color.white },
-            }};
-            _ = try win.print(&cursor_seg, .{ .row_offset = row + 1, .col_offset = cursor_col });
+            char_offset += text_line.len + 1; // +1 for the newline character
         }
 
-        // Bottom border: ╰─ Enter:Save  ESC:Cancel ─╯
+        // Last line: ┃ (bottom spacer)
         segments.clearRetainingCapacity();
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+        const bottom_spacer = try RenderUtils.frameTextSlice(app, layout.width - 1);
+        @memset(bottom_spacer, ' ');
+        try segments.append(.{ .text = bottom_spacer, .style = .{ .bg = Color.comment_hover_bg } });
+        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+        current_row += 1;
 
-        const help_text = " Enter:Save  ESC:Cancel ";
-        const bottom_h_count = layout.width - 3 - help_text.len;
-
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.bottom_left), .style = box_style });
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, help_text), .style = box_style });
-
-        i = 0;
-        while (i < bottom_h_count) : (i += 1) {
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        }
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.bottom_right), .style = box_style });
-
-        _ = try win.print(segments.items, .{ .row_offset = row + 2, .col_offset = layout.start_col });
-
-        return 3; // Used 3 rows
+        return current_row - row; // Return actual number of rows used
     }
 
     /// Render saved comment display in side-by-side mode
@@ -731,82 +770,124 @@ pub const SideBySideRenderer = struct {
 
         if (layout.width < 20) return 0;
 
-        const box_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.yellow, .bg = Color.cursor_bg, .bold = true }
+        // Use cyan for regular comments, yellow when focused
+        const border_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
         else
-            .{ .fg = Color.cyan, .bg = Color.dim, .bold = true };
+            .{ .fg = Color.cyan, .bold = true };
 
         const text_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg }
+            .{ .fg = Color.white, .bg = Color.comment_hover_bg }
         else
-            .{ .fg = Color.white, .bg = Color.dim };
+            .{ .fg = Color.white };
+
+        const label_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
+        else
+            .{ .fg = Color.cyan, .bold = true };
+
+        const hints_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true }
+        else
+            .{};
+
+        const bg_style: vaxis.Style = if (is_cursor)
+            .{ .bg = Color.comment_hover_bg }
+        else
+            .{};
 
         var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
         defer segments.deinit();
 
-        // Top border: ╭─ Comment ─────╮
-        const label = " Comment ";
-        const top_h_count = layout.width - 3 - label.len;
+        var current_row = row;
 
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.top_left), .style = box_style });
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, label), .style = box_style });
+        // Line 1: ┃ Comment                              Enter:Edit  d:Delete
+        if (is_cursor) {
+            const hints = "Enter:Edit  d:Delete";
+            const border_and_label = "┃ Comment";
+            const spacing = "  ";
+            const total_fixed = border_and_label.len + spacing.len + hints.len; // Total chars we're rendering
+            const available_for_spacer = layout.width -| total_fixed;
 
-        var i: usize = 0;
-        while (i < top_h_count) : (i += 1) {
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
-        }
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.top_right), .style = box_style });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
 
-        _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = layout.start_col });
-
-        // Render comment text lines
-        var lines_used: usize = 1;
-        const content_width = layout.width - 2; // -2 for borders
-        var line_iter = std.mem.splitScalar(u8, comment.text, '\n');
-
-        while (line_iter.next()) |text_line| {
-            if (row + lines_used >= win.height) break;
-
-            segments.clearRetainingCapacity();
-
-            const display_text = blk: {
-                var buf = try RenderUtils.frameTextSlice(app, content_width);
-                buf[0] = ' '; // Left padding
-                const text_len = content_width - 2; // -2 for left and right padding
-                const copy_len = @min(text_line.len, text_len);
-                if (copy_len > 0) {
-                    @memcpy(buf[1 .. 1 + copy_len], text_line[0..copy_len]);
-                }
-                if (1 + copy_len < buf.len) {
-                    @memset(buf[1 + copy_len ..], ' ');
-                }
-                break :blk buf;
-            };
-
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.vertical), .style = box_style });
-            try segments.append(.{ .text = display_text, .style = text_style });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.vertical), .style = box_style });
-
-            _ = try win.print(segments.items, .{ .row_offset = row + lines_used, .col_offset = layout.start_col });
-            lines_used += 1;
-        }
-
-        // Bottom border: ╰───────────╯
-        if (row + lines_used < win.height) {
-            segments.clearRetainingCapacity();
-
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.bottom_left), .style = box_style });
-            i = 0;
-            while (i < layout.width - 2) : (i += 1) {
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.horizontal), .style = box_style });
+            // Spacer between label and hints
+            if (available_for_spacer > 0) {
+                const spacer = try RenderUtils.frameTextSlice(app, available_for_spacer);
+                @memset(spacer, ' ');
+                try segments.append(.{ .text = spacer, .style = bg_style });
             }
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, FrameChars.bottom_right), .style = box_style });
 
-            _ = try win.print(segments.items, .{ .row_offset = row + lines_used, .col_offset = layout.start_col });
-            lines_used += 1;
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, spacing), .style = bg_style });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, hints), .style = hints_style });
+        } else {
+            // Just label when not focused
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
+            const label_spacer = try RenderUtils.frameTextSlice(app, layout.width - 9); // -9 for "┃ Comment"
+            @memset(label_spacer, ' ');
+            try segments.append(.{ .text = label_spacer, .style = bg_style });
         }
 
-        return lines_used;
+        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+        current_row += 1;
+
+        // Render comment text lines with word wrapping
+        const text_area_width = layout.width - 4; // -4 for "┃ > " or "┃   "
+        var line_iter = std.mem.splitScalar(u8, comment.text, '\n');
+        var is_first_line = true;
+        while (line_iter.next()) |text_line| {
+            if (current_row >= win.height) break;
+
+            // Wrap this line if it's too long
+            var wrapped_lines = try RenderUtils.wrapText(app.allocator, text_line, text_area_width);
+            defer wrapped_lines.deinit();
+
+            // Render each wrapped segment
+            for (wrapped_lines.items) |wrapped_segment| {
+                if (current_row >= win.height) break;
+
+                segments.clearRetainingCapacity();
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+                if (is_first_line) {
+                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " > "), .style = text_style });
+                } else {
+                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "   "), .style = text_style });
+                }
+
+                const display_text = blk: {
+                    var buf = try RenderUtils.frameTextSlice(app, text_area_width);
+                    const copy_len = @min(wrapped_segment.len, text_area_width);
+                    if (copy_len > 0) {
+                        @memcpy(buf[0..copy_len], wrapped_segment[0..copy_len]);
+                    }
+                    if (copy_len < buf.len) {
+                        @memset(buf[copy_len..], ' ');
+                    }
+                    break :blk buf;
+                };
+
+                try segments.append(.{ .text = display_text, .style = text_style });
+                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+                current_row += 1;
+                is_first_line = false;
+            }
+        }
+
+        if (current_row >= win.height) {
+            return current_row - row;
+        }
+
+        // Line N: ┃ (bottom spacer)
+        segments.clearRetainingCapacity();
+        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+        const bottom_spacer = try RenderUtils.frameTextSlice(app, layout.width - 1);
+        @memset(bottom_spacer, ' ');
+        try segments.append(.{ .text = bottom_spacer, .style = bg_style });
+        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+        current_row += 1;
+
+        return current_row - row;
     }
 };
