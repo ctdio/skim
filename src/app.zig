@@ -461,6 +461,9 @@ pub const App = struct {
                 // Refresh diff after returning from editor
                 try self.refresh();
 
+                // Force a full render after re-entering alt screen
+                self.needs_render = true;
+
                 // Clear the suspend flag
                 self.should_suspend_for_editor = false;
                 self.editor_file_path = null;
@@ -480,7 +483,11 @@ pub const App = struct {
                 try self.render(win);
                 try self.vx.render(buffered_writer.writer().any());
                 try buffered_writer.flush();
-                self.needs_render = false; // Clear the flag after rendering
+                // Don't clear needs_render if we're about to suspend for editor
+                // This prevents blocking on the next pollEvent()
+                if (!self.should_suspend_for_editor) {
+                    self.needs_render = false; // Clear the flag after rendering
+                }
             }
 
             if (first_render) {
@@ -1419,6 +1426,8 @@ pub const App = struct {
             self.should_suspend_for_editor = true;
             self.editor_file_path = file_path;
             self.editor_line_number = line_number;
+            // Prevent blocking on next pollEvent() so editor opens immediately
+            self.needs_render = true;
         } else {
             // GUI editor: just spawn it without suspending TUI
             editor.openInEditor(self.allocator, file_path, line_number) catch |err| {
