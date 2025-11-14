@@ -65,6 +65,7 @@ pub const App = struct {
         visual, // Visual selection mode
         command_palette, // Command palette
         help, // Help overlay
+        branch_selection, // Branch selection menu (when empty)
     };
 
     // Character find commands for NORMAL mode (f/t/F/T)
@@ -101,6 +102,12 @@ pub const App = struct {
         pending_find: ?FindCommand, // Waiting for character for f/t/F/T
         last_find: ?NormalModeLastFind, // Last f/t/F/T command for ; and , repeat
         pending_z: bool, // Waiting for second z for zz (center cursor)
+        empty_menu_selection: usize, // Selected index in empty state menu (0 = working, 1 = staged, 2 = main, 3 = branch, 4 = refresh, 5 = quit)
+        branch_list: [][]const u8, // List of available branches for selection
+        branch_selection: usize, // Selected branch index in branch selection menu
+        branch_search_query: [256]u8, // Search query buffer for filtering branches
+        branch_search_len: usize, // Length of search query
+        filtered_branches: std.ArrayList(usize), // Indices of branches matching search query
 
         const ViewMode = enum {
             unified,
@@ -249,6 +256,12 @@ pub const App = struct {
                 .pending_find = null,
                 .last_find = null,
                 .pending_z = false,
+                .empty_menu_selection = 0,
+                .branch_list = &[_][]const u8{},
+                .branch_selection = 0,
+                .branch_search_query = undefined,
+                .branch_search_len = 0,
+                .filtered_branches = std.ArrayList(usize).init(allocator),
             },
             .should_quit = false,
             .should_suspend_for_editor = false,
@@ -291,6 +304,12 @@ pub const App = struct {
         self.state.comment_store.deinit();
         self.state.search_state.deinit();
         self.state.command_palette_state.deinit();
+        // Free branch list
+        for (self.state.branch_list) |branch| {
+            self.allocator.free(branch);
+        }
+        self.allocator.free(self.state.branch_list);
+        self.state.filtered_branches.deinit();
         self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.anyWriter());
         self.tty.deinit();
@@ -576,10 +595,17 @@ pub const App = struct {
             .visual => try self.handleVisualMode(key),
             .command_palette => try self.handleCommandPaletteMode(key),
             .help => try self.handleHelpMode(key),
+            .branch_selection => try self.handleBranchSelectionMode(key),
         }
     }
 
     fn handleNormalMode(self: *App, key: vaxis.Key) !void {
+        // Special handling when there are no files (empty menu)
+        if (self.state.files.len == 0) {
+            try self.handleEmptyMenu(key);
+            return;
+        }
+
         // If waiting for second z for zz (center cursor)
         if (self.state.pending_z) {
             self.state.pending_z = false;
@@ -1666,6 +1692,257 @@ pub const App = struct {
         }
     }
 
+    fn handleEmptyMenu(self: *App, key: vaxis.Key) !void {
+        const menu_items_count: usize = 6; // working, staged, main, branch, refresh, quit
+
+        // Handle Ctrl+key combinations
+        if (key.mods.ctrl) {
+            switch (key.codepoint) {
+                'n' => {
+                    if (self.state.empty_menu_selection < menu_items_count - 1) {
+                        self.state.empty_menu_selection += 1;
+                    }
+                    return;
+                },
+                'p' => {
+                    if (self.state.empty_menu_selection > 0) {
+                        self.state.empty_menu_selection -= 1;
+                    }
+                    return;
+                },
+                else => {},
+            }
+        }
+
+        // Handle arrow keys
+        if (key.codepoint == vaxis.Key.down) {
+            if (self.state.empty_menu_selection < menu_items_count - 1) {
+                self.state.empty_menu_selection += 1;
+            }
+            return;
+        }
+        if (key.codepoint == vaxis.Key.up) {
+            if (self.state.empty_menu_selection > 0) {
+                self.state.empty_menu_selection -= 1;
+            }
+            return;
+        }
+
+        // Handle regular keys
+        switch (key.codepoint) {
+            'q' => self.should_quit = true,
+            'j' => {
+                if (self.state.empty_menu_selection < menu_items_count - 1) {
+                    self.state.empty_menu_selection += 1;
+                }
+            },
+            'k' => {
+                if (self.state.empty_menu_selection > 0) {
+                    self.state.empty_menu_selection -= 1;
+                }
+            },
+            '\r' => { // Enter key
+                switch (self.state.empty_menu_selection) {
+                    0 => try self.switchDiffMode(.working),
+                    1 => try self.switchDiffMode(.staged),
+                    2 => try self.switchDiffMode(.main),
+                    3 => try self.startBranchSelection(), // Select branch
+                    4 => try self.refresh(), // Refresh
+                    5 => self.should_quit = true, // Quit
+                    else => {},
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn startBranchSelection(self: *App) !void {
+        // Free old branch list
+        for (self.state.branch_list) |branch| {
+            self.allocator.free(branch);
+        }
+        self.allocator.free(self.state.branch_list);
+
+        // Fetch branches
+        self.state.branch_list = try git.getBranches(self.allocator);
+        self.state.branch_selection = 0;
+        self.state.branch_search_len = 0;
+
+        // Initialize filtered list with all branches
+        try self.filterBranches();
+
+        self.mode = .branch_selection;
+    }
+
+    fn filterBranches(self: *App) !void {
+        self.state.filtered_branches.clearRetainingCapacity();
+
+        const query = self.state.branch_search_query[0..self.state.branch_search_len];
+
+        // If no query, show all branches
+        if (query.len == 0) {
+            for (self.state.branch_list, 0..) |_, idx| {
+                try self.state.filtered_branches.append(idx);
+            }
+            return;
+        }
+
+        // Case-insensitive search
+        for (self.state.branch_list, 0..) |branch, idx| {
+            if (self.matchesBranchQuery(branch, query)) {
+                try self.state.filtered_branches.append(idx);
+            }
+        }
+
+        // Clamp selection to filtered list
+        if (self.state.filtered_branches.items.len > 0 and self.state.branch_selection >= self.state.filtered_branches.items.len) {
+            self.state.branch_selection = self.state.filtered_branches.items.len - 1;
+        }
+    }
+
+    fn matchesBranchQuery(self: *App, branch: []const u8, query: []const u8) bool {
+        _ = self;
+        // Simple case-insensitive substring match
+        if (branch.len < query.len) return false;
+
+        var i: usize = 0;
+        while (i <= branch.len - query.len) : (i += 1) {
+            var matches = true;
+            for (query, 0..) |qc, j| {
+                const bc = branch[i + j];
+                const qc_lower = if (qc >= 'A' and qc <= 'Z') qc + 32 else qc;
+                const bc_lower = if (bc >= 'A' and bc <= 'Z') bc + 32 else bc;
+                if (qc_lower != bc_lower) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) return true;
+        }
+        return false;
+    }
+
+    fn handleBranchSelectionMode(self: *App, key: vaxis.Key) !void {
+        if (self.state.branch_list.len == 0) {
+            // No branches - go back to empty menu
+            self.mode = .normal;
+            return;
+        }
+
+        const filtered_count = self.state.filtered_branches.items.len;
+
+        // Handle Ctrl+key combinations
+        if (key.mods.ctrl) {
+            switch (key.codepoint) {
+                'n' => {
+                    if (filtered_count > 0 and self.state.branch_selection < filtered_count - 1) {
+                        self.state.branch_selection += 1;
+                    }
+                    return;
+                },
+                'p' => {
+                    if (self.state.branch_selection > 0) {
+                        self.state.branch_selection -= 1;
+                    }
+                    return;
+                },
+                else => {},
+            }
+        }
+
+        // Handle arrow keys
+        if (key.codepoint == vaxis.Key.down) {
+            if (filtered_count > 0 and self.state.branch_selection < filtered_count - 1) {
+                self.state.branch_selection += 1;
+            }
+            return;
+        }
+        if (key.codepoint == vaxis.Key.up) {
+            if (self.state.branch_selection > 0) {
+                self.state.branch_selection -= 1;
+            }
+            return;
+        }
+
+        // Handle special keys
+        switch (key.codepoint) {
+            'q' => self.should_quit = true,
+            'j' => {
+                if (filtered_count > 0 and self.state.branch_selection < filtered_count - 1) {
+                    self.state.branch_selection += 1;
+                }
+            },
+            'k' => {
+                if (self.state.branch_selection > 0) {
+                    self.state.branch_selection -= 1;
+                }
+            },
+            27 => { // ESC key - clear search or go back
+                if (self.state.branch_search_len > 0) {
+                    // Clear search
+                    self.state.branch_search_len = 0;
+                    self.state.branch_selection = 0;
+                    try self.filterBranches();
+                } else {
+                    // Go back to empty menu
+                    self.mode = .normal;
+                }
+            },
+            vaxis.Key.backspace => { // Backspace - delete last search char
+                if (self.state.branch_search_len > 0) {
+                    self.state.branch_search_len -= 1;
+                    self.state.branch_selection = 0;
+                    try self.filterBranches();
+                }
+            },
+            '\r' => { // Enter key - select branch and diff against it
+                if (filtered_count == 0) return;
+
+                const filtered_idx = self.state.filtered_branches.items[self.state.branch_selection];
+                const selected_branch = self.state.branch_list[filtered_idx];
+                const branch_copy = try self.allocator.dupe(u8, selected_branch);
+                errdefer self.allocator.free(branch_copy);
+
+                const head = try self.allocator.dupe(u8, "HEAD");
+                errdefer self.allocator.free(head);
+
+                // Free old diff_source if needed
+                switch (self.state.diff_source) {
+                    .working_dir => {},
+                    .single_ref => |sr| {
+                        self.allocator.free(sr.ref);
+                    },
+                    .two_refs => |tr| {
+                        self.allocator.free(tr.ref1);
+                        self.allocator.free(tr.ref2);
+                    },
+                }
+
+                // Set up new diff source
+                self.state.diff_source = DiffSource{ .two_refs = .{
+                    .ref1 = branch_copy,
+                    .ref2 = head,
+                    .use_merge_base = true,
+                } };
+
+                // Go back to normal mode and refresh
+                self.mode = .normal;
+                try self.refresh();
+            },
+            else => {
+                // Handle text input for search
+                if (key.codepoint >= 32 and key.codepoint <= 126) { // Printable ASCII
+                    if (self.state.branch_search_len < self.state.branch_search_query.len - 1) {
+                        self.state.branch_search_query[self.state.branch_search_len] = @intCast(key.codepoint);
+                        self.state.branch_search_len += 1;
+                        self.state.branch_selection = 0;
+                        try self.filterBranches();
+                    }
+                }
+            },
+        }
+    }
+
     fn switchDiffMode(self: *App, mode: command_palette.DiffMode) !void {
         // Free old diff_source if needed
         switch (self.state.diff_source) {
@@ -1926,37 +2203,44 @@ pub const App = struct {
         // Hide cursor by default - comment input will show it when needed
         win.hideCursor();
 
-        if (self.state.files.len == 0) {
-            try UI.renderEmpty(self, win);
-            return;
-        }
-
         // Content height without dividers (continuous mode)
         const content_height = win.height - Layout.header_height - Layout.status_height;
 
-        const header_win = win.child(.{
-            .x_off = 0,
-            .y_off = 0,
-            .width = .{ .limit = win.width },
-            .height = .{ .limit = Layout.header_height },
-        });
-        try UI.renderHeader(self, header_win);
+        // Render header and content (or empty/branch menu if no files)
+        if (self.state.files.len == 0) {
+            // No files - show empty state or branch selection menu
+            if (self.mode == .branch_selection) {
+                try UI.renderBranchSelectionMenu(self, win);
+            } else {
+                try UI.renderEmptyMenu(self, win);
+            }
+        } else {
+            // Normal rendering with header, content, and status bar
+            const header_win = win.child(.{
+                .x_off = 0,
+                .y_off = 0,
+                .width = .{ .limit = win.width },
+                .height = .{ .limit = Layout.header_height },
+            });
+            try UI.renderHeader(self, header_win);
 
-        const content_win = win.child(.{
-            .x_off = 0,
-            .y_off = Layout.header_height,
-            .width = .{ .limit = win.width },
-            .height = .{ .limit = content_height },
-        });
-        try self.renderContent(content_win);
+            const content_win = win.child(.{
+                .x_off = 0,
+                .y_off = Layout.header_height,
+                .width = .{ .limit = win.width },
+                .height = .{ .limit = content_height },
+            });
+            try self.renderContent(content_win);
 
-        const status_win = win.child(.{
-            .x_off = 0,
-            .y_off = win.height - Layout.status_height,
-            .width = .{ .limit = win.width },
-            .height = .{ .limit = Layout.status_height },
-        });
-        try UI.renderStatus(self, status_win);
+            // Render status bar
+            const status_win = win.child(.{
+                .x_off = 0,
+                .y_off = win.height - Layout.status_height,
+                .width = .{ .limit = win.width },
+                .height = .{ .limit = Layout.status_height },
+            });
+            try UI.renderStatus(self, status_win);
+        }
 
         // Render command palette overlay if in command palette mode
         if (self.mode == .command_palette) {

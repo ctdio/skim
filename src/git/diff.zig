@@ -45,7 +45,7 @@ pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
                 var range_buf: [512]u8 = undefined;
                 const range = try std.fmt.bufPrint(&range_buf, "{s}...{s}", .{ tr.ref1, tr.ref2 });
                 const range_owned = try allocator.dupe(u8, range);
-                defer allocator.free(range_owned);
+                errdefer allocator.free(range_owned);
                 try args.append(range_owned);
             } else {
                 try args.append(tr.ref1);
@@ -54,7 +54,28 @@ pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
         },
     }
 
-    return runGitCommand(allocator, args.items);
+    const result = runGitCommand(allocator, args.items);
+
+    // Free any allocated range strings
+    switch (source) {
+        .two_refs => |tr| {
+            if (tr.use_merge_base and args.items.len > 0) {
+                // Last item is the allocated range string
+                for (args.items) |arg| {
+                    const is_git = std.mem.eql(u8, arg, "git");
+                    const is_diff = std.mem.eql(u8, arg, "diff");
+                    const is_flag = arg.len > 0 and arg[0] == '-';
+                    if (!is_git and !is_diff and !is_flag) {
+                        allocator.free(arg);
+                        break;
+                    }
+                }
+            }
+        },
+        else => {},
+    }
+
+    return result;
 }
 
 fn runGitCommand(allocator: Allocator, args: []const []const u8) ![]u8 {
@@ -118,7 +139,7 @@ pub fn getChangedFiles(allocator: Allocator, source: DiffSource) ![]FileStatus {
                 var range_buf: [512]u8 = undefined;
                 const range = try std.fmt.bufPrint(&range_buf, "{s}...{s}", .{ tr.ref1, tr.ref2 });
                 const range_owned = try allocator.dupe(u8, range);
-                defer allocator.free(range_owned);
+                errdefer allocator.free(range_owned);
                 try args.append(range_owned);
             } else {
                 try args.append(tr.ref1);
@@ -129,6 +150,25 @@ pub fn getChangedFiles(allocator: Allocator, source: DiffSource) ![]FileStatus {
 
     const output = try runGitCommand(allocator, args.items);
     defer allocator.free(output);
+
+    // Free any allocated range strings
+    switch (source) {
+        .two_refs => |tr| {
+            if (tr.use_merge_base and args.items.len > 0) {
+                // Find and free the allocated range string
+                for (args.items) |arg| {
+                    const is_git = std.mem.eql(u8, arg, "git");
+                    const is_diff = std.mem.eql(u8, arg, "diff");
+                    const is_flag = arg.len > 0 and arg[0] == '-';
+                    if (!is_git and !is_diff and !is_flag) {
+                        allocator.free(arg);
+                        break;
+                    }
+                }
+            }
+        },
+        else => {},
+    }
 
     return parseFileStatus(allocator, output);
 }
@@ -182,6 +222,43 @@ fn parseFileStatus(allocator: Allocator, output: []const u8) ![]FileStatus {
     }
 
     return files.toOwnedSlice();
+}
+
+/// Get list of all branches (local and remote)
+pub fn getBranches(allocator: Allocator) ![][]const u8 {
+    const args = &[_][]const u8{ "git", "branch", "-a", "--format=%(refname:short)" };
+
+    var child = std.process.Child.init(args, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+
+    try child.spawn();
+
+    const stdout = try child.stdout.?.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    defer allocator.free(stdout);
+
+    const term = try child.wait();
+    if (term != .Exited or term.Exited != 0) {
+        return error.GitCommandFailed;
+    }
+
+    var branches = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (branches.items) |branch| {
+            allocator.free(branch);
+        }
+        branches.deinit();
+    }
+
+    var lines = std.mem.tokenizeScalar(u8, stdout, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len > 0) {
+            try branches.append(try allocator.dupe(u8, trimmed));
+        }
+    }
+
+    return branches.toOwnedSlice();
 }
 
 /// Detect the default branch (main or master) by checking which exists

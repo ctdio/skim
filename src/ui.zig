@@ -103,16 +103,201 @@ pub const UI = struct {
         _ = try win.print(&right_seg, .{ .row_offset = 0, .col_offset = win.width -| 1 });
     }
 
-    pub fn renderEmpty(_: *App, win: vaxis.Window) !void {
-        const msg = "No changes to review";
-        const row = win.height / 2;
-        const col = (win.width -| msg.len) / 2;
+    pub fn renderEmptyMenu(app: *App, win: vaxis.Window) !void {
+        const title = "No changes to review";
+        const subtitle = "Select a diff source:";
 
-        var seg = [_]vaxis.Cell.Segment{.{
-            .text = msg,
+        const menu_items = [_]struct { label: []const u8, description: []const u8 }{
+            .{ .label = "Working directory", .description = "Uncommitted changes" },
+            .{ .label = "Staged changes", .description = "Changes ready to commit" },
+            .{ .label = "Main branch", .description = "Compare against main" },
+            .{ .label = "Select branch...", .description = "Choose a specific branch" },
+            .{ .label = "Refresh", .description = "Reload current diff source" },
+            .{ .label = "Quit", .description = "Exit Skim" },
+        };
+
+        const center_row = win.height / 2;
+        const start_row = if (center_row > 4) center_row - 4 else 0;
+
+        // Title
+        const title_col = (win.width -| title.len) / 2;
+        const title_copy = try RenderUtils.copyFrameText(app, title);
+        var title_seg = [_]vaxis.Cell.Segment{.{
+            .text = title_copy,
+            .style = .{ .fg = Color.white, .bold = true },
+        }};
+        _ = try win.print(&title_seg, .{ .row_offset = start_row, .col_offset = title_col });
+
+        // Subtitle
+        const subtitle_col = (win.width -| subtitle.len) / 2;
+        const subtitle_copy = try RenderUtils.copyFrameText(app, subtitle);
+        var subtitle_seg = [_]vaxis.Cell.Segment{.{
+            .text = subtitle_copy,
             .style = .{ .fg = Color.dim },
         }};
-        _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col });
+        _ = try win.print(&subtitle_seg, .{ .row_offset = start_row + 2, .col_offset = subtitle_col });
+
+        // Menu items - find longest item to center the block
+        const separator = " - ";
+        var max_len: usize = 0;
+        for (menu_items) |item| {
+            const item_len = item.label.len + separator.len + item.description.len;
+            if (item_len > max_len) {
+                max_len = item_len;
+            }
+        }
+
+        // Center the menu block based on longest item
+        const menu_start_col = if (win.width > max_len) (win.width - max_len) / 2 else 0;
+        const caret_offset = 2; // Space for caret to the left
+
+        for (menu_items, 0..) |item, idx| {
+            const row = start_row + 4 + idx;
+            const is_selected = idx == app.state.empty_menu_selection;
+
+            // All items start at the same column (left-aligned within centered block)
+            const item_col = menu_start_col;
+
+            // Render the menu item text
+            const label_copy = try RenderUtils.copyFrameText(app, item.label);
+            const separator_copy = try RenderUtils.copyFrameText(app, separator);
+            const desc_copy = try RenderUtils.copyFrameText(app, item.description);
+
+            var segments = [_]vaxis.Cell.Segment{
+                .{ .text = label_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } },
+                .{ .text = separator_copy, .style = .{ .fg = Color.dim } },
+                .{ .text = desc_copy, .style = .{ .fg = Color.dim } },
+            };
+
+            _ = try win.print(&segments, .{ .row_offset = row, .col_offset = item_col });
+
+            // Render caret to the left of selected item (if there's space)
+            if (is_selected and item_col >= caret_offset) {
+                const caret_copy = try RenderUtils.copyFrameText(app, "▶");
+                var caret_seg = [_]vaxis.Cell.Segment{.{
+                    .text = caret_copy,
+                    .style = .{ .fg = Color.cyan },
+                }};
+                _ = try win.print(&caret_seg, .{ .row_offset = row, .col_offset = item_col - caret_offset });
+            }
+        }
+
+        // Instructions at bottom
+        const instructions = "↑↓/j/k/Ctrl-n/p: Navigate  |  Enter: Select  |  q: Quit";
+        const instr_row = start_row + 4 + menu_items.len + 2;
+        const instr_col = (win.width -| instructions.len) / 2;
+        const instr_copy = try RenderUtils.copyFrameText(app, instructions);
+        var instr_seg = [_]vaxis.Cell.Segment{.{
+            .text = instr_copy,
+            .style = .{ .fg = Color.dim },
+        }};
+        _ = try win.print(&instr_seg, .{ .row_offset = instr_row, .col_offset = instr_col });
+    }
+
+    pub fn renderBranchSelectionMenu(app: *App, win: vaxis.Window) !void {
+        const title = "Select a branch";
+
+        const center_row = win.height / 2;
+        const start_row = if (center_row > 4) center_row - 4 else 0;
+
+        // Title
+        const title_col = (win.width -| title.len) / 2;
+        const title_copy = try RenderUtils.copyFrameText(app, title);
+        var title_seg = [_]vaxis.Cell.Segment{.{
+            .text = title_copy,
+            .style = .{ .fg = Color.white, .bold = true },
+        }};
+        _ = try win.print(&title_seg, .{ .row_offset = start_row, .col_offset = title_col });
+
+        // Search query line
+        const query = app.state.branch_search_query[0..app.state.branch_search_len];
+        var search_buf: [512]u8 = undefined;
+        const search_line = if (query.len > 0)
+            try std.fmt.bufPrint(&search_buf, "Search: {s}_", .{query})
+        else
+            "Type to search...";
+
+        const search_col = (win.width -| search_line.len) / 2;
+        const search_copy = try RenderUtils.copyFrameText(app, search_line);
+        var search_seg = [_]vaxis.Cell.Segment{.{
+            .text = search_copy,
+            .style = .{ .fg = if (query.len > 0) Color.cyan else Color.dim },
+        }};
+        _ = try win.print(&search_seg, .{ .row_offset = start_row + 2, .col_offset = search_col });
+
+        if (app.state.branch_list.len == 0) return;
+
+        // Use filtered branches
+        const filtered = app.state.filtered_branches.items;
+
+        // Show "No matches" if filtered list is empty
+        if (filtered.len == 0) {
+            const no_matches = "No matching branches";
+            const no_matches_col = (win.width -| no_matches.len) / 2;
+            const no_matches_copy = try RenderUtils.copyFrameText(app, no_matches);
+            var no_matches_seg = [_]vaxis.Cell.Segment{.{
+                .text = no_matches_copy,
+                .style = .{ .fg = Color.dim },
+            }};
+            _ = try win.print(&no_matches_seg, .{ .row_offset = start_row + 4, .col_offset = no_matches_col });
+        } else {
+            // Find longest branch name to center the block
+            var max_len: usize = 0;
+            for (filtered) |branch_idx| {
+                const branch = app.state.branch_list[branch_idx];
+                if (branch.len > max_len) {
+                    max_len = branch.len;
+                }
+            }
+
+            // Center the menu block
+            const menu_start_col = if (win.width > max_len) (win.width - max_len) / 2 else 0;
+            const caret_offset = 2;
+
+            // Show up to 10 branches at a time (with scrolling)
+            const max_visible = 10;
+            const start_idx = if (app.state.branch_selection >= max_visible)
+                app.state.branch_selection - max_visible + 1
+            else
+                0;
+            const end_idx = @min(start_idx + max_visible, filtered.len);
+
+            for (start_idx..end_idx) |idx| {
+                const row = start_row + 4 + (idx - start_idx);
+                const branch_idx = filtered[idx];
+                const branch = app.state.branch_list[branch_idx];
+                const is_selected = idx == app.state.branch_selection;
+
+            // Render branch name
+            const branch_copy = try RenderUtils.copyFrameText(app, branch);
+            var branch_seg = [_]vaxis.Cell.Segment{.{
+                .text = branch_copy,
+                .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected },
+            }};
+            _ = try win.print(&branch_seg, .{ .row_offset = row, .col_offset = menu_start_col });
+
+                // Render caret for selected branch
+                if (is_selected and menu_start_col >= caret_offset) {
+                    const caret_copy = try RenderUtils.copyFrameText(app, "▶");
+                    var caret_seg = [_]vaxis.Cell.Segment{.{
+                        .text = caret_copy,
+                        .style = .{ .fg = Color.cyan },
+                    }};
+                    _ = try win.print(&caret_seg, .{ .row_offset = row, .col_offset = menu_start_col - caret_offset });
+                }
+            }
+        }
+
+        // Instructions at bottom
+        const instructions = "Type to search  |  ↑↓/j/k: Navigate  |  Enter: Select  |  ESC: Clear/Back  |  q: Quit";
+        const instr_row = start_row + 4 + 10 + 1;
+        const instr_col = (win.width -| instructions.len) / 2;
+        const instr_copy = try RenderUtils.copyFrameText(app, instructions);
+        var instr_seg = [_]vaxis.Cell.Segment{.{
+            .text = instr_copy,
+            .style = .{ .fg = Color.dim },
+        }};
+        _ = try win.print(&instr_seg, .{ .row_offset = instr_row, .col_offset = instr_col });
     }
 
     pub fn renderHeader(app: *App, win: vaxis.Window) !void {
@@ -212,6 +397,7 @@ pub const UI = struct {
             .visual => "-- VISUAL --",
             .command_palette => "-- COMMAND PALETTE --",
             .help => "-- HELP --",
+            .branch_selection => "-- BRANCH SELECTION --",
         };
 
         const view_str = switch (app.state.view_mode) {
@@ -240,6 +426,7 @@ pub const UI = struct {
             .visual => "j/k:Extend selection  |  y:Yank  ESC:Exit",
             .command_palette => "Type to filter ('>':commands)  |  ↑↓/Ctrl-p/n:Select  Enter:Execute  ESC:Cancel",
             .help => "Press any key to close",
+            .branch_selection => "↑↓/j/k/Ctrl-n/p:Navigate  |  Enter:Select  |  ESC:Back  |  q:Quit",
         };
 
         // Get global position info
