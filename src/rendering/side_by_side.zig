@@ -438,10 +438,18 @@ pub const SideBySideRenderer = struct {
                     defer app.allocator.free(left_segments);
 
                     // Pad context lines only when cursor is on them
-                    if (is_cursor and left_chunk.len < left_width) {
-                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, left_segments, left_chunk.len, left_width, style);
-                        defer app.allocator.free(padded_segments);
-                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
+                    if (is_cursor) {
+                        const left_start_col = 1 + gutter_width + Layout.gutter_spacing;
+                        const available_to_divider = middle_col -| left_start_col;
+                        const left_current_width = RenderUtils.calculateSegmentsWidth(left_segments);
+
+                        if (left_current_width < available_to_divider) {
+                            const padded_segments = try RenderUtils.padSegments(app, app.allocator, left_segments, left_current_width, available_to_divider, style);
+                            defer app.allocator.free(padded_segments);
+                            _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = left_start_col });
+                        } else {
+                            _ = try win.print(left_segments, .{ .row_offset = current_row, .col_offset = left_start_col });
+                        }
                     } else {
                         _ = try win.print(left_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
                     }
@@ -459,10 +467,18 @@ pub const SideBySideRenderer = struct {
                     defer app.allocator.free(right_segments);
 
                     // Pad context lines only when cursor is on them
-                    if (is_cursor and right_chunk.len < right_width) {
-                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, right_segments, right_chunk.len, right_width, style);
-                        defer app.allocator.free(padded_segments);
-                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
+                    if (is_cursor) {
+                        const right_start_col = right_col + gutter_width + Layout.gutter_spacing;
+                        const available_to_edge = win.width -| right_start_col;
+                        const right_current_width = RenderUtils.calculateSegmentsWidth(right_segments);
+
+                        if (right_current_width < available_to_edge) {
+                            const padded_segments = try RenderUtils.padSegments(app, app.allocator, right_segments, right_current_width, available_to_edge, style);
+                            defer app.allocator.free(padded_segments);
+                            _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = right_start_col });
+                        } else {
+                            _ = try win.print(right_segments, .{ .row_offset = current_row, .col_offset = right_start_col });
+                        }
                     } else {
                         _ = try win.print(right_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
                     }
@@ -502,12 +518,16 @@ pub const SideBySideRenderer = struct {
                     defer app.allocator.free(segments);
 
                     // Always pad delete lines to show full-width background
-                    if (chunk.len < left_width) {
-                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, chunk.len, left_width, style);
+                    const left_start_col = 1 + gutter_width + Layout.gutter_spacing;
+                    const available_to_divider = middle_col -| left_start_col;
+                    const current_width = RenderUtils.calculateSegmentsWidth(segments);
+
+                    if (current_width < available_to_divider) {
+                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, current_width, available_to_divider, style);
                         defer app.allocator.free(padded_segments);
-                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
+                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = left_start_col });
                     } else {
-                        _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
+                        _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = left_start_col });
                     }
 
                     // Right side empty with cursor highlight if needed
@@ -567,12 +587,16 @@ pub const SideBySideRenderer = struct {
                     defer app.allocator.free(segments);
 
                     // Always pad add lines to show full-width background
-                    if (chunk.len < right_width) {
-                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, chunk.len, right_width, style);
+                    const right_start_col = right_col + gutter_width + Layout.gutter_spacing;
+                    const available_to_edge = win.width -| right_start_col;
+                    const current_width = RenderUtils.calculateSegmentsWidth(segments);
+
+                    if (current_width < available_to_edge) {
+                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, current_width, available_to_edge, style);
                         defer app.allocator.free(padded_segments);
-                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
+                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = right_start_col });
                     } else {
-                        _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
+                        _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = right_start_col });
                     }
 
                     current_row += 1;

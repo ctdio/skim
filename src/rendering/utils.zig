@@ -71,6 +71,21 @@ pub const RenderUtils = struct {
 
     // Segment manipulation utilities
 
+    /// Calculate the total display width (in terminal cells) of all segments
+    /// This properly counts UTF-8 codepoints instead of bytes.
+    pub fn calculateSegmentsWidth(segments: []const vaxis.Cell.Segment) usize {
+        var total_width: usize = 0;
+        for (segments) |seg| {
+            // Count UTF-8 codepoints, not bytes
+            // Each codepoint = 1 terminal cell (this works for most Unicode chars)
+            // Note: This doesn't handle full-width chars (CJK) or combining chars,
+            // but works correctly for arrows, symbols, and ASCII
+            const codepoint_count = std.unicode.utf8CountCodepoints(seg.text) catch seg.text.len;
+            total_width += codepoint_count;
+        }
+        return total_width;
+    }
+
     /// Pad segments to full width with trailing spaces
     pub fn padSegments(
         app: *App,

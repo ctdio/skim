@@ -401,12 +401,22 @@ pub const UnifiedRenderer = struct {
 
             // Pad segments to full width for cursor, visual selection, or diff lines (add/delete)
             const should_pad = is_cursor or is_in_visual or (line_type != null and line_type.? != .context);
-            if (should_pad and chunk.len < content_width) {
-                const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, chunk.len, content_width, style);
-                defer app.allocator.free(padded_segments);
-                _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = Layout.sidebar_width + gutter_width + Layout.gutter_spacing });
+            const content_start_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing;
+
+            if (should_pad) {
+                // Always pad to ensure background extends to the right edge
+                const available_width = win.width -| content_start_col;
+                const current_width = RenderUtils.calculateSegmentsWidth(segments);
+
+                if (current_width < available_width) {
+                    const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, current_width, available_width, style);
+                    defer app.allocator.free(padded_segments);
+                    _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = content_start_col });
+                } else {
+                    _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = content_start_col });
+                }
             } else {
-                _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = Layout.sidebar_width + gutter_width + Layout.gutter_spacing });
+                _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = content_start_col });
             }
 
             // Caret rendering removed with FOCUSED mode (show_caret is always false)
