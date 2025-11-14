@@ -5,7 +5,12 @@ const DiffSource = @import("git/diff.zig").DiffSource;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer {
+        const deinit_status = gpa.deinit();
+        if (deinit_status == .leak) {
+            std.log.err("Memory leak detected!", .{});
+        }
+    }
     const allocator = gpa.allocator();
 
     // Parse command line arguments

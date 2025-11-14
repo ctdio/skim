@@ -9,6 +9,8 @@ A keyboard-driven TUI for code reviews built in Zig. Fast, minimal, and focused 
 - File-by-file diff navigation
 - Unified and side-by-side views
 - Tree-sitter syntax highlighting with async processing (JS/TS/Zig full support)
+- **Command palette: `Ctrl-p` for files, `:` for commands (vim-style), or type `>` to switch modes**
+- **Built-in help with `?` - comprehensive keybindings reference**
 - **Search with `/` - smart case matching across all files**
 - Live refresh (press 'r')
 - Full git diff compatibility (working dir, staged, branch comparisons)
@@ -92,7 +94,7 @@ Navigate files and position cursor with vim-style movements:
 | `h` | Previous file |
 | `l` | Next file |
 | `Ctrl-n` | Next file (alternative) |
-| `Ctrl-p` | Previous file (alternative) |
+| `Ctrl-p` | **Open command palette** |
 | `j` | Cursor down |
 | `k` | Cursor up |
 | `g` | Jump to top of file |
@@ -101,6 +103,9 @@ Navigate files and position cursor with vim-style movements:
 | `Ctrl-u` | Page up |
 | `Shift-M` | Center cursor in viewport |
 | `/` | Enter search mode |
+| `Ctrl-p` | Open file palette (type `>` to switch to commands) |
+| `:` | Open command palette (vim-style) |
+| `?` | Show keybindings help |
 | `n` | Jump to next search match |
 | `N` | Jump to previous search match |
 | `Enter` | Add/edit comment on cursor line |
@@ -129,6 +134,31 @@ Search through diff content:
 - **Global**: Searches across all files in the diff
 - **Code lines only**: Searches through diff content (add/delete/context lines)
 - Use `n`/`N` in NORMAL mode to navigate between matches
+
+### COMMAND PALETTE Mode
+
+Quick access to files and commands:
+
+| Key | Action |
+|-----|--------|
+| Type | Filter files/commands by name (case-insensitive) |
+| `>` | Prefix to switch between file/command mode |
+| `↑`/`↓` or `Ctrl-p`/`Ctrl-n` | Navigate selection |
+| `Enter` | Execute selected command or jump to file |
+| `ESC` | Cancel and return to NORMAL mode |
+| `Backspace` | Delete character from filter |
+
+**Two modes in one:**
+- **File Mode** (`Ctrl-p`): Type to filter and jump to files in the diff
+  - Smart path truncation for long paths (e.g., `p/o/s/src/file.zig`)
+  - Substring matching on file paths
+  - Type `>` prefix to switch to command mode
+- **Command Mode** (`:` key): Access built-in commands (vim-style)
+  - **Toggle View Mode**: Switch between unified and side-by-side
+  - **Refresh Diff**: Reload the diff from git
+  - **Show Help**: Display help overlay
+  - **Quit**: Exit Skim
+  - Backspace `>` to switch back to file mode
 
 ### COMMENT Mode
 

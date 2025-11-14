@@ -14,6 +14,8 @@ const state_helpers = @import("state.zig");
 const ui_components = @import("ui.zig");
 const editor = @import("editor.zig");
 const comment_editor = @import("comment_editor.zig");
+const command_palette = @import("command_palette.zig");
+const help = @import("help.zig");
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
 const RenderUtils = render_utils.RenderUtils;
@@ -103,6 +105,8 @@ pub const App = struct {
         comment, // Comment editing
         search, // Search input
         visual, // Visual selection mode
+        command_palette, // Command palette
+        help, // Help overlay
     };
 
     // Character find commands for NORMAL mode (f/t/F/T)
@@ -134,6 +138,7 @@ pub const App = struct {
         comment_store: comments.CommentStore,
         active_comment_input: ?comment_editor.CommentEditor.State,
         search_state: SearchState,
+        command_palette_state: command_palette.CommandPaletteState,
         visual_anchor: ?usize, // Visual mode: anchor line (where selection started)
         pending_find: ?FindCommand, // Waiting for character for f/t/F/T
         last_find: ?NormalModeLastFind, // Last f/t/F/T command for ; and , repeat
@@ -281,6 +286,7 @@ pub const App = struct {
                 .comment_store = comment_store,
                 .active_comment_input = null,
                 .search_state = SearchState.init(allocator),
+                .command_palette_state = command_palette.CommandPaletteState.init(allocator),
                 .visual_anchor = null,
                 .pending_find = null,
                 .last_find = null,
@@ -326,6 +332,7 @@ pub const App = struct {
         self.state.line_map.deinit();
         self.state.comment_store.deinit();
         self.state.search_state.deinit();
+        self.state.command_palette_state.deinit();
         self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.anyWriter());
         self.tty.deinit();
@@ -567,6 +574,10 @@ pub const App = struct {
                 }
             }
         }
+
+        // Exit alt screen before returning
+        try self.vx.exitAltScreen(buffered_writer.writer().any());
+        try buffered_writer.flush();
     }
 
     fn handleEvent(self: *App, event: Event) !void {
@@ -605,6 +616,8 @@ pub const App = struct {
             .comment => try self.handleCommentMode(key),
             .search => try self.handleSearchMode(key),
             .visual => try self.handleVisualMode(key),
+            .command_palette => try self.handleCommandPaletteMode(key),
+            .help => try self.handleHelpMode(key),
         }
     }
 
@@ -648,9 +661,14 @@ pub const App = struct {
                     Navigation.navigateToNextFile(self);
                     self.state.cursor_column = 0; // Reset column on file change
                 },
-                'p' => {
-                    Navigation.navigateToPreviousFile(self);
-                    self.state.cursor_column = 0; // Reset column on file change
+                'p', 'P' => {
+                    // Ctrl-P: Open file palette (VSCode-style)
+                    // Ctrl-Shift-P: Try to open command palette (if terminal supports it)
+                    if (key.mods.shift or key.codepoint == 'P') {
+                        try self.startCommandPaletteInCommandMode();
+                    } else {
+                        try self.startCommandPalette();
+                    }
                 },
                 'd' => {
                     Navigation.pageDown(self);
@@ -735,6 +753,7 @@ pub const App = struct {
                 self.updateCurrentFileAndTriggerHighlighting();
             },
             '/' => self.startSearch(),
+            ':' => try self.startCommandPaletteInCommandMode(), // Vim-style command mode
             'n' => {
                 self.searchNext();
                 self.state.cursor_column = 0; // Reset column on search jump
@@ -767,6 +786,7 @@ pub const App = struct {
                 }
             },
             'z' => self.state.pending_z = true, // Wait for second z for zz (center cursor)
+            '?' => self.mode = .help, // Show help overlay
             else => {
                 // Reset count prefix on any other key
                 self.state.count_prefix = null;
@@ -1159,10 +1179,12 @@ pub const App = struct {
                     try self.saveCurrentComment();
                     self.mode = .normal;
                     self.state.active_comment_input = null;
+                    self.needs_render = true; // Force full redraw after saving comment
                 },
                 .cancel => {
                     self.mode = .normal;
                     self.state.active_comment_input = null;
+                    self.needs_render = true; // Force full redraw after canceling comment
                 },
             }
         }
@@ -1442,6 +1464,24 @@ pub const App = struct {
         self.mode = .search;
     }
 
+    fn startCommandPalette(self: *App) !void {
+        self.state.command_palette_state.reset();
+        // Build command registry with current files
+        try self.state.command_palette_state.buildCommandRegistry(self.state.files);
+        self.mode = .command_palette;
+    }
+
+    fn startCommandPaletteInCommandMode(self: *App) !void {
+        self.state.command_palette_state.reset();
+        // Build command registry with current files
+        try self.state.command_palette_state.buildCommandRegistry(self.state.files);
+        // Pre-populate with '>' to start in command mode
+        self.state.command_palette_state.query_buffer[0] = '>';
+        self.state.command_palette_state.query_len = 1;
+        try self.state.command_palette_state.filterCommands();
+        self.mode = .command_palette;
+    }
+
     fn handleSearchMode(self: *App, key: vaxis.Key) !void {
         var search_state = &self.state.search_state;
 
@@ -1454,11 +1494,13 @@ pub const App = struct {
             27 => { // ESC - cancel search
                 self.mode = .normal;
                 search_state.reset();
+                self.needs_render = true; // Force full redraw after closing search
             },
             '\r' => { // Enter - execute search
                 if (search_state.query_len > 0) {
                     try self.performSearch();
                     self.mode = .normal;
+                    self.needs_render = true; // Force full redraw after closing search
                     // Jump to first match at or after cursor, or wrap to first match
                     if (search_state.hasMatches()) {
                         const cursor = self.state.global_cursor_line;
@@ -1484,6 +1526,7 @@ pub const App = struct {
                     }
                 } else {
                     self.mode = .normal;
+                    self.needs_render = true; // Force full redraw
                 }
             },
             127, 8 => { // Backspace / Delete
@@ -1554,6 +1597,112 @@ pub const App = struct {
             }
         }
         return false;
+    }
+
+    fn handleCommandPaletteMode(self: *App, key: vaxis.Key) !void {
+        var palette_state = &self.state.command_palette_state;
+
+        // Handle Ctrl+n and Ctrl+p for navigation
+        if (key.mods.ctrl) {
+            switch (key.codepoint) {
+                'n' => {
+                    palette_state.moveSelectionDown();
+                    return;
+                },
+                'p' => {
+                    palette_state.moveSelectionUp();
+                    return;
+                },
+                else => return,
+            }
+        }
+
+        // Arrow keys for navigation
+        if (key.codepoint == vaxis.Key.up) {
+            palette_state.moveSelectionUp();
+            return;
+        }
+        if (key.codepoint == vaxis.Key.down) {
+            palette_state.moveSelectionDown();
+            return;
+        }
+
+        switch (key.codepoint) {
+            27 => { // ESC - cancel
+                self.mode = .normal;
+                palette_state.reset();
+                self.needs_render = true; // Force full redraw after closing popup
+            },
+            '\r' => { // Enter - execute selected command
+                // Save the command action before resetting state
+                const maybe_action = if (palette_state.getSelectedCommand()) |cmd| cmd.action else null;
+
+                // Exit command palette mode and reset state
+                self.mode = .normal;
+                palette_state.reset();
+                self.needs_render = true; // Force full redraw after closing popup
+
+                // Execute the command if there was one (may change mode again, e.g., to .help)
+                if (maybe_action) |action| {
+                    try self.executeCommand(action);
+                }
+            },
+            127, 8 => { // Backspace / Delete
+                if (palette_state.query_len > 0) {
+                    palette_state.query_len -= 1;
+                    // Update filtered results
+                    try palette_state.filterCommands();
+                }
+            },
+            else => {
+                // Regular character input
+                if (key.codepoint >= 32 and key.codepoint < 127 and palette_state.query_len < palette_state.query_buffer.len) {
+                    palette_state.query_buffer[palette_state.query_len] = @intCast(key.codepoint);
+                    palette_state.query_len += 1;
+                    // Update filtered results (live filtering)
+                    try palette_state.filterCommands();
+                }
+            },
+        }
+    }
+
+    fn handleHelpMode(self: *App, key: vaxis.Key) !void {
+        _ = key;
+        // Any key press exits help mode (ESC, ?, or any other key)
+        self.mode = .normal;
+        self.needs_render = true; // Force full redraw after closing popup
+    }
+
+    fn executeCommand(self: *App, action: command_palette.CommandAction) !void {
+        switch (action) {
+            .jump_to_file => |file_idx| {
+                // Navigate to file using existing file navigation logic
+                if (file_idx < self.state.files.len) {
+                    if (self.state.line_map.getFileHeaderLine(file_idx)) |header_line| {
+                        self.state.global_cursor_line = header_line;
+                        self.state.global_scroll_offset = header_line;
+                        self.state.current_file_idx = file_idx;
+                        self.needs_async_highlight = true;
+                    }
+                }
+            },
+            .toggle_view_mode => {
+                // Toggle between unified and side-by-side
+                self.state.view_mode = switch (self.state.view_mode) {
+                    .unified => .side_by_side,
+                    .side_by_side => .unified,
+                };
+            },
+            .refresh_diff => {
+                try self.refresh();
+            },
+            .show_help => {
+                self.mode = .help;
+            },
+            .quit => {
+                self.should_quit = true;
+            },
+        }
     }
 
     fn searchNext(self: *App) void {
@@ -1651,10 +1800,12 @@ pub const App = struct {
             27 => { // ESC - exit visual mode
                 self.mode = .normal;
                 self.state.visual_anchor = null;
+                self.needs_render = true; // Force full redraw after exiting visual mode
             },
             'v' => { // v again - exit visual mode (toggle)
                 self.mode = .normal;
                 self.state.visual_anchor = null;
+                self.needs_render = true; // Force full redraw after exiting visual mode
             },
             'j' => Navigation.moveCursorDown(self),
             'k' => Navigation.moveCursorUp(self),
@@ -1668,6 +1819,7 @@ pub const App = struct {
                 // Exit visual mode after yanking
                 self.mode = .normal;
                 self.state.visual_anchor = null;
+                self.needs_render = true; // Force full redraw after yanking
             },
             else => {},
         }
@@ -1811,6 +1963,16 @@ pub const App = struct {
             .height = .{ .limit = Layout.status_height },
         });
         try UI.renderStatus(self, status_win);
+
+        // Render command palette overlay if in command palette mode
+        if (self.mode == .command_palette) {
+            try command_palette.renderCommandPalette(self, win);
+        }
+
+        // Render help overlay if in help mode
+        if (self.mode == .help) {
+            try help.renderHelpPopup(self, win);
+        }
     }
 
     fn renderContent(self: *App, win: vaxis.Window) !void {

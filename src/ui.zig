@@ -185,6 +185,8 @@ pub const UI = struct {
             },
             .search => "-- SEARCH --",
             .visual => "-- VISUAL --",
+            .command_palette => "-- COMMAND PALETTE --",
+            .help => "-- HELP --",
         };
 
         const view_str = switch (app.state.view_mode) {
@@ -197,69 +199,22 @@ pub const UI = struct {
 
         // Context-aware keybindings based on cursor position and mode
         const keybindings = switch (app.mode) {
-            .normal => blk: {
-                // Check if waiting for find character
-                if (app.state.pending_find) |_| {
-                    break :blk "Press character to find (ESC cancels)";
-                }
-
-                // Get line record from LineMap
-                const record = app.state.line_map.getLineRecord(app.state.global_cursor_line);
-
-                if (record) |rec| {
-                    if (rec.file_idx < app.state.files.len) {
-                        const file = &app.state.files[rec.file_idx];
-                        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-                        switch (rec.line_type) {
-                            .file_header => {
-                                break :blk "h/l:File  j/k:Line  v:Visual  /:Search  g/G:Top/Bottom  q:Quit";
-                            },
-                            .comment_line => {
-                                // Cursor is on a comment - show edit/delete options prominently
-                                break :blk "Enter:Edit Comment  d:Delete Comment  v:Visual  /:Search  h/l:File  q:Quit";
-                            },
-                            .code_line => |code| {
-                                // Check if this code line has a comment
-                                if (app.state.comment_store.hasCommentAt(file_path, code.hunk_idx, code.line_idx_in_hunk)) {
-                                    // Code line with comment - show edit option
-                                    break :blk "Enter:Edit Comment  v:Visual  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
-                                } else {
-                                    // Code line without comment - show add option
-                                    break :blk "Enter:Add Comment  v:Visual  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
-                                }
-                            },
-                            .hunk_header => {
-                                // On hunk header - show navigation
-                                break :blk "h/l:File  j/k:Line  v:Visual  /:Search  g/G:Top/Bottom  Ctrl-g:Editor  q:Quit";
-                            },
-                            .spacer => {
-                                break :blk "h/l:File  j/k:Line  v:Visual  /:Search  g/G:Top/Bottom  q:Quit";
-                            },
-                        }
-                    }
-                }
-                // Default keybindings
-                break :blk "h/l:File  j/k:Line  v:Visual  /:Search  n/N:Next/Prev  Ctrl-g:Editor  q:Quit";
-            },
+            .normal => "Press ? for help  |  q:Quit  Ctrl-p:Files  ::Commands  /:Search  v:Visual",
             .comment => blk: {
                 if (app.state.active_comment_input) |input| {
-                    // Show appropriate help based on pending state
-                    if (input.pending_find) |_| {
-                        break :blk "Press character to find (ESC to cancel)";
-                    }
-
                     break :blk switch (input.vim_mode) {
-                        .normal => "i/a/I/A:Insert  v:Visual  hjkl:Move  w/e/b:Word  f/t/F/T:Find  M:Center  dd/yy/cc:Line  p:Paste  :q/:wq:Quit  Ctrl-W:Close",
-                        .insert => "ESC:Normal Mode  Ctrl-C:Normal  Enter:Newline  Ctrl-W:Close",
-                        .visual => "hjkl:Extend  y:Yank  d:Delete  v/ESC:Exit Visual  Ctrl-W:Close",
+                        .normal => "Comment editing (vim mode)  |  i:Insert  :wq:Save&Quit  ESC:Cancel",
+                        .insert => "INSERT MODE  |  ESC:Normal  Enter:Newline",
+                        .visual => "VISUAL MODE  |  y:Yank  d:Delete  ESC:Exit",
                         .command => ":w (save)  :q (quit)  :wq (save & quit)  Enter:Execute  ESC:Cancel",
                     };
                 }
-                break :blk "Ctrl-S:Save  ESC:Cancel";
+                break :blk "Enter:Save  ESC:Cancel";
             },
-            .search => "Enter:Search  ESC:Cancel  (Smart case: lowercase=ignore case, uppercase=exact)",
-            .visual => "j/k:Move  y:Yank  v/ESC/Ctrl-C:Exit Visual",
+            .search => "Type to search  |  Enter:Search  ESC:Cancel  |  Smart case matching",
+            .visual => "j/k:Extend selection  |  y:Yank  ESC:Exit",
+            .command_palette => "Type to filter ('>':commands)  |  ↑↓/Ctrl-p/n:Select  Enter:Execute  ESC:Cancel",
+            .help => "Press any key to close",
         };
 
         // Get global position info
