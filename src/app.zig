@@ -394,8 +394,8 @@ pub const App = struct {
 
         try self.vx.enterAltScreen(buffered_writer.writer().any());
 
-        // Query terminal capabilities
-        try self.vx.queryTerminal(buffered_writer.writer().any(), 1 * std.time.ns_per_s);
+        // Query terminal capabilities (50ms timeout - enough for modern terminals)
+        try self.vx.queryTerminal(buffered_writer.writer().any(), 50 * std.time.ns_per_ms);
 
         try buffered_writer.flush();
 
