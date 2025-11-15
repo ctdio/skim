@@ -205,52 +205,6 @@ Design decisions:
 - Async syntax highlighting (non-blocking)
 - Virtual scrolling (render visible lines only)
 
-## Development Status
-
-### Phase 1: MVP ✅
-
-- [x] Zig project setup with libvaxis
-- [x] Git diff execution with support for all git diff patterns
-- [x] Unified diff parser with line number tracking
-- [x] File list navigation (j/k, h/l, Ctrl-n/p)
-- [x] Unified diff view rendering
-- [x] NORMAL mode keybindings
-- [x] Status bar with mode-specific help
-
-### Phase 2: Core Features ✅
-
-- [x] FOCUSED mode vim navigation (g/G for top/bottom)
-- [x] Side-by-side diff view with intelligent wrapping
-- [x] Tree-sitter syntax highlighting (JS/TS/Zig)
-- [x] Live refresh functionality ('r' key)
-- [x] Context-aware highlighting (all lines with syntax overlay on diff colors)
-- [x] Comment system (Enter to add/edit, d/D to delete/clear)
-- [x] Export comments to clipboard ('y' to yank with context)
-- [x] Editor integration (Ctrl-g opens file at line in $EDITOR)
-- [x] Search functionality with `/` (smart case, global across files)
-- [ ] Hunk navigation
-- [ ] Help overlay
-
-### Phase 3: Polish (Current)
-
-- [x] LineMap system for accurate positioning
-- [x] Async highlighting for non-blocking syntax processing
-- [x] Search functionality with visual highlighting (/ for search, n/N for next/previous)
-- [ ] Expand syntax highlighting to Python, Rust, Go, C, C++ (parsers ready, need query files)
-- [ ] Hunk navigation
-- [ ] Help overlay
-- [ ] Mouse support
-- [ ] Configuration file
-- [ ] Color schemes / themes
-- [ ] Performance profiling and optimization
-
-### Phase 4: Advanced
-
-- [ ] Comment persistence and management
-- [ ] Delta integration for enhanced rendering
-- [ ] Fuzzy file search
-- [ ] Git workflow integration (stage hunks, etc.)
-
 ## Performance Targets
 
 | Metric | Target | Current |
@@ -285,7 +239,3 @@ Built with:
 ## License
 
 MIT
-
----
-
-**Status**: Alpha - Phase 2 complete, Phase 3 in progress (LineMap system, async highlighting, and editor integration complete)
