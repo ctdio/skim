@@ -566,23 +566,50 @@ pub const App = struct {
     }
 
     fn handleKey(self: *App, key: vaxis.Key) !void {
-        // Handle Ctrl-C for double-press exit (or single press in visual mode)
+        // Handle Ctrl-C for double-press exit (or single press in modal overlays)
         if (key.mods.ctrl and key.codepoint == 'c') {
-            // In visual mode, single Ctrl-C exits visual mode
-            if (self.mode == .visual) {
-                self.mode = .normal;
-                self.state.visual_anchor = null;
-                return;
+            // In modal overlay modes, single Ctrl-C closes the modal
+            switch (self.mode) {
+                .command_palette => {
+                    self.mode = .normal;
+                    self.state.command_palette_state.reset();
+                    self.needs_render = true;
+                    return;
+                },
+                .help => {
+                    self.mode = .normal;
+                    self.needs_render = true;
+                    return;
+                },
+                .search => {
+                    self.mode = .normal;
+                    self.state.search_state.reset();
+                    self.needs_render = true;
+                    return;
+                },
+                .branch_selection => {
+                    self.mode = .normal;
+                    self.state.branch_search_len = 0;
+                    self.state.filtered_branches.clearRetainingCapacity();
+                    self.needs_render = true;
+                    return;
+                },
+                .visual => {
+                    self.mode = .normal;
+                    self.state.visual_anchor = null;
+                    return;
+                },
+                .normal, .comment => {
+                    // In normal/comment modes, double-press to quit
+                    const now: i64 = @intCast(std.time.nanoTimestamp());
+                    if (now - self.last_ctrl_c < App.CTRL_C_TIMEOUT_NS) {
+                        self.should_quit = true;
+                        return;
+                    }
+                    self.last_ctrl_c = now;
+                    return;
+                },
             }
-
-            // In other modes, double-press to quit
-            const now: i64 = @intCast(std.time.nanoTimestamp());
-            if (now - self.last_ctrl_c < App.CTRL_C_TIMEOUT_NS) {
-                self.should_quit = true;
-                return;
-            }
-            self.last_ctrl_c = now;
-            return;
         }
 
         // Reset double-press timer on any other key
