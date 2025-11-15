@@ -99,7 +99,7 @@ pub fn renderHelpPopup(_: *App, win: vaxis.Window) !void {
         .{ .key = "Enter", .desc = "Add/edit comment" },
         .{ .key = "d/D", .desc = "Delete comment / Clear all" },
         .{ .key = "y", .desc = "Yank comments to clipboard" },
-        .{ .key = "v", .desc = "Enter visual mode" },
+        .{ .key = "v/V", .desc = "Enter visual mode" },
         .{ .key = "s", .desc = "Toggle unified/side-by-side" },
         .{ .key = "Tab/Shift-Tab", .desc = "Cycle hunk view mode" },
         .{ .key = "r", .desc = "Refresh diff" },

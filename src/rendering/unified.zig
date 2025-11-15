@@ -83,11 +83,26 @@ pub const UnifiedRenderer = struct {
                     if (app.mode == .comment and is_cursor) {
                         if (app.state.active_comment_input) |input| {
                             const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-                            // Check if the active comment is for this line AND it's a new comment (not editing existing)
-                            if (input.editing_comment_idx == null and
-                                std.mem.eql(u8, input.target_file_path, file_path) and
-                                input.target_hunk_idx == code_info.hunk_idx and
-                                input.target_line_idx == code_info.line_idx_in_hunk)
+
+                            // Check if this line is in the comment range (for new comments only)
+                            const is_in_comment_range = blk: {
+                                if (input.editing_comment_idx != null) break :blk false;
+                                if (!std.mem.eql(u8, input.target_file_path, file_path)) break :blk false;
+                                if (input.target_hunk_idx != code_info.hunk_idx) break :blk false;
+
+                                // Check if line is within range
+                                if (input.target_end_line_idx) |end_idx| {
+                                    // Range comment - check if current line is within [start, end]
+                                    const start_idx = input.target_line_idx;
+                                    const current_idx = code_info.line_idx_in_hunk;
+                                    break :blk (current_idx >= start_idx and current_idx <= end_idx);
+                                } else {
+                                    // Single-line comment - exact match
+                                    break :blk (input.target_line_idx == code_info.line_idx_in_hunk);
+                                }
+                            };
+
+                            if (is_in_comment_range)
                             {
                                 if (row < win.height) {
                                     const comment_start_row = row;

@@ -279,4 +279,77 @@ pub const Navigation = struct {
             app.state.global_scroll_offset = cursor_line -| (window_height -| (padding + 2));
         }
     }
+
+    /// Calculate actual comment box height based on text content
+    fn calculateCommentBoxHeight(app: *App) usize {
+        const input = app.state.active_comment_input orelse return 6; // Fallback if no input
+
+        // Fixed overhead: 2 lines (top spacer + label line) + 2 for bottom border/padding
+        var height: usize = 4;
+
+        // Count newlines in the text
+        const text = input.text_buffer[0..input.text_len];
+        var newline_count: usize = 0;
+        for (text) |ch| {
+            if (ch == '\n') {
+                newline_count += 1;
+            }
+        }
+
+        // Each text line (split by newlines) takes at least 1 row
+        // Empty text = 1 line, "a\nb" = 2 lines, etc.
+        const text_lines = newline_count + 1;
+        height += text_lines;
+
+        // Account for text wrapping (estimate based on typical viewport width)
+        // Assume text area width is ~80-100 chars (conservative estimate)
+        const estimated_text_width: usize = 80;
+
+        // For each text line, estimate how many wrapped rows it needs
+        var line_iter = std.mem.splitScalar(u8, text, '\n');
+        var wrap_overhead: usize = 0;
+        while (line_iter.next()) |line| {
+            if (line.len > estimated_text_width) {
+                // This line will wrap - add extra rows
+                const wrapped_rows = (line.len + estimated_text_width - 1) / estimated_text_width;
+                wrap_overhead += wrapped_rows - 1; // -1 because we already counted the base line
+            }
+        }
+        height += wrap_overhead;
+
+        // Add some buffer for safety (2-3 extra lines)
+        height += 3;
+
+        return height;
+    }
+
+    /// Ensure comment box is visible, accounting for its actual height
+    /// Dynamically calculates height based on text content and wrapping
+    pub fn ensureCommentBoxVisible(app: *App) void {
+        const cursor_line = app.state.global_cursor_line;
+        const scroll_offset = app.state.global_scroll_offset;
+        const window_height = app.state.viewport_height;
+
+        // Calculate actual comment box height based on current text
+        const comment_box_height = calculateCommentBoxHeight(app);
+        const top_padding: usize = 2; // Room at top
+
+        // Check if cursor is too high
+        if (cursor_line < scroll_offset + top_padding) {
+            app.state.global_scroll_offset = if (cursor_line >= top_padding)
+                cursor_line - top_padding
+            else
+                0;
+        }
+        // Check if comment box would extend below viewport
+        else if (cursor_line + comment_box_height >= scroll_offset + window_height) {
+            // Scroll so the entire comment box fits, with cursor near bottom
+            if (window_height > comment_box_height + top_padding) {
+                app.state.global_scroll_offset = (cursor_line + comment_box_height) -| window_height + 1;
+            } else {
+                // Window too small, just show cursor
+                app.state.global_scroll_offset = cursor_line;
+            }
+        }
+    }
 };

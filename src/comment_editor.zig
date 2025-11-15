@@ -8,8 +8,10 @@ pub const CommentEditor = struct {
     /// Active comment input state
     pub const State = struct {
         target_file_path: []const u8, // Which file
-        target_hunk_idx: usize, // Which hunk
-        target_line_idx: usize, // Which line (relative to hunk)
+        target_hunk_idx: usize, // Which hunk (start for ranges)
+        target_line_idx: usize, // Which line (relative to hunk, start for ranges)
+        target_end_hunk_idx: ?usize, // End hunk for range comments (null = single line)
+        target_end_line_idx: ?usize, // End line for range comments (null = single line)
         editing_comment_idx: ?usize, // If editing existing comment, its index
         text_buffer: [4096]u8, // Input buffer
         text_len: usize, // Current text length

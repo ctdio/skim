@@ -3,14 +3,18 @@ const parser = @import("git/parser.zig");
 
 const Allocator = std.mem.Allocator;
 
-/// A comment attached to a specific line in a diff
+/// A comment attached to a specific line or range of lines in a diff
 pub const Comment = struct {
     file_path: []const u8, // Which file this comment belongs to
-    hunk_idx: usize, // Which hunk (0-indexed)
-    line_idx: usize, // Line within hunk (0-indexed, relative to all hunk lines)
+    hunk_idx: usize, // Which hunk (0-indexed) - start of range
+    line_idx: usize, // Line within hunk (0-indexed, relative to all hunk lines) - start of range
     text: []const u8, // The comment text (can be multi-line)
 
-    // Captured context for export
+    // Range support (null means single-line comment)
+    end_hunk_idx: ?usize, // End hunk for range comments
+    end_line_idx: ?usize, // End line within hunk for range comments
+
+    // Captured context for export (start line)
     line_type: parser.Line.LineType,
     line_content: []const u8,
     old_lineno: ?u32,
@@ -42,7 +46,7 @@ pub const CommentStore = struct {
         self.comments.deinit();
     }
 
-    /// Add a new comment
+    /// Add a new comment (single line or range)
     pub fn addComment(
         self: *CommentStore,
         file_path: []const u8,
@@ -59,6 +63,37 @@ pub const CommentStore = struct {
             .hunk_idx = hunk_idx,
             .line_idx = line_idx,
             .text = try self.allocator.dupe(u8, text),
+            .end_hunk_idx = null,
+            .end_line_idx = null,
+            .line_type = line_type,
+            .line_content = try self.allocator.dupe(u8, line_content),
+            .old_lineno = old_lineno,
+            .new_lineno = new_lineno,
+        };
+        try self.comments.append(comment);
+    }
+
+    /// Add a new range comment (for visual selections)
+    pub fn addRangeComment(
+        self: *CommentStore,
+        file_path: []const u8,
+        hunk_idx: usize,
+        line_idx: usize,
+        end_hunk_idx: usize,
+        end_line_idx: usize,
+        text: []const u8,
+        line_type: parser.Line.LineType,
+        line_content: []const u8,
+        old_lineno: ?u32,
+        new_lineno: ?u32,
+    ) !void {
+        const comment = Comment{
+            .file_path = try self.allocator.dupe(u8, file_path),
+            .hunk_idx = hunk_idx,
+            .line_idx = line_idx,
+            .text = try self.allocator.dupe(u8, text),
+            .end_hunk_idx = end_hunk_idx,
+            .end_line_idx = end_line_idx,
             .line_type = line_type,
             .line_content = try self.allocator.dupe(u8, line_content),
             .old_lineno = old_lineno,
@@ -108,6 +143,24 @@ pub const CommentStore = struct {
     /// Check if there's a comment at this location
     pub fn hasCommentAt(self: *const CommentStore, file_path: []const u8, hunk_idx: usize, line_idx: usize) bool {
         return self.findCommentAt(file_path, hunk_idx, line_idx) != null;
+    }
+
+    /// Find a range comment that ENDS at this location (returns index or null)
+    /// Range comments should be displayed after their END line (lowest point)
+    pub fn findRangeCommentEndingAt(self: *const CommentStore, file_path: []const u8, hunk_idx: usize, line_idx: usize) ?usize {
+        for (self.comments.items, 0..) |*comment, idx| {
+            // Check if this is a range comment
+            if (comment.end_hunk_idx == null or comment.end_line_idx == null) continue;
+
+            // Check if it ends at this location
+            if (std.mem.eql(u8, comment.file_path, file_path) and
+                comment.end_hunk_idx.? == hunk_idx and
+                comment.end_line_idx.? == line_idx)
+            {
+                return idx;
+            }
+        }
+        return null;
     }
 
     /// Get comment at index
@@ -192,45 +245,75 @@ pub const CommentStore = struct {
     ) !void {
         if (comment.hunk_idx >= file.hunks.len) return;
 
-        const hunk = &file.hunks[comment.hunk_idx];
-        if (comment.line_idx >= hunk.lines.len) return;
+        const start_hunk = &file.hunks[comment.hunk_idx];
+        if (comment.line_idx >= start_hunk.lines.len) return;
 
-        // Calculate range of lines to show
-        const target_idx = comment.line_idx;
-        const start_idx = if (target_idx >= lines_before) target_idx - lines_before else 0;
-        const end_idx = @min(target_idx + lines_after + 1, hunk.lines.len);
+        // Determine if this is a range comment or single-line comment
+        const is_range = comment.end_hunk_idx != null and comment.end_line_idx != null;
 
-        // Render lines with proper formatting
-        for (hunk.lines[start_idx..end_idx], start_idx..) |line, idx| {
-            const is_target = (idx == target_idx);
+        if (is_range) {
+            // Range comment: show all lines in the range plus context
+            const end_hunk_idx = comment.end_hunk_idx.?;
+            const end_line_idx = comment.end_line_idx.?;
 
-            // Line number (use old for deletions, new for adds/context)
-            const lineno = switch (line.line_type) {
-                .delete => line.old_lineno,
-                .add, .context => line.new_lineno,
-            };
+            if (end_hunk_idx >= file.hunks.len) return;
 
-            // Diff marker
-            const marker = switch (line.line_type) {
-                .add => "+",
-                .delete => "-",
-                .context => " ",
-            };
+            // For simplicity, only handle ranges within the same hunk
+            if (comment.hunk_idx == end_hunk_idx) {
+                const target_start = comment.line_idx;
+                const target_end = end_line_idx;
+                const start_idx = if (target_start >= lines_before) target_start - lines_before else 0;
+                const end_idx = @min(target_end + lines_after + 1, start_hunk.lines.len);
 
-            // Format: "  150  │     .scroll_offset = 0,"
-            if (lineno) |num| {
-                try writer.print("{s} {d: >3}  │ {s}", .{ marker, num, line.content });
-            } else {
-                try writer.print("{s}      │ {s}", .{ marker, line.content });
+                // Render lines with proper formatting
+                for (start_hunk.lines[start_idx..end_idx], start_idx..) |line, idx| {
+                    const is_in_range = (idx >= target_start and idx <= target_end);
+
+                    try renderDiffLine(writer, line, is_in_range);
+                }
             }
+        } else {
+            // Single-line comment: original behavior
+            const target_idx = comment.line_idx;
+            const start_idx = if (target_idx >= lines_before) target_idx - lines_before else 0;
+            const end_idx = @min(target_idx + lines_after + 1, start_hunk.lines.len);
 
-            // Add arrow marker for commented line
-            if (is_target) {
-                try writer.writeAll("  ← COMMENT");
+            // Render lines with proper formatting
+            for (start_hunk.lines[start_idx..end_idx], start_idx..) |line, idx| {
+                const is_target = (idx == target_idx);
+
+                try renderDiffLine(writer, line, is_target);
             }
-
-            try writer.writeAll("\n");
         }
+    }
+
+    fn renderDiffLine(writer: anytype, line: parser.Line, is_highlighted: bool) !void {
+        // Line number (use old for deletions, new for adds/context)
+        const lineno = switch (line.line_type) {
+            .delete => line.old_lineno,
+            .add, .context => line.new_lineno,
+        };
+
+        // Diff marker
+        const marker = switch (line.line_type) {
+            .add => "+",
+            .delete => "-",
+            .context => " ",
+        };
+
+        // Format: "  150  │     .scroll_offset = 0,"
+        if (lineno) |num| {
+            try writer.print("{s} {d: >3}  │ {s}", .{ marker, num, line.content });
+        } else {
+            try writer.print("{s}      │ {s}", .{ marker, line.content });
+        }
+
+        // Add arrow marker for commented line(s)
+        if (is_highlighted) {
+            try writer.writeAll("  ← COMMENT");
+        }
+
+        try writer.writeAll("\n");
     }
 
     /// Simple export without context (backwards compatibility)

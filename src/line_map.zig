@@ -134,8 +134,27 @@ pub const LineMap = struct {
                     });
                     global_line += 1;
 
-                    // Check for comment on this line
-                    if (comment_store.findCommentAt(file_path, hunk_idx, line_idx_in_hunk)) |comment_idx| {
+                    // Check for comments on this line:
+                    // 1. First check for range comments that END at this line (displayed at lowest point)
+                    // 2. Then check for single-line comments that START at this line
+                    const comment_idx = blk: {
+                        // Check if a range comment ends here
+                        if (comment_store.findRangeCommentEndingAt(file_path, hunk_idx, line_idx_in_hunk)) |idx| {
+                            break :blk idx;
+                        }
+                        // Check if a single-line comment is at this location
+                        if (comment_store.findCommentAt(file_path, hunk_idx, line_idx_in_hunk)) |idx| {
+                            // Make sure it's actually a single-line comment (not a range comment that starts here)
+                            if (comment_store.getComment(idx)) |comment| {
+                                if (comment.end_hunk_idx == null and comment.end_line_idx == null) {
+                                    break :blk idx;
+                                }
+                            }
+                        }
+                        break :blk null;
+                    };
+
+                    if (comment_idx) |idx| {
                         try records.append(.{
                             .global_line = global_line,
                             .file_idx = file_idx,
@@ -143,7 +162,7 @@ pub const LineMap = struct {
                                 .comment_line = .{
                                     .parent_hunk_idx = hunk_idx,
                                     .parent_line_idx = line_idx_in_hunk,
-                                    .comment_idx = comment_idx,
+                                    .comment_idx = idx,
                                 },
                             },
                         });

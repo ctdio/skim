@@ -661,16 +661,38 @@ pub const RenderUtils = struct {
         // Render gutter for label line
         try renderEmptyCommentGutter(app, win, current_row, true, gutter_width);
 
-        // Line 2: ┃ Comment                              Ctrl+S:Save  Enter:Newline  ESC:Cancel
+        // Line 2: ┃ Comment [range info]                 Ctrl+S:Save  Enter:Newline  ESC:Cancel
         segments.clearRetainingCapacity();
         const hints = "Ctrl+S:Save  Enter:Newline  ESC:Cancel";
-        const border_and_label = "┃ Comment";
+
+        // Build label with range info if applicable
+        const label = blk: {
+            if (input.target_end_hunk_idx != null and input.target_end_line_idx != null) {
+                // Range comment - show line range
+                const start_line = input.target_line_idx + 1; // +1 for 1-based display
+                const end_line = input.target_end_line_idx.? + 1;
+                if (input.target_hunk_idx == input.target_end_hunk_idx.?) {
+                    // Same hunk - use frame text buffer for formatted string
+                    var label_buf: [64]u8 = undefined;
+                    const formatted = try std.fmt.bufPrint(&label_buf, " Comment (Lines {d}-{d})", .{ start_line, end_line });
+                    break :blk try copyFrameText(app, formatted);
+                } else {
+                    // Different hunks (unlikely but handle it)
+                    break :blk try copyFrameText(app, " Comment (Range)");
+                }
+            } else {
+                // Single-line comment
+                break :blk try copyFrameText(app, " Comment");
+            }
+        };
+
+        const border_and_label_len = 1 + label.len; // "┃" + label
         const spacing = "  ";
-        const total_fixed = border_and_label.len + spacing.len + hints.len; // Total chars we're rendering
+        const total_fixed = border_and_label_len + spacing.len + hints.len;
         const available_for_spacer = content_width -| total_fixed;
 
         try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
-        try segments.append(.{ .text = try copyFrameText(app, " Comment"), .style = label_style });
+        try segments.append(.{ .text = label, .style = label_style });
 
         // Spacer between label and hints
         if (available_for_spacer > 0) {

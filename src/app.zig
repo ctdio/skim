@@ -748,7 +748,7 @@ pub const App = struct {
                 self.state.cursor_column = 0; // Reset column on search jump
                 self.updateCurrentFileAndTriggerHighlighting();
             },
-            'v' => self.startVisualMode(),
+            'v', 'V' => self.startVisualMode(), // v or Shift+V to start visual mode
             'f' => self.state.pending_find = .f, // Wait for character to find forward
             't' => self.state.pending_find = .t, // Wait for character to move till forward
             'F' => self.state.pending_find = .F, // Wait for character to find backward
@@ -1171,6 +1171,10 @@ pub const App = struct {
                     self.needs_render = true; // Force full redraw after canceling comment
                 },
             }
+        } else {
+            // Still editing - adjust scroll to keep expanding comment visible
+            // This handles multiline text and prevents the comment from scrolling off screen
+            Navigation.ensureCommentBoxVisible(self);
         }
     }
 
@@ -1238,6 +1242,8 @@ pub const App = struct {
             .target_file_path = file_path,
             .target_hunk_idx = target_hunk_idx,
             .target_line_idx = target_line_idx,
+            .target_end_hunk_idx = null, // Single-line comment
+            .target_end_line_idx = null, // Single-line comment
             .editing_comment_idx = existing_comment_idx,
             .text_buffer = undefined,
             .text_len = 0,
@@ -1276,6 +1282,87 @@ pub const App = struct {
         self.mode = .comment;
     }
 
+    fn startCommentInputForVisualSelection(self: *App) !void {
+        // Get visual selection range
+        const selection = self.getVisualSelection() orelse return;
+        const start_line = selection.start;
+        const end_line = selection.end;
+
+        // Get records for start and end lines
+        const start_record = self.state.line_map.getLineRecord(start_line) orelse return;
+        const end_record = self.state.line_map.getLineRecord(end_line) orelse return;
+
+        // Selection must be within the same file
+        if (start_record.file_idx != end_record.file_idx) {
+            return; // Can't comment across multiple files
+        }
+
+        // Can only comment on code lines
+        if (start_record.line_type != .code_line or end_record.line_type != .code_line) {
+            return;
+        }
+
+        const start_code = start_record.line_type.code_line;
+        const end_code = end_record.line_type.code_line;
+
+        // Selection must be within the same hunk
+        if (start_code.hunk_idx != end_code.hunk_idx) {
+            return; // Can't comment across multiple hunks
+        }
+
+        // Get file information from start line
+        if (start_record.file_idx >= self.state.files.len) return;
+        const file = &self.state.files[start_record.file_idx];
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        // Check if selection is a single line
+        const is_single_line = (start_line == end_line);
+
+        // Initialize input buffer for range comment
+        var input = comment_editor.CommentEditor.State{
+            .target_file_path = file_path,
+            .target_hunk_idx = start_code.hunk_idx,
+            .target_line_idx = start_code.line_idx_in_hunk,
+            .target_end_hunk_idx = if (is_single_line) null else end_code.hunk_idx,
+            .target_end_line_idx = if (is_single_line) null else end_code.line_idx_in_hunk,
+            .editing_comment_idx = null, // Always creating new comment from visual mode
+            .text_buffer = undefined,
+            .text_len = 0,
+            .cursor_pos = 0,
+            .vim_mode = .insert, // Start in insert mode for user-friendliness
+            .visual_anchor = null,
+            .pending_find = null,
+            .pending_operator = null,
+            .pending_replace = false,
+            .pending_z = false,
+            .pending_text_object = null,
+            .yank_buffer = undefined,
+            .yank_len = 0,
+            .count_prefix = null,
+            .undo_stack = undefined,
+            .undo_count = 0,
+            .undo_index = 0,
+            .last_find = null,
+            .last_change = null,
+            .command_buffer = undefined,
+            .command_len = 0,
+        };
+        @memset(&input.text_buffer, 0);
+
+        self.state.active_comment_input = input;
+        self.mode = .comment;
+
+        // Move cursor to the end of the range (lowest selection point) where the comment will appear
+        self.state.global_cursor_line = end_line;
+
+        // Ensure the comment box is visible on screen
+        // Use extra padding to account for comment box height (starts with ~4 lines minimum)
+        Navigation.ensureCommentBoxVisible(self);
+
+        // Exit visual mode
+        self.state.visual_anchor = null;
+    }
+
     fn saveCurrentComment(self: *App) !void {
         if (self.state.active_comment_input == null) return;
 
@@ -1299,17 +1386,34 @@ pub const App = struct {
             // Update existing comment
             try self.state.comment_store.updateComment(idx, comment_text);
         } else {
-            // Add new comment
-            try self.state.comment_store.addComment(
-                input.target_file_path,
-                input.target_hunk_idx,
-                input.target_line_idx,
-                comment_text,
-                line.line_type,
-                line.content,
-                line.old_lineno,
-                line.new_lineno,
-            );
+            // Check if this is a range comment
+            if (input.target_end_hunk_idx != null and input.target_end_line_idx != null) {
+                // Add range comment
+                try self.state.comment_store.addRangeComment(
+                    input.target_file_path,
+                    input.target_hunk_idx,
+                    input.target_line_idx,
+                    input.target_end_hunk_idx.?,
+                    input.target_end_line_idx.?,
+                    comment_text,
+                    line.line_type,
+                    line.content,
+                    line.old_lineno,
+                    line.new_lineno,
+                );
+            } else {
+                // Add single-line comment
+                try self.state.comment_store.addComment(
+                    input.target_file_path,
+                    input.target_hunk_idx,
+                    input.target_line_idx,
+                    comment_text,
+                    line.line_type,
+                    line.content,
+                    line.old_lineno,
+                    line.new_lineno,
+                );
+            }
         }
 
         // Rebuild LineMap since comment count changed
@@ -1318,12 +1422,12 @@ pub const App = struct {
     }
 
     fn yankCommentsToClipboard(self: *App) !void {
-        // Generate export with context (5 lines before, 3 lines after)
+        // Generate export with context (10 lines before, 10 lines after for LLM context)
         const output = try self.state.comment_store.exportWithContext(
             self.allocator,
             self.state.files,
-            5, // lines before
-            3, // lines after
+            10, // lines before
+            10, // lines after
         );
         defer self.allocator.free(output);
 
@@ -2067,16 +2171,39 @@ pub const App = struct {
             return;
         }
 
+        // Handle digit keys for count prefix (1-9, matching vim behavior)
+        if (!key.mods.alt and !key.mods.shift) {
+            if (key.codepoint >= '1' and key.codepoint <= '9') {
+                const digit = @as(usize, @intCast(key.codepoint - '0'));
+                if (self.state.count_prefix) |count| {
+                    self.state.count_prefix = count * 10 + digit;
+                } else {
+                    self.state.count_prefix = digit;
+                }
+                return;
+            }
+            // Handle 0 as part of multi-digit count (e.g., 10, 20)
+            if (key.codepoint == '0' and self.state.count_prefix != null) {
+                self.state.count_prefix = self.state.count_prefix.? * 10;
+                return;
+            }
+        }
+
         switch (key.codepoint) {
             27 => { // ESC - exit visual mode
                 self.mode = .normal;
                 self.state.visual_anchor = null;
+                self.state.count_prefix = null; // Clear count prefix when exiting
                 self.needs_render = true; // Force full redraw after exiting visual mode
             },
             'v' => { // v again - exit visual mode (toggle)
                 self.mode = .normal;
                 self.state.visual_anchor = null;
+                self.state.count_prefix = null; // Clear count prefix when exiting
                 self.needs_render = true; // Force full redraw after exiting visual mode
+            },
+            '\r' => { // Enter - create comment for visual selection
+                try self.startCommentInputForVisualSelection();
             },
             'j' => Navigation.moveCursorDown(self),
             'k' => Navigation.moveCursorUp(self),
@@ -2090,6 +2217,7 @@ pub const App = struct {
                 // Exit visual mode after yanking
                 self.mode = .normal;
                 self.state.visual_anchor = null;
+                self.state.count_prefix = null; // Clear count prefix when exiting
                 self.needs_render = true; // Force full redraw after yanking
             },
             else => {},
