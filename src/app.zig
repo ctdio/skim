@@ -770,6 +770,16 @@ pub const App = struct {
                 }
             },
             'z' => self.state.pending_z = true, // Wait for second z for zz (center cursor)
+            '{' => {
+                Navigation.jumpToPreviousEmptyLine(self);
+                self.state.cursor_column = 0; // Reset column on jump
+                self.updateCurrentFileAndTriggerHighlighting();
+            },
+            '}' => {
+                Navigation.jumpToNextEmptyLine(self);
+                self.state.cursor_column = 0; // Reset column on jump
+                self.updateCurrentFileAndTriggerHighlighting();
+            },
             '?' => self.mode = .help, // Show help overlay
             else => {
                 // Reset count prefix on any other key

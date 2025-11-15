@@ -261,6 +261,30 @@ pub const LineMap = struct {
         }
         return null;
     }
+
+    /// Check if a global line is empty (spacer or empty content line)
+    pub fn isEmptyLine(self: *const LineMap, global_line: usize, files: []const parser.FileDiff) bool {
+        const record = self.getLineRecord(global_line) orelse return false;
+
+        // Spacer lines are always empty
+        if (record.line_type == .spacer) {
+            return true;
+        }
+
+        // Check if code line has empty content
+        if (record.line_type == .code_line) {
+            const code_line_info = record.line_type.code_line;
+            const file = &files[record.file_idx];
+            const hunk = &file.hunks[code_line_info.hunk_idx];
+            const line = &hunk.lines[code_line_info.line_idx_in_hunk];
+
+            // Check if content is empty or only whitespace
+            const trimmed = std.mem.trim(u8, line.content, " \t\r\n");
+            return trimmed.len == 0;
+        }
+
+        return false;
+    }
 };
 
 test "line map basic construction" {

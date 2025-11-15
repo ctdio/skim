@@ -352,4 +352,85 @@ pub const Navigation = struct {
             }
         }
     }
+
+    /// Jump to next empty line (spacer or empty content line)
+    /// Skips contiguous empty lines (vim-style paragraph motion)
+    /// Supports count prefix (e.g., 3} jumps to 3rd next paragraph boundary)
+    pub fn jumpToNextEmptyLine(app: *App) void {
+        const count = app.state.count_prefix orelse 1;
+        app.state.count_prefix = null;
+
+        const total_lines = app.getTotalGlobalLines();
+        if (total_lines == 0) return;
+
+        var jumps_remaining = count;
+        var search_line = app.state.global_cursor_line;
+
+        while (search_line < total_lines and jumps_remaining > 0) {
+            // Skip any contiguous empty lines from current position
+            while (search_line < total_lines and app.state.line_map.isEmptyLine(search_line, app.state.files)) {
+                search_line += 1;
+            }
+
+            // Skip non-empty lines to find next empty line
+            while (search_line < total_lines and !app.state.line_map.isEmptyLine(search_line, app.state.files)) {
+                search_line += 1;
+            }
+
+            // If we found an empty line, that's one jump
+            if (search_line < total_lines and app.state.line_map.isEmptyLine(search_line, app.state.files)) {
+                jumps_remaining -= 1;
+                if (jumps_remaining == 0) {
+                    app.state.global_cursor_line = search_line;
+                    ensureCursorVisible(app, true);
+                    return;
+                }
+                // Continue from next line for multiple jumps
+                search_line += 1;
+            }
+        }
+
+        // No wrapping - stay at current position if no more empty lines found
+    }
+
+    /// Jump to previous empty line (spacer or empty content line)
+    /// Skips contiguous empty lines (vim-style paragraph motion)
+    /// Supports count prefix (e.g., 3{ jumps to 3rd previous paragraph boundary)
+    pub fn jumpToPreviousEmptyLine(app: *App) void {
+        const count = app.state.count_prefix orelse 1;
+        app.state.count_prefix = null;
+
+        if (app.state.global_cursor_line == 0) return;
+
+        var jumps_remaining = count;
+        var search_line = app.state.global_cursor_line;
+
+        while (search_line > 0 and jumps_remaining > 0) {
+            // Skip any contiguous empty lines from current position
+            while (search_line > 0 and app.state.line_map.isEmptyLine(search_line, app.state.files)) {
+                search_line -= 1;
+            }
+
+            // Skip non-empty lines to find previous empty line
+            while (search_line > 0 and !app.state.line_map.isEmptyLine(search_line, app.state.files)) {
+                search_line -= 1;
+            }
+
+            // If we found an empty line, that's one jump
+            if (app.state.line_map.isEmptyLine(search_line, app.state.files)) {
+                jumps_remaining -= 1;
+                if (jumps_remaining == 0) {
+                    app.state.global_cursor_line = search_line;
+                    ensureCursorVisible(app, true);
+                    return;
+                }
+                // Continue from previous line for multiple jumps (only if not at start)
+                if (search_line > 0) {
+                    search_line -= 1;
+                }
+            }
+        }
+
+        // No wrapping - stay at current position if no more empty lines found
+    }
 };
