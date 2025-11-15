@@ -295,6 +295,18 @@ pub const App = struct {
         }
         self.pending_highlight_jobs.deinit();
 
+        // Free diff_source if needed
+        switch (self.state.diff_source) {
+            .working_dir => {},
+            .single_ref => |sr| {
+                self.allocator.free(sr.ref);
+            },
+            .two_refs => |tr| {
+                self.allocator.free(tr.ref1);
+                self.allocator.free(tr.ref2);
+            },
+        }
+
         for (self.state.files) |*file| {
             file.deinit(self.allocator);
         }
