@@ -418,10 +418,18 @@ pub const SideBySideRenderer = struct {
         const middle_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing + left_width;
         const right_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1; // +1 for middle divider
 
-        // Calculate byte offset for syntax highlighting
-        // Note: Only applies to lines in the NEW file (context and additions)
-        const byte_offset = StateHelpers.getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
-        const highlights = if (line.line_type == .delete) null else file.highlights;
+        // Calculate byte offset and apply appropriate syntax highlighting
+        // For deleted lines, use OLD file highlights and offsets
+        // For add/context lines, use NEW file highlights and offsets
+        const byte_offset = if (line.line_type == .delete)
+            StateHelpers.getOldLineByteOffset(file, hunk_idx, line_idx_in_hunk)
+        else
+            StateHelpers.getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
+
+        const highlights = if (line.line_type == .delete)
+            file.old_highlights
+        else
+            file.highlights;
 
         switch (line.line_type) {
             .context => {

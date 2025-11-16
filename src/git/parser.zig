@@ -7,7 +7,8 @@ pub const FileDiff = struct {
     old_path: []const u8,
     new_path: []const u8,
     hunks: []Hunk,
-    highlights: ?[]syntax.Highlight, // Cached syntax highlights for the file
+    highlights: ?[]syntax.Highlight, // Cached syntax highlights for the new file (add/context lines)
+    old_highlights: ?[]syntax.Highlight, // Cached syntax highlights for the old file (delete/context lines)
 
     pub fn deinit(self: *const FileDiff, allocator: Allocator) void {
         allocator.free(self.old_path);
@@ -22,6 +23,13 @@ pub const FileDiff = struct {
                 allocator.free(h.category);
             }
             allocator.free(highlights);
+        }
+        if (self.old_highlights) |old_highlights| {
+            // Free each category string (they were duplicated during parsing)
+            for (old_highlights) |h| {
+                allocator.free(h.category);
+            }
+            allocator.free(old_highlights);
         }
     }
 };
@@ -182,6 +190,7 @@ const PartialFileDiff = struct {
             .new_path = self.new_path orelse try allocator.dupe(u8, ""),
             .hunks = try self.hunks.toOwnedSlice(),
             .highlights = null, // Will be populated on first render
+            .old_highlights = null, // Will be populated on first render
         };
     }
 };

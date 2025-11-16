@@ -331,10 +331,18 @@ pub const UnifiedRenderer = struct {
             .add, .context => line.new_lineno,
         };
 
-        // Apply syntax highlighting only to lines in the NEW file (context and additions)
-        // Deletion lines are not in the new file, so highlights don't apply
-        const byte_offset = StateHelpers.getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
-        const highlights = if (line.line_type == .delete) null else file.highlights;
+        // Calculate byte offset and apply appropriate syntax highlighting
+        // For deleted lines, use OLD file highlights and offsets
+        // For add/context lines, use NEW file highlights and offsets
+        const byte_offset = if (line.line_type == .delete)
+            StateHelpers.getOldLineByteOffset(file, hunk_idx, line_idx_in_hunk)
+        else
+            StateHelpers.getLineByteOffset(file, hunk_idx, line_idx_in_hunk);
+
+        const highlights = if (line.line_type == .delete)
+            file.old_highlights
+        else
+            file.highlights;
 
         return try renderWrappedTextWithHighlights(
             app,

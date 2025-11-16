@@ -9,14 +9,16 @@ const Layout = rendering_common.Layout;
 // Highlighting job - lightweight request struct
 pub const HighlightJob = struct {
     file_path: []const u8, // Borrowed reference
-    content: []const u8, // Borrowed reference
+    content: []const u8, // Borrowed reference (new file content: add/context lines)
+    old_content: []const u8, // Borrowed reference (old file content: delete/context lines)
     file_idx: usize,
 };
 
 // Completed highlighting result
 pub const HighlightResult = struct {
     file_idx: usize,
-    highlights: ?[]syntax.Highlight,
+    highlights: ?[]syntax.Highlight, // Highlights for new file (add/context lines)
+    old_highlights: ?[]syntax.Highlight, // Highlights for old file (delete/context lines)
     failed: bool,
 };
 
@@ -113,14 +115,19 @@ pub const HighlightWorker = struct {
 
             if (job_opt) |job| {
                 // Process the job (outside the lock for parallel work)
+                // Highlight NEW file (add/context lines)
                 const highlights = self.highlighter.highlightFile(job.file_path, job.content) catch null;
+
+                // Highlight OLD file (delete/context lines)
+                const old_highlights = self.highlighter.highlightFile(job.file_path, job.old_content) catch null;
 
                 // Store result
                 self.mutex.lock();
                 self.result_queue.append(.{
                     .file_idx = job.file_idx,
                     .highlights = highlights,
-                    .failed = highlights == null,
+                    .old_highlights = old_highlights,
+                    .failed = highlights == null and old_highlights == null,
                 }) catch {};
                 self.mutex.unlock();
             } else {
@@ -137,10 +144,12 @@ pub const AsyncHighlightJob = struct {
     allocator: std.mem.Allocator,
     // Input data (set before spawning thread)
     file_path: []u8, // Owned copy
-    content: []u8, // Owned copy of file content (built on main thread, fast single-pass)
+    content: []u8, // Owned copy of NEW file content (add/context lines)
+    old_content: []u8, // Owned copy of OLD file content (delete/context lines)
     file_idx: usize,
     // Output data (written by thread, read by main)
-    highlights: ?[]syntax.Highlight,
+    highlights: ?[]syntax.Highlight, // Highlights for new file
+    old_highlights: ?[]syntax.Highlight, // Highlights for old file
     done: bool,
     failed: bool,
 
@@ -151,8 +160,10 @@ pub const AsyncHighlightJob = struct {
             .allocator = allocator,
             .file_path = &[_]u8{},
             .content = &[_]u8{},
+            .old_content = &[_]u8{},
             .file_idx = 0,
             .highlights = null,
+            .old_highlights = null,
             .done = false,
             .failed = false,
         };
@@ -162,6 +173,7 @@ pub const AsyncHighlightJob = struct {
     pub fn deinit(self: *AsyncHighlightJob) void {
         if (self.file_path.len > 0) self.allocator.free(self.file_path);
         if (self.content.len > 0) self.allocator.free(self.content);
+        if (self.old_content.len > 0) self.allocator.free(self.old_content);
         self.allocator.destroy(self);
     }
 
@@ -195,8 +207,17 @@ fn highlightWorker(job: *AsyncHighlightJob) void {
     };
     defer highlighter.deinit();
 
-    // Do the highlighting work (content already built on main thread)
+    // Highlight NEW file content (add/context lines)
     const highlights = highlighter.highlightFile(job.file_path, job.content) catch {
+        job.mutex.lock();
+        job.failed = true;
+        job.done = true;
+        job.mutex.unlock();
+        return;
+    };
+
+    // Highlight OLD file content (delete/context lines)
+    const old_highlights = highlighter.highlightFile(job.file_path, job.old_content) catch {
         job.mutex.lock();
         job.failed = true;
         job.done = true;
@@ -207,6 +228,7 @@ fn highlightWorker(job: *AsyncHighlightJob) void {
     // Store results (thread-safe)
     job.mutex.lock();
     job.highlights = highlights;
+    job.old_highlights = old_highlights;
     job.done = true;
     job.mutex.unlock();
 }
@@ -413,6 +435,67 @@ pub const StateHelpers = struct {
         return content;
     }
 
+    // Build old file content from diff (context + delete lines only)
+    // Returns owned slice that must be freed by caller
+    pub fn buildOldFileContent(allocator: std.mem.Allocator, file: *const parser.FileDiff) ![]u8 {
+        // Step 1: Calculate exact size needed
+        var total_size: usize = 0;
+        for (file.hunks) |hunk| {
+            for (hunk.lines) |line| {
+                switch (line.line_type) {
+                    .add => {}, // Skip additions - not in old file
+                    .delete, .context => {
+                        total_size += line.content.len + 1; // +1 for newline
+                    },
+                }
+            }
+        }
+
+        // Step 2: Single allocation with exact size
+        const content = try allocator.alloc(u8, total_size);
+        errdefer allocator.free(content);
+
+        // Step 3: Copy data in single pass
+        var offset: usize = 0;
+        for (file.hunks) |hunk| {
+            for (hunk.lines) |line| {
+                switch (line.line_type) {
+                    .add => {}, // Skip additions
+                    .delete, .context => {
+                        @memcpy(content[offset .. offset + line.content.len], line.content);
+                        offset += line.content.len;
+                        content[offset] = '\n';
+                        offset += 1;
+                    },
+                }
+            }
+        }
+
+        return content;
+    }
+
+    // Get byte offset for a line in the OLD file (for deleted/context lines)
+    pub fn getOldLineByteOffset(file: *const parser.FileDiff, target_hunk_idx: usize, target_line_idx: usize) usize {
+        var offset: usize = 0;
+
+        for (file.hunks, 0..) |hunk, hunk_idx| {
+            for (hunk.lines, 0..) |line, line_idx| {
+                if (hunk_idx == target_hunk_idx and line_idx == target_line_idx) {
+                    return offset;
+                }
+                // Only count deletions and context (additions are not in old file)
+                switch (line.line_type) {
+                    .add => {}, // Skip - not in old file
+                    .delete, .context => {
+                        offset += line.content.len + 1; // +1 for newline
+                    },
+                }
+            }
+        }
+
+        return offset;
+    }
+
     // Spawn a background thread to highlight a file (truly async)
     // Optimized: Build content on main thread with single allocation (fast)
     // Only parser loading/highlighting happens in background (slow part)
@@ -424,39 +507,13 @@ pub const StateHelpers = struct {
 
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
-        // Build file content efficiently on main thread
-        // Step 1: Calculate exact size needed (single pass, no reallocs)
-        var total_size: usize = 0;
-        for (file.hunks) |hunk| {
-            for (hunk.lines) |line| {
-                switch (line.line_type) {
-                    .delete => {}, // Skip deletions
-                    .add, .context => {
-                        total_size += line.content.len + 1; // +1 for newline
-                    },
-                }
-            }
-        }
-
-        // Step 2: Single allocation with exact size
-        const content = try app.allocator.alloc(u8, total_size);
+        // Build NEW file content (add/context lines)
+        const content = try buildFileContent(app.allocator, file);
         errdefer app.allocator.free(content);
 
-        // Step 3: Copy data in single pass (very fast, just memcpy operations)
-        var offset: usize = 0;
-        for (file.hunks) |hunk| {
-            for (hunk.lines) |line| {
-                switch (line.line_type) {
-                    .delete => {},
-                    .add, .context => {
-                        @memcpy(content[offset .. offset + line.content.len], line.content);
-                        offset += line.content.len;
-                        content[offset] = '\n';
-                        offset += 1;
-                    },
-                }
-            }
-        }
+        // Build OLD file content (delete/context lines)
+        const old_content = try buildOldFileContent(app.allocator, file);
+        errdefer app.allocator.free(old_content);
 
         // Create job with owned copies of data
         const job = try AsyncHighlightJob.init(app.allocator);
@@ -464,6 +521,7 @@ pub const StateHelpers = struct {
 
         job.file_path = try app.allocator.dupe(u8, file_path);
         job.content = content;
+        job.old_content = old_content;
         job.file_idx = file_idx;
 
         // Spawn worker thread

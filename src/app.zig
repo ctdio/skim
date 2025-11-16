@@ -38,6 +38,11 @@ const FrameChars = rendering_common.FrameChars;
 const HEADER_BUFFER_WIDTH = 4096;
 const FRAME_TEXT_CAPACITY = 262144; // 256 KiB per frame scratch space
 
+const PendingJob = struct {
+    content: []const u8, // Owned NEW file content
+    old_content: []const u8, // Owned OLD file content
+};
+
 pub const App = struct {
     allocator: Allocator,
     vx: Vaxis,
@@ -54,7 +59,7 @@ pub const App = struct {
     frame_text_used: usize,
     syntax_highlighter: syntax.SyntaxHighlighter,
     highlight_worker: ?*state_helpers.HighlightWorker, // Long-lived worker thread with cached parsers
-    pending_highlight_jobs: std.AutoHashMap(usize, []const u8), // file_idx -> owned content string
+    pending_highlight_jobs: std.AutoHashMap(usize, PendingJob), // file_idx -> owned content strings
     needs_render: bool, // Flag to force re-render (e.g., after async highlighting)
     needs_async_highlight: bool, // Flag to trigger async highlighting for current file
 
@@ -291,7 +296,7 @@ pub const App = struct {
             .frame_text_used = 0,
             .syntax_highlighter = syntax_highlighter,
             .highlight_worker = null, // Will be created on first use
-            .pending_highlight_jobs = std.AutoHashMap(usize, []const u8).init(allocator),
+            .pending_highlight_jobs = std.AutoHashMap(usize, PendingJob).init(allocator),
             .needs_render = false,
             .needs_async_highlight = true, // Start with highlighting needed for first file
         };
@@ -309,7 +314,8 @@ pub const App = struct {
         // Free pending job content strings
         var iter = self.pending_highlight_jobs.iterator();
         while (iter.next()) |entry| {
-            self.allocator.free(entry.value_ptr.*);
+            self.allocator.free(entry.value_ptr.content);
+            self.allocator.free(entry.value_ptr.old_content);
         }
         self.pending_highlight_jobs.deinit();
 
@@ -528,7 +534,8 @@ pub const App = struct {
 
                     // Remove from pending jobs and free content
                     if (self.pending_highlight_jobs.fetchRemove(file_idx)) |entry| {
-                        self.allocator.free(entry.value);
+                        self.allocator.free(entry.value.content);
+                        self.allocator.free(entry.value.old_content);
                     }
 
                     // Apply highlights to file
@@ -538,6 +545,11 @@ pub const App = struct {
                             const mutable_file = @constCast(file);
                             mutable_file.highlights = highlights;
 
+                            // Also apply old highlights if available
+                            if (result.old_highlights) |old_highlights| {
+                                mutable_file.old_highlights = old_highlights;
+                            }
+
                             // Only trigger re-render if this is the CURRENT file
                             if (file_idx == self.state.current_file_idx) {
                                 self.needs_render = true;
@@ -546,6 +558,9 @@ pub const App = struct {
                             // File no longer exists (refresh happened), free highlights
                             if (self.highlight_worker) |w| {
                                 w.highlighter.freeHighlights(highlights);
+                                if (result.old_highlights) |old_highlights| {
+                                    w.highlighter.freeHighlights(old_highlights);
+                                }
                             }
                         }
                     }
@@ -567,23 +582,37 @@ pub const App = struct {
                     }
 
                     if (self.highlight_worker) |worker| {
-                        // Build content string (fast, single allocation)
+                        // Build NEW file content (add/context lines)
                         const content = StateHelpers.buildFileContent(self.allocator, file) catch continue;
+                        errdefer self.allocator.free(content);
+
+                        // Build OLD file content (delete/context lines)
+                        const old_content = StateHelpers.buildOldFileContent(self.allocator, file) catch {
+                            self.allocator.free(content);
+                            continue;
+                        };
+                        errdefer self.allocator.free(old_content);
 
                         // Submit job to worker
                         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
                         worker.submitJob(.{
                             .file_path = file_path,
                             .content = content,
+                            .old_content = old_content,
                             .file_idx = file_idx,
                         }) catch {
                             self.allocator.free(content);
+                            self.allocator.free(old_content);
                             continue;
                         };
 
-                        // Track pending job
-                        self.pending_highlight_jobs.put(file_idx, content) catch {
+                        // Track pending job (store both content strings)
+                        self.pending_highlight_jobs.put(file_idx, .{
+                            .content = content,
+                            .old_content = old_content,
+                        }) catch {
                             self.allocator.free(content);
+                            self.allocator.free(old_content);
                         };
                     }
                 }
