@@ -433,4 +433,127 @@ pub const Navigation = struct {
 
         // No wrapping - stay at current position if no more empty lines found
     }
+
+    /// Jump to next code change (add/delete line) in next hunk (vim-style ]h)
+    /// Supports count prefix (e.g., 3]h jumps to 3rd next hunk's first change)
+    pub fn jumpToNextHunk(app: *App) void {
+        const count = app.state.count_prefix orelse 1;
+        app.state.count_prefix = null;
+
+        const total_lines = app.getTotalGlobalLines();
+        if (total_lines == 0) return;
+
+        var jumps_remaining = count;
+        var search_line = app.state.global_cursor_line + 1; // Start from next line
+        var found_hunk_header = false;
+
+        while (search_line < total_lines and jumps_remaining > 0) {
+            if (app.state.line_map.getLineRecord(search_line)) |record| {
+                // Track when we find a hunk header
+                if (record.line_type == .hunk_header) {
+                    found_hunk_header = true;
+                }
+                // If we found a hunk header, look for the first add/delete line
+                else if (found_hunk_header and record.line_type == .code_line) {
+                    const code_info = record.line_type.code_line;
+                    const file = &app.state.files[record.file_idx];
+                    const hunk = &file.hunks[code_info.hunk_idx];
+                    const line = &hunk.lines[code_info.line_idx_in_hunk];
+
+                    // Jump to first add or delete line in this hunk
+                    if (line.line_type == .add or line.line_type == .delete) {
+                        jumps_remaining -= 1;
+                        if (jumps_remaining == 0) {
+                            app.state.global_cursor_line = search_line;
+                            ensureCursorVisible(app, true);
+                            return;
+                        }
+                        found_hunk_header = false; // Reset to find next hunk
+                    }
+                }
+            }
+            search_line += 1;
+        }
+
+        // No wrapping - stay at current position if no more hunks found
+    }
+
+    /// Jump to previous code change (add/delete line) in previous hunk (vim-style [h)
+    /// Supports count prefix (e.g., 3[h jumps to 3rd previous hunk's first change)
+    pub fn jumpToPreviousHunk(app: *App) void {
+        const count = app.state.count_prefix orelse 1;
+        app.state.count_prefix = null;
+
+        if (app.state.global_cursor_line == 0) return;
+
+        var jumps_remaining = count;
+        var search_line = app.state.global_cursor_line;
+
+        // Move back one to start searching from previous line
+        if (search_line > 0) {
+            search_line -= 1;
+        }
+
+        // Strategy: Find hunk headers going backward, then find first add/delete in that hunk
+        while (search_line > 0 and jumps_remaining > 0) {
+            // First, find a hunk header going backward
+            var hunk_header_line: ?usize = null;
+            var temp_search = search_line;
+            while (temp_search > 0) {
+                if (app.state.line_map.getLineRecord(temp_search)) |record| {
+                    if (record.line_type == .hunk_header) {
+                        hunk_header_line = temp_search;
+                        break;
+                    }
+                }
+                temp_search -= 1;
+            }
+
+            // If we found a hunk header, find the first add/delete line in that hunk
+            if (hunk_header_line) |header_line| {
+                var found_change = false;
+                var change_search = header_line + 1;
+                const total_lines = app.getTotalGlobalLines();
+
+                while (change_search < total_lines) {
+                    if (app.state.line_map.getLineRecord(change_search)) |record| {
+                        // Stop if we hit another hunk header (moved to next hunk)
+                        if (record.line_type == .hunk_header) {
+                            break;
+                        }
+                        // Check if this is an add/delete line
+                        if (record.line_type == .code_line) {
+                            const code_info = record.line_type.code_line;
+                            const file = &app.state.files[record.file_idx];
+                            const hunk = &file.hunks[code_info.hunk_idx];
+                            const line = &hunk.lines[code_info.line_idx_in_hunk];
+
+                            if (line.line_type == .add or line.line_type == .delete) {
+                                jumps_remaining -= 1;
+                                if (jumps_remaining == 0) {
+                                    app.state.global_cursor_line = change_search;
+                                    ensureCursorVisible(app, true);
+                                    return;
+                                }
+                                found_change = true;
+                                break;
+                            }
+                        }
+                    }
+                    change_search += 1;
+                }
+
+                // Move search position before this hunk to find the next previous hunk
+                if (found_change and header_line > 0) {
+                    search_line = header_line - 1;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // No wrapping - stay at current position if no more hunks found
+    }
 };

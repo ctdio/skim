@@ -99,6 +99,8 @@ Navigate files and position cursor with vim-style movements:
 | `k` | Cursor up |
 | `g` | Jump to top of file |
 | `G` | Jump to bottom of file |
+| `[h` | Jump to previous hunk (supports count prefix) |
+| `]h` | Jump to next hunk (supports count prefix) |
 | `{` | Jump to previous empty line (supports count prefix) |
 | `}` | Jump to next empty line (supports count prefix) |
 | `Ctrl-d` | Page down |

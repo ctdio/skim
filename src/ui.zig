@@ -499,7 +499,7 @@ pub const UI = struct {
 
         // Context-aware keybindings based on cursor position and mode
         const keybindings = switch (app.mode) {
-            .normal => "Press ? for help  |  q:Quit  Ctrl-p:Files  ::Commands  /:Search  v:Visual  {}:Empty",
+            .normal => "Press ? for help  |  q:Quit  Ctrl-p:Files  ::Commands  /:Search  v:Visual  [h]h:Hunks  {}:Empty",
             .comment => blk: {
                 if (app.state.active_comment_input) |input| {
                     break :blk switch (input.vim_mode) {

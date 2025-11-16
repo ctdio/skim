@@ -102,6 +102,8 @@ pub const App = struct {
         pending_find: ?FindCommand, // Waiting for character for f/t/F/T
         last_find: ?NormalModeLastFind, // Last f/t/F/T command for ; and , repeat
         pending_z: bool, // Waiting for second z for zz (center cursor)
+        pending_bracket: bool, // Waiting for second character after [ (like [h)
+        pending_close_bracket: bool, // Waiting for second character after ] (like ]h)
         empty_menu_selection: usize, // Selected index in empty state menu (0 = working, 1 = staged, 2 = main, 3 = branch, 4 = refresh, 5 = quit)
         branch_list: [][]const u8, // List of available branches for selection
         branch_selection: usize, // Selected branch index in branch selection menu
@@ -265,6 +267,8 @@ pub const App = struct {
                 .pending_find = null,
                 .last_find = null,
                 .pending_z = false,
+                .pending_bracket = false,
+                .pending_close_bracket = false,
                 .empty_menu_selection = 0,
                 .branch_list = &[_][]const u8{},
                 .branch_selection = 0,
@@ -684,6 +688,40 @@ pub const App = struct {
             // Any other key cancels the pending z, but still processes the key below
         }
 
+        // If waiting for second character after [ (like [h for previous hunk)
+        if (self.state.pending_bracket) {
+            self.state.pending_bracket = false;
+            // ESC cancels pending bracket
+            if (key.codepoint == 27) { // ESC
+                return;
+            }
+            // If h, jump to previous hunk
+            if (key.codepoint == 'h') {
+                Navigation.jumpToPreviousHunk(self);
+                self.state.cursor_column = 0;
+                self.updateCurrentFileAndTriggerHighlighting();
+                return;
+            }
+            // Any other key cancels the pending bracket, but still processes the key below
+        }
+
+        // If waiting for second character after ] (like ]h for next hunk)
+        if (self.state.pending_close_bracket) {
+            self.state.pending_close_bracket = false;
+            // ESC cancels pending close bracket
+            if (key.codepoint == 27) { // ESC
+                return;
+            }
+            // If h, jump to next hunk
+            if (key.codepoint == 'h') {
+                Navigation.jumpToNextHunk(self);
+                self.state.cursor_column = 0;
+                self.updateCurrentFileAndTriggerHighlighting();
+                return;
+            }
+            // Any other key cancels the pending close bracket, but still processes the key below
+        }
+
         // If waiting for character for f/t/F/T, execute the find
         if (self.state.pending_find) |cmd| {
             self.state.pending_find = null;
@@ -831,6 +869,8 @@ pub const App = struct {
                 }
             },
             'z' => self.state.pending_z = true, // Wait for second z for zz (center cursor)
+            '[' => self.state.pending_bracket = true, // Wait for second character (like [h)
+            ']' => self.state.pending_close_bracket = true, // Wait for second character (like ]h)
             '{' => {
                 Navigation.jumpToPreviousEmptyLine(self);
                 self.state.cursor_column = 0; // Reset column on jump
