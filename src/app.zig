@@ -227,9 +227,11 @@ pub const App = struct {
         const header_buffers = std.mem.zeroes([Layout.header_height][HEADER_BUFFER_WIDTH]u8);
 
         const frame_buffer = try allocator.alloc(u8, FRAME_TEXT_CAPACITY);
+        errdefer allocator.free(frame_buffer);
         @memset(frame_buffer, 0);
 
-        const syntax_highlighter = try syntax.SyntaxHighlighter.init(allocator);
+        var syntax_highlighter = try syntax.SyntaxHighlighter.init(allocator);
+        errdefer syntax_highlighter.deinit();
 
         var comment_store = comments.CommentStore.init(allocator);
         errdefer comment_store.deinit();
@@ -334,6 +336,7 @@ pub const App = struct {
         }
         self.allocator.free(self.state.branch_list);
         self.state.filtered_branches.deinit();
+        self.state.branch_stats_cache.deinit();
         self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.anyWriter());
         self.tty.deinit();
@@ -384,6 +387,13 @@ pub const App = struct {
 
         // Rebuild line map with new files (preserve hunk view mode)
         const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+        errdefer {
+            // If LineMap.build failed, clean up new_files since old state is already freed
+            for (new_files) |*file| {
+                file.deinit(self.allocator);
+            }
+            self.allocator.free(new_files);
+        }
 
         // Update state with new files and line map
         self.state.files = new_files;

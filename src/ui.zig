@@ -112,8 +112,15 @@ pub const UI = struct {
         const staged_stats = git.getDiffStats(app.allocator, .{ .working_dir = .{ .staged = true } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
 
         // Detect default branch and fetch stats (matches switchDiffMode behavior)
-        const default_branch = git.detectDefaultBranch(app.allocator) catch "main";
-        defer if (!std.mem.eql(u8, default_branch, "main")) app.allocator.free(default_branch);
+        // Note: detectDefaultBranch always allocates, even for "main", so we must always free
+        var default_branch: []const u8 = "main"; // Fallback default
+        var branch_allocated = false;
+        if (git.detectDefaultBranch(app.allocator)) |branch| {
+            default_branch = branch;
+            branch_allocated = true;
+        } else |_| {}
+        defer if (branch_allocated) app.allocator.free(default_branch);
+
         const main_stats = git.getDiffStats(app.allocator, .{ .single_ref = .{ .ref = default_branch, .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
 
         // MenuItem struct with optional stats for colored rendering
