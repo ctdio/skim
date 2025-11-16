@@ -2,9 +2,15 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const parser = @import("git/parser.zig");
 const line_map = @import("line_map.zig");
-const DiffSource = @import("git/diff.zig").DiffSource;
+const git = @import("git/diff.zig");
+const DiffSource = git.DiffSource;
+const DiffStats = git.DiffStats;
+const state_helpers = @import("state.zig");
+const render_utils = @import("rendering/utils.zig");
 
 const Allocator = std.mem.Allocator;
+const StateHelpers = state_helpers.StateHelpers;
+const RenderUtils = render_utils.RenderUtils;
 
 // Forward declare App type (will be imported by app.zig)
 const App = @import("app.zig").App;
@@ -39,6 +45,8 @@ pub const Command = struct {
     action: CommandAction,
     category: Category,
     owns_display_name: bool, // Track if we need to free display_name
+    additions: usize, // For file commands - number of additions
+    deletions: usize, // For file commands - number of deletions
 };
 
 pub const CommandPaletteState = struct {
@@ -90,12 +98,27 @@ pub const CommandPaletteState = struct {
     }
 
     // Build command registry from current app state (both files and commands)
-    pub fn buildCommandRegistry(self: *CommandPaletteState, files: []const parser.FileDiff) !void {
+    pub fn buildCommandRegistry(self: *CommandPaletteState, app: *App, files: []const parser.FileDiff) !void {
         self.commands.clearRetainingCapacity();
 
-        // Add file navigation commands
-        for (files, 0..) |file, idx| {
+        // Pre-fetch stats for all diff sources (fast with --shortstat)
+        const working_stats = git.getDiffStats(self.allocator, DiffSource{ .working_dir = .{ .staged = false } }) catch DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+        const staged_stats = git.getDiffStats(self.allocator, DiffSource{ .working_dir = .{ .staged = true } }) catch DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+
+        // For main branch, try to detect default branch
+        const default_branch = git.detectDefaultBranch(self.allocator) catch null;
+        const main_stats = if (default_branch) |branch| blk: {
+            const stats = git.getDiffStats(self.allocator, DiffSource{ .single_ref = .{ .ref = branch, .staged = false } }) catch DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+            self.allocator.free(branch);
+            break :blk stats;
+        } else DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+
+        // Add file navigation commands with stats
+        for (files, 0..) |*file, idx| {
             const path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+            // Calculate stats for this file
+            const stats = StateHelpers.calculateDiffStats(app, file);
 
             // Apply smart path truncation for display
             const display_path = truncatePath(self.allocator, path, 70) catch path;
@@ -108,10 +131,12 @@ pub const CommandPaletteState = struct {
                 .action = .{ .jump_to_file = idx },
                 .category = .file,
                 .owns_display_name = owns_display,
+                .additions = stats.additions,
+                .deletions = stats.deletions,
             });
         }
 
-        // Add built-in commands
+        // Add built-in commands (no stats for non-file commands)
         try self.commands.append(.{
             .name = "Toggle View Mode",
             .display_name = "Toggle View Mode",
@@ -119,6 +144,8 @@ pub const CommandPaletteState = struct {
             .action = .toggle_view_mode,
             .category = .view,
             .owns_display_name = false,
+            .additions = 0,
+            .deletions = 0,
         });
 
         try self.commands.append(.{
@@ -128,6 +155,8 @@ pub const CommandPaletteState = struct {
             .action = .refresh_diff,
             .category = .view,
             .owns_display_name = false,
+            .additions = 0,
+            .deletions = 0,
         });
 
         try self.commands.append(.{
@@ -137,6 +166,8 @@ pub const CommandPaletteState = struct {
             .action = .show_help,
             .category = .help,
             .owns_display_name = false,
+            .additions = 0,
+            .deletions = 0,
         });
 
         try self.commands.append(.{
@@ -146,9 +177,11 @@ pub const CommandPaletteState = struct {
             .action = .quit,
             .category = .navigation,
             .owns_display_name = false,
+            .additions = 0,
+            .deletions = 0,
         });
 
-        // Diff mode switching commands
+        // Diff mode switching commands with stats
         try self.commands.append(.{
             .name = "diff:working",
             .display_name = "diff:working",
@@ -156,6 +189,8 @@ pub const CommandPaletteState = struct {
             .action = .{ .switch_diff_mode = .working },
             .category = .diff,
             .owns_display_name = false,
+            .additions = working_stats.additions,
+            .deletions = working_stats.deletions,
         });
 
         try self.commands.append(.{
@@ -165,6 +200,8 @@ pub const CommandPaletteState = struct {
             .action = .{ .switch_diff_mode = .staged },
             .category = .diff,
             .owns_display_name = false,
+            .additions = staged_stats.additions,
+            .deletions = staged_stats.deletions,
         });
 
         try self.commands.append(.{
@@ -174,6 +211,8 @@ pub const CommandPaletteState = struct {
             .action = .{ .switch_diff_mode = .main },
             .category = .diff,
             .owns_display_name = false,
+            .additions = main_stats.additions,
+            .deletions = main_stats.deletions,
         });
 
         // Initialize with files by default (no '>' prefix)
@@ -368,10 +407,20 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
 
     const state = &app.state.command_palette_state;
 
-    // Line 0: Title (dynamic based on mode)
+    // Line 0: Title (dynamic based on mode) with stats
     const query = state.query_buffer[0..state.query_len];
     const is_command_mode = query.len > 0 and query[0] == '>';
-    const title = if (is_command_mode) "Command Palette" else "Go to File";
+
+    // Calculate stats for title
+    const stats = StateHelpers.calculateTotalDiffStats(app, app.state.files);
+
+    // Format title with stats
+    var title_buf: [256]u8 = undefined;
+    const title = if (is_command_mode)
+        try std.fmt.bufPrint(&title_buf, "Command Palette ({d} files, +{d}, -{d})", .{ stats.files, stats.additions, stats.deletions })
+    else
+        try std.fmt.bufPrint(&title_buf, "Go to File ({d} files, +{d}, -{d})", .{ stats.files, stats.additions, stats.deletions });
+
     const title_style = vaxis.Style{
         .fg = .{ .index = 6 }, // cyan
         .bold = true,
@@ -398,12 +447,13 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     const sep_style = vaxis.Style{
         .fg = .{ .index = 8 }, // dim
     };
-    var sep_text: [60]u8 = undefined;
-    for (0..@min(palette_width - 2, sep_text.len)) |i| {
+    var sep_text: [256]u8 = undefined;
+    const sep_width = palette_win.width;
+    for (0..@min(sep_width, sep_text.len)) |i| {
         sep_text[i] = '-';
     }
     var sep_segments = [_]vaxis.Cell.Segment{
-        .{ .text = sep_text[0..@min(palette_width - 2, sep_text.len)], .style = sep_style },
+        .{ .text = sep_text[0..@min(sep_width, sep_text.len)], .style = sep_style },
     };
     _ = try palette_win.print(&sep_segments, .{ .row_offset = 2 });
 
@@ -445,17 +495,60 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
                 .fg = .{ .index = 8 }, // dim
             };
 
-            // Format: "▶ Name             Description"
+            // Format: "▶ Name             Description" with stats right-justified
             const spacing = "  ";
 
-            var segments = [_]vaxis.Cell.Segment{
-                .{ .text = indicator, .style = indicator_style },
-                .{ .text = cmd.display_name, .style = name_style },
-                .{ .text = spacing, .style = .{} },
-                .{ .text = cmd.description, .style = desc_style },
-            };
+            // Build left-side segments (indicator, name, description)
+            var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
+            defer segments.deinit();
 
-            _ = try palette_win.print(&segments, .{ .row_offset = row });
+            try segments.append(.{ .text = indicator, .style = indicator_style });
+            try segments.append(.{ .text = cmd.display_name, .style = name_style });
+            try segments.append(.{ .text = spacing, .style = .{} });
+            try segments.append(.{ .text = cmd.description, .style = desc_style });
+
+            // Add colored stats for file commands and diff commands (right-justified)
+            if ((cmd.category == .file or cmd.category == .diff) and (cmd.additions > 0 or cmd.deletions > 0)) {
+                // Calculate actual stats text width
+                var stats_buf: [32]u8 = undefined;
+                const stats_preview = try std.fmt.bufPrint(&stats_buf, "(+{d}, -{d})", .{ cmd.additions, cmd.deletions });
+                const stats_width = stats_preview.len;
+
+                // Calculate padding needed for right justification
+                const right_margin = 2;
+                const fixed_indicator_width = 2; // "▶ " or "  "
+
+                // Calculate current line width (use fixed width for indicator to avoid shift when selected)
+                const current_width = fixed_indicator_width + cmd.display_name.len + spacing.len + cmd.description.len;
+                const available_width = if (palette_width > right_margin + stats_width)
+                    palette_width - right_margin - stats_width
+                else
+                    palette_width - stats_width;
+
+                const padding_needed = if (available_width > current_width)
+                    available_width - current_width
+                else
+                    2; // Minimum spacing
+
+                // Add padding before stats
+                var padding_buf: [100]u8 = undefined;
+                @memset(&padding_buf, ' ');
+                const padding = padding_buf[0..@min(padding_needed, padding_buf.len)];
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, padding), .style = .{} });
+
+                // Add colored stats segments
+                const additions_text = try std.fmt.allocPrint(app.allocator, "+{d}", .{cmd.additions});
+                defer app.allocator.free(additions_text);
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, additions_text), .style = .{ .fg = .{ .index = 2 }, .bold = true } });
+
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, ", "), .style = .{} });
+
+                const deletions_text = try std.fmt.allocPrint(app.allocator, "-{d}", .{cmd.deletions});
+                defer app.allocator.free(deletions_text);
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, deletions_text), .style = .{ .fg = .{ .index = 1 }, .bold = true } });
+            }
+
+            _ = try palette_win.print(segments.items, .{ .row_offset = row });
         }
 
         // Show scroll indicator if there are more items

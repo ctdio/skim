@@ -280,6 +280,26 @@ pub const StateHelpers = struct {
         return .{ .additions = additions, .deletions = deletions };
     }
 
+    // Calculate total additions and deletions across all files
+    pub fn calculateTotalDiffStats(_: *App, files: []const parser.FileDiff) struct { files: usize, additions: usize, deletions: usize } {
+        var total_additions: usize = 0;
+        var total_deletions: usize = 0;
+
+        for (files) |*file| {
+            for (file.hunks) |hunk| {
+                for (hunk.lines) |line| {
+                    switch (line.line_type) {
+                        .add => total_additions += 1,
+                        .delete => total_deletions += 1,
+                        .context => {},
+                    }
+                }
+            }
+        }
+
+        return .{ .files = files.len, .additions = total_additions, .deletions = total_deletions };
+    }
+
     // Calculate byte offset of a line in the NEW file content
     // Used to map line positions to highlight byte offsets
     // Skips deletions since they're not in the reconstructed file

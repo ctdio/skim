@@ -113,6 +113,131 @@ fn runGitCommand(allocator: Allocator, args: []const []const u8) ![]u8 {
     return stdout;
 }
 
+/// Quick stats result
+pub const DiffStats = struct {
+    files: usize,
+    additions: usize,
+    deletions: usize,
+};
+
+/// Get quick diff stats using --shortstat (very fast)
+pub fn getDiffStats(allocator: Allocator, source: DiffSource) !DiffStats {
+    var args = std.ArrayList([]const u8).init(allocator);
+    defer args.deinit();
+
+    try args.append("git");
+    try args.append("diff");
+    try args.append("--shortstat");
+
+    switch (source) {
+        .working_dir => |wd| {
+            if (wd.staged) {
+                try args.append("--cached");
+            }
+        },
+        .single_ref => |sr| {
+            if (sr.staged) {
+                try args.append("--cached");
+            }
+            try args.append(sr.ref);
+        },
+        .two_refs => |tr| {
+            if (tr.use_merge_base) {
+                var range_buf: [512]u8 = undefined;
+                const range = try std.fmt.bufPrint(&range_buf, "{s}...{s}", .{ tr.ref1, tr.ref2 });
+                const range_owned = try allocator.dupe(u8, range);
+                errdefer allocator.free(range_owned);
+                try args.append(range_owned);
+            } else {
+                try args.append(tr.ref1);
+                try args.append(tr.ref2);
+            }
+        },
+    }
+
+    const output = runGitCommand(allocator, args.items) catch |err| {
+        // Free any allocated range strings before returning error
+        switch (source) {
+            .two_refs => |tr| {
+                if (tr.use_merge_base and args.items.len > 0) {
+                    for (args.items) |arg| {
+                        const is_git = std.mem.eql(u8, arg, "git");
+                        const is_diff = std.mem.eql(u8, arg, "diff");
+                        const is_flag = arg.len > 0 and arg[0] == '-';
+                        if (!is_git and !is_diff and !is_flag) {
+                            allocator.free(arg);
+                            break;
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+        return err;
+    };
+    defer allocator.free(output);
+
+    // Free any allocated range strings
+    switch (source) {
+        .two_refs => |tr| {
+            if (tr.use_merge_base and args.items.len > 0) {
+                for (args.items) |arg| {
+                    const is_git = std.mem.eql(u8, arg, "git");
+                    const is_diff = std.mem.eql(u8, arg, "diff");
+                    const is_flag = arg.len > 0 and arg[0] == '-';
+                    if (!is_git and !is_diff and !is_flag) {
+                        allocator.free(arg);
+                        break;
+                    }
+                }
+            }
+        },
+        else => {},
+    }
+
+    // Parse shortstat output
+    // Format: " 3 files changed, 25 insertions(+), 10 deletions(-)"
+    // or: " 1 file changed, 5 insertions(+)"
+    // or: "" (no changes)
+    if (output.len == 0) {
+        return DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+    }
+
+    var files: usize = 0;
+    var additions: usize = 0;
+    var deletions: usize = 0;
+
+    var iter = std.mem.tokenizeAny(u8, output, " ,\n");
+    while (iter.next()) |token| {
+        if (std.mem.eql(u8, token, "file") or std.mem.eql(u8, token, "files")) {
+            // Previous token should be the number
+            continue;
+        } else if (std.mem.eql(u8, token, "changed")) {
+            continue;
+        } else if (std.mem.eql(u8, token, "insertion") or std.mem.eql(u8, token, "insertions(+)")) {
+            continue;
+        } else if (std.mem.eql(u8, token, "deletion") or std.mem.eql(u8, token, "deletions(-)")) {
+            continue;
+        } else {
+            // Try to parse as number
+            const num = std.fmt.parseInt(usize, token, 10) catch continue;
+            // Look ahead to see what this number represents
+            const next = iter.peek();
+            if (next) |n| {
+                if (std.mem.indexOf(u8, n, "file") != null) {
+                    files = num;
+                } else if (std.mem.indexOf(u8, n, "insertion") != null) {
+                    additions = num;
+                } else if (std.mem.indexOf(u8, n, "deletion") != null) {
+                    deletions = num;
+                }
+            }
+        }
+    }
+
+    return DiffStats{ .files = files, .additions = additions, .deletions = deletions };
+}
+
 /// Get list of changed files (fast, without full diff)
 pub fn getChangedFiles(allocator: Allocator, source: DiffSource) ![]FileStatus {
     var args = std.ArrayList([]const u8).init(allocator);

@@ -109,6 +109,13 @@ pub const App = struct {
         branch_search_len: usize, // Length of search query
         filtered_branches: std.ArrayList(usize), // Indices of branches matching search query
 
+        // Cached stats for menu items (fetched once when entering empty menu mode)
+        menu_stats_cached: bool, // Whether stats have been fetched
+        working_stats: git.DiffStats,
+        staged_stats: git.DiffStats,
+        main_stats: git.DiffStats,
+        branch_stats_cache: std.AutoHashMap(usize, git.DiffStats), // branch_idx -> stats
+
         const ViewMode = enum {
             unified,
             side_by_side,
@@ -262,6 +269,11 @@ pub const App = struct {
                 .branch_search_query = undefined,
                 .branch_search_len = 0,
                 .filtered_branches = std.ArrayList(usize).init(allocator),
+                .menu_stats_cached = false,
+                .working_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
+                .staged_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
+                .main_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
+                .branch_stats_cache = std.AutoHashMap(usize, git.DiffStats).init(allocator),
             },
             .should_quit = false,
             .should_suspend_for_editor = false,
@@ -1604,14 +1616,14 @@ pub const App = struct {
     fn startCommandPalette(self: *App) !void {
         self.state.command_palette_state.reset();
         // Build command registry with current files
-        try self.state.command_palette_state.buildCommandRegistry(self.state.files);
+        try self.state.command_palette_state.buildCommandRegistry(self, self.state.files);
         self.mode = .command_palette;
     }
 
     fn startCommandPaletteInCommandMode(self: *App) !void {
         self.state.command_palette_state.reset();
         // Build command registry with current files
-        try self.state.command_palette_state.buildCommandRegistry(self.state.files);
+        try self.state.command_palette_state.buildCommandRegistry(self, self.state.files);
         // Pre-populate with '>' to start in command mode
         self.state.command_palette_state.query_buffer[0] = '>';
         self.state.command_palette_state.query_len = 1;
@@ -2115,12 +2127,11 @@ pub const App = struct {
             .staged => DiffSource{ .working_dir = .{ .staged = true } },
             .main => blk: {
                 const default_branch = try git.detectDefaultBranch(self.allocator);
-                errdefer self.allocator.free(default_branch);
-                const head = try self.allocator.dupe(u8, "HEAD");
-                break :blk DiffSource{ .two_refs = .{
-                    .ref1 = default_branch,
-                    .ref2 = head,
-                    .use_merge_base = true,
+                // Use single_ref to match command-line behavior (skim main)
+                // This compares working tree to default branch
+                break :blk DiffSource{ .single_ref = .{
+                    .ref = default_branch,
+                    .staged = false,
                 } };
             },
         };

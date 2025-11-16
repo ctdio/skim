@@ -107,13 +107,38 @@ pub const UI = struct {
         const title = "No changes to review";
         const subtitle = "Select a diff source:";
 
-        const menu_items = [_]struct { label: []const u8, description: []const u8 }{
-            .{ .label = "Working directory", .description = "Uncommitted changes" },
-            .{ .label = "Staged changes", .description = "Changes ready to commit" },
-            .{ .label = "Main branch", .description = "Compare against main" },
-            .{ .label = "Select branch...", .description = "Choose a specific branch" },
-            .{ .label = "Refresh", .description = "Reload current diff source" },
-            .{ .label = "Quit", .description = "Exit Skim" },
+        // Fetch stats for each menu option
+        const working_stats = git.getDiffStats(app.allocator, .{ .working_dir = .{ .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+        const staged_stats = git.getDiffStats(app.allocator, .{ .working_dir = .{ .staged = true } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+
+        // Detect default branch and fetch stats (matches switchDiffMode behavior)
+        const default_branch = git.detectDefaultBranch(app.allocator) catch "main";
+        defer if (!std.mem.eql(u8, default_branch, "main")) app.allocator.free(default_branch);
+        const main_stats = git.getDiffStats(app.allocator, .{ .single_ref = .{ .ref = default_branch, .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+
+        // MenuItem struct with optional stats for colored rendering
+        const MenuItem = struct {
+            label: []const u8,
+            description_prefix: []const u8,
+            stats: ?git.DiffStats,
+        };
+
+        var working_label_buf: [128]u8 = undefined;
+        const working_label = try std.fmt.bufPrint(&working_label_buf, "Uncommitted changes (", .{});
+
+        var staged_label_buf: [128]u8 = undefined;
+        const staged_label = try std.fmt.bufPrint(&staged_label_buf, "Changes ready to commit (", .{});
+
+        var main_label_buf: [128]u8 = undefined;
+        const main_label = try std.fmt.bufPrint(&main_label_buf, "Compare against {s} (", .{default_branch});
+
+        const menu_items = [_]MenuItem{
+            .{ .label = "Working directory", .description_prefix = working_label, .stats = working_stats },
+            .{ .label = "Staged changes", .description_prefix = staged_label, .stats = staged_stats },
+            .{ .label = "Main branch", .description_prefix = main_label, .stats = main_stats },
+            .{ .label = "Select branch...", .description_prefix = "Choose a specific branch", .stats = null },
+            .{ .label = "Refresh", .description_prefix = "Reload current diff source", .stats = null },
+            .{ .label = "Quit", .description_prefix = "Exit Skim", .stats = null },
         };
 
         const center_row = win.height / 2;
@@ -141,7 +166,9 @@ pub const UI = struct {
         const separator = " - ";
         var max_len: usize = 0;
         for (menu_items) |item| {
-            const item_len = item.label.len + separator.len + item.description.len;
+            // Calculate length including stats if present (e.g., "5 files, +10, -5)")
+            const stats_len: usize = if (item.stats) |_| 30 else 0; // Approximate length for stats
+            const item_len = item.label.len + separator.len + item.description_prefix.len + stats_len;
             if (item_len > max_len) {
                 max_len = item_len;
             }
@@ -158,18 +185,44 @@ pub const UI = struct {
             // All items start at the same column (left-aligned within centered block)
             const item_col = menu_start_col;
 
-            // Render the menu item text
+            // Build segments dynamically with colored stats
+            var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
+            defer segments.deinit();
+
+            // Label
             const label_copy = try RenderUtils.copyFrameText(app, item.label);
+            try segments.append(.{ .text = label_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+
+            // Separator
             const separator_copy = try RenderUtils.copyFrameText(app, separator);
-            const desc_copy = try RenderUtils.copyFrameText(app, item.description);
+            try segments.append(.{ .text = separator_copy, .style = .{ .fg = Color.dim } });
 
-            var segments = [_]vaxis.Cell.Segment{
-                .{ .text = label_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } },
-                .{ .text = separator_copy, .style = .{ .fg = Color.dim } },
-                .{ .text = desc_copy, .style = .{ .fg = Color.dim } },
-            };
+            // Description prefix
+            const desc_copy = try RenderUtils.copyFrameText(app, item.description_prefix);
+            try segments.append(.{ .text = desc_copy, .style = .{ .fg = Color.dim } });
 
-            _ = try win.print(&segments, .{ .row_offset = row, .col_offset = item_col });
+            // Add colored stats if present
+            if (item.stats) |stats| {
+                var files_buf: [32]u8 = undefined;
+                const files_text = try std.fmt.bufPrint(&files_buf, "{d} files, ", .{stats.files});
+                const files_copy = try RenderUtils.copyFrameText(app, files_text);
+                try segments.append(.{ .text = files_copy, .style = .{ .fg = Color.dim } });
+
+                var additions_buf: [16]u8 = undefined;
+                const additions_text = try std.fmt.bufPrint(&additions_buf, "+{d}", .{stats.additions});
+                const additions_copy = try RenderUtils.copyFrameText(app, additions_text);
+                try segments.append(.{ .text = additions_copy, .style = .{ .fg = Color.diff_sign_add, .bold = true } });
+
+                var deletions_buf: [16]u8 = undefined;
+                const deletions_text = try std.fmt.bufPrint(&deletions_buf, ", -{d}", .{stats.deletions});
+                const deletions_copy = try RenderUtils.copyFrameText(app, deletions_text);
+                try segments.append(.{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } });
+
+                const closing_paren = try RenderUtils.copyFrameText(app, ")");
+                try segments.append(.{ .text = closing_paren, .style = .{ .fg = Color.dim } });
+            }
+
+            _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = item_col });
 
             // Render caret to the left of selected item (if there's space)
             if (is_selected and item_col >= caret_offset) {
@@ -241,12 +294,13 @@ pub const UI = struct {
             }};
             _ = try win.print(&no_matches_seg, .{ .row_offset = start_row + 4, .col_offset = no_matches_col });
         } else {
-            // Find longest branch name to center the block
+            // Estimate max length including stats (branch name + stats format ~30 chars)
             var max_len: usize = 0;
             for (filtered) |branch_idx| {
                 const branch = app.state.branch_list[branch_idx];
-                if (branch.len > max_len) {
-                    max_len = branch.len;
+                const estimated_len = branch.len + 30; // Approximate space for stats
+                if (estimated_len > max_len) {
+                    max_len = estimated_len;
                 }
             }
 
@@ -268,13 +322,41 @@ pub const UI = struct {
                 const branch = app.state.branch_list[branch_idx];
                 const is_selected = idx == app.state.branch_selection;
 
-            // Render branch name
-            const branch_copy = try RenderUtils.copyFrameText(app, branch);
-            var branch_seg = [_]vaxis.Cell.Segment{.{
-                .text = branch_copy,
-                .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected },
-            }};
-            _ = try win.print(&branch_seg, .{ .row_offset = row, .col_offset = menu_start_col });
+                // Fetch stats for this branch (compare HEAD to branch)
+                const branch_stats = git.getDiffStats(app.allocator, .{ .two_refs = .{ .ref1 = branch, .ref2 = "HEAD", .use_merge_base = true } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+
+                // Build segments with colored stats
+                var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
+                defer segments.deinit();
+
+                // Branch name
+                const branch_copy = try RenderUtils.copyFrameText(app, branch);
+                try segments.append(.{ .text = branch_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+
+                // Stats with colors
+                const opening_paren = try RenderUtils.copyFrameText(app, "  (");
+                try segments.append(.{ .text = opening_paren, .style = .{ .fg = Color.dim } });
+
+                var files_buf: [32]u8 = undefined;
+                const files_text = try std.fmt.bufPrint(&files_buf, "{d} files, ", .{branch_stats.files});
+                const files_copy = try RenderUtils.copyFrameText(app, files_text);
+                try segments.append(.{ .text = files_copy, .style = .{ .fg = Color.dim } });
+
+                var additions_buf: [16]u8 = undefined;
+                const additions_text = try std.fmt.bufPrint(&additions_buf, "+{d}", .{branch_stats.additions});
+                const additions_copy = try RenderUtils.copyFrameText(app, additions_text);
+                try segments.append(.{ .text = additions_copy, .style = .{ .fg = Color.diff_sign_add, .bold = true } });
+
+                var deletions_buf: [16]u8 = undefined;
+                const deletions_text = try std.fmt.bufPrint(&deletions_buf, ", -{d}", .{branch_stats.deletions});
+                const deletions_copy = try RenderUtils.copyFrameText(app, deletions_text);
+                try segments.append(.{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } });
+
+                const closing_paren = try RenderUtils.copyFrameText(app, ")");
+                try segments.append(.{ .text = closing_paren, .style = .{ .fg = Color.dim } });
+
+                // Render branch with colored stats
+                _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = menu_start_col });
 
                 // Render caret for selected branch
                 if (is_selected and menu_start_col >= caret_offset) {
