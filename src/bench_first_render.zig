@@ -1,7 +1,7 @@
 const std = @import("std");
 const git = @import("git/diff.zig");
 const parser = @import("git/parser.zig");
-const syntax = @import("syntax.zig");
+const syntax = @import("highlighting/core.zig");
 const DiffSource = git.DiffSource;
 
 pub fn main() !void {

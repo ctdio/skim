@@ -3,20 +3,20 @@ const zts = @import("zts");
 
 // Embed highlight query files at compile time
 // Programming languages
-const JAVASCRIPT_HIGHLIGHTS = @embedFile("queries/javascript.scm");
-const TYPESCRIPT_HIGHLIGHTS = @embedFile("queries/typescript.scm");
-const PYTHON_HIGHLIGHTS = @embedFile("queries/python.scm");
-const RUST_HIGHLIGHTS = @embedFile("queries/rust.scm");
-const GO_HIGHLIGHTS = @embedFile("queries/go.scm");
-const ZIG_HIGHLIGHTS = @embedFile("queries/zig.scm");
-const C_HIGHLIGHTS = @embedFile("queries/c.scm");
-const CPP_HIGHLIGHTS = @embedFile("queries/cpp.scm");
+const JAVASCRIPT_HIGHLIGHTS = @embedFile("../queries/javascript.scm");
+const TYPESCRIPT_HIGHLIGHTS = @embedFile("../queries/typescript.scm");
+const PYTHON_HIGHLIGHTS = @embedFile("../queries/python.scm");
+const RUST_HIGHLIGHTS = @embedFile("../queries/rust.scm");
+const GO_HIGHLIGHTS = @embedFile("../queries/go.scm");
+const ZIG_HIGHLIGHTS = @embedFile("../queries/zig.scm");
+const C_HIGHLIGHTS = @embedFile("../queries/c.scm");
+const CPP_HIGHLIGHTS = @embedFile("../queries/cpp.scm");
 // Common file formats
-const JSON_HIGHLIGHTS = @embedFile("queries/json.scm");
-const TOML_HIGHLIGHTS = @embedFile("queries/toml.scm");
-const MARKDOWN_HIGHLIGHTS = @embedFile("queries/markdown.scm");
-const CSS_HIGHLIGHTS = @embedFile("queries/css.scm");
-const BASH_HIGHLIGHTS = @embedFile("queries/bash.scm");
+const JSON_HIGHLIGHTS = @embedFile("../queries/json.scm");
+const TOML_HIGHLIGHTS = @embedFile("../queries/toml.scm");
+const MARKDOWN_HIGHLIGHTS = @embedFile("../queries/markdown.scm");
+const CSS_HIGHLIGHTS = @embedFile("../queries/css.scm");
+const BASH_HIGHLIGHTS = @embedFile("../queries/bash.scm");
 
 // Supported languages and file formats for syntax highlighting
 pub const Language = enum {

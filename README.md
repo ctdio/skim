@@ -177,31 +177,21 @@ Edit comments on specific lines:
 
 ## Architecture
 
+See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
+
+**Quick Overview:**
 ```
 src/
-├── main.zig              # CLI arg parsing and initialization
-├── app.zig               # State machine, event handling, rendering coordination
-├── line_map.zig          # Pre-computed position registry (single source of truth)
-├── comments.zig          # Comment storage and management
-├── navigation.zig        # Cursor and file navigation logic
-├── state.zig             # State helpers and async highlighting
-├── ui.zig                # UI components (header, status, dividers)
-├── editor.zig            # External editor integration (Ctrl-g)
-├── syntax.zig            # Tree-sitter integration
-├── git/
-│   ├── diff.zig          # Git command execution
-│   └── parser.zig        # Unified diff parser (single-pass O(n))
-├── rendering/
-│   ├── common.zig        # Shared types (Color, Layout, FrameChars)
-│   ├── utils.zig         # Frame buffer management
-│   ├── file_header.zig   # File header rendering
-│   ├── unified.zig       # Unified diff view
-│   └── side_by_side.zig  # Side-by-side diff view
-└── queries/
-    └── *.scm             # Tree-sitter highlighting queries
+├── main.zig              # CLI entry point
+├── app.zig               # State machine, event handling
+├── line_map.zig          # Position registry (single source of truth)
+├── git/                  # Git command execution and parsing
+├── rendering/            # Unified and side-by-side renderers
+├── modes/                # Mode handlers (normal, comment, search, etc.)
+└── syntax.zig            # Tree-sitter syntax highlighting
 ```
 
-Design decisions:
+**Design Principles:**
 - Shell out to git (respects user config)
 - Single-pass O(n) diff parsing
 - Modal interface (vim-style)

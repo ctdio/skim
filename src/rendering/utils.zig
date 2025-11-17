@@ -1,7 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const parser = @import("../git/parser.zig");
-const comments = @import("../comments.zig");
+const comments = @import("../comments/store.zig");
 const rendering_common = @import("common.zig");
 
 const App = @import("../app.zig").App;

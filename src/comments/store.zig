@@ -1,5 +1,5 @@
 const std = @import("std");
-const parser = @import("git/parser.zig");
+const parser = @import("../git/parser.zig");
 
 const Allocator = std.mem.Allocator;
 

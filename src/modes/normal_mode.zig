@@ -1,0 +1,297 @@
+const std = @import("std");
+const vaxis = @import("vaxis");
+const App = @import("../app.zig").App;
+const FindCommand = @import("../app.zig").App.FindCommand;
+const navigation = @import("../navigation.zig");
+const Navigation = navigation.Navigation;
+
+/// Handle keyboard input when in normal mode
+pub fn handleKey(app: *App, key: vaxis.Key) !void {
+    // Special handling when there are no files (empty menu)
+    if (app.state.files.len == 0) {
+        try handleEmptyMenu(app, key);
+        return;
+    }
+
+    // If waiting for second z for zz (center cursor)
+    if (app.state.pending_z) {
+        app.state.pending_z = false;
+        // ESC cancels pending z
+        if (key.codepoint == 27) { // ESC
+            return;
+        }
+        // If second z, center the viewport on cursor (like vim's zz)
+        if (key.codepoint == 'z') {
+            Navigation.centerViewportOnCursor(app);
+            app.state.cursor_column = 0;
+            app.updateCurrentFileAndTriggerHighlighting();
+            return;
+        }
+        // Any other key cancels the pending z, but still processes the key below
+    }
+
+    // If waiting for second character after [ (like [h for previous hunk)
+    if (app.state.pending_bracket) {
+        app.state.pending_bracket = false;
+        // ESC cancels pending bracket
+        if (key.codepoint == 27) { // ESC
+            return;
+        }
+        // If h, jump to previous hunk
+        if (key.codepoint == 'h') {
+            Navigation.jumpToPreviousHunk(app);
+            app.state.cursor_column = 0;
+            app.updateCurrentFileAndTriggerHighlighting();
+            return;
+        }
+        // Any other key cancels the pending bracket, but still processes the key below
+    }
+
+    // If waiting for second character after ] (like ]h for next hunk)
+    if (app.state.pending_close_bracket) {
+        app.state.pending_close_bracket = false;
+        // ESC cancels pending close bracket
+        if (key.codepoint == 27) { // ESC
+            return;
+        }
+        // If h, jump to next hunk
+        if (key.codepoint == 'h') {
+            Navigation.jumpToNextHunk(app);
+            app.state.cursor_column = 0;
+            app.updateCurrentFileAndTriggerHighlighting();
+            return;
+        }
+        // Any other key cancels the pending close bracket, but still processes the key below
+    }
+
+    // If waiting for character for f/t/F/T, execute the find
+    if (app.state.pending_find) |cmd| {
+        app.state.pending_find = null;
+        // ESC cancels pending find
+        if (key.codepoint == 27) { // ESC
+            return;
+        }
+        // Convert key to u8 if it's a printable character
+        if (key.codepoint >= 0 and key.codepoint <= 127) {
+            const target_char: u8 = @intCast(key.codepoint);
+            app.executeFindInLine(cmd, target_char);
+        }
+        return;
+    }
+
+    // Handle Ctrl+key combinations first (before regular key handling)
+    if (key.mods.ctrl) {
+        switch (key.codepoint) {
+            'n' => {
+                Navigation.navigateToNextFile(app);
+                app.state.cursor_column = 0; // Reset column on file change
+            },
+            'p', 'P' => {
+                // Ctrl-P: Open file palette (VSCode-style)
+                // Ctrl-Shift-P: Try to open command palette (if terminal supports it)
+                if (key.mods.shift or key.codepoint == 'P') {
+                    try app.startCommandPaletteInCommandMode();
+                } else {
+                    try app.startCommandPalette();
+                }
+            },
+            'd' => {
+                Navigation.pageDown(app);
+                app.state.cursor_column = 0; // Reset column on page navigation
+                app.updateCurrentFileAndTriggerHighlighting();
+            },
+            'u' => {
+                Navigation.pageUp(app);
+                app.state.cursor_column = 0; // Reset column on page navigation
+                app.updateCurrentFileAndTriggerHighlighting();
+            },
+            'g' => try app.openInEditor(),
+            else => {},
+        }
+        return;
+    }
+
+    // Handle digit keys for count prefix (1-9, not 0 to match vim)
+    if (!key.mods.alt and !key.mods.shift) {
+        if (key.codepoint >= '1' and key.codepoint <= '9') {
+            const digit = @as(usize, @intCast(key.codepoint - '0'));
+            if (app.state.count_prefix) |count| {
+                app.state.count_prefix = count * 10 + digit;
+            } else {
+                app.state.count_prefix = digit;
+            }
+            return;
+        }
+        // Handle 0 - append to existing count, or go to start of line (not applicable here)
+        if (key.codepoint == '0' and app.state.count_prefix != null) {
+            app.state.count_prefix = app.state.count_prefix.? * 10;
+            return;
+        }
+    }
+
+    // Handle Shift+Tab before the main switch
+    if (key.mods.shift and key.codepoint == '\t') {
+        try app.cycleHunkViewModePrev();
+        return;
+    }
+
+    switch (key.codepoint) {
+        'q' => app.should_quit = true,
+        'j' => {
+            Navigation.moveCursorDown(app);
+            app.state.cursor_column = 0; // Reset column on vertical movement
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        'k' => {
+            Navigation.moveCursorUp(app);
+            app.state.cursor_column = 0; // Reset column on vertical movement
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        'h' => {
+            Navigation.navigateToPreviousFile(app);
+            app.state.cursor_column = 0; // Reset column on file change
+        },
+        'l' => {
+            Navigation.navigateToNextFile(app);
+            app.state.cursor_column = 0; // Reset column on file change
+        },
+        'g' => {
+            Navigation.scrollToTop(app);
+            app.state.cursor_column = 0; // Reset column on jump
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        'G' => {
+            Navigation.scrollToBottom(app);
+            app.state.cursor_column = 0; // Reset column on jump
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        '\r' => try app.startCommentInput(), // Enter to create/edit comment
+        's' => app.toggleViewMode(),
+        '\t' => try app.cycleHunkViewMode(), // Tab to cycle hunk view mode forward
+        'r' => try app.refresh(),
+        'y' => try app.yankCommentsToClipboard(),
+        'd' => try app.deleteCommentUnderCursor(),
+        'D' => app.clearAllComments(),
+        'M' => {
+            Navigation.centerCursor(app);
+            app.state.cursor_column = 0; // Reset column on center
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        '/' => app.startSearch(),
+        ':' => try app.startCommandPaletteInCommandMode(), // Vim-style command mode
+        'n' => {
+            app.searchNext();
+            app.state.cursor_column = 0; // Reset column on search jump
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        'N' => {
+            app.searchPrevious();
+            app.state.cursor_column = 0; // Reset column on search jump
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        'v', 'V' => app.startVisualMode(), // v or Shift+V to start visual mode
+        'f' => app.state.pending_find = .f, // Wait for character to find forward
+        't' => app.state.pending_find = .t, // Wait for character to move till forward
+        'F' => app.state.pending_find = .F, // Wait for character to find backward
+        'T' => app.state.pending_find = .T, // Wait for character to move till backward
+        ';' => { // Repeat last find in same direction
+            if (app.state.last_find) |last| {
+                app.executeFindInLine(last.command, last.char);
+            }
+        },
+        ',' => { // Repeat last find in opposite direction
+            if (app.state.last_find) |last| {
+                const opposite_cmd = switch (last.command) {
+                    .f => FindCommand.F,
+                    .F => FindCommand.f,
+                    .t => FindCommand.T,
+                    .T => FindCommand.t,
+                };
+                app.executeFindInLine(opposite_cmd, last.char);
+            }
+        },
+        'z' => app.state.pending_z = true, // Wait for second z for zz (center cursor)
+        '[' => app.state.pending_bracket = true, // Wait for second character (like [h)
+        ']' => app.state.pending_close_bracket = true, // Wait for second character (like ]h)
+        '{' => {
+            Navigation.jumpToPreviousEmptyLine(app);
+            app.state.cursor_column = 0; // Reset column on jump
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        '}' => {
+            Navigation.jumpToNextEmptyLine(app);
+            app.state.cursor_column = 0; // Reset column on jump
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        '?' => app.mode = .help, // Show help overlay
+        else => {
+            // Reset count prefix on any other key
+            app.state.count_prefix = null;
+        },
+    }
+}
+
+/// Handle keyboard input when in empty menu (no files loaded)
+fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
+    const menu_items_count: usize = 6; // working, staged, main, branch, refresh, quit
+
+    // Handle Ctrl+key combinations
+    if (key.mods.ctrl) {
+        switch (key.codepoint) {
+            'n' => {
+                if (app.state.empty_menu_selection < menu_items_count - 1) {
+                    app.state.empty_menu_selection += 1;
+                }
+                return;
+            },
+            'p' => {
+                if (app.state.empty_menu_selection > 0) {
+                    app.state.empty_menu_selection -= 1;
+                }
+                return;
+            },
+            else => {},
+        }
+    }
+
+    // Handle arrow keys
+    if (key.codepoint == vaxis.Key.down) {
+        if (app.state.empty_menu_selection < menu_items_count - 1) {
+            app.state.empty_menu_selection += 1;
+        }
+        return;
+    }
+    if (key.codepoint == vaxis.Key.up) {
+        if (app.state.empty_menu_selection > 0) {
+            app.state.empty_menu_selection -= 1;
+        }
+        return;
+    }
+
+    // Handle regular keys
+    switch (key.codepoint) {
+        'q' => app.should_quit = true,
+        'j' => {
+            if (app.state.empty_menu_selection < menu_items_count - 1) {
+                app.state.empty_menu_selection += 1;
+            }
+        },
+        'k' => {
+            if (app.state.empty_menu_selection > 0) {
+                app.state.empty_menu_selection -= 1;
+            }
+        },
+        '\r' => { // Enter key
+            switch (app.state.empty_menu_selection) {
+                0 => try app.switchDiffMode(.working),
+                1 => try app.switchDiffMode(.staged),
+                2 => try app.switchDiffMode(.main),
+                3 => try app.startBranchSelection(), // Select branch
+                4 => try app.refresh(), // Refresh
+                5 => app.should_quit = true, // Quit
+                else => {},
+            }
+        },
+        else => {},
+    }
+}

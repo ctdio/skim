@@ -1,5 +1,5 @@
 const std = @import("std");
-const syntax = @import("../syntax.zig");
+const syntax = @import("../highlighting/core.zig");
 
 const Allocator = std.mem.Allocator;
 

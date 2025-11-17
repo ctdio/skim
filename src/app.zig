@@ -2,8 +2,8 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const git = @import("git/diff.zig");
 const parser = @import("git/parser.zig");
-const syntax = @import("syntax.zig");
-const comments = @import("comments.zig");
+const syntax = @import("highlighting/core.zig");
+const comments = @import("comments/store.zig");
 const line_map = @import("line_map.zig");
 const navigation = @import("navigation.zig");
 const rendering_common = @import("rendering/common.zig");
@@ -13,9 +13,19 @@ const render_side_by_side = @import("rendering/side_by_side.zig");
 const state_helpers = @import("state.zig");
 const ui_components = @import("ui.zig");
 const editor = @import("editor.zig");
-const comment_editor = @import("comment_editor.zig");
+const comment_editor = @import("comments/editor.zig");
 const command_palette = @import("command_palette.zig");
 const help = @import("help.zig");
+
+// Mode handlers
+const normal_mode = @import("modes/normal_mode.zig");
+const comment_mode = @import("modes/comment_mode.zig");
+const search_mode = @import("modes/search_mode.zig");
+const visual_mode = @import("modes/visual_mode.zig");
+const command_palette_mode = @import("modes/command_palette_mode.zig");
+const help_mode = @import("modes/help_mode.zig");
+const branch_selection_mode = @import("modes/branch_selection_mode.zig");
+
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
 const RenderUtils = render_utils.RenderUtils;
@@ -74,7 +84,7 @@ pub const App = struct {
     };
 
     // Character find commands for NORMAL mode (f/t/F/T)
-    const FindCommand = enum {
+    pub const FindCommand = enum {
         f, // Find character forward (move to char)
         t, // Till character forward (move before char)
         F, // Find character backward
@@ -189,7 +199,7 @@ pub const App = struct {
             self.matches.deinit();
         }
 
-        fn reset(self: *SearchState) void {
+        pub fn reset(self: *SearchState) void {
             self.query_len = 0;
             self.matches.clearRetainingCapacity();
             self.current_match_idx = null;
@@ -419,7 +429,7 @@ pub const App = struct {
     }
 
     // Update current_file_idx based on cursor position and trigger highlighting if file changed
-    fn updateCurrentFileAndTriggerHighlighting(self: *App) void {
+    pub fn updateCurrentFileAndTriggerHighlighting(self: *App) void {
         const cursor_file_idx = self.state.line_map.getFileIndexForLine(self.state.global_cursor_line) orelse return;
 
         // If we moved to a different file, update and request highlighting
@@ -567,21 +577,45 @@ pub const App = struct {
                 }
             }
 
-            // Submit new highlighting jobs
-            if (self.needs_async_highlight and self.state.files.len > 0) {
-                self.needs_async_highlight = false;
+            // Submit highlighting jobs for visible files
+            // Strategy: Highlight files that are currently visible on screen
+            // This ensures smooth scrolling without waiting for highlights
+            if (self.state.files.len > 0) {
+                // Create worker on first use
+                if (self.highlight_worker == null) {
+                    self.highlight_worker = state_helpers.HighlightWorker.init(self.allocator) catch null;
+                }
 
-                const file = &self.state.files[self.state.current_file_idx];
-                const file_idx = self.state.current_file_idx;
+                if (self.highlight_worker) |worker| {
+                    // Determine which files are visible in the viewport
+                    // Strategy: Check files around scroll position (current + next few)
+                    const viewport_height = self.state.viewport_height;
+                    const scroll_line = self.state.global_scroll_offset;
+                    const visible_end = scroll_line + viewport_height;
 
-                // Only submit if file doesn't have highlights and no job is pending
-                if (file.highlights == null and !self.pending_highlight_jobs.contains(file_idx)) {
-                    // Create worker on first use
-                    if (self.highlight_worker == null) {
-                        self.highlight_worker = state_helpers.HighlightWorker.init(self.allocator) catch null;
-                    }
+                    // Start from file at scroll position
+                    const start_file_idx = self.state.line_map.getFileIndexForLine(scroll_line) orelse 0;
 
-                    if (self.highlight_worker) |worker| {
+                    // Submit jobs for visible files (current + up to 3 ahead for smooth scrolling)
+                    var files_submitted: usize = 0;
+                    var check_idx = start_file_idx;
+                    while (check_idx < self.state.files.len and files_submitted < 4) : (check_idx += 1) {
+                        const file = &self.state.files[check_idx];
+
+                        // Skip if already highlighted or job pending
+                        if (file.highlights != null or self.pending_highlight_jobs.contains(check_idx)) {
+                            continue;
+                        }
+
+                        // Check if this file is visible or close to visible
+                        if (self.state.line_map.getFileHeaderLine(check_idx)) |file_header_line| {
+                            // Only submit if file starts before end of viewport + buffer
+                            const buffer_lines = viewport_height; // One screen ahead
+                            if (file_header_line > visible_end + buffer_lines) {
+                                break; // File is too far ahead
+                            }
+                        }
+
                         // Build NEW file content (add/context lines)
                         const content = StateHelpers.buildFileContent(self.allocator, file) catch continue;
                         errdefer self.allocator.free(content);
@@ -599,7 +633,7 @@ pub const App = struct {
                             .file_path = file_path,
                             .content = content,
                             .old_content = old_content,
-                            .file_idx = file_idx,
+                            .file_idx = check_idx,
                         }) catch {
                             self.allocator.free(content);
                             self.allocator.free(old_content);
@@ -607,15 +641,20 @@ pub const App = struct {
                         };
 
                         // Track pending job (store both content strings)
-                        self.pending_highlight_jobs.put(file_idx, .{
+                        self.pending_highlight_jobs.put(check_idx, .{
                             .content = content,
                             .old_content = old_content,
                         }) catch {
                             self.allocator.free(content);
                             self.allocator.free(old_content);
                         };
+
+                        files_submitted += 1;
                     }
                 }
+
+                // Reset the flag after processing
+                self.needs_async_highlight = false;
             }
         }
 
@@ -683,242 +722,17 @@ pub const App = struct {
         self.last_ctrl_c = 0;
 
         switch (self.mode) {
-            .normal => try self.handleNormalMode(key),
-            .comment => try self.handleCommentMode(key),
-            .search => try self.handleSearchMode(key),
-            .visual => try self.handleVisualMode(key),
-            .command_palette => try self.handleCommandPaletteMode(key),
-            .help => try self.handleHelpMode(key),
-            .branch_selection => try self.handleBranchSelectionMode(key),
+            .normal => try normal_mode.handleKey(self, key),
+            .comment => try comment_mode.handleKey(self, key),
+            .search => try search_mode.handleKey(self, key),
+            .visual => try visual_mode.handleKey(self, key),
+            .command_palette => try command_palette_mode.handleKey(self, key),
+            .help => try help_mode.handleKey(self, key),
+            .branch_selection => try branch_selection_mode.handleKey(self, key),
         }
     }
 
-    fn handleNormalMode(self: *App, key: vaxis.Key) !void {
-        // Special handling when there are no files (empty menu)
-        if (self.state.files.len == 0) {
-            try self.handleEmptyMenu(key);
-            return;
-        }
-
-        // If waiting for second z for zz (center cursor)
-        if (self.state.pending_z) {
-            self.state.pending_z = false;
-            // ESC cancels pending z
-            if (key.codepoint == 27) { // ESC
-                return;
-            }
-            // If second z, center the viewport on cursor (like vim's zz)
-            if (key.codepoint == 'z') {
-                Navigation.centerViewportOnCursor(self);
-                self.state.cursor_column = 0;
-                self.updateCurrentFileAndTriggerHighlighting();
-                return;
-            }
-            // Any other key cancels the pending z, but still processes the key below
-        }
-
-        // If waiting for second character after [ (like [h for previous hunk)
-        if (self.state.pending_bracket) {
-            self.state.pending_bracket = false;
-            // ESC cancels pending bracket
-            if (key.codepoint == 27) { // ESC
-                return;
-            }
-            // If h, jump to previous hunk
-            if (key.codepoint == 'h') {
-                Navigation.jumpToPreviousHunk(self);
-                self.state.cursor_column = 0;
-                self.updateCurrentFileAndTriggerHighlighting();
-                return;
-            }
-            // Any other key cancels the pending bracket, but still processes the key below
-        }
-
-        // If waiting for second character after ] (like ]h for next hunk)
-        if (self.state.pending_close_bracket) {
-            self.state.pending_close_bracket = false;
-            // ESC cancels pending close bracket
-            if (key.codepoint == 27) { // ESC
-                return;
-            }
-            // If h, jump to next hunk
-            if (key.codepoint == 'h') {
-                Navigation.jumpToNextHunk(self);
-                self.state.cursor_column = 0;
-                self.updateCurrentFileAndTriggerHighlighting();
-                return;
-            }
-            // Any other key cancels the pending close bracket, but still processes the key below
-        }
-
-        // If waiting for character for f/t/F/T, execute the find
-        if (self.state.pending_find) |cmd| {
-            self.state.pending_find = null;
-            // ESC cancels pending find
-            if (key.codepoint == 27) { // ESC
-                return;
-            }
-            // Convert key to u8 if it's a printable character
-            if (key.codepoint >= 0 and key.codepoint <= 127) {
-                const target_char: u8 = @intCast(key.codepoint);
-                self.executeFindInLine(cmd, target_char);
-            }
-            return;
-        }
-
-        // Handle Ctrl+key combinations first (before regular key handling)
-        if (key.mods.ctrl) {
-            switch (key.codepoint) {
-                'n' => {
-                    Navigation.navigateToNextFile(self);
-                    self.state.cursor_column = 0; // Reset column on file change
-                },
-                'p', 'P' => {
-                    // Ctrl-P: Open file palette (VSCode-style)
-                    // Ctrl-Shift-P: Try to open command palette (if terminal supports it)
-                    if (key.mods.shift or key.codepoint == 'P') {
-                        try self.startCommandPaletteInCommandMode();
-                    } else {
-                        try self.startCommandPalette();
-                    }
-                },
-                'd' => {
-                    Navigation.pageDown(self);
-                    self.state.cursor_column = 0; // Reset column on page navigation
-                    self.updateCurrentFileAndTriggerHighlighting();
-                },
-                'u' => {
-                    Navigation.pageUp(self);
-                    self.state.cursor_column = 0; // Reset column on page navigation
-                    self.updateCurrentFileAndTriggerHighlighting();
-                },
-                'g' => try self.openInEditor(),
-                else => {},
-            }
-            return;
-        }
-
-        // Handle digit keys for count prefix (1-9, not 0 to match vim)
-        if (!key.mods.alt and !key.mods.shift) {
-            if (key.codepoint >= '1' and key.codepoint <= '9') {
-                const digit = @as(usize, @intCast(key.codepoint - '0'));
-                if (self.state.count_prefix) |count| {
-                    self.state.count_prefix = count * 10 + digit;
-                } else {
-                    self.state.count_prefix = digit;
-                }
-                return;
-            }
-            // Handle 0 - append to existing count, or go to start of line (not applicable here)
-            if (key.codepoint == '0' and self.state.count_prefix != null) {
-                self.state.count_prefix = self.state.count_prefix.? * 10;
-                return;
-            }
-        }
-
-        // Handle Shift+Tab before the main switch
-        if (key.mods.shift and key.codepoint == '\t') {
-            try self.cycleHunkViewModePrev();
-            return;
-        }
-
-        switch (key.codepoint) {
-            'q' => self.should_quit = true,
-            'j' => {
-                Navigation.moveCursorDown(self);
-                self.state.cursor_column = 0; // Reset column on vertical movement
-                self.updateCurrentFileAndTriggerHighlighting();
-            },
-            'k' => {
-                Navigation.moveCursorUp(self);
-                self.state.cursor_column = 0; // Reset column on vertical movement
-                self.updateCurrentFileAndTriggerHighlighting();
-            },
-            'h' => {
-                Navigation.navigateToPreviousFile(self);
-                self.state.cursor_column = 0; // Reset column on file change
-            },
-            'l' => {
-                Navigation.navigateToNextFile(self);
-                self.state.cursor_column = 0; // Reset column on file change
-            },
-            'g' => {
-                Navigation.scrollToTop(self);
-                self.state.cursor_column = 0; // Reset column on jump
-                self.updateCurrentFileAndTriggerHighlighting();
-            },
-            'G' => {
-                Navigation.scrollToBottom(self);
-                self.state.cursor_column = 0; // Reset column on jump
-                self.updateCurrentFileAndTriggerHighlighting();
-            },
-            '\r' => try self.startCommentInput(), // Enter to create/edit comment
-            's' => self.toggleViewMode(),
-            '\t' => try self.cycleHunkViewMode(), // Tab to cycle hunk view mode forward
-            'r' => try self.refresh(),
-            'y' => try self.yankCommentsToClipboard(),
-            'd' => try self.deleteCommentUnderCursor(),
-            'D' => self.clearAllComments(),
-            'M' => {
-                Navigation.centerCursor(self);
-                self.state.cursor_column = 0; // Reset column on center
-                self.updateCurrentFileAndTriggerHighlighting();
-            },
-            '/' => self.startSearch(),
-            ':' => try self.startCommandPaletteInCommandMode(), // Vim-style command mode
-            'n' => {
-                self.searchNext();
-                self.state.cursor_column = 0; // Reset column on search jump
-                self.updateCurrentFileAndTriggerHighlighting();
-            },
-            'N' => {
-                self.searchPrevious();
-                self.state.cursor_column = 0; // Reset column on search jump
-                self.updateCurrentFileAndTriggerHighlighting();
-            },
-            'v', 'V' => self.startVisualMode(), // v or Shift+V to start visual mode
-            'f' => self.state.pending_find = .f, // Wait for character to find forward
-            't' => self.state.pending_find = .t, // Wait for character to move till forward
-            'F' => self.state.pending_find = .F, // Wait for character to find backward
-            'T' => self.state.pending_find = .T, // Wait for character to move till backward
-            ';' => { // Repeat last find in same direction
-                if (self.state.last_find) |last| {
-                    self.executeFindInLine(last.command, last.char);
-                }
-            },
-            ',' => { // Repeat last find in opposite direction
-                if (self.state.last_find) |last| {
-                    const opposite_cmd = switch (last.command) {
-                        .f => FindCommand.F,
-                        .F => FindCommand.f,
-                        .t => FindCommand.T,
-                        .T => FindCommand.t,
-                    };
-                    self.executeFindInLine(opposite_cmd, last.char);
-                }
-            },
-            'z' => self.state.pending_z = true, // Wait for second z for zz (center cursor)
-            '[' => self.state.pending_bracket = true, // Wait for second character (like [h)
-            ']' => self.state.pending_close_bracket = true, // Wait for second character (like ]h)
-            '{' => {
-                Navigation.jumpToPreviousEmptyLine(self);
-                self.state.cursor_column = 0; // Reset column on jump
-                self.updateCurrentFileAndTriggerHighlighting();
-            },
-            '}' => {
-                Navigation.jumpToNextEmptyLine(self);
-                self.state.cursor_column = 0; // Reset column on jump
-                self.updateCurrentFileAndTriggerHighlighting();
-            },
-            '?' => self.mode = .help, // Show help overlay
-            else => {
-                // Reset count prefix on any other key
-                self.state.count_prefix = null;
-            },
-        }
-    }
-
-    fn toggleViewMode(self: *App) void {
+    pub fn toggleViewMode(self: *App) void {
         // Capture current position for anchoring
         const old_cursor = self.state.global_cursor_line;
         const old_scroll = self.state.global_scroll_offset;
@@ -956,7 +770,7 @@ pub const App = struct {
         Navigation.clampScrollOffset(self);
     }
 
-    fn cycleHunkViewModePrev(self: *App) !void {
+    pub fn cycleHunkViewModePrev(self: *App) !void {
         // Only apply in unified mode
         if (!self.shouldApplyHunkFiltering()) return;
 
@@ -1058,7 +872,7 @@ pub const App = struct {
         Navigation.clampScrollOffset(self);
     }
 
-    fn cycleHunkViewMode(self: *App) !void {
+    pub fn cycleHunkViewMode(self: *App) !void {
         // Only apply in unified mode
         if (!self.shouldApplyHunkFiltering()) return;
 
@@ -1218,7 +1032,7 @@ pub const App = struct {
     }
 
     // Execute a find command (f/t/F/T) in NORMAL mode
-    fn executeFindInLine(self: *App, cmd: FindCommand, target_char: u8) void {
+    pub fn executeFindInLine(self: *App, cmd: FindCommand, target_char: u8) void {
         const line_content = self.getCurrentLineContent() orelse return;
         const count = self.state.count_prefix orelse 1;
         self.state.count_prefix = null; // Clear count prefix
@@ -1290,35 +1104,7 @@ pub const App = struct {
         }
     }
 
-    fn handleCommentMode(self: *App, key: vaxis.Key) !void {
-        const input = &self.state.active_comment_input.?;
-
-        // Delegate to comment editor module
-        const action = try comment_editor.CommentEditor.handleKey(input, key, self.allocator);
-
-        // Handle save/cancel actions
-        if (action) |act| {
-            switch (act) {
-                .save => {
-                    try self.saveCurrentComment();
-                    self.mode = .normal;
-                    self.state.active_comment_input = null;
-                    self.needs_render = true; // Force full redraw after saving comment
-                },
-                .cancel => {
-                    self.mode = .normal;
-                    self.state.active_comment_input = null;
-                    self.needs_render = true; // Force full redraw after canceling comment
-                },
-            }
-        } else {
-            // Still editing - adjust scroll to keep expanding comment visible
-            // This handles multiline text and prevents the comment from scrolling off screen
-            Navigation.ensureCommentBoxVisible(self);
-        }
-    }
-
-    fn startCommentInput(self: *App) !void {
+    pub fn startCommentInput(self: *App) !void {
         // Get line record from LineMap
         const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
 
@@ -1422,7 +1208,7 @@ pub const App = struct {
         self.mode = .comment;
     }
 
-    fn startCommentInputForVisualSelection(self: *App) !void {
+    pub fn startCommentInputForVisualSelection(self: *App) !void {
         // Get visual selection range
         const selection = self.getVisualSelection() orelse return;
         const start_line = selection.start;
@@ -1503,7 +1289,7 @@ pub const App = struct {
         self.state.visual_anchor = null;
     }
 
-    fn saveCurrentComment(self: *App) !void {
+    pub fn saveCurrentComment(self: *App) !void {
         if (self.state.active_comment_input == null) return;
 
         const input = self.state.active_comment_input.?;
@@ -1561,7 +1347,7 @@ pub const App = struct {
         self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
     }
 
-    fn yankCommentsToClipboard(self: *App) !void {
+    pub fn yankCommentsToClipboard(self: *App) !void {
         // Generate export with context (10 lines before, 10 lines after for LLM context)
         const output = try self.state.comment_store.exportWithContext(
             self.allocator,
@@ -1589,7 +1375,7 @@ pub const App = struct {
         _ = try child.wait();
     }
 
-    fn deleteCommentUnderCursor(self: *App) !void {
+    pub fn deleteCommentUnderCursor(self: *App) !void {
         // Get line record from LineMap
         const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
 
@@ -1616,11 +1402,11 @@ pub const App = struct {
         }
     }
 
-    fn clearAllComments(self: *App) void {
+    pub fn clearAllComments(self: *App) void {
         self.state.comment_store.clearAll();
     }
 
-    fn openInEditor(self: *App) !void {
+    pub fn openInEditor(self: *App) !void {
         // Get line record from LineMap
         const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
 
@@ -1687,19 +1473,19 @@ pub const App = struct {
     }
 
     // Search functions
-    fn startSearch(self: *App) void {
+    pub fn startSearch(self: *App) void {
         self.state.search_state.reset();
         self.mode = .search;
     }
 
-    fn startCommandPalette(self: *App) !void {
+    pub fn startCommandPalette(self: *App) !void {
         self.state.command_palette_state.reset();
         // Build command registry with current files
         try self.state.command_palette_state.buildCommandRegistry(self, self.state.files);
         self.mode = .command_palette;
     }
 
-    fn startCommandPaletteInCommandMode(self: *App) !void {
+    pub fn startCommandPaletteInCommandMode(self: *App) !void {
         self.state.command_palette_state.reset();
         // Build command registry with current files
         try self.state.command_palette_state.buildCommandRegistry(self, self.state.files);
@@ -1710,73 +1496,7 @@ pub const App = struct {
         self.mode = .command_palette;
     }
 
-    fn handleSearchMode(self: *App, key: vaxis.Key) !void {
-        var search_state = &self.state.search_state;
-
-        // Handle special keys
-        if (key.mods.ctrl) {
-            return;
-        }
-
-        switch (key.codepoint) {
-            27 => { // ESC - cancel search
-                self.mode = .normal;
-                search_state.reset();
-                self.needs_render = true; // Force full redraw after closing search
-            },
-            '\r' => { // Enter - execute search
-                if (search_state.query_len > 0) {
-                    try self.performSearch();
-                    self.mode = .normal;
-                    self.needs_render = true; // Force full redraw after closing search
-                    // Jump to first match at or after cursor, or wrap to first match
-                    if (search_state.hasMatches()) {
-                        const cursor = self.state.global_cursor_line;
-                        var found = false;
-
-                        // Find first match at or after cursor
-                        for (search_state.matches.items, 0..) |match_line, idx| {
-                            if (match_line >= cursor) {
-                                search_state.current_match_idx = idx;
-                                self.state.global_cursor_line = match_line;
-                                found = true;
-                                break;
-                            }
-                        }
-
-                        // If no match after cursor, wrap to first match
-                        if (!found and search_state.matches.items.len > 0) {
-                            search_state.current_match_idx = 0;
-                            self.state.global_cursor_line = search_state.matches.items[0];
-                        }
-
-                        Navigation.ensureCursorVisible(self, false); // no padding for search jumps
-                    }
-                } else {
-                    self.mode = .normal;
-                    self.needs_render = true; // Force full redraw
-                }
-            },
-            127, 8 => { // Backspace / Delete
-                if (search_state.query_len > 0) {
-                    search_state.query_len -= 1;
-                    // Update search results as user types
-                    try self.performSearch();
-                }
-            },
-            else => {
-                // Regular character input
-                if (key.codepoint >= 32 and key.codepoint < 127 and search_state.query_len < search_state.query_buffer.len) {
-                    search_state.query_buffer[search_state.query_len] = @intCast(key.codepoint);
-                    search_state.query_len += 1;
-                    // Update search results as user types (live highlighting)
-                    try self.performSearch();
-                }
-            },
-        }
-    }
-
-    fn performSearch(self: *App) !void {
+    pub fn performSearch(self: *App) !void {
         var search_state = &self.state.search_state;
         search_state.matches.clearRetainingCapacity();
 
@@ -1827,81 +1547,7 @@ pub const App = struct {
         return false;
     }
 
-    fn handleCommandPaletteMode(self: *App, key: vaxis.Key) !void {
-        var palette_state = &self.state.command_palette_state;
-
-        // Handle Ctrl+n and Ctrl+p for navigation
-        if (key.mods.ctrl) {
-            switch (key.codepoint) {
-                'n' => {
-                    palette_state.moveSelectionDown();
-                    return;
-                },
-                'p' => {
-                    palette_state.moveSelectionUp();
-                    return;
-                },
-                else => return,
-            }
-        }
-
-        // Arrow keys for navigation
-        if (key.codepoint == vaxis.Key.up) {
-            palette_state.moveSelectionUp();
-            return;
-        }
-        if (key.codepoint == vaxis.Key.down) {
-            palette_state.moveSelectionDown();
-            return;
-        }
-
-        switch (key.codepoint) {
-            27 => { // ESC - cancel
-                self.mode = .normal;
-                palette_state.reset();
-                self.needs_render = true; // Force full redraw after closing popup
-            },
-            '\r' => { // Enter - execute selected command
-                // Save the command action before resetting state
-                const maybe_action = if (palette_state.getSelectedCommand()) |cmd| cmd.action else null;
-
-                // Exit command palette mode and reset state
-                self.mode = .normal;
-                palette_state.reset();
-                self.needs_render = true; // Force full redraw after closing popup
-
-                // Execute the command if there was one (may change mode again, e.g., to .help)
-                if (maybe_action) |action| {
-                    try self.executeCommand(action);
-                }
-            },
-            127, 8 => { // Backspace / Delete
-                if (palette_state.query_len > 0) {
-                    palette_state.query_len -= 1;
-                    // Update filtered results
-                    try palette_state.filterCommands();
-                }
-            },
-            else => {
-                // Regular character input
-                if (key.codepoint >= 32 and key.codepoint < 127 and palette_state.query_len < palette_state.query_buffer.len) {
-                    palette_state.query_buffer[palette_state.query_len] = @intCast(key.codepoint);
-                    palette_state.query_len += 1;
-                    // Update filtered results (live filtering)
-                    try palette_state.filterCommands();
-                }
-            },
-        }
-    }
-
-    fn handleHelpMode(self: *App, key: vaxis.Key) !void {
-        _ = key;
-        // Any key press exits help mode (ESC, ?, or any other key)
-        self.mode = .normal;
-        self.needs_render = true; // Force full redraw after closing popup
-    }
-
-    fn executeCommand(self: *App, action: command_palette.CommandAction) !void {
+    pub fn executeCommand(self: *App, action: command_palette.CommandAction) !void {
         switch (action) {
             .jump_to_file => |file_idx| {
                 // Navigate to file using existing file navigation logic
@@ -1936,71 +1582,7 @@ pub const App = struct {
         }
     }
 
-    fn handleEmptyMenu(self: *App, key: vaxis.Key) !void {
-        const menu_items_count: usize = 6; // working, staged, main, branch, refresh, quit
-
-        // Handle Ctrl+key combinations
-        if (key.mods.ctrl) {
-            switch (key.codepoint) {
-                'n' => {
-                    if (self.state.empty_menu_selection < menu_items_count - 1) {
-                        self.state.empty_menu_selection += 1;
-                    }
-                    return;
-                },
-                'p' => {
-                    if (self.state.empty_menu_selection > 0) {
-                        self.state.empty_menu_selection -= 1;
-                    }
-                    return;
-                },
-                else => {},
-            }
-        }
-
-        // Handle arrow keys
-        if (key.codepoint == vaxis.Key.down) {
-            if (self.state.empty_menu_selection < menu_items_count - 1) {
-                self.state.empty_menu_selection += 1;
-            }
-            return;
-        }
-        if (key.codepoint == vaxis.Key.up) {
-            if (self.state.empty_menu_selection > 0) {
-                self.state.empty_menu_selection -= 1;
-            }
-            return;
-        }
-
-        // Handle regular keys
-        switch (key.codepoint) {
-            'q' => self.should_quit = true,
-            'j' => {
-                if (self.state.empty_menu_selection < menu_items_count - 1) {
-                    self.state.empty_menu_selection += 1;
-                }
-            },
-            'k' => {
-                if (self.state.empty_menu_selection > 0) {
-                    self.state.empty_menu_selection -= 1;
-                }
-            },
-            '\r' => { // Enter key
-                switch (self.state.empty_menu_selection) {
-                    0 => try self.switchDiffMode(.working),
-                    1 => try self.switchDiffMode(.staged),
-                    2 => try self.switchDiffMode(.main),
-                    3 => try self.startBranchSelection(), // Select branch
-                    4 => try self.refresh(), // Refresh
-                    5 => self.should_quit = true, // Quit
-                    else => {},
-                }
-            },
-            else => {},
-        }
-    }
-
-    fn startBranchSelection(self: *App) !void {
+    pub fn startBranchSelection(self: *App) !void {
         // Free old branch list
         for (self.state.branch_list) |branch| {
             self.allocator.free(branch);
@@ -2018,7 +1600,7 @@ pub const App = struct {
         self.mode = .branch_selection;
     }
 
-    fn filterBranches(self: *App) !void {
+    pub fn filterBranches(self: *App) !void {
         self.state.filtered_branches.clearRetainingCapacity();
 
         const query = self.state.branch_search_query[0..self.state.branch_search_len];
@@ -2066,128 +1648,7 @@ pub const App = struct {
         return false;
     }
 
-    fn handleBranchSelectionMode(self: *App, key: vaxis.Key) !void {
-        if (self.state.branch_list.len == 0) {
-            // No branches - go back to empty menu
-            self.mode = .normal;
-            return;
-        }
-
-        const filtered_count = self.state.filtered_branches.items.len;
-
-        // Handle Ctrl+key combinations
-        if (key.mods.ctrl) {
-            switch (key.codepoint) {
-                'n' => {
-                    if (filtered_count > 0 and self.state.branch_selection < filtered_count - 1) {
-                        self.state.branch_selection += 1;
-                    }
-                    return;
-                },
-                'p' => {
-                    if (self.state.branch_selection > 0) {
-                        self.state.branch_selection -= 1;
-                    }
-                    return;
-                },
-                else => {},
-            }
-        }
-
-        // Handle arrow keys
-        if (key.codepoint == vaxis.Key.down) {
-            if (filtered_count > 0 and self.state.branch_selection < filtered_count - 1) {
-                self.state.branch_selection += 1;
-            }
-            return;
-        }
-        if (key.codepoint == vaxis.Key.up) {
-            if (self.state.branch_selection > 0) {
-                self.state.branch_selection -= 1;
-            }
-            return;
-        }
-
-        // Handle special keys
-        switch (key.codepoint) {
-            'q' => self.should_quit = true,
-            'j' => {
-                if (filtered_count > 0 and self.state.branch_selection < filtered_count - 1) {
-                    self.state.branch_selection += 1;
-                }
-            },
-            'k' => {
-                if (self.state.branch_selection > 0) {
-                    self.state.branch_selection -= 1;
-                }
-            },
-            27 => { // ESC key - clear search or go back
-                if (self.state.branch_search_len > 0) {
-                    // Clear search
-                    self.state.branch_search_len = 0;
-                    self.state.branch_selection = 0;
-                    try self.filterBranches();
-                } else {
-                    // Go back to empty menu
-                    self.mode = .normal;
-                }
-            },
-            vaxis.Key.backspace => { // Backspace - delete last search char
-                if (self.state.branch_search_len > 0) {
-                    self.state.branch_search_len -= 1;
-                    self.state.branch_selection = 0;
-                    try self.filterBranches();
-                }
-            },
-            '\r' => { // Enter key - select branch and diff against it
-                if (filtered_count == 0) return;
-
-                const filtered_idx = self.state.filtered_branches.items[self.state.branch_selection];
-                const selected_branch = self.state.branch_list[filtered_idx];
-                const branch_copy = try self.allocator.dupe(u8, selected_branch);
-                errdefer self.allocator.free(branch_copy);
-
-                const head = try self.allocator.dupe(u8, "HEAD");
-                errdefer self.allocator.free(head);
-
-                // Free old diff_source if needed
-                switch (self.state.diff_source) {
-                    .working_dir => {},
-                    .single_ref => |sr| {
-                        self.allocator.free(sr.ref);
-                    },
-                    .two_refs => |tr| {
-                        self.allocator.free(tr.ref1);
-                        self.allocator.free(tr.ref2);
-                    },
-                }
-
-                // Set up new diff source
-                self.state.diff_source = DiffSource{ .two_refs = .{
-                    .ref1 = branch_copy,
-                    .ref2 = head,
-                    .use_merge_base = true,
-                } };
-
-                // Go back to normal mode and refresh
-                self.mode = .normal;
-                try self.refresh();
-            },
-            else => {
-                // Handle text input for search
-                if (key.codepoint >= 32 and key.codepoint <= 126) { // Printable ASCII
-                    if (self.state.branch_search_len < self.state.branch_search_query.len - 1) {
-                        self.state.branch_search_query[self.state.branch_search_len] = @intCast(key.codepoint);
-                        self.state.branch_search_len += 1;
-                        self.state.branch_selection = 0;
-                        try self.filterBranches();
-                    }
-                }
-            },
-        }
-    }
-
-    fn switchDiffMode(self: *App, mode: command_palette.DiffMode) !void {
+    pub fn switchDiffMode(self: *App, mode: command_palette.DiffMode) !void {
         // Free old diff_source if needed
         switch (self.state.diff_source) {
             .working_dir => {},
@@ -2219,7 +1680,7 @@ pub const App = struct {
         try self.refresh();
     }
 
-    fn searchNext(self: *App) void {
+    pub fn searchNext(self: *App) void {
         var search_state = &self.state.search_state;
 
         if (!search_state.hasMatches()) return;
@@ -2252,7 +1713,7 @@ pub const App = struct {
         }
     }
 
-    fn searchPrevious(self: *App) void {
+    pub fn searchPrevious(self: *App) void {
         var search_state = &self.state.search_state;
 
         if (!search_state.hasMatches()) return;
@@ -2292,75 +1753,9 @@ pub const App = struct {
     }
 
     // Visual mode functions
-    fn startVisualMode(self: *App) void {
+    pub fn startVisualMode(self: *App) void {
         self.state.visual_anchor = self.state.global_cursor_line;
         self.mode = .visual;
-    }
-
-    fn handleVisualMode(self: *App, key: vaxis.Key) !void {
-        // Handle Ctrl+key combinations
-        if (key.mods.ctrl) {
-            switch (key.codepoint) {
-                'n' => Navigation.navigateToNextFile(self),
-                'p' => Navigation.navigateToPreviousFile(self),
-                'd' => Navigation.pageDown(self),
-                'u' => Navigation.pageUp(self),
-                else => {},
-            }
-            return;
-        }
-
-        // Handle digit keys for count prefix (1-9, matching vim behavior)
-        if (!key.mods.alt and !key.mods.shift) {
-            if (key.codepoint >= '1' and key.codepoint <= '9') {
-                const digit = @as(usize, @intCast(key.codepoint - '0'));
-                if (self.state.count_prefix) |count| {
-                    self.state.count_prefix = count * 10 + digit;
-                } else {
-                    self.state.count_prefix = digit;
-                }
-                return;
-            }
-            // Handle 0 as part of multi-digit count (e.g., 10, 20)
-            if (key.codepoint == '0' and self.state.count_prefix != null) {
-                self.state.count_prefix = self.state.count_prefix.? * 10;
-                return;
-            }
-        }
-
-        switch (key.codepoint) {
-            27 => { // ESC - exit visual mode
-                self.mode = .normal;
-                self.state.visual_anchor = null;
-                self.state.count_prefix = null; // Clear count prefix when exiting
-                self.needs_render = true; // Force full redraw after exiting visual mode
-            },
-            'v' => { // v again - exit visual mode (toggle)
-                self.mode = .normal;
-                self.state.visual_anchor = null;
-                self.state.count_prefix = null; // Clear count prefix when exiting
-                self.needs_render = true; // Force full redraw after exiting visual mode
-            },
-            '\r' => { // Enter - create comment for visual selection
-                try self.startCommentInputForVisualSelection();
-            },
-            'j' => Navigation.moveCursorDown(self),
-            'k' => Navigation.moveCursorUp(self),
-            'h' => Navigation.navigateToPreviousFile(self),
-            'l' => Navigation.navigateToNextFile(self),
-            'g' => Navigation.scrollToTop(self),
-            'G' => Navigation.scrollToBottom(self),
-            'M' => Navigation.centerCursor(self),
-            'y' => {
-                try self.yankVisualSelection();
-                // Exit visual mode after yanking
-                self.mode = .normal;
-                self.state.visual_anchor = null;
-                self.state.count_prefix = null; // Clear count prefix when exiting
-                self.needs_render = true; // Force full redraw after yanking
-            },
-            else => {},
-        }
     }
 
     // Get the visual selection range (start_line, end_line) inclusive
@@ -2382,7 +1777,7 @@ pub const App = struct {
         return global_line >= selection.start and global_line <= selection.end;
     }
 
-    fn yankVisualSelection(self: *App) !void {
+    pub fn yankVisualSelection(self: *App) !void {
         const selection = self.getVisualSelection() orelse return;
 
         // Build text from selected lines

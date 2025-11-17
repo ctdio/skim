@@ -1,625 +1,656 @@
-# Skim Architecture
+# Skim Architecture Guide
 
-This document provides an in-depth overview of Skim's architecture, design decisions, and implementation details.
+This document provides a comprehensive overview of Skim's codebase architecture, design decisions, and guidelines for maintainers.
 
 ## Table of Contents
+1. [Architecture Overview](#architecture-overview)
+2. [Module Organization](#module-organization)
+3. [Key Design Patterns](#key-design-patterns)
+4. [Data Flow](#data-flow)
+5. [Adding New Features](#adding-new-features)
+6. [Code Organization Principles](#code-organization-principles)
 
-1. [System Overview](#system-overview)
-2. [Module Architecture](#module-architecture)
-3. [Data Flow](#data-flow)
-4. [Rendering Pipeline](#rendering-pipeline)
-5. [Syntax Highlighting](#syntax-highlighting)
-6. [Performance Optimizations](#performance-optimizations)
-7. [Design Patterns](#design-patterns)
+---
 
-## System Overview
+## Architecture Overview
 
-TUI for reviewing git diffs. Priorities: performance, simplicity, correctness.
-
-### Technology Stack
-
-- Zig 0.13.0+
-- libvaxis v0.5.1 (TUI)
-- z-tree-sitter (syntax highlighting)
-- System git binary
-
-## Module Architecture
-
-The codebase is organized into four main layers:
+Skim is organized into five main layers:
 
 ```
-┌─────────────────────────────────────────┐
-│         CLI Layer (main.zig)            │
-│  ┌────────────────────────────────┐     │
-│  │ Argument parsing               │     │
-│  │ DiffSource configuration       │     │
-│  └────────────────────────────────┘     │
-└─────────────────┬───────────────────────┘
+┌─────────────────────────────────────────────┐
+│ CLI Layer (main.zig)                        │
+│ - Argument parsing                          │
+│ - Initialization                            │
+└─────────────────┬───────────────────────────┘
                   │
-┌─────────────────▼───────────────────────┐
-│    Application Layer (app.zig)          │
-│  ┌────────────────────────────────┐     │
-│  │ Modal state machine            │     │
-│  │ Event handling                 │     │
-│  │ Rendering orchestration        │     │
-│  │ Frame buffer management        │     │
-│  └────────────────────────────────┘     │
-└─────┬───────────────────────────┬───────┘
+┌─────────────────▼───────────────────────────┐
+│ Application Layer (app.zig)                 │
+│ - Modal state machine                       │
+│ - Event routing                             │
+│ - Rendering coordination                    │
+└─────┬───────────────────────────┬───────────┘
       │                           │
-┌─────▼──────────┐        ┌──────▼────────┐
-│  Git Layer     │        │ Syntax Layer  │
-│  (git/*.zig)   │        │ (syntax.zig)  │
-│  ┌──────────┐  │        │ ┌──────────┐  │
-│  │ diff.zig │  │        │ │ Highlighter│ │
-│  │ parser   │  │        │ │ Query files│ │
-│  └──────────┘  │        │ └──────────┘  │
-└────────────────┘        └───────────────┘
+┌─────▼──────────┐    ┌──────────▼──────────┐
+│ Mode Handlers  │    │ UI Components       │
+│ (src/modes/)   │    │ (ui.zig)            │
+└────────────────┘    └─────────────────────┘
+      │                           │
+┌─────▼───────────────────────────▼───────────┐
+│ Core Systems                                 │
+│ - LineMap (line_map.zig)                    │
+│ - Navigation (navigation.zig)               │
+│ - State Helpers (state.zig)                 │
+└─────┬───────────────────────────┬───────────┘
+      │                           │
+┌─────▼──────────┐    ┌──────────▼──────────┐
+│ Git Integration│    │ Rendering System    │
+│ (git/)         │    │ (rendering/)        │
+└────────────────┘    └─────────────────────┘
 ```
 
-### 1. CLI Layer (main.zig)
+### Layer Responsibilities
 
-Parse args, configure DiffSource, initialize app, manage memory.
+**CLI Layer** (`main.zig`)
+- Parse command-line arguments (working dir, staged, ref comparison)
+- Initialize terminal and vaxis
+- Create and run App instance
 
-```zig
-pub const Config = struct {
-    allocator: std.mem.Allocator,
-    diff_source: DiffSource,
-};
+**Application Layer** (`app.zig`)
+- Central state machine managing 7 modes: normal, comment, search, visual, command_palette, help, branch_selection
+- Event loop handling keyboard and terminal events
+- Coordinate rendering pipeline
+- **Size:** ~2,500 lines (reduced from 3,099 after refactoring)
+
+**Mode Handlers** (`src/modes/`)
+- Isolated logic for each interaction mode
+- See [Mode System](#mode-system) for details
+
+**UI Components** (`ui.zig`)
+- Header rendering (file info, stats)
+- Status bar (mode indicator, keybindings)
+- Empty state screens
+- Branch selection menu
+
+**Core Systems**
+- **LineMap** (`line_map.zig`): Pre-computed position registry for all renderable lines
+- **Navigation** (`navigation.zig`): Cursor movement and scrolling logic
+- **State Helpers** (`state.zig`): Async highlighting, diff stats
+
+**Git Integration** (`git/`)
+- Execute git commands (`git diff`, `git log`, etc.)
+- Parse unified diff format
+- Track file and hunk metadata
+
+**Rendering System** (`rendering/`)
+- Unified diff view (single column)
+- Side-by-side diff view (split columns)
+- Syntax highlighting integration
+- Comment display
+
+---
+
+## Module Organization
+
+### src/ Directory Structure
+
+```
+src/
+├── main.zig              - CLI entry point
+├── app.zig               - Application state machine (2,494 lines)
+├── navigation.zig        - Cursor/scroll navigation (559 lines)
+├── line_map.zig          - Line position registry (394 lines)
+├── state.zig             - State helpers, async highlighting (533 lines)
+├── ui.zig                - UI components (647 lines)
+├── syntax.zig            - Tree-sitter integration (628 lines)
+├── comments.zig          - Comment storage (482 lines)
+├── comment_editor.zig    - Vim-like comment editor (1,399 lines)
+├── command_palette.zig   - Command palette (567 lines)
+├── help.zig              - Help overlay
+├── editor.zig            - External editor integration
+│
+├── modes/                - Mode handlers (extracted Phase 1)
+│   ├── normal_mode.zig           (299 lines)
+│   ├── comment_mode.zig          (36 lines)
+│   ├── search_mode.zig           (72 lines)
+│   ├── visual_mode.zig           (78 lines)
+│   ├── command_palette_mode.zig  (75 lines)
+│   ├── help_mode.zig             (11 lines)
+│   └── branch_selection_mode.zig (127 lines)
+│
+├── git/                  - Git integration
+│   ├── diff.zig          - Execute git commands
+│   └── parser.zig        - Unified diff parser
+│
+└── rendering/            - Rendering system
+    ├── common.zig        - Color palette, layout constants
+    ├── utils.zig         - Rendering utilities (1,104 lines)
+    ├── styles.zig        - Style calculation (extracted Phase 2)
+    ├── unified.zig       - Unified diff renderer (453 lines)
+    ├── side_by_side.zig  - Side-by-side renderer (998 lines)
+    └── file_header.zig   - File header rendering
 ```
 
-Diff patterns: `skim`, `skim --staged`, `skim ref`, `skim ref1 ref2`, `skim ref1..ref2`, `skim ref1...ref2`
+### File Size Guidelines
 
-### 2. Application Layer (app.zig)
+**Target Sizes:**
+- **Small:** < 200 lines (focused, single-purpose)
+- **Medium:** 200-600 lines (well-defined subsystem)
+- **Large:** 600-1,000 lines (complex but cohesive)
+- **Very Large:** > 1,000 lines (consider splitting)
 
-Manages state and rendering.
+**Current Large Files:**
+- `rendering/utils.zig` (1,104 lines) - candidate for further splitting
+- `comment_editor.zig` (1,399 lines) - complex vim editor, acceptable
+- `rendering/side_by_side.zig` (998 lines) - has duplication with unified.zig
 
-**App Structure:**
-```zig
-pub const App = struct {
-    allocator: Allocator,
-    vx: Vaxis,                    // Terminal instance
-    tty: vaxis.Tty,               // TTY handle
-    mode: Mode,                   // Current modal state
-    state: State,                 // Application state
-    should_quit: bool,
-    last_ctrl_c: i64,             // For double-press exit
-    header_line_buffers: [2][4096]u8,  // Pre-allocated header buffers
-    frame_text_buffer: []u8,      // 256KB frame scratch space
-    frame_text_used: usize,
-    syntax_highlighter: SyntaxHighlighter,
-};
-```
+---
 
-**Modal System:**
+## Key Design Patterns
+
+### 1. Modal State Machine
+
+Skim uses a central modal state machine in `app.zig`:
+
 ```zig
 const Mode = enum {
-    normal,   // File navigation, cursor positioning
-    focused,  // In-file scrolling with vim keys
-    comment,  // Comment editing (placeholder)
+    normal,           // Navigation and viewing
+    comment,          // Editing comments
+    search,           // Text search
+    visual,           // Visual selection (like vim)
+    command_palette,  // Command fuzzy finder
+    help,             // Help overlay
+    branch_selection, // Branch selection menu
 };
 ```
 
-**Application State:**
+**Event Flow:**
+```
+User Input → handleKey() → Mode Switch → Mode Handler → Update State → Render
+```
+
+**Adding a New Mode:**
+1. Add enum variant to `Mode` in `app.zig`
+2. Create `src/modes/your_mode.zig` with `pub fn handleKey(app: *App, key: vaxis.Key) !void`
+3. Add case to `handleKey()` switch in `app.zig`
+4. Add mode indicator to status bar in `ui.zig`
+
+### 2. Global Line Coordinate System
+
+**Definition:** Every renderable line has a unique zero-based index called a "global line number."
+
+**What counts as a line:**
+- File headers ("diff --git a/file.txt b/file.txt")
+- Hunk headers ("@@ -1,3 +1,4 @@")
+- Code lines (add/delete/context)
+- Comment lines
+- Spacer lines (3 blank lines between files)
+
+**Purpose:**
+- Single source of truth for positioning
+- Prevents sync issues between navigation and rendering
+- Makes cursor and scroll calculations simple
+
+**Example:**
+```
+Global Line | Type         | Content
+-----------|--------------|---------------------------
+0          | file_header  | diff --git a/foo.txt ...
+1          | hunk_header  | @@ -1,2 +1,3 @@
+2          | code_line    |  context line
+3          | code_line    | -deleted line
+4          | comment_line | "This deletion looks wrong"
+5          | code_line    | +added line
+6          | spacer       | (blank)
+7          | spacer       | (blank)
+8          | spacer       | (blank)
+9          | file_header  | diff --git a/bar.txt ...
+```
+
+**Usage:**
+- `app.state.global_cursor_line` - cursor position
+- `app.state.global_scroll_offset` - first visible line
+- `LineMap.getLineRecord(global_line)` - get line metadata
+
+**Key Invariant:** Global line numbers are always sequential with no gaps.
+
+### 3. LineMap System
+
+The LineMap pre-computes all line positions during initialization.
+
+**Why?**
+- Previously, navigation and rendering calculated positions independently → sync bugs
+- LineMap ensures one source of truth
+
+**Lifecycle:**
+```
+Init/Refresh → Build LineMap → Navigation uses it → Rendering uses it
+                    ↑
+                    └── Rebuild on comment add/delete ─────────┘
+```
+
+**LineRecord Structure:**
 ```zig
-const State = struct {
-    diff_source: DiffSource,
-    files: []parser.FileDiff,           // Parsed diff files
-    line_map: LineMap,                  // Pre-computed line positions
-    global_cursor_line: usize,          // Cursor position (global line number)
-    global_scroll_offset: usize,        // Viewport scroll position (global line number)
-    view_mode: ViewMode,                // unified vs. side-by-side
-    viewport_height: usize,             // For scroll calculations
-    comment_store: CommentStore,        // In-memory comment storage
-    syntax_highlighter: SyntaxHighlighter,
+const LineRecord = struct {
+    global_line: usize,
+    file_idx: usize,
+    line_type: LineType, // union of file_header, hunk_header, code_line, comment_line, spacer
 };
 ```
 
-**View Modes:**
-```zig
-const ViewMode = enum {
-    unified,       // Traditional unified diff
-    side_by_side,  // Split view with old/new side-by-side
-};
+**When to Rebuild:**
+- `app.init()` - initial build
+- `app.refresh()` - diff reload
+- `saveCurrentComment()` - after adding comment
+- `deleteCommentUnderCursor()` - after deleting comment
+
+### 4. Rendering Pipeline
+
+```
+app.render()
+    ↓
+resetFrameTextBuffer()  (clear 256KB temp buffer)
+    ↓
+renderHeader()         (file info, stats)
+    ↓
+renderContent()        (unified OR side_by_side)
+    ↓
+    Iterate through LineMap records
+    ├─ file_header → render file path
+    ├─ hunk_header → render @@ range @@
+    ├─ code_line → render with syntax highlighting
+    ├─ comment_line → render comment box
+    └─ spacer → render blank line
+    ↓
+renderStatus()         (mode, position, keybindings)
 ```
 
-### 2.5. Line Map Layer (line_map.zig)
+**Frame Text Buffer:**
+- 256KB pre-allocated buffer in `app.state.frame_text_buffer`
+- Used for temporary string allocations during rendering
+- Reset at start of each frame
+- Prevents per-frame heap allocations
 
-The LineMap system provides a **global line coordinate system** - a pre-computed registry of all renderable lines that serves as the single source of truth for positioning.
+### 5. Syntax Highlighting
 
-#### Global Line Coordinate System
-
-**Definition**: A global line is a zero-based sequential index (0, 1, 2, ...) that uniquely identifies every renderable line in the entire diff view.
-
-**Why it exists**:
-- Eliminates sync issues between navigation and rendering logic
-- Simplifies cursor and scroll calculations (both are just global line numbers)
-- Provides consistent, unambiguous references to any line
-- Built once, used everywhere - no duplicate position calculations
-
-**What gets a global line number**:
-- File headers (e.g., "diff --git a/file.txt b/file.txt")
-- Hunk headers (e.g., "@@ -1,3 +1,4 @@")
-- Code lines (add/delete/context from diff)
-- Comment lines (review comments attached to code lines)
-- Spacer lines (3 blank lines between each file)
-
-**Example layout**:
+**Architecture:**
 ```
-Global 0: file_header    "diff --git a/foo.txt b/foo.txt"
-Global 1: hunk_header    "@@ -1,2 +1,3 @@"
-Global 2: code_line      " context line"
-Global 3: code_line      "-deleted line"
-Global 4: comment_line   "This deletion looks wrong"
-Global 5: code_line      "+added line"
-Global 6: spacer         (blank)
-Global 7: spacer         (blank)
-Global 8: spacer         (blank)
-Global 9: file_header    "diff --git a/bar.txt b/bar.txt"
-...
+Code Line → Request Highlights → Check Cache → If Missing:
+                                               ├─ Spawn Background Thread
+                                               ├─ Parse with Tree-sitter
+                                               ├─ Run Queries
+                                               └─ Store in Cache
+            ↓
+Apply Highlights → Render with Colors
 ```
 
-#### LineMap Structure
+**Key Components:**
+- `syntax.zig` - Tree-sitter integration
+- `state.zig` - HighlightWorker, AsyncHighlightJob
+- Cache stored in `FileDiff.cached_highlights`
 
-```zig
-pub const LineRecord = struct {
-    global_line: usize,      // Sequential position (0, 1, 2, ...)
-    file_idx: usize,         // Which file this line belongs to
-    line_type: LineType,     // Union enum with type-specific metadata
-};
+**Supported Languages:**
+- JavaScript, TypeScript (with JSX/TSX)
+- Zig, Python, Rust, Go, C, C++
 
-pub const LineType = union(enum) {
-    file_header,
-    hunk_header: struct { hunk_idx: usize },
-    code_line: struct {
-        hunk_idx: usize,
-        line_idx_in_hunk: usize,
-    },
-    comment_line: struct {
-        parent_hunk_idx: usize,
-        parent_line_idx: usize,
-        comment_idx: usize,
-    },
-    spacer: struct {
-        after_file_idx: usize,
-        spacer_line_num: usize,
-    },
-};
+**How it Works:**
+1. Highlighting is requested for visible files only
+2. Background thread parses file and runs tree-sitter queries
+3. Results cached in file struct
+4. Syntax colors overlay diff backgrounds (green/red)
 
-pub const LineMap = struct {
-    records: []LineRecord,   // All lines in sequential order
-    allocator: Allocator,
-
-    pub fn build(allocator, files, comment_store) !LineMap
-    pub fn getLineRecord(global_line: usize) ?*const LineRecord
-    pub fn getFileHeaderLine(file_idx: usize) ?usize
-    pub fn getTotalLines() usize
-    // ... other helper methods
-};
-```
-
-#### Building the LineMap
-
-LineMap is built during initialization and rebuilt when structure changes:
-1. Iterate through all files sequentially
-2. For each file: add file header, then iterate hunks
-3. For each hunk: add hunk header, then iterate lines
-4. For each code line: add code line record, check for attached comment
-5. If comment exists: add comment line record
-6. Between files: add 3 spacer records
-7. Assign sequential global line numbers (no gaps)
-
-**Rebuild triggers**:
-- Application init
-- Diff refresh ('r' key)
-- Comment added/saved
-- Comment deleted
-
-#### Usage in Navigation & Rendering
-
-**Navigation**:
-```zig
-// Move cursor down
-state.global_cursor_line += 1;
-
-// Jump to file
-state.global_cursor_line = line_map.getFileHeaderLine(file_idx);
-state.global_scroll_offset = state.global_cursor_line;
-
-// Bounds checking
-if (state.global_cursor_line >= line_map.getTotalLines()) {
-    state.global_cursor_line = line_map.getTotalLines() - 1;
-}
-```
-
-**Rendering**:
-```zig
-// Start from scroll offset, render until viewport full
-for (line_map.records) |*record| {
-    if (record.global_line < state.global_scroll_offset) continue;
-    if (row >= viewport_height) break;
-
-    // Render based on line type
-    switch (record.line_type) {
-        .file_header => renderFileHeader(),
-        .hunk_header => renderHunkHeader(),
-        .code_line => renderCodeLine(),
-        .comment_line => renderComment(),
-        .spacer => renderBlankLine(),
-    }
-    row += 1;
-}
-```
-
-**Key invariant**: Global line numbers are always sequential with no gaps (0, 1, 2, ..., N-1).
-
-### 3. Git Integration Layer (git/)
-
-#### git/diff.zig - Command Execution
-
-```zig
-pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8
-pub fn getChangedFiles(allocator: Allocator, source: DiffSource) ![]FileStatus
-```
-
-Command: `git diff --no-color --no-ext-diff -U7` (7 context lines, 100MB limit)
-
-#### git/parser.zig - Unified Diff Parser
-
-Single-pass O(n) parser.
-```zig
-pub const FileDiff = struct {
-    old_path: []const u8,
-    new_path: []const u8,
-    hunks: []Hunk,
-    highlights: ?[]syntax.Highlight,  // Cached after first render
-};
-
-pub const Hunk = struct {
-    header: HunkHeader,
-    lines: []Line,
-};
-
-pub const HunkHeader = struct {
-    old_start: u32,
-    old_count: u32,
-    new_start: u32,
-    new_count: u32,
-    context: []const u8,
-};
-
-pub const Line = struct {
-    line_type: LineType,
-    content: []const u8,
-    old_lineno: ?u32,  // Line number in old file
-    new_lineno: ?u32,  // Line number in new file
-};
-```
-
-Parser state machine: `diff --git` → new file, `---`/`+++` → paths, `@@` → hunk header, `+`/`-`/` ` → lines. Tracks line numbers, handles edge cases.
-
-### 4. Syntax Highlighting Layer (syntax.zig)
-```zig
-pub const SyntaxHighlighter = struct {
-    allocator: std.mem.Allocator,
-
-    pub fn highlightFile(file_path: []const u8, content: []const u8) ![]Highlight
-};
-
-pub const Highlight = struct {
-    start_byte: usize,
-    end_byte: usize,
-    category: []const u8,  // e.g., "keyword", "function", "string"
-};
-```
-
-Languages: JS/JSX, TS/TSX, Zig (full queries). Python, Rust, Go, C/C++ (parsers ready, need queries).
-
-Colors: Keywords (magenta), functions (blue), types (green), strings/numbers (yellow), comments (cyan).
+---
 
 ## Data Flow
 
-### Initialization Flow
+### App Initialization
 
 ```
-User runs: skim main..feature
-    │
-    ▼
-main.zig: parseArgs()
-    │
-    ▼
-DiffSource{ .two_refs = { "main", "feature" } }
-    │
-    ▼
-App.init()
-    │
-    ├─▶ git.getDiff() ──▶ Execute: git diff --no-color --no-ext-diff -U7 main feature
-    │       │
-    │       ▼
-    │   parser.parse() ──▶ []FileDiff
-    │
-    ├─▶ SyntaxHighlighter.init()
-    │
-    └─▶ vaxis.Tty.init() + Vaxis.init()
-    │
-    ▼
-App.run() ──▶ Event loop starts
+main.zig
+    ↓
+Parse CLI args → Determine DiffSource
+    ↓
+App.init(allocator, diff_source)
+    ↓
+git.getDiff() → Execute git command
+    ↓
+parser.parseDiff() → Parse unified diff
+    ↓
+LineMap.build() → Compute line positions
+    ↓
+Run event loop
 ```
 
-### Event Loop
+### Keyboard Event Flow
 
 ```
-┌──────────────────────────┐
-│   Vaxis Event Loop       │
-└────────┬─────────────────┘
-         │
-         ▼
-    Poll events
-         │
-    ┌────┴────┐
-    │ Event?  │
-    └────┬────┘
-         │
-    ┌────▼────────────┐
-    │ Key Press       │──▶ handleKey()
-    │                 │     │
-    │                 │     ├─▶ Mode-specific handler
-    │                 │     │   (normal, focused, comment)
-    │                 │     │
-    │                 │     ├─▶ Update state
-    │                 │     │   (cursor, scroll, file index)
-    │                 │     │
-    │                 │     └─▶ Set should_quit if needed
-    └─────────────────┘
-         │
-    ┌────▼────────────┐
-    │ Window Resize   │──▶ vx.resize()
-    └─────────────────┘
-         │
-    ┌────▼────────────┐
-    │ Render Frame    │──▶ render()
-    │                 │     │
-    │                 │     └─▶ Rendering Pipeline
-    └─────────────────┘
-         │
-         └──▶ Loop until should_quit
+User presses key
+    ↓
+vaxis event loop
+    ↓
+app.handleKey()
+    ↓
+Mode-specific handler (src/modes/*)
+    ↓
+Update state (cursor, mode, etc.)
+    ↓
+Trigger re-render
 ```
 
-### Refresh Flow
-
-When user presses 'r':
+### Comment Flow
 
 ```
-handleKey('r')
-    │
-    ▼
-refresh()
-    │
-    ├─▶ Store current file path
-    │
-    ├─▶ git.getDiff(diff_source)
-    │       │
-    │       ▼
-    │   parser.parse() ──▶ new []FileDiff
-    │
-    ├─▶ Find same file in new files
-    │   (by path matching)
-    │
-    ├─▶ Free old FileDiff structs
-    │
-    ├─▶ Update state.files
-    │
-    └─▶ Restore file index, reset scroll
+User presses Enter on code line
+    ↓
+startCommentInput()
+    ├─ Create CommentInput state
+    ├─ Switch to comment mode
+    └─ Render comment box
+    ↓
+User types in comment editor
+    ↓
+saveCurrentComment()
+    ├─ Store in CommentStore
+    ├─ Rebuild LineMap (comment now has a line)
+    └─ Switch back to normal mode
 ```
 
-## Rendering Pipeline
+---
 
-Full frame render each time (optimized for speed):
+## Adding New Features
 
-```
-render(win: vaxis.Window)
-    │
-    ├─▶ Reset frame_text_buffer
-    │
-    ├─▶ renderHeader()
-    │   └─▶ File count, mode, view mode, current file stats
-    │
-    ├─▶ renderDivider(.top)
-    │   └─▶ ╭─────────────────╮
-    │
-    ├─▶ renderContent()
-    │   │
-    │   ├─▶ unified: renderContentUnified()
-    │   │   │
-    │   │   ├─▶ ensureHighlights() (lazy load)
-    │   │   │
-    │   │   ├─▶ Render borders (│)
-    │   │   │
-    │   │   └─▶ For each visible line:
-    │   │       ├─▶ renderHunkHeader()
-    │   │       └─▶ renderDiffLine()
-    │   │           ├─▶ renderGutter() (line numbers)
-    │   │           └─▶ renderWrappedTextWithHighlights()
-    │   │               └─▶ createHighlightedSegments()
-    │   │
-    │   └─▶ side_by_side: renderContentSideBySide()
-    │       └─▶ Similar but two columns with middle divider
-    │
-    ├─▶ renderDivider(.bottom)
-    │   └─▶ ╰─────────────────╯
-    │
-    └─▶ renderStatus()
-        └─▶ Mode-specific keybinding help
-```
+### Adding a Keybinding
 
-### Virtual Scrolling
-Skip off-screen hunks, render visible lines only.
+**1. Identify the mode** (normal, comment, visual, etc.)
 
-### Text Wrapping
-Long lines wrap to viewport width, line number on first row only.
-
-### Cursor Tracking
-3-line padding around cursor, auto-adjust scroll to keep visible.
-
-## Syntax Highlighting
-
-Lazy generation on first render, cached per file:
-
+**2. Edit the mode handler:**
 ```zig
-fn ensureHighlights(file: *FileDiff) !void {
-    if (file.highlights != null) return;  // Already cached
-
-    // Reconstruct NEW file content from diff
-    var content = ArrayList(u8).init();
-    for (file.hunks) |hunk| {
-        for (hunk.lines) |line| {
-            switch (line.line_type) {
-                .delete => {},  // Skip - not in new file
-                .add, .context => {
-                    content.append(line.content);
-                    content.append('\n');
-                },
-            }
-        }
-    }
-
-    // Generate highlights
-    highlights = syntax_highlighter.highlightFile(file_path, content.items);
-    file.highlights = highlights;  // Cache for subsequent renders
+// src/modes/normal_mode.zig
+switch (key.codepoint) {
+    'x' => try app.yourNewFeature(),
+    // ...
 }
 ```
 
-### Byte Offset Mapping
-
-Calculate byte offset for each line in reconstructed file:
-
+**3. Implement the feature in app.zig:**
 ```zig
-fn getLineByteOffset(file: *FileDiff, hunk_idx: usize, line_idx: usize) usize {
-    var offset: usize = 0;
-    for (file.hunks[0..hunk_idx]) |hunk| {
-        for (hunk.lines) |line| {
-            switch (line.line_type) {
-                .delete => {},  // Skip
-                .add, .context => offset += line.content.len + 1,
-            }
-        }
-    }
-    // Add lines in current hunk up to target line
-    return offset;
+pub fn yourNewFeature(self: *App) !void {
+    // Implementation
 }
 ```
 
-### Segment Generation
-
-Convert highlights to terminal segments:
-
+**4. Update status bar help text:**
 ```zig
-fn createHighlightedSegments(text: []const u8, byte_offset: usize) ![]Segment {
-    // Find highlights overlapping this line
-    for (highlights) |h| {
-        if (h.end_byte > line_start and h.start_byte < line_end) {
-            // Add segment with syntax color
-            segments.append(.{
-                .text = text[h.start_byte..h.end_byte],
-                .style = getStyleForCategory(h.category),
-            });
-        }
-    }
+// src/ui.zig - renderStatus()
+// Add your keybinding to the help text
+```
+
+### Adding a New Mode
+
+See [Modal State Machine](#1-modal-state-machine) section.
+
+### Adding a Language for Syntax Highlighting
+
+**1. Add tree-sitter grammar to `build.zig.zon`**
+
+**2. Add language detection in `syntax.zig`:**
+```zig
+fn detectLanguage(path: []const u8) ?Language {
+    // Add file extension mapping
 }
 ```
 
-### Context-Only Highlighting
+**3. Add query file:**
+- Create `queries/your-language.scm` with tree-sitter queries
+- Embed in `build.zig`
 
-Context lines get syntax highlighting. Add/delete lines keep solid colors for clarity.
+**4. Update documentation**
 
-## Performance Optimizations
+---
 
-### Memory Management
-- 256KB pre-allocated frame buffer (reused each frame)
-- 4KB pre-allocated header buffers
+## Code Organization Principles
 
-### Lazy Evaluation
-- Syntax highlights: generated once, cached
-- Viewport culling: skip off-screen hunks
+### From CLAUDE.md
 
-### Single-Pass Algorithms
-- Diff parser: tokenize once, no backtracking
-- Renderer: one pass top-to-bottom
+**File Structure (top-down):**
+```zig
+// 1. Imports (all at top, no gaps)
+const std = @import("std");
+const vaxis = @import("vaxis");
 
-### Compile-Time Optimizations
-- Embedded query files (no runtime I/O)
-- Static string maps (constant-time lookups)
+// 2. Types/Interfaces (all together)
+const MyType = struct { ... };
 
-## Design Patterns
+// 3. Constants (if any)
+const DEFAULT_VALUE = 10;
 
-### Modal State Machine
-Vim-inspired modes: normal (file nav), focused (scroll), comment (future).
+// 4. Main exports - the "what" this module does
+pub fn mainFeature() void { ... }
 
-### Lazy Initialization
-Defer expensive ops: syntax highlights, file reconstruction.
+// 5. Implementation details - the "how" it works
+fn helper() void { ... }
+```
 
-### Explicit State Updates
-State changes are localized and clear.
+**Function Rules:**
+- Use `fn` keyword (not arrow functions)
+- Public functions first, helpers at bottom
+- Keep functions focused (< 100 lines ideal)
 
-### Error Handling
-Zig's explicit error propagation with errdefer cleanup.
+**Error Handling:**
+- Use `err` in catch blocks (not `e`, `error`, or `ex`)
+- Pass full error object to logger
+```zig
+catch (err) {
+    logger.error({ err, context }, "Operation failed");
+}
+```
 
-### Struct-of-Arrays
-Cache-friendly: lines stored contiguously in hunks.
+**Type Safety:**
+- Avoid `any` - use proper interfaces
+- Use `unknown` with type guards when needed
+- Prefer explicit types over inference in public APIs
 
-## Future Architecture Considerations
+### Locality of Behavior
 
-### Comment System
+**Principle:** Behavior should be obvious from looking at the code.
 
-Planned architecture for comment functionality:
+**Good:**
+```zig
+pub fn handleSearch(app: *App) void {
+    const query = app.getQuery();
+    const results = search(query);
+    app.displayResults(results);
+}
+```
+
+**Bad:**
+```zig
+// Behavior hidden in event subscriptions elsewhere
+pub fn handleSearch(app: *App) void {
+    eventBus.emit("search_start", app);
+}
+```
+
+### When to Extract Code
+
+**Extract to new file when:**
+- Module exceeds 1,000 lines
+- Clear subsystem with distinct responsibility
+- Code is reused across multiple files
+- Testing in isolation would be valuable
+
+**Keep together when:**
+- Tightly coupled (changes together)
+- Small and focused (< 500 lines)
+- Only used in one place
+
+---
+
+## Performance Considerations
+
+### Targets
+
+- **Cold startup:** < 10ms ✅
+- **Binary size:** < 2MB ✅ (currently 209KB release)
+- **Memory usage:** < 50MB ✅
+- **Scrolling FPS:** 60 ✅
+
+### Optimizations
+
+**1. Pre-allocation:**
+- 256KB frame text buffer (avoids per-frame allocations)
+- LineMap computed once (not per render)
+
+**2. Virtual Scrolling:**
+- Only render visible lines
+- Skip highlighting for off-screen files
+
+**3. Async Highlighting:**
+- Non-blocking tree-sitter parsing
+- Cache results per file
+
+**4. Shell-out to Git:**
+- Respects user config
+- No git library dependency (smaller binary)
+
+---
+
+## Testing Strategy
+
+### Current State
+
+- Unit tests colocated with implementation
+- Run with `zig build test`
+- Coverage: arg parsing, diff execution, parser, line_map, comments, editor
+
+### Adding Tests
 
 ```zig
-pub const Comment = struct {
-    file_path: []const u8,
-    hunk_idx: usize,
-    line_idx: usize,
-    content: []const u8,
-    timestamp: i64,
-};
-
-pub const CommentStore = struct {
-    comments: std.ArrayList(Comment),
-
-    pub fn addComment(file: *FileDiff, line_idx: usize, text: []const u8) !void
-    pub fn getCommentsForLine(file: *FileDiff, line_idx: usize) []Comment
-    pub fn exportAsAnnotatedPatch() ![]u8
-};
+// At bottom of your_module.zig
+test "describe what you're testing" {
+    const allocator = std.testing.allocator;
+    // Test implementation
+    try std.testing.expectEqual(expected, actual);
+}
 ```
 
-### Configuration System
+### Test TUI Apps
 
-Planned TOML-based configuration:
+- Use `std.log` for debugging (goes to stderr)
+- Write to file if needed
+- Terminal may be corrupted on crash (run `reset`)
 
-```toml
-[ui]
-theme = "dark"
-line_numbers = true
-context_lines = 7
+---
 
-[keybindings]
-quit = "q"
-toggle_view = "s"
+## Common Patterns
 
-[highlighting]
-enabled = true
-languages = ["javascript", "typescript", "zig"]
+### Accessing Line Content
+
+```zig
+const record = app.state.line_map.getLineRecord(global_line) orelse return;
+const file = &app.state.files[record.file_idx];
+
+switch (record.line_type) {
+    .code_line => |code| {
+        const line = &file.hunks[code.hunk_idx].lines[code.line_idx_in_hunk];
+        const content = line.content;
+    },
+    // ...
+}
 ```
 
-### Performance Monitoring
+### Navigating to a File
 
-Potential instrumentation points:
-- Frame render time
-- Git command execution time
-- Diff parsing time
-- Syntax highlighting time
-- Memory usage tracking
+```zig
+const header_line = app.state.line_map.getFileHeaderLine(file_idx) orelse return;
+app.state.global_cursor_line = header_line;
+app.state.global_scroll_offset = header_line;
+Navigation.ensureCursorVisible(app, false);
+```
 
-## Summary
+### Adding a Comment
 
-Architecture priorities: performance, simplicity, correctness, extensibility.
+```zig
+// Create comment
+const comment = try app.state.comment_store.addComment(
+    file_path, hunk_idx, line_idx, line_type, line_content,
+    old_line_num, new_line_num, comment_text
+);
 
-Sub-10ms startup, 60 FPS scrolling, ~209KB binary.
+// Rebuild LineMap to include new comment line
+app.state.line_map.deinit();
+app.state.line_map = try line_map.LineMap.build(...);
+```
+
+---
+
+## Debugging Tips
+
+### Enable Debug Logging
+
+```bash
+# Build debug binary
+zig build
+
+# Run with stderr logging
+./zig-out/bin/skim 2>debug.log
+
+# View logs
+tail -f debug.log
+```
+
+### Common Issues
+
+**LineMap out of sync:**
+- Check if LineMap was rebuilt after state changes
+- Verify global line bounds checking
+
+**Rendering glitches:**
+- Check frame text buffer hasn't overflowed
+- Verify segment widths calculated correctly
+
+**Mode confusion:**
+- Add logging to mode transitions
+- Check mode state in status bar
+
+---
+
+## Future Architecture Improvements
+
+### Potential Refactorings (Not Prioritized)
+
+**1. Context Structs (High Impact, High Complexity)**
+- Replace `app: *App` with focused contexts
+- `RenderContext`, `NavigationContext`, `StateContext`
+- Benefits: Better testability, clearer dependencies
+- Effort: Touches many files
+
+**2. Rendering Base Consolidation (Medium Impact, High Complexity)**
+- Extract common logic from unified.zig and side_by_side.zig
+- ~200 lines of duplicated hunk header rendering
+- Benefits: DRY, easier to maintain
+- Effort: Requires careful testing of both renderers
+
+**3. Comment System Organization (Medium Impact, Medium Complexity)**
+- Create `src/comments/` directory
+- Consolidate: storage, editor, rendering, operations
+- Benefits: Better organization
+- Effort: Moderate refactoring
+
+**4. Split rendering/utils.zig (Low-Medium Impact, Medium Complexity)**
+- Create: text_utils.zig, comment_rendering.zig, gutter_rendering.zig
+- Benefits: Smaller, focused files
+- Effort: Extract ~1,100 lines
+
+---
+
+## Conclusion
+
+Skim's architecture emphasizes:
+- **Clarity:** Modal state machine with isolated mode handlers
+- **Performance:** Pre-allocation, virtual scrolling, async highlighting
+- **Maintainability:** Focused modules, clear data flow
+- **Simplicity:** Minimal dependencies, shell-out to git
+
+The recent refactoring (Phases 1-2) has significantly improved code organization, reducing app.zig by 20% and creating a clear module structure for modes.
+
+For questions or suggestions, see the main README.md or open an issue.
