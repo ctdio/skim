@@ -44,6 +44,13 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.updateCurrentFileAndTriggerHighlighting();
             return;
         }
+        // If c, jump to previous comment
+        if (key.codepoint == 'c') {
+            Navigation.jumpToPreviousComment(app);
+            app.state.cursor_column = 0;
+            app.updateCurrentFileAndTriggerHighlighting();
+            return;
+        }
         // Any other key cancels the pending bracket, but still processes the key below
     }
 
@@ -57,6 +64,13 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // If h, jump to next hunk
         if (key.codepoint == 'h') {
             Navigation.jumpToNextHunk(app);
+            app.state.cursor_column = 0;
+            app.updateCurrentFileAndTriggerHighlighting();
+            return;
+        }
+        // If c, jump to next comment
+        if (key.codepoint == 'c') {
+            Navigation.jumpToNextComment(app);
             app.state.cursor_column = 0;
             app.updateCurrentFileAndTriggerHighlighting();
             return;

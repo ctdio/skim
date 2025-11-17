@@ -556,4 +556,72 @@ pub const Navigation = struct {
 
         // No wrapping - stay at current position if no more hunks found
     }
+
+    /// Jump to next comment line (vim-style ]c)
+    /// Supports count prefix (e.g., 3]c jumps to 3rd next comment)
+    pub fn jumpToNextComment(app: *App) void {
+        const count = app.state.count_prefix orelse 1;
+        app.state.count_prefix = null;
+
+        const total_lines = app.getTotalGlobalLines();
+        if (total_lines == 0) return;
+
+        var jumps_remaining = count;
+        var search_line = app.state.global_cursor_line + 1; // Start from next line
+
+        while (search_line < total_lines and jumps_remaining > 0) {
+            if (app.state.line_map.getLineRecord(search_line)) |record| {
+                // Check if this is a comment line
+                if (record.line_type == .comment_line) {
+                    jumps_remaining -= 1;
+                    if (jumps_remaining == 0) {
+                        app.state.global_cursor_line = search_line;
+                        ensureCursorVisible(app, true);
+                        return;
+                    }
+                }
+            }
+            search_line += 1;
+        }
+
+        // No wrapping - stay at current position if no more comments found
+    }
+
+    /// Jump to previous comment line (vim-style [c)
+    /// Supports count prefix (e.g., 3[c jumps to 3rd previous comment)
+    pub fn jumpToPreviousComment(app: *App) void {
+        const count = app.state.count_prefix orelse 1;
+        app.state.count_prefix = null;
+
+        if (app.state.global_cursor_line == 0) return;
+
+        var jumps_remaining = count;
+        var search_line = app.state.global_cursor_line;
+
+        // Move back one to start searching from previous line
+        if (search_line > 0) {
+            search_line -= 1;
+        }
+
+        while (search_line > 0 and jumps_remaining > 0) {
+            if (app.state.line_map.getLineRecord(search_line)) |record| {
+                // Check if this is a comment line
+                if (record.line_type == .comment_line) {
+                    jumps_remaining -= 1;
+                    if (jumps_remaining == 0) {
+                        app.state.global_cursor_line = search_line;
+                        ensureCursorVisible(app, true);
+                        return;
+                    }
+                }
+            }
+            if (search_line > 0) {
+                search_line -= 1;
+            } else {
+                break;
+            }
+        }
+
+        // No wrapping - stay at current position if no more comments found
+    }
 };
