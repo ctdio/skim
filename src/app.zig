@@ -99,6 +99,7 @@ pub const App = struct {
 
     const State = struct {
         diff_source: DiffSource,
+        git_repo_root: []const u8, // Absolute path to git repository root
         files: []parser.FileDiff,
         line_map: line_map.LineMap, // Complete map of all lines
         current_file_idx: usize, // Tracks which file is visible in sticky header
@@ -228,6 +229,10 @@ pub const App = struct {
         var vx = try Vaxis.init(allocator, .{});
         errdefer vx.deinit(allocator, tty.anyWriter());
 
+        // Get git repository root (for resolving file paths)
+        const git_repo_root = try git.getRepoRoot(allocator);
+        errdefer allocator.free(git_repo_root);
+
         // Load git diff
         const diff_text = try git.getDiff(allocator, config.diff_source);
         errdefer allocator.free(diff_text);
@@ -264,6 +269,7 @@ pub const App = struct {
             .mode = .normal,
             .state = State{
                 .diff_source = config.diff_source,
+                .git_repo_root = git_repo_root,
                 .files = files,
                 .line_map = built_line_map,
                 .current_file_idx = 0,
@@ -341,6 +347,7 @@ pub const App = struct {
             },
         }
 
+        self.allocator.free(self.state.git_repo_root);
         for (self.state.files) |*file| {
             file.deinit(self.allocator);
         }
@@ -484,6 +491,7 @@ pub const App = struct {
 
                 // Open editor (blocks until editor exits)
                 if (self.editor_file_path) |file_path| {
+                    defer self.allocator.free(file_path);
                     editor.openInEditor(self.allocator, file_path, self.editor_line_number) catch |err| {
                         std.log.err("Failed to open editor: {}", .{err});
                     };
@@ -1412,12 +1420,16 @@ pub const App = struct {
 
         if (record.file_idx >= self.state.files.len) return;
         const file = &self.state.files[record.file_idx];
-        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+        const relative_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
         // Skip if it's a deleted file or /dev/null
-        if (file.new_path.len == 0 or std.mem.eql(u8, file_path, "/dev/null")) {
+        if (file.new_path.len == 0 or std.mem.eql(u8, relative_path, "/dev/null")) {
             return;
         }
+
+        // Resolve to absolute path (git diff returns paths relative to repo root)
+        const absolute_path = try std.fs.path.join(self.allocator, &[_][]const u8{ self.state.git_repo_root, relative_path });
+        defer self.allocator.free(absolute_path);
 
         // Get the line number from the line type
         var line_number: ?usize = null;
@@ -1459,14 +1471,16 @@ pub const App = struct {
 
         if (is_terminal) {
             // Terminal editor: suspend TUI and wait for editor to complete
+            // Need to allocate the path since we're storing a pointer for later use
+            const path_copy = try self.allocator.dupe(u8, absolute_path);
             self.should_suspend_for_editor = true;
-            self.editor_file_path = file_path;
+            self.editor_file_path = path_copy;
             self.editor_line_number = line_number;
             // Prevent blocking on next pollEvent() so editor opens immediately
             self.needs_render = true;
         } else {
             // GUI editor: just spawn it without suspending TUI
-            editor.openInEditor(self.allocator, file_path, line_number) catch |err| {
+            editor.openInEditor(self.allocator, absolute_path, line_number) catch |err| {
                 std.log.err("Failed to open editor: {}", .{err});
             };
         }

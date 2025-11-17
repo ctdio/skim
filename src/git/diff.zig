@@ -420,6 +420,19 @@ fn checkBranchExists(allocator: Allocator, branch: []const u8) !bool {
     };
 }
 
+/// Get the absolute path to the git repository root
+pub fn getRepoRoot(allocator: Allocator) ![]u8 {
+    const args = &[_][]const u8{ "git", "rev-parse", "--show-toplevel" };
+    const output = try runGitCommand(allocator, args);
+
+    // Trim trailing newline/whitespace
+    const trimmed = std.mem.trim(u8, output, " \t\r\n");
+    const result = try allocator.dupe(u8, trimmed);
+    allocator.free(output);
+
+    return result;
+}
+
 test "getDiff working directory" {
     const allocator = std.testing.allocator;
 
