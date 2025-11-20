@@ -49,7 +49,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Handle special keys
     switch (key.codepoint) {
-        'q' => app.should_quit = true,
         'j' => {
             if (filtered_count > 0 and app.state.branch_selection < filtered_count - 1) {
                 app.state.branch_selection += 1;

@@ -150,7 +150,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     }
 
     switch (key.codepoint) {
-        'q' => app.should_quit = true,
         'j' => {
             Navigation.moveCursorDown(app);
             app.state.cursor_column = 0; // Reset column on vertical movement
@@ -284,7 +283,6 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
 
     // Handle regular keys
     switch (key.codepoint) {
-        'q' => app.should_quit = true,
         'j' => {
             if (app.state.empty_menu_selection < menu_items_count - 1) {
                 app.state.empty_menu_selection += 1;

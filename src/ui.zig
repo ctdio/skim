@@ -243,7 +243,7 @@ pub const UI = struct {
         }
 
         // Instructions at bottom
-        const instructions = "↑↓/j/k/Ctrl-n/p: Navigate  |  Enter: Select  |  q: Quit";
+        const instructions = "↑↓/j/k/Ctrl-n/p: Navigate  |  Enter: Select";
         const instr_row = start_row + 4 + menu_items.len + 2;
         const instr_col = (win.width -| instructions.len) / 2;
         const instr_copy = try RenderUtils.copyFrameText(app, instructions);
@@ -378,7 +378,7 @@ pub const UI = struct {
         }
 
         // Instructions at bottom
-        const instructions = "Type to search  |  ↑↓/j/k: Navigate  |  Enter: Select  |  ESC: Clear/Back  |  q: Quit";
+        const instructions = "Type to search  |  ↑↓/j/k: Navigate  |  Enter: Select  |  ESC: Clear/Back";
         const instr_row = start_row + 4 + 10 + 1;
         const instr_col = (win.width -| instructions.len) / 2;
         const instr_copy = try RenderUtils.copyFrameText(app, instructions);
@@ -499,7 +499,7 @@ pub const UI = struct {
 
         // Context-aware keybindings based on cursor position and mode
         const keybindings = switch (app.mode) {
-            .normal => "Press ? for help  |  q:Quit  Ctrl-p:Files  ::Commands  /:Search  v:Visual  [h]h:Hunks  [c]c:Comments  {}:Empty",
+            .normal => "Press ? for help  |  Ctrl-p:Files  ::Commands  /:Search  v:Visual  [h]h:Hunks  [c]c:Comments  {}:Empty",
             .comment => blk: {
                 if (app.state.active_comment_input) |input| {
                     break :blk switch (input.vim_mode) {
@@ -515,7 +515,7 @@ pub const UI = struct {
             .visual => "j/k:Extend selection  |  y:Yank  ESC:Exit",
             .command_palette => "Type to filter ('>':commands)  |  ↑↓/Ctrl-p/n:Select  Enter:Execute  ESC:Cancel",
             .help => "Press any key to close",
-            .branch_selection => "↑↓/j/k/Ctrl-n/p:Navigate  |  Enter:Select  |  ESC:Back  |  q:Quit",
+            .branch_selection => "↑↓/j/k/Ctrl-n/p:Navigate  |  Enter:Select  |  ESC:Back",
         };
 
         // Get global position info

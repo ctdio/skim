@@ -152,7 +152,6 @@ fn printHelp() !void {
         \\    Enter              Focus mode
         \\    c                  Add comment on cursor line
         \\    s                  Toggle split view
-        \\    q                  Quit
         \\    Ctrl-C × 2         Force exit (double-press)
         \\    ?                  Help
         \\

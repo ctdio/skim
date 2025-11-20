@@ -107,7 +107,6 @@ pub fn renderHelpPopup(_: *App, win: vaxis.Window) !void {
         .{ .key = "Tab/Shift-Tab", .desc = "Cycle hunk view mode" },
         .{ .key = "r", .desc = "Refresh diff" },
         .{ .key = "Ctrl-g", .desc = "Open file in $EDITOR" },
-        .{ .key = "q", .desc = "Quit" },
         .{ .key = "Ctrl-C x2", .desc = "Force quit" },
     };
 

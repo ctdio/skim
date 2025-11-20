@@ -119,7 +119,6 @@ Navigate files and position cursor with vim-style movements:
 | `y` | Yank (copy) comments to clipboard |
 | `s` | Toggle unified/side-by-side view |
 | `r` | Refresh diff (reload from git) |
-| `q` | Quit |
 | `Ctrl-C` × 2 | Force exit (double-press within 1 second) |
 
 ### SEARCH Mode
