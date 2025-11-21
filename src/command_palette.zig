@@ -443,19 +443,20 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     // Show cursor after the query text
     palette_win.showCursor(2 + query.len, 1);
 
-    // Line 2: Separator
+    // Line 2: Separator (account for border width like help.zig does)
     const sep_style = vaxis.Style{
         .fg = .{ .index = 8 }, // dim
     };
-    var sep_text: [256]u8 = undefined;
-    const sep_width = palette_win.width;
-    for (0..@min(sep_width, sep_text.len)) |i| {
-        sep_text[i] = '-';
+    if (palette_win.width > 2) {
+        // Subtract 2 for border padding (1 on each side)
+        const sep_width = palette_win.width - 2;
+        const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
+        @memset(sep_text, '-');
+        var sep_segments = [_]vaxis.Cell.Segment{
+            .{ .text = sep_text, .style = sep_style },
+        };
+        _ = try palette_win.print(&sep_segments, .{ .row_offset = 2 });
     }
-    var sep_segments = [_]vaxis.Cell.Segment{
-        .{ .text = sep_text[0..@min(sep_width, sep_text.len)], .style = sep_style },
-    };
-    _ = try palette_win.print(&sep_segments, .{ .row_offset = 2 });
 
     // Lines 3+: Command list
     if (state.filtered_commands.items.len == 0) {
