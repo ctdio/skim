@@ -1546,6 +1546,34 @@ pub const App = struct {
         }
     }
 
+    /// Jump to first search match (used for live search preview)
+    pub fn jumpToFirstSearchMatch(self: *App) void {
+        var search_state = &self.state.search_state;
+
+        if (!search_state.hasMatches()) return;
+
+        const cursor = self.state.global_cursor_line;
+        var found = false;
+
+        // Find first match at or after cursor
+        for (search_state.matches.items, 0..) |match_line, idx| {
+            if (match_line >= cursor) {
+                search_state.current_match_idx = idx;
+                self.state.global_cursor_line = match_line;
+                found = true;
+                break;
+            }
+        }
+
+        // If no match after cursor, wrap to first match
+        if (!found and search_state.matches.items.len > 0) {
+            search_state.current_match_idx = 0;
+            self.state.global_cursor_line = search_state.matches.items[0];
+        }
+
+        Navigation.centerViewportOnCursor(self);
+    }
+
     fn searchInLine(haystack: []const u8, needle: []const u8, case_sensitive: bool) bool {
         if (needle.len > haystack.len) return false;
 
@@ -1723,7 +1751,7 @@ pub const App = struct {
         // Jump to the match
         if (search_state.getCurrentMatchLine()) |line| {
             self.state.global_cursor_line = line;
-            Navigation.ensureCursorVisible(self, false); // no padding for search jumps
+            Navigation.centerViewportOnCursor(self); // Center search result on screen (vim-style)
         }
     }
 
@@ -1762,7 +1790,7 @@ pub const App = struct {
         // Jump to the match
         if (search_state.getCurrentMatchLine()) |line| {
             self.state.global_cursor_line = line;
-            Navigation.ensureCursorVisible(self, false); // no padding for search jumps
+            Navigation.centerViewportOnCursor(self); // Center search result on screen (vim-style)
         }
     }
 
