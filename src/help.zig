@@ -3,7 +3,7 @@ const vaxis = @import("vaxis");
 
 const App = @import("app.zig").App;
 
-pub fn renderHelpPopup(_: *App, win: vaxis.Window) !void {
+pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     // Calculate popup dimensions - larger for help content
     const popup_width = @min(80, win.width - 4);
     const popup_height = @min(35, win.height - 4);
@@ -34,30 +34,15 @@ pub fn renderHelpPopup(_: *App, win: vaxis.Window) !void {
     };
     popup_win.fill(bg_cell);
 
-    var row: usize = 0;
+    // Build all content lines first
+    var content_lines = std.ArrayList(ContentLine).init(app.allocator);
+    defer content_lines.deinit();
 
     // Title
-    const title = "Skim - Keybindings";
-    const title_style = vaxis.Style{
-        .fg = .{ .index = 6 }, // cyan
-        .bold = true,
-    };
-    var title_segments = [_]vaxis.Cell.Segment{
-        .{ .text = title, .style = title_style },
-    };
-    _ = try popup_win.print(&title_segments, .{ .row_offset = row });
-    row += 1;
+    try content_lines.append(.{ .text = "Skim - Keybindings", .style = .{ .fg = .{ .index = 6 }, .bold = true } });
 
     // Separator
-    var sep_text: [80]u8 = undefined;
-    for (0..@min(popup_width - 2, sep_text.len)) |i| {
-        sep_text[i] = '-';
-    }
-    var sep_segments = [_]vaxis.Cell.Segment{
-        .{ .text = sep_text[0..@min(popup_width - 2, sep_text.len)], .style = .{ .fg = .{ .index = 8 } } },
-    };
-    _ = try popup_win.print(&sep_segments, .{ .row_offset = row });
-    row += 1;
+    try content_lines.append(.{ .text = null, .style = .{}, .is_separator = true });
 
     const section_style = vaxis.Style{
         .fg = .{ .index = 3 }, // yellow
@@ -70,20 +55,10 @@ pub fn renderHelpPopup(_: *App, win: vaxis.Window) !void {
         .fg = .{ .index = 7 }, // white
     };
 
-    // Helper function to print a keybinding line
-    const KeyBinding = struct {
-        key: []const u8,
-        desc: []const u8,
-    };
-
     // NORMAL MODE section
-    var normal_header = [_]vaxis.Cell.Segment{
-        .{ .text = "NORMAL MODE", .style = section_style },
-    };
-    _ = try popup_win.print(&normal_header, .{ .row_offset = row });
-    row += 1;
+    try content_lines.append(.{ .text = "NORMAL MODE", .style = section_style });
 
-    const normal_bindings = [_]KeyBinding{
+    const normal_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "h/l", .desc = "Previous/Next file" },
         .{ .key = "j/k", .desc = "Cursor down/up" },
         .{ .key = "g/G", .desc = "Jump to top/bottom" },
@@ -111,25 +86,14 @@ pub fn renderHelpPopup(_: *App, win: vaxis.Window) !void {
     };
 
     for (normal_bindings) |binding| {
-        var segments = [_]vaxis.Cell.Segment{
-            .{ .text = "  ", .style = .{} },
-            .{ .text = binding.key, .style = key_style },
-            .{ .text = "  ", .style = .{} },
-            .{ .text = binding.desc, .style = desc_style },
-        };
-        _ = try popup_win.print(&segments, .{ .row_offset = row });
-        row += 1;
+        try content_lines.append(.{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    row += 1;
+    try content_lines.append(.{ .text = "", .style = .{} }); // Blank line
 
     // SEARCH MODE section
-    var search_header = [_]vaxis.Cell.Segment{
-        .{ .text = "SEARCH MODE", .style = section_style },
-    };
-    _ = try popup_win.print(&search_header, .{ .row_offset = row });
-    row += 1;
+    try content_lines.append(.{ .text = "SEARCH MODE", .style = section_style });
 
-    const search_bindings = [_]KeyBinding{
+    const search_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Type", .desc = "Enter search query (smart case)" },
         .{ .key = "Enter", .desc = "Execute search" },
         .{ .key = "ESC", .desc = "Cancel search" },
@@ -137,25 +101,14 @@ pub fn renderHelpPopup(_: *App, win: vaxis.Window) !void {
     };
 
     for (search_bindings) |binding| {
-        var segments = [_]vaxis.Cell.Segment{
-            .{ .text = "  ", .style = .{} },
-            .{ .text = binding.key, .style = key_style },
-            .{ .text = "  ", .style = .{} },
-            .{ .text = binding.desc, .style = desc_style },
-        };
-        _ = try popup_win.print(&segments, .{ .row_offset = row });
-        row += 1;
+        try content_lines.append(.{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    row += 1;
+    try content_lines.append(.{ .text = "", .style = .{} }); // Blank line
 
     // COMMAND PALETTE section
-    var palette_header = [_]vaxis.Cell.Segment{
-        .{ .text = "COMMAND PALETTE", .style = section_style },
-    };
-    _ = try popup_win.print(&palette_header, .{ .row_offset = row });
-    row += 1;
+    try content_lines.append(.{ .text = "COMMAND PALETTE", .style = section_style });
 
-    const palette_bindings = [_]KeyBinding{
+    const palette_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Type", .desc = "Filter files (default mode)" },
         .{ .key = ">", .desc = "Prefix to switch to command mode" },
         .{ .key = "Up/Down", .desc = "Navigate selection" },
@@ -165,50 +118,28 @@ pub fn renderHelpPopup(_: *App, win: vaxis.Window) !void {
     };
 
     for (palette_bindings) |binding| {
-        var segments = [_]vaxis.Cell.Segment{
-            .{ .text = "  ", .style = .{} },
-            .{ .text = binding.key, .style = key_style },
-            .{ .text = "  ", .style = .{} },
-            .{ .text = binding.desc, .style = desc_style },
-        };
-        _ = try popup_win.print(&segments, .{ .row_offset = row });
-        row += 1;
+        try content_lines.append(.{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    row += 1;
+    try content_lines.append(.{ .text = "", .style = .{} }); // Blank line
 
     // VISUAL MODE section
-    var visual_header = [_]vaxis.Cell.Segment{
-        .{ .text = "VISUAL MODE", .style = section_style },
-    };
-    _ = try popup_win.print(&visual_header, .{ .row_offset = row });
-    row += 1;
+    try content_lines.append(.{ .text = "VISUAL MODE", .style = section_style });
 
-    const visual_bindings = [_]KeyBinding{
+    const visual_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "j/k", .desc = "Extend selection" },
         .{ .key = "y", .desc = "Yank selection" },
         .{ .key = "v/ESC", .desc = "Exit visual mode" },
     };
 
     for (visual_bindings) |binding| {
-        var segments = [_]vaxis.Cell.Segment{
-            .{ .text = "  ", .style = .{} },
-            .{ .text = binding.key, .style = key_style },
-            .{ .text = "  ", .style = .{} },
-            .{ .text = binding.desc, .style = desc_style },
-        };
-        _ = try popup_win.print(&segments, .{ .row_offset = row });
-        row += 1;
+        try content_lines.append(.{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    row += 1;
+    try content_lines.append(.{ .text = "", .style = .{} }); // Blank line
 
     // COMMENT MODE section
-    var comment_header = [_]vaxis.Cell.Segment{
-        .{ .text = "COMMENT MODE", .style = section_style },
-    };
-    _ = try popup_win.print(&comment_header, .{ .row_offset = row });
-    row += 1;
+    try content_lines.append(.{ .text = "COMMENT MODE", .style = section_style });
 
-    const comment_bindings = [_]KeyBinding{
+    const comment_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Enter", .desc = "Save comment" },
         .{ .key = "Shift-Enter", .desc = "Insert newline" },
         .{ .key = "ESC", .desc = "Cancel" },
@@ -216,20 +147,87 @@ pub fn renderHelpPopup(_: *App, win: vaxis.Window) !void {
     };
 
     for (comment_bindings) |binding| {
-        var segments = [_]vaxis.Cell.Segment{
-            .{ .text = "  ", .style = .{} },
-            .{ .text = binding.key, .style = key_style },
-            .{ .text = "  ", .style = .{} },
-            .{ .text = binding.desc, .style = desc_style },
-        };
-        _ = try popup_win.print(&segments, .{ .row_offset = row });
-        row += 1;
+        try content_lines.append(.{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
 
     // Footer
-    row += 1;
-    var footer_segments = [_]vaxis.Cell.Segment{
-        .{ .text = "Press ? or ESC to close", .style = .{ .fg = .{ .index = 8 } } },
-    };
-    _ = try popup_win.print(&footer_segments, .{ .row_offset = row });
+    try content_lines.append(.{ .text = "", .style = .{} }); // Blank line
+    try content_lines.append(.{ .text = "j/k or ↑↓: Scroll  |  Ctrl-d/u: Page down/up  |  g/G: Top/Bottom  |  ? or ESC: Close", .style = .{ .fg = .{ .index = 8 } } });
+
+    // Calculate visible range based on scroll offset
+    const scroll_offset = app.state.help_scroll_offset;
+    const max_visible_rows = popup_height - 2; // Account for borders
+    const total_content_rows = content_lines.items.len;
+    const visible_start = scroll_offset;
+    const visible_end = @min(visible_start + max_visible_rows, total_content_rows);
+
+    // Show scroll indicator at top if scrolled down
+    var current_row: usize = 0;
+    if (scroll_offset > 0) {
+        const indicator = "▲ (scroll up for more)";
+        var indicator_seg = [_]vaxis.Cell.Segment{
+            .{ .text = indicator, .style = .{ .fg = .{ .index = 8 } } },
+        };
+        _ = try popup_win.print(&indicator_seg, .{ .row_offset = current_row });
+        current_row += 1;
+    }
+
+    // Render visible content
+    const render_utils = @import("rendering/utils.zig");
+    const RenderUtils = render_utils.RenderUtils;
+
+    for (visible_start..visible_end) |content_idx| {
+        if (current_row >= max_visible_rows - 1) break; // Leave room for bottom indicator
+
+        const line = content_lines.items[content_idx];
+
+        if (line.is_separator) {
+            // Render separator
+            if (popup_width > 2) {
+                const sep_width = popup_width - 2;
+                const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
+                @memset(sep_text, '-');
+                var sep_segments = [_]vaxis.Cell.Segment{
+                    .{ .text = sep_text, .style = .{ .fg = .{ .index = 8 } } },
+                };
+                _ = try popup_win.print(&sep_segments, .{ .row_offset = current_row });
+            }
+        } else if (line.key) |key| {
+            // Render keybinding
+            var segments = [_]vaxis.Cell.Segment{
+                .{ .text = "  ", .style = .{} },
+                .{ .text = key, .style = line.key_style.? },
+                .{ .text = "  ", .style = .{} },
+                .{ .text = line.desc.?, .style = line.desc_style.? },
+            };
+            _ = try popup_win.print(&segments, .{ .row_offset = current_row });
+        } else if (line.text) |text| {
+            // Render regular text
+            var text_seg = [_]vaxis.Cell.Segment{
+                .{ .text = text, .style = line.style },
+            };
+            _ = try popup_win.print(&text_seg, .{ .row_offset = current_row });
+        }
+
+        current_row += 1;
+    }
+
+    // Show scroll indicator at bottom if there's more content
+    if (visible_end < total_content_rows and current_row < max_visible_rows) {
+        const indicator = "▼ (scroll down for more)";
+        var indicator_seg = [_]vaxis.Cell.Segment{
+            .{ .text = indicator, .style = .{ .fg = .{ .index = 8 } } },
+        };
+        _ = try popup_win.print(&indicator_seg, .{ .row_offset = current_row });
+    }
 }
+
+const ContentLine = struct {
+    text: ?[]const u8 = null,
+    key: ?[]const u8 = null,
+    desc: ?[]const u8 = null,
+    style: vaxis.Style = .{},
+    key_style: ?vaxis.Style = null,
+    desc_style: ?vaxis.Style = null,
+    is_separator: bool = false,
+};

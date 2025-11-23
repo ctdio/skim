@@ -499,23 +499,23 @@ pub const UI = struct {
 
         // Context-aware keybindings based on cursor position and mode
         const keybindings = switch (app.mode) {
-            .normal => "Press ? for help  |  Ctrl-p:Files  ::Commands  /:Search  v:Visual  [h]h:Hunks  [c]c:Comments  {}:Empty",
+            .normal => "j/k:Move  |  ? for help",
             .comment => blk: {
                 if (app.state.active_comment_input) |input| {
                     break :blk switch (input.vim_mode) {
-                        .normal => "Comment editing (vim mode)  |  i:Insert  :wq:Save&Quit  ESC:Cancel",
-                        .insert => "INSERT MODE  |  ESC:Normal  Enter:Newline",
-                        .visual => "VISUAL MODE  |  y:Yank  d:Delete  ESC:Exit",
-                        .command => ":w (save)  :q (quit)  :wq (save & quit)  Enter:Execute  ESC:Cancel",
+                        .normal => "i:Insert  |  :wq:Save  |  ESC:Cancel",
+                        .insert => "INSERT  |  ESC:Normal",
+                        .visual => "VISUAL  |  ESC:Exit",
+                        .command => ":w :q :wq  |  Enter:Execute  |  ESC:Cancel",
                     };
                 }
-                break :blk "Enter:Save  ESC:Cancel";
+                break :blk "Enter:Save  |  ESC:Cancel";
             },
-            .search => "Type to search  |  Enter:Search  ESC:Cancel  |  Smart case matching",
-            .visual => "j/k:Extend selection  |  y:Yank  ESC:Exit",
-            .command_palette => "Type to filter ('>':commands)  |  ↑↓/Ctrl-p/n:Select  Enter:Execute  ESC:Cancel",
-            .help => "Press any key to close",
-            .branch_selection => "↑↓/j/k/Ctrl-n/p:Navigate  |  Enter:Select  |  ESC:Back",
+            .search => "Type to search  |  Enter:Execute  |  ESC:Cancel",
+            .visual => "j/k:Extend  |  y:Yank  |  ESC:Exit",
+            .command_palette => "Type to filter  |  '>':Commands  |  ↑↓:Select  |  ESC:Cancel",
+            .help => "j/k:Scroll  |  Ctrl-d/u:Page  |  ?/ESC:Close",
+            .branch_selection => "j/k:Move  |  Enter:Select  |  ESC:Back",
         };
 
         // Get global position info

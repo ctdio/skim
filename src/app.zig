@@ -126,6 +126,7 @@ pub const App = struct {
         branch_search_query: [256]u8, // Search query buffer for filtering branches
         branch_search_len: usize, // Length of search query
         filtered_branches: std.ArrayList(usize), // Indices of branches matching search query
+        help_scroll_offset: usize, // Scroll position in help overlay
 
         // Cached stats for menu items (fetched once when entering empty menu mode)
         menu_stats_cached: bool, // Whether stats have been fetched
@@ -296,6 +297,7 @@ pub const App = struct {
                 .branch_search_query = undefined,
                 .branch_search_len = 0,
                 .filtered_branches = std.ArrayList(usize).init(allocator),
+                .help_scroll_offset = 0,
                 .menu_stats_cached = false,
                 .working_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
                 .staged_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
