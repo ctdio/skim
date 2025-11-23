@@ -66,7 +66,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "Ctrl-n", .desc = "Next file" },
         .{ .key = "Shift-M", .desc = "Center cursor in viewport" },
         .{ .key = "zz", .desc = "Center viewport on cursor" },
-        .{ .key = "[h/]h", .desc = "Previous/Next hunk" },
+        .{ .key = "[h/]h", .desc = "Previous/Next code change" },
         .{ .key = "[c/]c", .desc = "Previous/Next comment" },
         .{ .key = "{/}", .desc = "Previous/Next empty line" },
         .{ .key = "/", .desc = "Enter search mode" },
