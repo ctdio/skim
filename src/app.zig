@@ -1357,7 +1357,44 @@ pub const App = struct {
         self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
     }
 
-    pub fn yankCommentsToClipboard(self: *App) !void {
+    pub fn yankCurrentCommentToClipboard(self: *App) !void {
+        // Get line record from LineMap
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
+
+        switch (record.line_type) {
+            .comment_line => |comment_info| {
+                // Generate export with context (10 lines before, 10 lines after for LLM context)
+                const output = try self.state.comment_store.exportSingleCommentWithContext(
+                    self.allocator,
+                    comment_info.comment_idx,
+                    self.state.files,
+                    10, // lines before
+                    10, // lines after
+                );
+                defer self.allocator.free(output);
+
+                // Copy to clipboard using pbcopy on macOS
+                const argv = [_][]const u8{"pbcopy"};
+                var child = std.process.Child.init(&argv, self.allocator);
+                child.stdin_behavior = .Pipe;
+                child.stdout_behavior = .Ignore;
+                child.stderr_behavior = .Ignore;
+
+                try child.spawn();
+
+                if (child.stdin) |stdin| {
+                    try stdin.writeAll(output);
+                    stdin.close();
+                    child.stdin = null;
+                }
+
+                _ = try child.wait();
+            },
+            else => {}, // Not on a comment line, do nothing
+        }
+    }
+
+    pub fn yankAllCommentsToClipboard(self: *App) !void {
         // Generate export with context (10 lines before, 10 lines after for LLM context)
         const output = try self.state.comment_store.exportWithContext(
             self.allocator,

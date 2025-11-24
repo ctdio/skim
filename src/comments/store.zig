@@ -236,6 +236,59 @@ pub const CommentStore = struct {
         return output.toOwnedSlice();
     }
 
+    pub fn exportSingleCommentWithContext(
+        self: *const CommentStore,
+        allocator: Allocator,
+        comment_idx: usize,
+        files: []const parser.FileDiff,
+        context_lines_before: usize,
+        context_lines_after: usize,
+    ) ![]const u8 {
+        if (comment_idx >= self.comments.items.len) {
+            return error.InvalidCommentIndex;
+        }
+
+        var output = std.ArrayList(u8).init(allocator);
+        errdefer output.deinit();
+
+        const writer = output.writer();
+        const comment = &self.comments.items[comment_idx];
+
+        try writer.writeAll("<code_review>\n");
+        try writer.print("File: {s}\n\n", .{comment.file_path});
+
+        // Find the file and render context
+        const file = blk: {
+            for (files) |*f| {
+                const path = if (f.new_path.len > 0) f.new_path else f.old_path;
+                if (std.mem.eql(u8, path, comment.file_path)) {
+                    break :blk f;
+                }
+            }
+            break :blk null;
+        };
+
+        if (file) |f| {
+            try writer.writeAll("```diff\n");
+            try renderCommentContext(
+                writer,
+                f,
+                comment,
+                context_lines_before,
+                context_lines_after,
+            );
+            try writer.writeAll("```\n\n");
+        }
+
+        // Comment text
+        try writer.writeAll("Comment:\n");
+        try writer.print("{s}\n\n", .{comment.text});
+        try writer.writeAll("---\n");
+
+        try writer.writeAll("</code_review>\n");
+        return output.toOwnedSlice();
+    }
+
     fn renderCommentContext(
         writer: anytype,
         file: *const parser.FileDiff,

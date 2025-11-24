@@ -186,7 +186,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         's' => app.toggleViewMode(),
         '\t' => try app.cycleHunkViewMode(), // Tab to cycle hunk view mode forward
         'r' => try app.refresh(),
-        'y' => try app.yankCommentsToClipboard(),
+        'y' => try app.yankCurrentCommentToClipboard(),
+        'Y' => try app.yankAllCommentsToClipboard(),
         'd' => try app.deleteCommentUnderCursor(),
         'D' => app.clearAllComments(),
         'M' => {

@@ -14,7 +14,7 @@ A keyboard-driven TUI for code reviews built in Zig. Fast, minimal, and focused 
 - **Search with `/` - smart case matching across all files**
 - Live refresh (press 'r')
 - Full git diff compatibility (working dir, staged, branch comparisons)
-- Comment system with export to clipboard ('y' to yank)
+- Comment system with export to clipboard ('y' for current, 'Y' for all)
 - Editor integration (Ctrl-g opens file at line in $EDITOR)
 
 ## Installation
@@ -116,7 +116,8 @@ Navigate files and position cursor with vim-style movements:
 | `d` | Delete comment under cursor |
 | `D` | Clear all comments |
 | `Ctrl-g` | Open current file in $EDITOR |
-| `y` | Yank (copy) comments to clipboard |
+| `y` | Yank (copy) current comment to clipboard |
+| `Y` | Yank (copy) all comments to clipboard |
 | `s` | Toggle unified/side-by-side view |
 | `r` | Refresh diff (reload from git) |
 | `Ctrl-C` × 2 | Force exit (double-press within 1 second) |
