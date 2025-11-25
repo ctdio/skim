@@ -178,11 +178,14 @@ fn runDaemonCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
 
 fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var port: u16 = discovery.DEFAULT_ADAPTER_PORT;
+    var stdio_mode = false;
 
-    // Parse optional arguments
+    // Parse arguments
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--port") or std.mem.eql(u8, args[i], "-p")) {
+        if (std.mem.eql(u8, args[i], "--stdio")) {
+            stdio_mode = true;
+        } else if (std.mem.eql(u8, args[i], "--port") or std.mem.eql(u8, args[i], "-p")) {
             i += 1;
             if (i >= args.len) {
                 std.debug.print("--port requires a port number\n", .{});
@@ -195,7 +198,17 @@ fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             try printMcpHelp();
             std.process.exit(0);
+        } else {
+            std.debug.print("Unknown option: {s}\n", .{args[i]});
+            try printMcpHelp();
+            std.process.exit(1);
         }
+    }
+
+    if (!stdio_mode) {
+        std.debug.print("Error: --stdio flag is required\n\n", .{});
+        try printMcpHelp();
+        std.process.exit(1);
     }
 
     try adapter.runAdapter(allocator, port);
@@ -234,7 +247,7 @@ fn printMcpHelp() !void {
         \\skim mcp - Run as MCP adapter (for AI agents)
         \\
         \\USAGE:
-        \\    skim mcp [OPTIONS]
+        \\    skim mcp --stdio [OPTIONS]
         \\
         \\This command runs skim as a thin MCP adapter that connects to the
         \\skim daemon. It reads MCP JSON-RPC from stdin and writes responses
@@ -242,6 +255,7 @@ fn printMcpHelp() !void {
         \\Cursor, or similar AI coding assistants.
         \\
         \\OPTIONS:
+        \\    --stdio              Use stdio transport (required)
         \\    -p, --port <port>    Daemon adapter port (default: 9998)
         \\    -h, --help           Print this help message
         \\
@@ -251,7 +265,7 @@ fn printMcpHelp() !void {
         \\      "mcpServers": {
         \\        "skim": {
         \\          "command": "skim",
-        \\          "args": ["mcp"]
+        \\          "args": ["mcp", "--stdio"]
         \\        }
         \\      }
         \\    }

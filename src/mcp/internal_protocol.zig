@@ -66,6 +66,7 @@ pub const AdapterWelcomePayload = struct {
 /// MCP response from daemon to adapter
 pub const McpResponsePayload = struct {
     request_id: []const u8,
+    mcp_id: McpId, // Original MCP request ID to return to agent
     result: ?[]const u8, // Raw JSON string (null if error)
     @"error": ?McpErrorPayload,
 };
@@ -195,14 +196,15 @@ pub fn encodeAdapterWelcome(allocator: Allocator, adapter_id: []const u8, client
     return output.toOwnedSlice();
 }
 
-pub fn encodeMcpResponse(allocator: Allocator, request_id: []const u8, result: ?[]const u8, err: ?McpErrorPayload) ![]u8 {
+pub fn encodeMcpResponse(allocator: Allocator, request_id: []const u8, mcp_id: McpId, result: ?[]const u8, err: ?McpErrorPayload) ![]u8 {
     var output = std.ArrayList(u8).init(allocator);
     errdefer output.deinit();
 
     const writer = output.writer();
     try writer.writeAll("{\"event\":\"mcp_response\",\"request_id\":\"");
     try writer.writeAll(request_id);
-    try writer.writeByte('"');
+    try writer.writeAll("\",\"mcp_id\":");
+    try mcp_id.format(writer);
 
     if (result) |r| {
         try writer.writeAll(",\"result\":");
@@ -315,6 +317,7 @@ const RawDaemonMessage = struct {
     adapter_id: ?[]const u8 = null,
     clients: ?[]const ClientSummaryRaw = null,
     request_id: ?[]const u8 = null,
+    mcp_id: ?std.json.Value = null, // Can be number, string, or null
     result: ?std.json.Value = null,
     @"error": ?struct {
         code: i32,
@@ -366,6 +369,16 @@ pub fn decodeDaemonMessage(allocator: Allocator, json_line: []const u8) !ParsedD
             .clients = clients,
         } };
     } else if (std.mem.eql(u8, event, "mcp_response")) {
+        // Parse mcp_id
+        const mcp_id: McpId = if (msg.mcp_id) |id_val| blk: {
+            break :blk switch (id_val) {
+                .integer => |n| .{ .number = n },
+                .string => |s| .{ .string = try allocator.dupe(u8, s) },
+                .null => .{ .null_value = {} },
+                else => .{ .null_value = {} },
+            };
+        } else .{ .null_value = {} };
+
         // Stringify result if present
         const result_str: ?[]const u8 = if (msg.result) |r| blk: {
             var result_output = std.ArrayList(u8).init(allocator);
@@ -381,6 +394,7 @@ pub fn decodeDaemonMessage(allocator: Allocator, json_line: []const u8) !ParsedD
 
         return .{ .mcp_response = .{
             .request_id = try allocator.dupe(u8, msg.request_id orelse return error.MissingField),
+            .mcp_id = mcp_id,
             .result = result_str,
             .@"error" = err_payload,
         } };
@@ -442,6 +456,10 @@ pub fn freeDaemonMessage(allocator: Allocator, msg: *ParsedDaemonMessage) void {
         },
         .mcp_response => |r| {
             allocator.free(r.request_id);
+            switch (r.mcp_id) {
+                .string => |s| allocator.free(s),
+                else => {},
+            }
             if (r.result) |res| allocator.free(res);
             if (r.@"error") |e| allocator.free(e.message);
         },
@@ -536,7 +554,7 @@ test "encode and decode mcp_request" {
 test "encode and decode mcp_response success" {
     const allocator = std.testing.allocator;
 
-    const encoded = try encodeMcpResponse(allocator, "req-123", "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}", null);
+    const encoded = try encodeMcpResponse(allocator, "req-123", .{ .number = 42 }, "{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}", null);
     defer allocator.free(encoded);
 
     var decoded = try decodeDaemonMessage(allocator, encoded);
@@ -544,6 +562,7 @@ test "encode and decode mcp_response success" {
 
     try std.testing.expect(decoded == .mcp_response);
     try std.testing.expectEqualStrings("req-123", decoded.mcp_response.request_id);
+    try std.testing.expectEqual(@as(i64, 42), decoded.mcp_response.mcp_id.number);
     try std.testing.expect(decoded.mcp_response.result != null);
     try std.testing.expect(decoded.mcp_response.@"error" == null);
 }
@@ -551,7 +570,7 @@ test "encode and decode mcp_response success" {
 test "encode and decode mcp_response error" {
     const allocator = std.testing.allocator;
 
-    const encoded = try encodeMcpResponse(allocator, "req-456", null, .{
+    const encoded = try encodeMcpResponse(allocator, "req-456", .{ .number = 99 }, null, .{
         .code = -32001,
         .message = "Client not found",
     });
@@ -562,6 +581,7 @@ test "encode and decode mcp_response error" {
 
     try std.testing.expect(decoded == .mcp_response);
     try std.testing.expectEqualStrings("req-456", decoded.mcp_response.request_id);
+    try std.testing.expectEqual(@as(i64, 99), decoded.mcp_response.mcp_id.number);
     try std.testing.expect(decoded.mcp_response.result == null);
     try std.testing.expect(decoded.mcp_response.@"error" != null);
     try std.testing.expectEqual(@as(i32, -32001), decoded.mcp_response.@"error".?.code);

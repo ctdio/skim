@@ -330,7 +330,18 @@ pub const McpAdapter = struct {
     fn writeMcpResponse(self: *Self, writer: anytype, response: internal_protocol.McpResponsePayload) !void {
         _ = self;
 
-        try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":0");
+        try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
+
+        // Write the MCP ID from the response
+        switch (response.mcp_id) {
+            .number => |n| try std.fmt.formatInt(n, 10, .lower, .{}, writer),
+            .string => |s| {
+                try writer.writeByte('"');
+                try writer.writeAll(s);
+                try writer.writeByte('"');
+            },
+            .null_value => try writer.writeAll("null"),
+        }
 
         if (response.result) |result| {
             try writer.writeAll(",\"result\":");

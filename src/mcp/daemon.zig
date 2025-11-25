@@ -9,6 +9,8 @@ const internal_protocol = @import("internal_protocol.zig");
 const registry = @import("registry.zig");
 const discovery = @import("discovery.zig");
 const line_resolver = @import("line_resolver.zig");
+const framework = @import("framework.zig");
+const tools = @import("tools.zig");
 
 // =============================================================================
 // Daemon Server
@@ -35,6 +37,9 @@ pub const Daemon = struct {
     // Request tracking for async response correlation
     pending_requests: std.AutoHashMap([36]u8, PendingRequest),
 
+    // MCP Framework server
+    mcp_server: framework.Server,
+
     // State
     running: bool,
 
@@ -55,6 +60,7 @@ pub const Daemon = struct {
             .pending_tui_connections = std.ArrayList(PendingConnection).init(allocator),
             .pending_adapter_connections = std.ArrayList(PendingConnection).init(allocator),
             .pending_requests = std.AutoHashMap([36]u8, PendingRequest).init(allocator),
+            .mcp_server = try tools.createServer(allocator),
             .running = false,
         };
 
@@ -87,6 +93,7 @@ pub const Daemon = struct {
         }
         self.pending_requests.deinit();
 
+        self.mcp_server.deinit();
         self.tui_clients.deinit();
         self.adapters.deinit();
         self.allocator.destroy(self);
@@ -545,37 +552,38 @@ pub const Daemon = struct {
     // =========================================================================
 
     fn handleMcpRequest(self: *Self, adapter: *AdapterInfo, req: internal_protocol.McpRequestPayload) !void {
-        if (std.mem.eql(u8, req.method, "tools/list")) {
+        // Use framework for initialize and tools/list
+        if (std.mem.eql(u8, req.method, "initialize")) {
+            try self.handleInitialize(adapter, req);
+        } else if (std.mem.eql(u8, req.method, "tools/list")) {
             try self.handleToolsList(adapter, req);
         } else if (std.mem.eql(u8, req.method, "tools/call")) {
             try self.handleToolsCall(adapter, req);
-        } else if (std.mem.eql(u8, req.method, "initialize")) {
-            try self.handleInitialize(adapter, req);
         } else if (std.mem.eql(u8, req.method, "notifications/initialized")) {
             // No response needed for notifications
         } else {
-            try self.sendMcpError(adapter, req.request_id, -32601, "Method not found");
+            try self.sendMcpError(adapter, req.request_id, req.mcp_id, -32601, "Method not found");
         }
     }
 
     fn handleInitialize(self: *Self, adapter: *AdapterInfo, req: internal_protocol.McpRequestPayload) !void {
-        const result =
-            \\{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"skim-mcp","version":"0.1.0"}}
-        ;
-        try self.sendMcpResponse(adapter, req.request_id, result);
+        // Use framework to encode initialize response
+        const result = try self.mcp_server.encodeInitializeResponse(self.allocator);
+        defer self.allocator.free(result);
+        try self.sendMcpResponse(adapter, req.request_id, req.mcp_id, result);
     }
 
     fn handleToolsList(self: *Self, adapter: *AdapterInfo, req: internal_protocol.McpRequestPayload) !void {
-        const result =
-            \\{"tools":[{"name":"list_clients","description":"List all connected skim instances","inputSchema":{"type":"object","properties":{},"required":[]}},{"name":"add_comment","description":"Add a review comment to a specific line","inputSchema":{"type":"object","properties":{"client_id":{"type":"string","description":"ID of the skim instance"},"file":{"type":"string","description":"File path"},"line":{"type":"integer","description":"Line number"},"text":{"type":"string","description":"Comment text"}},"required":["client_id","file","line","text"]}},{"name":"get_comments","description":"Get all comments from a skim instance","inputSchema":{"type":"object","properties":{"client_id":{"type":"string","description":"ID of the skim instance"}},"required":["client_id"]}}]}
-        ;
-        try self.sendMcpResponse(adapter, req.request_id, result);
+        // Use framework to encode tools list response
+        const result = try self.mcp_server.encodeToolsListResponse(self.allocator);
+        defer self.allocator.free(result);
+        try self.sendMcpResponse(adapter, req.request_id, req.mcp_id, result);
     }
 
     fn handleToolsCall(self: *Self, adapter: *AdapterInfo, req: internal_protocol.McpRequestPayload) !void {
         // Parse params to get tool name
         const params_str = req.params orelse {
-            try self.sendMcpError(adapter, req.request_id, -32602, "Missing params");
+            try self.sendMcpError(adapter, req.request_id, req.mcp_id, -32602, "Missing params");
             return;
         };
 
@@ -583,7 +591,7 @@ pub const Daemon = struct {
             name: []const u8,
             arguments: ?std.json.Value = null,
         }, self.allocator, params_str, .{ .ignore_unknown_fields = true }) catch {
-            try self.sendMcpError(adapter, req.request_id, -32602, "Invalid params");
+            try self.sendMcpError(adapter, req.request_id, req.mcp_id, -32602, "Invalid params");
             return;
         };
         defer parsed.deinit();
@@ -597,7 +605,7 @@ pub const Daemon = struct {
         } else if (std.mem.eql(u8, tool_name, "get_comments")) {
             try self.handleGetComments(adapter, req, parsed.value.arguments);
         } else {
-            try self.sendMcpError(adapter, req.request_id, -32602, "Unknown tool");
+            try self.sendMcpError(adapter, req.request_id, req.mcp_id, -32602, "Unknown tool");
         }
     }
 
@@ -627,57 +635,57 @@ pub const Daemon = struct {
 
         try output.appendSlice("\"}]}");
 
-        try self.sendMcpResponse(adapter, req.request_id, output.items);
+        try self.sendMcpResponse(adapter, req.request_id, req.mcp_id, output.items);
     }
 
     fn handleAddComment(self: *Self, adapter: *AdapterInfo, req: internal_protocol.McpRequestPayload, arguments: ?std.json.Value) !void {
         const args = arguments orelse {
-            try self.sendToolError(adapter, req.request_id, "Missing arguments");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing arguments");
             return;
         };
 
         if (args != .object) {
-            try self.sendToolError(adapter, req.request_id, "Invalid arguments");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid arguments");
             return;
         }
 
         const client_id = args.object.get("client_id") orelse {
-            try self.sendToolError(adapter, req.request_id, "Missing client_id");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing client_id");
             return;
         };
         const file = args.object.get("file") orelse {
-            try self.sendToolError(adapter, req.request_id, "Missing file");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing file");
             return;
         };
         const line_val = args.object.get("line") orelse {
-            try self.sendToolError(adapter, req.request_id, "Missing line");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing line");
             return;
         };
         const text = args.object.get("text") orelse {
-            try self.sendToolError(adapter, req.request_id, "Missing text");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing text");
             return;
         };
 
         if (client_id != .string or file != .string or text != .string) {
-            try self.sendToolError(adapter, req.request_id, "Invalid argument types");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid argument types");
             return;
         }
 
         const line: u32 = switch (line_val) {
             .integer => |i| @intCast(i),
             .number_string => |s| std.fmt.parseInt(u32, s, 10) catch {
-                try self.sendToolError(adapter, req.request_id, "Invalid line number");
+                try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid line number");
                 return;
             },
             else => {
-                try self.sendToolError(adapter, req.request_id, "Invalid line type");
+                try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid line type");
                 return;
             },
         };
 
         // Find TUI client
         const client = self.tui_clients.getByIdString(client_id.string) orelse {
-            try self.sendToolError(adapter, req.request_id, "Client not found");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Client not found");
             return;
         };
 
@@ -709,35 +717,35 @@ pub const Daemon = struct {
         client.stream.writeAll(msg) catch |err| {
             std.log.err("Failed to send to TUI: {}", .{err});
             _ = self.pending_requests.remove(request_id);
-            try self.sendToolError(adapter, req.request_id, "Failed to send to client");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
             return;
         };
     }
 
     fn handleGetComments(self: *Self, adapter: *AdapterInfo, req: internal_protocol.McpRequestPayload, arguments: ?std.json.Value) !void {
         const args = arguments orelse {
-            try self.sendToolError(adapter, req.request_id, "Missing arguments");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing arguments");
             return;
         };
 
         if (args != .object) {
-            try self.sendToolError(adapter, req.request_id, "Invalid arguments");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid arguments");
             return;
         }
 
         const client_id = args.object.get("client_id") orelse {
-            try self.sendToolError(adapter, req.request_id, "Missing client_id");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing client_id");
             return;
         };
 
         if (client_id != .string) {
-            try self.sendToolError(adapter, req.request_id, "Invalid client_id type");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid client_id type");
             return;
         }
 
         // Find TUI client
         const client = self.tui_clients.getByIdString(client_id.string) orelse {
-            try self.sendToolError(adapter, req.request_id, "Client not found");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Client not found");
             return;
         };
 
@@ -765,7 +773,7 @@ pub const Daemon = struct {
         client.stream.writeAll(msg) catch |err| {
             std.log.err("Failed to send to TUI: {}", .{err});
             _ = self.pending_requests.remove(request_id);
-            try self.sendToolError(adapter, req.request_id, "Failed to send to client");
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
             return;
         };
     }
@@ -815,7 +823,7 @@ pub const Daemon = struct {
                     }
                     try output.appendSlice("}");
 
-                    try self.sendMcpResponse(adapter, &key, output.items);
+                    try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
                 }
             }
         }
@@ -867,7 +875,7 @@ pub const Daemon = struct {
 
                     try output.appendSlice("\"}]}");
 
-                    try self.sendMcpResponse(adapter, &key, output.items);
+                    try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
                 }
             }
         }
@@ -914,7 +922,7 @@ pub const Daemon = struct {
             if (self.pending_requests.fetchRemove(key)) |entry| {
                 // Send timeout error to adapter
                 if (self.adapters.get(entry.value.adapter_id)) |adapter| {
-                    self.sendMcpError(adapter, &key, -32000, "Request timed out") catch {};
+                    self.sendMcpError(adapter, &key, entry.value.mcp_id, -32000, "Request timed out") catch {};
                 }
 
                 switch (entry.value.mcp_id) {
@@ -931,14 +939,14 @@ pub const Daemon = struct {
     // Helper Functions
     // =========================================================================
 
-    fn sendMcpResponse(self: *Self, adapter: *AdapterInfo, request_id: []const u8, result: []const u8) !void {
-        const msg = try internal_protocol.encodeMcpResponse(self.allocator, request_id, result, null);
+    fn sendMcpResponse(self: *Self, adapter: *AdapterInfo, request_id: []const u8, mcp_id: internal_protocol.McpId, result: []const u8) !void {
+        const msg = try internal_protocol.encodeMcpResponse(self.allocator, request_id, mcp_id, result, null);
         defer self.allocator.free(msg);
         adapter.stream.writeAll(msg) catch {};
     }
 
-    fn sendMcpError(self: *Self, adapter: *AdapterInfo, request_id: []const u8, code: i32, message: []const u8) !void {
-        const msg = try internal_protocol.encodeMcpResponse(self.allocator, request_id, null, .{
+    fn sendMcpError(self: *Self, adapter: *AdapterInfo, request_id: []const u8, mcp_id: internal_protocol.McpId, code: i32, message: []const u8) !void {
+        const msg = try internal_protocol.encodeMcpResponse(self.allocator, request_id, mcp_id, null, .{
             .code = code,
             .message = message,
         });
@@ -946,7 +954,7 @@ pub const Daemon = struct {
         adapter.stream.writeAll(msg) catch {};
     }
 
-    fn sendToolError(self: *Self, adapter: *AdapterInfo, request_id: []const u8, message: []const u8) !void {
+    fn sendToolError(self: *Self, adapter: *AdapterInfo, request_id: []const u8, mcp_id: internal_protocol.McpId, message: []const u8) !void {
         var output = std.ArrayList(u8).init(self.allocator);
         defer output.deinit();
 
@@ -954,7 +962,7 @@ pub const Daemon = struct {
         try output.appendSlice(message);
         try output.appendSlice("\"}],\"isError\":true}");
 
-        try self.sendMcpResponse(adapter, request_id, output.items);
+        try self.sendMcpResponse(adapter, request_id, mcp_id, output.items);
     }
 
     fn broadcastClientUpdate(self: *Self, action: internal_protocol.ClientAction, client: *registry.ClientInfo) !void {
