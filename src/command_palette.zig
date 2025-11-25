@@ -36,6 +36,7 @@ pub const CommandAction = union(enum) {
     show_help: void,
     quit: void,
     switch_diff_mode: DiffMode,
+    show_mcp_status: void,
 };
 
 pub const Command = struct {
@@ -164,6 +165,17 @@ pub const CommandPaletteState = struct {
             .display_name = "Show Help",
             .description = "Display help overlay",
             .action = .show_help,
+            .category = .help,
+            .owns_display_name = false,
+            .additions = 0,
+            .deletions = 0,
+        });
+
+        try self.commands.append(.{
+            .name = "MCP Status",
+            .display_name = "MCP Status",
+            .description = "Show MCP server connection status",
+            .action = .show_mcp_status,
             .category = .help,
             .owns_display_name = false,
             .additions = 0,

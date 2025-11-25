@@ -5,6 +5,10 @@ const parser = @import("git/parser.zig");
 const syntax = @import("highlighting/core.zig");
 const comments = @import("comments/store.zig");
 const line_map = @import("line_map.zig");
+const mcp_client = @import("mcp/client.zig");
+const mcp_protocol = @import("mcp/protocol.zig");
+const mcp_line_resolver = @import("mcp/line_resolver.zig");
+const mcp_registry = @import("mcp/registry.zig");
 const navigation = @import("navigation.zig");
 const rendering_common = @import("rendering/common.zig");
 const render_utils = @import("rendering/utils.zig");
@@ -25,6 +29,8 @@ const visual_mode = @import("modes/visual_mode.zig");
 const command_palette_mode = @import("modes/command_palette_mode.zig");
 const help_mode = @import("modes/help_mode.zig");
 const branch_selection_mode = @import("modes/branch_selection_mode.zig");
+const mcp_status_mode = @import("modes/mcp_status_mode.zig");
+const mcp_status = @import("mcp_status.zig");
 
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
@@ -72,6 +78,8 @@ pub const App = struct {
     pending_highlight_jobs: std.AutoHashMap(usize, PendingJob), // file_idx -> owned content strings
     needs_render: bool, // Flag to force re-render (e.g., after async highlighting)
     needs_async_highlight: bool, // Flag to trigger async highlighting for current file
+    mcp: ?*mcp_client.McpClient, // MCP client for server connection
+    mcp_port: ?u16, // Port to connect to MCP server
 
     const Mode = enum {
         normal, // Normal navigation and viewing
@@ -81,6 +89,7 @@ pub const App = struct {
         command_palette, // Command palette
         help, // Help overlay
         branch_selection, // Branch selection menu (when empty)
+        mcp_status, // MCP server connection status
     };
 
     // Character find commands for NORMAL mode (f/t/F/T)
@@ -317,6 +326,8 @@ pub const App = struct {
             .pending_highlight_jobs = std.AutoHashMap(usize, PendingJob).init(allocator),
             .needs_render = false,
             .needs_async_highlight = true, // Start with highlighting needed for first file
+            .mcp = null,
+            .mcp_port = if (@hasField(@TypeOf(config), "mcp_port")) config.mcp_port else null,
         };
 
         // Main loop will spawn background thread to highlight initial file
@@ -366,6 +377,11 @@ pub const App = struct {
         self.allocator.free(self.state.branch_list);
         self.state.filtered_branches.deinit();
         self.state.branch_stats_cache.deinit();
+        // Clean up MCP client
+        if (self.mcp) |mcp| {
+            mcp.deinit();
+            self.allocator.destroy(mcp);
+        }
         self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.anyWriter());
         self.tty.deinit();
@@ -466,6 +482,32 @@ pub const App = struct {
         try loop.init();
         try loop.start();
         defer loop.stop();
+
+        // Auto-connect to MCP server (default port 9999, or override with mcp_port)
+        {
+            const mcp_port = self.mcp_port orelse 9999;
+            std.log.debug("MCP: Attempting to connect to port {d}", .{mcp_port});
+            if (self.allocator.create(mcp_client.McpClient)) |m| {
+                m.* = mcp_client.McpClient.init(self.allocator);
+
+                if (m.connect(mcp_port)) {
+                    std.log.debug("MCP: Connection successful, connected={}", .{m.connected});
+                    self.mcp = m;
+                    // Send hello message to register with server
+                    self.sendMcpHello() catch |err| {
+                        std.log.debug("MCP: Failed to send hello: {}", .{err});
+                    };
+                    std.log.debug("MCP: Hello sent, connected={}", .{m.connected});
+                } else |err| {
+                    std.log.debug("MCP: Connection failed: {}", .{err});
+                    // Server not available - silently continue without MCP
+                    m.deinit();
+                    self.allocator.destroy(m);
+                }
+            } else |_| {
+                // Allocation failed - continue without MCP
+            }
+        }
 
         var first_render = true;
 
@@ -584,6 +626,19 @@ pub const App = struct {
                             }
                         }
                     }
+                }
+            }
+
+            // Poll for MCP messages (non-blocking)
+            if (self.mcp) |mcp| {
+                mcp.pollMessages() catch {};
+
+                // Process any pending messages
+                const messages = mcp.consumeMessages();
+                defer mcp.freeMessages(messages);
+
+                for (messages) |*msg| {
+                    try self.handleMcpMessage(msg);
                 }
             }
 
@@ -715,6 +770,11 @@ pub const App = struct {
                     self.state.visual_anchor = null;
                     return;
                 },
+                .mcp_status => {
+                    self.mode = .normal;
+                    self.needs_render = true;
+                    return;
+                },
                 .normal, .comment => {
                     // In normal/comment modes, double-press to quit
                     const now: i64 = @intCast(std.time.nanoTimestamp());
@@ -739,6 +799,7 @@ pub const App = struct {
             .command_palette => try command_palette_mode.handleKey(self, key),
             .help => try help_mode.handleKey(self, key),
             .branch_selection => try branch_selection_mode.handleKey(self, key),
+            .mcp_status => try mcp_status_mode.handleKey(self, key),
         }
     }
 
@@ -1660,6 +1721,9 @@ pub const App = struct {
             .switch_diff_mode => |mode| {
                 try self.switchDiffMode(mode);
             },
+            .show_mcp_status => {
+                self.mode = .mcp_status;
+            },
         }
     }
 
@@ -1994,6 +2058,11 @@ pub const App = struct {
         if (self.mode == .help) {
             try help.renderHelpPopup(self, win);
         }
+
+        // Render MCP status overlay if in mcp_status mode
+        if (self.mode == .mcp_status) {
+            try mcp_status.renderMcpStatusPopup(self, win);
+        }
     }
 
     fn renderContent(self: *App, win: vaxis.Window) !void {
@@ -2313,6 +2382,156 @@ pub const App = struct {
 
         const result = try result_segments.toOwnedSlice();
         return result;
+    }
+
+    // ===== MCP Integration =====
+
+    /// Send hello message to MCP server to register this client
+    fn sendMcpHello(self: *App) !void {
+        const mcp = self.mcp orelse return;
+
+        // Build file info list
+        var file_infos = std.ArrayList(mcp_protocol.FileInfo).init(self.allocator);
+        defer file_infos.deinit();
+
+        for (self.state.files) |file| {
+            const path = if (file.new_path.len > 0) file.new_path else file.old_path;
+            const old_path = file.old_path;
+            try file_infos.append(.{
+                .path = path,
+                .old_path = old_path,
+                .hunk_count = file.hunks.len,
+            });
+        }
+
+        // Get diff ref string
+        const diff_ref = switch (self.state.diff_source) {
+            .working_dir => |wd| if (wd.staged) "staged" else "working",
+            .single_ref => |sr| sr.ref,
+            .two_refs => |tr| tr.ref2,
+        };
+
+        // Generate session ID
+        const session_id = mcp_registry.generateSessionId();
+
+        // Get current working directory (must free if allocated)
+        const cwd_allocated = std.fs.cwd().realpathAlloc(self.allocator, ".") catch null;
+        defer if (cwd_allocated) |c| self.allocator.free(c);
+        const cwd = cwd_allocated orelse ".";
+
+        try mcp.sendHello(.{
+            .id = &session_id,
+            .cwd = cwd,
+            .diff_ref = diff_ref,
+            .files = file_infos.items,
+        });
+    }
+
+    /// Handle incoming MCP message
+    fn handleMcpMessage(self: *App, msg: *mcp_protocol.ParsedMessage) !void {
+        switch (msg.*) {
+            .add_comment => |ac| {
+                try self.handleMcpAddComment(ac);
+            },
+            .get_comments => {
+                try self.handleMcpGetComments();
+            },
+            .welcome => |w| {
+                // Store session ID for status display
+                if (self.mcp) |mcp| {
+                    if (mcp.session_id) |old_id| {
+                        self.allocator.free(old_id);
+                    }
+                    mcp.session_id = self.allocator.dupe(u8, w.id) catch null;
+                }
+            },
+            .ping => {
+                // Respond with pong
+                if (self.mcp) |mcp| {
+                    const pong = try mcp_protocol.encodePong(self.allocator);
+                    defer self.allocator.free(pong);
+                    mcp.send(pong) catch {};
+                }
+            },
+            .@"error" => {
+                // Silently ignore errors - can check status via command palette
+            },
+            else => {},
+        }
+    }
+
+    /// Handle add_comment request from MCP server
+    fn handleMcpAddComment(self: *App, ac: mcp_protocol.AddCommentPayload) !void {
+        const mcp = self.mcp orelse return;
+
+        // Use LineResolver to translate file:line to hunk coordinates
+        const resolver = mcp_line_resolver.LineResolver.init(self.allocator, self.state.files);
+        const resolved = resolver.resolve(ac.file, ac.line) orelse {
+            // Line not in diff - send error response
+            try mcp.sendCommentAdded(false, null, "Line not in diff");
+            return;
+        };
+
+        // Get line context
+        const file = &self.state.files[resolved.file_idx];
+        const hunk = &file.hunks[resolved.hunk_idx];
+        const line = &hunk.lines[resolved.line_idx];
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        // Add the comment
+        try self.state.comment_store.addComment(
+            file_path,
+            resolved.hunk_idx,
+            resolved.line_idx,
+            ac.text,
+            line.line_type,
+            line.content,
+            line.old_lineno,
+            line.new_lineno,
+        );
+
+        // Get the new comment index (last one added)
+        const comment_count = self.state.comment_store.comments.items.len;
+        const comment_idx = if (comment_count > 0) comment_count - 1 else 0;
+
+        // Rebuild LineMap since comment count changed
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(
+            self.allocator,
+            self.state.files,
+            &self.state.comment_store,
+            self.convertHunkViewMode(),
+            self.shouldApplyHunkFiltering(),
+        );
+
+        // Send success response
+        try mcp.sendCommentAdded(true, comment_idx, null);
+
+        // Trigger re-render to show the new comment
+        self.needs_render = true;
+    }
+
+    /// Handle get_comments request - send all comments back
+    fn handleMcpGetComments(self: *App) !void {
+        const mcp = self.mcp orelse return;
+
+        var comment_infos = std.ArrayList(mcp_protocol.CommentInfo).init(self.allocator);
+        defer comment_infos.deinit();
+
+        const all_comments = self.state.comment_store.comments.items;
+        for (all_comments, 0..) |comment, idx| {
+            // Use new_lineno if available, otherwise old_lineno for deleted lines
+            const line_number = comment.new_lineno orelse comment.old_lineno orelse 0;
+            try comment_infos.append(.{
+                .idx = idx,
+                .file_path = comment.file_path,
+                .line = line_number,
+                .text = comment.text,
+                .line_type = @tagName(comment.line_type),
+            });
+        }
+
+        try mcp.sendComments(comment_infos.items);
     }
 };
 

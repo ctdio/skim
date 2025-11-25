@@ -487,6 +487,7 @@ pub const UI = struct {
             .command_palette => "-- COMMAND PALETTE --",
             .help => "-- HELP --",
             .branch_selection => "-- BRANCH SELECTION --",
+            .mcp_status => "-- MCP STATUS --",
         };
 
         const view_str = switch (app.state.view_mode) {
@@ -516,6 +517,7 @@ pub const UI = struct {
             .command_palette => "Type to filter  |  '>':Commands  |  ↑↓:Select  |  ESC:Cancel",
             .help => "j/k:Scroll  |  Ctrl-d/u:Page  |  ?/ESC:Close",
             .branch_selection => "j/k:Move  |  Enter:Select  |  ESC:Back",
+            .mcp_status => "q/ESC:Close",
         };
 
         // Get global position info

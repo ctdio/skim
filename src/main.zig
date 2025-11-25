@@ -2,6 +2,10 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const App = @import("app.zig").App;
 const DiffSource = @import("git/diff.zig").DiffSource;
+const McpServer = @import("mcp/server.zig").McpServer;
+const Daemon = @import("mcp/daemon.zig").Daemon;
+const adapter = @import("mcp/adapter.zig");
+const discovery = @import("mcp/discovery.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -17,8 +21,29 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    // Check for subcommands first
+    if (args.len >= 2) {
+        if (std.mem.eql(u8, args[1], "daemon")) {
+            return runDaemonCommand(allocator, args);
+        } else if (std.mem.eql(u8, args[1], "mcp")) {
+            return runMcpCommand(allocator, args);
+        }
+    }
+
     const config = try parseArgs(allocator, args);
     defer config.deinit();
+
+    // Check if we should run as MCP server (deprecated --serve flag)
+    if (config.serve_port) |port| {
+        std.debug.print("Warning: --serve is deprecated. Use 'skim daemon start' instead.\n", .{});
+
+        const server = try McpServer.init(allocator, port);
+        defer server.deinit();
+
+        try server.start();
+        try server.run();
+        return;
+    }
 
     // Initialize and run the app
     var app = try App.init(allocator, config);
@@ -27,9 +52,221 @@ pub fn main() !void {
     try app.run();
 }
 
+// =============================================================================
+// Subcommand Handlers
+// =============================================================================
+
+fn runDaemonCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 3) {
+        try printDaemonHelp();
+        std.process.exit(1);
+    }
+
+    const subcommand = args[2];
+
+    if (std.mem.eql(u8, subcommand, "start")) {
+        // Parse optional port arguments
+        var tui_port: u16 = discovery.DEFAULT_TUI_PORT;
+        var adapter_port: u16 = discovery.DEFAULT_ADAPTER_PORT;
+
+        var i: usize = 3;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--port") or std.mem.eql(u8, args[i], "-p")) {
+                i += 1;
+                if (i >= args.len) {
+                    std.debug.print("--port requires a port number\n", .{});
+                    std.process.exit(1);
+                }
+                tui_port = std.fmt.parseInt(u16, args[i], 10) catch {
+                    std.debug.print("Invalid port number: {s}\n", .{args[i]});
+                    std.process.exit(1);
+                };
+                adapter_port = tui_port - 1; // Adapter port is one below TUI port
+            } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
+                try printDaemonHelp();
+                std.process.exit(0);
+            }
+        }
+
+        // Check if daemon is already running
+        const status = discovery.discoverDaemon(allocator);
+        switch (status) {
+            .running => |info| {
+                std.debug.print("Daemon already running (PID {d}) on ports {d}/{d}\n", .{ info.pid, info.tui_port, info.adapter_port });
+                std.process.exit(1);
+            },
+            .stale => {
+                // Clean up stale discovery file
+                discovery.deleteDiscoveryFile(allocator);
+            },
+            else => {},
+        }
+
+        std.debug.print("Starting skim daemon on ports {d} (TUI) and {d} (adapters)...\n", .{ tui_port, adapter_port });
+
+        const daemon = try Daemon.init(allocator, tui_port, adapter_port);
+        defer daemon.deinit();
+
+        try daemon.start();
+        std.debug.print("Daemon started (PID {d})\n", .{getCurrentPid()});
+        try daemon.run();
+    } else if (std.mem.eql(u8, subcommand, "stop")) {
+        const status = discovery.discoverDaemon(allocator);
+        switch (status) {
+            .running => |info| {
+                // Send SIGTERM to the daemon
+                std.posix.kill(info.pid, std.posix.SIG.TERM) catch |err| {
+                    if (err == error.NoSuchProcess) {
+                        std.debug.print("Daemon process not found, cleaning up...\n", .{});
+                        discovery.deleteDiscoveryFile(allocator);
+                    }
+                    return;
+                };
+                std.debug.print("Sent stop signal to daemon (PID {d})\n", .{info.pid});
+            },
+            .stale => {
+                std.debug.print("Cleaning up stale daemon state...\n", .{});
+                discovery.deleteDiscoveryFile(allocator);
+            },
+            .not_running => {
+                std.debug.print("Daemon is not running\n", .{});
+            },
+            .unhealthy => {
+                std.debug.print("Daemon appears unhealthy, cleaning up...\n", .{});
+                discovery.deleteDiscoveryFile(allocator);
+            },
+        }
+    } else if (std.mem.eql(u8, subcommand, "status")) {
+        const status = discovery.discoverDaemon(allocator);
+        const formatted = try discovery.formatStatus(allocator, status);
+        defer allocator.free(formatted);
+        std.debug.print("{s}\n", .{formatted});
+    } else if (std.mem.eql(u8, subcommand, "restart")) {
+        // Stop then start
+        const status = discovery.discoverDaemon(allocator);
+        switch (status) {
+            .running => |info| {
+                std.debug.print("Stopping daemon (PID {d})...\n", .{info.pid});
+                std.posix.kill(info.pid, std.posix.SIG.TERM) catch {};
+                // Wait a bit for it to stop
+                std.time.sleep(500 * std.time.ns_per_ms);
+            },
+            else => {},
+        }
+        discovery.deleteDiscoveryFile(allocator);
+
+        // Now start
+        const tui_port = discovery.DEFAULT_TUI_PORT;
+        const adapter_port = discovery.DEFAULT_ADAPTER_PORT;
+
+        std.debug.print("Starting skim daemon on ports {d} (TUI) and {d} (adapters)...\n", .{ tui_port, adapter_port });
+
+        const daemon = try Daemon.init(allocator, tui_port, adapter_port);
+        defer daemon.deinit();
+
+        try daemon.start();
+        std.debug.print("Daemon started (PID {d})\n", .{getCurrentPid()});
+        try daemon.run();
+    } else if (std.mem.eql(u8, subcommand, "--help") or std.mem.eql(u8, subcommand, "-h")) {
+        try printDaemonHelp();
+    } else {
+        std.debug.print("Unknown daemon command: {s}\n", .{subcommand});
+        try printDaemonHelp();
+        std.process.exit(1);
+    }
+}
+
+fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var port: u16 = discovery.DEFAULT_ADAPTER_PORT;
+
+    // Parse optional arguments
+    var i: usize = 2;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--port") or std.mem.eql(u8, args[i], "-p")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("--port requires a port number\n", .{});
+                std.process.exit(1);
+            }
+            port = std.fmt.parseInt(u16, args[i], 10) catch {
+                std.debug.print("Invalid port number: {s}\n", .{args[i]});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
+            try printMcpHelp();
+            std.process.exit(0);
+        }
+    }
+
+    try adapter.runAdapter(allocator, port);
+}
+
+fn printDaemonHelp() !void {
+    const stdout = std.io.getStdOut().writer();
+    try stdout.writeAll(
+        \\skim daemon - Manage the skim MCP daemon
+        \\
+        \\USAGE:
+        \\    skim daemon <command> [OPTIONS]
+        \\
+        \\COMMANDS:
+        \\    start      Start the daemon
+        \\    stop       Stop the daemon
+        \\    status     Show daemon status
+        \\    restart    Restart the daemon
+        \\
+        \\OPTIONS:
+        \\    -p, --port <port>    Set TUI port (default: 9999, adapter port is TUI-1)
+        \\    -h, --help           Print this help message
+        \\
+        \\EXAMPLES:
+        \\    skim daemon start              # Start with default ports
+        \\    skim daemon start --port 8888  # Start on custom port
+        \\    skim daemon status             # Check if daemon is running
+        \\    skim daemon stop               # Stop the daemon
+        \\
+    );
+}
+
+fn printMcpHelp() !void {
+    const stdout = std.io.getStdOut().writer();
+    try stdout.writeAll(
+        \\skim mcp - Run as MCP adapter (for AI agents)
+        \\
+        \\USAGE:
+        \\    skim mcp [OPTIONS]
+        \\
+        \\This command runs skim as a thin MCP adapter that connects to the
+        \\skim daemon. It reads MCP JSON-RPC from stdin and writes responses
+        \\to stdout, suitable for use as an MCP server in Claude Desktop,
+        \\Cursor, or similar AI coding assistants.
+        \\
+        \\OPTIONS:
+        \\    -p, --port <port>    Daemon adapter port (default: 9998)
+        \\    -h, --help           Print this help message
+        \\
+        \\CONFIGURATION:
+        \\    Add to your MCP configuration (e.g., Claude Desktop):
+        \\    {
+        \\      "mcpServers": {
+        \\        "skim": {
+        \\          "command": "skim",
+        \\          "args": ["mcp"]
+        \\        }
+        \\      }
+        \\    }
+        \\
+        \\ENVIRONMENT:
+        \\    SKIM_DAEMON_AUTO_START=1   Auto-start daemon if not running
+        \\
+    );
+}
+
 const Config = struct {
     allocator: std.mem.Allocator,
     diff_source: DiffSource,
+    mcp_port: ?u16, // Port to connect to MCP server
+    serve_port: ?u16, // Port to run MCP server on
 
     fn deinit(self: *const Config) void {
         switch (self.diff_source) {
@@ -47,6 +284,8 @@ const Config = struct {
 
 fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
     var staged = false;
+    var mcp_port: ?u16 = null;
+    var serve_port: ?u16 = null;
     var positional_args = std.ArrayList([]const u8).init(allocator);
     defer positional_args.deinit();
 
@@ -57,6 +296,29 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
 
         if (std.mem.eql(u8, arg, "--staged") or std.mem.eql(u8, arg, "--cached")) {
             staged = true;
+        } else if (std.mem.eql(u8, arg, "--connect")) {
+            // Parse port argument
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("--connect requires a port number\n", .{});
+                try printHelp();
+                std.process.exit(1);
+            }
+            mcp_port = std.fmt.parseInt(u16, args[i], 10) catch {
+                std.debug.print("Invalid port number: {s}\n", .{args[i]});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--serve")) {
+            // Parse port argument (optional, defaults to 9999)
+            if (i + 1 < args.len and args[i + 1][0] != '-') {
+                i += 1;
+                serve_port = std.fmt.parseInt(u16, args[i], 10) catch {
+                    std.debug.print("Invalid port number: {s}\n", .{args[i]});
+                    std.process.exit(1);
+                };
+            } else {
+                serve_port = 9999; // Default port
+            }
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             try printHelp();
             std.process.exit(0);
@@ -110,6 +372,8 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
     return Config{
         .allocator = allocator,
         .diff_source = diff_source,
+        .mcp_port = mcp_port,
+        .serve_port = serve_port,
     };
 }
 
@@ -120,9 +384,16 @@ fn printHelp() !void {
         \\
         \\USAGE:
         \\    skim [OPTIONS] [<ref> | <ref1> <ref2> | <ref1>..<ref2> | <ref1>...<ref2>]
+        \\    skim daemon <start|stop|status|restart>
+        \\    skim mcp
+        \\
+        \\SUBCOMMANDS:
+        \\    daemon             Manage the MCP daemon (for AI agent integration)
+        \\    mcp                Run as MCP adapter (for Claude Desktop, Cursor, etc.)
         \\
         \\OPTIONS:
         \\    --staged, --cached    Review staged changes (or staged vs. ref if ref provided)
+        \\    --connect <port>      Override MCP client port (default: 9999, auto-connects)
         \\    -h, --help            Print this help message
         \\    -v, --version         Print version information
         \\
@@ -145,6 +416,11 @@ fn printHelp() !void {
         \\    skim main...feature       # Changes on feature since diverging from main
         \\    skim HEAD~5               # Working dir vs. 5 commits ago
         \\
+        \\AI INTEGRATION:
+        \\    skim daemon start         # Start MCP daemon
+        \\    skim daemon status        # Check daemon status
+        \\    skim mcp                  # Run MCP adapter (for agent configs)
+        \\
         \\KEYBINDINGS:
         \\    h/l or Ctrl-n/p    Navigate files
         \\    j/k                Cursor up/down (vim-style)
@@ -161,6 +437,17 @@ fn printHelp() !void {
 fn printVersion() !void {
     const stdout = std.io.getStdOut().writer();
     try stdout.writeAll("skim 0.1.0\n");
+}
+
+fn getCurrentPid() i32 {
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .linux) {
+        return @intCast(std.os.linux.getpid());
+    } else {
+        // Use extern for macOS and other POSIX systems
+        const c_getpid = @extern(*const fn () callconv(.C) c_int, .{ .name = "getpid" });
+        return @intCast(c_getpid());
+    }
 }
 
 test "parse args: working directory" {
@@ -246,4 +533,29 @@ test "parse args: two refs with triple-dot" {
     try std.testing.expectEqualStrings("main", config.diff_source.two_refs.ref1);
     try std.testing.expectEqualStrings("feature", config.diff_source.two_refs.ref2);
     try std.testing.expect(config.diff_source.two_refs.use_merge_base == true);
+}
+
+test "parse args: connect to mcp server" {
+    const allocator = std.testing.allocator;
+    const args = &[_][]const u8{ "skim", "--connect", "9999" };
+
+    const config = try parseArgs(allocator, args);
+    defer config.deinit();
+
+    try std.testing.expect(config.diff_source == .working_dir);
+    try std.testing.expect(config.mcp_port != null);
+    try std.testing.expectEqual(@as(u16, 9999), config.mcp_port.?);
+}
+
+test "parse args: connect with staged" {
+    const allocator = std.testing.allocator;
+    const args = &[_][]const u8{ "skim", "--staged", "--connect", "8080" };
+
+    const config = try parseArgs(allocator, args);
+    defer config.deinit();
+
+    try std.testing.expect(config.diff_source == .working_dir);
+    try std.testing.expect(config.diff_source.working_dir.staged == true);
+    try std.testing.expect(config.mcp_port != null);
+    try std.testing.expectEqual(@as(u16, 8080), config.mcp_port.?);
 }
