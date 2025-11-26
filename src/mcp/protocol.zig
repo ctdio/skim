@@ -59,10 +59,58 @@ pub const CommentChangedPayload = struct {
     comment: CommentInfo,
 };
 
+/// File summary for get_diff_context response
+pub const DiffFileSummary = struct {
+    path: []const u8,
+    old_path: []const u8,
+    status: []const u8, // "added", "modified", "deleted", "renamed"
+    additions: usize,
+    deletions: usize,
+    hunk_count: usize,
+};
+
+/// Diff context response from skim TUI to server
+pub const DiffContextPayload = struct {
+    diff_ref: []const u8,
+    cwd: []const u8,
+    files: []const DiffFileSummary,
+};
+
 /// Error response
 pub const ErrorPayload = struct {
     code: []const u8,
     message: []const u8,
+};
+
+/// Get file diff request from server to skim TUI
+pub const GetFileDiffPayload = struct {
+    file: []const u8,
+};
+
+/// Line info for file_diff response
+pub const DiffLineInfo = struct {
+    line_type: []const u8, // "add", "delete", "context"
+    content: []const u8,
+    old_lineno: ?u32,
+    new_lineno: ?u32,
+};
+
+/// Hunk info for file_diff response
+pub const DiffHunkInfo = struct {
+    header: []const u8, // e.g., "@@ -10,5 +10,7 @@"
+    old_start: u32,
+    old_count: u32,
+    new_start: u32,
+    new_count: u32,
+    lines: []const DiffLineInfo,
+};
+
+/// File diff response from skim TUI to server
+pub const FileDiffPayload = struct {
+    file: []const u8,
+    old_file: []const u8,
+    status: []const u8, // "added", "modified", "deleted", "renamed"
+    hunks: []const DiffHunkInfo,
 };
 
 /// Internal protocol message types
@@ -74,9 +122,41 @@ pub const MessageType = enum {
     get_comments,
     comments,
     comment_changed,
+    get_diff_context,
+    diff_context,
+    get_file_diff,
+    file_diff,
     @"error",
     ping,
     pong,
+};
+
+/// File summary for raw message parsing (diff_context)
+pub const RawDiffFileSummary = struct {
+    path: []const u8,
+    old_path: []const u8,
+    status: []const u8,
+    additions: usize,
+    deletions: usize,
+    hunk_count: usize,
+};
+
+/// Line info for raw message parsing (file_diff)
+pub const RawDiffLineInfo = struct {
+    line_type: []const u8,
+    content: []const u8,
+    old_lineno: ?u32 = null,
+    new_lineno: ?u32 = null,
+};
+
+/// Hunk info for raw message parsing (file_diff)
+pub const RawDiffHunkInfo = struct {
+    header: []const u8,
+    old_start: u32,
+    old_count: u32,
+    new_start: u32,
+    new_count: u32,
+    lines: []const RawDiffLineInfo,
 };
 
 /// Raw message envelope for JSON parsing
@@ -88,6 +168,7 @@ pub const RawMessage = struct {
     diff_ref: ?[]const u8 = null,
     files: ?[]const FileInfo = null,
     file: ?[]const u8 = null,
+    old_file: ?[]const u8 = null,
     line: ?u32 = null,
     text: ?[]const u8 = null,
     success: ?bool = null,
@@ -98,6 +179,11 @@ pub const RawMessage = struct {
     comments: ?[]const CommentInfo = null,
     action: ?[]const u8 = null,
     comment: ?CommentInfo = null,
+    status: ?[]const u8 = null,
+    // For diff_context response
+    diff_files: ?[]const RawDiffFileSummary = null,
+    // For file_diff response
+    hunks: ?[]const RawDiffHunkInfo = null,
 };
 
 // =============================================================================
@@ -328,6 +414,112 @@ pub fn encodePong(allocator: Allocator) ![]u8 {
     return output.toOwnedSlice();
 }
 
+/// Encode a get_diff_context request
+pub fn encodeGetDiffContext(allocator: Allocator) ![]u8 {
+    var output = std.ArrayList(u8).init(allocator);
+    errdefer output.deinit();
+    try output.appendSlice("{\"event\":\"get_diff_context\"}\n");
+    return output.toOwnedSlice();
+}
+
+/// Encode a get_file_diff request
+pub fn encodeGetFileDiff(allocator: Allocator, file: []const u8) ![]u8 {
+    var output = std.ArrayList(u8).init(allocator);
+    errdefer output.deinit();
+
+    const writer = output.writer();
+    try writer.writeAll("{\"event\":\"get_file_diff\",\"file\":\"");
+    try writeJsonEscaped(writer, file);
+    try writer.writeAll("\"}\n");
+    return output.toOwnedSlice();
+}
+
+/// Encode a diff_context response
+pub fn encodeDiffContext(allocator: Allocator, payload: DiffContextPayload) ![]u8 {
+    var output = std.ArrayList(u8).init(allocator);
+    errdefer output.deinit();
+
+    const writer = output.writer();
+    try writer.writeAll("{\"event\":\"diff_context\",\"diff_ref\":\"");
+    try writeJsonEscaped(writer, payload.diff_ref);
+    try writer.writeAll("\",\"cwd\":\"");
+    try writeJsonEscaped(writer, payload.cwd);
+    try writer.writeAll("\",\"diff_files\":[");
+
+    for (payload.files, 0..) |file, file_idx| {
+        if (file_idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"path\":\"");
+        try writeJsonEscaped(writer, file.path);
+        try writer.writeAll("\",\"old_path\":\"");
+        try writeJsonEscaped(writer, file.old_path);
+        try writer.writeAll("\",\"status\":\"");
+        try writer.writeAll(file.status);
+        try writer.writeAll("\",\"additions\":");
+        try std.fmt.formatInt(file.additions, 10, .lower, .{}, writer);
+        try writer.writeAll(",\"deletions\":");
+        try std.fmt.formatInt(file.deletions, 10, .lower, .{}, writer);
+        try writer.writeAll(",\"hunk_count\":");
+        try std.fmt.formatInt(file.hunk_count, 10, .lower, .{}, writer);
+        try writer.writeByte('}');
+    }
+
+    try writer.writeAll("]}\n");
+    return output.toOwnedSlice();
+}
+
+/// Encode a file_diff response
+pub fn encodeFileDiff(allocator: Allocator, payload: FileDiffPayload) ![]u8 {
+    var output = std.ArrayList(u8).init(allocator);
+    errdefer output.deinit();
+
+    const writer = output.writer();
+    try writer.writeAll("{\"event\":\"file_diff\",\"file\":\"");
+    try writeJsonEscaped(writer, payload.file);
+    try writer.writeAll("\",\"old_file\":\"");
+    try writeJsonEscaped(writer, payload.old_file);
+    try writer.writeAll("\",\"status\":\"");
+    try writer.writeAll(payload.status);
+    try writer.writeAll("\",\"hunks\":[");
+
+    for (payload.hunks, 0..) |hunk, hunk_idx| {
+        if (hunk_idx > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"header\":\"");
+        try writeJsonEscaped(writer, hunk.header);
+        try writer.writeAll("\",\"old_start\":");
+        try std.fmt.formatInt(hunk.old_start, 10, .lower, .{}, writer);
+        try writer.writeAll(",\"old_count\":");
+        try std.fmt.formatInt(hunk.old_count, 10, .lower, .{}, writer);
+        try writer.writeAll(",\"new_start\":");
+        try std.fmt.formatInt(hunk.new_start, 10, .lower, .{}, writer);
+        try writer.writeAll(",\"new_count\":");
+        try std.fmt.formatInt(hunk.new_count, 10, .lower, .{}, writer);
+        try writer.writeAll(",\"lines\":[");
+
+        for (hunk.lines, 0..) |line, line_idx| {
+            if (line_idx > 0) try writer.writeByte(',');
+            try writer.writeAll("{\"line_type\":\"");
+            try writer.writeAll(line.line_type);
+            try writer.writeAll("\",\"content\":\"");
+            try writeJsonEscaped(writer, line.content);
+            try writer.writeByte('"');
+            if (line.old_lineno) |n| {
+                try writer.writeAll(",\"old_lineno\":");
+                try std.fmt.formatInt(n, 10, .lower, .{}, writer);
+            }
+            if (line.new_lineno) |n| {
+                try writer.writeAll(",\"new_lineno\":");
+                try std.fmt.formatInt(n, 10, .lower, .{}, writer);
+            }
+            try writer.writeByte('}');
+        }
+
+        try writer.writeAll("]}");
+    }
+
+    try writer.writeAll("]}\n");
+    return output.toOwnedSlice();
+}
+
 // =============================================================================
 // Decoding Functions
 // =============================================================================
@@ -339,6 +531,10 @@ pub const ParsedMessage = union(enum) {
     comment_added: CommentAddedPayload,
     get_comments: void,
     comments: CommentsPayload,
+    get_diff_context: void,
+    diff_context: DiffContextPayload,
+    get_file_diff: GetFileDiffPayload,
+    file_diff: FileDiffPayload,
     @"error": ErrorPayload,
     ping: void,
     pong: void,
@@ -410,6 +606,58 @@ pub fn decode(allocator: Allocator, json_line: []const u8) !ParsedMessage {
             };
         }
         return .{ .comments = .{ .comments = duped } };
+    } else if (std.mem.eql(u8, event, "get_diff_context")) {
+        return .{ .get_diff_context = {} };
+    } else if (std.mem.eql(u8, event, "diff_context")) {
+        const diff_files = msg.diff_files orelse &[_]RawDiffFileSummary{};
+        var duped = try allocator.alloc(DiffFileSummary, diff_files.len);
+        for (diff_files, 0..) |f, i| {
+            duped[i] = .{
+                .path = try allocator.dupe(u8, f.path),
+                .old_path = try allocator.dupe(u8, f.old_path),
+                .status = try allocator.dupe(u8, f.status),
+                .additions = f.additions,
+                .deletions = f.deletions,
+                .hunk_count = f.hunk_count,
+            };
+        }
+        return .{ .diff_context = .{
+            .diff_ref = try allocator.dupe(u8, msg.diff_ref orelse ""),
+            .cwd = try allocator.dupe(u8, msg.cwd orelse ""),
+            .files = duped,
+        } };
+    } else if (std.mem.eql(u8, event, "get_file_diff")) {
+        return .{ .get_file_diff = .{
+            .file = try allocator.dupe(u8, msg.file orelse return error.MissingField),
+        } };
+    } else if (std.mem.eql(u8, event, "file_diff")) {
+        const hunks = msg.hunks orelse &[_]RawDiffHunkInfo{};
+        var duped_hunks = try allocator.alloc(DiffHunkInfo, hunks.len);
+        for (hunks, 0..) |h, hi| {
+            var duped_lines = try allocator.alloc(DiffLineInfo, h.lines.len);
+            for (h.lines, 0..) |l, li| {
+                duped_lines[li] = .{
+                    .line_type = try allocator.dupe(u8, l.line_type),
+                    .content = try allocator.dupe(u8, l.content),
+                    .old_lineno = l.old_lineno,
+                    .new_lineno = l.new_lineno,
+                };
+            }
+            duped_hunks[hi] = .{
+                .header = try allocator.dupe(u8, h.header),
+                .old_start = h.old_start,
+                .old_count = h.old_count,
+                .new_start = h.new_start,
+                .new_count = h.new_count,
+                .lines = duped_lines,
+            };
+        }
+        return .{ .file_diff = .{
+            .file = try allocator.dupe(u8, msg.file orelse ""),
+            .old_file = try allocator.dupe(u8, msg.old_file orelse ""),
+            .status = try allocator.dupe(u8, msg.status orelse "modified"),
+            .hunks = duped_hunks,
+        } };
     } else if (std.mem.eql(u8, event, "error")) {
         return .{ .@"error" = .{
             .code = try allocator.dupe(u8, msg.code orelse "unknown"),

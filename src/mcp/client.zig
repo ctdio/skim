@@ -7,49 +7,65 @@ const discovery = @import("discovery.zig");
 const Allocator = std.mem.Allocator;
 
 /// TCP client for skim TUI to connect to MCP server.
-/// Handles non-blocking I/O for integration with the main event loop.
+/// Uses a background thread for reading to avoid blocking the main event loop.
 pub const McpClient = struct {
     allocator: Allocator,
     stream: ?net.Stream,
-    recv_buffer: [8192]u8,
-    recv_len: usize,
-    pending_messages: std.ArrayList(protocol.ParsedMessage),
     connected: bool,
     session_id: ?[]const u8,
+
+    // Thread-safe message queue (reader thread -> main thread)
+    message_queue: std.ArrayList(protocol.ParsedMessage),
+    queue_mutex: std.Thread.Mutex,
+
+    // Reader thread management
+    reader_thread: ?std.Thread,
+    shutdown_flag: std.atomic.Value(bool),
+
+    // For freeing messages (needed by main thread)
+    const Self = @This();
 
     pub fn init(allocator: Allocator) McpClient {
         return .{
             .allocator = allocator,
             .stream = null,
-            .recv_buffer = undefined,
-            .recv_len = 0,
-            .pending_messages = std.ArrayList(protocol.ParsedMessage).init(allocator),
             .connected = false,
             .session_id = null,
+            .message_queue = std.ArrayList(protocol.ParsedMessage).init(allocator),
+            .queue_mutex = .{},
+            .reader_thread = null,
+            .shutdown_flag = std.atomic.Value(bool).init(false),
         };
     }
 
     pub fn deinit(self: *McpClient) void {
         self.disconnect();
-        self.clearPendingMessages();
-        self.pending_messages.deinit();
+
+        // Clear any remaining messages in queue
+        self.queue_mutex.lock();
+        for (self.message_queue.items) |*msg| {
+            freeMessageStatic(self.allocator, msg);
+        }
+        self.message_queue.deinit();
+        self.queue_mutex.unlock();
+
         if (self.session_id) |id| {
             self.allocator.free(id);
         }
     }
 
     /// Attempt to connect to the MCP server on specified port.
-    /// Returns error if connection fails.
+    /// Spawns a background reader thread for incoming messages.
     pub fn connect(self: *McpClient, port: u16) !void {
         if (self.connected) return;
 
         const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
         self.stream = try net.tcpConnectToAddress(address);
         self.connected = true;
-        self.recv_len = 0;
+        self.shutdown_flag.store(false, .release);
 
-        // Set non-blocking mode
-        try self.setNonBlocking(true);
+        // Spawn reader thread
+        self.reader_thread = try std.Thread.spawn(.{}, readerThreadFn, .{self});
     }
 
     /// Connection result for discovery-based connection
@@ -87,26 +103,34 @@ pub const McpClient = struct {
         return status == .running;
     }
 
-    /// Disconnect from the server
+    /// Disconnect from the server and stop reader thread
     pub fn disconnect(self: *McpClient) void {
+        if (!self.connected) return;
+
+        // Signal reader thread to stop
+        self.shutdown_flag.store(true, .release);
+
+        // Close stream (this will unblock the reader thread's blocking read)
         if (self.stream) |stream| {
             stream.close();
         }
         self.stream = null;
         self.connected = false;
-        self.recv_len = 0;
+
+        // Wait for reader thread to finish
+        if (self.reader_thread) |thread| {
+            thread.join();
+            self.reader_thread = null;
+        }
     }
 
-    /// Send a message to the server
+    /// Send a message to the server (called from main thread)
     pub fn send(self: *McpClient, msg: []const u8) !void {
         if (!self.connected) return error.NotConnected;
 
         const stream = self.stream orelse return error.NotConnected;
 
-        // Temporarily set blocking mode for send
-        try self.setNonBlocking(false);
-        defer self.setNonBlocking(true) catch {};
-
+        // Write is thread-safe on TCP sockets (full-duplex)
         try stream.writeAll(msg);
     }
 
@@ -131,166 +155,192 @@ pub const McpClient = struct {
         try self.send(msg);
     }
 
-    /// Poll for incoming messages (non-blocking).
-    /// Messages are added to pending_messages and should be consumed by the caller.
-    pub fn pollMessages(self: *McpClient) !void {
-        if (!self.connected) return;
-
-        const stream = self.stream orelse return;
-
-        // Try to read available data (non-blocking)
-        const bytes_read = stream.read(self.recv_buffer[self.recv_len..]) catch |err| switch (err) {
-            error.WouldBlock => return, // No data available, that's fine
-            error.ConnectionResetByPeer, error.BrokenPipe => {
-                std.log.debug("MCP client: pollMessages got connection error: {}", .{err});
-                self.handleDisconnect();
-                return;
-            },
-            else => {
-                std.log.debug("MCP client: pollMessages got error: {}", .{err});
-                return err;
-            },
-        };
-
-        if (bytes_read == 0) {
-            // Connection closed by server (EOF)
-            std.log.debug("MCP client: pollMessages got 0 bytes (EOF), disconnecting", .{});
-            self.handleDisconnect();
-            return;
-        }
-
-        std.log.debug("MCP client: pollMessages read {d} bytes", .{bytes_read});
-        self.recv_len += bytes_read;
-
-        // Parse complete messages (newline-delimited)
-        try self.parseBufferedMessages();
+    /// Send diff context response
+    pub fn sendDiffContext(self: *McpClient, payload: protocol.DiffContextPayload) !void {
+        const msg = try protocol.encodeDiffContext(self.allocator, payload);
+        defer self.allocator.free(msg);
+        try self.send(msg);
     }
 
-    /// Check if there are pending messages to process
-    pub fn hasPendingMessages(self: *const McpClient) bool {
-        return self.pending_messages.items.len > 0;
+    /// Send file diff response
+    pub fn sendFileDiff(self: *McpClient, payload: protocol.FileDiffPayload) !void {
+        const msg = try protocol.encodeFileDiff(self.allocator, payload);
+        defer self.allocator.free(msg);
+        try self.send(msg);
     }
 
-    /// Get and clear pending messages
+    /// Check if there are pending messages to process (non-blocking)
+    pub fn hasPendingMessages(self: *McpClient) bool {
+        self.queue_mutex.lock();
+        defer self.queue_mutex.unlock();
+        return self.message_queue.items.len > 0;
+    }
+
+    /// Get and clear pending messages (called from main thread)
     pub fn consumeMessages(self: *McpClient) []protocol.ParsedMessage {
-        const messages = self.pending_messages.toOwnedSlice() catch {
+        self.queue_mutex.lock();
+        defer self.queue_mutex.unlock();
+
+        const messages = self.message_queue.toOwnedSlice() catch {
             return &[_]protocol.ParsedMessage{};
         };
-        self.pending_messages = std.ArrayList(protocol.ParsedMessage).init(self.allocator);
+        self.message_queue = std.ArrayList(protocol.ParsedMessage).init(self.allocator);
         return messages;
     }
 
     /// Free a list of consumed messages
     pub fn freeMessages(self: *McpClient, messages: []protocol.ParsedMessage) void {
         for (messages) |*msg| {
-            self.freeMessage(msg);
+            freeMessageStatic(self.allocator, msg);
         }
         self.allocator.free(messages);
     }
 
-    /// Free a single message
-    pub fn freeMessage(self: *McpClient, msg: *protocol.ParsedMessage) void {
+    /// Free a single message (static version for use by reader thread)
+    fn freeMessageStatic(allocator: Allocator, msg: *protocol.ParsedMessage) void {
         switch (msg.*) {
             .hello => |h| {
-                self.allocator.free(h.id);
-                self.allocator.free(h.cwd);
-                self.allocator.free(h.diff_ref);
+                allocator.free(h.id);
+                allocator.free(h.cwd);
+                allocator.free(h.diff_ref);
                 for (h.files) |f| {
-                    self.allocator.free(f.path);
-                    self.allocator.free(f.old_path);
+                    allocator.free(f.path);
+                    allocator.free(f.old_path);
                 }
-                self.allocator.free(h.files);
+                allocator.free(h.files);
             },
             .welcome => |w| {
-                self.allocator.free(w.id);
+                allocator.free(w.id);
             },
             .add_comment => |ac| {
-                self.allocator.free(ac.file);
-                self.allocator.free(ac.text);
+                allocator.free(ac.file);
+                allocator.free(ac.text);
             },
             .comment_added => |ca| {
-                if (ca.@"error") |e| self.allocator.free(e);
+                if (ca.@"error") |e| allocator.free(e);
             },
             .comments => |c| {
                 for (c.comments) |comment| {
-                    self.allocator.free(comment.file_path);
-                    self.allocator.free(comment.text);
-                    self.allocator.free(comment.line_type);
+                    allocator.free(comment.file_path);
+                    allocator.free(comment.text);
+                    allocator.free(comment.line_type);
                 }
-                self.allocator.free(c.comments);
+                allocator.free(c.comments);
             },
             .@"error" => |e| {
-                self.allocator.free(e.code);
-                self.allocator.free(e.message);
+                allocator.free(e.code);
+                allocator.free(e.message);
+            },
+            .diff_context => |d| {
+                allocator.free(d.diff_ref);
+                allocator.free(d.cwd);
+                for (d.files) |file| {
+                    allocator.free(file.path);
+                    allocator.free(file.old_path);
+                    allocator.free(file.status);
+                }
+                allocator.free(d.files);
+            },
+            .get_file_diff => |gfd| {
+                allocator.free(gfd.file);
+            },
+            .file_diff => |fd| {
+                allocator.free(fd.file);
+                allocator.free(fd.old_file);
+                allocator.free(fd.status);
+                for (fd.hunks) |hunk| {
+                    allocator.free(hunk.header);
+                    for (hunk.lines) |line| {
+                        allocator.free(line.line_type);
+                        allocator.free(line.content);
+                    }
+                    allocator.free(hunk.lines);
+                }
+                allocator.free(fd.hunks);
             },
             .unknown => |u| {
-                self.allocator.free(u);
+                allocator.free(u);
             },
-            .get_comments, .ping, .pong => {},
+            .get_comments, .get_diff_context, .ping, .pong => {},
         }
     }
 
-    // Internal helpers
+    // =========================================================================
+    // Reader Thread
+    // =========================================================================
 
-    fn setNonBlocking(self: *McpClient, non_blocking: bool) !void {
-        if (self.stream) |stream| {
-            const flags = try posix.fcntl(stream.handle, posix.F.GETFL, @as(usize, 0));
-            // O_NONBLOCK value for darwin/macOS
-            const O_NONBLOCK: usize = 0x0004;
-            const new_flags: usize = if (non_blocking)
-                flags | O_NONBLOCK
-            else
-                flags & ~O_NONBLOCK;
-            _ = try posix.fcntl(stream.handle, posix.F.SETFL, new_flags);
-        }
-    }
+    fn readerThreadFn(self: *Self) void {
+        var recv_buffer: [8192]u8 = undefined;
+        var recv_len: usize = 0;
 
-    fn handleDisconnect(self: *McpClient) void {
-        std.log.debug("MCP client: handleDisconnect called", .{});
-        self.disconnect();
-    }
+        while (!self.shutdown_flag.load(.acquire)) {
+            const stream = self.stream orelse break;
 
-    fn parseBufferedMessages(self: *McpClient) !void {
-        var start: usize = 0;
-
-        while (start < self.recv_len) {
-            // Find newline
-            const newline_pos = std.mem.indexOfScalar(u8, self.recv_buffer[start..self.recv_len], '\n');
-            if (newline_pos) |pos| {
-                const end = start + pos;
-                const line = self.recv_buffer[start..end];
-
-                if (line.len > 0) {
-                    // Parse the JSON message
-                    const msg = protocol.decode(self.allocator, line) catch {
-                        start = end + 1;
-                        continue;
-                    };
-                    try self.pending_messages.append(msg);
+            // Blocking read
+            const bytes_read = stream.read(recv_buffer[recv_len..]) catch |err| {
+                switch (err) {
+                    error.ConnectionResetByPeer, error.BrokenPipe => {
+                        std.log.debug("MCP reader: connection error: {}", .{err});
+                    },
+                    else => {
+                        // Socket was likely closed by main thread during shutdown
+                        if (!self.shutdown_flag.load(.acquire)) {
+                            std.log.debug("MCP reader: read error: {}", .{err});
+                        }
+                    },
                 }
-
-                start = end + 1;
-            } else {
-                // No complete message yet
                 break;
+            };
+
+            if (bytes_read == 0) {
+                // EOF - server closed connection
+                std.log.debug("MCP reader: EOF, server disconnected", .{});
+                break;
+            }
+
+            recv_len += bytes_read;
+
+            // Parse complete messages (newline-delimited)
+            var start: usize = 0;
+            while (start < recv_len) {
+                const newline_pos = std.mem.indexOfScalar(u8, recv_buffer[start..recv_len], '\n');
+                if (newline_pos) |pos| {
+                    const end = start + pos;
+                    const line = recv_buffer[start..end];
+
+                    if (line.len > 0) {
+                        // Parse the JSON message
+                        const msg = protocol.decode(self.allocator, line) catch {
+                            start = end + 1;
+                            continue;
+                        };
+
+                        // Add to queue (thread-safe)
+                        self.queue_mutex.lock();
+                        self.message_queue.append(msg) catch {
+                            // Queue full or OOM, drop message
+                            freeMessageStatic(self.allocator, @constCast(&msg));
+                        };
+                        self.queue_mutex.unlock();
+                    }
+
+                    start = end + 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Move remaining data to beginning of buffer
+            if (start > 0 and start < recv_len) {
+                const remaining = recv_len - start;
+                std.mem.copyForwards(u8, recv_buffer[0..remaining], recv_buffer[start..recv_len]);
+                recv_len = remaining;
+            } else if (start >= recv_len) {
+                recv_len = 0;
             }
         }
 
-        // Move remaining data to beginning of buffer
-        if (start > 0 and start < self.recv_len) {
-            const remaining = self.recv_len - start;
-            std.mem.copyForwards(u8, self.recv_buffer[0..remaining], self.recv_buffer[start..self.recv_len]);
-            self.recv_len = remaining;
-        } else if (start >= self.recv_len) {
-            self.recv_len = 0;
-        }
-    }
-
-    fn clearPendingMessages(self: *McpClient) void {
-        for (self.pending_messages.items) |*msg| {
-            self.freeMessage(msg);
-        }
-        self.pending_messages.clearRetainingCapacity();
+        std.log.debug("MCP reader: thread exiting", .{});
     }
 };
 
@@ -306,44 +356,6 @@ test "client init and deinit" {
 
     try std.testing.expect(!client.connected);
     try std.testing.expect(client.stream == null);
-}
-
-test "parse buffered messages" {
-    const allocator = std.testing.allocator;
-
-    var client = McpClient.init(allocator);
-    defer client.deinit();
-
-    // Simulate receiving two messages
-    const data = "{\"event\":\"ping\"}\n{\"event\":\"pong\"}\n";
-    @memcpy(client.recv_buffer[0..data.len], data);
-    client.recv_len = data.len;
-
-    try client.parseBufferedMessages();
-
-    try std.testing.expectEqual(@as(usize, 2), client.pending_messages.items.len);
-    try std.testing.expect(client.pending_messages.items[0] == .ping);
-    try std.testing.expect(client.pending_messages.items[1] == .pong);
-    try std.testing.expectEqual(@as(usize, 0), client.recv_len);
-}
-
-test "parse partial message buffering" {
-    const allocator = std.testing.allocator;
-
-    var client = McpClient.init(allocator);
-    defer client.deinit();
-
-    // Simulate receiving partial message
-    const partial = "{\"event\":\"pi";
-    @memcpy(client.recv_buffer[0..partial.len], partial);
-    client.recv_len = partial.len;
-
-    try client.parseBufferedMessages();
-
-    // No complete messages yet
-    try std.testing.expectEqual(@as(usize, 0), client.pending_messages.items.len);
-    // Partial data still in buffer
-    try std.testing.expectEqual(@as(usize, partial.len), client.recv_len);
 }
 
 test "discovery result types" {

@@ -514,14 +514,16 @@ pub const App = struct {
         // Main event loop
         while (!self.should_quit) {
             // Only block on pollEvent if we don't need to render AND no async job is running
+            // AND not connected to MCP (reader thread may queue messages anytime)
             // This allows async operations to trigger immediate renders
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0;
+            const mcp_connected = if (self.mcp) |mcp| mcp.connected else false;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_connected;
             if (should_poll) {
                 loop.pollEvent();
             } else {
-                // If we need to render or have an active job, check for events without blocking
-                // Then sleep briefly to avoid busy-looping
-                std.time.sleep(1 * std.time.ns_per_ms); // 1ms delay
+                // If we need to render, have an active job, or connected to MCP,
+                // check for events without blocking. Sleep briefly to avoid busy-looping.
+                std.time.sleep(10 * std.time.ns_per_ms); // 10ms delay (100Hz) - enough for responsive MCP
             }
 
             // Check if we need to suspend for editor
@@ -629,11 +631,8 @@ pub const App = struct {
                 }
             }
 
-            // Poll for MCP messages (non-blocking)
+            // Process MCP messages (reader thread handles receiving)
             if (self.mcp) |mcp| {
-                mcp.pollMessages() catch {};
-
-                // Process any pending messages
                 const messages = mcp.consumeMessages();
                 defer mcp.freeMessages(messages);
 
@@ -2436,6 +2435,12 @@ pub const App = struct {
             .get_comments => {
                 try self.handleMcpGetComments();
             },
+            .get_diff_context => {
+                try self.handleMcpGetDiffContext();
+            },
+            .get_file_diff => |gfd| {
+                try self.handleMcpGetFileDiff(gfd.file);
+            },
             .welcome => |w| {
                 // Store session ID for status display
                 if (self.mcp) |mcp| {
@@ -2532,6 +2537,175 @@ pub const App = struct {
         }
 
         try mcp.sendComments(comment_infos.items);
+    }
+
+    /// Handle get_diff_context request - send lightweight diff metadata
+    fn handleMcpGetDiffContext(self: *App) !void {
+        const mcp = self.mcp orelse return;
+
+        var file_summaries = std.ArrayList(mcp_protocol.DiffFileSummary).init(self.allocator);
+        defer file_summaries.deinit();
+
+        for (self.state.files) |file| {
+            var additions: usize = 0;
+            var deletions: usize = 0;
+
+            // Count additions and deletions
+            for (file.hunks) |hunk| {
+                for (hunk.lines) |line| {
+                    switch (line.line_type) {
+                        .add => additions += 1,
+                        .delete => deletions += 1,
+                        .context => {},
+                    }
+                }
+            }
+
+            // Determine file status
+            const status: []const u8 = blk: {
+                if (file.old_path.len == 0 or std.mem.eql(u8, file.old_path, "/dev/null")) {
+                    break :blk "added";
+                } else if (file.new_path.len == 0 or std.mem.eql(u8, file.new_path, "/dev/null")) {
+                    break :blk "deleted";
+                } else if (!std.mem.eql(u8, file.old_path, file.new_path)) {
+                    break :blk "renamed";
+                } else {
+                    break :blk "modified";
+                }
+            };
+
+            try file_summaries.append(.{
+                .path = if (file.new_path.len > 0 and !std.mem.eql(u8, file.new_path, "/dev/null"))
+                    file.new_path
+                else
+                    file.old_path,
+                .old_path = file.old_path,
+                .status = status,
+                .additions = additions,
+                .deletions = deletions,
+                .hunk_count = file.hunks.len,
+            });
+        }
+
+        // Get diff_ref string
+        const diff_ref: []const u8 = switch (self.state.diff_source) {
+            .working_dir => |wd| if (wd.staged) "staged" else "working",
+            .single_ref => |sr| sr.ref,
+            .two_refs => |tr| tr.ref1, // Simplified - could build "ref1..ref2" if needed
+        };
+
+        try mcp.sendDiffContext(.{
+            .diff_ref = diff_ref,
+            .cwd = self.state.git_repo_root,
+            .files = file_summaries.items,
+        });
+    }
+
+    /// Handle get_file_diff request - send full diff content for a specific file
+    fn handleMcpGetFileDiff(self: *App, requested_file: []const u8) !void {
+        const mcp = self.mcp orelse return;
+
+        // Find the requested file in our diff
+        var found_file: ?*const parser.FileDiff = null;
+        for (self.state.files) |*file| {
+            const file_path = if (file.new_path.len > 0 and !std.mem.eql(u8, file.new_path, "/dev/null"))
+                file.new_path
+            else
+                file.old_path;
+
+            if (std.mem.eql(u8, file_path, requested_file)) {
+                found_file = file;
+                break;
+            }
+        }
+
+        const file = found_file orelse {
+            // File not found - send empty response
+            try mcp.sendFileDiff(.{
+                .file = requested_file,
+                .old_file = "",
+                .status = "not_found",
+                .hunks = &[_]mcp_protocol.DiffHunkInfo{},
+            });
+            return;
+        };
+
+        // Determine file status
+        const status: []const u8 = blk: {
+            if (file.old_path.len == 0 or std.mem.eql(u8, file.old_path, "/dev/null")) {
+                break :blk "added";
+            } else if (file.new_path.len == 0 or std.mem.eql(u8, file.new_path, "/dev/null")) {
+                break :blk "deleted";
+            } else if (!std.mem.eql(u8, file.old_path, file.new_path)) {
+                break :blk "renamed";
+            } else {
+                break :blk "modified";
+            }
+        };
+
+        // Build hunk info array
+        var hunks = std.ArrayList(mcp_protocol.DiffHunkInfo).init(self.allocator);
+        defer {
+            for (hunks.items) |hunk| {
+                self.allocator.free(hunk.header);
+                self.allocator.free(hunk.lines);
+            }
+            hunks.deinit();
+        }
+
+        for (file.hunks) |hunk| {
+            // Build lines array for this hunk
+            var lines = std.ArrayList(mcp_protocol.DiffLineInfo).init(self.allocator);
+            errdefer lines.deinit();
+
+            for (hunk.lines) |line| {
+                const line_type_str: []const u8 = switch (line.line_type) {
+                    .add => "add",
+                    .delete => "delete",
+                    .context => "context",
+                };
+
+                try lines.append(.{
+                    .line_type = line_type_str,
+                    .content = line.content,
+                    .old_lineno = line.old_lineno,
+                    .new_lineno = line.new_lineno,
+                });
+            }
+
+            // Build header string like "@@ -10,5 +10,7 @@"
+            // Must heap-allocate since stack buffer would be invalidated after loop iteration
+            var header_buf: [128]u8 = undefined;
+            const header_slice = std.fmt.bufPrint(&header_buf, "@@ -{d},{d} +{d},{d} @@", .{
+                hunk.header.old_start,
+                hunk.header.old_count,
+                hunk.header.new_start,
+                hunk.header.new_count,
+            }) catch "@@ ... @@";
+            const header_str = try self.allocator.dupe(u8, header_slice);
+            errdefer self.allocator.free(header_str);
+
+            try hunks.append(.{
+                .header = header_str,
+                .old_start = hunk.header.old_start,
+                .old_count = hunk.header.old_count,
+                .new_start = hunk.header.new_start,
+                .new_count = hunk.header.new_count,
+                .lines = try lines.toOwnedSlice(),
+            });
+        }
+
+        const file_path = if (file.new_path.len > 0 and !std.mem.eql(u8, file.new_path, "/dev/null"))
+            file.new_path
+        else
+            file.old_path;
+
+        try mcp.sendFileDiff(.{
+            .file = file_path,
+            .old_file = file.old_path,
+            .status = status,
+            .hunks = hunks.items,
+        });
     }
 };
 

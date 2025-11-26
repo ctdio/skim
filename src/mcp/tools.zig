@@ -24,6 +24,15 @@ pub const GetCommentsParams = struct {
     client_id: []const u8,
 };
 
+pub const GetDiffContextParams = struct {
+    client_id: []const u8,
+};
+
+pub const GetFileDiffParams = struct {
+    client_id: []const u8,
+    file: []const u8,
+};
+
 // =============================================================================
 // Daemon State - Shared state accessible by tool handlers
 // =============================================================================
@@ -203,6 +212,83 @@ pub fn getComments(ctx: *Context, args: ?std.json.Value) Result {
         return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
 }
 
+/// Get diff context metadata from a skim client (files, mode, stats)
+pub fn getDiffContext(ctx: *Context, args: ?std.json.Value) Result {
+    const state = ctx.getUserData(DaemonState) orelse
+        return Result.mcpError(framework.ErrorCode.internal_error, "No daemon state");
+
+    const params = framework.parseParams(GetDiffContextParams, ctx.allocator, args) catch |err| {
+        return switch (err) {
+            error.MissingParams => Result.mcpError(framework.ErrorCode.invalid_params, "Missing arguments"),
+            error.InvalidParams => Result.mcpError(framework.ErrorCode.invalid_params, "Invalid arguments"),
+            error.MissingField => Result.mcpError(framework.ErrorCode.invalid_params, "Missing required field"),
+            error.InvalidType => Result.mcpError(framework.ErrorCode.invalid_params, "Invalid field type"),
+            else => Result.mcpError(framework.ErrorCode.internal_error, "Failed to parse params"),
+        };
+    };
+    defer ctx.allocator.free(params.client_id);
+
+    // Find TUI client
+    const client = state.tui_clients.getByIdString(params.client_id) orelse
+        return Result.textError(ctx.allocator, "Client not found") catch
+            return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+
+    // Encode and send get_diff_context message to TUI
+    const msg = protocol.encodeGetDiffContext(ctx.allocator) catch
+        return Result.mcpError(framework.ErrorCode.internal_error, "Failed to encode message");
+    defer ctx.allocator.free(msg);
+
+    // Store pending request for async response
+    state.storePendingRequest(client.id, "get_diff_context") catch {};
+
+    client.stream.writeAll(msg) catch
+        return Result.textError(ctx.allocator, "Failed to send to client") catch
+            return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+
+    // Return pending result - actual result will come async
+    return Result.text(ctx.allocator, "Diff context request sent") catch
+        return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+}
+
+/// Get the full diff content for a specific file
+pub fn getFileDiff(ctx: *Context, args: ?std.json.Value) Result {
+    const state = ctx.getUserData(DaemonState) orelse
+        return Result.mcpError(framework.ErrorCode.internal_error, "No daemon state");
+
+    const params = framework.parseParams(GetFileDiffParams, ctx.allocator, args) catch |err| {
+        return switch (err) {
+            error.MissingParams => Result.mcpError(framework.ErrorCode.invalid_params, "Missing arguments"),
+            error.InvalidParams => Result.mcpError(framework.ErrorCode.invalid_params, "Invalid arguments"),
+            error.MissingField => Result.mcpError(framework.ErrorCode.invalid_params, "Missing required field"),
+            error.InvalidType => Result.mcpError(framework.ErrorCode.invalid_params, "Invalid field type"),
+            else => Result.mcpError(framework.ErrorCode.internal_error, "Failed to parse params"),
+        };
+    };
+    defer ctx.allocator.free(params.client_id);
+    defer ctx.allocator.free(params.file);
+
+    // Find TUI client
+    const client = state.tui_clients.getByIdString(params.client_id) orelse
+        return Result.textError(ctx.allocator, "Client not found") catch
+            return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+
+    // Encode and send get_file_diff message to TUI
+    const msg = protocol.encodeGetFileDiff(ctx.allocator, params.file) catch
+        return Result.mcpError(framework.ErrorCode.internal_error, "Failed to encode message");
+    defer ctx.allocator.free(msg);
+
+    // Store pending request for async response
+    state.storePendingRequest(client.id, "get_file_diff") catch {};
+
+    client.stream.writeAll(msg) catch
+        return Result.textError(ctx.allocator, "Failed to send to client") catch
+            return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+
+    // Return pending result - actual result will come async
+    return Result.text(ctx.allocator, "File diff request sent") catch
+        return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+}
+
 // =============================================================================
 // Server Setup
 // =============================================================================
@@ -236,6 +322,20 @@ pub fn createServer(allocator: Allocator) !Server {
         getComments,
     );
 
+    try server.tool(
+        "get_diff_context",
+        "Get diff context metadata from a skim instance (files, mode, additions/deletions)",
+        GetDiffContextParams,
+        getDiffContext,
+    );
+
+    try server.tool(
+        "get_file_diff",
+        "Get the full diff content for a specific file (hunks and lines)",
+        GetFileDiffParams,
+        getFileDiff,
+    );
+
     return server;
 }
 
@@ -249,10 +349,12 @@ test "create server with tools" {
     var server = try createServer(allocator);
     defer server.deinit();
 
-    try std.testing.expectEqual(@as(usize, 3), server.tools.items.len);
+    try std.testing.expectEqual(@as(usize, 5), server.tools.items.len);
     try std.testing.expectEqualStrings("list_clients", server.tools.items[0].name);
     try std.testing.expectEqualStrings("add_comment", server.tools.items[1].name);
     try std.testing.expectEqualStrings("get_comments", server.tools.items[2].name);
+    try std.testing.expectEqualStrings("get_diff_context", server.tools.items[3].name);
+    try std.testing.expectEqualStrings("get_file_diff", server.tools.items[4].name);
 }
 
 test "encode tools list" {
@@ -268,6 +370,8 @@ test "encode tools list" {
     try std.testing.expect(std.mem.indexOf(u8, tools_json, "list_clients") != null);
     try std.testing.expect(std.mem.indexOf(u8, tools_json, "add_comment") != null);
     try std.testing.expect(std.mem.indexOf(u8, tools_json, "get_comments") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tools_json, "get_diff_context") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tools_json, "get_file_diff") != null);
 }
 
 test "encode initialize response" {

@@ -65,9 +65,10 @@ fn runDaemonCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
     const subcommand = args[2];
 
     if (std.mem.eql(u8, subcommand, "start")) {
-        // Parse optional port arguments
+        // Parse optional arguments
         var tui_port: u16 = discovery.DEFAULT_TUI_PORT;
         var adapter_port: u16 = discovery.DEFAULT_ADAPTER_PORT;
+        var foreground = false;
 
         var i: usize = 3;
         while (i < args.len) : (i += 1) {
@@ -82,6 +83,8 @@ fn runDaemonCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
                     std.process.exit(1);
                 };
                 adapter_port = tui_port - 1; // Adapter port is one below TUI port
+            } else if (std.mem.eql(u8, args[i], "--foreground") or std.mem.eql(u8, args[i], "-f")) {
+                foreground = true;
             } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
                 try printDaemonHelp();
                 std.process.exit(0);
@@ -104,11 +107,19 @@ fn runDaemonCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
 
         std.debug.print("Starting skim daemon on ports {d} (TUI) and {d} (adapters)...\n", .{ tui_port, adapter_port });
 
+        // Daemonize unless --foreground is specified
+        if (!foreground) {
+            const daemon_pid = try daemonize(allocator, tui_port, adapter_port);
+            std.debug.print("Daemon started (PID {d})\n", .{daemon_pid});
+            return; // Parent exits, daemon runs in background
+        }
+
+        // Foreground mode - run directly
         const daemon = try Daemon.init(allocator, tui_port, adapter_port);
         defer daemon.deinit();
 
         try daemon.start();
-        std.debug.print("Daemon started (PID {d})\n", .{getCurrentPid()});
+        std.debug.print("Daemon running in foreground (PID {d})\n", .{getCurrentPid()});
         try daemon.run();
     } else if (std.mem.eql(u8, subcommand, "stop")) {
         const status = discovery.discoverDaemon(allocator);
@@ -155,18 +166,14 @@ fn runDaemonCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
         }
         discovery.deleteDiscoveryFile(allocator);
 
-        // Now start
-        const tui_port = discovery.DEFAULT_TUI_PORT;
-        const adapter_port = discovery.DEFAULT_ADAPTER_PORT;
+        // Now start (restart always daemonizes)
+        const restart_tui_port = discovery.DEFAULT_TUI_PORT;
+        const restart_adapter_port = discovery.DEFAULT_ADAPTER_PORT;
 
-        std.debug.print("Starting skim daemon on ports {d} (TUI) and {d} (adapters)...\n", .{ tui_port, adapter_port });
+        std.debug.print("Starting skim daemon on ports {d} (TUI) and {d} (adapters)...\n", .{ restart_tui_port, restart_adapter_port });
 
-        const daemon = try Daemon.init(allocator, tui_port, adapter_port);
-        defer daemon.deinit();
-
-        try daemon.start();
-        std.debug.print("Daemon started (PID {d})\n", .{getCurrentPid()});
-        try daemon.run();
+        const daemon_pid = try daemonize(allocator, restart_tui_port, restart_adapter_port);
+        std.debug.print("Daemon started (PID {d})\n", .{daemon_pid});
     } else if (std.mem.eql(u8, subcommand, "--help") or std.mem.eql(u8, subcommand, "-h")) {
         try printDaemonHelp();
     } else {
@@ -230,10 +237,12 @@ fn printDaemonHelp() !void {
         \\
         \\OPTIONS:
         \\    -p, --port <port>    Set TUI port (default: 9999, adapter port is TUI-1)
+        \\    -f, --foreground     Run in foreground (don't daemonize)
         \\    -h, --help           Print this help message
         \\
         \\EXAMPLES:
-        \\    skim daemon start              # Start with default ports
+        \\    skim daemon start              # Start daemon in background
+        \\    skim daemon start --foreground # Run in foreground (for debugging)
         \\    skim daemon start --port 8888  # Start on custom port
         \\    skim daemon status             # Check if daemon is running
         \\    skim daemon stop               # Stop the daemon
@@ -462,6 +471,105 @@ fn getCurrentPid() i32 {
         const c_getpid = @extern(*const fn () callconv(.C) c_int, .{ .name = "getpid" });
         return @intCast(c_getpid());
     }
+}
+
+/// Daemonize the process using double-fork pattern.
+/// Returns the daemon's PID to the parent process.
+/// The daemon process does not return - it runs the daemon loop.
+fn daemonize(allocator: std.mem.Allocator, tui_port: u16, adapter_port: u16) !i32 {
+    const posix = std.posix;
+    const c = struct {
+        extern "c" fn setsid() c_int;
+    };
+
+    // Create a pipe to communicate daemon PID back to parent
+    const pipe_fds = try posix.pipe();
+    const pipe_read = pipe_fds[0];
+    const pipe_write = pipe_fds[1];
+
+    // First fork
+    const pid1 = try posix.fork();
+    if (pid1 != 0) {
+        // Parent: close write end, read daemon PID, return
+        posix.close(pipe_write);
+
+        var pid_buf: [16]u8 = undefined;
+        const bytes_read = posix.read(pipe_read, &pid_buf) catch |err| {
+            posix.close(pipe_read);
+            return err;
+        };
+        posix.close(pipe_read);
+
+        if (bytes_read == 0) {
+            return error.DaemonFailed;
+        }
+
+        const daemon_pid = std.fmt.parseInt(i32, pid_buf[0..bytes_read], 10) catch {
+            return error.DaemonFailed;
+        };
+
+        // Wait for first child to exit
+        _ = posix.waitpid(pid1, 0);
+
+        return daemon_pid;
+    }
+
+    // First child: close read end, create new session
+    posix.close(pipe_read);
+
+    // Create new session (detach from controlling terminal)
+    if (c.setsid() == -1) {
+        posix.close(pipe_write);
+        posix.exit(1);
+    }
+
+    // Second fork (prevents reacquiring a controlling terminal)
+    const pid2 = posix.fork() catch {
+        posix.close(pipe_write);
+        posix.exit(1);
+    };
+
+    if (pid2 != 0) {
+        // First child exits, letting grandchild be adopted by init
+        posix.close(pipe_write);
+        posix.exit(0);
+    }
+
+    // Grandchild: this is the daemon process
+
+    // Write our PID to the pipe
+    const daemon_pid = getCurrentPid();
+    var pid_str: [16]u8 = undefined;
+    const pid_len = std.fmt.formatIntBuf(&pid_str, daemon_pid, 10, .lower, .{});
+    _ = posix.write(pipe_write, pid_str[0..pid_len]) catch {};
+    posix.close(pipe_write);
+
+    // Redirect stdin/stdout/stderr to /dev/null
+    const dev_null = posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch {
+        posix.exit(1);
+    };
+    posix.dup2(dev_null, posix.STDIN_FILENO) catch {};
+    posix.dup2(dev_null, posix.STDOUT_FILENO) catch {};
+    posix.dup2(dev_null, posix.STDERR_FILENO) catch {};
+    if (dev_null > 2) {
+        posix.close(dev_null);
+    }
+
+    // Now run the daemon
+    const daemon = Daemon.init(allocator, tui_port, adapter_port) catch {
+        posix.exit(1);
+    };
+    defer daemon.deinit();
+
+    daemon.start() catch {
+        posix.exit(1);
+    };
+
+    daemon.run() catch {
+        posix.exit(1);
+    };
+
+    posix.exit(0);
 }
 
 test "parse args: working directory" {

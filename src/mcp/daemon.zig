@@ -346,6 +346,14 @@ pub const Daemon = struct {
                 std.log.debug("TUI {s} sent {} comments", .{ client.id, result.comments.len });
                 try self.completePendingCommentsRequest(client, result);
             },
+            .diff_context => |result| {
+                std.log.debug("TUI {s} sent diff context with {} files", .{ client.id, result.files.len });
+                try self.completePendingDiffContextRequest(client, result);
+            },
+            .file_diff => |result| {
+                std.log.debug("TUI {s} sent file diff for {s} with {} hunks", .{ client.id, result.file, result.hunks.len });
+                try self.completePendingFileDiffRequest(client, result);
+            },
             .ping => {
                 const pong = try protocol.encodePong(self.allocator);
                 defer self.allocator.free(pong);
@@ -604,6 +612,10 @@ pub const Daemon = struct {
             try self.handleAddComment(adapter, req, parsed.value.arguments);
         } else if (std.mem.eql(u8, tool_name, "get_comments")) {
             try self.handleGetComments(adapter, req, parsed.value.arguments);
+        } else if (std.mem.eql(u8, tool_name, "get_diff_context")) {
+            try self.handleGetDiffContext(adapter, req, parsed.value.arguments);
+        } else if (std.mem.eql(u8, tool_name, "get_file_diff")) {
+            try self.handleGetFileDiff(adapter, req, parsed.value.arguments);
         } else {
             try self.sendMcpError(adapter, req.request_id, req.mcp_id, -32602, "Unknown tool");
         }
@@ -778,6 +790,123 @@ pub const Daemon = struct {
         };
     }
 
+    fn handleGetDiffContext(self: *Self, adapter: *AdapterInfo, req: internal_protocol.McpRequestPayload, arguments: ?std.json.Value) !void {
+        const args = arguments orelse {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing arguments");
+            return;
+        };
+
+        if (args != .object) {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid arguments");
+            return;
+        }
+
+        const client_id = args.object.get("client_id") orelse {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing client_id");
+            return;
+        };
+
+        if (client_id != .string) {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid client_id type");
+            return;
+        }
+
+        // Find TUI client
+        const client = self.tui_clients.getByIdString(client_id.string) orelse {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Client not found");
+            return;
+        };
+
+        // Store pending request
+        var request_id: [36]u8 = undefined;
+        @memcpy(&request_id, req.request_id[0..36]);
+
+        try self.pending_requests.put(request_id, .{
+            .adapter_id = adapter.id,
+            .mcp_id = switch (req.mcp_id) {
+                .string => |s| .{ .string = try self.allocator.dupe(u8, s) },
+                .number => |n| .{ .number = n },
+                .null_value => .{ .null_value = {} },
+            },
+            .method = try self.allocator.dupe(u8, "get_diff_context"),
+            .params = null,
+            .tui_client_id = client.id,
+            .created_at = std.time.timestamp(),
+        });
+
+        // Send get_diff_context to TUI
+        const msg = try protocol.encodeGetDiffContext(self.allocator);
+        defer self.allocator.free(msg);
+
+        client.stream.writeAll(msg) catch |err| {
+            std.log.err("Failed to send to TUI: {}", .{err});
+            _ = self.pending_requests.remove(request_id);
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
+            return;
+        };
+    }
+
+    fn handleGetFileDiff(self: *Self, adapter: *AdapterInfo, req: internal_protocol.McpRequestPayload, arguments: ?std.json.Value) !void {
+        const args = arguments orelse {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing arguments");
+            return;
+        };
+
+        if (args != .object) {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid arguments");
+            return;
+        }
+
+        const client_id = args.object.get("client_id") orelse {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing client_id");
+            return;
+        };
+
+        const file_path = args.object.get("file") orelse {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing file");
+            return;
+        };
+
+        if (client_id != .string or file_path != .string) {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid argument types");
+            return;
+        }
+
+        // Find TUI client
+        const client = self.tui_clients.getByIdString(client_id.string) orelse {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Client not found");
+            return;
+        };
+
+        // Store pending request
+        var request_id: [36]u8 = undefined;
+        @memcpy(&request_id, req.request_id[0..36]);
+
+        try self.pending_requests.put(request_id, .{
+            .adapter_id = adapter.id,
+            .mcp_id = switch (req.mcp_id) {
+                .string => |s| .{ .string = try self.allocator.dupe(u8, s) },
+                .number => |n| .{ .number = n },
+                .null_value => .{ .null_value = {} },
+            },
+            .method = try self.allocator.dupe(u8, "get_file_diff"),
+            .params = null,
+            .tui_client_id = client.id,
+            .created_at = std.time.timestamp(),
+        });
+
+        // Send get_file_diff to TUI
+        const msg = try protocol.encodeGetFileDiff(self.allocator, file_path.string);
+        defer self.allocator.free(msg);
+
+        client.stream.writeAll(msg) catch |err| {
+            std.log.err("Failed to send to TUI: {}", .{err});
+            _ = self.pending_requests.remove(request_id);
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
+            return;
+        };
+    }
+
     // =========================================================================
     // Response Handling
     // =========================================================================
@@ -870,6 +999,148 @@ pub const Daemon = struct {
                                 comment.line_type,
                                 comment.text,
                             });
+                        }
+                    }
+
+                    try output.appendSlice("\"}]}");
+
+                    try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
+                }
+            }
+        }
+    }
+
+    fn completePendingDiffContextRequest(self: *Self, client: *registry.ClientInfo, result: protocol.DiffContextPayload) !void {
+        // Find pending request for this TUI client
+        var found_key: ?[36]u8 = null;
+        var it = self.pending_requests.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, &entry.value_ptr.tui_client_id, &client.id) and
+                std.mem.eql(u8, entry.value_ptr.method, "get_diff_context"))
+            {
+                found_key = entry.key_ptr.*;
+                break;
+            }
+        }
+
+        if (found_key) |key| {
+            if (self.pending_requests.fetchRemove(key)) |entry| {
+                defer {
+                    switch (entry.value.mcp_id) {
+                        .string => |s| self.allocator.free(s),
+                        else => {},
+                    }
+                    self.allocator.free(entry.value.method);
+                }
+
+                // Find adapter and send response
+                if (self.adapters.get(entry.value.adapter_id)) |adapter| {
+                    var output = std.ArrayList(u8).init(self.allocator);
+                    defer output.deinit();
+
+                    // Build JSON response with diff context metadata
+                    try output.appendSlice("{\"content\":[{\"type\":\"text\",\"text\":\"");
+
+                    // Header with diff mode and project info
+                    try output.appendSlice("Diff Context:\\n");
+                    try output.appendSlice("  Mode: ");
+                    try writeJsonEscaped(output.writer(), result.diff_ref);
+                    try output.appendSlice("\\n  Project: ");
+                    try writeJsonEscaped(output.writer(), result.cwd);
+                    try output.appendSlice("\\n\\n");
+
+                    if (result.files.len == 0) {
+                        try output.appendSlice("No files in diff.");
+                    } else {
+                        try output.writer().print("Files ({d}):\\n", .{result.files.len});
+                        for (result.files) |file| {
+                            // Format: path [status] (+additions/-deletions, N hunks)
+                            try output.appendSlice("  ");
+                            try writeJsonEscaped(output.writer(), file.path);
+                            if (!std.mem.eql(u8, file.old_path, file.path) and file.old_path.len > 0) {
+                                try output.appendSlice(" (was: ");
+                                try writeJsonEscaped(output.writer(), file.old_path);
+                                try output.appendSlice(")");
+                            }
+                            try output.appendSlice(" [");
+                            try output.appendSlice(file.status);
+                            try output.writer().print("] (+{d}/-{d}, {d} hunks)\\n", .{
+                                file.additions,
+                                file.deletions,
+                                file.hunk_count,
+                            });
+                        }
+                    }
+
+                    try output.appendSlice("\"}]}");
+
+                    try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
+                }
+            }
+        }
+    }
+
+    fn completePendingFileDiffRequest(self: *Self, client: *registry.ClientInfo, result: protocol.FileDiffPayload) !void {
+        // Find pending request for this TUI client
+        var found_key: ?[36]u8 = null;
+        var it = self.pending_requests.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, &entry.value_ptr.tui_client_id, &client.id) and
+                std.mem.eql(u8, entry.value_ptr.method, "get_file_diff"))
+            {
+                found_key = entry.key_ptr.*;
+                break;
+            }
+        }
+
+        if (found_key) |key| {
+            if (self.pending_requests.fetchRemove(key)) |entry| {
+                defer {
+                    switch (entry.value.mcp_id) {
+                        .string => |s| self.allocator.free(s),
+                        else => {},
+                    }
+                    self.allocator.free(entry.value.method);
+                }
+
+                // Find adapter and send response
+                if (self.adapters.get(entry.value.adapter_id)) |adapter| {
+                    var output = std.ArrayList(u8).init(self.allocator);
+                    defer output.deinit();
+
+                    // Build response with file diff content
+                    try output.appendSlice("{\"content\":[{\"type\":\"text\",\"text\":\"");
+
+                    // File header
+                    try output.appendSlice("File: ");
+                    try writeJsonEscaped(output.writer(), result.file);
+                    if (!std.mem.eql(u8, result.old_file, result.file) and result.old_file.len > 0) {
+                        try output.appendSlice(" (was: ");
+                        try writeJsonEscaped(output.writer(), result.old_file);
+                        try output.appendSlice(")");
+                    }
+                    try output.appendSlice("\\nStatus: ");
+                    try output.appendSlice(result.status);
+                    try output.appendSlice("\\n\\n");
+
+                    // Output hunks
+                    for (result.hunks) |hunk| {
+                        // Hunk header
+                        try writeJsonEscaped(output.writer(), hunk.header);
+                        try output.appendSlice("\\n");
+
+                        // Lines
+                        for (hunk.lines) |line| {
+                            // Prefix based on line type
+                            if (std.mem.eql(u8, line.line_type, "add")) {
+                                try output.appendSlice("+");
+                            } else if (std.mem.eql(u8, line.line_type, "delete")) {
+                                try output.appendSlice("-");
+                            } else {
+                                try output.appendSlice(" ");
+                            }
+                            try writeJsonEscaped(output.writer(), line.content);
+                            try output.appendSlice("\\n");
                         }
                     }
 
@@ -1031,8 +1302,35 @@ pub const Daemon = struct {
                 self.allocator.free(e.code);
                 self.allocator.free(e.message);
             },
+            .diff_context => |d| {
+                self.allocator.free(d.diff_ref);
+                self.allocator.free(d.cwd);
+                for (d.files) |file| {
+                    self.allocator.free(file.path);
+                    self.allocator.free(file.old_path);
+                    self.allocator.free(file.status);
+                }
+                self.allocator.free(d.files);
+            },
+            .get_file_diff => |gfd| {
+                self.allocator.free(gfd.file);
+            },
+            .file_diff => |fd| {
+                self.allocator.free(fd.file);
+                self.allocator.free(fd.old_file);
+                self.allocator.free(fd.status);
+                for (fd.hunks) |hunk| {
+                    self.allocator.free(hunk.header);
+                    for (hunk.lines) |line| {
+                        self.allocator.free(line.line_type);
+                        self.allocator.free(line.content);
+                    }
+                    self.allocator.free(hunk.lines);
+                }
+                self.allocator.free(fd.hunks);
+            },
             .unknown => |u| self.allocator.free(u),
-            .get_comments, .ping, .pong => {},
+            .get_comments, .get_diff_context, .ping, .pong => {},
         }
     }
 };
@@ -1164,6 +1462,26 @@ fn getCurrentPid() i32 {
         // Use extern for macOS and other POSIX systems
         const c_getpid = @extern(*const fn () callconv(.C) c_int, .{ .name = "getpid" });
         return @intCast(c_getpid());
+    }
+}
+
+/// Write a string with JSON escaping (for embedding in JSON strings)
+fn writeJsonEscaped(writer: anytype, str: []const u8) !void {
+    for (str) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    try writer.print("\\u{x:0>4}", .{c});
+                } else {
+                    try writer.writeByte(c);
+                }
+            },
+        }
     }
 }
 
