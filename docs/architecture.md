@@ -9,18 +9,22 @@ This document provides a comprehensive overview of Skim's codebase architecture,
 4. [Data Flow](#data-flow)
 5. [Adding New Features](#adding-new-features)
 6. [Code Organization Principles](#code-organization-principles)
+7. [MCP System Architecture](#mcp-system-architecture)
+8. [Review Command System](#review-command-system)
+9. [Logging System](#logging-system)
 
 ---
 
 ## Architecture Overview
 
-Skim is organized into five main layers:
+Skim is organized into six main layers:
 
 ```
 ┌─────────────────────────────────────────────┐
 │ CLI Layer (main.zig)                        │
 │ - Argument parsing                          │
 │ - Initialization                            │
+│ - Subcommand routing (daemon, mcp)          │
 └─────────────────┬───────────────────────────┘
                   │
 ┌─────────────────▼───────────────────────────┐
@@ -28,6 +32,7 @@ Skim is organized into five main layers:
 │ - Modal state machine                       │
 │ - Event routing                             │
 │ - Rendering coordination                    │
+│ - Review process management                 │
 └─────┬───────────────────────────┬───────────┘
       │                           │
 ┌─────▼──────────┐    ┌──────────▼──────────┐
@@ -36,30 +41,43 @@ Skim is organized into five main layers:
 └────────────────┘    └─────────────────────┘
       │                           │
 ┌─────▼───────────────────────────▼───────────┐
-│ Core Systems                                 │
+│ Core Systems                                │
 │ - LineMap (line_map.zig)                    │
 │ - Navigation (navigation.zig)               │
 │ - State Helpers (state.zig)                 │
+│ - Logging (logging.zig)                     │
 └─────┬───────────────────────────┬───────────┘
       │                           │
 ┌─────▼──────────┐    ┌──────────▼──────────┐
 │ Git Integration│    │ Rendering System    │
 │ (git/)         │    │ (rendering/)        │
 └────────────────┘    └─────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────┐
+│ MCP System (mcp/)                           │
+│ - Daemon (daemon.zig)                       │
+│ - MCP Adapter (adapter.zig)                 │
+│ - TUI Client (client.zig)                   │
+│ - Protocol (protocol.zig)                   │
+│ - Discovery (discovery.zig)                 │
+└─────────────────────────────────────────────┘
 ```
 
 ### Layer Responsibilities
 
 **CLI Layer** (`main.zig`)
 - Parse command-line arguments (working dir, staged, ref comparison)
+- Route subcommands (`daemon`, `mcp`)
 - Initialize terminal and vaxis
 - Create and run App instance
 
 **Application Layer** (`app.zig`)
-- Central state machine managing 7 modes: normal, comment, search, visual, command_palette, help, branch_selection
+- Central state machine managing 8 modes: normal, comment, search, visual, command_palette, help, branch_selection, review_log
 - Event loop handling keyboard and terminal events
 - Coordinate rendering pipeline
-- **Size:** ~2,500 lines (reduced from 3,099 after refactoring)
+- Manage MCP client connection
+- Manage review process lifecycle
+- **Size:** ~2,900 lines
 
 **Mode Handlers** (`src/modes/`)
 - Isolated logic for each interaction mode
@@ -95,8 +113,8 @@ Skim is organized into five main layers:
 
 ```
 src/
-├── main.zig              - CLI entry point
-├── app.zig               - Application state machine (2,494 lines)
+├── main.zig              - CLI entry point, subcommand routing
+├── app.zig               - Application state machine (~2,900 lines)
 ├── navigation.zig        - Cursor/scroll navigation (559 lines)
 ├── line_map.zig          - Line position registry (394 lines)
 ├── state.zig             - State helpers, async highlighting (533 lines)
@@ -107,15 +125,34 @@ src/
 ├── command_palette.zig   - Command palette (567 lines)
 ├── help.zig              - Help overlay
 ├── editor.zig            - External editor integration
+├── logging.zig           - File-based logging system
+├── review.zig            - Review process management
+├── config.zig            - Config loading and template substitution
+├── mcp_status.zig        - MCP connection status popup
 │
-├── modes/                - Mode handlers (extracted Phase 1)
+├── modes/                - Mode handlers
 │   ├── normal_mode.zig           (299 lines)
 │   ├── comment_mode.zig          (36 lines)
 │   ├── search_mode.zig           (72 lines)
 │   ├── visual_mode.zig           (78 lines)
 │   ├── command_palette_mode.zig  (75 lines)
 │   ├── help_mode.zig             (11 lines)
-│   └── branch_selection_mode.zig (127 lines)
+│   ├── branch_selection_mode.zig (127 lines)
+│   ├── review_log_mode.zig       - Review log panel navigation
+│   └── mcp_status_mode.zig       - MCP status popup
+│
+├── mcp/                  - MCP system (AI agent integration)
+│   ├── daemon.zig        - Central daemon server (~1,500 lines)
+│   ├── adapter.zig       - stdio MCP adapter for AI agents
+│   ├── client.zig        - TUI-side MCP client
+│   ├── server.zig        - Legacy MCP server (deprecated)
+│   ├── protocol.zig      - TUI ↔ Daemon message protocol
+│   ├── internal_protocol.zig - Daemon ↔ Adapter protocol
+│   ├── tools.zig         - MCP tool implementations
+│   ├── framework.zig     - Mini MCP JSON-RPC framework
+│   ├── registry.zig      - TUI client registry
+│   ├── discovery.zig     - Daemon discovery via ~/.skim/daemon.json
+│   └── line_resolver.zig - Map agent line numbers to TUI lines
 │
 ├── git/                  - Git integration
 │   ├── diff.zig          - Execute git commands
@@ -124,7 +161,7 @@ src/
 └── rendering/            - Rendering system
     ├── common.zig        - Color palette, layout constants
     ├── utils.zig         - Rendering utilities (1,104 lines)
-    ├── styles.zig        - Style calculation (extracted Phase 2)
+    ├── styles.zig        - Style calculation
     ├── unified.zig       - Unified diff renderer (453 lines)
     ├── side_by_side.zig  - Side-by-side renderer (998 lines)
     └── file_header.zig   - File header rendering
@@ -643,6 +680,224 @@ tail -f debug.log
 
 ---
 
+## MCP System Architecture
+
+The MCP (Model Context Protocol) system enables AI agents to interact with skim code reviews.
+
+### Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     AI Agent (Claude, etc.)                      │
+│  - Invokes MCP tools via JSON-RPC                               │
+│  - Can: list clients, read diffs, add comments                  │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ JSON-RPC over stdio
+┌───────────────────────────▼─────────────────────────────────────┐
+│                MCP Adapter (skim mcp --stdio)                    │
+│  - Thin translator process                                      │
+│  - Reads MCP JSON-RPC from stdin                                │
+│  - Connects to daemon on adapter port (9998)                    │
+│  - Translates MCP ↔ internal protocol                           │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ TCP (port 9998)
+┌───────────────────────────▼─────────────────────────────────────┐
+│                         Daemon                                   │
+│  - Single persistent process (daemonized)                       │
+│  - Manages registry of connected TUI clients                    │
+│  - Routes requests from adapters to appropriate TUI             │
+│  - Implements MCP tools via framework.zig                       │
+│  - Handles async request/response correlation                   │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ TCP (port 9999)
+┌───────────────────────────▼─────────────────────────────────────┐
+│                      Skim TUI Client                             │
+│  - Connects to daemon on startup (if available)                 │
+│  - Sends hello with session info (cwd, diff_ref, files)         │
+│  - Receives commands (add_comment, get_diff_context, etc.)      │
+│  - Responds with results (comments added, diff content, etc.)   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Component Details
+
+**Daemon (`mcp/daemon.zig`)**
+- Listens on two ports: TUI (9999) and Adapter (9998)
+- Maintains registries for TUI clients and MCP adapters
+- Routes messages between adapters and TUI clients
+- Handles pending request correlation (async responses)
+- Writes discovery file (`~/.skim/daemon.json`) for client lookup
+- Daemonizes via double-fork pattern
+
+**Adapter (`mcp/adapter.zig`)**
+- Spawned by AI agents (e.g., Claude Desktop)
+- Reads MCP JSON-RPC from stdin, writes to stdout
+- Connects to daemon via TCP
+- Translates between MCP protocol and internal protocol
+- Stateless - each invocation is independent
+
+**Client (`mcp/client.zig`)**
+- Background reader thread for non-blocking message handling
+- Automatic reconnection on disconnect (2-second cooldown)
+- Thread-safe message queue for cross-thread communication
+- Discovery-based connection to find daemon
+
+**Protocol (`mcp/protocol.zig`)**
+- TUI ↔ Daemon message format
+- Messages: hello, welcome, add_comment, comment_added, get_comments, comments, get_diff_context, diff_context, get_file_diff, file_diff, ping, pong
+- Newline-delimited JSON encoding
+
+**Tools (`mcp/tools.zig`)**
+- `list_clients`: List connected TUI instances
+- `add_comment`: Add comment to specific file/line
+- `get_comments`: Retrieve all comments from a TUI
+- `get_diff_context`: Get diff metadata (files, stats)
+- `get_file_diff`: Get full diff content for a file
+
+**Framework (`mcp/framework.zig`)**
+- Mini MCP JSON-RPC 2.0 implementation
+- Tool registration with JSON schema generation
+- Request/response encoding
+- Error handling with MCP error codes
+
+**Discovery (`mcp/discovery.zig`)**
+- Discovery file: `~/.skim/daemon.json`
+- Contains: version, tui_port, adapter_port, pid
+- Health checking: process alive + port reachable
+- Auto-cleanup of stale discovery files
+
+### Message Flow Example
+
+```
+Agent calls mcp__skim__add_comment(client_id, file, line, text)
+    │
+    ▼
+Adapter receives MCP JSON-RPC
+    │ {"jsonrpc":"2.0","method":"tools/call","params":{"name":"add_comment",...}}
+    ▼
+Adapter translates to internal protocol
+    │ {"type":"mcp_request","method":"tools/call",...}
+    ▼
+Daemon receives, extracts tool call
+    │
+    ▼
+Daemon sends to TUI client
+    │ {"type":"add_comment","file":"src/main.zig","line":42,"text":"Consider..."}
+    ▼
+TUI adds comment, rebuilds LineMap
+    │
+    ▼
+TUI responds to daemon
+    │ {"type":"comment_added","success":true}
+    ▼
+Daemon sends MCP response to adapter
+    │ {"type":"mcp_response","result":{"content":[{"type":"text","text":"Comment added"}]}}
+    ▼
+Adapter writes JSON-RPC response to stdout
+    │ {"jsonrpc":"2.0","id":1,"result":{...}}
+    ▼
+Agent receives success response
+```
+
+---
+
+## Review Command System
+
+The review command (`R` key) allows users to trigger an AI review directly from skim.
+
+### Architecture
+
+```
+User presses 'R'
+    │
+    ▼
+app.startReview()
+    │
+    ▼
+config.getReviewCommand()
+    │ Priority: SKIM_REVIEW_COMMAND env > ~/.skim/config.json
+    ▼
+config.substituteTemplateVars(command, context)
+    │ Replace {client_id}, {repo}, {diff_ref}, {adapter_port}
+    ▼
+review.start(command, context)
+    │ - Ensure ~/.skim exists
+    │ - Build shell command with output redirection
+    │ - Spawn child process
+    ▼
+Process runs in background
+    │ Output → ~/.skim/review.log
+    ▼
+User can press 'L' to view log panel
+    │
+    ▼
+review_log_mode handles navigation
+    │ j/k scroll, g/G top/bottom, Tab toggle style
+```
+
+### Template Variables
+
+- `{client_id}`: Session ID for MCP targeting
+- `{repo}`: Git repository root path
+- `{diff_ref}`: Diff reference string (e.g., "staged", "main..feature")
+- `{adapter_port}`: MCP adapter port (default 9998)
+
+### Log Panel
+
+- Sidebar mode: Shows log alongside diff
+- Dialog mode: Full-width modal overlay
+- Tail-follow: Auto-scroll when at bottom
+- ANSI stripping: Removes escape codes for clean display
+
+---
+
+## Logging System
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    std.log.* calls                              │
+│  std.log.debug("message", .{});                                 │
+│  std.log.info("message", .{});                                  │
+│  std.log.err("message", .{});                                   │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────────┐
+│                    logging.logFn                                 │
+│  - Custom log function (overrides std.log default)             │
+│  - Thread-safe via mutex                                        │
+│  - Formats: [HH:MM:SS] [LEVEL] (scope) message                 │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────────┐
+│                 Component-specific log file                      │
+│  ~/.skim/tui.log     - TUI client logs                         │
+│  ~/.skim/daemon.log  - Daemon process logs                     │
+│  ~/.skim/mcp.log     - MCP adapter logs                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Initialization
+
+Each component initializes logging with its type:
+```zig
+logging.init(.tui);      // In TUI main
+logging.init(.daemon);   // In daemon command
+logging.init(.mcp);      // In mcp command
+defer logging.deinit();
+```
+
+### Why File-Based Logging?
+
+- TUI uses stdout for rendering (vaxis)
+- stderr also captured by terminal handling
+- Background daemon has no terminal
+- File logs persist for debugging
+- Can `tail -f` for real-time viewing
+
+---
+
 ## Conclusion
 
 Skim's architecture emphasizes:
@@ -650,7 +905,8 @@ Skim's architecture emphasizes:
 - **Performance:** Pre-allocation, virtual scrolling, async highlighting
 - **Maintainability:** Focused modules, clear data flow
 - **Simplicity:** Minimal dependencies, shell-out to git
+- **Extensibility:** Daemon architecture for AI agent integration
 
-The recent refactoring (Phases 1-2) has significantly improved code organization, reducing app.zig by 20% and creating a clear module structure for modes.
+The MCP system (Phase 4) adds a complete infrastructure for AI-assisted code reviews while maintaining the lightweight, fast nature of the core TUI.
 
 For questions or suggestions, see the main README.md or open an issue.

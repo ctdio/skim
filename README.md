@@ -175,6 +175,133 @@ Edit comments on specific lines:
 | `ESC` | Cancel and return to NORMAL mode |
 | `Backspace` | Delete character before cursor |
 
+## AI Agent Integration
+
+Skim includes an MCP (Model Context Protocol) server that allows AI agents like Claude to review your code changes. The agent can read diff context, add comments to specific lines, and the comments appear in real-time in your TUI.
+
+### Quick Start for AI Reviews
+
+```bash
+# 1. Start the skim daemon (runs in background)
+skim daemon start
+
+# 2. Open your diff in skim
+skim --staged
+
+# 3. Press 'R' to start an AI review (requires SKIM_REVIEW_COMMAND configured)
+# Or press 'L' to view the review log panel
+```
+
+### Daemon Commands
+
+```bash
+# Start the daemon (runs in background by default)
+skim daemon start
+skim daemon start --foreground  # Run in foreground for debugging
+skim daemon start --port 8888   # Use custom port
+
+# Check daemon status
+skim daemon status
+
+# Stop the daemon
+skim daemon stop
+
+# Restart the daemon
+skim daemon restart
+```
+
+The daemon listens on two ports:
+- **TUI port (default 9999)**: For skim TUI clients to connect
+- **Adapter port (default 9998)**: For MCP adapters (AI agents)
+
+### MCP Server Configuration
+
+Add skim to your AI assistant's MCP configuration:
+
+**Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):**
+```json
+{
+  "mcpServers": {
+    "skim": {
+      "command": "skim",
+      "args": ["mcp", "--stdio"]
+    }
+  }
+}
+```
+
+**Cursor or other MCP-compatible tools:**
+```json
+{
+  "skim": {
+    "command": "skim",
+    "args": ["mcp", "--stdio"]
+  }
+}
+```
+
+### MCP Tools Available
+
+The skim MCP server exposes these tools to AI agents:
+
+| Tool | Description |
+|------|-------------|
+| `list_clients` | List all connected skim TUI instances |
+| `get_diff_context` | Get diff metadata (files, stats, mode) |
+| `get_file_diff` | Get full diff content for a specific file |
+| `add_comment` | Add a review comment to a specific line |
+| `get_comments` | Get all comments from a skim instance |
+
+### Configuring the Review Command
+
+Set the `SKIM_REVIEW_COMMAND` environment variable or create `~/.skim/config.json`:
+
+**Environment variable:**
+```bash
+export SKIM_REVIEW_COMMAND='claude --mcp skim "Review this diff for bugs and style issues"'
+```
+
+**Config file (`~/.skim/config.json`):**
+```json
+{
+  "review_command": "your-review-command --client {client_id} --repo {repo}"
+}
+```
+
+### Template Variables
+
+The review command supports these template variables:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `{client_id}` | The skim session ID | `a1b2c3d4-...` |
+| `{repo}` | Path to the git repository | `/home/user/project` |
+| `{diff_ref}` | The diff reference being reviewed | `staged`, `main..feature` |
+| `{adapter_port}` | The MCP adapter port | `9998` |
+
+**Example command with variables:**
+```bash
+export SKIM_REVIEW_COMMAND='my-review-tool --session {client_id} --cwd {repo} --ref {diff_ref}'
+```
+
+### Review Keybindings
+
+| Key | Action |
+|-----|--------|
+| `R` | Start AI review (runs SKIM_REVIEW_COMMAND) |
+| `L` | Toggle review log side panel |
+| `Tab` | Toggle panel style (sidebar/dialog) when panel focused |
+| `Ctrl-w h` | Focus left (diff view) from panel |
+| `Ctrl-w l` | Focus right (panel) from diff |
+
+### Log Files
+
+Skim writes logs to `~/.skim/`:
+- `tui.log` - TUI client logs
+- `daemon.log` - Daemon process logs
+- `mcp.log` - MCP adapter logs
+- `review.log` - Review command output
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
@@ -185,9 +312,20 @@ src/
 ├── main.zig              # CLI entry point
 ├── app.zig               # State machine, event handling
 ├── line_map.zig          # Position registry (single source of truth)
+├── logging.zig           # File-based logging system
+├── review.zig            # Review process management
+├── config.zig            # Config loading and template substitution
 ├── git/                  # Git command execution and parsing
 ├── rendering/            # Unified and side-by-side renderers
 ├── modes/                # Mode handlers (normal, comment, search, etc.)
+├── mcp/                  # MCP server and daemon
+│   ├── daemon.zig        # Central daemon server
+│   ├── client.zig        # TUI-side MCP client
+│   ├── adapter.zig       # stdio MCP adapter for AI agents
+│   ├── protocol.zig      # TUI<->Daemon protocol
+│   ├── tools.zig         # MCP tool implementations
+│   ├── discovery.zig     # Daemon discovery via ~/.skim/daemon.json
+│   └── framework.zig     # MCP JSON-RPC framework
 └── syntax.zig            # Tree-sitter syntax highlighting
 ```
 
@@ -198,6 +336,7 @@ src/
 - LineMap system for accurate positioning
 - Async syntax highlighting (non-blocking)
 - Virtual scrolling (render visible lines only)
+- Daemon architecture for AI integration
 
 ## Performance Targets
 

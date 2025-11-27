@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Skim is a keyboard-driven TUI for code reviews built in Zig. Vim-style navigation, sub-10ms startup, 60 FPS scrolling.
 
-**Current Status**: Alpha - Phase 2 complete, Phase 3 in progress (LineMap system, async highlighting, and editor integration complete).
+**Current Status**: Alpha - Phase 4 in progress (MCP daemon, AI agent integration, review command system).
 
 ## Build System
 
@@ -56,12 +56,15 @@ zig build test
 For detailed architecture documentation, see [docs/architecture.md](docs/architecture.md).
 
 **Quick Overview:**
-- **CLI Layer** (`main.zig`): Arg parsing, initialization
+- **CLI Layer** (`main.zig`): Arg parsing, initialization, subcommand routing
 - **Application Layer** (`app.zig`): Modal state machine, event handling
 - **Line Tracking** (`line_map.zig`): Pre-computed position registry
 - **Git Integration** (`git/`): Command execution, diff parsing
 - **Rendering** (`rendering/`): Unified and side-by-side views
 - **Syntax Highlighting** (`syntax.zig`): Async tree-sitter integration
+- **MCP System** (`mcp/`): Daemon, adapters, and protocol for AI agent integration
+- **Logging** (`logging.zig`): File-based logging to `~/.skim/*.log`
+- **Review** (`review.zig`, `config.zig`): Review command execution with template substitution
 
 **Key Design Principles:**
 - Modal interface (vim-style)
@@ -69,6 +72,96 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 - LineMap system (single source of truth for positioning)
 - Virtual scrolling (render visible lines only)
 - Minimal dependencies (vaxis + z-tree-sitter)
+- Daemon architecture for AI agent integration
+
+## Logging System
+
+Logs are written to files in `~/.skim/` instead of stderr (since stdout/stderr are used for TUI rendering):
+
+```bash
+~/.skim/
+├── tui.log      # TUI client logs
+├── daemon.log   # Daemon process logs
+├── mcp.log      # MCP adapter logs
+└── review.log   # Review command output
+```
+
+**Using logs for debugging:**
+```bash
+# Watch TUI logs in real-time
+tail -f ~/.skim/tui.log
+
+# Watch daemon logs
+tail -f ~/.skim/daemon.log
+
+# View review output
+cat ~/.skim/review.log
+```
+
+The logging module (`src/logging.zig`) overrides `std.log` to write to these files with timestamps and log levels.
+
+## MCP System Overview
+
+The MCP (Model Context Protocol) system enables AI agents to interact with skim. It uses a daemon architecture:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     AI Agent (Claude, etc.)                     │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ JSON-RPC over stdio
+┌───────────────────────────▼─────────────────────────────────────┐
+│                    MCP Adapter (skim mcp --stdio)               │
+│                    Translates MCP ↔ Internal Protocol           │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ TCP (port 9998)
+┌───────────────────────────▼─────────────────────────────────────┐
+│                         Daemon                                  │
+│  - Manages TUI client registry                                  │
+│  - Routes messages between adapters and TUI clients             │
+│  - Implements MCP tools (list_clients, add_comment, etc.)       │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ TCP (port 9999)
+┌───────────────────────────▼─────────────────────────────────────┐
+│                      Skim TUI Client                            │
+│  - Connects to daemon on startup                                │
+│  - Registers with session info (cwd, diff_ref, files)           │
+│  - Responds to daemon requests (add_comment, get_diff, etc.)    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key MCP files:**
+- `daemon.zig`: Central server managing clients and adapters
+- `adapter.zig`: stdio adapter for AI agents (MCP JSON-RPC)
+- `client.zig`: TUI-side client connecting to daemon
+- `protocol.zig`: TUI ↔ Daemon message protocol
+- `tools.zig`: MCP tool implementations (list_clients, add_comment, etc.)
+- `discovery.zig`: Daemon discovery via `~/.skim/daemon.json`
+- `framework.zig`: Mini MCP JSON-RPC framework
+
+## Review Command System
+
+The review command (`R` key) runs a configurable shell command that can invoke an AI agent:
+
+**Configuration priority:**
+1. `SKIM_REVIEW_COMMAND` environment variable
+2. `~/.skim/config.json` with `review_command` field
+
+**Template variables in commands:**
+- `{client_id}` - Skim session ID (for MCP targeting)
+- `{repo}` - Git repository path
+- `{diff_ref}` - Diff reference (e.g., "staged", "main..feature")
+- `{adapter_port}` - MCP adapter port (default 9998)
+
+**Example:**
+```bash
+export SKIM_REVIEW_COMMAND='claude --mcp skim "Review {diff_ref} in {repo}"'
+```
+
+**Implementation:**
+- `config.zig`: Loads command and performs template substitution
+- `review.zig`: Spawns process, manages lifecycle, reads output
+- Output redirected to `~/.skim/review.log`
+- Status viewable via `L` key (review log panel)
 
 ## Development Workflow
 
@@ -78,7 +171,9 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 - Coverage includes: arg parsing, diff execution, parser, line_map, comments, editor
 
 ### Debugging TUI Apps
-- Stdout is for rendering - use `std.log` (stderr) or write to file
+- Stdout/stderr not available (TUI rendering) - logs go to `~/.skim/*.log`
+- Use `std.log.debug/info/warn/err()` - routed to component-specific log files
+- Watch logs in real-time: `tail -f ~/.skim/tui.log`
 - Terminal in raw mode - crashes may corrupt it (run `reset`)
 - Debug builds: `zig build` (better stack traces, assertions enabled)
 
@@ -106,6 +201,8 @@ For detailed implementation guides, see [docs/architecture.md](docs/architecture
 - **New keybinding**: Update mode handler in `src/modes/`, update status bar help, update README
 - **New language**: Add grammar to `build.zig.zon`, update `syntax.zig`, add `.scm` query file
 - **New line type**: Update `LineType` enum, update `LineMap.build()`, update renderers
+- **New MCP tool**: Add to `src/mcp/tools.zig`, register in `createServer()`, update tool docs
+- **New template var**: Add to `ReviewContext` struct, update `substituteTemplateVars()` in `config.zig`
 
 ## Git Integration
 
