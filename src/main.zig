@@ -6,6 +6,13 @@ const McpServer = @import("mcp/server.zig").McpServer;
 const Daemon = @import("mcp/daemon.zig").Daemon;
 const adapter = @import("mcp/adapter.zig");
 const discovery = @import("mcp/discovery.zig");
+const logging = @import("logging.zig");
+
+/// Override std.log to use file-based logging
+pub const std_options = std.Options{
+    .logFn = logging.logFn,
+    .log_level = .debug,
+};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -24,11 +31,19 @@ pub fn main() !void {
     // Check for subcommands first
     if (args.len >= 2) {
         if (std.mem.eql(u8, args[1], "daemon")) {
+            logging.init(.daemon);
+            defer logging.deinit();
             return runDaemonCommand(allocator, args);
         } else if (std.mem.eql(u8, args[1], "mcp")) {
+            logging.init(.mcp);
+            defer logging.deinit();
             return runMcpCommand(allocator, args);
         }
     }
+
+    // Initialize TUI logging
+    logging.init(.tui);
+    defer logging.deinit();
 
     const config = try parseArgs(allocator, args);
     defer config.deinit();

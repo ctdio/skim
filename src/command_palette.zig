@@ -172,9 +172,9 @@ pub const CommandPaletteState = struct {
         });
 
         try self.commands.append(.{
-            .name = "MCP Status",
-            .display_name = "MCP Status",
-            .description = "Show MCP server connection status",
+            .name = "Daemon Status",
+            .display_name = "Daemon Status",
+            .description = "Show daemon connection status",
             .action = .show_mcp_status,
             .category = .help,
             .owns_display_name = false,

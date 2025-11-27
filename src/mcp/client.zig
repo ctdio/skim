@@ -13,6 +13,8 @@ pub const McpClient = struct {
     stream: ?net.Stream,
     connected: bool,
     session_id: ?[]const u8,
+    last_connect_port: ?u16, // For reconnection
+    last_reconnect_attempt: i64, // Timestamp of last reconnect attempt
 
     // Thread-safe message queue (reader thread -> main thread)
     message_queue: std.ArrayList(protocol.ParsedMessage),
@@ -31,6 +33,8 @@ pub const McpClient = struct {
             .stream = null,
             .connected = false,
             .session_id = null,
+            .last_connect_port = null,
+            .last_reconnect_attempt = 0,
             .message_queue = std.ArrayList(protocol.ParsedMessage).init(allocator),
             .queue_mutex = .{},
             .reader_thread = null,
@@ -59,6 +63,7 @@ pub const McpClient = struct {
     pub fn connect(self: *McpClient, port: u16) !void {
         if (self.connected) return;
 
+        self.last_connect_port = port;
         const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
         self.stream = try net.tcpConnectToAddress(address);
         self.connected = true;
@@ -66,6 +71,47 @@ pub const McpClient = struct {
 
         // Spawn reader thread
         self.reader_thread = try std.Thread.spawn(.{}, readerThreadFn, .{self});
+    }
+
+    /// Attempt to connect with retries (for initial connection)
+    pub fn connectWithRetry(self: *McpClient, port: u16, max_retries: u32) !void {
+        var retries: u32 = 0;
+        while (retries < max_retries) : (retries += 1) {
+            self.connect(port) catch |err| {
+                if (retries + 1 < max_retries) {
+                    // Wait before retry (50ms, 100ms, 150ms...)
+                    std.time.sleep((retries + 1) * 50 * std.time.ns_per_ms);
+                    continue;
+                }
+                return err;
+            };
+            return; // Success
+        }
+    }
+
+    /// Attempt to reconnect if disconnected (with 2 second cooldown)
+    pub fn tryReconnect(self: *McpClient) bool {
+        if (self.connected) return true;
+
+        const port = self.last_connect_port orelse return false;
+
+        // Cooldown: only try once every 2 seconds
+        const now = std.time.timestamp();
+        if (now - self.last_reconnect_attempt < 2) {
+            return false;
+        }
+        self.last_reconnect_attempt = now;
+
+        // Clean up old reader thread if any
+        if (self.reader_thread) |thread| {
+            thread.join();
+            self.reader_thread = null;
+        }
+
+        self.connect(port) catch {
+            return false;
+        };
+        return true;
     }
 
     /// Connection result for discovery-based connection

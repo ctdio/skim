@@ -45,7 +45,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
 
     // Title
     var title_seg = [_]vaxis.Cell.Segment{
-        .{ .text = "MCP Server Status", .style = title_style },
+        .{ .text = "Daemon Connection", .style = title_style },
     };
     _ = try popup_win.print(&title_seg, .{ .row_offset = row });
     row += 1;
@@ -102,13 +102,13 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
 
         // Description
         var desc_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  MCP allows AI agents to add comments to your", .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = "  The daemon allows AI agents to interact with", .style = .{ .fg = .{ .index = 8 } } },
         };
         _ = try popup_win.print(&desc_seg, .{ .row_offset = row });
         row += 1;
 
         var desc2_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  code review session programmatically.", .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = "  your code review session via MCP.", .style = .{ .fg = .{ .index = 8 } } },
         };
         _ = try popup_win.print(&desc2_seg, .{ .row_offset = row });
     } else {
@@ -121,19 +121,19 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
         row += 2;
 
         var info_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  No MCP server running on port 9999.", .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = "  Daemon not running or not reachable.", .style = .{ .fg = .{ .index = 8 } } },
         };
         _ = try popup_win.print(&info_seg, .{ .row_offset = row });
         row += 2;
 
         var start_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  To start an MCP server:", .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = "  To start the daemon:", .style = .{ .fg = .{ .index = 8 } } },
         };
         _ = try popup_win.print(&start_seg, .{ .row_offset = row });
         row += 1;
 
         var cmd_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "    skim --serve", .style = .{ .fg = .{ .index = 6 } } },
+            .{ .text = "    skim daemon start", .style = .{ .fg = .{ .index = 6 } } },
         };
         _ = try popup_win.print(&cmd_seg, .{ .row_offset = row });
     }

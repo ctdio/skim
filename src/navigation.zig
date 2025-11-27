@@ -563,7 +563,7 @@ pub const Navigation = struct {
                     jumps_remaining -= 1;
                     if (jumps_remaining == 0) {
                         app.state.global_cursor_line = search_line;
-                        ensureCursorVisible(app, true);
+                        centerViewportOnCursor(app);
                         return;
                     }
                 }
@@ -598,7 +598,7 @@ pub const Navigation = struct {
                     jumps_remaining -= 1;
                     if (jumps_remaining == 0) {
                         app.state.global_cursor_line = search_line;
-                        ensureCursorVisible(app, true);
+                        centerViewportOnCursor(app);
                         return;
                     }
                 }

@@ -217,7 +217,8 @@ pub const Daemon = struct {
             if (std.mem.indexOfScalar(u8, pending.recv_buffer[0..pending.recv_len], '\n')) |newline_pos| {
                 const line = pending.recv_buffer[0..newline_pos];
 
-                const msg = protocol.decode(self.allocator, line) catch {
+                const msg = protocol.decode(self.allocator, line) catch |err| {
+                    std.log.err("Failed to decode TUI message: {}, raw: {s}", .{ err, line });
                     pending.stream.close();
                     _ = self.pending_tui_connections.swapRemove(i);
                     continue;

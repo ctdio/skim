@@ -97,6 +97,36 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
+    // If waiting for second key in Ctrl+w chord (window navigation)
+    if (app.state.pending_ctrl_w) {
+        app.state.pending_ctrl_w = false;
+        // ESC cancels pending Ctrl+w
+        if (key.codepoint == 27) { // ESC
+            return;
+        }
+        switch (key.codepoint) {
+            'l' => {
+                // Focus right (review panel) - enter review_log mode
+                if (app.state.review_panel_open) {
+                    app.mode = .review_log;
+                    app.needs_render = true;
+                }
+            },
+            'h' => {
+                // Focus left (diff) - already in normal mode, no-op
+            },
+            'w' => {
+                // Cycle focus - enter review_log mode if panel is open
+                if (app.state.review_panel_open) {
+                    app.mode = .review_log;
+                    app.needs_render = true;
+                }
+            },
+            else => {},
+        }
+        return;
+    }
+
     // Handle Ctrl+key combinations first (before regular key handling)
     if (key.mods.ctrl) {
         switch (key.codepoint) {
@@ -124,6 +154,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.updateCurrentFileAndTriggerHighlighting();
             },
             'g' => try app.openInEditor(),
+            'w' => {
+                // Start Ctrl+w chord for window navigation
+                app.state.pending_ctrl_w = true;
+            },
             else => {},
         }
         return;
@@ -242,6 +276,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.updateCurrentFileAndTriggerHighlighting();
         },
         '?' => app.mode = .help, // Show help overlay
+        'R' => try app.startReview(), // Start AI review
+        'L' => try app.toggleReviewPanel(), // Toggle review log side panel
         else => {
             // Reset count prefix on any other key
             app.state.count_prefix = null;

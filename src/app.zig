@@ -31,6 +31,9 @@ const help_mode = @import("modes/help_mode.zig");
 const branch_selection_mode = @import("modes/branch_selection_mode.zig");
 const mcp_status_mode = @import("modes/mcp_status_mode.zig");
 const mcp_status = @import("mcp_status.zig");
+const review_log_mode = @import("modes/review_log_mode.zig");
+const app_config = @import("config.zig");
+const review = @import("review.zig");
 
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
@@ -80,6 +83,7 @@ pub const App = struct {
     needs_async_highlight: bool, // Flag to trigger async highlighting for current file
     mcp: ?*mcp_client.McpClient, // MCP client for server connection
     mcp_port: ?u16, // Port to connect to MCP server
+    review_process: ?*review.ReviewProcess, // Background review process
 
     const Mode = enum {
         normal, // Normal navigation and viewing
@@ -90,6 +94,7 @@ pub const App = struct {
         help, // Help overlay
         branch_selection, // Branch selection menu (when empty)
         mcp_status, // MCP server connection status
+        review_log, // Review log viewer
     };
 
     // Character find commands for NORMAL mode (f/t/F/T)
@@ -137,6 +142,19 @@ pub const App = struct {
         filtered_branches: std.ArrayList(usize), // Indices of branches matching search query
         help_scroll_offset: usize, // Scroll position in help overlay
 
+        // Review log viewer state
+        review_log_scroll: usize, // Scroll position in review log viewer
+        review_log_content: ?[]const u8, // Cached review log content
+        review_log_line_count: usize, // Number of lines in review log (wrapped)
+        review_log_tail_follow: bool, // Auto-scroll to bottom when new content arrives
+        review_panel_open: bool, // Whether the review log side panel is visible
+        review_panel_style: ReviewPanelStyle, // Sidebar or dialog style
+        pending_ctrl_w: bool, // Waiting for second key in Ctrl+w chord
+
+        // Temporary status message
+        status_message: ?[]const u8, // Message to show in status bar
+        status_message_time: i64, // When message was set (for auto-clear)
+
         // Cached stats for menu items (fetched once when entering empty menu mode)
         menu_stats_cached: bool, // Whether stats have been fetched
         working_stats: git.DiffStats,
@@ -147,6 +165,11 @@ pub const App = struct {
         const ViewMode = enum {
             unified,
             side_by_side,
+        };
+
+        const ReviewPanelStyle = enum {
+            sidebar,
+            dialog,
         };
 
         const HunkViewMode = enum {
@@ -307,6 +330,15 @@ pub const App = struct {
                 .branch_search_len = 0,
                 .filtered_branches = std.ArrayList(usize).init(allocator),
                 .help_scroll_offset = 0,
+                .review_log_scroll = 0,
+                .review_log_content = null,
+                .review_log_line_count = 0,
+                .review_log_tail_follow = true, // Start with tail-follow enabled
+                .review_panel_open = false,
+                .review_panel_style = .sidebar,
+                .pending_ctrl_w = false,
+                .status_message = null,
+                .status_message_time = 0,
                 .menu_stats_cached = false,
                 .working_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
                 .staged_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
@@ -328,6 +360,7 @@ pub const App = struct {
             .needs_async_highlight = true, // Start with highlighting needed for first file
             .mcp = null,
             .mcp_port = if (@hasField(@TypeOf(config), "mcp_port")) config.mcp_port else null,
+            .review_process = null,
         };
 
         // Main loop will spawn background thread to highlight initial file
@@ -381,6 +414,14 @@ pub const App = struct {
         if (self.mcp) |mcp| {
             mcp.deinit();
             self.allocator.destroy(mcp);
+        }
+        // Clean up review process
+        if (self.review_process) |proc| {
+            proc.deinit();
+        }
+        // Clean up review log content
+        if (self.state.review_log_content) |content| {
+            self.allocator.free(content);
         }
         self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.anyWriter());
@@ -490,19 +531,21 @@ pub const App = struct {
             if (self.allocator.create(mcp_client.McpClient)) |m| {
                 m.* = mcp_client.McpClient.init(self.allocator);
 
-                if (m.connect(mcp_port)) {
+                // Try connecting with retries (3 attempts with backoff)
+                if (m.connectWithRetry(mcp_port, 3)) {
                     std.log.debug("MCP: Connection successful, connected={}", .{m.connected});
                     self.mcp = m;
+                    // Small delay to ensure daemon has finished accepting
+                    std.time.sleep(10 * std.time.ns_per_ms);
                     // Send hello message to register with server
                     self.sendMcpHello() catch |err| {
                         std.log.debug("MCP: Failed to send hello: {}", .{err});
                     };
                     std.log.debug("MCP: Hello sent, connected={}", .{m.connected});
                 } else |err| {
-                    std.log.debug("MCP: Connection failed: {}", .{err});
-                    // Server not available - silently continue without MCP
-                    m.deinit();
-                    self.allocator.destroy(m);
+                    std.log.debug("MCP: Connection failed after retries: {}", .{err});
+                    // Server not available - keep client for potential reconnection
+                    self.mcp = m;
                 }
             } else |_| {
                 // Allocation failed - continue without MCP
@@ -569,6 +612,10 @@ pub const App = struct {
                 had_events = true;
             }
 
+            // Check review process status and clear expired messages
+            self.checkReviewStatus();
+            self.clearExpiredStatusMessage();
+
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
                 const win = self.vx.window();
@@ -633,6 +680,16 @@ pub const App = struct {
 
             // Process MCP messages (reader thread handles receiving)
             if (self.mcp) |mcp| {
+                // Try to reconnect if disconnected
+                if (!mcp.connected) {
+                    if (mcp.tryReconnect()) {
+                        // Small delay to ensure daemon has finished accepting
+                        std.time.sleep(10 * std.time.ns_per_ms);
+                        // Reconnected - send hello again
+                        self.sendMcpHello() catch {};
+                    }
+                }
+
                 const messages = mcp.consumeMessages();
                 defer mcp.freeMessages(messages);
 
@@ -774,6 +831,12 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
+                .review_log => {
+                    self.mode = .normal;
+                    self.state.review_log_scroll = 0;
+                    self.needs_render = true;
+                    return;
+                },
                 .normal, .comment => {
                     // In normal/comment modes, double-press to quit
                     const now: i64 = @intCast(std.time.nanoTimestamp());
@@ -799,6 +862,7 @@ pub const App = struct {
             .help => try help_mode.handleKey(self, key),
             .branch_selection => try branch_selection_mode.handleKey(self, key),
             .mcp_status => try mcp_status_mode.handleKey(self, key),
+            .review_log => try review_log_mode.handleKey(self, key),
         }
     }
 
@@ -2030,13 +2094,48 @@ pub const App = struct {
             });
             try UI.renderHeader(self, header_win);
 
-            const content_win = win.child(.{
-                .x_off = 0,
-                .y_off = Layout.header_height,
-                .width = .{ .limit = win.width },
-                .height = .{ .limit = content_height },
-            });
-            try self.renderContent(content_win);
+            // Split content area if review panel is open in sidebar mode
+            if (self.state.review_panel_open and self.state.review_panel_style == .sidebar) {
+                const panel_width = @min(win.width / 3, 80); // Max 80 chars or 1/3 of screen
+                const divider_width: usize = 1;
+                const diff_width = win.width - panel_width - divider_width;
+
+                // Diff content on left
+                const content_win = win.child(.{
+                    .x_off = 0,
+                    .y_off = Layout.header_height,
+                    .width = .{ .limit = diff_width },
+                    .height = .{ .limit = content_height },
+                });
+                try self.renderContent(content_win);
+
+                // Vertical divider
+                const divider_win = win.child(.{
+                    .x_off = diff_width,
+                    .y_off = Layout.header_height,
+                    .width = .{ .limit = divider_width },
+                    .height = .{ .limit = content_height },
+                });
+                try UI.renderVerticalDivider(divider_win);
+
+                // Review panel on right
+                const panel_win = win.child(.{
+                    .x_off = diff_width + divider_width,
+                    .y_off = Layout.header_height,
+                    .width = .{ .limit = panel_width },
+                    .height = .{ .limit = content_height },
+                });
+                try UI.renderReviewPanel(self, panel_win);
+            } else {
+                // Full width content
+                const content_win = win.child(.{
+                    .x_off = 0,
+                    .y_off = Layout.header_height,
+                    .width = .{ .limit = win.width },
+                    .height = .{ .limit = content_height },
+                });
+                try self.renderContent(content_win);
+            }
 
             // Render status bar
             const status_win = win.child(.{
@@ -2061,6 +2160,11 @@ pub const App = struct {
         // Render MCP status overlay if in mcp_status mode
         if (self.mode == .mcp_status) {
             try mcp_status.renderMcpStatusPopup(self, win);
+        }
+
+        // Render review log dialog if open in dialog mode
+        if (self.state.review_panel_open and self.state.review_panel_style == .dialog) {
+            try UI.renderReviewLogPopup(self, win);
         }
     }
 
@@ -2706,6 +2810,195 @@ pub const App = struct {
             .status = status,
             .hunks = hunks.items,
         });
+    }
+
+    // =========================================================================
+    // Review Methods
+    // =========================================================================
+
+    /// Start an AI review using the configured review command.
+    /// The review runs in the background, outputting to ~/.skim/review.log
+    pub fn startReview(self: *App) !void {
+        // Check if a review is already in progress
+        if (self.review_process) |proc| {
+            const status = review.checkStatus(proc);
+            if (status == .running) {
+                self.showStatusMessage("Review already in progress");
+                return;
+            }
+            // Previous review finished, clean it up
+            proc.deinit();
+            self.review_process = null;
+        }
+
+        // Get the review command from config
+        const review_command = app_config.getReviewCommand(self.allocator) catch |err| {
+            std.log.err("Failed to get review command: {}", .{err});
+            self.showStatusMessage("Failed to load review config");
+            return;
+        };
+
+        if (review_command == null) {
+            self.showStatusMessage("No review command configured. Set SKIM_REVIEW_COMMAND");
+            return;
+        }
+        defer self.allocator.free(review_command.?);
+
+        // Build the review context
+        const client_id = if (self.mcp) |mcp| mcp.session_id orelse "no-mcp-session" else "no-mcp-client";
+        const ctx = app_config.ReviewContext{
+            .client_id = client_id,
+            .repo = self.state.git_repo_root,
+            .diff_ref = self.getDiffRefString(),
+            .adapter_port = 9998, // Default MCP adapter port
+        };
+
+        // Start the review process
+        self.review_process = review.start(self.allocator, review_command.?, ctx) catch |err| {
+            std.log.err("Failed to start review: {}", .{err});
+            self.showStatusMessage("Failed to start review");
+            return;
+        };
+
+        self.showStatusMessage("Review started...");
+        self.needs_render = true;
+    }
+
+    /// Toggle the review log side panel
+    pub fn toggleReviewPanel(self: *App) !void {
+        self.state.review_panel_open = !self.state.review_panel_open;
+        if (self.state.review_panel_open) {
+            try self.loadReviewLogContent();
+            // Enable tail-follow and start at bottom
+            self.state.review_log_tail_follow = true;
+            // Automatically focus the panel when opened
+            self.mode = .review_log;
+        } else {
+            // Exit review_log mode when closing panel
+            if (self.mode == .review_log) {
+                self.mode = .normal;
+            }
+        }
+        self.needs_render = true;
+    }
+
+    /// Toggle between sidebar and dialog panel styles
+    pub fn toggleReviewPanelStyle(self: *App) !void {
+        self.state.review_panel_style = switch (self.state.review_panel_style) {
+            .sidebar => .dialog,
+            .dialog => .sidebar,
+        };
+        // Open panel if not already open
+        if (!self.state.review_panel_open) {
+            self.state.review_panel_open = true;
+            try self.loadReviewLogContent();
+            // Enable tail-follow
+            self.state.review_log_tail_follow = true;
+        }
+        self.needs_render = true;
+    }
+
+    /// Scroll review panel down one line
+    pub fn scrollReviewPanelDown(self: *App) void {
+        const max_scroll = if (self.state.review_log_line_count > 20)
+            self.state.review_log_line_count - 20
+        else
+            0;
+        if (self.state.review_log_scroll < max_scroll) {
+            self.state.review_log_scroll += 1;
+            self.needs_render = true;
+        }
+    }
+
+    /// Scroll review panel up one line
+    pub fn scrollReviewPanelUp(self: *App) void {
+        if (self.state.review_log_scroll > 0) {
+            self.state.review_log_scroll -= 1;
+            self.needs_render = true;
+        }
+    }
+
+    /// Scroll review panel to bottom
+    pub fn scrollReviewPanelToBottom(self: *App) void {
+        const max_scroll = if (self.state.review_log_line_count > 20)
+            self.state.review_log_line_count - 20
+        else
+            0;
+        self.state.review_log_scroll = max_scroll;
+        self.needs_render = true;
+    }
+
+    /// Load/reload the review log content from disk
+    pub fn loadReviewLogContent(self: *App) !void {
+        // Free old content if any
+        if (self.state.review_log_content) |old| {
+            self.allocator.free(old);
+        }
+
+        // Read the log file
+        const content = try review.readLogContents(self.allocator);
+        self.state.review_log_content = content;
+
+        // Count lines
+        var line_count: usize = 1;
+        for (content) |c| {
+            if (c == '\n') line_count += 1;
+        }
+        self.state.review_log_line_count = line_count;
+    }
+
+    /// Check and update review process status (called from main loop)
+    pub fn checkReviewStatus(self: *App) void {
+        if (self.review_process) |proc| {
+            const old_status = proc.status;
+            const new_status = review.checkStatus(proc);
+
+            // Auto-reload log if panel is open while review is running
+            if (self.state.review_panel_open and old_status == .running) {
+                self.loadReviewLogContent() catch {};
+                self.needs_render = true;
+            }
+
+            if (old_status == .running and new_status != .running) {
+                // Review just finished - reload log one more time
+                if (self.state.review_panel_open) {
+                    self.loadReviewLogContent() catch {};
+                }
+                if (new_status == .completed) {
+                    self.showStatusMessage("Review complete");
+                } else {
+                    self.showStatusMessage("Review failed");
+                }
+                self.needs_render = true;
+            }
+        }
+    }
+
+    /// Get the diff reference string for display
+    fn getDiffRefString(self: *App) []const u8 {
+        return switch (self.state.diff_source) {
+            .working_dir => |wd| if (wd.staged) "staged" else "working",
+            .single_ref => |sr| sr.ref,
+            .two_refs => "refs",
+        };
+    }
+
+    /// Show a temporary status message (displayed for 3 seconds)
+    fn showStatusMessage(self: *App, message: []const u8) void {
+        self.state.status_message = message;
+        self.state.status_message_time = std.time.timestamp();
+        self.needs_render = true;
+    }
+
+    /// Clear status message if it has expired (after 3 seconds)
+    pub fn clearExpiredStatusMessage(self: *App) void {
+        if (self.state.status_message != null) {
+            const elapsed = std.time.timestamp() - self.state.status_message_time;
+            if (elapsed >= 3) {
+                self.state.status_message = null;
+                self.needs_render = true;
+            }
+        }
     }
 };
 

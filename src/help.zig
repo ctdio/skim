@@ -82,6 +82,9 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "s", .desc = "Toggle unified/side-by-side" },
         .{ .key = "Tab/Shift-Tab", .desc = "Cycle hunk view mode" },
         .{ .key = "r", .desc = "Refresh diff" },
+        .{ .key = "R", .desc = "Start AI review" },
+        .{ .key = "L", .desc = "Toggle review panel" },
+        .{ .key = "Ctrl-w l/h/w", .desc = "Focus panel/diff/cycle" },
         .{ .key = "Ctrl-g", .desc = "Open file in $EDITOR" },
         .{ .key = "Ctrl-C x2", .desc = "Force quit" },
     };
