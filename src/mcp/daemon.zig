@@ -459,6 +459,40 @@ pub const Daemon = struct {
                         _ = self.pending_adapter_connections.swapRemove(i);
                         continue;
                     },
+                    .status_query => {
+                        std.log.info("Status query received", .{});
+
+                        // Build client summary list
+                        const clients = self.buildClientSummaryList() catch {
+                            pending.stream.close();
+                            _ = self.pending_adapter_connections.swapRemove(i);
+                            continue;
+                        };
+                        defer {
+                            for (clients) |c| {
+                                self.allocator.free(c.id);
+                            }
+                            self.allocator.free(clients);
+                        }
+
+                        // Send status response
+                        const response = internal_protocol.encodeStatusResponse(
+                            self.allocator,
+                            clients,
+                            self.adapters.count(),
+                        ) catch {
+                            pending.stream.close();
+                            _ = self.pending_adapter_connections.swapRemove(i);
+                            continue;
+                        };
+                        defer self.allocator.free(response);
+                        pending.stream.writeAll(response) catch {};
+
+                        // Close connection after sending response
+                        pending.stream.close();
+                        _ = self.pending_adapter_connections.swapRemove(i);
+                        continue;
+                    },
                     else => {
                         pending.stream.close();
                         _ = self.pending_adapter_connections.swapRemove(i);

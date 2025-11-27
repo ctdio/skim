@@ -248,8 +248,9 @@ pub const SideBySideRenderer = struct {
         var buf: [256]u8 = undefined;
         const header_text = try RenderUtils.buildHunkHeaderText(hunk, &buf);
 
-        // Calculate number of rows needed for wrapping (based on left width)
-        const num_rows = if (header_text.len == 0) 1 else (header_text.len + left_width - 1) / left_width;
+        // Calculate number of rows needed for wrapping (use display width, not bytes)
+        const text_display_width = RenderUtils.displayWidth(header_text);
+        const num_rows = if (text_display_width == 0) 1 else (text_display_width + left_width - 1) / left_width;
 
         // Get styles using shared utilities
         const fill_style = RenderUtils.getFillStyle(app, is_cursor, is_in_visual);
@@ -301,19 +302,36 @@ pub const SideBySideRenderer = struct {
             // Render spacing after left gutter
             try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, null);
 
-            // Render left content
-            const text_start = wrap_idx * left_width;
-            const text_end = @min(text_start + left_width, header_text.len);
-            const chunk = if (text_start < header_text.len) header_text[text_start..text_end] else "";
+            // Render left content (slice by display width, not bytes)
+            const display_start = wrap_idx * left_width;
+            const byte_start = RenderUtils.skipCodepoints(header_text, display_start);
+            const remaining_text = if (byte_start < header_text.len) header_text[byte_start..] else "";
+            const chunk = RenderUtils.sliceByDisplayWidth(remaining_text, left_width);
+
+            // Calculate display position of range boundary
+            const range_display_len = RenderUtils.displayWidth(header_text[0..range_len]);
 
             const left_content_start = 1 + gutter_width + Layout.gutter_spacing;
             if (chunk.len > 0) {
-                if (text_start < range_len) {
-                    const range_chunk_end = @min(text_end, range_len);
-                    const range_chunk = chunk[0 .. range_chunk_end - text_start];
+                // Determine if we're in range or context section based on display position
+                if (display_start < range_display_len) {
+                    // This chunk starts in range section (possibly mixed with context)
+                    const display_end = display_start + RenderUtils.displayWidth(chunk);
+                    if (display_end <= range_display_len) {
+                        // Pure range
+                        const range_text = try RenderUtils.copyFrameText(app, chunk);
+                        var seg = [_]vaxis.Cell.Segment{.{
+                            .text = range_text,
+                            .style = range_style,
+                        }};
+                        _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = left_content_start });
+                    } else {
+                        // Mixed: range + context - split at the boundary
+                        const range_codepoints = range_display_len - display_start;
+                        const range_chunk = RenderUtils.sliceByDisplayWidth(chunk, range_codepoints);
+                        const context_byte_start = range_chunk.len;
+                        const context_chunk = chunk[context_byte_start..];
 
-                    if (range_chunk_end < text_end) {
-                        const context_chunk = chunk[range_chunk_end - text_start ..];
                         const range_text = try RenderUtils.copyFrameText(app, range_chunk);
                         const context_text = try RenderUtils.copyFrameText(app, context_chunk);
 
@@ -322,15 +340,9 @@ pub const SideBySideRenderer = struct {
                             .{ .text = context_text, .style = context_style },
                         };
                         _ = try win.print(&segments, .{ .row_offset = current_row, .col_offset = left_content_start });
-                    } else {
-                        const range_text = try RenderUtils.copyFrameText(app, range_chunk);
-                        var seg = [_]vaxis.Cell.Segment{.{
-                            .text = range_text,
-                            .style = range_style,
-                        }};
-                        _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = left_content_start });
                     }
                 } else {
+                    // Pure context
                     const context_text = try RenderUtils.copyFrameText(app, chunk);
                     var seg = [_]vaxis.Cell.Segment{.{
                         .text = context_text,
@@ -356,15 +368,27 @@ pub const SideBySideRenderer = struct {
             // Render spacing after right gutter
             try RenderUtils.renderGutterSpacing(app, win, current_row, right_col + gutter_width, is_cursor, null);
 
-            // Render right content (same as left)
+            // Render right content (same as left, reusing chunk and display position calculations)
             const right_content_start = right_col + gutter_width + Layout.gutter_spacing;
             if (chunk.len > 0) {
-                if (text_start < range_len) {
-                    const range_chunk_end = @min(text_end, range_len);
-                    const range_chunk = chunk[0 .. range_chunk_end - text_start];
+                // Reuse the display position calculations from left side
+                if (display_start < range_display_len) {
+                    const display_end = display_start + RenderUtils.displayWidth(chunk);
+                    if (display_end <= range_display_len) {
+                        // Pure range
+                        const range_text = try RenderUtils.copyFrameText(app, chunk);
+                        var seg = [_]vaxis.Cell.Segment{.{
+                            .text = range_text,
+                            .style = range_style,
+                        }};
+                        _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = right_content_start });
+                    } else {
+                        // Mixed: range + context
+                        const range_codepoints = range_display_len - display_start;
+                        const range_chunk = RenderUtils.sliceByDisplayWidth(chunk, range_codepoints);
+                        const context_byte_start = range_chunk.len;
+                        const context_chunk = chunk[context_byte_start..];
 
-                    if (range_chunk_end < text_end) {
-                        const context_chunk = chunk[range_chunk_end - text_start ..];
                         const range_text = try RenderUtils.copyFrameText(app, range_chunk);
                         const context_text = try RenderUtils.copyFrameText(app, context_chunk);
 
@@ -373,15 +397,9 @@ pub const SideBySideRenderer = struct {
                             .{ .text = context_text, .style = context_style },
                         };
                         _ = try win.print(&segments, .{ .row_offset = current_row, .col_offset = right_content_start });
-                    } else {
-                        const range_text = try RenderUtils.copyFrameText(app, range_chunk);
-                        var seg = [_]vaxis.Cell.Segment{.{
-                            .text = range_text,
-                            .style = range_style,
-                        }};
-                        _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = right_content_start });
                     }
                 } else {
+                    // Pure context
                     const context_text = try RenderUtils.copyFrameText(app, chunk);
                     var seg = [_]vaxis.Cell.Segment{.{
                         .text = context_text,
@@ -433,10 +451,14 @@ pub const SideBySideRenderer = struct {
 
         switch (line.line_type) {
             .context => {
-                // Show on both sides - calculate rows based on left width
-                const num_rows = if (line.content.len == 0) 1 else (line.content.len + left_width - 1) / left_width;
+                // Show on both sides - calculate rows based on display width
+                const content_display_width = RenderUtils.displayWidth(line.content);
+                const num_rows = if (content_display_width == 0) 1 else (content_display_width + left_width - 1) / left_width;
 
                 var current_row = row;
+                var left_byte_offset_in_content: usize = 0;
+                var right_byte_offset_in_content: usize = 0;
+
                 for (0..num_rows) |wrap_idx| {
                     if (current_row >= win.height) break;
 
@@ -450,13 +472,13 @@ pub const SideBySideRenderer = struct {
                     // Render left side
                     try RenderUtils.renderGutter(app, win, 0, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type, gutter_width);
 
-                    const left_start = wrap_idx * left_width;
-                    const left_end = @min(left_start + left_width, line.content.len);
-                    const left_chunk = if (left_start < line.content.len) line.content[left_start..left_end] else "";
+                    // Slice by display width for left side
+                    const left_remaining = line.content[left_byte_offset_in_content..];
+                    const left_chunk = RenderUtils.sliceByDisplayWidth(left_remaining, left_width);
 
                     // Generate syntax-highlighted segments for left chunk
-                    const left_chunk_byte_offset = byte_offset + left_start;
-                    const left_segments = try app.createHighlightedSegments(left_chunk, line.content, left_start, left_chunk_byte_offset, highlights, style, global_line);
+                    const left_chunk_byte_offset = byte_offset + left_byte_offset_in_content;
+                    const left_segments = try app.createHighlightedSegments(left_chunk, line.content, left_byte_offset_in_content, left_chunk_byte_offset, highlights, style, global_line);
                     defer app.allocator.free(left_segments);
 
                     // Pad context lines only when cursor is on them
@@ -476,16 +498,18 @@ pub const SideBySideRenderer = struct {
                         _ = try win.print(left_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
                     }
 
+                    left_byte_offset_in_content += left_chunk.len;
+
                     // Render right side (same content)
                     try RenderUtils.renderGutterAtColumn(app, win, current_row, right_col, is_cursor, is_in_visual, show_lineno, line.new_lineno, line.line_type, gutter_width);
 
-                    const right_start = wrap_idx * right_width;
-                    const right_end = @min(right_start + right_width, line.content.len);
-                    const right_chunk = if (right_start < line.content.len) line.content[right_start..right_end] else "";
+                    // Slice by display width for right side
+                    const right_remaining = line.content[right_byte_offset_in_content..];
+                    const right_chunk = RenderUtils.sliceByDisplayWidth(right_remaining, right_width);
 
                     // Generate syntax-highlighted segments for right chunk
-                    const right_chunk_byte_offset = byte_offset + right_start;
-                    const right_segments = try app.createHighlightedSegments(right_chunk, line.content, right_start, right_chunk_byte_offset, highlights, style, global_line);
+                    const right_chunk_byte_offset = byte_offset + right_byte_offset_in_content;
+                    const right_segments = try app.createHighlightedSegments(right_chunk, line.content, right_byte_offset_in_content, right_chunk_byte_offset, highlights, style, global_line);
                     defer app.allocator.free(right_segments);
 
                     // Pad context lines only when cursor is on them
@@ -505,6 +529,7 @@ pub const SideBySideRenderer = struct {
                         _ = try win.print(right_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
                     }
 
+                    right_byte_offset_in_content += right_chunk.len;
                     current_row += 1;
                 }
 
@@ -513,30 +538,33 @@ pub const SideBySideRenderer = struct {
             .delete => {
                 // Show on left only, wrap as needed
                 // Note: Delete lines are not in the new file, so syntax highlighting won't apply
-                const num_rows = if (line.content.len == 0) 1 else (line.content.len + left_width - 1) / left_width;
+                const content_display_width = RenderUtils.displayWidth(line.content);
+                const num_rows = if (content_display_width == 0) 1 else (content_display_width + left_width - 1) / left_width;
 
                 var current_row = row;
-                for (0..num_rows) |wrap_idx| {
+                var byte_offset_in_content: usize = 0;
+
+                for (0..num_rows) |_| {
                     if (current_row >= win.height) break;
 
                     // Render sidebar and middle divider for continuation rows
-                    if (wrap_idx > 0) {
+                    if (byte_offset_in_content > 0) {
                         try RenderUtils.renderContinuationBorders(win, current_row, middle_col);
                     }
 
-                    const show_lineno = wrap_idx == 0;
+                    const show_lineno = byte_offset_in_content == 0;
 
                     // Render left side
                     try RenderUtils.renderGutter(app, win, 0, current_row, is_cursor, show_lineno, line.old_lineno, line.line_type, gutter_width);
 
-                    const text_start = wrap_idx * left_width;
-                    const text_end = @min(text_start + left_width, line.content.len);
-                    const chunk = if (text_start < line.content.len) line.content[text_start..text_end] else "";
+                    // Slice by display width
+                    const remaining_text = line.content[byte_offset_in_content..];
+                    const chunk = RenderUtils.sliceByDisplayWidth(remaining_text, left_width);
 
                     // Generate syntax-highlighted segments for chunk
                     // (will fall back to plain text for delete lines since highlights is null)
-                    const chunk_byte_offset = byte_offset + text_start;
-                    const segments = try app.createHighlightedSegments(chunk, line.content, text_start, chunk_byte_offset, highlights, style, global_line);
+                    const chunk_byte_offset = byte_offset + byte_offset_in_content;
+                    const segments = try app.createHighlightedSegments(chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, style, global_line);
                     defer app.allocator.free(segments);
 
                     // Always pad delete lines to show full-width background
@@ -564,6 +592,7 @@ pub const SideBySideRenderer = struct {
                         _ = try win.print(&blank_seg, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
                     }
 
+                    byte_offset_in_content += chunk.len;
                     current_row += 1;
                 }
 
@@ -571,18 +600,21 @@ pub const SideBySideRenderer = struct {
             },
             .add => {
                 // Show on right only, wrap as needed
-                const num_rows = if (line.content.len == 0) 1 else (line.content.len + right_width - 1) / right_width;
+                const content_display_width = RenderUtils.displayWidth(line.content);
+                const num_rows = if (content_display_width == 0) 1 else (content_display_width + right_width - 1) / right_width;
 
                 var current_row = row;
-                for (0..num_rows) |wrap_idx| {
+                var byte_offset_in_content: usize = 0;
+
+                for (0..num_rows) |_| {
                     if (current_row >= win.height) break;
 
                     // Render sidebar and middle divider for continuation rows
-                    if (wrap_idx > 0) {
+                    if (byte_offset_in_content > 0) {
                         try RenderUtils.renderContinuationBorders(win, current_row, middle_col);
                     }
 
-                    const show_lineno = wrap_idx == 0;
+                    const show_lineno = byte_offset_in_content == 0;
 
                     // Left side empty with cursor highlight if needed
                     if (is_cursor) {
@@ -599,13 +631,13 @@ pub const SideBySideRenderer = struct {
                     // Render right side
                     try RenderUtils.renderGutterAtColumn(app, win, current_row, right_col, is_cursor, is_in_visual, show_lineno, line.new_lineno, line.line_type, gutter_width);
 
-                    const text_start = wrap_idx * right_width;
-                    const text_end = @min(text_start + right_width, line.content.len);
-                    const chunk = if (text_start < line.content.len) line.content[text_start..text_end] else "";
+                    // Slice by display width
+                    const remaining_text = line.content[byte_offset_in_content..];
+                    const chunk = RenderUtils.sliceByDisplayWidth(remaining_text, right_width);
 
                     // Generate syntax-highlighted segments for chunk
-                    const chunk_byte_offset = byte_offset + text_start;
-                    const segments = try app.createHighlightedSegments(chunk, line.content, text_start, chunk_byte_offset, highlights, style, global_line);
+                    const chunk_byte_offset = byte_offset + byte_offset_in_content;
+                    const segments = try app.createHighlightedSegments(chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, style, global_line);
                     defer app.allocator.free(segments);
 
                     // Always pad add lines to show full-width background
@@ -621,6 +653,7 @@ pub const SideBySideRenderer = struct {
                         _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = right_start_col });
                     }
 
+                    byte_offset_in_content += chunk.len;
                     current_row += 1;
                 }
 

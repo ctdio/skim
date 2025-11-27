@@ -864,17 +864,17 @@ review_log_mode handles navigation
 └───────────────────────────┬─────────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────────┐
-│                    logging.logFn                                 │
-│  - Custom log function (overrides std.log default)             │
+│                    logging.logFn                                │
+│  - Custom log function (overrides std.log default)              │
 │  - Thread-safe via mutex                                        │
-│  - Formats: [HH:MM:SS] [LEVEL] (scope) message                 │
+│  - Formats: [HH:MM:SS] [LEVEL] (scope) message                  │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────────┐
-│                 Component-specific log file                      │
-│  ~/.skim/tui.log     - TUI client logs                         │
-│  ~/.skim/daemon.log  - Daemon process logs                     │
-│  ~/.skim/mcp.log     - MCP adapter logs                        │
+│                 Component-specific log file                     │
+│  ~/.skim/tui.log     - TUI client logs                          │
+│  ~/.skim/daemon.log  - Daemon process logs                      │
+│  ~/.skim/mcp.log     - MCP adapter logs                         │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

@@ -323,6 +323,10 @@ pub const McpAdapter = struct {
                     if (update.action == .connected) "connected" else "disconnected",
                 });
             },
+            .status_response => {
+                // Status responses are not expected by the adapter
+                std.log.debug("Unexpected status_response received by adapter", .{});
+            },
             .unknown => {},
         }
     }

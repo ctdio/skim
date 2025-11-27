@@ -206,8 +206,9 @@ pub const UnifiedRenderer = struct {
         var buf: [256]u8 = undefined;
         const header_text = try RenderUtils.buildHunkHeaderText(hunk, &buf);
 
-        // Calculate number of rows needed for wrapping
-        const num_rows = if (header_text.len == 0) 1 else (header_text.len + content_width - 1) / content_width;
+        // Calculate number of rows needed for wrapping (use display width, not bytes)
+        const text_display_width = RenderUtils.displayWidth(header_text);
+        const num_rows = if (text_display_width == 0) 1 else (text_display_width + content_width - 1) / content_width;
 
         const content_start = 1 + gutter_width + Layout.gutter_spacing;
 
@@ -258,21 +259,36 @@ pub const UnifiedRenderer = struct {
             // Render spacing after gutter
             try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, null);
 
-            // Render content for this row
-            const text_start = wrap_idx * content_width;
-            const text_end = @min(text_start + content_width, header_text.len);
-            const chunk = if (text_start < header_text.len) header_text[text_start..text_end] else "";
+            // Render content for this row (slice by display width, not bytes)
+            // Skip codepoints for previous rows, then take up to content_width codepoints
+            const display_start = wrap_idx * content_width;
+            const byte_start = RenderUtils.skipCodepoints(header_text, display_start);
+            const remaining_text = if (byte_start < header_text.len) header_text[byte_start..] else "";
+            const chunk = RenderUtils.sliceByDisplayWidth(remaining_text, content_width);
+
+            // Calculate display position of range boundary
+            const range_display_len = RenderUtils.displayWidth(header_text[0..range_len]);
 
             if (chunk.len > 0) {
-                // Determine if we're in range or context section
-                if (text_start < range_len) {
-                    // This chunk contains range text (possibly mixed with context)
-                    const range_chunk_end = @min(text_end, range_len);
-                    const range_chunk = chunk[0 .. range_chunk_end - text_start];
+                // Determine if we're in range or context section based on display position
+                if (display_start < range_display_len) {
+                    // This chunk starts in range section (possibly mixed with context)
+                    const display_end = display_start + RenderUtils.displayWidth(chunk);
+                    if (display_end <= range_display_len) {
+                        // Pure range
+                        const range_text = try RenderUtils.copyFrameText(app, chunk);
+                        var seg = [_]vaxis.Cell.Segment{.{
+                            .text = range_text,
+                            .style = range_style,
+                        }};
+                        _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = content_start });
+                    } else {
+                        // Mixed: range + context - split at the boundary
+                        const range_codepoints = range_display_len - display_start;
+                        const range_chunk = RenderUtils.sliceByDisplayWidth(chunk, range_codepoints);
+                        const context_byte_start = range_chunk.len;
+                        const context_chunk = chunk[context_byte_start..];
 
-                    if (range_chunk_end < text_end) {
-                        // Mixed: range + context
-                        const context_chunk = chunk[range_chunk_end - text_start ..];
                         const range_text = try RenderUtils.copyFrameText(app, range_chunk);
                         const context_text = try RenderUtils.copyFrameText(app, context_chunk);
 
@@ -281,14 +297,6 @@ pub const UnifiedRenderer = struct {
                             .{ .text = context_text, .style = context_style },
                         };
                         _ = try win.print(&segments, .{ .row_offset = current_row, .col_offset = content_start });
-                    } else {
-                        // Pure range
-                        const range_text = try RenderUtils.copyFrameText(app, range_chunk);
-                        var seg = [_]vaxis.Cell.Segment{.{
-                            .text = range_text,
-                            .style = range_style,
-                        }};
-                        _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = content_start });
                     }
                 } else {
                     // Pure context
@@ -397,9 +405,9 @@ pub const UnifiedRenderer = struct {
 
         // No horizontal scrolling (removed with FOCUSED mode)
         var rows_rendered: usize = 0;
-        var text_offset: usize = 0;
+        var byte_offset_in_text: usize = 0;
 
-        while (text_offset < text.len) {
+        while (byte_offset_in_text < text.len) {
             const current_row = start_row + rows_rendered;
             if (current_row >= win.height) break;
 
@@ -412,14 +420,13 @@ pub const UnifiedRenderer = struct {
             const show_line_number = rows_rendered == 0;
             try RenderUtils.renderGutter(app, win, 0, current_row, is_cursor or is_in_visual, show_line_number, file_lineno, line_type, gutter_width);
 
-            // Get the chunk of text for this row
-            const remaining = text.len - text_offset;
-            const chunk_len = @min(remaining, content_width);
-            const chunk = text[text_offset .. text_offset + chunk_len];
+            // Get the chunk of text for this row (slice by display width, not bytes)
+            const remaining_text = text[byte_offset_in_text..];
+            const chunk = RenderUtils.sliceByDisplayWidth(remaining_text, content_width);
 
             // Generate syntax-highlighted segments for this chunk
-            const chunk_byte_offset = byte_offset + text_offset;
-            const segments = try app.createHighlightedSegments(chunk, text, text_offset, chunk_byte_offset, highlights, style, global_line);
+            const chunk_byte_offset = byte_offset + byte_offset_in_text;
+            const segments = try app.createHighlightedSegments(chunk, text, byte_offset_in_text, chunk_byte_offset, highlights, style, global_line);
             defer app.allocator.free(segments);
 
             // Pad segments to full width for cursor, visual selection, or diff lines (add/delete)
@@ -444,7 +451,7 @@ pub const UnifiedRenderer = struct {
 
             // Caret rendering removed with FOCUSED mode (show_caret is always false)
 
-            text_offset += chunk_len;
+            byte_offset_in_text += chunk.len;
             rows_rendered += 1;
         }
 

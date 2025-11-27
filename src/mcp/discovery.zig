@@ -3,6 +3,7 @@ const net = std.net;
 const posix = std.posix;
 
 const Allocator = std.mem.Allocator;
+const internal_protocol = @import("internal_protocol.zig");
 
 // =============================================================================
 // Discovery Types
@@ -32,11 +33,21 @@ pub const DaemonStatus = union(enum) {
     },
 };
 
+/// Summary of a connected skim TUI client
+pub const ConnectedClient = struct {
+    id: []const u8,
+    cwd: []const u8,
+    diff_ref: []const u8,
+    file_count: usize,
+};
+
 /// Information about a running daemon
 pub const DaemonInfo = struct {
     tui_port: u16,
     adapter_port: u16,
     pid: i32,
+    clients: []ConnectedClient = &[_]ConnectedClient{},
+    adapter_count: usize = 0,
 };
 
 /// Contents of the discovery file
@@ -60,7 +71,7 @@ pub fn discoverDaemon(allocator: Allocator) DaemonStatus {
     defer allocator.free(path);
 
     // Try to read and parse discovery file
-    const info = readDiscoveryFile(allocator, path) catch {
+    var info = readDiscoveryFile(allocator, path) catch {
         return .not_running;
     };
 
@@ -69,12 +80,81 @@ pub fn discoverDaemon(allocator: Allocator) DaemonStatus {
         return .{ .stale = .{ .reason = "Daemon process not found" } };
     }
 
-    // Try to connect to verify it's responding
-    if (!canConnectToPort(info.adapter_port)) {
-        return .{ .unhealthy = .{ .reason = "Daemon not responding on adapter port" } };
+    // Query daemon for connected clients
+    if (queryDaemonStatus(allocator, info.adapter_port)) |status| {
+        info.clients = status.clients;
+        info.adapter_count = status.adapter_count;
+    } else |_| {
+        // If query fails, daemon might be unhealthy
+        return .{ .unhealthy = .{ .reason = "Daemon not responding to status query" } };
     }
 
     return .{ .running = info };
+}
+
+/// Query daemon for connected clients and adapter count
+fn queryDaemonStatus(allocator: Allocator, adapter_port: u16) !struct { clients: []ConnectedClient, adapter_count: usize } {
+    // Connect to daemon adapter port
+    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, adapter_port);
+    const stream = try net.tcpConnectToAddress(address);
+    defer stream.close();
+
+    // Send status query
+    const query = try internal_protocol.encodeStatusQuery(allocator);
+    defer allocator.free(query);
+    try stream.writeAll(query);
+
+    // Read response with timeout
+    var buffer: [8192]u8 = undefined;
+    var total_read: usize = 0;
+
+    // Read until we get a newline or timeout
+    const start_time = std.time.milliTimestamp();
+    const timeout_ms: i64 = 5000; // 5 second timeout
+
+    while (total_read < buffer.len) {
+        if (std.time.milliTimestamp() - start_time > timeout_ms) {
+            return error.Timeout;
+        }
+
+        const bytes_read = stream.read(buffer[total_read..]) catch |err| {
+            if (err == error.WouldBlock) continue;
+            return err;
+        };
+
+        if (bytes_read == 0) break;
+        total_read += bytes_read;
+
+        // Check for complete message (newline terminated)
+        if (std.mem.indexOfScalar(u8, buffer[0..total_read], '\n')) |_| {
+            break;
+        }
+    }
+
+    if (total_read == 0) {
+        return error.NoResponse;
+    }
+
+    // Parse response
+    var msg = try internal_protocol.decodeDaemonMessage(allocator, buffer[0..total_read]);
+    defer internal_protocol.freeDaemonMessage(allocator, &msg);
+
+    switch (msg) {
+        .status_response => |status| {
+            // Copy clients to return (we need to own them since msg will be freed)
+            var clients = try allocator.alloc(ConnectedClient, status.clients.len);
+            for (status.clients, 0..) |c, i| {
+                clients[i] = .{
+                    .id = try allocator.dupe(u8, c.id),
+                    .cwd = try allocator.dupe(u8, c.cwd),
+                    .diff_ref = try allocator.dupe(u8, c.diff_ref),
+                    .file_count = c.file_count,
+                };
+            }
+            return .{ .clients = clients, .adapter_count = status.adapter_count };
+        },
+        else => return error.UnexpectedResponse,
+    }
 }
 
 /// Get the path to the discovery file
@@ -199,6 +279,25 @@ pub fn formatStatus(allocator: Allocator, status: DaemonStatus) ![]u8 {
                 \\Adapter Port: {d}
                 \\
             , .{ info.pid, info.tui_port, info.adapter_port });
+
+            // Display connected clients
+            try writer.print(
+                \\Adapters:     {d}
+                \\Clients:      {d}
+                \\
+            , .{ info.adapter_count, info.clients.len });
+
+            if (info.clients.len > 0) {
+                try writer.writeAll("\nConnected TUI Clients:\n");
+                for (info.clients) |client| {
+                    try writer.print("  - {s}\n    {s} ({d} files)\n    {s}\n", .{
+                        client.id,
+                        client.diff_ref,
+                        client.file_count,
+                        client.cwd,
+                    });
+                }
+            }
         },
         .not_running => {
             try writer.writeAll(

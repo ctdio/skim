@@ -96,12 +96,14 @@ pub const AdapterMessageType = enum {
     adapter_hello,
     adapter_goodbye,
     mcp_request,
+    status_query,
 };
 
 pub const DaemonMessageType = enum {
     adapter_welcome,
     mcp_response,
     client_update,
+    status_response,
 };
 
 // =============================================================================
@@ -112,13 +114,21 @@ pub const ParsedAdapterMessage = union(enum) {
     adapter_hello: AdapterHelloPayload,
     adapter_goodbye: void,
     mcp_request: McpRequestPayload,
+    status_query: void,
     unknown: []const u8,
+};
+
+/// Status response payload from daemon
+pub const StatusResponsePayload = struct {
+    clients: []const ClientSummary,
+    adapter_count: usize,
 };
 
 pub const ParsedDaemonMessage = union(enum) {
     adapter_welcome: AdapterWelcomePayload,
     mcp_response: McpResponsePayload,
     client_update: ClientUpdatePayload,
+    status_response: StatusResponsePayload,
     unknown: []const u8,
 };
 
@@ -163,6 +173,13 @@ pub fn encodeMcpRequest(allocator: Allocator, payload: McpRequestPayload) ![]u8 
     }
 
     try writer.writeAll("}\n");
+    return output.toOwnedSlice();
+}
+
+pub fn encodeStatusQuery(allocator: Allocator) ![]u8 {
+    var output = std.ArrayList(u8).init(allocator);
+    errdefer output.deinit();
+    try output.appendSlice("{\"event\":\"status_query\"}\n");
     return output.toOwnedSlice();
 }
 
@@ -245,6 +262,32 @@ pub fn encodeClientUpdate(allocator: Allocator, action: ClientAction, client: Cl
     return output.toOwnedSlice();
 }
 
+pub fn encodeStatusResponse(allocator: Allocator, clients: []const ClientSummary, adapter_count: usize) ![]u8 {
+    var output = std.ArrayList(u8).init(allocator);
+    errdefer output.deinit();
+
+    const writer = output.writer();
+    try writer.writeAll("{\"event\":\"status_response\",\"clients\":[");
+
+    for (clients, 0..) |client, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"id\":\"");
+        try writer.writeAll(client.id);
+        try writer.writeAll("\",\"cwd\":\"");
+        try writeJsonEscaped(writer, client.cwd);
+        try writer.writeAll("\",\"diff_ref\":\"");
+        try writeJsonEscaped(writer, client.diff_ref);
+        try writer.writeAll("\",\"file_count\":");
+        try std.fmt.formatInt(client.file_count, 10, .lower, .{}, writer);
+        try writer.writeByte('}');
+    }
+
+    try writer.writeAll("],\"adapter_count\":");
+    try std.fmt.formatInt(adapter_count, 10, .lower, .{}, writer);
+    try writer.writeAll("}\n");
+    return output.toOwnedSlice();
+}
+
 // =============================================================================
 // Decoding Functions
 // =============================================================================
@@ -281,6 +324,8 @@ pub fn decodeAdapterMessage(allocator: Allocator, json_line: []const u8) !Parsed
         } };
     } else if (std.mem.eql(u8, event, "adapter_goodbye")) {
         return .{ .adapter_goodbye = {} };
+    } else if (std.mem.eql(u8, event, "status_query")) {
+        return .{ .status_query = {} };
     } else if (std.mem.eql(u8, event, "mcp_request")) {
         // Parse MCP ID
         const mcp_id: McpId = if (msg.mcp_id) |id_val| blk: {
@@ -316,6 +361,7 @@ const RawDaemonMessage = struct {
     event: []const u8,
     adapter_id: ?[]const u8 = null,
     clients: ?[]const ClientSummaryRaw = null,
+    adapter_count: ?usize = null,
     request_id: ?[]const u8 = null,
     mcp_id: ?std.json.Value = null, // Can be number, string, or null
     result: ?std.json.Value = null,
@@ -417,6 +463,24 @@ pub fn decodeDaemonMessage(allocator: Allocator, json_line: []const u8) !ParsedD
                 .file_count = raw_client.file_count,
             },
         } };
+    } else if (std.mem.eql(u8, event, "status_response")) {
+        const raw_clients = msg.clients orelse &[_]ClientSummaryRaw{};
+        var clients = try allocator.alloc(ClientSummary, raw_clients.len);
+        errdefer allocator.free(clients);
+
+        for (raw_clients, 0..) |rc, i| {
+            clients[i] = .{
+                .id = try allocator.dupe(u8, rc.id),
+                .cwd = try allocator.dupe(u8, rc.cwd),
+                .diff_ref = try allocator.dupe(u8, rc.diff_ref),
+                .file_count = rc.file_count,
+            };
+        }
+
+        return .{ .status_response = .{
+            .clients = clients,
+            .adapter_count = msg.adapter_count orelse 0,
+        } };
     }
 
     return .{ .unknown = try allocator.dupe(u8, event) };
@@ -429,7 +493,7 @@ pub fn decodeDaemonMessage(allocator: Allocator, json_line: []const u8) !ParsedD
 pub fn freeAdapterMessage(allocator: Allocator, msg: *ParsedAdapterMessage) void {
     switch (msg.*) {
         .adapter_hello => |h| allocator.free(h.adapter_id),
-        .adapter_goodbye => {},
+        .adapter_goodbye, .status_query => {},
         .mcp_request => |r| {
             allocator.free(r.request_id);
             allocator.free(r.method);
@@ -467,6 +531,14 @@ pub fn freeDaemonMessage(allocator: Allocator, msg: *ParsedDaemonMessage) void {
             allocator.free(u.client.id);
             allocator.free(u.client.cwd);
             allocator.free(u.client.diff_ref);
+        },
+        .status_response => |s| {
+            for (s.clients) |c| {
+                allocator.free(c.id);
+                allocator.free(c.cwd);
+                allocator.free(c.diff_ref);
+            }
+            allocator.free(s.clients);
         },
         .unknown => |u| allocator.free(u),
     }

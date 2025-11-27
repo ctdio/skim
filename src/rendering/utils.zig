@@ -10,6 +10,52 @@ const FrameChars = rendering_common.FrameChars;
 const Layout = rendering_common.Layout;
 
 pub const RenderUtils = struct {
+    // Unicode display width utilities
+
+    /// Calculate the display width of a UTF-8 string in terminal cells.
+    /// This counts codepoints, which works correctly for most characters
+    /// including box-drawing chars, arrows, and symbols.
+    /// Note: Does not handle full-width CJK characters (would need wcwidth tables).
+    pub fn displayWidth(text: []const u8) usize {
+        return std.unicode.utf8CountCodepoints(text) catch text.len;
+    }
+
+    /// Slice a UTF-8 string by display width (codepoints), not bytes.
+    /// Returns a slice of the input text containing at most `max_width` codepoints.
+    /// The returned slice ends at a valid UTF-8 boundary.
+    pub fn sliceByDisplayWidth(text: []const u8, max_width: usize) []const u8 {
+        if (max_width == 0) return text[0..0];
+
+        var width: usize = 0;
+        var byte_pos: usize = 0;
+
+        while (byte_pos < text.len and width < max_width) {
+            const byte = text[byte_pos];
+            const char_len = std.unicode.utf8ByteSequenceLength(byte) catch 1;
+            const next_pos = @min(byte_pos + char_len, text.len);
+            byte_pos = next_pos;
+            width += 1;
+        }
+
+        return text[0..byte_pos];
+    }
+
+    /// Skip a number of codepoints in a UTF-8 string and return the byte offset.
+    /// Returns the byte position after skipping `count` codepoints.
+    pub fn skipCodepoints(text: []const u8, count: usize) usize {
+        var skipped: usize = 0;
+        var byte_pos: usize = 0;
+
+        while (byte_pos < text.len and skipped < count) {
+            const byte = text[byte_pos];
+            const char_len = std.unicode.utf8ByteSequenceLength(byte) catch 1;
+            byte_pos = @min(byte_pos + char_len, text.len);
+            skipped += 1;
+        }
+
+        return byte_pos;
+    }
+
     // Style calculation utilities
 
     /// Get style for a line based on cursor, visual selection, and line type
@@ -562,7 +608,8 @@ pub const RenderUtils = struct {
         _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = col_offset });
     }
 
-    /// Wrap text to fit within max_width, breaking at word boundaries when possible
+    /// Wrap text to fit within max_width (in display cells), breaking at word boundaries when possible
+    /// Properly handles UTF-8 multi-byte characters.
     pub fn wrapText(allocator: std.mem.Allocator, text: []const u8, max_width: usize) !std.ArrayList([]const u8) {
         var lines = std.ArrayList([]const u8).init(allocator);
         errdefer lines.deinit();
@@ -575,44 +622,49 @@ pub const RenderUtils = struct {
             return lines;
         }
 
-        var start: usize = 0;
-        while (start < text.len) {
-            const remaining = text[start..];
+        var byte_start: usize = 0;
+        while (byte_start < text.len) {
+            const remaining = text[byte_start..];
+            const remaining_display_width = displayWidth(remaining);
 
             // If remaining text fits, add it as-is
-            if (remaining.len <= max_width) {
+            if (remaining_display_width <= max_width) {
                 try lines.append(remaining);
                 break;
             }
 
-            // Find the last space within max_width
-            var break_point = max_width;
+            // Get max_width characters worth of text
+            const max_chunk = sliceByDisplayWidth(remaining, max_width);
+
+            // Find the last space within this chunk to break at word boundary
+            var break_byte_pos = max_chunk.len;
             var found_space = false;
 
-            // Look backwards from max_width to find a space
-            var i: usize = max_width;
+            // Look backwards through the bytes to find a space
+            // (Space is always a single byte in UTF-8)
+            var i: usize = max_chunk.len;
             while (i > 0) : (i -= 1) {
-                if (remaining[i - 1] == ' ') {
-                    break_point = i - 1; // Break before the space
+                if (max_chunk[i - 1] == ' ') {
+                    break_byte_pos = i - 1; // Break before the space
                     found_space = true;
                     break;
                 }
             }
 
-            // If no space found, hard break at max_width
+            // If no space found, hard break at max_width characters
             if (!found_space) {
-                break_point = max_width;
+                break_byte_pos = max_chunk.len;
             }
 
             // Add this segment
-            try lines.append(remaining[0..break_point]);
+            try lines.append(remaining[0..break_byte_pos]);
 
             // Move past the break point and any spaces
-            start += break_point;
+            byte_start += break_byte_pos;
             if (found_space) {
                 // Skip the space(s) we broke on
-                while (start < text.len and text[start] == ' ') {
-                    start += 1;
+                while (byte_start < text.len and text[byte_start] == ' ') {
+                    byte_start += 1;
                 }
             }
         }
