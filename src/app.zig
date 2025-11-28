@@ -7,9 +7,11 @@ const comments = @import("comments/store.zig");
 const line_map = @import("line_map.zig");
 const mcp_client = @import("mcp/client.zig");
 const mcp_protocol = @import("mcp/protocol.zig");
-const mcp_line_resolver = @import("mcp/line_resolver.zig");
 const mcp_registry = @import("mcp/registry.zig");
+const mcp_handlers = @import("mcp/handlers.zig");
 const navigation = @import("navigation.zig");
+const search = @import("search.zig");
+const clipboard = @import("clipboard.zig");
 const rendering_common = @import("rendering/common.zig");
 const render_utils = @import("rendering/utils.zig");
 const render_unified = @import("rendering/unified.zig");
@@ -212,46 +214,8 @@ pub const App = struct {
         };
     };
 
-    const SearchState = struct {
-        query_buffer: [256]u8, // Search query input buffer
-        query_len: usize, // Current query length
-        matches: std.ArrayList(usize), // Global line indices of matches
-        current_match_idx: ?usize, // Index in matches array (not global line)
-        allocator: Allocator, // For matches ArrayList
-
-        fn init(allocator: Allocator) SearchState {
-            return .{
-                .query_buffer = undefined,
-                .query_len = 0,
-                .matches = std.ArrayList(usize).init(allocator),
-                .current_match_idx = null,
-                .allocator = allocator,
-            };
-        }
-
-        fn deinit(self: *SearchState) void {
-            self.matches.deinit();
-        }
-
-        pub fn reset(self: *SearchState) void {
-            self.query_len = 0;
-            self.matches.clearRetainingCapacity();
-            self.current_match_idx = null;
-        }
-
-        pub fn hasMatches(self: *const SearchState) bool {
-            return self.matches.items.len > 0;
-        }
-
-        fn getCurrentMatchLine(self: *const SearchState) ?usize {
-            if (self.current_match_idx) |idx| {
-                if (idx < self.matches.items.len) {
-                    return self.matches.items[idx];
-                }
-            }
-            return null;
-        }
-    };
+    // SearchState is now in search.zig
+    const SearchState = search.SearchState;
 
     const CTRL_C_TIMEOUT_NS = 1 * std.time.ns_per_s; // 1 second window
 
@@ -1497,22 +1461,7 @@ pub const App = struct {
                 );
                 defer self.allocator.free(output);
 
-                // Copy to clipboard using pbcopy on macOS
-                const argv = [_][]const u8{"pbcopy"};
-                var child = std.process.Child.init(&argv, self.allocator);
-                child.stdin_behavior = .Pipe;
-                child.stdout_behavior = .Ignore;
-                child.stderr_behavior = .Ignore;
-
-                try child.spawn();
-
-                if (child.stdin) |stdin| {
-                    try stdin.writeAll(output);
-                    stdin.close();
-                    child.stdin = null;
-                }
-
-                _ = try child.wait();
+                try clipboard.copyToClipboard(self.allocator, output);
             },
             else => {}, // Not on a comment line, do nothing
         }
@@ -1528,22 +1477,7 @@ pub const App = struct {
         );
         defer self.allocator.free(output);
 
-        // Copy to clipboard using pbcopy on macOS
-        const argv = [_][]const u8{"pbcopy"};
-        var child = std.process.Child.init(&argv, self.allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-
-        try child.spawn();
-
-        if (child.stdin) |stdin| {
-            try stdin.writeAll(output);
-            stdin.close();
-            child.stdin = null;
-        }
-
-        _ = try child.wait();
+        try clipboard.copyToClipboard(self.allocator, output);
     }
 
     pub fn deleteCommentUnderCursor(self: *App) !void {
@@ -1674,82 +1608,15 @@ pub const App = struct {
     }
 
     pub fn performSearch(self: *App) !void {
-        var search_state = &self.state.search_state;
-        search_state.matches.clearRetainingCapacity();
-
-        if (search_state.query_len == 0) return;
-
-        const query = search_state.query_buffer[0..search_state.query_len];
-
-        // Smart case: case-insensitive if query is all lowercase, sensitive otherwise
-        const is_case_sensitive = blk: {
-            for (query) |c| {
-                if (c >= 'A' and c <= 'Z') break :blk true;
-            }
-            break :blk false;
-        };
-
-        // Search through all lines in LineMap
-        const total_lines = self.state.line_map.getTotalLines();
-        var line_idx: usize = 0;
-        while (line_idx < total_lines) : (line_idx += 1) {
-            const record = self.state.line_map.getLineRecord(line_idx) orelse continue;
-
-            // Only search code lines (add, delete, context)
-            if (record.line_type != .code_line) continue;
-
-            const file = &self.state.files[record.file_idx];
-            const code = record.line_type.code_line;
-            const line_content = file.hunks[code.hunk_idx].lines[code.line_idx_in_hunk].content;
-
-            // Search for query in line content
-            if (searchInLine(line_content, query, is_case_sensitive)) {
-                try search_state.matches.append(line_idx);
-            }
-        }
+        try search.performSearch(&self.state.search_state, &self.state.line_map, self.state.files);
     }
 
     /// Jump to first search match (used for live search preview)
     pub fn jumpToFirstSearchMatch(self: *App) void {
-        var search_state = &self.state.search_state;
-
-        if (!search_state.hasMatches()) return;
-
-        const cursor = self.state.global_cursor_line;
-        var found = false;
-
-        // Find first match at or after cursor
-        for (search_state.matches.items, 0..) |match_line, idx| {
-            if (match_line >= cursor) {
-                search_state.current_match_idx = idx;
-                self.state.global_cursor_line = match_line;
-                found = true;
-                break;
-            }
+        if (search.jumpToFirstMatch(&self.state.search_state, self.state.global_cursor_line)) |new_line| {
+            self.state.global_cursor_line = new_line;
+            Navigation.centerViewportOnCursor(self);
         }
-
-        // If no match after cursor, wrap to first match
-        if (!found and search_state.matches.items.len > 0) {
-            search_state.current_match_idx = 0;
-            self.state.global_cursor_line = search_state.matches.items[0];
-        }
-
-        Navigation.centerViewportOnCursor(self);
-    }
-
-    fn searchInLine(haystack: []const u8, needle: []const u8, case_sensitive: bool) bool {
-        if (needle.len > haystack.len) return false;
-
-        var i: usize = 0;
-        while (i <= haystack.len - needle.len) : (i += 1) {
-            const slice = haystack[i .. i + needle.len];
-            if (case_sensitive) {
-                if (std.mem.eql(u8, slice, needle)) return true;
-            } else {
-                if (std.ascii.eqlIgnoreCase(slice, needle)) return true;
-            }
-        }
-        return false;
     }
 
     pub fn executeCommand(self: *App, action: command_palette.CommandAction) !void {
@@ -1889,74 +1756,16 @@ pub const App = struct {
     }
 
     pub fn searchNext(self: *App) void {
-        var search_state = &self.state.search_state;
-
-        if (!search_state.hasMatches()) return;
-
-        if (search_state.current_match_idx) |current_idx| {
-            // Move to next match
-            const next_idx = (current_idx + 1) % search_state.matches.items.len;
-            search_state.current_match_idx = next_idx;
-        } else {
-            // No current match - find first match after cursor
-            const cursor = self.state.global_cursor_line;
-            var found = false;
-            for (search_state.matches.items, 0..) |match_line, idx| {
-                if (match_line > cursor) {
-                    search_state.current_match_idx = idx;
-                    found = true;
-                    break;
-                }
-            }
-            // If no match after cursor, wrap to first
-            if (!found and search_state.matches.items.len > 0) {
-                search_state.current_match_idx = 0;
-            }
-        }
-
-        // Jump to the match
-        if (search_state.getCurrentMatchLine()) |line| {
-            self.state.global_cursor_line = line;
-            Navigation.centerViewportOnCursor(self); // Center search result on screen (vim-style)
+        if (search.nextMatch(&self.state.search_state, self.state.global_cursor_line)) |new_line| {
+            self.state.global_cursor_line = new_line;
+            Navigation.centerViewportOnCursor(self);
         }
     }
 
     pub fn searchPrevious(self: *App) void {
-        var search_state = &self.state.search_state;
-
-        if (!search_state.hasMatches()) return;
-
-        if (search_state.current_match_idx) |current_idx| {
-            // Move to previous match (with wraparound)
-            const prev_idx = if (current_idx == 0)
-                search_state.matches.items.len - 1
-            else
-                current_idx - 1;
-            search_state.current_match_idx = prev_idx;
-        } else {
-            // No current match - find last match before cursor
-            const cursor = self.state.global_cursor_line;
-            var found = false;
-            var idx = search_state.matches.items.len;
-            while (idx > 0) {
-                idx -= 1;
-                const match_line = search_state.matches.items[idx];
-                if (match_line < cursor) {
-                    search_state.current_match_idx = idx;
-                    found = true;
-                    break;
-                }
-            }
-            // If no match before cursor, wrap to last
-            if (!found and search_state.matches.items.len > 0) {
-                search_state.current_match_idx = search_state.matches.items.len - 1;
-            }
-        }
-
-        // Jump to the match
-        if (search_state.getCurrentMatchLine()) |line| {
-            self.state.global_cursor_line = line;
-            Navigation.centerViewportOnCursor(self); // Center search result on screen (vim-style)
+        if (search.previousMatch(&self.state.search_state, self.state.global_cursor_line)) |new_line| {
+            self.state.global_cursor_line = new_line;
+            Navigation.centerViewportOnCursor(self);
         }
     }
 
@@ -2048,22 +1857,7 @@ pub const App = struct {
             }
         }
 
-        // Copy to clipboard using pbcopy on macOS
-        const argv = [_][]const u8{"pbcopy"};
-        var child = std.process.Child.init(&argv, self.allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-
-        try child.spawn();
-
-        if (child.stdin) |stdin| {
-            try stdin.writeAll(buffer.items);
-            stdin.close();
-            child.stdin = null;
-        }
-
-        _ = try child.wait();
+        try clipboard.copyToClipboard(self.allocator, buffer.items);
     }
 
     fn render(self: *App, win: vaxis.Window) !void {
@@ -2385,12 +2179,7 @@ pub const App = struct {
         }
 
         // Determine case sensitivity (smart case)
-        const is_case_sensitive = blk: {
-            for (query) |c| {
-                if (c >= 'A' and c <= 'Z') break :blk true;
-            }
-            break :blk false;
-        };
+        const is_case_sensitive = search.isCaseSensitive(query);
 
         // Find all matches in the chunk_text (this is the actual text to render)
         var chunk_matches = std.ArrayList(struct { start: usize, end: usize }).init(self.allocator);
@@ -2492,324 +2281,56 @@ pub const App = struct {
     /// Send hello message to MCP server to register this client
     fn sendMcpHello(self: *App) !void {
         const mcp = self.mcp orelse return;
-
-        // Build file info list
-        var file_infos = std.ArrayList(mcp_protocol.FileInfo).init(self.allocator);
-        defer file_infos.deinit();
-
-        for (self.state.files) |file| {
-            const path = if (file.new_path.len > 0) file.new_path else file.old_path;
-            const old_path = file.old_path;
-            try file_infos.append(.{
-                .path = path,
-                .old_path = old_path,
-                .hunk_count = file.hunks.len,
-            });
-        }
-
-        // Get diff ref string
-        const diff_ref = switch (self.state.diff_source) {
-            .working_dir => |wd| if (wd.staged) "staged" else "working",
-            .single_ref => |sr| sr.ref,
-            .two_refs => |tr| tr.ref2,
-        };
-
-        // Generate session ID
-        const session_id = mcp_registry.generateSessionId();
-
-        // Get current working directory (must free if allocated)
-        const cwd_allocated = std.fs.cwd().realpathAlloc(self.allocator, ".") catch null;
-        defer if (cwd_allocated) |c| self.allocator.free(c);
-        const cwd = cwd_allocated orelse ".";
-
-        try mcp.sendHello(.{
-            .id = &session_id,
-            .cwd = cwd,
-            .diff_ref = diff_ref,
-            .files = file_infos.items,
-        });
+        try mcp_handlers.sendHello(self.allocator, mcp, self.state.files, self.state.diff_source);
     }
 
     /// Handle incoming MCP message
     fn handleMcpMessage(self: *App, msg: *mcp_protocol.ParsedMessage) !void {
+        const mcp = self.mcp orelse return;
+
         switch (msg.*) {
             .add_comment => |ac| {
-                try self.handleMcpAddComment(ac);
+                // Delegate to handler - returns comment_idx if successful
+                if (try mcp_handlers.handleAddComment(self.allocator, mcp, ac, self.state.files, &self.state.comment_store)) |_| {
+                    // Rebuild LineMap since comment count changed
+                    self.state.line_map.deinit();
+                    self.state.line_map = try line_map.LineMap.build(
+                        self.allocator,
+                        self.state.files,
+                        &self.state.comment_store,
+                        self.convertHunkViewMode(),
+                        self.shouldApplyHunkFiltering(),
+                    );
+                    self.needs_render = true;
+                }
             },
             .get_comments => {
-                try self.handleMcpGetComments();
+                try mcp_handlers.handleGetComments(self.allocator, mcp, &self.state.comment_store);
             },
             .get_diff_context => {
-                try self.handleMcpGetDiffContext();
+                try mcp_handlers.handleGetDiffContext(self.allocator, mcp, self.state.files, self.state.diff_source, self.state.git_repo_root);
             },
             .get_file_diff => |gfd| {
-                try self.handleMcpGetFileDiff(gfd.file);
+                try mcp_handlers.handleGetFileDiff(self.allocator, mcp, self.state.files, gfd.file);
             },
             .welcome => |w| {
                 // Store session ID for status display
-                if (self.mcp) |mcp| {
-                    if (mcp.session_id) |old_id| {
-                        self.allocator.free(old_id);
-                    }
-                    mcp.session_id = self.allocator.dupe(u8, w.id) catch null;
+                if (mcp.session_id) |old_id| {
+                    self.allocator.free(old_id);
                 }
+                mcp.session_id = self.allocator.dupe(u8, w.id) catch null;
             },
             .ping => {
                 // Respond with pong
-                if (self.mcp) |mcp| {
-                    const pong = try mcp_protocol.encodePong(self.allocator);
-                    defer self.allocator.free(pong);
-                    mcp.send(pong) catch {};
-                }
+                const pong = try mcp_protocol.encodePong(self.allocator);
+                defer self.allocator.free(pong);
+                mcp.send(pong) catch {};
             },
             .@"error" => {
                 // Silently ignore errors - can check status via command palette
             },
             else => {},
         }
-    }
-
-    /// Handle add_comment request from MCP server
-    fn handleMcpAddComment(self: *App, ac: mcp_protocol.AddCommentPayload) !void {
-        const mcp = self.mcp orelse return;
-
-        // Use LineResolver to translate file:line to hunk coordinates
-        const resolver = mcp_line_resolver.LineResolver.init(self.allocator, self.state.files);
-        const resolved = resolver.resolve(ac.file, ac.line) orelse {
-            // Line not in diff - send error response
-            try mcp.sendCommentAdded(false, null, "Line not in diff");
-            return;
-        };
-
-        // Get line context
-        const file = &self.state.files[resolved.file_idx];
-        const hunk = &file.hunks[resolved.hunk_idx];
-        const line = &hunk.lines[resolved.line_idx];
-        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-        // Add the comment
-        try self.state.comment_store.addComment(
-            file_path,
-            resolved.hunk_idx,
-            resolved.line_idx,
-            ac.text,
-            line.line_type,
-            line.content,
-            line.old_lineno,
-            line.new_lineno,
-        );
-
-        // Get the new comment index (last one added)
-        const comment_count = self.state.comment_store.comments.items.len;
-        const comment_idx = if (comment_count > 0) comment_count - 1 else 0;
-
-        // Rebuild LineMap since comment count changed
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(
-            self.allocator,
-            self.state.files,
-            &self.state.comment_store,
-            self.convertHunkViewMode(),
-            self.shouldApplyHunkFiltering(),
-        );
-
-        // Send success response
-        try mcp.sendCommentAdded(true, comment_idx, null);
-
-        // Trigger re-render to show the new comment
-        self.needs_render = true;
-    }
-
-    /// Handle get_comments request - send all comments back
-    fn handleMcpGetComments(self: *App) !void {
-        const mcp = self.mcp orelse return;
-
-        var comment_infos = std.ArrayList(mcp_protocol.CommentInfo).init(self.allocator);
-        defer comment_infos.deinit();
-
-        const all_comments = self.state.comment_store.comments.items;
-        for (all_comments, 0..) |comment, idx| {
-            // Use new_lineno if available, otherwise old_lineno for deleted lines
-            const line_number = comment.new_lineno orelse comment.old_lineno orelse 0;
-            try comment_infos.append(.{
-                .idx = idx,
-                .file_path = comment.file_path,
-                .line = line_number,
-                .text = comment.text,
-                .line_type = @tagName(comment.line_type),
-            });
-        }
-
-        try mcp.sendComments(comment_infos.items);
-    }
-
-    /// Handle get_diff_context request - send lightweight diff metadata
-    fn handleMcpGetDiffContext(self: *App) !void {
-        const mcp = self.mcp orelse return;
-
-        var file_summaries = std.ArrayList(mcp_protocol.DiffFileSummary).init(self.allocator);
-        defer file_summaries.deinit();
-
-        for (self.state.files) |file| {
-            var additions: usize = 0;
-            var deletions: usize = 0;
-
-            // Count additions and deletions
-            for (file.hunks) |hunk| {
-                for (hunk.lines) |line| {
-                    switch (line.line_type) {
-                        .add => additions += 1,
-                        .delete => deletions += 1,
-                        .context => {},
-                    }
-                }
-            }
-
-            // Determine file status
-            const status: []const u8 = blk: {
-                if (file.old_path.len == 0 or std.mem.eql(u8, file.old_path, "/dev/null")) {
-                    break :blk "added";
-                } else if (file.new_path.len == 0 or std.mem.eql(u8, file.new_path, "/dev/null")) {
-                    break :blk "deleted";
-                } else if (!std.mem.eql(u8, file.old_path, file.new_path)) {
-                    break :blk "renamed";
-                } else {
-                    break :blk "modified";
-                }
-            };
-
-            try file_summaries.append(.{
-                .path = if (file.new_path.len > 0 and !std.mem.eql(u8, file.new_path, "/dev/null"))
-                    file.new_path
-                else
-                    file.old_path,
-                .old_path = file.old_path,
-                .status = status,
-                .additions = additions,
-                .deletions = deletions,
-                .hunk_count = file.hunks.len,
-            });
-        }
-
-        // Get diff_ref string
-        const diff_ref: []const u8 = switch (self.state.diff_source) {
-            .working_dir => |wd| if (wd.staged) "staged" else "working",
-            .single_ref => |sr| sr.ref,
-            .two_refs => |tr| tr.ref1, // Simplified - could build "ref1..ref2" if needed
-        };
-
-        try mcp.sendDiffContext(.{
-            .diff_ref = diff_ref,
-            .cwd = self.state.git_repo_root,
-            .files = file_summaries.items,
-        });
-    }
-
-    /// Handle get_file_diff request - send full diff content for a specific file
-    fn handleMcpGetFileDiff(self: *App, requested_file: []const u8) !void {
-        const mcp = self.mcp orelse return;
-
-        // Find the requested file in our diff
-        var found_file: ?*const parser.FileDiff = null;
-        for (self.state.files) |*file| {
-            const file_path = if (file.new_path.len > 0 and !std.mem.eql(u8, file.new_path, "/dev/null"))
-                file.new_path
-            else
-                file.old_path;
-
-            if (std.mem.eql(u8, file_path, requested_file)) {
-                found_file = file;
-                break;
-            }
-        }
-
-        const file = found_file orelse {
-            // File not found - send empty response
-            try mcp.sendFileDiff(.{
-                .file = requested_file,
-                .old_file = "",
-                .status = "not_found",
-                .hunks = &[_]mcp_protocol.DiffHunkInfo{},
-            });
-            return;
-        };
-
-        // Determine file status
-        const status: []const u8 = blk: {
-            if (file.old_path.len == 0 or std.mem.eql(u8, file.old_path, "/dev/null")) {
-                break :blk "added";
-            } else if (file.new_path.len == 0 or std.mem.eql(u8, file.new_path, "/dev/null")) {
-                break :blk "deleted";
-            } else if (!std.mem.eql(u8, file.old_path, file.new_path)) {
-                break :blk "renamed";
-            } else {
-                break :blk "modified";
-            }
-        };
-
-        // Build hunk info array
-        var hunks = std.ArrayList(mcp_protocol.DiffHunkInfo).init(self.allocator);
-        defer {
-            for (hunks.items) |hunk| {
-                self.allocator.free(hunk.header);
-                self.allocator.free(hunk.lines);
-            }
-            hunks.deinit();
-        }
-
-        for (file.hunks) |hunk| {
-            // Build lines array for this hunk
-            var lines = std.ArrayList(mcp_protocol.DiffLineInfo).init(self.allocator);
-            errdefer lines.deinit();
-
-            for (hunk.lines) |line| {
-                const line_type_str: []const u8 = switch (line.line_type) {
-                    .add => "add",
-                    .delete => "delete",
-                    .context => "context",
-                };
-
-                try lines.append(.{
-                    .line_type = line_type_str,
-                    .content = line.content,
-                    .old_lineno = line.old_lineno,
-                    .new_lineno = line.new_lineno,
-                });
-            }
-
-            // Build header string like "@@ -10,5 +10,7 @@"
-            // Must heap-allocate since stack buffer would be invalidated after loop iteration
-            var header_buf: [128]u8 = undefined;
-            const header_slice = std.fmt.bufPrint(&header_buf, "@@ -{d},{d} +{d},{d} @@", .{
-                hunk.header.old_start,
-                hunk.header.old_count,
-                hunk.header.new_start,
-                hunk.header.new_count,
-            }) catch "@@ ... @@";
-            const header_str = try self.allocator.dupe(u8, header_slice);
-            errdefer self.allocator.free(header_str);
-
-            try hunks.append(.{
-                .header = header_str,
-                .old_start = hunk.header.old_start,
-                .old_count = hunk.header.old_count,
-                .new_start = hunk.header.new_start,
-                .new_count = hunk.header.new_count,
-                .lines = try lines.toOwnedSlice(),
-            });
-        }
-
-        const file_path = if (file.new_path.len > 0 and !std.mem.eql(u8, file.new_path, "/dev/null"))
-            file.new_path
-        else
-            file.old_path;
-
-        try mcp.sendFileDiff(.{
-            .file = file_path,
-            .old_file = file.old_path,
-            .status = status,
-            .hunks = hunks.items,
-        });
     }
 
     // =========================================================================
@@ -3003,34 +2524,7 @@ pub const App = struct {
 };
 
 // ===== Tests =====
-
-test "searchInLine - case sensitive" {
-    try std.testing.expect(App.searchInLine("Hello World", "World", true));
-    try std.testing.expect(!App.searchInLine("Hello World", "world", true));
-    try std.testing.expect(!App.searchInLine("Hello World", "WORLD", true));
-}
-
-test "searchInLine - case insensitive" {
-    try std.testing.expect(App.searchInLine("Hello World", "world", false));
-    try std.testing.expect(App.searchInLine("Hello World", "WORLD", false));
-    try std.testing.expect(App.searchInLine("Hello World", "WoRlD", false));
-}
-
-test "searchInLine - edge cases" {
-    // Empty strings
-    try std.testing.expect(!App.searchInLine("", "test", false));
-    try std.testing.expect(!App.searchInLine("test", "", false));
-
-    // Needle longer than haystack
-    try std.testing.expect(!App.searchInLine("hi", "hello", false));
-
-    // Multiple occurrences
-    try std.testing.expect(App.searchInLine("test test test", "test", false));
-
-    // Partial match
-    try std.testing.expect(!App.searchInLine("testing", "tin", false));
-    try std.testing.expect(App.searchInLine("testing", "test", false));
-}
+// Note: searchInLine tests moved to src/search.zig
 
 test "search highlighting - basic match" {
     const allocator = std.testing.allocator;
