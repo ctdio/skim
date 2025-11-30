@@ -223,7 +223,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         'y' => try app.yankCurrentCommentToClipboard(),
         'Y' => try app.yankAllCommentsToClipboard(),
         'd' => try app.deleteCommentUnderCursor(),
-        'D' => app.clearAllComments(),
+        'D' => try app.clearAllComments(),
         'M' => {
             Navigation.centerCursor(app);
             app.state.cursor_column = 0; // Reset column on center

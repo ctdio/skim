@@ -1556,8 +1556,12 @@ pub const App = struct {
         }
     }
 
-    pub fn clearAllComments(self: *App) void {
+    pub fn clearAllComments(self: *App) !void {
         self.state.comment_store.clearAll();
+
+        // Rebuild LineMap since comment count changed
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
     }
 
     pub fn openInEditor(self: *App) !void {
