@@ -230,18 +230,21 @@ pub const App = struct {
         const git_repo_root = try git.getRepoRoot(allocator);
         errdefer allocator.free(git_repo_root);
 
-        // Load git diff
-        const diff_text = try git.getDiff(allocator, config.diff_source);
-        errdefer allocator.free(diff_text);
+        // Load git diff (including untracked files for working directory mode)
+        const diff_result = try git.getDiffWithUntracked(allocator, config.diff_source);
+        errdefer diff_result.deinit(allocator);
 
-        const files = try parser.parse(allocator, diff_text);
+        const files = try parser.parse(allocator, diff_result.diff_text);
         errdefer {
             for (files) |*file| {
                 file.deinit(allocator);
             }
             allocator.free(files);
         }
-        allocator.free(diff_text);
+
+        // Mark untracked files
+        parser.markUntrackedFiles(files, diff_result.untracked_paths);
+        diff_result.deinit(allocator);
 
         const header_buffers = std.mem.zeroes([Layout.header_height][HEADER_BUFFER_WIDTH]u8);
 
@@ -393,17 +396,20 @@ pub const App = struct {
     }
 
     pub fn refresh(self: *App) !void {
-        // Load fresh git diff
-        const diff_text = try git.getDiff(self.allocator, self.state.diff_source);
-        defer self.allocator.free(diff_text);
+        // Load fresh git diff (including untracked files for working directory mode)
+        const diff_result = try git.getDiffWithUntracked(self.allocator, self.state.diff_source);
+        defer diff_result.deinit(self.allocator);
 
-        const new_files = try parser.parse(self.allocator, diff_text);
+        const new_files = try parser.parse(self.allocator, diff_result.diff_text);
         errdefer {
             for (new_files) |*file| {
                 file.deinit(self.allocator);
             }
             self.allocator.free(new_files);
         }
+
+        // Mark untracked files
+        parser.markUntrackedFiles(new_files, diff_result.untracked_paths);
 
         // Try to preserve current file if it still exists
         var new_file_idx: usize = 0;
@@ -456,6 +462,49 @@ pub const App = struct {
             self.state.global_cursor_line = total_lines - 1;
         }
         Navigation.clampScrollOffset(self);
+    }
+
+    /// Stage the current file (git add) and refresh the view
+    pub fn stageCurrentFile(self: *App) !void {
+        if (self.state.files.len == 0) return;
+        if (self.state.current_file_idx >= self.state.files.len) return;
+
+        const file = &self.state.files[self.state.current_file_idx];
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        if (file_path.len == 0) return;
+
+        // Stage the file
+        git.stageFile(self.allocator, file_path) catch {
+            // Show error in status message
+            self.state.status_message = "Failed to stage file";
+            self.state.status_message_time = std.time.milliTimestamp();
+            return;
+        };
+
+        // Show success message
+        self.state.status_message = "File staged";
+        self.state.status_message_time = std.time.milliTimestamp();
+
+        // Refresh to reflect changes
+        try self.refresh();
+    }
+
+    /// Stage all files (git add -A) and switch to staged view
+    pub fn stageAllFiles(self: *App) !void {
+        // Stage all files
+        git.stageAllFiles(self.allocator) catch {
+            self.state.status_message = "Failed to stage files";
+            self.state.status_message_time = std.time.milliTimestamp();
+            return;
+        };
+
+        // Show success message
+        self.state.status_message = "All files staged";
+        self.state.status_message_time = std.time.milliTimestamp();
+
+        // Switch to staged view to show what was staged
+        try self.switchDiffMode(.staged);
     }
 
     // Update current_file_idx based on cursor position and trigger highlighting if file changed

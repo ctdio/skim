@@ -278,6 +278,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         '?' => app.mode = .help, // Show help overlay
         'R' => try app.startReview(), // Start AI review
         'L' => try app.toggleReviewPanel(), // Toggle review log side panel
+        'a' => try app.stageCurrentFile(), // Stage the current file (git add)
+        'A' => try app.stageAllFiles(), // Stage all files (git add -A)
         else => {
             // Reset count prefix on any other key
             app.state.count_prefix = null;

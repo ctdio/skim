@@ -9,6 +9,7 @@ pub const FileDiff = struct {
     hunks: []Hunk,
     highlights: ?[]syntax.Highlight, // Cached syntax highlights for the new file (add/context lines)
     old_highlights: ?[]syntax.Highlight, // Cached syntax highlights for the old file (delete/context lines)
+    is_untracked: bool, // True if file is untracked (not yet added to git)
 
     pub fn deinit(self: *const FileDiff, allocator: Allocator) void {
         allocator.free(self.old_path);
@@ -191,6 +192,7 @@ const PartialFileDiff = struct {
             .hunks = try self.hunks.toOwnedSlice(),
             .highlights = null, // Will be populated on first render
             .old_highlights = null, // Will be populated on first render
+            .is_untracked = false, // Will be set to true for untracked files after parsing
         };
     }
 };
@@ -275,6 +277,19 @@ fn parseDiffRange(token: []const u8, expected_prefix: u8) !struct { start: u32, 
     } else 1;
 
     return .{ .start = start, .count = count };
+}
+
+/// Mark files as untracked based on a list of untracked file paths
+pub fn markUntrackedFiles(files: []FileDiff, untracked_paths: []const []const u8) void {
+    for (files) |*file| {
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+        for (untracked_paths) |untracked_path| {
+            if (std.mem.eql(u8, file_path, untracked_path)) {
+                file.is_untracked = true;
+                break;
+            }
+        }
+    }
 }
 
 test "parse simple diff" {

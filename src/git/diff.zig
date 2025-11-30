@@ -433,6 +433,179 @@ pub fn getRepoRoot(allocator: Allocator) ![]u8 {
     return result;
 }
 
+/// Get list of untracked files via git status --porcelain
+pub fn getUntrackedFiles(allocator: Allocator) ![][]const u8 {
+    const args = &[_][]const u8{ "git", "status", "--porcelain" };
+    const output = try runGitCommand(allocator, args);
+    defer allocator.free(output);
+
+    var files = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (files.items) |file| {
+            allocator.free(file);
+        }
+        files.deinit();
+    }
+
+    var lines = std.mem.tokenizeScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        // Untracked files start with "?? "
+        if (line.len > 3 and std.mem.startsWith(u8, line, "?? ")) {
+            const path = line[3..];
+            try files.append(try allocator.dupe(u8, path));
+        }
+    }
+
+    return files.toOwnedSlice();
+}
+
+/// Generate a synthetic diff for an untracked file (as if diffing /dev/null to the file)
+pub fn getUntrackedFileDiff(allocator: Allocator, file_path: []const u8) ![]u8 {
+    const args = &[_][]const u8{ "git", "diff", "--no-color", "--no-ext-diff", "-U10", "--no-index", "/dev/null", file_path };
+
+    var child = std.process.Child.init(args, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    try child.spawn();
+
+    const stdout = try child.stdout.?.readToEndAlloc(allocator, 100 * 1024 * 1024);
+    errdefer allocator.free(stdout);
+
+    // Consume stderr but ignore it
+    const stderr = try child.stderr.?.readToEndAlloc(allocator, 1 * 1024 * 1024);
+    defer allocator.free(stderr);
+
+    const term = try child.wait();
+
+    // git diff --no-index exits with 1 when there are differences (which is expected)
+    // Exit code 0 means no differences, 1 means differences, other codes are errors
+    switch (term) {
+        .Exited => |code| {
+            if (code == 0 or code == 1) {
+                return stdout;
+            } else {
+                allocator.free(stdout);
+                return error.GitCommandFailed;
+            }
+        },
+        else => {
+            allocator.free(stdout);
+            return error.GitCommandFailed;
+        },
+    }
+}
+
+/// Stage a file (git add)
+pub fn stageFile(allocator: Allocator, file_path: []const u8) !void {
+    const args = &[_][]const u8{ "git", "add", file_path };
+    const output = try runGitCommand(allocator, args);
+    allocator.free(output);
+}
+
+/// Stage all files (git add -A)
+pub fn stageAllFiles(allocator: Allocator) !void {
+    const args = &[_][]const u8{ "git", "add", "-A" };
+    const output = try runGitCommand(allocator, args);
+    allocator.free(output);
+}
+
+/// Result of getDiffWithUntracked - includes diff text and list of untracked file paths
+pub const DiffWithUntrackedResult = struct {
+    diff_text: []u8,
+    untracked_paths: [][]const u8,
+
+    pub fn deinit(self: *const DiffWithUntrackedResult, allocator: Allocator) void {
+        allocator.free(self.diff_text);
+        for (self.untracked_paths) |path| {
+            allocator.free(path);
+        }
+        allocator.free(self.untracked_paths);
+    }
+};
+
+/// Get diff including untracked files (only for working_dir non-staged mode)
+/// Returns the combined diff text and a list of untracked file paths that were included
+pub fn getDiffWithUntracked(allocator: Allocator, source: DiffSource) !DiffWithUntrackedResult {
+    // Get the normal tracked diff
+    const tracked_diff = try getDiff(allocator, source);
+    errdefer allocator.free(tracked_diff);
+
+    // Only include untracked files for working directory non-staged mode
+    const include_untracked = switch (source) {
+        .working_dir => |wd| !wd.staged,
+        else => false,
+    };
+
+    if (!include_untracked) {
+        return DiffWithUntrackedResult{
+            .diff_text = tracked_diff,
+            .untracked_paths = try allocator.alloc([]const u8, 0),
+        };
+    }
+
+    // Get untracked files
+    const untracked_files = getUntrackedFiles(allocator) catch {
+        // If we can't get untracked files, just return tracked diff
+        return DiffWithUntrackedResult{
+            .diff_text = tracked_diff,
+            .untracked_paths = try allocator.alloc([]const u8, 0),
+        };
+    };
+    errdefer {
+        for (untracked_files) |f| allocator.free(f);
+        allocator.free(untracked_files);
+    }
+
+    if (untracked_files.len == 0) {
+        allocator.free(untracked_files);
+        return DiffWithUntrackedResult{
+            .diff_text = tracked_diff,
+            .untracked_paths = try allocator.alloc([]const u8, 0),
+        };
+    }
+
+    // Build combined diff text
+    var combined = std.ArrayList(u8).init(allocator);
+    errdefer combined.deinit();
+
+    try combined.appendSlice(tracked_diff);
+    allocator.free(tracked_diff);
+
+    // Keep track of which untracked files we successfully got diffs for
+    var successful_paths = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (successful_paths.items) |p| allocator.free(p);
+        successful_paths.deinit();
+    }
+
+    for (untracked_files) |file_path| {
+        const untracked_diff = getUntrackedFileDiff(allocator, file_path) catch {
+            // Skip files we can't diff (binary, permission issues, etc.)
+            allocator.free(file_path);
+            continue;
+        };
+        defer allocator.free(untracked_diff);
+
+        if (untracked_diff.len > 0) {
+            // Add newline separator if needed
+            if (combined.items.len > 0 and combined.items[combined.items.len - 1] != '\n') {
+                try combined.append('\n');
+            }
+            try combined.appendSlice(untracked_diff);
+            try successful_paths.append(file_path);
+        } else {
+            allocator.free(file_path);
+        }
+    }
+    allocator.free(untracked_files);
+
+    return DiffWithUntrackedResult{
+        .diff_text = try combined.toOwnedSlice(),
+        .untracked_paths = try successful_paths.toOwnedSlice(),
+    };
+}
+
 test "getDiff working directory" {
     const allocator = std.testing.allocator;
 

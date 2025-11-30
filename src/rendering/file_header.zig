@@ -57,16 +57,39 @@ pub const FileHeader = struct {
         else
             .{ .fg = Color.diff_sign_delete };
 
-        var segments = [_]vaxis.Cell.Segment{
-            .{ .text = path_copy, .style = path_style },
-            .{ .text = add_copy, .style = add_style },
-            .{ .text = del_copy, .style = del_style },
-        };
+        // Style for untracked indicator (yellow/warning color)
+        const untracked_style: vaxis.Style = if (is_cursor)
+            .{ .fg = Color.yellow, .bg = Color.cursor_bg }
+        else
+            .{ .fg = Color.yellow };
 
-        _ = try win.print(&segments, .{
-            .row_offset = row,
-            .col_offset = 0,
-        });
+        const untracked_text = if (file.is_untracked)
+            try RenderUtils.copyFrameText(app, "  [untracked]")
+        else
+            "";
+
+        if (file.is_untracked) {
+            var segments = [_]vaxis.Cell.Segment{
+                .{ .text = path_copy, .style = path_style },
+                .{ .text = add_copy, .style = add_style },
+                .{ .text = del_copy, .style = del_style },
+                .{ .text = untracked_text, .style = untracked_style },
+            };
+            _ = try win.print(&segments, .{
+                .row_offset = row,
+                .col_offset = 0,
+            });
+        } else {
+            var segments = [_]vaxis.Cell.Segment{
+                .{ .text = path_copy, .style = path_style },
+                .{ .text = add_copy, .style = add_style },
+                .{ .text = del_copy, .style = del_style },
+            };
+            _ = try win.print(&segments, .{
+                .row_offset = row,
+                .col_offset = 0,
+            });
+        }
 
         return 1; // Always uses 1 row
     }
