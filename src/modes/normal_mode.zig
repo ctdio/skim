@@ -104,7 +104,15 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         if (key.codepoint == 27) { // ESC
             return;
         }
-        switch (key.codepoint) {
+        // Support both Ctrl+w l and Ctrl+w Ctrl+l (vim-style)
+        // Ctrl+h sends 8 (backspace), Ctrl+l sends 12 (form feed), Ctrl+w sends 23
+        const effective_key: u21 = switch (key.codepoint) {
+            8 => 'h', // Ctrl+h
+            12 => 'l', // Ctrl+l
+            23 => 'w', // Ctrl+w
+            else => key.codepoint,
+        };
+        switch (effective_key) {
             'l' => {
                 // Focus right (review panel) - enter review_log mode
                 if (app.state.review_panel_open) {

@@ -23,7 +23,15 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         const PanelStyle = @TypeOf(app.state.review_panel_style);
         const is_dialog = app.state.review_panel_style == PanelStyle.dialog;
 
-        switch (key.codepoint) {
+        // Support both Ctrl+w h and Ctrl+w Ctrl+h (vim-style)
+        // Ctrl+h sends 8 (backspace), Ctrl+l sends 12 (form feed), Ctrl+w sends 23
+        const effective_key: u21 = switch (key.codepoint) {
+            8 => 'h', // Ctrl+h
+            12 => 'l', // Ctrl+l
+            23 => 'w', // Ctrl+w
+            else => key.codepoint,
+        };
+        switch (effective_key) {
             'h' => {
                 // Focus left (diff) - only allowed in sidebar mode (dialog is modal)
                 if (!is_dialog) {
