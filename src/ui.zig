@@ -716,9 +716,8 @@ pub const UI = struct {
         const content = app.state.review_log_content orelse "No review log yet. Press R to start a review.";
 
         // Calculate visible range
-        const scroll_offset = app.state.review_log_scroll;
         const max_visible_rows = popup_height - 3; // Account for borders and title
-        const wrap_width = popup_width - 2; // Width available for text
+        const wrap_width = if (popup_width > 3) popup_width - 3 else 1; // Account for left margin and right padding
 
         // Build wrapped lines
         var wrapped_lines = std.ArrayList([]const u8).init(app.allocator);
@@ -740,18 +739,32 @@ pub const UI = struct {
             }
         }
 
+        // Update line count for scrolling (use wrapped count)
+        app.state.review_log_line_count = wrapped_lines.items.len;
+
+        // Calculate max valid scroll and clamp
+        const max_scroll = if (wrapped_lines.items.len > max_visible_rows)
+            wrapped_lines.items.len - max_visible_rows
+        else
+            0;
+        if (app.state.review_log_scroll > max_scroll) {
+            app.state.review_log_scroll = max_scroll;
+        }
+        const scroll_offset = app.state.review_log_scroll;
+
         // Render visible wrapped lines
         var row: usize = 2; // Start after title and blank line
-        const start_line = scroll_offset;
+        const start_line = @min(scroll_offset, wrapped_lines.items.len);
         const end_line = @min(start_line + max_visible_rows, wrapped_lines.items.len);
 
+        if (start_line >= wrapped_lines.items.len) return;
         for (wrapped_lines.items[start_line..end_line]) |line| {
             if (row >= max_visible_rows + 1) break;
 
             var line_seg = [_]vaxis.Cell.Segment{
                 .{ .text = line, .style = .{ .fg = .{ .index = 7 } } },
             };
-            _ = try popup_win.print(&line_seg, .{ .row_offset = row });
+            _ = try popup_win.print(&line_seg, .{ .row_offset = row, .col_offset = 1 });
             row += 1;
         }
 
@@ -770,9 +783,6 @@ pub const UI = struct {
             };
             _ = try popup_win.print(&down_seg, .{ .row_offset = popup_height - 2 });
         }
-
-        // Update line count for scrolling (use wrapped count)
-        app.state.review_log_line_count = wrapped_lines.items.len;
     }
 
     /// Render a vertical divider line
@@ -851,7 +861,7 @@ pub const UI = struct {
 
         // Calculate visible range
         const max_visible_rows = if (win.height > 2) win.height - 2 else 1; // Account for title and bottom margin
-        const wrap_width = if (win.width > 1) win.width - 1 else 1; // Leave small margin
+        const wrap_width = if (win.width > 2) win.width - 2 else 1; // Leave margin on left (for divider overflow) and right
 
         // Build wrapped lines
         var wrapped_lines = std.ArrayList([]const u8).init(app.allocator);
@@ -874,15 +884,24 @@ pub const UI = struct {
         // Update line count
         app.state.review_log_line_count = wrapped_lines.items.len;
 
+        // Calculate max valid scroll position
+        const max_scroll = if (wrapped_lines.items.len > max_visible_rows)
+            wrapped_lines.items.len - max_visible_rows
+        else
+            0;
+
         // Tail-follow: auto-scroll to bottom if enabled and review is running
         if (app.state.review_log_tail_follow) {
             if (app.review_process) |proc| {
                 if (proc.status == .running) {
-                    if (wrapped_lines.items.len > max_visible_rows) {
-                        app.state.review_log_scroll = wrapped_lines.items.len - max_visible_rows;
-                    }
+                    app.state.review_log_scroll = max_scroll;
                 }
             }
+        }
+
+        // Clamp scroll position to valid range (content may have changed)
+        if (app.state.review_log_scroll > max_scroll) {
+            app.state.review_log_scroll = max_scroll;
         }
 
         const scroll_offset = app.state.review_log_scroll;
@@ -899,7 +918,7 @@ pub const UI = struct {
                 var line_seg = [_]vaxis.Cell.Segment{
                     .{ .text = line, .style = .{ .fg = .{ .index = 7 } } },
                 };
-                _ = try win.print(&line_seg, .{ .row_offset = row });
+                _ = try win.print(&line_seg, .{ .row_offset = row, .col_offset = 1 });
                 row += 1;
             }
         }

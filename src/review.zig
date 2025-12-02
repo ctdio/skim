@@ -222,19 +222,23 @@ fn stripAnsiCodes(allocator: Allocator, input: []const u8) ![]u8 {
 
         // Check for malformed CSI sequence (missing ESC): "[" followed by params and final byte
         // This handles cases like "[2m" or "[0m" where the ESC was lost
+        // IMPORTANT: Require at least one digit to avoid stripping text like "[Bash]" or "[method]"
         if (input[i] == '[' and i + 1 < input.len) {
             // Check if this looks like a CSI sequence (digits, semicolons, then final byte)
             var j = i + 1;
+            var found_digit = false;
             var looks_like_csi = false;
             while (j < input.len) {
                 const c = input[j];
                 if (c >= '0' and c <= '9') {
+                    found_digit = true;
                     j += 1;
                 } else if (c == ';' or c == ':' or c == '?') {
                     j += 1;
                 } else if (c >= 0x40 and c <= 0x7E) {
-                    // Final byte found - this is a CSI sequence
-                    looks_like_csi = true;
+                    // Final byte found - only treat as CSI if we found digits
+                    // This prevents stripping "[Bash]" while still stripping "[0m"
+                    looks_like_csi = found_digit;
                     j += 1;
                     break;
                 } else {

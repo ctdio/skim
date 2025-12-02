@@ -571,9 +571,11 @@ pub const App = struct {
         while (!self.should_quit) {
             // Only block on pollEvent if we don't need to render AND no async job is running
             // AND not connected to MCP (reader thread may queue messages anytime)
+            // AND no active review process streaming to the panel
             // This allows async operations to trigger immediate renders
             const mcp_connected = if (self.mcp) |mcp| mcp.connected else false;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_connected;
+            const has_active_review = if (self.review_process) |proc| proc.status == .running and self.state.review_panel_open else false;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_connected and !has_active_review;
             if (should_poll) {
                 loop.pollEvent();
             } else {
