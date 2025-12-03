@@ -18,14 +18,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     if (key.mods.ctrl) {
         switch (key.codepoint) {
             'n' => {
-                if (filtered_count > 0 and app.state.branch_selection < filtered_count - 1) {
-                    app.state.branch_selection += 1;
+                if (filtered_count > 0) {
+                    app.state.branch_selection = (app.state.branch_selection + 1) % filtered_count;
                 }
                 return;
             },
             'p' => {
-                if (app.state.branch_selection > 0) {
-                    app.state.branch_selection -= 1;
+                if (filtered_count > 0) {
+                    app.state.branch_selection = if (app.state.branch_selection == 0) filtered_count - 1 else app.state.branch_selection - 1;
                 }
                 return;
             },
@@ -35,14 +35,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Handle arrow keys
     if (key.codepoint == vaxis.Key.down) {
-        if (filtered_count > 0 and app.state.branch_selection < filtered_count - 1) {
-            app.state.branch_selection += 1;
+        if (filtered_count > 0) {
+            app.state.branch_selection = (app.state.branch_selection + 1) % filtered_count;
         }
         return;
     }
     if (key.codepoint == vaxis.Key.up) {
-        if (app.state.branch_selection > 0) {
-            app.state.branch_selection -= 1;
+        if (filtered_count > 0) {
+            app.state.branch_selection = if (app.state.branch_selection == 0) filtered_count - 1 else app.state.branch_selection - 1;
         }
         return;
     }
@@ -50,13 +50,13 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     // Handle special keys
     switch (key.codepoint) {
         'j' => {
-            if (filtered_count > 0 and app.state.branch_selection < filtered_count - 1) {
-                app.state.branch_selection += 1;
+            if (filtered_count > 0) {
+                app.state.branch_selection = (app.state.branch_selection + 1) % filtered_count;
             }
         },
         'k' => {
-            if (app.state.branch_selection > 0) {
-                app.state.branch_selection -= 1;
+            if (filtered_count > 0) {
+                app.state.branch_selection = if (app.state.branch_selection == 0) filtered_count - 1 else app.state.branch_selection - 1;
             }
         },
         27 => { // ESC key - clear search or go back

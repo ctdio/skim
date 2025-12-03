@@ -284,18 +284,14 @@ pub const CommandPaletteState = struct {
 
     pub fn moveSelectionUp(self: *CommandPaletteState) void {
         if (self.filtered_commands.items.len == 0) return;
-        if (self.selected_idx > 0) {
-            self.selected_idx -= 1;
-            self.adjustScrollOffset();
-        }
+        self.selected_idx = if (self.selected_idx == 0) self.filtered_commands.items.len - 1 else self.selected_idx - 1;
+        self.adjustScrollOffset();
     }
 
     pub fn moveSelectionDown(self: *CommandPaletteState) void {
         if (self.filtered_commands.items.len == 0) return;
-        if (self.selected_idx < self.filtered_commands.items.len - 1) {
-            self.selected_idx += 1;
-            self.adjustScrollOffset();
-        }
+        self.selected_idx = (self.selected_idx + 1) % self.filtered_commands.items.len;
+        self.adjustScrollOffset();
     }
 
     fn adjustScrollOffset(self: *CommandPaletteState) void {
