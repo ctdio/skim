@@ -64,8 +64,9 @@ pub const McpAdapter = struct {
         const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
         self.daemon_stream = try net.tcpConnectToAddress(address);
 
-        // Set non-blocking
+        // Set non-blocking and enable keepalive
         try setNonBlocking(self.daemon_stream.?.handle);
+        setKeepalive(self.daemon_stream.?.handle);
 
         // Send hello
         const hello = try internal_protocol.encodeAdapterHello(self.allocator, &self.adapter_id);
@@ -424,6 +425,13 @@ fn setBlocking(handle: posix.fd_t) !void {
     const flags = try posix.fcntl(handle, posix.F.GETFL, @as(usize, 0));
     const O_NONBLOCK: usize = 0x0004;
     _ = try posix.fcntl(handle, posix.F.SETFL, flags & ~O_NONBLOCK);
+}
+
+fn setKeepalive(handle: posix.socket_t) void {
+    const enable: c_int = 1;
+    posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&enable)) catch |err| {
+        std.log.warn("Failed to set SO_KEEPALIVE: {}", .{err});
+    };
 }
 
 // =============================================================================

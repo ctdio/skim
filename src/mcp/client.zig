@@ -23,6 +23,7 @@ pub const McpClient = struct {
     // Reader thread management
     reader_thread: ?std.Thread,
     shutdown_flag: std.atomic.Value(bool),
+    needs_reconnect: std.atomic.Value(bool),
 
     // For freeing messages (needed by main thread)
     const Self = @This();
@@ -39,6 +40,7 @@ pub const McpClient = struct {
             .queue_mutex = .{},
             .reader_thread = null,
             .shutdown_flag = std.atomic.Value(bool).init(false),
+            .needs_reconnect = std.atomic.Value(bool).init(false),
         };
     }
 
@@ -68,6 +70,12 @@ pub const McpClient = struct {
         self.stream = try net.tcpConnectToAddress(address);
         self.connected = true;
         self.shutdown_flag.store(false, .release);
+        self.needs_reconnect.store(false, .release);
+
+        // Enable TCP keepalive to detect dead connections
+        if (self.stream) |s| {
+            setKeepalive(s.handle);
+        }
 
         // Spawn reader thread
         self.reader_thread = try std.Thread.spawn(.{}, readerThreadFn, .{self});
@@ -89,6 +97,11 @@ pub const McpClient = struct {
         }
     }
 
+    /// Check if reconnection is needed (set by reader thread on disconnect)
+    pub fn needsReconnect(self: *McpClient) bool {
+        return self.needs_reconnect.load(.acquire);
+    }
+
     /// Attempt to reconnect if disconnected (with 2 second cooldown)
     pub fn tryReconnect(self: *McpClient) bool {
         if (self.connected) return true;
@@ -108,10 +121,28 @@ pub const McpClient = struct {
             self.reader_thread = null;
         }
 
+        // Close old stream if any (to avoid fd leak)
+        if (self.stream) |stream| {
+            stream.close();
+            self.stream = null;
+        }
+
         self.connect(port) catch {
             return false;
         };
+
+        // Clear the reconnect flag on success
+        self.needs_reconnect.store(false, .release);
+        std.log.info("MCP client reconnected to daemon", .{});
         return true;
+    }
+
+    /// Check if reconnection is needed and attempt if so
+    /// Returns true if connected (either already or after reconnect)
+    pub fn checkAndReconnect(self: *McpClient) bool {
+        if (self.connected) return true;
+        if (!self.needs_reconnect.load(.acquire)) return false;
+        return self.tryReconnect();
     }
 
     /// Connection result for discovery-based connection
@@ -327,11 +358,18 @@ pub const McpClient = struct {
                 switch (err) {
                     error.ConnectionResetByPeer, error.BrokenPipe => {
                         std.log.debug("MCP reader: connection error: {}", .{err});
+                        // Signal that reconnection is needed (unless shutting down)
+                        if (!self.shutdown_flag.load(.acquire)) {
+                            self.connected = false;
+                            self.needs_reconnect.store(true, .release);
+                        }
                     },
                     else => {
                         // Socket was likely closed by main thread during shutdown
                         if (!self.shutdown_flag.load(.acquire)) {
                             std.log.debug("MCP reader: read error: {}", .{err});
+                            self.connected = false;
+                            self.needs_reconnect.store(true, .release);
                         }
                     },
                 }
@@ -341,6 +379,11 @@ pub const McpClient = struct {
             if (bytes_read == 0) {
                 // EOF - server closed connection
                 std.log.debug("MCP reader: EOF, server disconnected", .{});
+                // Signal that reconnection is needed (unless shutting down)
+                if (!self.shutdown_flag.load(.acquire)) {
+                    self.connected = false;
+                    self.needs_reconnect.store(true, .release);
+                }
                 break;
             }
 
@@ -389,6 +432,17 @@ pub const McpClient = struct {
         std.log.debug("MCP reader: thread exiting", .{});
     }
 };
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+fn setKeepalive(handle: posix.socket_t) void {
+    const enable: c_int = 1;
+    posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&enable)) catch |err| {
+        std.log.warn("Failed to set SO_KEEPALIVE: {}", .{err});
+    };
+}
 
 // =============================================================================
 // Tests

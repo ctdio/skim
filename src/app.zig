@@ -695,12 +695,12 @@ pub const App = struct {
 
             // Process MCP messages (reader thread handles receiving)
             if (self.mcp) |mcp| {
-                // Try to reconnect if disconnected
-                if (!mcp.connected) {
+                // Check if reconnection is needed (reader thread sets flag on disconnect)
+                if (mcp.needsReconnect()) {
                     if (mcp.tryReconnect()) {
                         // Small delay to ensure daemon has finished accepting
                         std.time.sleep(10 * std.time.ns_per_ms);
-                        // Reconnected - send hello again
+                        // Reconnected - send hello again to re-register
                         self.sendMcpHello() catch {};
                     }
                 }
@@ -2357,27 +2357,40 @@ pub const App = struct {
         switch (msg.*) {
             .add_comment => |ac| {
                 // Delegate to handler - returns comment_idx if successful
-                if (try mcp_handlers.handleAddComment(self.allocator, mcp, ac, self.state.files, &self.state.comment_store)) |_| {
+                const result = mcp_handlers.handleAddComment(self.allocator, mcp, ac, self.state.files, &self.state.comment_store) catch |err| {
+                    std.log.warn("MCP add_comment failed: {}", .{err});
+                    return;
+                };
+                if (result) |_| {
                     // Rebuild LineMap since comment count changed
                     self.state.line_map.deinit();
-                    self.state.line_map = try line_map.LineMap.build(
+                    self.state.line_map = line_map.LineMap.build(
                         self.allocator,
                         self.state.files,
                         &self.state.comment_store,
                         self.convertHunkViewMode(),
                         self.shouldApplyHunkFiltering(),
-                    );
+                    ) catch |err| {
+                        std.log.err("Failed to rebuild LineMap: {}", .{err});
+                        return;
+                    };
                     self.needs_render = true;
                 }
             },
             .get_comments => {
-                try mcp_handlers.handleGetComments(self.allocator, mcp, &self.state.comment_store);
+                mcp_handlers.handleGetComments(self.allocator, mcp, &self.state.comment_store) catch |err| {
+                    std.log.warn("MCP get_comments failed: {}", .{err});
+                };
             },
             .get_diff_context => {
-                try mcp_handlers.handleGetDiffContext(self.allocator, mcp, self.state.files, self.state.diff_source, self.state.git_repo_root);
+                mcp_handlers.handleGetDiffContext(self.allocator, mcp, self.state.files, self.state.diff_source, self.state.git_repo_root) catch |err| {
+                    std.log.warn("MCP get_diff_context failed: {}", .{err});
+                };
             },
             .get_file_diff => |gfd| {
-                try mcp_handlers.handleGetFileDiff(self.allocator, mcp, self.state.files, gfd.file);
+                mcp_handlers.handleGetFileDiff(self.allocator, mcp, self.state.files, gfd.file) catch |err| {
+                    std.log.warn("MCP get_file_diff failed: {}", .{err});
+                };
             },
             .welcome => |w| {
                 // Store session ID for status display
@@ -2388,7 +2401,9 @@ pub const App = struct {
             },
             .ping => {
                 // Respond with pong
-                const pong = try mcp_protocol.encodePong(self.allocator);
+                const pong = mcp_protocol.encodePong(self.allocator) catch {
+                    return;
+                };
                 defer self.allocator.free(pong);
                 mcp.send(pong) catch {};
             },

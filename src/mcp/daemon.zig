@@ -40,6 +40,9 @@ pub const Daemon = struct {
     // MCP Framework server
     mcp_server: framework.Server,
 
+    // Heartbeat tracking
+    last_heartbeat_check: i64,
+
     // State
     running: bool,
 
@@ -61,6 +64,7 @@ pub const Daemon = struct {
             .pending_adapter_connections = std.ArrayList(PendingConnection).init(allocator),
             .pending_requests = std.AutoHashMap([36]u8, PendingRequest).init(allocator),
             .mcp_server = try tools.createServer(allocator),
+            .last_heartbeat_check = 0,
             .running = false,
         };
 
@@ -159,6 +163,9 @@ pub const Daemon = struct {
             // Sweep for timed-out requests (every loop iteration is fine for now)
             self.sweepTimedOutRequests();
 
+            // Heartbeat check for stale clients (every 10 seconds)
+            self.heartbeatCheck();
+
             // Small sleep to avoid busy-waiting
             std.time.sleep(1 * std.time.ns_per_ms);
         }
@@ -177,6 +184,7 @@ pub const Daemon = struct {
 
             std.log.info("New TUI connection from {}", .{conn.address});
             try setNonBlocking(conn.stream.handle);
+            setKeepalive(conn.stream.handle);
 
             try self.pending_tui_connections.append(.{
                 .stream = conn.stream,
@@ -379,6 +387,7 @@ pub const Daemon = struct {
 
             std.log.info("New adapter connection from {}", .{conn.address});
             try setNonBlocking(conn.stream.handle);
+            setKeepalive(conn.stream.handle);
 
             try self.pending_adapter_connections.append(.{
                 .stream = conn.stream,
@@ -1241,6 +1250,60 @@ pub const Daemon = struct {
         }
     }
 
+    /// Periodic heartbeat check: ping clients and evict stale ones
+    fn heartbeatCheck(self: *Self) void {
+        const now = std.time.timestamp();
+        const check_interval: i64 = 10; // Check every 10 seconds
+        const stale_timeout: i64 = 60; // Evict clients not seen in 60 seconds
+
+        // Only run periodically
+        if (now - self.last_heartbeat_check < check_interval) return;
+        self.last_heartbeat_check = now;
+
+        var to_remove = std.ArrayList(registry.SessionId).init(self.allocator);
+        defer to_remove.deinit();
+
+        // First pass: send pings and identify stale clients
+        var it = self.tui_clients.iterator();
+        while (it.next()) |client_ptr| {
+            const client = client_ptr.*;
+
+            // Check if client is stale
+            if (now - client.last_seen > stale_timeout) {
+                std.log.warn("TUI client {s} is stale (last seen {}s ago), removing", .{
+                    client.id,
+                    now - client.last_seen,
+                });
+                to_remove.append(client.id) catch continue;
+                continue;
+            }
+
+            // Send ping to keep connection alive and verify responsiveness
+            const ping = protocol.encodePing(self.allocator) catch continue;
+            defer self.allocator.free(ping);
+            client.stream.writeAll(ping) catch |err| {
+                std.log.warn("Failed to ping TUI client {s}: {}, marking for removal", .{ client.id, err });
+                to_remove.append(client.id) catch continue;
+            };
+        }
+
+        // Remove stale clients
+        for (to_remove.items) |id| {
+            if (self.tui_clients.get(id)) |client| {
+                std.log.info("Removing stale TUI client {s}", .{client.id});
+                self.broadcastClientUpdate(.disconnected, client) catch {};
+            }
+            self.tui_clients.remove(id);
+        }
+
+        if (to_remove.items.len > 0) {
+            std.log.info("Heartbeat check: removed {} stale clients, {} remaining", .{
+                to_remove.items.len,
+                self.tui_clients.count(),
+            });
+        }
+    }
+
     // =========================================================================
     // Helper Functions
     // =========================================================================
@@ -1487,6 +1550,13 @@ fn setNonBlocking(handle: posix.fd_t) !void {
     const flags = try posix.fcntl(handle, posix.F.GETFL, @as(usize, 0));
     const O_NONBLOCK: usize = 0x0004; // darwin/macOS
     _ = try posix.fcntl(handle, posix.F.SETFL, flags | O_NONBLOCK);
+}
+
+fn setKeepalive(handle: posix.socket_t) void {
+    const enable: c_int = 1;
+    posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&enable)) catch |err| {
+        std.log.warn("Failed to set SO_KEEPALIVE: {}", .{err});
+    };
 }
 
 fn getCurrentPid() i32 {
