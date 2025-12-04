@@ -1457,9 +1457,13 @@ pub const App = struct {
         const hunk = &file.hunks[input.target_hunk_idx];
         const line = &hunk.lines[input.target_line_idx];
 
+        // Track the comment index for cursor positioning after save
+        var saved_comment_idx: usize = undefined;
+
         if (input.editing_comment_idx) |idx| {
             // Update existing comment
             try self.state.comment_store.updateComment(idx, comment_text);
+            saved_comment_idx = idx;
         } else {
             // Check if this is a range comment
             if (input.target_end_hunk_idx != null and input.target_end_line_idx != null) {
@@ -1489,11 +1493,18 @@ pub const App = struct {
                     line.new_lineno,
                 );
             }
+            // New comment is at the end of the list
+            saved_comment_idx = self.state.comment_store.comments.items.len - 1;
         }
 
         // Rebuild LineMap since comment count changed
         self.state.line_map.deinit();
         self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+
+        // Move cursor to the saved comment so it can be easily yanked
+        if (self.state.line_map.findLineByCommentIdx(saved_comment_idx)) |comment_line| {
+            self.state.global_cursor_line = comment_line;
+        }
     }
 
     pub fn yankCurrentCommentToClipboard(self: *App) !void {

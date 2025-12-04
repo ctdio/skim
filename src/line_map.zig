@@ -285,6 +285,18 @@ pub const LineMap = struct {
 
         return false;
     }
+
+    /// Find the global line number for a given comment index
+    pub fn findLineByCommentIdx(self: *const LineMap, comment_idx: usize) ?usize {
+        for (self.records) |*record| {
+            if (record.line_type == .comment_line) {
+                if (record.line_type.comment_line.comment_idx == comment_idx) {
+                    return record.global_line;
+                }
+            }
+        }
+        return null;
+    }
 };
 
 test "line map basic construction" {
