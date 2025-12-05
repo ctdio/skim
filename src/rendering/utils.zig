@@ -900,11 +900,12 @@ pub const RenderUtils = struct {
         return current_row - row; // Return actual number of rows used
     }
 
-    /// Render saved comment display box (expanded view)
+    /// Render saved comment display box with optional truncation
     pub fn renderCommentDisplay(
         app: *App,
         win: vaxis.Window,
         comment: *const comments.Comment,
+        comment_idx: usize,
         row: usize,
         gutter_width: usize,
         is_cursor: bool,
@@ -916,6 +917,9 @@ pub const RenderUtils = struct {
         const content_width = win.width -| content_start;
 
         if (content_width < 20) return 0;
+
+        const is_expanded = app.isCommentExpanded(comment_idx);
+        const max_lines = Layout.max_comment_lines;
 
         // Use cyan for regular comments, yellow when focused
         // Always use background - comment_bg for normal, comment_hover_bg when cursor is on it
@@ -960,13 +964,15 @@ pub const RenderUtils = struct {
         // Render gutter for label line
         try renderEmptyCommentGutter(app, win, current_row, is_cursor, gutter_width);
 
-        // Line 2: ┃ Comment                              Enter:Edit  d:Delete
+        // Line 2: ┃ Comment                              Enter:Edit  d:Delete  o:Expand
         segments.clearRetainingCapacity();
         if (is_cursor) {
-            const hints = "Enter:Edit  d:Delete";
+            const expand_hint = if (is_expanded) "o:Collapse" else "o:Expand";
+            var hints_buf: [64]u8 = undefined;
+            const hints = std.fmt.bufPrint(&hints_buf, "Enter:Edit  d:Delete  {s}", .{expand_hint}) catch "Enter:Edit  d:Delete";
             const border_and_label = "┃ Comment";
             const spacing = "  ";
-            const total_fixed = border_and_label.len + spacing.len + hints.len; // Total chars we're rendering
+            const total_fixed = border_and_label.len + spacing.len + hints.len;
             const available_for_spacer = content_width -| total_fixed;
 
             try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
@@ -997,6 +1003,20 @@ pub const RenderUtils = struct {
         const text_area_width = content_width - 4; // -4 for "┃ > " or "┃   "
         var line_iter = std.mem.splitScalar(u8, comment.text, '\n');
         var is_first_line = true;
+        var text_lines_rendered: usize = 0;
+        var total_text_lines: usize = 0;
+        var truncated = false;
+
+        // First pass: count total lines if we need to truncate
+        if (!is_expanded) {
+            var count_iter = std.mem.splitScalar(u8, comment.text, '\n');
+            while (count_iter.next()) |text_line| {
+                var wrapped = try wrapText(app.allocator, text_line, text_area_width);
+                defer wrapped.deinit();
+                total_text_lines += wrapped.items.len;
+            }
+        }
+
         while (line_iter.next()) |text_line| {
             if (current_row >= win.height) break;
 
@@ -1007,6 +1027,12 @@ pub const RenderUtils = struct {
             // Render each wrapped segment
             for (wrapped_lines.items) |wrapped_segment| {
                 if (current_row >= win.height) break;
+
+                // Check if we should truncate (only when collapsed)
+                if (!is_expanded and text_lines_rendered >= max_lines) {
+                    truncated = true;
+                    break;
+                }
 
                 // Render gutter for text line
                 try renderEmptyCommentGutter(app, win, current_row, is_cursor, gutter_width);
@@ -1034,7 +1060,43 @@ pub const RenderUtils = struct {
                 try segments.append(.{ .text = display_text, .style = text_style });
                 _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
                 current_row += 1;
+                text_lines_rendered += 1;
                 is_first_line = false;
+            }
+
+            if (truncated) break;
+        }
+
+        // Show truncation indicator if collapsed and has more lines
+        if (truncated and total_text_lines > max_lines) {
+            if (current_row < win.height) {
+                try renderEmptyCommentGutter(app, win, current_row, is_cursor, gutter_width);
+
+                segments.clearRetainingCapacity();
+                try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+
+                const remaining = total_text_lines - max_lines;
+                var more_buf: [64]u8 = undefined;
+                const more_text = std.fmt.bufPrint(&more_buf, "   ... {d} more line{s} (press o to expand)", .{
+                    remaining,
+                    if (remaining == 1) "" else "s",
+                }) catch "   ... (press o to expand)";
+
+                const display_text = blk: {
+                    var buf = try frameTextSlice(app, text_area_width);
+                    const copy_len = @min(more_text.len, text_area_width);
+                    if (copy_len > 0) {
+                        @memcpy(buf[0..copy_len], more_text[0..copy_len]);
+                    }
+                    if (copy_len < buf.len) {
+                        @memset(buf[copy_len..], ' ');
+                    }
+                    break :blk buf;
+                };
+
+                try segments.append(.{ .text = display_text, .style = hints_style });
+                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+                current_row += 1;
             }
         }
 

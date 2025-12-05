@@ -143,6 +143,7 @@ pub const App = struct {
         branch_search_len: usize, // Length of search query
         filtered_branches: std.ArrayList(usize), // Indices of branches matching search query
         help_scroll_offset: usize, // Scroll position in help overlay
+        expanded_comments: std.AutoHashMap(usize, void), // Set of expanded comment indices
 
         // Review log viewer state
         review_log_scroll: usize, // Scroll position in review log viewer
@@ -297,6 +298,7 @@ pub const App = struct {
                 .branch_search_len = 0,
                 .filtered_branches = std.ArrayList(usize).init(allocator),
                 .help_scroll_offset = 0,
+                .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
                 .review_log_scroll = 0,
                 .review_log_content = null,
                 .review_log_line_count = 0,
@@ -376,6 +378,7 @@ pub const App = struct {
         }
         self.allocator.free(self.state.branch_list);
         self.state.filtered_branches.deinit();
+        self.state.expanded_comments.deinit();
         self.state.branch_stats_cache.deinit();
         // Clean up MCP client
         if (self.mcp) |mcp| {
@@ -1569,6 +1572,22 @@ pub const App = struct {
         }
     }
 
+    pub fn toggleCommentUnderCursorExpanded(self: *App) void {
+        // Get line record from LineMap
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
+
+        switch (record.line_type) {
+            .comment_line => |comment_info| {
+                self.toggleCommentExpanded(comment_info.comment_idx);
+                self.needs_render = true;
+            },
+            else => {
+                // Not on a comment line - do nothing
+                return;
+            },
+        }
+    }
+
     pub fn clearAllComments(self: *App) !void {
         self.state.comment_store.clearAll();
 
@@ -1858,6 +1877,20 @@ pub const App = struct {
 
         const selection = self.getVisualSelection() orelse return false;
         return global_line >= selection.start and global_line <= selection.end;
+    }
+
+    // Check if a comment is expanded (collapsed by default)
+    pub fn isCommentExpanded(self: *App, comment_idx: usize) bool {
+        return self.state.expanded_comments.contains(comment_idx);
+    }
+
+    // Toggle comment expanded/collapsed state
+    pub fn toggleCommentExpanded(self: *App, comment_idx: usize) void {
+        if (self.state.expanded_comments.contains(comment_idx)) {
+            _ = self.state.expanded_comments.remove(comment_idx);
+        } else {
+            self.state.expanded_comments.put(comment_idx, {}) catch {};
+        }
     }
 
     pub fn yankVisualSelection(self: *App) !void {

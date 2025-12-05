@@ -162,7 +162,7 @@ pub const SideBySideRenderer = struct {
                         const comment_rows = if (is_editing_this_comment)
                             try renderSideBySideCommentInput(app, win, row, left_content_width, right_content_width, gutter_width, line.line_type)
                         else
-                            try renderSideBySideComment(app, win, comment, row, left_content_width, right_content_width, gutter_width, line.line_type, is_cursor);
+                            try renderSideBySideComment(app, win, comment, comment_info.comment_idx, row, left_content_width, right_content_width, gutter_width, line.line_type, is_cursor);
 
                         // Render sidebar for all comment rows (no middle divider - spans full width)
                         var comment_row_idx: usize = 1; // First sidebar already rendered above
@@ -870,11 +870,12 @@ pub const SideBySideRenderer = struct {
         return current_row - row; // Return actual number of rows used
     }
 
-    /// Render saved comment display in side-by-side mode
+    /// Render saved comment display in side-by-side mode with optional truncation
     fn renderSideBySideComment(
         app: *App,
         win: vaxis.Window,
         comment: *const comments.Comment,
+        comment_idx: usize,
         row: usize,
         left_width: usize,
         right_width: usize,
@@ -908,6 +909,9 @@ pub const SideBySideRenderer = struct {
 
         if (layout.width < 20) return 0;
 
+        const is_expanded = app.isCommentExpanded(comment_idx);
+        const max_lines = Layout.max_comment_lines;
+
         // Use cyan for regular comments, yellow when focused
         const border_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
@@ -939,12 +943,14 @@ pub const SideBySideRenderer = struct {
 
         var current_row = row;
 
-        // Line 1: ┃ Comment                              Enter:Edit  d:Delete
+        // Line 1: ┃ Comment                              Enter:Edit  d:Delete  o:Expand
         if (is_cursor) {
-            const hints = "Enter:Edit  d:Delete";
+            const expand_hint = if (is_expanded) "o:Collapse" else "o:Expand";
+            var hints_buf: [64]u8 = undefined;
+            const hints = std.fmt.bufPrint(&hints_buf, "Enter:Edit  d:Delete  {s}", .{expand_hint}) catch "Enter:Edit  d:Delete";
             const border_and_label = "┃ Comment";
             const spacing = "  ";
-            const total_fixed = border_and_label.len + spacing.len + hints.len; // Total chars we're rendering
+            const total_fixed = border_and_label.len + spacing.len + hints.len;
             const available_for_spacer = layout.width -| total_fixed;
 
             try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
@@ -975,6 +981,20 @@ pub const SideBySideRenderer = struct {
         const text_area_width = layout.width - 4; // -4 for "┃ > " or "┃   "
         var line_iter = std.mem.splitScalar(u8, comment.text, '\n');
         var is_first_line = true;
+        var text_lines_rendered: usize = 0;
+        var total_text_lines: usize = 0;
+        var truncated = false;
+
+        // First pass: count total lines if we need to truncate
+        if (!is_expanded) {
+            var count_iter = std.mem.splitScalar(u8, comment.text, '\n');
+            while (count_iter.next()) |text_line| {
+                var wrapped = try RenderUtils.wrapText(app.allocator, text_line, text_area_width);
+                defer wrapped.deinit();
+                total_text_lines += wrapped.items.len;
+            }
+        }
+
         while (line_iter.next()) |text_line| {
             if (current_row >= win.height) break;
 
@@ -985,6 +1005,12 @@ pub const SideBySideRenderer = struct {
             // Render each wrapped segment
             for (wrapped_lines.items) |wrapped_segment| {
                 if (current_row >= win.height) break;
+
+                // Check if we should truncate (only when collapsed)
+                if (!is_expanded and text_lines_rendered >= max_lines) {
+                    truncated = true;
+                    break;
+                }
 
                 segments.clearRetainingCapacity();
                 try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
@@ -1009,7 +1035,41 @@ pub const SideBySideRenderer = struct {
                 try segments.append(.{ .text = display_text, .style = text_style });
                 _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
                 current_row += 1;
+                text_lines_rendered += 1;
                 is_first_line = false;
+            }
+
+            if (truncated) break;
+        }
+
+        // Show truncation indicator if collapsed and has more lines
+        if (truncated and total_text_lines > max_lines) {
+            if (current_row < win.height) {
+                segments.clearRetainingCapacity();
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+
+                const remaining = total_text_lines - max_lines;
+                var more_buf: [64]u8 = undefined;
+                const more_text = std.fmt.bufPrint(&more_buf, "   ... {d} more line{s} (press o to expand)", .{
+                    remaining,
+                    if (remaining == 1) "" else "s",
+                }) catch "   ... (press o to expand)";
+
+                const display_text = blk: {
+                    var buf = try RenderUtils.frameTextSlice(app, text_area_width);
+                    const copy_len = @min(more_text.len, text_area_width);
+                    if (copy_len > 0) {
+                        @memcpy(buf[0..copy_len], more_text[0..copy_len]);
+                    }
+                    if (copy_len < buf.len) {
+                        @memset(buf[copy_len..], ' ');
+                    }
+                    break :blk buf;
+                };
+
+                try segments.append(.{ .text = display_text, .style = hints_style });
+                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+                current_row += 1;
             }
         }
 

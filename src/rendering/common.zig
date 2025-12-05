@@ -65,6 +65,7 @@ pub const Layout = struct {
     pub const cursor_padding = 3; // Padding around cursor when scrolling
     pub const page_scroll_lines = 10;
     pub const gutter_spacing = 2; // Spacing between gutter and content
+    pub const max_comment_lines = 6; // Max visible text lines in collapsed comments
 };
 
 // Frame drawing characters

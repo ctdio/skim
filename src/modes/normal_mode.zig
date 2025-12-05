@@ -288,6 +288,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         'L' => try app.toggleReviewPanel(), // Toggle review log side panel
         'a' => try app.stageCurrentFile(), // Stage the current file (git add)
         'A' => try app.stageAllFiles(), // Stage all files (git add -A)
+        'o' => app.toggleCommentUnderCursorExpanded(), // Toggle comment expand/collapse
         else => {
             // Reset count prefix on any other key
             app.state.count_prefix = null;

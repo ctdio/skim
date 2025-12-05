@@ -142,7 +142,7 @@ pub const UnifiedRenderer = struct {
                         const comment_rows = if (is_editing_this_comment)
                             try RenderUtils.renderCommentInputBox(app, win, row, gutter_width)
                         else
-                            try RenderUtils.renderCommentDisplay(app, win, comment, row, gutter_width, is_cursor);
+                            try RenderUtils.renderCommentDisplay(app, win, comment, comment_info.comment_idx, row, gutter_width, is_cursor);
 
                         // Render sidebar for all comment rows
                         var comment_row_idx: usize = 1; // First sidebar already rendered above

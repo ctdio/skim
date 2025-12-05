@@ -264,20 +264,83 @@ pub const Navigation = struct {
 
     // Adjust scroll to ensure cursor is visible with padding
     // Only called after explicit cursor movement (j/k), not during file navigation
+    // Accounts for comment height when cursor is on a comment line
     pub fn ensureCursorVisible(app: *App, with_padding: bool) void {
         const padding: usize = if (with_padding) Layout.cursor_padding else 0;
         const cursor_line = app.state.global_cursor_line;
         const scroll_offset = app.state.global_scroll_offset;
         const window_height = app.state.viewport_height;
 
+        // Check if cursor is on a comment line and get its rendered height
+        const cursor_line_height = getSavedCommentHeight(app, cursor_line);
+
         if (cursor_line < scroll_offset + padding) {
             app.state.global_scroll_offset = if (cursor_line >= padding)
                 cursor_line - padding
             else
                 0;
-        } else if (cursor_line >= scroll_offset + window_height -| (padding + 1)) {
-            app.state.global_scroll_offset = cursor_line -| (window_height -| (padding + 2));
+        } else if (cursor_line + cursor_line_height > scroll_offset + window_height -| padding) {
+            // Need to scroll down to show the entire comment
+            const needed_bottom_space = cursor_line_height + padding;
+            if (window_height > needed_bottom_space) {
+                app.state.global_scroll_offset = (cursor_line + cursor_line_height) -| (window_height -| padding);
+            } else {
+                // Window too small, just show cursor line
+                app.state.global_scroll_offset = cursor_line;
+            }
         }
+    }
+
+    /// Calculate rendered height of a saved comment at the given line
+    /// Returns 1 for non-comment lines
+    fn getSavedCommentHeight(app: *App, global_line: usize) usize {
+        const record = app.state.line_map.getLineRecord(global_line) orelse return 1;
+
+        switch (record.line_type) {
+            .comment_line => |comment_info| {
+                const comment = app.state.comment_store.getComment(comment_info.comment_idx) orelse return 1;
+                const is_expanded = app.isCommentExpanded(comment_info.comment_idx);
+                return calculateSavedCommentHeight(comment.text, is_expanded);
+            },
+            else => return 1,
+        }
+    }
+
+    /// Calculate rendered height of a saved comment based on its text
+    fn calculateSavedCommentHeight(text: []const u8, is_expanded: bool) usize {
+        const max_lines = Layout.max_comment_lines;
+        const estimated_text_width: usize = 80; // Conservative estimate for wrapping
+
+        // Count total text lines (with wrapping estimation)
+        var total_text_lines: usize = 0;
+        var line_iter = std.mem.splitScalar(u8, text, '\n');
+        while (line_iter.next()) |line| {
+            // Each text line takes at least 1 row
+            if (line.len <= estimated_text_width or line.len == 0) {
+                total_text_lines += 1;
+            } else {
+                // Account for wrapping
+                total_text_lines += (line.len + estimated_text_width - 1) / estimated_text_width;
+            }
+        }
+
+        // Height components:
+        // - 1 line for top spacer
+        // - 1 line for label
+        // - N text lines (capped at max_lines if collapsed)
+        // - 1 line for truncation indicator (if truncated)
+        // - 1 line for bottom spacer
+        var height: usize = 3; // top spacer + label + bottom spacer
+
+        if (is_expanded or total_text_lines <= max_lines) {
+            height += total_text_lines;
+        } else {
+            // Collapsed and truncated
+            height += max_lines;
+            height += 1; // truncation indicator line
+        }
+
+        return height;
     }
 
     /// Calculate actual comment box height based on text content
