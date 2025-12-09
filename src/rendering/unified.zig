@@ -25,7 +25,7 @@ pub const UnifiedRenderer = struct {
         Navigation.clampScrollOffset(app);
 
         // Calculate global gutter width (consistent across all files)
-        const gutter_width = StateHelpers.getGlobalGutterWidth(app.state.files);
+        const gutter_width = StateHelpers.getGlobalGutterWidthWithBlame(app.state.files, app.state.show_blame);
         const content_width = win.width -| (Layout.sidebar_width + gutter_width + Layout.gutter_spacing);
         const sidebar_style = .{ .fg = Color.dim };
 
@@ -352,6 +352,12 @@ pub const UnifiedRenderer = struct {
         else
             file.highlights;
 
+        // Get file path for blame lookup
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        // First line in hunk should always show blame (no deduplication with previous hunk)
+        const is_first_line_in_hunk = line_idx_in_hunk == 0;
+
         return try renderWrappedTextWithHighlights(
             app,
             win,
@@ -367,6 +373,8 @@ pub const UnifiedRenderer = struct {
             line.line_type,
             gutter_width,
             global_line,
+            file_path,
+            is_first_line_in_hunk,
         );
     }
 
@@ -385,12 +393,14 @@ pub const UnifiedRenderer = struct {
         line_type: ?parser.Line.LineType,
         gutter_width: usize,
         global_line: usize,
+        file_path: ?[]const u8,
+        is_first_line_in_hunk: bool,
     ) !usize {
         if (content_width == 0) return 1;
 
         // Handle empty lines explicitly
         if (text.len == 0) {
-            try RenderUtils.renderGutter(app, win, 0, start_row, is_cursor or is_in_visual, true, file_lineno, line_type, gutter_width);
+            try RenderUtils.renderGutterWithBlame(app, win, 0, start_row, is_cursor or is_in_visual, true, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
             // Pad empty lines for cursor, visual selection, or diff lines (add/delete)
             const should_pad = is_cursor or is_in_visual or (line_type != null and line_type.? != .context);
             const display_text = try RenderUtils.padTextForCursor(app, "", content_width, should_pad);
@@ -417,8 +427,10 @@ pub const UnifiedRenderer = struct {
             }
 
             // Only show line number on first row
+            // Only pass is_first_line_in_hunk for the first rendered row
             const show_line_number = rows_rendered == 0;
-            try RenderUtils.renderGutter(app, win, 0, current_row, is_cursor or is_in_visual, show_line_number, file_lineno, line_type, gutter_width);
+            const first_line_flag = is_first_line_in_hunk and rows_rendered == 0;
+            try RenderUtils.renderGutterWithBlame(app, win, 0, current_row, is_cursor or is_in_visual, show_line_number, file_lineno, line_type, gutter_width, file_path, first_line_flag);
 
             // Get the chunk of text for this row (slice by display width, not bytes)
             const remaining_text = text[byte_offset_in_text..];

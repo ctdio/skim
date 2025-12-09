@@ -26,6 +26,7 @@ pub const SideBySideRenderer = struct {
         Navigation.clampScrollOffset(app);
 
         // Calculate global gutter width (consistent across all files)
+        // Note: Blame is not shown in side-by-side view (too wide)
         const gutter_width = StateHelpers.getGlobalGutterWidth(app.state.files);
 
         // Calculate layout: [sidebar][gutter][spacing][left_content][divider][gutter][spacing][right_content]

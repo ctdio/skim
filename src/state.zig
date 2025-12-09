@@ -53,6 +53,15 @@ pub const StateHelpers = struct {
 
     // Calculate the gutter width across all files (for consistent width in continuous view)
     pub fn getGlobalGutterWidth(files: []const parser.FileDiff) usize {
+        return getGlobalGutterWidthWithBlame(files, false);
+    }
+
+    // Calculate the gutter width with optional blame info
+    // Blame format: "12ab34cd username____ Dec  5 2024 2mo msg_trunc... " = 8 + 1 + 12 + 1 + 11 + 1 + 4 + 1 + 16 + 1 = 56 chars
+    // Or continuation: "│" (same commit as previous line)
+    pub const BLAME_GUTTER_WIDTH: usize = 56;
+
+    pub fn getGlobalGutterWidthWithBlame(files: []const parser.FileDiff, show_blame: bool) usize {
         var max_lineno: u32 = 0;
         for (files) |*file| {
             const file_max = getMaxLineNumber(file);
@@ -60,7 +69,12 @@ pub const StateHelpers = struct {
         }
         const digits = countDigits(max_lineno);
         const calculated = digits + 1;
-        return @max(calculated, Layout.min_gutter_width);
+        const base_width = @max(calculated, Layout.min_gutter_width);
+
+        if (show_blame) {
+            return base_width + BLAME_GUTTER_WIDTH;
+        }
+        return base_width;
     }
 
     // Calculate additions and deletions in a file

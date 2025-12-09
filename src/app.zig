@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const git = @import("git/diff.zig");
+const blame = @import("git/blame.zig");
 const parser = @import("git/parser.zig");
 const syntax = @import("highlighting/core.zig");
 const comments = @import("comments/store.zig");
@@ -86,6 +87,7 @@ pub const App = struct {
     mcp: ?*mcp_client.McpClient, // MCP client for server connection
     mcp_port: ?u16, // Port to connect to MCP server
     review_process: ?*review.ReviewProcess, // Background review process
+    blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
 
     const Mode = enum {
         normal, // Normal navigation and viewing
@@ -157,6 +159,9 @@ pub const App = struct {
         // Temporary status message
         status_message: ?[]const u8, // Message to show in status bar
         status_message_time: i64, // When message was set (for auto-clear)
+
+        // Blame view
+        show_blame: bool, // Whether to show git blame info in gutter
 
         // Cached stats for menu items (fetched once when entering empty menu mode)
         menu_stats_cached: bool, // Whether stats have been fetched
@@ -308,6 +313,7 @@ pub const App = struct {
                 .pending_ctrl_w = false,
                 .status_message = null,
                 .status_message_time = 0,
+                .show_blame = false,
                 .menu_stats_cached = false,
                 .working_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
                 .staged_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
@@ -330,6 +336,7 @@ pub const App = struct {
             .mcp = null,
             .mcp_port = if (@hasField(@TypeOf(config), "mcp_port")) config.mcp_port else null,
             .review_process = null,
+            .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
         };
 
         // Main loop will spawn background thread to highlight initial file
@@ -389,6 +396,13 @@ pub const App = struct {
         if (self.review_process) |proc| {
             proc.deinit();
         }
+        // Clean up blame cache
+        var blame_iter = self.blame_cache.iterator();
+        while (blame_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit();
+        }
+        self.blame_cache.deinit();
         // Clean up review log content
         if (self.state.review_log_content) |content| {
             self.allocator.free(content);
@@ -920,6 +934,49 @@ pub const App = struct {
             self.state.global_scroll_offset = 0;
         }
         Navigation.clampScrollOffset(self);
+    }
+
+    pub fn toggleBlame(self: *App) void {
+        self.state.show_blame = !self.state.show_blame;
+        self.needs_render = true;
+
+        // If enabling blame, fetch blame for all visible files
+        if (self.state.show_blame) {
+            self.fetchBlameForVisibleFiles();
+        }
+    }
+
+    /// Fetch blame data for all visible files (cached per file path)
+    fn fetchBlameForVisibleFiles(self: *App) void {
+        for (self.state.files) |*file| {
+            const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+            // Skip if already cached
+            if (self.blame_cache.contains(file_path)) continue;
+
+            // Skip untracked files (no blame available)
+            if (file.is_untracked) continue;
+
+            // Fetch blame data
+            const blame_data = blame.getBlame(self.allocator, file_path, null) catch {
+                // Silently skip files that fail to blame (binary, too large, etc.)
+                continue;
+            };
+
+            // Cache it (need to dupe the key since file_path is from parsed diff)
+            const key = self.allocator.dupe(u8, file_path) catch continue;
+            self.blame_cache.put(key, blame_data) catch {
+                self.allocator.free(key);
+                var bd = blame_data;
+                bd.deinit();
+            };
+        }
+    }
+
+    /// Get blame info for a specific file line (returns null if not available)
+    pub fn getBlameForLine(self: *App, file_path: []const u8, lineno: u32) ?*const blame.BlameLine {
+        const data = self.blame_cache.get(file_path) orelse return null;
+        return data.getLine(lineno);
     }
 
     pub fn cycleHunkViewModePrev(self: *App) !void {

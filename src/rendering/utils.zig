@@ -1,10 +1,13 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const parser = @import("../git/parser.zig");
+const blame = @import("../git/blame.zig");
 const comments = @import("../comments/store.zig");
 const rendering_common = @import("common.zig");
+const state_helpers = @import("../state.zig");
 
 const App = @import("../app.zig").App;
+const StateHelpers = state_helpers.StateHelpers;
 const Color = rendering_common.Color;
 const FrameChars = rendering_common.FrameChars;
 const Layout = rendering_common.Layout;
@@ -438,6 +441,26 @@ pub const RenderUtils = struct {
         line_type: ?parser.Line.LineType,
         gutter_width: usize,
     ) !void {
+        // Forward to extended version with no file path (no blame)
+        try renderGutterWithBlame(app, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, null, false);
+    }
+
+    /// Render gutter with optional blame info
+    /// When file_path is provided and show_blame is enabled, shows blame info before line number
+    /// is_first_line_in_hunk: When true, always show blame (don't deduplicate with previous line)
+    pub fn renderGutterWithBlame(
+        app: *App,
+        win: vaxis.Window,
+        line_idx: usize,
+        row: usize,
+        is_cursor_or_visual: bool,
+        show_number: bool,
+        file_lineno: ?u32,
+        line_type: ?parser.Line.LineType,
+        gutter_width: usize,
+        file_path: ?[]const u8,
+        is_first_line_in_hunk: bool,
+    ) !void {
         _ = line_idx; // No longer used, but kept for API compatibility
 
         // Check if we're in visual mode to use visual colors
@@ -468,6 +491,132 @@ pub const RenderUtils = struct {
             .context => base_style,
         } else base_style;
 
+        // Calculate blame width if blame is shown
+        const show_blame = app.state.show_blame and file_path != null;
+        const blame_width: usize = if (show_blame) StateHelpers.BLAME_GUTTER_WIDTH else 0;
+        const lineno_width = gutter_width - blame_width;
+
+        // Track current column offset (starts after sidebar)
+        var col_offset: usize = 1;
+
+        // Render blame info if enabled
+        if (show_blame) {
+            // Blame gutter uses same background as the diff line
+            const blame_style: vaxis.Style = if (is_visual)
+                .{ .fg = Color.dim, .bg = Color.visual_select_bg }
+            else if (is_cursor)
+                .{ .fg = Color.dim, .bg = Color.cursor_bg }
+            else if (line_type) |lt| switch (lt) {
+                .add => .{ .fg = Color.dim, .bg = Color.diff_add_bg },
+                .delete => .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
+                .context => .{ .fg = Color.dim },
+            } else .{ .fg = Color.dim };
+
+            if (show_number and file_lineno != null) {
+                // Get blame info for this line
+                const blame_info = if (file_path) |fp| app.getBlameForLine(fp, file_lineno.?) else null;
+
+                if (blame_info) |info| {
+                    // Check if this is an uncommitted line (hash starts with 00000000)
+                    const is_uncommitted = std.mem.eql(u8, &info.commit_hash, "00000000");
+
+                    // Check if same commit as previous line (for deduplication)
+                    // Skip deduplication at the start of a hunk - always show blame there
+                    const same_as_prev = if (is_first_line_in_hunk) false else blk: {
+                        const prev_blame = if (file_path) |fp| app.getBlameForLine(fp, file_lineno.? -| 1) else null;
+                        break :blk if (prev_blame) |prev| std.mem.eql(u8, &info.commit_hash, &prev.commit_hash) else false;
+                    };
+
+                    // Check if this is the 2nd line of a commit block (prev is same, prev-of-prev is different)
+                    // Used to show commit message on the line after the blame info
+                    const is_second_line_of_block = if (same_as_prev and file_lineno.? >= 2) blk: {
+                        const prev_prev_blame = if (file_path) |fp| app.getBlameForLine(fp, file_lineno.? - 2) else null;
+                        break :blk if (prev_prev_blame) |pp| !std.mem.eql(u8, &info.commit_hash, &pp.commit_hash) else true;
+                    } else same_as_prev; // If line 1, treat as 2nd line of block if same_as_prev
+
+                    var blame_buf: [StateHelpers.BLAME_GUTTER_WIDTH]u8 = undefined;
+                    @memset(&blame_buf, ' ');
+
+                    if (same_as_prev and is_second_line_of_block and info.summary.len > 0 and !is_uncommitted) {
+                        // 2nd line of commit block - show commit message (skip for uncommitted - git generates useless summary)
+                        const msg_len = @min(info.summary.len, StateHelpers.BLAME_GUTTER_WIDTH);
+                        @memcpy(blame_buf[0..msg_len], info.summary[0..msg_len]);
+                    } else if (same_as_prev) {
+                        // 3rd+ line of commit block - do nothing
+                    } else if (is_uncommitted) {
+                        const uncommited_changes_title = "Uncommited changes";
+
+                        @memcpy(blame_buf[0..uncommited_changes_title.len], uncommited_changes_title);
+                    } else {
+                        // Different commit - show full info
+                        // Copy short hash (8 chars)
+                        @memcpy(blame_buf[0..8], &info.commit_hash);
+                        blame_buf[8] = ' ';
+
+                        // Copy username or author (truncated to 12 chars)
+                        // Prefer username if it's different from author and non-empty
+                        const display_name = blk: {
+                            if (info.username.len > 0) {
+                                // Check if username looks different from author (not just a prefix)
+                                const author_lower_start = if (info.author.len > 0) info.author[0] else 0;
+                                const user_lower_start = if (info.username.len > 0) info.username[0] else 0;
+                                if (author_lower_start != user_lower_start) {
+                                    break :blk info.username;
+                                }
+                            }
+                            break :blk info.author;
+                        };
+                        const name = blame.formatAuthor(display_name, 12);
+                        @memcpy(blame_buf[9 .. 9 + name.len], name);
+                        blame_buf[21] = ' ';
+
+                        // Format date as "Mon DD YYYY" (11 chars)
+                        var date_buf: [16]u8 = undefined;
+                        const date_str = blame.formatDate(&date_buf, info.timestamp);
+                        const date_start: usize = 22;
+                        const date_len = @min(date_str.len, @as(usize, 11));
+                        @memcpy(blame_buf[date_start .. date_start + date_len], date_str[0..date_len]);
+                        blame_buf[33] = ' ';
+
+                        // Format relative time (up to 4 chars)
+                        var time_buf: [8]u8 = undefined;
+                        const time_str = blame.formatRelativeTime(&time_buf, info.timestamp);
+                        const time_start: usize = 34;
+                        const time_len = @min(time_str.len, @as(usize, 4));
+                        @memcpy(blame_buf[time_start .. time_start + time_len], time_str[0..time_len]);
+                        // Commit message is shown on 2nd line of block (if available)
+                    }
+
+                    const blame_text = try copyFrameText(app, &blame_buf);
+                    var blame_seg = [_]vaxis.Cell.Segment{.{
+                        .text = blame_text,
+                        .style = blame_style,
+                    }};
+                    _ = try win.print(&blame_seg, .{ .row_offset = row, .col_offset = col_offset });
+                } else {
+                    // No blame info - render empty space
+                    const spaces = try frameTextSlice(app, blame_width);
+                    @memset(spaces, ' ');
+                    var blame_seg = [_]vaxis.Cell.Segment{.{
+                        .text = spaces,
+                        .style = blame_style,
+                    }};
+                    _ = try win.print(&blame_seg, .{ .row_offset = row, .col_offset = col_offset });
+                }
+            } else {
+                // No line number - render empty blame space
+                const spaces = try frameTextSlice(app, blame_width);
+                @memset(spaces, ' ');
+                var blame_seg = [_]vaxis.Cell.Segment{.{
+                    .text = spaces,
+                    .style = if (show_number) base_style else empty_gutter_style,
+                }};
+                _ = try win.print(&blame_seg, .{ .row_offset = row, .col_offset = col_offset });
+            }
+            col_offset += blame_width;
+        }
+
+        // Render line number and sign
         if (show_number) {
             if (file_lineno) |lineno| {
                 // Show line number and diff sign (GitHub style: number right-justified, sign after)
@@ -480,7 +629,7 @@ pub const RenderUtils = struct {
                 // Format number
                 var num_buf: [16]u8 = undefined;
                 const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{lineno});
-                const num_width = gutter_width - 1; // Reserve 1 char for sign
+                const num_width = lineno_width - 1; // Reserve 1 char for sign
                 const padding_needed = num_width -| num_str.len;
 
                 // Build gutter with right-justified number and sign
@@ -542,26 +691,26 @@ pub const RenderUtils = struct {
                     .{ .text = number_text, .style = number_style },
                     .{ .text = sign_text, .style = sign_style },
                 };
-                _ = try win.print(&segments, .{ .row_offset = row, .col_offset = 1 });
+                _ = try win.print(&segments, .{ .row_offset = row, .col_offset = col_offset });
             } else {
                 // For hunk headers or other lines without file line numbers, always show empty gutter
-                const spaces_slice = try frameTextSlice(app, gutter_width);
+                const spaces_slice = try frameTextSlice(app, lineno_width);
                 @memset(spaces_slice, ' ');
                 var seg = [_]vaxis.Cell.Segment{.{
                     .text = spaces_slice,
                     .style = base_style,
                 }};
-                _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 1 });
+                _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
             }
         } else {
             // For wrapped continuation lines, show empty gutter with diff background
-            const spaces_slice = try frameTextSlice(app, gutter_width);
+            const spaces_slice = try frameTextSlice(app, lineno_width);
             @memset(spaces_slice, ' ');
             var seg = [_]vaxis.Cell.Segment{.{
                 .text = spaces_slice,
                 .style = empty_gutter_style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 1 });
+            _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
         }
 
         // Render spacing after gutter with appropriate diff background color
