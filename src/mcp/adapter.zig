@@ -432,6 +432,26 @@ fn setKeepalive(handle: posix.socket_t) void {
     posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&enable)) catch |err| {
         std.log.warn("Failed to set SO_KEEPALIVE: {}", .{err});
     };
+
+    // Set aggressive keepalive parameters to detect dead connections faster
+    const keepalive_time: c_int = 30; // 30 seconds
+    const IPPROTO_TCP: u32 = 6;
+
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .macos) {
+        const TCP_KEEPALIVE: u32 = 0x10; // macOS specific
+        posix.setsockopt(handle, IPPROTO_TCP, TCP_KEEPALIVE, std.mem.asBytes(&keepalive_time)) catch {};
+    } else if (builtin.os.tag == .linux) {
+        const TCP_KEEPIDLE: u32 = 4;
+        const TCP_KEEPINTVL: u32 = 5;
+        const TCP_KEEPCNT: u32 = 6;
+        const keepalive_interval: c_int = 10; // 10 seconds between probes
+        const keepalive_count: c_int = 3; // 3 probes before giving up
+
+        posix.setsockopt(handle, IPPROTO_TCP, TCP_KEEPIDLE, std.mem.asBytes(&keepalive_time)) catch {};
+        posix.setsockopt(handle, IPPROTO_TCP, TCP_KEEPINTVL, std.mem.asBytes(&keepalive_interval)) catch {};
+        posix.setsockopt(handle, IPPROTO_TCP, TCP_KEEPCNT, std.mem.asBytes(&keepalive_count)) catch {};
+    }
 }
 
 // =============================================================================
