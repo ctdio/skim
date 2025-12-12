@@ -109,56 +109,33 @@ pub const UI = struct {
         const title = "No changes to review";
         const subtitle = "Select a diff source:";
 
-        // Fetch stats for each menu option
-        const working_stats = git.getDiffStats(app.allocator, .{ .working_dir = .{ .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
-        const staged_stats = git.getDiffStats(app.allocator, .{ .working_dir = .{ .staged = true } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+        // Start async stats fetch on first render (non-blocking)
+        app.startMenuStatsFetch();
 
-        // Detect default branch and fetch stats (matches switchDiffMode behavior)
-        // Note: detectDefaultBranch always allocates, even for "main", so we must always free
-        var default_branch: []const u8 = "main"; // Fallback default
-        var branch_allocated = false;
-        if (git.detectDefaultBranch(app.allocator)) |branch| {
-            default_branch = branch;
-            branch_allocated = true;
-        } else |_| {}
-        defer if (branch_allocated) app.allocator.free(default_branch);
+        // Get cached stats if available, otherwise null
+        const stats_ready = app.state.menu_stats_cached;
+        const working_stats: ?git.DiffStats = if (stats_ready) app.state.working_stats else null;
+        const staged_stats: ?git.DiffStats = if (stats_ready) app.state.staged_stats else null;
+        const main_stats: ?git.DiffStats = if (stats_ready) app.state.main_stats else null;
 
-        const main_stats = git.getDiffStats(app.allocator, .{ .single_ref = .{ .ref = default_branch, .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+        // Get default branch name (use cached if available, otherwise "main")
+        const default_branch = app.state.default_branch_name orelse "main";
 
-        // MenuItem struct with optional stats for colored rendering
         const MenuItem = struct {
             label: []const u8,
-            description_prefix: []const u8,
+            description: []const u8,
             stats: ?git.DiffStats,
         };
 
-        var working_label_buf: [128]u8 = undefined;
-        const working_label = try std.fmt.bufPrint(&working_label_buf, "Uncommitted changes (", .{});
-
-        var staged_label_buf: [128]u8 = undefined;
-        const staged_label = try std.fmt.bufPrint(&staged_label_buf, "Changes ready to commit (", .{});
-
-        var main_label_buf: [128]u8 = undefined;
-        const main_label = try std.fmt.bufPrint(&main_label_buf, "Compare against {s} (", .{default_branch});
-
-        // Build menu items dynamically based on graphite availability
-        const has_graphite = app.state.graphite_available;
-
-        // Use ArrayList to build menu dynamically
-        var menu_items = std.ArrayList(MenuItem).init(app.allocator);
-        defer menu_items.deinit();
-
-        try menu_items.append(.{ .label = "Working directory", .description_prefix = working_label, .stats = working_stats });
-        try menu_items.append(.{ .label = "Staged changes", .description_prefix = staged_label, .stats = staged_stats });
-        try menu_items.append(.{ .label = "Main branch", .description_prefix = main_label, .stats = main_stats });
-        try menu_items.append(.{ .label = "Select branch...", .description_prefix = "Choose a specific branch", .stats = null });
-
-        if (has_graphite) {
-            try menu_items.append(.{ .label = "Graphite stack", .description_prefix = "Review branches in current stack", .stats = null });
-        }
-
-        try menu_items.append(.{ .label = "Refresh", .description_prefix = "Reload current diff source", .stats = null });
-        try menu_items.append(.{ .label = "Quit", .description_prefix = "Exit Skim", .stats = null });
+        const menu_items = [_]MenuItem{
+            .{ .label = "Working directory", .description = "Uncommitted changes", .stats = working_stats },
+            .{ .label = "Staged changes", .description = "Changes ready to commit", .stats = staged_stats },
+            .{ .label = "Main branch", .description = default_branch, .stats = main_stats },
+            .{ .label = "Select branch...", .description = "Choose a specific branch", .stats = null },
+            .{ .label = "Graphite stack", .description = "Review branches in current stack", .stats = null },
+            .{ .label = "Refresh", .description = "Reload current diff source", .stats = null },
+            .{ .label = "Quit", .description = "Exit Skim", .stats = null },
+        };
 
         const center_row = win.height / 2;
         const start_row = if (center_row > 4) center_row - 4 else 0;
@@ -184,10 +161,10 @@ pub const UI = struct {
         // Menu items - find longest item to center the block
         const separator = " - ";
         var max_len: usize = 0;
-        for (menu_items.items) |item| {
-            // Calculate length including stats if present (e.g., "5 files, +10, -5)")
-            const stats_len: usize = if (item.stats) |_| 30 else 0; // Approximate length for stats
-            const item_len = item.label.len + separator.len + item.description_prefix.len + stats_len;
+        for (menu_items) |item| {
+            // Estimate length including stats if present
+            const stats_len: usize = if (item.stats != null) 25 else 0;
+            const item_len = item.label.len + separator.len + item.description.len + stats_len;
             if (item_len > max_len) {
                 max_len = item_len;
             }
@@ -197,14 +174,12 @@ pub const UI = struct {
         const menu_start_col = if (win.width > max_len) (win.width - max_len) / 2 else 0;
         const caret_offset = 2; // Space for caret to the left
 
-        for (menu_items.items, 0..) |item, idx| {
+        for (menu_items, 0..) |item, idx| {
             const row = start_row + 4 + idx;
             const is_selected = idx == app.state.empty_menu_selection;
-
-            // All items start at the same column (left-aligned within centered block)
             const item_col = menu_start_col;
 
-            // Build segments dynamically with colored stats
+            // Build segments dynamically
             var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
             defer segments.deinit();
 
@@ -216,12 +191,15 @@ pub const UI = struct {
             const separator_copy = try RenderUtils.copyFrameText(app, separator);
             try segments.append(.{ .text = separator_copy, .style = .{ .fg = Color.dim } });
 
-            // Description prefix
-            const desc_copy = try RenderUtils.copyFrameText(app, item.description_prefix);
+            // Description
+            const desc_copy = try RenderUtils.copyFrameText(app, item.description);
             try segments.append(.{ .text = desc_copy, .style = .{ .fg = Color.dim } });
 
-            // Add colored stats if present
+            // Add stats if available
             if (item.stats) |stats| {
+                const stats_open = try RenderUtils.copyFrameText(app, " (");
+                try segments.append(.{ .text = stats_open, .style = .{ .fg = Color.dim } });
+
                 var files_buf: [32]u8 = undefined;
                 const files_text = try std.fmt.bufPrint(&files_buf, "{d} files, ", .{stats.files});
                 const files_copy = try RenderUtils.copyFrameText(app, files_text);
@@ -237,13 +215,13 @@ pub const UI = struct {
                 const deletions_copy = try RenderUtils.copyFrameText(app, deletions_text);
                 try segments.append(.{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } });
 
-                const closing_paren = try RenderUtils.copyFrameText(app, ")");
-                try segments.append(.{ .text = closing_paren, .style = .{ .fg = Color.dim } });
+                const stats_close = try RenderUtils.copyFrameText(app, ")");
+                try segments.append(.{ .text = stats_close, .style = .{ .fg = Color.dim } });
             }
 
             _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = item_col });
 
-            // Render caret to the left of selected item (if there's space)
+            // Render caret to the left of selected item
             if (is_selected and item_col >= caret_offset) {
                 const caret_copy = try RenderUtils.copyFrameText(app, "▶");
                 var caret_seg = [_]vaxis.Cell.Segment{.{
@@ -256,7 +234,7 @@ pub const UI = struct {
 
         // Instructions at bottom
         const instructions = "↑↓/j/k/Ctrl-n/p: Navigate  |  Enter: Select";
-        const instr_row = start_row + 4 + menu_items.items.len + 2;
+        const instr_row = start_row + 4 + menu_items.len + 2;
         const instr_col = (win.width -| instructions.len) / 2;
         const instr_copy = try RenderUtils.copyFrameText(app, instructions);
         var instr_seg = [_]vaxis.Cell.Segment{.{
@@ -341,8 +319,12 @@ pub const UI = struct {
                 const branch = app.state.branch_list[branch_idx];
                 const is_selected = idx == app.state.branch_selection;
 
-                // Fetch stats for this branch (compare HEAD to branch)
-                const branch_stats = git.getDiffStats(app.allocator, .{ .two_refs = .{ .ref1 = branch, .ref2 = "HEAD", .use_merge_base = true } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+                // Use cached stats (only fetch once per branch, not on every render)
+                const branch_stats = app.state.branch_stats_cache.get(branch_idx) orelse blk: {
+                    const stats = git.getDiffStats(app.allocator, .{ .two_refs = .{ .ref1 = branch, .ref2 = "HEAD", .use_merge_base = true } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+                    app.state.branch_stats_cache.put(branch_idx, stats) catch {};
+                    break :blk stats;
+                };
 
                 // Build segments with colored stats
                 var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);

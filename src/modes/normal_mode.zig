@@ -310,10 +310,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
 /// Handle keyboard input when in empty menu (no files loaded)
 fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
-    // Menu items count depends on whether graphite is available
-    // Items: working, staged, main, branch, [stack if graphite], refresh, quit
-    const has_graphite = app.state.graphite_available;
-    const menu_items_count: usize = if (has_graphite) 7 else 6;
+    // Fixed menu: working, staged, main, branch, graphite stack, refresh, quit
+    // Graphite detection happens lazily when user selects it
+    const menu_items_count: usize = 7;
 
     // Handle Ctrl+key combinations
     if (key.mods.ctrl) {
@@ -349,28 +348,16 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
             app.state.empty_menu_selection = if (app.state.empty_menu_selection == 0) menu_items_count - 1 else app.state.empty_menu_selection - 1;
         },
         '\r' => { // Enter key
-            // Menu order: working(0), staged(1), main(2), branch(3), [stack(4) if graphite], refresh, quit
-            if (has_graphite) {
-                switch (app.state.empty_menu_selection) {
-                    0 => try app.switchDiffMode(.working),
-                    1 => try app.switchDiffMode(.staged),
-                    2 => try app.switchDiffMode(.main),
-                    3 => try app.startBranchSelection(), // Select branch
-                    4 => try app.startGraphiteStack(), // Graphite stack
-                    5 => try app.refresh(), // Refresh
-                    6 => app.should_quit = true, // Quit
-                    else => {},
-                }
-            } else {
-                switch (app.state.empty_menu_selection) {
-                    0 => try app.switchDiffMode(.working),
-                    1 => try app.switchDiffMode(.staged),
-                    2 => try app.switchDiffMode(.main),
-                    3 => try app.startBranchSelection(), // Select branch
-                    4 => try app.refresh(), // Refresh
-                    5 => app.should_quit = true, // Quit
-                    else => {},
-                }
+            // Menu order: working(0), staged(1), main(2), branch(3), stack(4), refresh(5), quit(6)
+            switch (app.state.empty_menu_selection) {
+                0 => try app.switchDiffMode(.working),
+                1 => try app.switchDiffMode(.staged),
+                2 => try app.switchDiffMode(.main),
+                3 => try app.startBranchSelection(),
+                4 => try app.startGraphiteStack(), // Lazy detection happens here
+                5 => try app.refresh(),
+                6 => app.should_quit = true,
+                else => {},
             }
         },
         else => {},

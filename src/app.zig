@@ -166,14 +166,17 @@ pub const App = struct {
         // Blame view
         show_blame: bool, // Whether to show git blame info in gutter
 
-        // Cached stats for menu items (fetched once when entering empty menu mode)
+        // Cached stats for menu items (fetched async to avoid blocking UI)
         menu_stats_cached: bool, // Whether stats have been fetched
+        menu_stats_loading: bool, // Whether async fetch is in progress
         working_stats: git.DiffStats,
         staged_stats: git.DiffStats,
         main_stats: git.DiffStats,
+        default_branch_name: ?[]const u8, // Cached default branch name
         branch_stats_cache: std.AutoHashMap(usize, git.DiffStats), // branch_idx -> stats
 
-        // Graphite stack state
+        // Graphite stack state (lazy-loaded to avoid blocking startup)
+        graphite_detected: bool, // Has graphite detection been performed?
         graphite_available: bool, // Is gt CLI installed?
         graphite_stack: ?graphite.GraphiteStack, // Current stack (null if not graphite repo)
         graphite_stack_selection: usize, // Selected index in stack picker
@@ -323,12 +326,15 @@ pub const App = struct {
                 .status_message_time = 0,
                 .show_blame = false,
                 .menu_stats_cached = false,
+                .menu_stats_loading = false,
                 .working_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
                 .staged_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
                 .main_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
+                .default_branch_name = null,
                 .branch_stats_cache = std.AutoHashMap(usize, git.DiffStats).init(allocator),
-                .graphite_available = graphite.isGraphiteAvailable(allocator),
-                .graphite_stack = null, // Will be detected below
+                .graphite_detected = false, // Lazy detection on first access
+                .graphite_available = false,
+                .graphite_stack = null,
                 .graphite_stack_selection = 0,
             },
             .should_quit = false,
@@ -350,15 +356,7 @@ pub const App = struct {
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
         };
 
-        // Detect graphite stack if graphite is available
-        if (app.state.graphite_available) {
-            if (graphite.getGraphiteStack(allocator) catch null) |stack| {
-                var mutable_app = app;
-                mutable_app.state.graphite_stack = stack;
-                return mutable_app;
-            }
-        }
-
+        // Graphite detection is lazy - happens on first access to avoid blocking startup
         // Main loop will spawn background thread to highlight initial file
         return app;
     }
@@ -407,6 +405,10 @@ pub const App = struct {
         self.state.filtered_branches.deinit();
         self.state.expanded_comments.deinit();
         self.state.branch_stats_cache.deinit();
+        // Clean up cached default branch name
+        if (self.state.default_branch_name) |name| {
+            self.allocator.free(name);
+        }
         // Clean up graphite stack
         if (self.state.graphite_stack) |*stack| {
             stack.deinit(self.allocator);
@@ -503,6 +505,15 @@ pub const App = struct {
             self.state.global_cursor_line = total_lines - 1;
         }
         Navigation.clampScrollOffset(self);
+
+        // Invalidate menu stats cache (will be re-fetched on next render if needed)
+        self.state.menu_stats_cached = false;
+        self.state.menu_stats_loading = false;
+        if (self.state.default_branch_name) |name| {
+            self.allocator.free(name);
+            self.state.default_branch_name = null;
+        }
+        self.state.branch_stats_cache.clearRetainingCapacity();
 
         // Refresh graphite stack (branch state may have changed)
         self.refreshGraphiteStack();
@@ -620,7 +631,8 @@ pub const App = struct {
             // This allows async operations to trigger immediate renders
             const mcp_active = if (self.mcp) |mcp| mcp.connected or mcp.needsReconnect() else false;
             const has_active_review = if (self.review_process) |proc| proc.status == .running and self.state.review_panel_open else false;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !has_active_review;
+            const stats_loading = self.state.menu_stats_loading;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !has_active_review and !stats_loading;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -1899,8 +1911,112 @@ pub const App = struct {
         return false;
     }
 
+    // Menu stats async fetching
+
+    /// Context passed to the stats fetching thread
+    const MenuStatsContext = struct {
+        app: *App,
+    };
+
+    /// Start async fetching of menu stats (non-blocking)
+    /// Call this on first render of empty menu, then check menu_stats_cached on subsequent renders
+    pub fn startMenuStatsFetch(self: *App) void {
+        if (self.state.menu_stats_cached or self.state.menu_stats_loading) return;
+
+        self.state.menu_stats_loading = true;
+
+        // Spawn detached thread to fetch stats
+        const thread = std.Thread.spawn(.{}, menuStatsFetchWorker, .{self}) catch {
+            // If thread spawn fails, fall back to sync fetch
+            self.state.menu_stats_loading = false;
+            self.fetchMenuStatsSync();
+            return;
+        };
+        thread.detach();
+    }
+
+    /// Worker thread that fetches menu stats in background
+    fn menuStatsFetchWorker(self: *App) void {
+        // Use a thread-local allocator for git operations
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer _ = gpa.deinit();
+        const alloc = gpa.allocator();
+
+        // Fetch stats using thread-local allocator
+        const working = git.getDiffStats(alloc, .{ .working_dir = .{ .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+        const staged = git.getDiffStats(alloc, .{ .working_dir = .{ .staged = true } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+
+        // Detect default branch
+        var default_branch: []const u8 = "main";
+        var branch_allocated = false;
+        if (git.detectDefaultBranch(alloc)) |branch| {
+            default_branch = branch;
+            branch_allocated = true;
+        } else |_| {}
+        defer if (branch_allocated) alloc.free(default_branch);
+
+        const main_stats = git.getDiffStats(alloc, .{ .single_ref = .{ .ref = default_branch, .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+
+        // Copy default branch name to app's allocator (for long-term storage)
+        const branch_copy = self.allocator.dupe(u8, default_branch) catch null;
+
+        // Write results to app state
+        // Note: This is safe because we only read these when menu_stats_cached is true
+        self.state.working_stats = working;
+        self.state.staged_stats = staged;
+        self.state.main_stats = main_stats;
+        self.state.default_branch_name = branch_copy;
+        self.state.menu_stats_cached = true;
+        self.state.menu_stats_loading = false;
+
+        // Trigger re-render so stats appear without user input
+        self.needs_render = true;
+    }
+
+    /// Synchronous fallback for stats fetching (used if thread spawn fails)
+    fn fetchMenuStatsSync(self: *App) void {
+        self.state.working_stats = git.getDiffStats(self.allocator, .{ .working_dir = .{ .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+        self.state.staged_stats = git.getDiffStats(self.allocator, .{ .working_dir = .{ .staged = true } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+
+        var default_branch: []const u8 = "main";
+        var branch_allocated = false;
+        if (git.detectDefaultBranch(self.allocator)) |branch| {
+            default_branch = branch;
+            branch_allocated = true;
+        } else |_| {}
+
+        self.state.main_stats = git.getDiffStats(self.allocator, .{ .single_ref = .{ .ref = default_branch, .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+
+        // Store branch name (take ownership if allocated, otherwise dupe)
+        if (branch_allocated) {
+            self.state.default_branch_name = default_branch;
+        } else {
+            self.state.default_branch_name = self.allocator.dupe(u8, default_branch) catch null;
+        }
+
+        self.state.menu_stats_cached = true;
+    }
+
     // Graphite stack functions
+
+    /// Lazy graphite detection - only runs once on first access
+    /// This avoids blocking startup with `which gt` and `gt state` calls
+    pub fn ensureGraphiteDetected(self: *App) void {
+        if (self.state.graphite_detected) return;
+
+        self.state.graphite_detected = true;
+        self.state.graphite_available = graphite.isGraphiteAvailable(self.allocator);
+
+        if (self.state.graphite_available) {
+            if (graphite.getGraphiteStack(self.allocator) catch null) |stack| {
+                self.state.graphite_stack = stack;
+            }
+        }
+    }
+
     pub fn startGraphiteStack(self: *App) !void {
+        self.ensureGraphiteDetected();
+
         if (!self.state.graphite_available) {
             self.state.status_message = "Graphite CLI (gt) not installed";
             self.state.status_message_time = std.time.milliTimestamp();
@@ -1920,6 +2036,8 @@ pub const App = struct {
 
     /// Refresh the graphite stack (called on app refresh)
     pub fn refreshGraphiteStack(self: *App) void {
+        self.ensureGraphiteDetected();
+
         if (!self.state.graphite_available) return;
 
         // Free old stack
