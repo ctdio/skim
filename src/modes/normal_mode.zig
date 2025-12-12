@@ -53,6 +53,11 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.updateCurrentFileAndTriggerHighlighting();
             return;
         }
+        // If s, navigate to parent branch (visually down toward trunk)
+        if (key.codepoint == 's') {
+            try app.navigateStackToParent();
+            return;
+        }
         // Any other key cancels the pending bracket, but still processes the key below
     }
 
@@ -77,6 +82,11 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             Navigation.jumpToNextComment(app);
             app.state.cursor_column = 0;
             app.updateCurrentFileAndTriggerHighlighting();
+            return;
+        }
+        // If s, navigate to child branch (visually up toward tip)
+        if (key.codepoint == 's') {
+            try app.navigateStackToChild();
             return;
         }
         // Any other key cancels the pending close bracket, but still processes the key below
@@ -290,6 +300,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         'A' => try app.stageAllFiles(), // Stage all files (git add -A)
         'o' => app.toggleCommentUnderCursorExpanded(), // Toggle comment expand/collapse
         'B' => app.toggleBlame(), // Toggle git blame in gutter
+        'S' => try app.startGraphiteStack(), // Open graphite stack picker
         else => {
             // Reset count prefix on any other key
             app.state.count_prefix = null;
@@ -299,7 +310,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
 /// Handle keyboard input when in empty menu (no files loaded)
 fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
-    const menu_items_count: usize = 6; // working, staged, main, branch, refresh, quit
+    // Menu items count depends on whether graphite is available
+    // Items: working, staged, main, branch, [stack if graphite], refresh, quit
+    const has_graphite = app.state.graphite_available;
+    const menu_items_count: usize = if (has_graphite) 7 else 6;
 
     // Handle Ctrl+key combinations
     if (key.mods.ctrl) {
@@ -335,14 +349,28 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
             app.state.empty_menu_selection = if (app.state.empty_menu_selection == 0) menu_items_count - 1 else app.state.empty_menu_selection - 1;
         },
         '\r' => { // Enter key
-            switch (app.state.empty_menu_selection) {
-                0 => try app.switchDiffMode(.working),
-                1 => try app.switchDiffMode(.staged),
-                2 => try app.switchDiffMode(.main),
-                3 => try app.startBranchSelection(), // Select branch
-                4 => try app.refresh(), // Refresh
-                5 => app.should_quit = true, // Quit
-                else => {},
+            // Menu order: working(0), staged(1), main(2), branch(3), [stack(4) if graphite], refresh, quit
+            if (has_graphite) {
+                switch (app.state.empty_menu_selection) {
+                    0 => try app.switchDiffMode(.working),
+                    1 => try app.switchDiffMode(.staged),
+                    2 => try app.switchDiffMode(.main),
+                    3 => try app.startBranchSelection(), // Select branch
+                    4 => try app.startGraphiteStack(), // Graphite stack
+                    5 => try app.refresh(), // Refresh
+                    6 => app.should_quit = true, // Quit
+                    else => {},
+                }
+            } else {
+                switch (app.state.empty_menu_selection) {
+                    0 => try app.switchDiffMode(.working),
+                    1 => try app.switchDiffMode(.staged),
+                    2 => try app.switchDiffMode(.main),
+                    3 => try app.startBranchSelection(), // Select branch
+                    4 => try app.refresh(), // Refresh
+                    5 => app.should_quit = true, // Quit
+                    else => {},
+                }
             }
         },
         else => {},

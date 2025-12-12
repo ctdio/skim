@@ -7,6 +7,7 @@ const git = @import("git/diff.zig");
 const review = @import("review.zig");
 
 const App = @import("app.zig").App;
+const graphite = @import("git/graphite.zig");
 const Color = rendering_common.Color;
 const Layout = rendering_common.Layout;
 const FrameChars = rendering_common.FrameChars;
@@ -140,14 +141,24 @@ pub const UI = struct {
         var main_label_buf: [128]u8 = undefined;
         const main_label = try std.fmt.bufPrint(&main_label_buf, "Compare against {s} (", .{default_branch});
 
-        const menu_items = [_]MenuItem{
-            .{ .label = "Working directory", .description_prefix = working_label, .stats = working_stats },
-            .{ .label = "Staged changes", .description_prefix = staged_label, .stats = staged_stats },
-            .{ .label = "Main branch", .description_prefix = main_label, .stats = main_stats },
-            .{ .label = "Select branch...", .description_prefix = "Choose a specific branch", .stats = null },
-            .{ .label = "Refresh", .description_prefix = "Reload current diff source", .stats = null },
-            .{ .label = "Quit", .description_prefix = "Exit Skim", .stats = null },
-        };
+        // Build menu items dynamically based on graphite availability
+        const has_graphite = app.state.graphite_available;
+
+        // Use ArrayList to build menu dynamically
+        var menu_items = std.ArrayList(MenuItem).init(app.allocator);
+        defer menu_items.deinit();
+
+        try menu_items.append(.{ .label = "Working directory", .description_prefix = working_label, .stats = working_stats });
+        try menu_items.append(.{ .label = "Staged changes", .description_prefix = staged_label, .stats = staged_stats });
+        try menu_items.append(.{ .label = "Main branch", .description_prefix = main_label, .stats = main_stats });
+        try menu_items.append(.{ .label = "Select branch...", .description_prefix = "Choose a specific branch", .stats = null });
+
+        if (has_graphite) {
+            try menu_items.append(.{ .label = "Graphite stack", .description_prefix = "Review branches in current stack", .stats = null });
+        }
+
+        try menu_items.append(.{ .label = "Refresh", .description_prefix = "Reload current diff source", .stats = null });
+        try menu_items.append(.{ .label = "Quit", .description_prefix = "Exit Skim", .stats = null });
 
         const center_row = win.height / 2;
         const start_row = if (center_row > 4) center_row - 4 else 0;
@@ -173,7 +184,7 @@ pub const UI = struct {
         // Menu items - find longest item to center the block
         const separator = " - ";
         var max_len: usize = 0;
-        for (menu_items) |item| {
+        for (menu_items.items) |item| {
             // Calculate length including stats if present (e.g., "5 files, +10, -5)")
             const stats_len: usize = if (item.stats) |_| 30 else 0; // Approximate length for stats
             const item_len = item.label.len + separator.len + item.description_prefix.len + stats_len;
@@ -186,7 +197,7 @@ pub const UI = struct {
         const menu_start_col = if (win.width > max_len) (win.width - max_len) / 2 else 0;
         const caret_offset = 2; // Space for caret to the left
 
-        for (menu_items, 0..) |item, idx| {
+        for (menu_items.items, 0..) |item, idx| {
             const row = start_row + 4 + idx;
             const is_selected = idx == app.state.empty_menu_selection;
 
@@ -245,7 +256,7 @@ pub const UI = struct {
 
         // Instructions at bottom
         const instructions = "↑↓/j/k/Ctrl-n/p: Navigate  |  Enter: Select";
-        const instr_row = start_row + 4 + menu_items.len + 2;
+        const instr_row = start_row + 4 + menu_items.items.len + 2;
         const instr_col = (win.width -| instructions.len) / 2;
         const instr_copy = try RenderUtils.copyFrameText(app, instructions);
         var instr_seg = [_]vaxis.Cell.Segment{.{
@@ -390,6 +401,110 @@ pub const UI = struct {
         _ = try win.print(&instr_seg, .{ .row_offset = instr_row, .col_offset = instr_col });
     }
 
+    pub fn renderGraphiteStackDialog(app: *App, win: vaxis.Window) !void {
+        const stack = app.state.graphite_stack orelse return;
+
+        const branch_count = stack.branches.len;
+
+        // Calculate dialog dimensions
+        var max_branch_len: usize = 0;
+        for (stack.branches) |branch| {
+            const indicator_len: usize = if (branch.needs_restack) " (needs restack)".len else 0;
+            const current_indicator_len: usize = 12; // " ← current"
+            const item_len = branch.name.len + indicator_len + current_indicator_len + 6; // "▶ ◯ " prefix
+            if (item_len > max_branch_len) {
+                max_branch_len = item_len;
+            }
+        }
+
+        const title = " Graphite Stack ";
+        const instructions = "j/k:Navigate  Enter:Select  ESC:Close";
+        const dialog_width = @max(@max(max_branch_len + 4, title.len + 4), instructions.len + 4);
+        const dialog_height = branch_count + 5; // title + branches + instructions + padding
+
+        const popup_width = @min(dialog_width, win.width - 4);
+        const popup_height = @min(dialog_height, win.height - 4);
+        const x_offset = if (win.width > popup_width) (win.width - popup_width) / 2 else 0;
+        const y_offset = if (win.height > popup_height) (win.height - popup_height) / 2 else 0;
+
+        const popup_win = win.child(.{
+            .x_off = x_offset,
+            .y_off = y_offset,
+            .width = .{ .limit = popup_width },
+            .height = .{ .limit = popup_height },
+            .border = .{
+                .where = .all,
+                .style = .{ .fg = Color.cyan },
+            },
+        });
+
+        popup_win.clear();
+
+        // Fill with solid background
+        const bg_cell = vaxis.Cell{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{ .bg = .{ .index = 0 } }, // black background
+        };
+        popup_win.fill(bg_cell);
+
+        // Title
+        const title_copy = try RenderUtils.copyFrameText(app, title);
+        var title_seg = [_]vaxis.Cell.Segment{.{
+            .text = title_copy,
+            .style = .{ .fg = Color.cyan, .bold = true },
+        }};
+        _ = try popup_win.print(&title_seg, .{ .row_offset = 0 });
+
+        // Render stack branches (tip at top, trunk at bottom)
+        for (0..branch_count) |visual_idx| {
+            const array_idx = branch_count - 1 - visual_idx;
+            const branch = stack.branches[array_idx];
+            const row = visual_idx + 2;
+            const is_selected = array_idx == app.state.graphite_stack_selection;
+            const is_current = array_idx == stack.current_idx;
+
+            var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
+            defer segments.deinit();
+
+            // Selection caret
+            const caret = if (is_selected) "▶ " else "  ";
+            const caret_copy = try RenderUtils.copyFrameText(app, caret);
+            try segments.append(.{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+
+            // Tree symbol (trunk at bottom, tip branches at top)
+            const is_tip = array_idx == branch_count - 1;
+            const tree_symbol = if (branch.is_trunk) "◉ " else if (is_tip) "◇ " else "○ ";
+            const tree_copy = try RenderUtils.copyFrameText(app, tree_symbol);
+            try segments.append(.{ .text = tree_copy, .style = .{ .fg = if (is_current) Color.green else Color.dim } });
+
+            // Branch name
+            const name_copy = try RenderUtils.copyFrameText(app, branch.name);
+            try segments.append(.{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+
+            // Current indicator
+            if (is_current) {
+                const current_copy = try RenderUtils.copyFrameText(app, " ← you");
+                try segments.append(.{ .text = current_copy, .style = .{ .fg = Color.green } });
+            }
+
+            // Needs restack indicator
+            if (branch.needs_restack) {
+                const restack_copy = try RenderUtils.copyFrameText(app, " !");
+                try segments.append(.{ .text = restack_copy, .style = .{ .fg = Color.yellow, .bold = true } });
+            }
+
+            _ = try popup_win.print(segments.items, .{ .row_offset = row, .col_offset = 1 });
+        }
+
+        // Instructions at bottom
+        const instr_copy = try RenderUtils.copyFrameText(app, instructions);
+        var instr_seg = [_]vaxis.Cell.Segment{.{
+            .text = instr_copy,
+            .style = .{ .fg = Color.dim },
+        }};
+        _ = try popup_win.print(&instr_seg, .{ .row_offset = popup_height - 2, .col_offset = 1 });
+    }
+
     pub fn renderHeader(app: *App, win: vaxis.Window) !void {
         if (win.height == 0 or win.width == 0) return;
         win.clear();
@@ -490,6 +605,7 @@ pub const UI = struct {
             .branch_selection => "-- BRANCH SELECTION --",
             .mcp_status => "-- MCP STATUS --",
             .review_log => "-- REVIEW LOG --",
+            .graphite_stack => "-- GRAPHITE STACK --",
         };
 
         const view_str = switch (app.state.view_mode) {
@@ -521,6 +637,7 @@ pub const UI = struct {
             .branch_selection => "j/k:Move  |  Enter:Select  |  ESC:Back",
             .mcp_status => "q/ESC:Close",
             .review_log => "j/k:Scroll  |  d/u:Page  |  Tab:Style  |  q:Exit  |  L:Close",
+            .graphite_stack => "j/k:Move  |  Enter:Select  |  ESC:Back  |  [s/]s:Navigate",
         };
 
         // Get global position info
@@ -578,6 +695,13 @@ pub const UI = struct {
             const diff_str_copy = try RenderUtils.copyFrameText(app, diff_str);
             try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
             try segments.append(.{ .text = diff_str_copy, .style = .{ .fg = Color.cyan } });
+
+            // Show graphite stack position if in a stack
+            if (app.state.graphite_stack) |stack| {
+                var stack_buf: [64]u8 = undefined;
+                const stack_pos = try std.fmt.bufPrint(&stack_buf, " [{d}/{d} in stack]", .{ stack.current_idx + 1, stack.branches.len });
+                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, stack_pos), .style = .{ .fg = Color.magenta } });
+            }
 
             // Only show hunk view mode indicator in unified view (where filtering applies)
             if (app.state.view_mode == .unified) {

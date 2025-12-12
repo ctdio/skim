@@ -35,8 +35,10 @@ const branch_selection_mode = @import("modes/branch_selection_mode.zig");
 const mcp_status_mode = @import("modes/mcp_status_mode.zig");
 const mcp_status = @import("mcp_status.zig");
 const review_log_mode = @import("modes/review_log_mode.zig");
+const graphite_mode = @import("modes/graphite_mode.zig");
 const app_config = @import("config.zig");
 const review = @import("review.zig");
+const graphite = @import("git/graphite.zig");
 
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
@@ -99,6 +101,7 @@ pub const App = struct {
         branch_selection, // Branch selection menu (when empty)
         mcp_status, // MCP server connection status
         review_log, // Review log viewer
+        graphite_stack, // Graphite stack picker
     };
 
     // Character find commands for NORMAL mode (f/t/F/T)
@@ -169,6 +172,11 @@ pub const App = struct {
         staged_stats: git.DiffStats,
         main_stats: git.DiffStats,
         branch_stats_cache: std.AutoHashMap(usize, git.DiffStats), // branch_idx -> stats
+
+        // Graphite stack state
+        graphite_available: bool, // Is gt CLI installed?
+        graphite_stack: ?graphite.GraphiteStack, // Current stack (null if not graphite repo)
+        graphite_stack_selection: usize, // Selected index in stack picker
 
         const ViewMode = enum {
             unified,
@@ -319,6 +327,9 @@ pub const App = struct {
                 .staged_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
                 .main_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
                 .branch_stats_cache = std.AutoHashMap(usize, git.DiffStats).init(allocator),
+                .graphite_available = graphite.isGraphiteAvailable(allocator),
+                .graphite_stack = null, // Will be detected below
+                .graphite_stack_selection = 0,
             },
             .should_quit = false,
             .should_suspend_for_editor = false,
@@ -338,6 +349,15 @@ pub const App = struct {
             .review_process = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
         };
+
+        // Detect graphite stack if graphite is available
+        if (app.state.graphite_available) {
+            if (graphite.getGraphiteStack(allocator) catch null) |stack| {
+                var mutable_app = app;
+                mutable_app.state.graphite_stack = stack;
+                return mutable_app;
+            }
+        }
 
         // Main loop will spawn background thread to highlight initial file
         return app;
@@ -387,6 +407,10 @@ pub const App = struct {
         self.state.filtered_branches.deinit();
         self.state.expanded_comments.deinit();
         self.state.branch_stats_cache.deinit();
+        // Clean up graphite stack
+        if (self.state.graphite_stack) |*stack| {
+            stack.deinit(self.allocator);
+        }
         // Clean up MCP client
         if (self.mcp) |mcp| {
             mcp.deinit();
@@ -479,6 +503,9 @@ pub const App = struct {
             self.state.global_cursor_line = total_lines - 1;
         }
         Navigation.clampScrollOffset(self);
+
+        // Refresh graphite stack (branch state may have changed)
+        self.refreshGraphiteStack();
     }
 
     /// Stage the current file (git add) and refresh the view
@@ -870,6 +897,11 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
+                .graphite_stack => {
+                    self.mode = .normal;
+                    self.needs_render = true;
+                    return;
+                },
                 .normal, .comment => {
                     // In normal/comment modes, double-press to quit
                     const now: i64 = @intCast(std.time.nanoTimestamp());
@@ -896,6 +928,7 @@ pub const App = struct {
             .branch_selection => try branch_selection_mode.handleKey(self, key),
             .mcp_status => try mcp_status_mode.handleKey(self, key),
             .review_log => try review_log_mode.handleKey(self, key),
+            .graphite_stack => try graphite_mode.handleKey(self, key),
         }
     }
 
@@ -1866,6 +1899,121 @@ pub const App = struct {
         return false;
     }
 
+    // Graphite stack functions
+    pub fn startGraphiteStack(self: *App) !void {
+        if (!self.state.graphite_available) {
+            self.state.status_message = "Graphite CLI (gt) not installed";
+            self.state.status_message_time = std.time.milliTimestamp();
+            return;
+        }
+
+        // Use cached stack - don't re-fetch (that's slow)
+        // Stack is refreshed on app refresh ('r' key)
+        if (self.state.graphite_stack) |stack| {
+            self.state.graphite_stack_selection = stack.current_idx;
+            self.mode = .graphite_stack;
+        } else {
+            self.state.status_message = "Not in a Graphite stack";
+            self.state.status_message_time = std.time.milliTimestamp();
+        }
+    }
+
+    /// Refresh the graphite stack (called on app refresh)
+    pub fn refreshGraphiteStack(self: *App) void {
+        if (!self.state.graphite_available) return;
+
+        // Free old stack
+        if (self.state.graphite_stack) |*old_stack| {
+            old_stack.deinit(self.allocator);
+            self.state.graphite_stack = null;
+        }
+
+        // Re-fetch stack
+        if (graphite.getGraphiteStack(self.allocator) catch null) |stack| {
+            self.state.graphite_stack = stack;
+        }
+    }
+
+    pub fn selectGraphiteStackBranch(self: *App, idx: usize) !void {
+        const stack = self.state.graphite_stack orelse return;
+        if (idx >= stack.branches.len) return;
+
+        const selected = &stack.branches[idx];
+
+        // Free old diff_source
+        switch (self.state.diff_source) {
+            .working_dir => {},
+            .single_ref => |sr| self.allocator.free(sr.ref),
+            .two_refs => |tr| {
+                self.allocator.free(tr.ref1);
+                self.allocator.free(tr.ref2);
+            },
+        }
+
+        // For trunk, diff against HEAD (working changes)
+        // For other branches, diff against parent
+        if (selected.is_trunk) {
+            self.state.diff_source = DiffSource{ .working_dir = .{ .staged = false } };
+        } else if (selected.parent_ref) |parent| {
+            const parent_copy = try self.allocator.dupe(u8, parent);
+            errdefer self.allocator.free(parent_copy);
+            const branch_copy = try self.allocator.dupe(u8, selected.name);
+            errdefer self.allocator.free(branch_copy);
+
+            self.state.diff_source = DiffSource{ .two_refs = .{
+                .ref1 = parent_copy,
+                .ref2 = branch_copy,
+                .use_merge_base = true,
+            } };
+        } else {
+            // No parent - shouldn't happen for non-trunk branches
+            self.state.status_message = "No parent branch found";
+            self.state.status_message_time = std.time.milliTimestamp();
+            return;
+        }
+
+        // Update current_idx in stack to reflect selection
+        self.state.graphite_stack.?.current_idx = idx;
+
+        // Go back to normal mode and refresh
+        self.mode = .normal;
+        try self.refresh();
+    }
+
+    /// Navigate to parent branch (toward trunk, visually down in stack display)
+    pub fn navigateStackToParent(self: *App) !void {
+        const stack = self.state.graphite_stack orelse {
+            self.state.status_message = "Not in a Graphite stack";
+            self.state.status_message_time = std.time.milliTimestamp();
+            return;
+        };
+
+        if (stack.current_idx == 0) {
+            self.state.status_message = "Already at trunk (bottom of stack)";
+            self.state.status_message_time = std.time.milliTimestamp();
+            return;
+        }
+
+        try self.selectGraphiteStackBranch(stack.current_idx - 1);
+    }
+
+    /// Navigate to child branch (toward tip, visually up in stack display)
+    pub fn navigateStackToChild(self: *App) !void {
+        const stack = self.state.graphite_stack orelse {
+            self.state.status_message = "Not in a Graphite stack";
+            self.state.status_message_time = std.time.milliTimestamp();
+            return;
+        };
+
+        if (stack.current_idx + 1 >= stack.branches.len) {
+            self.state.status_message = "Already at tip (top of stack)";
+            self.state.status_message_time = std.time.milliTimestamp();
+            return;
+        }
+
+        try self.selectGraphiteStackBranch(stack.current_idx + 1);
+    }
+
     pub fn switchDiffMode(self: *App, mode: command_palette.DiffMode) !void {
         // Free old diff_source if needed
         switch (self.state.diff_source) {
@@ -2116,6 +2264,11 @@ pub const App = struct {
         // Render review log dialog if open in dialog mode
         if (self.state.review_panel_open and self.state.review_panel_style == .dialog) {
             try UI.renderReviewLogPopup(self, win);
+        }
+
+        // Render graphite stack dialog if in graphite_stack mode
+        if (self.mode == .graphite_stack) {
+            try UI.renderGraphiteStackDialog(self, win);
         }
     }
 
