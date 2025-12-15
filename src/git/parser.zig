@@ -398,3 +398,56 @@ test "parse path with prefix" {
     try std.testing.expectEqualStrings("foo/bar.txt", parsePath("b/foo/bar.txt"));
     try std.testing.expectEqualStrings("", parsePath("/dev/null"));
 }
+
+test "parse diff with merge conflict markers" {
+    const allocator = std.testing.allocator;
+
+    // This is the unified diff format that git produces with `git diff HEAD`
+    // during a merge conflict - conflict markers appear as added lines
+    const diff =
+        \\diff --git a/test.txt b/test.txt
+        \\--- a/test.txt
+        \\+++ b/test.txt
+        \\@@ -1 +1,9 @@
+        \\+<<<<<<< HEAD
+        \\ main line 2
+        \\+||||||| fa1ef98
+        \\+line 1
+        \\+line 2
+        \\+line 3
+        \\+=======
+        \\+feature line 2
+        \\+>>>>>>> feature
+    ;
+
+    const files = try parse(allocator, diff);
+    defer {
+        for (files) |*file| {
+            file.deinit(allocator);
+        }
+        allocator.free(files);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), files.len);
+    try std.testing.expectEqualStrings("test.txt", files[0].new_path);
+    try std.testing.expectEqual(@as(usize, 1), files[0].hunks.len);
+
+    const hunk = files[0].hunks[0];
+    try std.testing.expectEqual(@as(usize, 9), hunk.lines.len);
+
+    // Verify conflict markers are parsed as added lines
+    try std.testing.expectEqual(Line.LineType.add, hunk.lines[0].line_type);
+    try std.testing.expectEqualStrings("<<<<<<< HEAD", hunk.lines[0].content);
+
+    try std.testing.expectEqual(Line.LineType.context, hunk.lines[1].line_type);
+    try std.testing.expectEqualStrings("main line 2", hunk.lines[1].content);
+
+    try std.testing.expectEqual(Line.LineType.add, hunk.lines[2].line_type);
+    try std.testing.expectEqualStrings("||||||| fa1ef98", hunk.lines[2].content);
+
+    try std.testing.expectEqual(Line.LineType.add, hunk.lines[5].line_type);
+    try std.testing.expectEqualStrings("=======", hunk.lines[5].content);
+
+    try std.testing.expectEqual(Line.LineType.add, hunk.lines[7].line_type);
+    try std.testing.expectEqualStrings(">>>>>>> feature", hunk.lines[7].content);
+}

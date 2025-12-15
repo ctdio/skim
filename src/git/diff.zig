@@ -32,6 +32,11 @@ pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
         .working_dir => |wd| {
             if (wd.staged) {
                 try args.append("--cached");
+            } else if (isInMergeConflict(allocator)) {
+                // During merge conflicts, git diff outputs combined diff format which
+                // our parser doesn't understand. Use HEAD to get unified diff format
+                // that shows conflict markers as additions.
+                try args.append("HEAD");
             }
         },
         .single_ref => |sr| {
@@ -431,6 +436,36 @@ pub fn getRepoRoot(allocator: Allocator) ![]u8 {
     allocator.free(output);
 
     return result;
+}
+
+/// Check if we're currently in a merge conflict state
+/// Returns true if .git/MERGE_HEAD exists (indicates an incomplete merge)
+pub fn isInMergeConflict(allocator: Allocator) bool {
+    // Get the git directory path
+    const args = &[_][]const u8{ "git", "rev-parse", "--git-dir" };
+
+    var child = std.process.Child.init(args, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+
+    child.spawn() catch return false;
+
+    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024) catch return false;
+    defer allocator.free(stdout);
+
+    const term = child.wait() catch return false;
+    if (term != .Exited or term.Exited != 0) {
+        return false;
+    }
+
+    const git_dir = std.mem.trim(u8, stdout, " \t\r\n");
+
+    // Check if MERGE_HEAD exists
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const merge_head_path = std.fmt.bufPrint(&path_buf, "{s}/MERGE_HEAD", .{git_dir}) catch return false;
+
+    std.fs.cwd().access(merge_head_path, .{}) catch return false;
+    return true;
 }
 
 /// Get list of untracked files via git status --porcelain

@@ -2397,6 +2397,42 @@ pub const App = struct {
         }
     }
 
+    // Detect merge conflict markers and return appropriate style
+    // Conflict markers: <<<<<<< (ours/HEAD), ======= (separator), >>>>>>> (theirs), ||||||| (base in diff3)
+    fn getConflictMarkerStyle(line_text: []const u8, base_style: vaxis.Style) ?vaxis.Style {
+        // Check for each type of conflict marker at start of line
+        if (std.mem.startsWith(u8, line_text, "<<<<<<<")) {
+            // "Ours" marker (HEAD/current changes) - blue
+            return vaxis.Style{
+                .fg = Color.conflict_ours_fg,
+                .bg = if (base_style.bg != .default) base_style.bg else Color.conflict_ours_bg,
+                .bold = true,
+            };
+        } else if (std.mem.startsWith(u8, line_text, "=======")) {
+            // Separator marker - yellow
+            return vaxis.Style{
+                .fg = Color.conflict_separator_fg,
+                .bg = if (base_style.bg != .default) base_style.bg else Color.conflict_separator_bg,
+                .bold = true,
+            };
+        } else if (std.mem.startsWith(u8, line_text, ">>>>>>>")) {
+            // "Theirs" marker (incoming changes) - purple
+            return vaxis.Style{
+                .fg = Color.conflict_theirs_fg,
+                .bg = if (base_style.bg != .default) base_style.bg else Color.conflict_theirs_bg,
+                .bold = true,
+            };
+        } else if (std.mem.startsWith(u8, line_text, "|||||||")) {
+            // Base marker (diff3 mode) - gray
+            return vaxis.Style{
+                .fg = Color.conflict_base_fg,
+                .bg = if (base_style.bg != .default) base_style.bg else Color.conflict_base_bg,
+                .bold = true,
+            };
+        }
+        return null;
+    }
+
     // Generate colored segments for a line of text using syntax highlights
     // Returns array of segments with syntax colors applied as foreground
     // text: the text chunk to render (may be part of a wrapped line)
@@ -2413,6 +2449,16 @@ pub const App = struct {
         base_style: vaxis.Style,
         global_line: usize,
     ) ![]vaxis.Cell.Segment {
+        // Check for merge conflict markers and apply special styling
+        if (getConflictMarkerStyle(full_line_text, base_style)) |conflict_style| {
+            var segments = try self.allocator.alloc(vaxis.Cell.Segment, 1);
+            segments[0] = .{
+                .text = text,
+                .style = conflict_style,
+            };
+            return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
+        }
+
         if (highlights == null or text.len == 0) {
             // No highlights - return single segment
             var segments = try self.allocator.alloc(vaxis.Cell.Segment, 1);

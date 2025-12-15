@@ -54,6 +54,16 @@ pub const Color = struct {
     pub const syntax_comment = .{ .rgb = [3]u8{ 139, 148, 158 } }; // Gray #8B949E
     pub const syntax_constant = .{ .rgb = [3]u8{ 121, 192, 255 } }; // Bright blue #79C0FF
     pub const syntax_operator = .{ .rgb = [3]u8{ 255, 123, 114 } }; // Coral red (same as keywords) #FF7B72
+
+    // Merge conflict marker colors - distinct colors for each marker type
+    pub const conflict_ours_fg = .{ .rgb = [3]u8{ 88, 166, 255 } }; // Blue #58A6FF (<<<<<<< HEAD)
+    pub const conflict_ours_bg = .{ .rgb = [3]u8{ 35, 50, 70 } }; // Dark blue background #233246
+    pub const conflict_separator_fg = .{ .rgb = [3]u8{ 255, 200, 50 } }; // Yellow #FFC832 (=======)
+    pub const conflict_separator_bg = .{ .rgb = [3]u8{ 60, 55, 30 } }; // Dark yellow background #3C371E
+    pub const conflict_theirs_fg = .{ .rgb = [3]u8{ 210, 168, 255 } }; // Purple #D2A8FF (>>>>>>>)
+    pub const conflict_theirs_bg = .{ .rgb = [3]u8{ 55, 40, 70 } }; // Dark purple background #372846
+    pub const conflict_base_fg = .{ .rgb = [3]u8{ 139, 148, 158 } }; // Gray #8B949E (|||||||)
+    pub const conflict_base_bg = .{ .rgb = [3]u8{ 45, 45, 50 } }; // Dark gray background #2D2D32
 };
 
 // Layout constants
