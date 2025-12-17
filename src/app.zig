@@ -2035,10 +2035,15 @@ pub const App = struct {
     }
 
     /// Refresh the graphite stack (called on app refresh)
+    /// Only re-fetches if a graphite stack was already loaded to avoid unnecessary
+    /// process spawns when not using graphite mode.
     pub fn refreshGraphiteStack(self: *App) void {
-        self.ensureGraphiteDetected();
+        // Skip if graphite hasn't been detected or isn't available
+        if (!self.state.graphite_detected or !self.state.graphite_available) return;
 
-        if (!self.state.graphite_available) return;
+        // Only re-fetch if we already had a graphite stack loaded
+        // This avoids blocking when not using graphite mode
+        if (self.state.graphite_stack == null) return;
 
         // Free old stack
         if (self.state.graphite_stack) |*old_stack| {
@@ -2150,7 +2155,12 @@ pub const App = struct {
             .working => DiffSource{ .working_dir = .{ .staged = false } },
             .staged => DiffSource{ .working_dir = .{ .staged = true } },
             .main => blk: {
-                const default_branch = try git.detectDefaultBranch(self.allocator);
+                // Use cached default branch name if available (from async menu stats fetch)
+                // to avoid blocking git command. Fall back to detection only if not cached.
+                const default_branch = if (self.state.default_branch_name) |cached|
+                    try self.allocator.dupe(u8, cached)
+                else
+                    try git.detectDefaultBranch(self.allocator);
                 // Use single_ref to match command-line behavior (skim main)
                 // This compares working tree to default branch
                 break :blk DiffSource{ .single_ref = .{
