@@ -438,8 +438,8 @@ pub fn getRepoRoot(allocator: Allocator) ![]u8 {
     return result;
 }
 
-/// Check if we're currently in a merge conflict state
-/// Returns true if .git/MERGE_HEAD exists (indicates an incomplete merge)
+/// Check if we're currently in any conflict state (merge, rebase, cherry-pick, revert)
+/// Returns true if we're in an incomplete merge/rebase/cherry-pick/revert with conflicts
 pub fn isInMergeConflict(allocator: Allocator) bool {
     // Get the git directory path
     const args = &[_][]const u8{ "git", "rev-parse", "--git-dir" };
@@ -460,12 +460,43 @@ pub fn isInMergeConflict(allocator: Allocator) bool {
 
     const git_dir = std.mem.trim(u8, stdout, " \t\r\n");
 
-    // Check if MERGE_HEAD exists
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const merge_head_path = std.fmt.bufPrint(&path_buf, "{s}/MERGE_HEAD", .{git_dir}) catch return false;
 
-    std.fs.cwd().access(merge_head_path, .{}) catch return false;
-    return true;
+    // Check for merge conflict (MERGE_HEAD exists)
+    if (std.fmt.bufPrint(&path_buf, "{s}/MERGE_HEAD", .{git_dir})) |merge_head_path| {
+        if (std.fs.cwd().access(merge_head_path, .{})) {
+            return true;
+        } else |_| {}
+    } else |_| {}
+
+    // Check for rebase conflict (rebase-merge/ or rebase-apply/ directories exist)
+    if (std.fmt.bufPrint(&path_buf, "{s}/rebase-merge", .{git_dir})) |rebase_merge_path| {
+        if (std.fs.cwd().access(rebase_merge_path, .{})) {
+            return true;
+        } else |_| {}
+    } else |_| {}
+
+    if (std.fmt.bufPrint(&path_buf, "{s}/rebase-apply", .{git_dir})) |rebase_apply_path| {
+        if (std.fs.cwd().access(rebase_apply_path, .{})) {
+            return true;
+        } else |_| {}
+    } else |_| {}
+
+    // Check for cherry-pick conflict (CHERRY_PICK_HEAD exists)
+    if (std.fmt.bufPrint(&path_buf, "{s}/CHERRY_PICK_HEAD", .{git_dir})) |cherry_pick_path| {
+        if (std.fs.cwd().access(cherry_pick_path, .{})) {
+            return true;
+        } else |_| {}
+    } else |_| {}
+
+    // Check for revert conflict (REVERT_HEAD exists)
+    if (std.fmt.bufPrint(&path_buf, "{s}/REVERT_HEAD", .{git_dir})) |revert_path| {
+        if (std.fs.cwd().access(revert_path, .{})) {
+            return true;
+        } else |_| {}
+    } else |_| {}
+
+    return false;
 }
 
 /// Get list of untracked files via git status --porcelain
