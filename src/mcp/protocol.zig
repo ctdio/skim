@@ -29,6 +29,7 @@ pub const WelcomePayload = struct {
 pub const AddCommentPayload = struct {
     file: []const u8,
     line: u32,
+    line_type: []const u8, // "new" or "old" - which file version
     text: []const u8,
 };
 
@@ -45,7 +46,8 @@ pub const CommentInfo = struct {
     file_path: []const u8,
     line: u32,
     text: []const u8,
-    line_type: []const u8,
+    line_type: []const u8, // "add", "delete", "context"
+    line_type_flag: []const u8, // "new" or "old" - which file version
 };
 
 /// Comments list response from skim TUI to server
@@ -170,6 +172,7 @@ pub const RawMessage = struct {
     file: ?[]const u8 = null,
     old_file: ?[]const u8 = null,
     line: ?u32 = null,
+    line_type: ?[]const u8 = null, // "new" or "old"
     text: ?[]const u8 = null,
     success: ?bool = null,
     comment_idx: ?usize = null,
@@ -318,7 +321,9 @@ pub fn encodeAddComment(allocator: Allocator, payload: AddCommentPayload) ![]u8 
     try writeJsonEscaped(writer, payload.file);
     try writer.writeAll("\",\"line\":");
     try std.fmt.formatInt(payload.line, 10, .lower, .{}, writer);
-    try writer.writeAll(",\"text\":\"");
+    try writer.writeAll(",\"line_type\":\"");
+    try writeJsonEscaped(writer, payload.line_type);
+    try writer.writeAll("\",\"text\":\"");
     try writeJsonEscaped(writer, payload.text);
     try writer.writeAll("\"}\n");
     return output.toOwnedSlice();
@@ -377,6 +382,8 @@ pub fn encodeComments(allocator: Allocator, comments: []const CommentInfo) ![]u8
         try writeJsonEscaped(writer, comment.text);
         try writer.writeAll("\",\"line_type\":\"");
         try writer.writeAll(comment.line_type);
+        try writer.writeAll("\",\"line_type_flag\":\"");
+        try writeJsonEscaped(writer, comment.line_type_flag);
         try writer.writeAll("\"}");
     }
 
@@ -583,6 +590,7 @@ pub fn decode(allocator: Allocator, json_line: []const u8) !ParsedMessage {
         return .{ .add_comment = .{
             .file = try allocator.dupe(u8, msg.file orelse return error.MissingField),
             .line = msg.line orelse return error.MissingField,
+            .line_type = try allocator.dupe(u8, msg.line_type orelse return error.MissingField),
             .text = try allocator.dupe(u8, msg.text orelse return error.MissingField),
         } };
     } else if (std.mem.eql(u8, event, "comment_added")) {
@@ -603,6 +611,7 @@ pub fn decode(allocator: Allocator, json_line: []const u8) !ParsedMessage {
                 .line = c.line,
                 .text = try allocator.dupe(u8, c.text),
                 .line_type = try allocator.dupe(u8, c.line_type),
+                .line_type_flag = try allocator.dupe(u8, c.line_type_flag),
             };
         }
         return .{ .comments = .{ .comments = duped } };
@@ -745,6 +754,7 @@ test "encode and decode add_comment" {
     const encoded = try encodeAddComment(allocator, .{
         .file = "src/app.zig",
         .line = 150,
+        .line_type = "new",
         .text = "This needs error handling",
     });
     defer allocator.free(encoded);
@@ -754,6 +764,7 @@ test "encode and decode add_comment" {
         switch (decoded) {
             .add_comment => |ac| {
                 allocator.free(ac.file);
+                allocator.free(ac.line_type);
                 allocator.free(ac.text);
             },
             else => {},
@@ -763,7 +774,35 @@ test "encode and decode add_comment" {
     try std.testing.expect(decoded == .add_comment);
     try std.testing.expectEqualStrings("src/app.zig", decoded.add_comment.file);
     try std.testing.expectEqual(@as(u32, 150), decoded.add_comment.line);
+    try std.testing.expectEqualStrings("new", decoded.add_comment.line_type);
     try std.testing.expectEqualStrings("This needs error handling", decoded.add_comment.text);
+}
+
+test "add_comment with old line type" {
+    const allocator = std.testing.allocator;
+
+    const encoded = try encodeAddComment(allocator, .{
+        .file = "deleted.zig",
+        .line = 50,
+        .line_type = "old",
+        .text = "This line was deleted",
+    });
+    defer allocator.free(encoded);
+
+    const decoded = try decode(allocator, encoded);
+    defer {
+        switch (decoded) {
+            .add_comment => |ac| {
+                allocator.free(ac.file);
+                allocator.free(ac.line_type);
+                allocator.free(ac.text);
+            },
+            else => {},
+        }
+    }
+
+    try std.testing.expect(decoded == .add_comment);
+    try std.testing.expectEqualStrings("old", decoded.add_comment.line_type);
 }
 
 test "encode and decode comment_added success" {

@@ -717,13 +717,23 @@ pub const Daemon = struct {
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing line");
             return;
         };
+        const line_type = args.object.get("line_type") orelse {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing line_type");
+            return;
+        };
         const text = args.object.get("text") orelse {
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Missing text");
             return;
         };
 
-        if (client_id != .string or file != .string or text != .string) {
+        if (client_id != .string or file != .string or line_type != .string or text != .string) {
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid argument types");
+            return;
+        }
+
+        // Validate line_type
+        if (!std.mem.eql(u8, line_type.string, "new") and !std.mem.eql(u8, line_type.string, "old")) {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid line_type: must be 'new' or 'old'");
             return;
         }
 
@@ -766,6 +776,7 @@ pub const Daemon = struct {
         const msg = try protocol.encodeAddComment(self.allocator, .{
             .file = file.string,
             .line = line,
+            .line_type = line_type.string,
             .text = text.string,
         });
         defer self.allocator.free(msg);

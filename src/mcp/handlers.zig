@@ -59,25 +59,69 @@ pub fn handleAddComment(
     files: []parser.FileDiff,
     comment_store: *comments.CommentStore,
 ) !?usize {
-    // Use LineResolver to translate file:line to hunk coordinates
+    // Use LineResolver with explicit line_type selection
     const resolver = mcp_line_resolver.LineResolver.init(allocator, files);
-    const resolved = resolver.resolve(ac.file, ac.line) orelse {
-        // Line not in diff - send error response
-        try mcp.sendCommentAdded(false, null, "Line not in diff");
+
+    // Choose resolution method based on line_type
+    const resolved = if (std.mem.eql(u8, ac.line_type, "new"))
+        resolver.resolveNewLine(ac.file, ac.line)
+    else if (std.mem.eql(u8, ac.line_type, "old"))
+        resolver.resolveOldLine(ac.file, ac.line)
+    else
+        null; // Invalid line_type - should have been caught earlier
+
+    if (resolved == null) {
+        // Build descriptive error message with available lines
+        const line_info = try resolver.getLineNumbersForFile(allocator, ac.file);
+        defer if (line_info) |info| {
+            allocator.free(info.new_lines);
+            allocator.free(info.old_lines);
+        };
+
+        var error_msg = std.ArrayList(u8).init(allocator);
+        defer error_msg.deinit();
+
+        const writer = error_msg.writer();
+        try writer.print("Line {d} not found in {s} version of {s}", .{
+            ac.line,
+            ac.line_type,
+            ac.file,
+        });
+
+        if (line_info) |info| {
+            const target_lines = if (std.mem.eql(u8, ac.line_type, "new"))
+                info.new_lines
+            else
+                info.old_lines;
+
+            if (target_lines.len > 0) {
+                try writer.writeAll(". Lines in diff: ");
+                try formatLineRanges(writer, target_lines);
+            } else {
+                try writer.writeAll(". No lines of this type in diff");
+            }
+        }
+
+        const error_str = try error_msg.toOwnedSlice();
+        defer allocator.free(error_str);
+
+        try mcp.sendCommentAdded(false, null, error_str);
         return null;
-    };
+    }
+
+    const resolved_line = resolved.?;
 
     // Get line context
-    const file = &files[resolved.file_idx];
-    const hunk = &file.hunks[resolved.hunk_idx];
-    const line = &hunk.lines[resolved.line_idx];
+    const file = &files[resolved_line.file_idx];
+    const hunk = &file.hunks[resolved_line.hunk_idx];
+    const line = &hunk.lines[resolved_line.line_idx];
     const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
     // Add the comment
     try comment_store.addComment(
         file_path,
-        resolved.hunk_idx,
-        resolved.line_idx,
+        resolved_line.hunk_idx,
+        resolved_line.line_idx,
         ac.text,
         line.line_type,
         line.content,
@@ -95,6 +139,36 @@ pub fn handleAddComment(
     return comment_idx;
 }
 
+/// Helper function to format line ranges (e.g., "10-50, 100-120, 200")
+fn formatLineRanges(writer: anytype, lines: []const u32) !void {
+    if (lines.len == 0) return;
+
+    var i: usize = 0;
+    var range_count: usize = 0;
+
+    while (i < lines.len) {
+        if (range_count > 0) try writer.writeAll(", ");
+
+        const start = lines[i];
+        var end = start;
+
+        // Find consecutive lines
+        while (i + 1 < lines.len and lines[i + 1] == lines[i] + 1) {
+            i += 1;
+            end = lines[i];
+        }
+
+        if (start == end) {
+            try writer.print("{d}", .{start});
+        } else {
+            try writer.print("{d}-{d}", .{ start, end });
+        }
+
+        i += 1;
+        range_count += 1;
+    }
+}
+
 /// Handle get_comments request - send all comments back
 pub fn handleGetComments(
     allocator: Allocator,
@@ -106,14 +180,17 @@ pub fn handleGetComments(
 
     const all_comments = comment_store.comments.items;
     for (all_comments, 0..) |comment, idx| {
-        // Use new_lineno if available, otherwise old_lineno for deleted lines
-        const line_number = comment.new_lineno orelse comment.old_lineno orelse 0;
+        // Determine which line number and type flag to use
+        const line_number: u32 = if (comment.new_lineno) |new| new else comment.old_lineno orelse 0;
+        const line_type_flag: []const u8 = if (comment.new_lineno != null) "new" else "old";
+
         try comment_infos.append(.{
             .idx = idx,
             .file_path = comment.file_path,
             .line = line_number,
             .text = comment.text,
             .line_type = @tagName(comment.line_type),
+            .line_type_flag = line_type_flag,
         });
     }
 

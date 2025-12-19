@@ -17,6 +17,7 @@ pub const AddCommentParams = struct {
     client_id: []const u8,
     file: []const u8,
     line: u32,
+    line_type: []const u8, // "new" or "old" - which file version
     text: []const u8,
 };
 
@@ -147,7 +148,16 @@ pub fn addComment(ctx: *Context, args: ?std.json.Value) Result {
     };
     defer ctx.allocator.free(params.client_id);
     defer ctx.allocator.free(params.file);
+    defer ctx.allocator.free(params.line_type);
     defer ctx.allocator.free(params.text);
+
+    // Validate line_type parameter
+    if (!std.mem.eql(u8, params.line_type, "new") and
+        !std.mem.eql(u8, params.line_type, "old"))
+    {
+        return Result.textError(ctx.allocator, "Invalid line_type: must be 'new' or 'old'") catch
+            return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+    }
 
     // Find TUI client
     const client = state.tui_clients.getByIdString(params.client_id) orelse
@@ -158,6 +168,7 @@ pub fn addComment(ctx: *Context, args: ?std.json.Value) Result {
     const msg = protocol.encodeAddComment(ctx.allocator, .{
         .file = params.file,
         .line = params.line,
+        .line_type = params.line_type,
         .text = params.text,
     }) catch return Result.mcpError(framework.ErrorCode.internal_error, "Failed to encode message");
     defer ctx.allocator.free(msg);
@@ -310,7 +321,9 @@ pub fn createServer(allocator: Allocator) !Server {
 
     try server.tool(
         "add_comment",
-        "Add a review comment to a specific line",
+        "Add a review comment to a specific line. The line parameter must specify " ++
+            "which file version it refers to: use line_type='new' for added/modified " ++
+            "lines (in the new file), or line_type='old' for deleted lines (in the old file).",
         AddCommentParams,
         addComment,
     );
