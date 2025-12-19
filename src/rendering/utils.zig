@@ -288,19 +288,20 @@ pub const RenderUtils = struct {
                 const gutter_text = try copyFrameText(app, buf[0 .. sign_pos + sign.len]);
 
                 // Color the sign and number based on line type (with matching background)
+                // Use same colors as unified view for consistency
                 const sign_style: vaxis.Style = if (line_type) |lt| switch (lt) {
                     .add => if (is_cursor)
-                        .{ .fg = Color.green, .bg = Color.cursor_bg, .bold = true }
+                        .{ .fg = Color.diff_sign_add, .bg = Color.cursor_bg, .bold = true }
                     else if (is_in_visual)
-                        .{ .fg = Color.green, .bg = Color.visual_select_bg, .bold = true }
+                        .{ .fg = Color.diff_sign_add, .bg = Color.visual_select_bg, .bold = true }
                     else
-                        .{ .fg = Color.green, .bg = Color.diff_add_bg, .bold = true },
+                        .{ .fg = Color.diff_sign_add, .bg = Color.diff_add_bg, .bold = true },
                     .delete => if (is_cursor)
-                        .{ .fg = Color.red, .bg = Color.cursor_bg, .bold = true }
+                        .{ .fg = Color.diff_sign_delete, .bg = Color.cursor_bg, .bold = true }
                     else if (is_in_visual)
-                        .{ .fg = Color.red, .bg = Color.visual_select_bg, .bold = true }
+                        .{ .fg = Color.diff_sign_delete, .bg = Color.visual_select_bg, .bold = true }
                     else
-                        .{ .fg = Color.red, .bg = Color.diff_delete_bg, .bold = true },
+                        .{ .fg = Color.diff_sign_delete, .bg = Color.diff_delete_bg, .bold = true },
                     .context => if (is_cursor)
                         .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else if (is_in_visual)
@@ -310,19 +311,20 @@ pub const RenderUtils = struct {
                 } else base_style;
 
                 // Apply diff background to number as well for add/delete lines
+                // Use same colors as unified view for consistency
                 const number_style: vaxis.Style = if (line_type) |lt| switch (lt) {
                     .add => if (is_cursor)
-                        .{ .fg = Color.dim, .bg = Color.cursor_bg }
+                        .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else if (is_in_visual)
-                        .{ .fg = Color.dim, .bg = Color.visual_select_bg }
+                        .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
                     else
-                        .{ .fg = Color.dim, .bg = Color.diff_add_bg },
+                        .{ .fg = Color.diff_sign_add, .bg = Color.diff_add_bg },
                     .delete => if (is_cursor)
-                        .{ .fg = Color.dim, .bg = Color.cursor_bg }
+                        .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
                     else if (is_in_visual)
-                        .{ .fg = Color.dim, .bg = Color.visual_select_bg }
+                        .{ .fg = Color.visual_select_fg, .bg = Color.visual_select_bg, .bold = true }
                     else
-                        .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
+                        .{ .fg = Color.diff_sign_delete, .bg = Color.diff_delete_bg },
                     .context => base_style,
                 } else base_style;
 
