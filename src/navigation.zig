@@ -24,11 +24,7 @@ pub const Navigation = struct {
         const count = app.state.count_prefix orelse 1;
         app.state.count_prefix = null;
 
-        if (app.state.global_cursor_line >= count) {
-            app.state.global_cursor_line -= count;
-        } else {
-            app.state.global_cursor_line = 0;
-        }
+        app.state.global_cursor_line -|= count;
 
         // Ensure cursor stays visible
         ensureCursorVisible(app, true);
@@ -106,20 +102,10 @@ pub const Navigation = struct {
         const scroll_amount = app.state.viewport_height / 2;
 
         // Move cursor up by half viewport, clamped to 0
-        if (app.state.global_cursor_line >= scroll_amount) {
-            app.state.global_cursor_line -= scroll_amount;
-        } else {
-            app.state.global_cursor_line = 0;
-        }
+        app.state.global_cursor_line -|= scroll_amount;
 
         // Move viewport up by same amount to maintain screen position
-        if (app.state.global_scroll_offset >= scroll_amount) {
-            app.state.global_scroll_offset -= scroll_amount;
-        } else {
-            app.state.global_scroll_offset = 0;
-        }
-
-        // Clamp cursor column to new line length
+        app.state.global_scroll_offset -|= scroll_amount;
     }
 
     pub fn scrollDown(app: *App) void {
@@ -143,18 +129,10 @@ pub const Navigation = struct {
         app.state.count_prefix = null;
 
         // Move cursor up, clamped to 0
-        if (app.state.global_cursor_line >= count) {
-            app.state.global_cursor_line -= count;
-        } else {
-            app.state.global_cursor_line = 0;
-        }
+        app.state.global_cursor_line -|= count;
 
         // Move viewport up by same amount
-        if (app.state.global_scroll_offset >= count) {
-            app.state.global_scroll_offset -= count;
-        } else {
-            app.state.global_scroll_offset = 0;
-        }
+        app.state.global_scroll_offset -|= count;
     }
 
     pub fn scrollToTop(app: *App) void {
@@ -233,18 +211,10 @@ pub const Navigation = struct {
         const scroll_amount = app.state.viewport_height / 2;
 
         // Move cursor up by half viewport, clamped to 0
-        if (app.state.global_cursor_line >= scroll_amount) {
-            app.state.global_cursor_line -= scroll_amount;
-        } else {
-            app.state.global_cursor_line = 0;
-        }
+        app.state.global_cursor_line -|= scroll_amount;
 
         // Move viewport up by same amount to maintain screen position
-        if (app.state.global_scroll_offset >= scroll_amount) {
-            app.state.global_scroll_offset -= scroll_amount;
-        } else {
-            app.state.global_scroll_offset = 0;
-        }
+        app.state.global_scroll_offset -|= scroll_amount;
     }
 
     pub fn clampScrollOffset(app: *App) void {

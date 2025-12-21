@@ -67,8 +67,7 @@ pub fn performSearch(
 
     // Search through all lines in LineMap
     const total_lines = lmap.getTotalLines();
-    var line_idx: usize = 0;
-    while (line_idx < total_lines) : (line_idx += 1) {
+    for (0..total_lines) |line_idx| {
         const record = lmap.getLineRecord(line_idx) orelse continue;
 
         // Only search code lines (add, delete, context)
@@ -151,21 +150,19 @@ pub fn previousMatch(search_state: *SearchState, current_cursor: usize) ?usize {
             current_idx - 1;
         search_state.current_match_idx = prev_idx;
     } else {
-        // No current match - find last match before cursor
-        var found = false;
-        var idx = search_state.matches.items.len;
-        while (idx > 0) {
-            idx -= 1;
-            const match_line = search_state.matches.items[idx];
+        // No current match - find last match before cursor using reverse iteration
+        const items = search_state.matches.items;
+        var found_idx: ?usize = null;
+        for (items, 0..) |match_line, idx| {
             if (match_line < current_cursor) {
-                search_state.current_match_idx = idx;
-                found = true;
-                break;
+                found_idx = idx;
             }
         }
-        // If no match before cursor, wrap to last
-        if (!found and search_state.matches.items.len > 0) {
-            search_state.current_match_idx = search_state.matches.items.len - 1;
+        if (found_idx) |idx| {
+            search_state.current_match_idx = idx;
+        } else if (items.len > 0) {
+            // No match before cursor, wrap to last
+            search_state.current_match_idx = items.len - 1;
         }
     }
 
@@ -177,8 +174,8 @@ pub fn searchInLine(haystack: []const u8, needle: []const u8, case_sensitive: bo
     if (needle.len > haystack.len) return false;
     if (needle.len == 0) return false;
 
-    var i: usize = 0;
-    while (i <= haystack.len - needle.len) : (i += 1) {
+    const end = haystack.len - needle.len + 1;
+    for (0..end) |i| {
         const slice = haystack[i .. i + needle.len];
         if (case_sensitive) {
             if (std.mem.eql(u8, slice, needle)) return true;
@@ -193,7 +190,7 @@ pub fn searchInLine(haystack: []const u8, needle: []const u8, case_sensitive: bo
 /// Smart case: case-insensitive if query is all lowercase, sensitive otherwise
 pub fn isCaseSensitive(query: []const u8) bool {
     for (query) |c| {
-        if (c >= 'A' and c <= 'Z') return true;
+        if (std.ascii.isUpper(c)) return true;
     }
     return false;
 }

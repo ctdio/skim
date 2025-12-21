@@ -17,25 +17,26 @@ pub const DiffSource = union(enum) {
     },
 };
 
-/// Execute git diff and return the output as a string
-pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
+/// Build common git diff arguments for a given source
+/// Returns the args list and an optional allocated range string that the caller must free
+fn buildDiffArgs(allocator: Allocator, source: DiffSource, extra_flags: []const []const u8) !struct { args: std.ArrayList([]const u8), range_owned: ?[]const u8 } {
     var args: std.ArrayList([]const u8) = .{};
-    defer args.deinit(allocator);
+    errdefer args.deinit(allocator);
 
     try args.append(allocator, "git");
     try args.append(allocator, "diff");
-    try args.append(allocator, "--no-color");
-    try args.append(allocator, "--no-ext-diff");
-    try args.append(allocator, "-U10"); // 10 lines of context
+
+    for (extra_flags) |flag| {
+        try args.append(allocator, flag);
+    }
+
+    var range_owned: ?[]const u8 = null;
 
     switch (source) {
         .working_dir => |wd| {
             if (wd.staged) {
                 try args.append(allocator, "--cached");
             } else if (isInMergeConflict(allocator)) {
-                // During merge conflicts, git diff outputs combined diff format which
-                // our parser doesn't understand. Use HEAD to get unified diff format
-                // that shows conflict markers as additions.
                 try args.append(allocator, "HEAD");
             }
         },
@@ -49,9 +50,9 @@ pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
             if (tr.use_merge_base) {
                 var range_buf: [512]u8 = undefined;
                 const range = try std.fmt.bufPrint(&range_buf, "{s}...{s}", .{ tr.ref1, tr.ref2 });
-                const range_owned = try allocator.dupe(u8, range);
-                errdefer allocator.free(range_owned);
-                try args.append(allocator, range_owned);
+                range_owned = try allocator.dupe(u8, range);
+                errdefer if (range_owned) |r| allocator.free(r);
+                try args.append(allocator, range_owned.?);
             } else {
                 try args.append(allocator, tr.ref1);
                 try args.append(allocator, tr.ref2);
@@ -59,28 +60,17 @@ pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
         },
     }
 
-    const result = runGitCommand(allocator, args.items);
+    return .{ .args = args, .range_owned = range_owned };
+}
 
-    // Free any allocated range strings
-    switch (source) {
-        .two_refs => |tr| {
-            if (tr.use_merge_base and args.items.len > 0) {
-                // Last item is the allocated range string
-                for (args.items) |arg| {
-                    const is_git = std.mem.eql(u8, arg, "git");
-                    const is_diff = std.mem.eql(u8, arg, "diff");
-                    const is_flag = arg.len > 0 and arg[0] == '-';
-                    if (!is_git and !is_diff and !is_flag) {
-                        allocator.free(arg);
-                        break;
-                    }
-                }
-            }
-        },
-        else => {},
-    }
+/// Execute git diff and return the output as a string
+pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
+    const extra_flags = &[_][]const u8{ "--no-color", "--no-ext-diff", "-U10" };
+    var build = try buildDiffArgs(allocator, source, extra_flags);
+    defer build.args.deinit(allocator);
+    defer if (build.range_owned) |r| allocator.free(r);
 
-    return result;
+    return runGitCommand(allocator, build.args.items);
 }
 
 fn runGitCommand(allocator: Allocator, args: []const []const u8) ![]u8 {
@@ -127,78 +117,13 @@ pub const DiffStats = struct {
 
 /// Get quick diff stats using --shortstat (very fast)
 pub fn getDiffStats(allocator: Allocator, source: DiffSource) !DiffStats {
-    var args: std.ArrayList([]const u8) = .{};
-    defer args.deinit(allocator);
+    const extra_flags = &[_][]const u8{"--shortstat"};
+    var build = try buildDiffArgs(allocator, source, extra_flags);
+    defer build.args.deinit(allocator);
+    defer if (build.range_owned) |r| allocator.free(r);
 
-    try args.append(allocator, "git");
-    try args.append(allocator, "diff");
-    try args.append(allocator, "--shortstat");
-
-    switch (source) {
-        .working_dir => |wd| {
-            if (wd.staged) {
-                try args.append(allocator, "--cached");
-            }
-        },
-        .single_ref => |sr| {
-            if (sr.staged) {
-                try args.append(allocator, "--cached");
-            }
-            try args.append(allocator, sr.ref);
-        },
-        .two_refs => |tr| {
-            if (tr.use_merge_base) {
-                var range_buf: [512]u8 = undefined;
-                const range = try std.fmt.bufPrint(&range_buf, "{s}...{s}", .{ tr.ref1, tr.ref2 });
-                const range_owned = try allocator.dupe(u8, range);
-                errdefer allocator.free(range_owned);
-                try args.append(allocator, range_owned);
-            } else {
-                try args.append(allocator, tr.ref1);
-                try args.append(allocator, tr.ref2);
-            }
-        },
-    }
-
-    const output = runGitCommand(allocator, args.items) catch |err| {
-        // Free any allocated range strings before returning error
-        switch (source) {
-            .two_refs => |tr| {
-                if (tr.use_merge_base and args.items.len > 0) {
-                    for (args.items) |arg| {
-                        const is_git = std.mem.eql(u8, arg, "git");
-                        const is_diff = std.mem.eql(u8, arg, "diff");
-                        const is_flag = arg.len > 0 and arg[0] == '-';
-                        if (!is_git and !is_diff and !is_flag) {
-                            allocator.free(arg);
-                            break;
-                        }
-                    }
-                }
-            },
-            else => {},
-        }
-        return err;
-    };
+    const output = try runGitCommand(allocator, build.args.items);
     defer allocator.free(output);
-
-    // Free any allocated range strings
-    switch (source) {
-        .two_refs => |tr| {
-            if (tr.use_merge_base and args.items.len > 0) {
-                for (args.items) |arg| {
-                    const is_git = std.mem.eql(u8, arg, "git");
-                    const is_diff = std.mem.eql(u8, arg, "diff");
-                    const is_flag = arg.len > 0 and arg[0] == '-';
-                    if (!is_git and !is_diff and !is_flag) {
-                        allocator.free(arg);
-                        break;
-                    }
-                }
-            }
-        },
-        else => {},
-    }
 
     // Parse shortstat output
     // Format: " 3 files changed, 25 insertions(+), 10 deletions(-)"
@@ -245,60 +170,13 @@ pub fn getDiffStats(allocator: Allocator, source: DiffSource) !DiffStats {
 
 /// Get list of changed files (fast, without full diff)
 pub fn getChangedFiles(allocator: Allocator, source: DiffSource) ![]FileStatus {
-    var args: std.ArrayList([]const u8) = .{};
-    defer args.deinit(allocator);
+    const extra_flags = &[_][]const u8{"--name-status"};
+    var build = try buildDiffArgs(allocator, source, extra_flags);
+    defer build.args.deinit(allocator);
+    defer if (build.range_owned) |r| allocator.free(r);
 
-    try args.append(allocator, "git");
-    try args.append(allocator, "diff");
-    try args.append(allocator, "--name-status");
-
-    switch (source) {
-        .working_dir => |wd| {
-            if (wd.staged) {
-                try args.append(allocator, "--cached");
-            }
-        },
-        .single_ref => |sr| {
-            if (sr.staged) {
-                try args.append(allocator, "--cached");
-            }
-            try args.append(allocator, sr.ref);
-        },
-        .two_refs => |tr| {
-            if (tr.use_merge_base) {
-                var range_buf: [512]u8 = undefined;
-                const range = try std.fmt.bufPrint(&range_buf, "{s}...{s}", .{ tr.ref1, tr.ref2 });
-                const range_owned = try allocator.dupe(u8, range);
-                errdefer allocator.free(range_owned);
-                try args.append(allocator, range_owned);
-            } else {
-                try args.append(allocator, tr.ref1);
-                try args.append(allocator, tr.ref2);
-            }
-        },
-    }
-
-    const output = try runGitCommand(allocator, args.items);
+    const output = try runGitCommand(allocator, build.args.items);
     defer allocator.free(output);
-
-    // Free any allocated range strings
-    switch (source) {
-        .two_refs => |tr| {
-            if (tr.use_merge_base and args.items.len > 0) {
-                // Find and free the allocated range string
-                for (args.items) |arg| {
-                    const is_git = std.mem.eql(u8, arg, "git");
-                    const is_diff = std.mem.eql(u8, arg, "diff");
-                    const is_flag = arg.len > 0 and arg[0] == '-';
-                    if (!is_git and !is_diff and !is_flag) {
-                        allocator.free(arg);
-                        break;
-                    }
-                }
-            }
-        },
-        else => {},
-    }
 
     return parseFileStatus(allocator, output);
 }
@@ -460,41 +338,23 @@ pub fn isInMergeConflict(allocator: Allocator) bool {
 
     const git_dir = std.mem.trim(u8, stdout, " \t\r\n");
 
+    // Check for conflict markers in git directory
+    // These files/directories indicate an incomplete merge/rebase/cherry-pick/revert
+    const conflict_markers = [_][]const u8{
+        "/MERGE_HEAD", // merge conflict
+        "/rebase-merge", // rebase conflict
+        "/rebase-apply", // rebase conflict (older format)
+        "/CHERRY_PICK_HEAD", // cherry-pick conflict
+        "/REVERT_HEAD", // revert conflict
+    };
+
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-
-    // Check for merge conflict (MERGE_HEAD exists)
-    if (std.fmt.bufPrint(&path_buf, "{s}/MERGE_HEAD", .{git_dir})) |merge_head_path| {
-        if (std.fs.cwd().access(merge_head_path, .{})) {
+    for (conflict_markers) |marker| {
+        const path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{ git_dir, marker }) catch continue;
+        if (std.fs.cwd().access(path, .{})) {
             return true;
         } else |_| {}
-    } else |_| {}
-
-    // Check for rebase conflict (rebase-merge/ or rebase-apply/ directories exist)
-    if (std.fmt.bufPrint(&path_buf, "{s}/rebase-merge", .{git_dir})) |rebase_merge_path| {
-        if (std.fs.cwd().access(rebase_merge_path, .{})) {
-            return true;
-        } else |_| {}
-    } else |_| {}
-
-    if (std.fmt.bufPrint(&path_buf, "{s}/rebase-apply", .{git_dir})) |rebase_apply_path| {
-        if (std.fs.cwd().access(rebase_apply_path, .{})) {
-            return true;
-        } else |_| {}
-    } else |_| {}
-
-    // Check for cherry-pick conflict (CHERRY_PICK_HEAD exists)
-    if (std.fmt.bufPrint(&path_buf, "{s}/CHERRY_PICK_HEAD", .{git_dir})) |cherry_pick_path| {
-        if (std.fs.cwd().access(cherry_pick_path, .{})) {
-            return true;
-        } else |_| {}
-    } else |_| {}
-
-    // Check for revert conflict (REVERT_HEAD exists)
-    if (std.fmt.bufPrint(&path_buf, "{s}/REVERT_HEAD", .{git_dir})) |revert_path| {
-        if (std.fs.cwd().access(revert_path, .{})) {
-            return true;
-        } else |_| {}
-    } else |_| {}
+    }
 
     return false;
 }
