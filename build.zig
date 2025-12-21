@@ -148,6 +148,17 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // ACP module tests
+    const acp_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/acp/acp.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_acp_tests = b.addRunArtifact(acp_tests);
+    test_step.dependOn(&run_acp_tests.step);
 }
 
 // Grammar metadata for building

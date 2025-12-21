@@ -1,0 +1,37 @@
+//! Agent Client Protocol (ACP) implementation for skim.
+//!
+//! ACP enables skim to communicate with AI coding agents like Claude Code,
+//! Gemini CLI, and Codex. This module implements the client side of the
+//! protocol, allowing skim to spawn agents, send prompts, and receive
+//! streaming responses.
+//!
+//! Protocol specification: https://agentclientprotocol.com
+
+// Re-export submodules
+pub const types = @import("types.zig");
+pub const capabilities = @import("capabilities.zig");
+pub const protocol = @import("protocol.zig");
+pub const codec = @import("codec.zig");
+
+// Convenience re-exports for common types
+pub const PROTOCOL_VERSION = types.PROTOCOL_VERSION;
+pub const StopReason = types.StopReason;
+pub const ToolCallStatus = types.ToolCallStatus;
+pub const ToolCallKind = types.ToolCallKind;
+
+pub const ContentBlock = protocol.ContentBlock;
+pub const TextContent = protocol.TextContent;
+
+pub const JsonRpcId = codec.JsonRpcId;
+pub const Encoder = codec.Encoder;
+pub const Decoder = codec.Decoder;
+pub const DecodedMessage = codec.DecodedMessage;
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test {
+    // Run all submodule tests
+    @import("std").testing.refAllDecls(@This());
+}
