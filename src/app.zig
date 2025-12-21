@@ -244,7 +244,16 @@ pub const App = struct {
         var tty = try vaxis.Tty.init(&tty_static_buffer);
         errdefer tty.deinit();
 
-        var vx = try Vaxis.init(allocator, .{});
+        var vx = try Vaxis.init(allocator, .{
+            // Enable kitty keyboard protocol for proper modifier detection (Shift+Enter, etc.)
+            .kitty_keyboard_flags = .{
+                .disambiguate = true,
+                .report_events = false,
+                .report_alternate_keys = true,
+                .report_all_as_ctl_seqs = true,
+                .report_text = true,
+            },
+        });
         errdefer vx.deinit(allocator, tty.writer());
 
         // Get git repository root (for resolving file paths)

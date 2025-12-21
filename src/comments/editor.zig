@@ -607,10 +607,18 @@ pub const CommentEditor = struct {
             return null;
         }
 
-        // Enter - insert newline
-        if (key.matches(vaxis.Key.enter, .{})) {
+        // Shift+Enter or Ctrl+J - insert newline
+        // (Ctrl+J is the fallback for terminals that don't support kitty keyboard protocol)
+        if (key.matches(vaxis.Key.enter, .{ .shift = true }) or
+            (key.mods.ctrl and key.codepoint == 'j'))
+        {
             try insertChar(state, '\n');
             return null;
+        }
+
+        // Enter (no modifiers) - save comment
+        if (key.matches(vaxis.Key.enter, .{})) {
+            return .save;
         }
 
         switch (key.codepoint) {

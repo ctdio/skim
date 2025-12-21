@@ -145,7 +145,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
 
     const comment_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Enter", .desc = "Save comment" },
-        .{ .key = "Shift-Enter", .desc = "Insert newline" },
+        .{ .key = "Ctrl+J", .desc = "Insert newline" },
         .{ .key = "ESC", .desc = "Cancel" },
         .{ .key = "Vim keybindings", .desc = "Full vim editing supported" },
     };

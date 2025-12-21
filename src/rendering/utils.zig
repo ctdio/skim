@@ -864,9 +864,9 @@ pub const RenderUtils = struct {
         // Render gutter for label line
         try renderEmptyCommentGutter(app, win, current_row, true, gutter_width);
 
-        // Line 2: ┃ Comment [range info]                 Ctrl+S:Save  Enter:Newline  ESC:Cancel
+        // Line 2: ┃ Comment [range info]                 Enter:Save  Ctrl+J:Newline  ESC:Cancel
         segments.clearRetainingCapacity();
-        const hints = "Ctrl+S:Save  Enter:Newline  ESC:Cancel";
+        const hints = "Enter:Save  Ctrl+J:Newline  ESC:Cancel";
 
         // Build label with range info if applicable
         const label = blk: {

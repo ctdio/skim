@@ -714,8 +714,8 @@ pub const SideBySideRenderer = struct {
 
         var current_row = row;
 
-        // Line 1: ┃ Comment                              Ctrl+S:Save  Enter:Newline  ESC:Cancel
-        const hints = "Ctrl+S:Save  Enter:Newline  ESC:Cancel";
+        // Line 1: ┃ Comment                              Enter:Save  Ctrl+J:Newline  ESC:Cancel
+        const hints = "Enter:Save  Ctrl+J:Newline  ESC:Cancel";
         const border_and_label = "┃ Comment";
         const spacing = "  ";
         const total_fixed = border_and_label.len + spacing.len + hints.len; // Total chars we're rendering
