@@ -12,6 +12,9 @@ pub const types = @import("types.zig");
 pub const capabilities = @import("capabilities.zig");
 pub const protocol = @import("protocol.zig");
 pub const codec = @import("codec.zig");
+pub const process = @import("process.zig");
+pub const transport = @import("transport.zig");
+pub const client = @import("client.zig");
 
 // Convenience re-exports for common types
 pub const PROTOCOL_VERSION = types.PROTOCOL_VERSION;
@@ -26,6 +29,12 @@ pub const JsonRpcId = codec.JsonRpcId;
 pub const Encoder = codec.Encoder;
 pub const Decoder = codec.Decoder;
 pub const DecodedMessage = codec.DecodedMessage;
+
+// Phase 2: Agent lifecycle
+pub const AgentProcess = process.AgentProcess;
+pub const SpawnConfig = process.SpawnConfig;
+pub const StdioTransport = transport.StdioTransport;
+pub const Client = client.Client;
 
 // =============================================================================
 // Tests

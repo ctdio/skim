@@ -65,9 +65,9 @@ pub const Request = struct {
 
 /// Decoded response (has id, no method)
 pub const Response = struct {
-    id: JsonRpcId,
+    id: ?JsonRpcId,
     result_json: ?[]const u8,
-    @"error": ?JsonRpcError,
+    error_msg: ?JsonRpcError,
 };
 
 /// Decoded notification (no id, has method)
@@ -81,6 +81,33 @@ pub const DecodedMessage = union(enum) {
     request: Request,
     response: Response,
     notification: Notification,
+
+    pub fn deinit(self: *DecodedMessage, allocator: Allocator) void {
+        switch (self.*) {
+            .request => |*r| {
+                switch (r.id) {
+                    .string => |s| allocator.free(s),
+                    else => {},
+                }
+                allocator.free(r.method);
+                if (r.params_json) |p| allocator.free(p);
+            },
+            .response => |*r| {
+                if (r.id) |id| {
+                    switch (id) {
+                        .string => |s| allocator.free(s),
+                        else => {},
+                    }
+                }
+                if (r.result_json) |res| allocator.free(res);
+                if (r.error_msg) |e| allocator.free(e.message);
+            },
+            .notification => |*n| {
+                allocator.free(n.method);
+                if (n.params_json) |p| allocator.free(p);
+            },
+        }
+    }
 };
 
 // =============================================================================
@@ -134,6 +161,30 @@ pub const Encoder = struct {
 
         try writer.writeAll("}\n");
         return output.toOwnedSlice(self.allocator);
+    }
+
+    /// Encode a notification (client -> agent, no response expected)
+    pub fn encodeNotification(self: *Encoder, method: []const u8, params_json: ?[]const u8) ![]u8 {
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(self.allocator);
+        const writer = output.writer(self.allocator);
+
+        try writer.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"");
+        try writer.writeAll(method);
+        try writer.writeByte('"');
+
+        if (params_json) |params| {
+            try writer.writeAll(",\"params\":");
+            try writer.writeAll(params);
+        }
+
+        try writer.writeAll("}\n");
+        return output.toOwnedSlice(self.allocator);
+    }
+
+    /// Encode an error response (client -> agent)
+    pub fn encodeError(self: *Encoder, id: JsonRpcId, code: i32, message: []const u8) ![]u8 {
+        return self.encodeErrorResponse(id, code, message);
     }
 
     /// Encode an error response (client -> agent)
@@ -248,26 +299,26 @@ pub const Encoder = struct {
     }
 
     /// Encode session/cancel params to JSON
-    pub fn encodeSessionCancelParams(self: *Encoder, session_id: []const u8) ![]u8 {
+    pub fn encodeSessionCancelParams(self: *Encoder, params: protocol.SessionCancelParams) ![]u8 {
         var output: std.ArrayList(u8) = .{};
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
         try writer.writeAll("{\"sessionId\":\"");
-        try writeJsonEscaped(writer, session_id);
+        try writeJsonEscaped(writer, params.session_id);
         try writer.writeAll("\"}");
 
         return output.toOwnedSlice(self.allocator);
     }
 
     /// Encode fs/read_text_file result to JSON
-    pub fn encodeReadTextFileResult(self: *Encoder, content: []const u8) ![]u8 {
+    pub fn encodeReadTextFileResult(self: *Encoder, result: protocol.ReadTextFileResult) ![]u8 {
         var output: std.ArrayList(u8) = .{};
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
         try writer.writeAll("{\"content\":\"");
-        try writeJsonEscaped(writer, content);
+        try writeJsonEscaped(writer, result.content);
         try writer.writeAll("\"}");
 
         return output.toOwnedSlice(self.allocator);
@@ -301,6 +352,11 @@ pub const Encoder = struct {
             .number => |n| try writer.print("{d}", .{n}),
             .null_value => try writer.writeAll("null"),
         }
+    }
+
+    pub fn deinit(self: *Encoder) void {
+        _ = self;
+        // Encoder doesn't hold any state that needs cleanup
     }
 };
 
@@ -353,7 +409,7 @@ pub const Decoder = struct {
             return .{ .response = .{
                 .id = try self.parseId(msg.id.?),
                 .result_json = try self.stringifyValue(msg.result),
-                .@"error" = if (msg.@"error") |e| blk: {
+                .error_msg = if (msg.@"error") |e| blk: {
                     break :blk .{
                         .code = e.code,
                         .message = try self.allocator.dupe(u8, e.message),
@@ -449,6 +505,55 @@ pub const Decoder = struct {
             .stop_reason = types.StopReason.fromString(parsed.value.stopReason) orelse .end_turn,
         };
     }
+
+    /// Parse fs/read_text_file params from JSON
+    pub fn parseReadTextFileParams(self: *Decoder, json: []const u8) !protocol.ReadTextFileParams {
+        const parsed = try std.json.parseFromSlice(struct {
+            sessionId: []const u8,
+            path: []const u8,
+            line: ?u32 = null,
+            limit: ?u32 = null,
+        }, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        });
+        defer parsed.deinit();
+
+        return .{
+            .session_id = try self.allocator.dupe(u8, parsed.value.sessionId),
+            .path = try self.allocator.dupe(u8, parsed.value.path),
+            .line = parsed.value.line,
+            .limit = parsed.value.limit,
+        };
+    }
+
+    /// Parse session/update params from JSON (for notifications)
+    pub fn parseSessionUpdateParams(self: *Decoder, json: []const u8) !protocol.SessionUpdateParams {
+        _ = self;
+        const parsed = try std.json.parseFromSlice(RawSessionUpdate, std.heap.page_allocator, json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        });
+        defer parsed.deinit();
+
+        const r = parsed.value;
+
+        return .{
+            .session_id = r.sessionId,
+            .message = if (r.message != null) blk: {
+                break :blk .{
+                    .content = &.{}, // Simplified - just text for now
+                };
+            } else null,
+            .tool_call = null, // Would need more parsing
+            .tool_call_update = null, // Would need more parsing
+        };
+    }
+
+    pub fn deinit(self: *Decoder) void {
+        _ = self;
+        // Decoder doesn't hold any state that needs cleanup
+    }
 };
 
 // =============================================================================
@@ -482,6 +587,19 @@ const RawInitializeResult = struct {
         title: ?[]const u8 = null,
         version: []const u8,
     } = null,
+};
+
+const RawSessionUpdate = struct {
+    sessionId: []const u8,
+    message: ?struct {
+        type: []const u8 = "message_update",
+        content: ?[]const struct {
+            type: []const u8,
+            text: ?[]const u8 = null,
+        } = null,
+    } = null,
+    toolCall: ?std.json.Value = null,
+    toolCallUpdate: ?std.json.Value = null,
 };
 
 // =============================================================================
@@ -521,12 +639,14 @@ pub fn freeRequest(allocator: Allocator, req: *Request) void {
 }
 
 pub fn freeResponse(allocator: Allocator, resp: *Response) void {
-    switch (resp.id) {
-        .string => |s| allocator.free(s),
-        else => {},
+    if (resp.id) |id| {
+        switch (id) {
+            .string => |s| allocator.free(s),
+            else => {},
+        }
     }
     if (resp.result_json) |r| allocator.free(r);
-    if (resp.@"error") |e| allocator.free(e.message);
+    if (resp.error_msg) |e| allocator.free(e.message);
 }
 
 pub fn freeNotification(allocator: Allocator, notif: *Notification) void {
@@ -577,9 +697,10 @@ test "decode response with result" {
     defer freeDecodedMessage(allocator, &msg);
 
     try std.testing.expect(msg == .response);
-    try std.testing.expectEqual(@as(i64, 0), msg.response.id.number);
+    try std.testing.expect(msg.response.id != null);
+    try std.testing.expectEqual(@as(i64, 0), msg.response.id.?.number);
     try std.testing.expect(msg.response.result_json != null);
-    try std.testing.expect(msg.response.@"error" == null);
+    try std.testing.expect(msg.response.error_msg == null);
 }
 
 test "decode notification" {
@@ -626,8 +747,8 @@ test "decode error response" {
     defer freeDecodedMessage(allocator, &msg);
 
     try std.testing.expect(msg == .response);
-    try std.testing.expect(msg.response.@"error" != null);
-    try std.testing.expectEqual(@as(i32, -32601), msg.response.@"error".?.code);
+    try std.testing.expect(msg.response.error_msg != null);
+    try std.testing.expectEqual(@as(i32, -32601), msg.response.error_msg.?.code);
 }
 
 test "encode and decode roundtrip" {
