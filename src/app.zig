@@ -280,8 +280,36 @@ pub const App = struct {
         errdefer comment_store.deinit();
 
         // Build the line map (default to showing all lines, filtering enabled for unified view)
-        const built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true);
+        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true);
         errdefer built_line_map.deinit();
+
+        // Deep copy diff_source - App takes ownership of its own copy
+        // so Config.deinit() and App.deinit() don't double-free
+        const owned_diff_source: DiffSource = switch (config.diff_source) {
+            .working_dir => |wd| .{ .working_dir = wd },
+            .single_ref => |sr| .{ .single_ref = .{
+                .ref = try allocator.dupe(u8, sr.ref),
+                .staged = sr.staged,
+            } },
+            .two_refs => |tr| blk: {
+                const ref1 = try allocator.dupe(u8, tr.ref1);
+                errdefer allocator.free(ref1);
+                const ref2 = try allocator.dupe(u8, tr.ref2);
+                break :blk .{ .two_refs = .{
+                    .ref1 = ref1,
+                    .ref2 = ref2,
+                    .use_merge_base = tr.use_merge_base,
+                } };
+            },
+        };
+        errdefer switch (owned_diff_source) {
+            .working_dir => {},
+            .single_ref => |sr| allocator.free(sr.ref),
+            .two_refs => |tr| {
+                allocator.free(tr.ref1);
+                allocator.free(tr.ref2);
+            },
+        };
 
         const app = App{
             .allocator = allocator,
@@ -289,7 +317,7 @@ pub const App = struct {
             .tty = tty,
             .mode = .normal,
             .state = State{
-                .diff_source = config.diff_source,
+                .diff_source = owned_diff_source,
                 .git_repo_root = git_repo_root,
                 .files = files,
                 .line_map = built_line_map,

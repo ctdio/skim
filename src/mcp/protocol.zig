@@ -604,15 +604,34 @@ pub fn decode(allocator: Allocator, json_line: []const u8) !ParsedMessage {
     } else if (std.mem.eql(u8, event, "comments")) {
         const comments = msg.comments orelse &[_]CommentInfo{};
         var duped = try allocator.alloc(CommentInfo, comments.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (duped[0..initialized]) |c| {
+                allocator.free(c.file_path);
+                allocator.free(c.text);
+                allocator.free(c.line_type);
+                allocator.free(c.line_type_flag);
+            }
+            allocator.free(duped);
+        }
         for (comments, 0..) |c, i| {
+            const file_path = try allocator.dupe(u8, c.file_path);
+            errdefer allocator.free(file_path);
+            const text = try allocator.dupe(u8, c.text);
+            errdefer allocator.free(text);
+            const line_type = try allocator.dupe(u8, c.line_type);
+            errdefer allocator.free(line_type);
+            const line_type_flag = try allocator.dupe(u8, c.line_type_flag);
+
             duped[i] = .{
                 .idx = c.idx,
-                .file_path = try allocator.dupe(u8, c.file_path),
+                .file_path = file_path,
                 .line = c.line,
-                .text = try allocator.dupe(u8, c.text),
-                .line_type = try allocator.dupe(u8, c.line_type),
-                .line_type_flag = try allocator.dupe(u8, c.line_type_flag),
+                .text = text,
+                .line_type = line_type,
+                .line_type_flag = line_type_flag,
             };
+            initialized = i + 1;
         }
         return .{ .comments = .{ .comments = duped } };
     } else if (std.mem.eql(u8, event, "get_diff_context")) {
@@ -620,19 +639,40 @@ pub fn decode(allocator: Allocator, json_line: []const u8) !ParsedMessage {
     } else if (std.mem.eql(u8, event, "diff_context")) {
         const diff_files = msg.diff_files orelse &[_]RawDiffFileSummary{};
         var duped = try allocator.alloc(DiffFileSummary, diff_files.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (duped[0..initialized]) |f| {
+                allocator.free(f.path);
+                allocator.free(f.old_path);
+                allocator.free(f.status);
+            }
+            allocator.free(duped);
+        }
         for (diff_files, 0..) |f, i| {
+            const path = try allocator.dupe(u8, f.path);
+            errdefer allocator.free(path);
+            const old_path = try allocator.dupe(u8, f.old_path);
+            errdefer allocator.free(old_path);
+            const status = try allocator.dupe(u8, f.status);
+
             duped[i] = .{
-                .path = try allocator.dupe(u8, f.path),
-                .old_path = try allocator.dupe(u8, f.old_path),
-                .status = try allocator.dupe(u8, f.status),
+                .path = path,
+                .old_path = old_path,
+                .status = status,
                 .additions = f.additions,
                 .deletions = f.deletions,
                 .hunk_count = f.hunk_count,
             };
+            initialized = i + 1;
         }
+
+        const diff_ref = try allocator.dupe(u8, msg.diff_ref orelse "");
+        errdefer allocator.free(diff_ref);
+        const cwd = try allocator.dupe(u8, msg.cwd orelse "");
+
         return .{ .diff_context = .{
-            .diff_ref = try allocator.dupe(u8, msg.diff_ref orelse ""),
-            .cwd = try allocator.dupe(u8, msg.cwd orelse ""),
+            .diff_ref = diff_ref,
+            .cwd = cwd,
             .files = duped,
         } };
     } else if (std.mem.eql(u8, event, "get_file_diff")) {
@@ -642,29 +682,67 @@ pub fn decode(allocator: Allocator, json_line: []const u8) !ParsedMessage {
     } else if (std.mem.eql(u8, event, "file_diff")) {
         const hunks = msg.hunks orelse &[_]RawDiffHunkInfo{};
         var duped_hunks = try allocator.alloc(DiffHunkInfo, hunks.len);
+        var hunks_initialized: usize = 0;
+        errdefer {
+            // Clean up fully initialized hunks
+            for (duped_hunks[0..hunks_initialized]) |hunk| {
+                allocator.free(hunk.header);
+                for (hunk.lines) |line| {
+                    allocator.free(line.line_type);
+                    allocator.free(line.content);
+                }
+                allocator.free(hunk.lines);
+            }
+            allocator.free(duped_hunks);
+        }
+
         for (hunks, 0..) |h, hi| {
             var duped_lines = try allocator.alloc(DiffLineInfo, h.lines.len);
+            var lines_initialized: usize = 0;
+            errdefer {
+                for (duped_lines[0..lines_initialized]) |line| {
+                    allocator.free(line.line_type);
+                    allocator.free(line.content);
+                }
+                allocator.free(duped_lines);
+            }
+
             for (h.lines, 0..) |l, li| {
+                const line_type = try allocator.dupe(u8, l.line_type);
+                errdefer allocator.free(line_type);
+                const content = try allocator.dupe(u8, l.content);
+
                 duped_lines[li] = .{
-                    .line_type = try allocator.dupe(u8, l.line_type),
-                    .content = try allocator.dupe(u8, l.content),
+                    .line_type = line_type,
+                    .content = content,
                     .old_lineno = l.old_lineno,
                     .new_lineno = l.new_lineno,
                 };
+                lines_initialized = li + 1;
             }
+
+            const header = try allocator.dupe(u8, h.header);
             duped_hunks[hi] = .{
-                .header = try allocator.dupe(u8, h.header),
+                .header = header,
                 .old_start = h.old_start,
                 .old_count = h.old_count,
                 .new_start = h.new_start,
                 .new_count = h.new_count,
                 .lines = duped_lines,
             };
+            hunks_initialized = hi + 1;
         }
+
+        const file = try allocator.dupe(u8, msg.file orelse "");
+        errdefer allocator.free(file);
+        const old_file = try allocator.dupe(u8, msg.old_file orelse "");
+        errdefer allocator.free(old_file);
+        const status = try allocator.dupe(u8, msg.status orelse "modified");
+
         return .{ .file_diff = .{
-            .file = try allocator.dupe(u8, msg.file orelse ""),
-            .old_file = try allocator.dupe(u8, msg.old_file orelse ""),
-            .status = try allocator.dupe(u8, msg.status orelse "modified"),
+            .file = file,
+            .old_file = old_file,
+            .status = status,
             .hunks = duped_hunks,
         } };
     } else if (std.mem.eql(u8, event, "error")) {

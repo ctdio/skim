@@ -250,6 +250,7 @@ fn parseBlameOutput(allocator: Allocator, output: []const u8) !BlameData {
                     const key = try allocator.dupe(u8, commit_slice);
                     errdefer allocator.free(key);
                     const val = try allocator.dupe(u8, author_name);
+                    errdefer allocator.free(val);
                     try commit_authors.put(key, val);
                 }
             }
@@ -271,6 +272,7 @@ fn parseBlameOutput(allocator: Allocator, output: []const u8) !BlameData {
                         const key = try allocator.dupe(u8, commit_slice);
                         errdefer allocator.free(key);
                         const val = try allocator.dupe(u8, username);
+                        errdefer allocator.free(val);
                         try commit_usernames.put(key, val);
                     }
                 }
@@ -287,7 +289,9 @@ fn parseBlameOutput(allocator: Allocator, output: []const u8) !BlameData {
             if (current_commit) |commit| {
                 const commit_slice = commit[0..40];
                 if (!commit_times.contains(commit_slice)) {
-                    try commit_times.put(try allocator.dupe(u8, commit_slice), current_time);
+                    const key = try allocator.dupe(u8, commit_slice);
+                    errdefer allocator.free(key);
+                    try commit_times.put(key, current_time);
                 }
             }
             continue;
@@ -305,6 +309,7 @@ fn parseBlameOutput(allocator: Allocator, output: []const u8) !BlameData {
                     const key = try allocator.dupe(u8, commit_slice);
                     errdefer allocator.free(key);
                     const val = try allocator.dupe(u8, summary);
+                    errdefer allocator.free(val);
                     try commit_summaries.put(key, val);
                 }
             }
