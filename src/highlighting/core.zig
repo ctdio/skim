@@ -1,5 +1,5 @@
 const std = @import("std");
-const zts = @import("zts");
+const ts = @import("tree-sitter");
 
 // Embed highlight query files at compile time
 // Programming languages
@@ -17,6 +17,23 @@ const TOML_HIGHLIGHTS = @embedFile("../queries/toml.scm");
 const MARKDOWN_HIGHLIGHTS = @embedFile("../queries/markdown.scm");
 const CSS_HIGHLIGHTS = @embedFile("../queries/css.scm");
 const BASH_HIGHLIGHTS = @embedFile("../queries/bash.scm");
+
+// Extern declarations for grammar language functions
+// These are provided by the linked grammar libraries
+extern fn tree_sitter_javascript() callconv(.c) *const ts.Language;
+extern fn tree_sitter_typescript() callconv(.c) *const ts.Language;
+extern fn tree_sitter_tsx() callconv(.c) *const ts.Language;
+extern fn tree_sitter_python() callconv(.c) *const ts.Language;
+extern fn tree_sitter_rust() callconv(.c) *const ts.Language;
+extern fn tree_sitter_go() callconv(.c) *const ts.Language;
+extern fn tree_sitter_zig() callconv(.c) *const ts.Language;
+extern fn tree_sitter_c() callconv(.c) *const ts.Language;
+extern fn tree_sitter_cpp() callconv(.c) *const ts.Language;
+extern fn tree_sitter_json() callconv(.c) *const ts.Language;
+extern fn tree_sitter_toml() callconv(.c) *const ts.Language;
+extern fn tree_sitter_markdown() callconv(.c) *const ts.Language;
+extern fn tree_sitter_css() callconv(.c) *const ts.Language;
+extern fn tree_sitter_bash() callconv(.c) *const ts.Language;
 
 // Supported languages and file formats for syntax highlighting
 pub const Language = enum {
@@ -138,6 +155,26 @@ pub const Language = enum {
             .css => "CSS",
             .bash => "Bash",
             .unknown => "Unknown",
+        };
+    }
+
+    // Get the tree-sitter language for this enum value
+    fn getTreeSitterLanguage(self: Language) ?*const ts.Language {
+        return switch (self) {
+            .javascript => tree_sitter_javascript(),
+            .typescript => tree_sitter_typescript(),
+            .python => tree_sitter_python(),
+            .rust => tree_sitter_rust(),
+            .go => tree_sitter_go(),
+            .zig => tree_sitter_zig(),
+            .c => tree_sitter_c(),
+            .cpp => tree_sitter_cpp(),
+            .json => tree_sitter_json(),
+            .toml => tree_sitter_toml(),
+            .markdown => tree_sitter_markdown(),
+            .css => tree_sitter_css(),
+            .bash => tree_sitter_bash(),
+            .unknown => null,
         };
     }
 };
@@ -262,8 +299,9 @@ pub const Highlight = struct {
 
 // Cached parser and query for a language
 const LanguageCache = struct {
-    parser: *zts.Parser,
-    query: *zts.Query,
+    parser: *ts.Parser,
+    query: *ts.Query,
+    language: *const ts.Language,
 };
 
 // Manages syntax highlighting for multiple files
@@ -283,8 +321,9 @@ pub const SyntaxHighlighter = struct {
         // Free all cached parsers and queries
         var iter = self.cache.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.parser.deinit();
-            entry.value_ptr.query.deinit();
+            entry.value_ptr.parser.destroy();
+            entry.value_ptr.query.destroy();
+            // Note: Language is owned by grammar library, don't destroy
         }
         self.cache.deinit();
     }
@@ -338,22 +377,7 @@ pub const SyntaxHighlighter = struct {
         }
 
         // Not cached - create new parser and query
-        const ts_lang = switch (lang) {
-            .javascript => try zts.loadLanguage(.javascript),
-            .typescript => try zts.loadLanguage(.typescript),
-            .python => try zts.loadLanguage(.python),
-            .rust => try zts.loadLanguage(.rust),
-            .go => try zts.loadLanguage(.go),
-            .zig => try zts.loadLanguage(.zig),
-            .c => try zts.loadLanguage(.c),
-            .cpp => try zts.loadLanguage(.cpp),
-            .json => try zts.loadLanguage(.json),
-            .toml => try zts.loadLanguage(.toml),
-            .markdown => try zts.loadLanguage(.markdown),
-            .css => try zts.loadLanguage(.css),
-            .bash => try zts.loadLanguage(.bash),
-            .unknown => unreachable,
-        };
+        const ts_lang = lang.getTreeSitterLanguage() orelse return error.UnsupportedLanguage;
 
         // Get query string
         // TypeScript needs both JS and TS queries combined since TS is a superset of JS
@@ -397,20 +421,19 @@ pub const SyntaxHighlighter = struct {
 
         defer if (needs_free) self.allocator.free(combined_query);
 
-        // Create parser (init already returns a pointer)
-        const parser = zts.Parser.init() catch {
-            return error.ParserInitFailed;
-        };
-        errdefer parser.deinit();
+        // Create parser
+        const parser = ts.Parser.create();
+        errdefer parser.destroy();
 
         parser.setLanguage(ts_lang) catch {
-            parser.deinit();
+            parser.destroy();
             return error.LanguageSetFailed;
         };
 
-        // Create query (init already returns a pointer)
-        const query = zts.Query.init(ts_lang, query_str) catch {
-            parser.deinit();
+        // Create query
+        var error_offset: u32 = 0;
+        const query = ts.Query.create(ts_lang, query_str, &error_offset) catch {
+            parser.destroy();
             return error.QueryInitFailed;
         };
 
@@ -418,6 +441,7 @@ pub const SyntaxHighlighter = struct {
         try self.cache.put(lang, .{
             .parser = parser,
             .query = query,
+            .language = ts_lang,
         });
 
         // Return pointer to cached entry
@@ -436,38 +460,27 @@ pub const SyntaxHighlighter = struct {
         };
 
         // Parse the content using cached parser
-        const tree = cache.parser.parseString(null, content) catch {
+        const tree = cache.parser.parseString(content, null) orelse {
             return &[_]Highlight{};
         };
-        defer tree.deinit();
+        defer tree.destroy();
 
         // Execute query using cached query
-        var cursor = zts.QueryCursor.init() catch {
-            return &[_]Highlight{};
-        };
-        defer cursor.deinit();
+        const cursor = ts.QueryCursor.create();
+        defer cursor.destroy();
 
         const root = tree.rootNode();
         cursor.exec(cache.query, root);
 
         // Collect all captures into highlights
-        var highlights = std.ArrayList(Highlight).init(self.allocator);
-        errdefer highlights.deinit();
+        var highlights: std.ArrayList(Highlight) = .{};
+        errdefer highlights.deinit(self.allocator);
 
-        var match: zts.QueryMatch = undefined;
-        while (cursor.nextMatch(&match)) {
-            // Convert pointer to slice
-            const captures_slice = @as([*]const zts.QueryCapture, @ptrCast(match.captures))[0..match.capture_count];
-
-            for (captures_slice) |capture| {
+        while (cursor.nextMatch()) |match| {
+            for (match.captures) |capture| {
                 const node = capture.node;
 
-                // captureNameForId needs a length pointer
-                var length: u32 = 0;
-                const capture_name_opt = cache.query.captureNameForId(capture.index, &length);
-                if (capture_name_opt == null) continue;
-
-                const capture_name = capture_name_opt.?;
+                const capture_name = cache.query.captureNameForId(capture.index) orelse continue;
 
                 if (capture_name.len == 0) continue;
 
@@ -476,15 +489,15 @@ pub const SyntaxHighlighter = struct {
                 // which is now cached and persists for the lifetime of SyntaxHighlighter
                 const category_copy = try self.allocator.dupe(u8, capture_name);
 
-                try highlights.append(.{
-                    .start_byte = node.getStartByte(),
-                    .end_byte = node.getEndByte(),
+                try highlights.append(self.allocator, .{
+                    .start_byte = node.startByte(),
+                    .end_byte = node.endByte(),
                     .category = category_copy,
                 });
             }
         }
 
-        return highlights.toOwnedSlice();
+        return highlights.toOwnedSlice(self.allocator);
     }
 };
 

@@ -74,8 +74,8 @@ pub const LineMap = struct {
         hunk_view_mode: HunkViewMode,
         apply_filtering: bool, // Only apply filtering in unified view
     ) !LineMap {
-        var records = std.ArrayList(LineRecord).init(allocator);
-        errdefer records.deinit();
+        var records: std.ArrayList(LineRecord) = .{};
+        errdefer records.deinit(allocator);
 
         var global_line: usize = 0;
 
@@ -83,7 +83,7 @@ pub const LineMap = struct {
             const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
             // Add file header line
-            try records.append(.{
+            try records.append(allocator, .{
                 .global_line = global_line,
                 .file_idx = file_idx,
                 .line_type = .file_header,
@@ -91,7 +91,7 @@ pub const LineMap = struct {
             global_line += 1;
 
             // Add a single spacer after file header
-            try records.append(.{
+            try records.append(allocator, .{
                 .global_line = global_line,
                 .file_idx = file_idx,
                 .line_type = .{
@@ -107,7 +107,7 @@ pub const LineMap = struct {
             // Add hunks and their lines
             for (file.hunks, 0..) |hunk, hunk_idx| {
                 // Add hunk header
-                try records.append(.{
+                try records.append(allocator, .{
                     .global_line = global_line,
                     .file_idx = file_idx,
                     .line_type = .{ .hunk_header = .{ .hunk_idx = hunk_idx } },
@@ -122,7 +122,7 @@ pub const LineMap = struct {
                     }
 
                     // Add the code line
-                    try records.append(.{
+                    try records.append(allocator, .{
                         .global_line = global_line,
                         .file_idx = file_idx,
                         .line_type = .{
@@ -155,7 +155,7 @@ pub const LineMap = struct {
                     };
 
                     if (comment_idx) |idx| {
-                        try records.append(.{
+                        try records.append(allocator, .{
                             .global_line = global_line,
                             .file_idx = file_idx,
                             .line_type = .{
@@ -175,7 +175,7 @@ pub const LineMap = struct {
             if (file_idx < files.len - 1) {
                 var spacer_num: usize = 0;
                 while (spacer_num < file_spacing) : (spacer_num += 1) {
-                    try records.append(.{
+                    try records.append(allocator, .{
                         .global_line = global_line,
                         .file_idx = file_idx, // Belongs to file it comes after
                         .line_type = .{
@@ -192,7 +192,7 @@ pub const LineMap = struct {
         }
 
         return LineMap{
-            .records = try records.toOwnedSlice(),
+            .records = try records.toOwnedSlice(allocator),
             .allocator = allocator,
         };
     }

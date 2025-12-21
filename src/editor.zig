@@ -88,22 +88,22 @@ pub fn openInEditor(
     const is_terminal = isTerminalEditor(editor_cmd);
 
     // Build the command with arguments
-    var args = std.ArrayList([]const u8).init(allocator);
-    defer args.deinit();
+    var args: std.ArrayList([]const u8) = .{};
+    defer args.deinit(allocator);
 
-    var allocated_args = std.ArrayList([]u8).init(allocator);
+    var allocated_args: std.ArrayList([]u8) = .{};
     defer {
         for (allocated_args.items) |allocated| {
             allocator.free(allocated);
         }
-        allocated_args.deinit();
+        allocated_args.deinit(allocator);
     }
 
     // Split editor command in case it contains flags
     var cmd_iter = std.mem.splitScalar(u8, editor_cmd, ' ');
     while (cmd_iter.next()) |part| {
         if (part.len > 0) {
-            try args.append(part);
+            try args.append(allocator, part);
         }
     }
 
@@ -118,26 +118,26 @@ pub fn openInEditor(
         if (args.items.len > 0) {
             const line_to_use: usize = if (raw_line == 0) 1 else raw_line;
             if (analysis.uses_open and !appended_args_separator) {
-                try args.append("--args");
+                try args.append(allocator, "--args");
                 appended_args_separator = true;
             }
 
             switch (analysis.mode) {
                 .plus => {
                     const plus_arg = try std.fmt.bufPrint(&line_arg_buffer, "+{d}", .{line_to_use});
-                    try args.append(plus_arg);
+                    try args.append(allocator, plus_arg);
                 },
                 .goto_flag => {
-                    try args.append("--goto");
+                    try args.append(allocator, "--goto");
                     const goto_arg = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ file_path, line_to_use });
-                    try allocated_args.append(goto_arg);
-                    try args.append(goto_arg);
+                    try allocated_args.append(allocator, goto_arg);
+                    try args.append(allocator, goto_arg);
                     file_arg_appended = true;
                 },
                 .embed_colon => {
                     const colon_arg = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ file_path, line_to_use });
-                    try allocated_args.append(colon_arg);
-                    try args.append(colon_arg);
+                    try allocated_args.append(allocator, colon_arg);
+                    try args.append(allocator, colon_arg);
                     file_arg_appended = true;
                 },
                 .none => {},
@@ -147,7 +147,7 @@ pub fn openInEditor(
 
     // Add the file path if it hasn't already been embedded alongside --goto or colon syntax
     if (!file_arg_appended) {
-        try args.append(file_path);
+        try args.append(allocator, file_path);
     }
 
     // Debug: log the command being executed

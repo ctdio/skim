@@ -86,7 +86,7 @@ pub const UI = struct {
             .text = left_corner,
             .style = .{ .fg = Color.dim },
         }};
-        _ = try win.print(&left_seg, .{ .row_offset = 0 });
+        _ = win.print(&left_seg, .{ .row_offset = @intCast(0 )});
 
         // Print horizontal line
         if (h_line.len > 0) {
@@ -94,7 +94,7 @@ pub const UI = struct {
                 .text = h_line,
                 .style = .{ .fg = Color.dim },
             }};
-            _ = try win.print(&h_seg, .{ .row_offset = 0, .col_offset = 1 });
+            _ = win.print(&h_seg, .{ .row_offset = 0, .col_offset = @intCast(1 )});
         }
 
         // Print right corner
@@ -102,7 +102,7 @@ pub const UI = struct {
             .text = right_corner,
             .style = .{ .fg = Color.dim },
         }};
-        _ = try win.print(&right_seg, .{ .row_offset = 0, .col_offset = win.width -| 1 });
+        _ = win.print(&right_seg, .{ .row_offset = 0, .col_offset = @intCast(win.width -| 1 )});
     }
 
     pub fn renderEmptyMenu(app: *App, win: vaxis.Window) !void {
@@ -147,7 +147,7 @@ pub const UI = struct {
             .text = title_copy,
             .style = .{ .fg = Color.white, .bold = true },
         }};
-        _ = try win.print(&title_seg, .{ .row_offset = start_row, .col_offset = title_col });
+        _ = win.print(&title_seg, .{ .row_offset = @intCast(start_row), .col_offset = @intCast(title_col) });
 
         // Subtitle
         const subtitle_col = (win.width -| subtitle.len) / 2;
@@ -156,7 +156,7 @@ pub const UI = struct {
             .text = subtitle_copy,
             .style = .{ .fg = Color.dim },
         }};
-        _ = try win.print(&subtitle_seg, .{ .row_offset = start_row + 2, .col_offset = subtitle_col });
+        _ = win.print(&subtitle_seg, .{ .row_offset = @intCast(start_row + 2), .col_offset = @intCast(subtitle_col )});
 
         // Menu items - find longest item to center the block
         const separator = " - ";
@@ -180,46 +180,46 @@ pub const UI = struct {
             const item_col = menu_start_col;
 
             // Build segments dynamically
-            var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
-            defer segments.deinit();
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            defer segments.deinit(app.allocator);
 
             // Label
             const label_copy = try RenderUtils.copyFrameText(app, item.label);
-            try segments.append(.{ .text = label_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+            try segments.append(app.allocator, .{ .text = label_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
 
             // Separator
             const separator_copy = try RenderUtils.copyFrameText(app, separator);
-            try segments.append(.{ .text = separator_copy, .style = .{ .fg = Color.dim } });
+            try segments.append(app.allocator, .{ .text = separator_copy, .style = .{ .fg = Color.dim } });
 
             // Description
             const desc_copy = try RenderUtils.copyFrameText(app, item.description);
-            try segments.append(.{ .text = desc_copy, .style = .{ .fg = Color.dim } });
+            try segments.append(app.allocator, .{ .text = desc_copy, .style = .{ .fg = Color.dim } });
 
             // Add stats if available
             if (item.stats) |stats| {
                 const stats_open = try RenderUtils.copyFrameText(app, " (");
-                try segments.append(.{ .text = stats_open, .style = .{ .fg = Color.dim } });
+                try segments.append(app.allocator, .{ .text = stats_open, .style = .{ .fg = Color.dim } });
 
                 var files_buf: [32]u8 = undefined;
                 const files_text = try std.fmt.bufPrint(&files_buf, "{d} files, ", .{stats.files});
                 const files_copy = try RenderUtils.copyFrameText(app, files_text);
-                try segments.append(.{ .text = files_copy, .style = .{ .fg = Color.dim } });
+                try segments.append(app.allocator, .{ .text = files_copy, .style = .{ .fg = Color.dim } });
 
                 var additions_buf: [16]u8 = undefined;
                 const additions_text = try std.fmt.bufPrint(&additions_buf, "+{d}", .{stats.additions});
                 const additions_copy = try RenderUtils.copyFrameText(app, additions_text);
-                try segments.append(.{ .text = additions_copy, .style = .{ .fg = Color.diff_sign_add, .bold = true } });
+                try segments.append(app.allocator, .{ .text = additions_copy, .style = .{ .fg = Color.diff_sign_add, .bold = true } });
 
                 var deletions_buf: [16]u8 = undefined;
                 const deletions_text = try std.fmt.bufPrint(&deletions_buf, ", -{d}", .{stats.deletions});
                 const deletions_copy = try RenderUtils.copyFrameText(app, deletions_text);
-                try segments.append(.{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } });
+                try segments.append(app.allocator, .{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } });
 
                 const stats_close = try RenderUtils.copyFrameText(app, ")");
-                try segments.append(.{ .text = stats_close, .style = .{ .fg = Color.dim } });
+                try segments.append(app.allocator, .{ .text = stats_close, .style = .{ .fg = Color.dim } });
             }
 
-            _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = item_col });
+            _ = win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(item_col )});
 
             // Render caret to the left of selected item
             if (is_selected and item_col >= caret_offset) {
@@ -228,7 +228,7 @@ pub const UI = struct {
                     .text = caret_copy,
                     .style = .{ .fg = Color.cyan },
                 }};
-                _ = try win.print(&caret_seg, .{ .row_offset = row, .col_offset = item_col - caret_offset });
+                _ = win.print(&caret_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(item_col - caret_offset )});
             }
         }
 
@@ -241,7 +241,7 @@ pub const UI = struct {
             .text = instr_copy,
             .style = .{ .fg = Color.dim },
         }};
-        _ = try win.print(&instr_seg, .{ .row_offset = instr_row, .col_offset = instr_col });
+        _ = win.print(&instr_seg, .{ .row_offset = @intCast(instr_row), .col_offset = @intCast(instr_col )});
     }
 
     pub fn renderBranchSelectionMenu(app: *App, win: vaxis.Window) !void {
@@ -257,7 +257,7 @@ pub const UI = struct {
             .text = title_copy,
             .style = .{ .fg = Color.white, .bold = true },
         }};
-        _ = try win.print(&title_seg, .{ .row_offset = start_row, .col_offset = title_col });
+        _ = win.print(&title_seg, .{ .row_offset = @intCast(start_row), .col_offset = @intCast(title_col) });
 
         // Search query line
         const query = app.state.branch_search_query[0..app.state.branch_search_len];
@@ -273,7 +273,7 @@ pub const UI = struct {
             .text = search_copy,
             .style = .{ .fg = if (query.len > 0) Color.cyan else Color.dim },
         }};
-        _ = try win.print(&search_seg, .{ .row_offset = start_row + 2, .col_offset = search_col });
+        _ = win.print(&search_seg, .{ .row_offset = @intCast(start_row + 2), .col_offset = @intCast(search_col )});
 
         if (app.state.branch_list.len == 0) return;
 
@@ -289,7 +289,7 @@ pub const UI = struct {
                 .text = no_matches_copy,
                 .style = .{ .fg = Color.dim },
             }};
-            _ = try win.print(&no_matches_seg, .{ .row_offset = start_row + 4, .col_offset = no_matches_col });
+            _ = win.print(&no_matches_seg, .{ .row_offset = @intCast(start_row + 4), .col_offset = @intCast(no_matches_col )});
         } else {
             // Estimate max length including stats (branch name + stats format ~30 chars)
             var max_len: usize = 0;
@@ -327,37 +327,37 @@ pub const UI = struct {
                 };
 
                 // Build segments with colored stats
-                var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
-                defer segments.deinit();
+                var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+                defer segments.deinit(app.allocator);
 
                 // Branch name
                 const branch_copy = try RenderUtils.copyFrameText(app, branch);
-                try segments.append(.{ .text = branch_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+                try segments.append(app.allocator, .{ .text = branch_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
 
                 // Stats with colors
                 const opening_paren = try RenderUtils.copyFrameText(app, "  (");
-                try segments.append(.{ .text = opening_paren, .style = .{ .fg = Color.dim } });
+                try segments.append(app.allocator, .{ .text = opening_paren, .style = .{ .fg = Color.dim } });
 
                 var files_buf: [32]u8 = undefined;
                 const files_text = try std.fmt.bufPrint(&files_buf, "{d} files, ", .{branch_stats.files});
                 const files_copy = try RenderUtils.copyFrameText(app, files_text);
-                try segments.append(.{ .text = files_copy, .style = .{ .fg = Color.dim } });
+                try segments.append(app.allocator, .{ .text = files_copy, .style = .{ .fg = Color.dim } });
 
                 var additions_buf: [16]u8 = undefined;
                 const additions_text = try std.fmt.bufPrint(&additions_buf, "+{d}", .{branch_stats.additions});
                 const additions_copy = try RenderUtils.copyFrameText(app, additions_text);
-                try segments.append(.{ .text = additions_copy, .style = .{ .fg = Color.diff_sign_add, .bold = true } });
+                try segments.append(app.allocator, .{ .text = additions_copy, .style = .{ .fg = Color.diff_sign_add, .bold = true } });
 
                 var deletions_buf: [16]u8 = undefined;
                 const deletions_text = try std.fmt.bufPrint(&deletions_buf, ", -{d}", .{branch_stats.deletions});
                 const deletions_copy = try RenderUtils.copyFrameText(app, deletions_text);
-                try segments.append(.{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } });
+                try segments.append(app.allocator, .{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } });
 
                 const closing_paren = try RenderUtils.copyFrameText(app, ")");
-                try segments.append(.{ .text = closing_paren, .style = .{ .fg = Color.dim } });
+                try segments.append(app.allocator, .{ .text = closing_paren, .style = .{ .fg = Color.dim } });
 
                 // Render branch with colored stats
-                _ = try win.print(segments.items, .{ .row_offset = row, .col_offset = menu_start_col });
+                _ = win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(menu_start_col )});
 
                 // Render caret for selected branch
                 if (is_selected and menu_start_col >= caret_offset) {
@@ -366,7 +366,7 @@ pub const UI = struct {
                         .text = caret_copy,
                         .style = .{ .fg = Color.cyan },
                     }};
-                    _ = try win.print(&caret_seg, .{ .row_offset = row, .col_offset = menu_start_col - caret_offset });
+                    _ = win.print(&caret_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(menu_start_col - caret_offset )});
                 }
             }
         }
@@ -380,7 +380,7 @@ pub const UI = struct {
             .text = instr_copy,
             .style = .{ .fg = Color.dim },
         }};
-        _ = try win.print(&instr_seg, .{ .row_offset = instr_row, .col_offset = instr_col });
+        _ = win.print(&instr_seg, .{ .row_offset = @intCast(instr_row), .col_offset = @intCast(instr_col )});
     }
 
     pub fn renderGraphiteStackDialog(app: *App, win: vaxis.Window) !void {
@@ -412,8 +412,8 @@ pub const UI = struct {
         const popup_win = win.child(.{
             .x_off = x_offset,
             .y_off = y_offset,
-            .width = .{ .limit = popup_width },
-            .height = .{ .limit = popup_height },
+            .width = @intCast(popup_width),
+            .height = @intCast(popup_height),
             .border = .{
                 .where = .all,
                 .style = .{ .fg = Color.cyan },
@@ -435,7 +435,7 @@ pub const UI = struct {
             .text = title_copy,
             .style = .{ .fg = Color.cyan, .bold = true },
         }};
-        _ = try popup_win.print(&title_seg, .{ .row_offset = 0 });
+        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0 )});
 
         // Render stack branches (tip at top, trunk at bottom)
         for (0..branch_count) |visual_idx| {
@@ -445,37 +445,37 @@ pub const UI = struct {
             const is_selected = array_idx == app.state.graphite_stack_selection;
             const is_current = array_idx == stack.current_idx;
 
-            var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
-            defer segments.deinit();
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            defer segments.deinit(app.allocator);
 
             // Selection caret
             const caret = if (is_selected) "▶ " else "  ";
             const caret_copy = try RenderUtils.copyFrameText(app, caret);
-            try segments.append(.{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+            try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
 
             // Tree symbol (trunk at bottom, tip branches at top)
             const is_tip = array_idx == branch_count - 1;
             const tree_symbol = if (branch.is_trunk) "◉ " else if (is_tip) "◇ " else "○ ";
             const tree_copy = try RenderUtils.copyFrameText(app, tree_symbol);
-            try segments.append(.{ .text = tree_copy, .style = .{ .fg = if (is_current) Color.green else Color.dim } });
+            try segments.append(app.allocator, .{ .text = tree_copy, .style = .{ .fg = if (is_current) Color.green else Color.dim } });
 
             // Branch name
             const name_copy = try RenderUtils.copyFrameText(app, branch.name);
-            try segments.append(.{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+            try segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
 
             // Current indicator
             if (is_current) {
                 const current_copy = try RenderUtils.copyFrameText(app, " ← you");
-                try segments.append(.{ .text = current_copy, .style = .{ .fg = Color.green } });
+                try segments.append(app.allocator, .{ .text = current_copy, .style = .{ .fg = Color.green } });
             }
 
             // Needs restack indicator
             if (branch.needs_restack) {
                 const restack_copy = try RenderUtils.copyFrameText(app, " !");
-                try segments.append(.{ .text = restack_copy, .style = .{ .fg = Color.yellow, .bold = true } });
+                try segments.append(app.allocator, .{ .text = restack_copy, .style = .{ .fg = Color.yellow, .bold = true } });
             }
 
-            _ = try popup_win.print(segments.items, .{ .row_offset = row, .col_offset = 1 });
+            _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 )});
         }
 
         // Instructions at bottom
@@ -484,7 +484,7 @@ pub const UI = struct {
             .text = instr_copy,
             .style = .{ .fg = Color.dim },
         }};
-        _ = try popup_win.print(&instr_seg, .{ .row_offset = popup_height - 2, .col_offset = 1 });
+        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1 )});
     }
 
     pub fn renderHeader(app: *App, win: vaxis.Window) !void {
@@ -527,7 +527,7 @@ pub const UI = struct {
             .{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } },
         };
 
-        _ = try win.print(&segments, .{ .row_offset = 0, .col_offset = 0 });
+        _ = win.print(&segments, .{ .row_offset = 0, .col_offset = @intCast(0 )});
     }
 
     pub fn renderStatus(app: *App, win: vaxis.Window) !void {
@@ -629,8 +629,8 @@ pub const UI = struct {
         const current_file = app.state.current_file_idx + 1; // Display 1-indexed
 
         // Build status bar using segments with colors
-        var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
-        defer segments.deinit();
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        defer segments.deinit(app.allocator);
 
         if (app.mode == .comment and app.state.active_comment_input != null and
             app.state.active_comment_input.?.vim_mode == .command)
@@ -639,62 +639,62 @@ pub const UI = struct {
             const input = app.state.active_comment_input.?;
             const command = input.command_buffer[0..input.command_len];
 
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, ":"), .style = .{ .bold = true } });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, command), .style = .{} });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "_"), .style = .{} });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ":"), .style = .{ .bold = true } });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, command), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "_"), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
         } else if (app.mode == .search) {
             // In search mode, show search prompt with current query
             const query = app.state.search_state.query_buffer[0..app.state.search_state.query_len];
             const match_count = app.state.search_state.matches.items.len;
 
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "  /"), .style = .{} });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, query), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  /"), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, query), .style = .{} });
 
             if (match_count > 0) {
                 const current_match = if (app.state.search_state.current_match_idx) |idx| idx + 1 else 0;
                 var buf: [64]u8 = undefined;
                 const match_info = try std.fmt.bufPrint(&buf, "  ({d} of {d} matches)  ", .{ current_match, match_count });
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
             } else if (app.state.search_state.query_len > 0) {
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "_  "), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "_  "), .style = .{} });
             } else {
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "_  "), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "_  "), .style = .{} });
             }
 
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
         } else {
             // Normal mode status bar with colored hunk view mode
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, view_str), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, view_str), .style = .{} });
 
             // Show diff source mode
             const diff_str = try formatDiffSource(app.allocator, app.state.diff_source);
             defer app.allocator.free(diff_str);
             const diff_str_copy = try RenderUtils.copyFrameText(app, diff_str);
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
-            try segments.append(.{ .text = diff_str_copy, .style = .{ .fg = Color.cyan } });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
+            try segments.append(app.allocator, .{ .text = diff_str_copy, .style = .{ .fg = Color.cyan } });
 
             // Show graphite stack position if in a stack
             if (app.state.graphite_stack) |stack| {
                 var stack_buf: [64]u8 = undefined;
                 const stack_pos = try std.fmt.bufPrint(&stack_buf, " [{d}/{d} in stack]", .{ stack.current_idx + 1, stack.branches.len });
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, stack_pos), .style = .{ .fg = Color.magenta } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, stack_pos), .style = .{ .fg = Color.magenta } });
             }
 
             // Only show hunk view mode indicator in unified view (where filtering applies)
             if (app.state.view_mode == .unified) {
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " ["), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " ["), .style = .{} });
 
                 // Add colored hunk view symbol
                 if (app.state.hunk_view_mode == .all) {
                     // For "+/-" mode, color + green and - red
-                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "+"), .style = .{ .fg = Color.green, .bold = true } });
-                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "/"), .style = .{ .bold = true } });
-                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "-"), .style = .{ .fg = Color.red, .bold = true } });
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "+"), .style = .{ .fg = Color.green, .bold = true } });
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "/"), .style = .{ .bold = true } });
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "-"), .style = .{ .fg = Color.red, .bold = true } });
                 } else {
                     // For single mode, use appropriate color
                     const hunk_view_style: vaxis.Style = switch (app.state.hunk_view_mode) {
@@ -702,20 +702,20 @@ pub const UI = struct {
                         .old => .{ .fg = Color.red, .bold = true },
                         .new => .{ .fg = Color.green, .bold = true },
                     };
-                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, hunk_view_symbol), .style = hunk_view_style });
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, hunk_view_symbol), .style = hunk_view_style });
                 }
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "]"), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "]"), .style = .{} });
             }
 
             if (app.state.count_prefix) |count| {
                 var buf: [64]u8 = undefined;
                 const count_str = try std.fmt.bufPrint(&buf, " [{d}]", .{count});
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, count_str), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, count_str), .style = .{} });
             }
 
             var buf: [128]u8 = undefined;
             const pos_info = try std.fmt.bufPrint(&buf, "  Line {d}/{d} (File {d}/{d})", .{ current_line, total_lines, current_file, total_files });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, pos_info), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, pos_info), .style = .{} });
 
             // Show search info if there are active matches in normal mode
             if (app.state.search_state.hasMatches()) {
@@ -723,7 +723,7 @@ pub const UI = struct {
                 const current_match = if (app.state.search_state.current_match_idx) |idx| idx + 1 else 0;
                 var match_buf: [64]u8 = undefined;
                 const match_info = try std.fmt.bufPrint(&match_buf, "  [{d}/{d} matches]", .{ current_match, match_count });
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
             }
 
             // Show review status if a review is in progress
@@ -739,21 +739,21 @@ pub const UI = struct {
                     .completed => .{ .fg = Color.green },
                     .failed => .{ .fg = Color.red },
                 };
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, review_text), .style = review_style });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, review_text), .style = review_style });
             }
 
             // Show temporary status message (if any)
             if (app.state.status_message) |msg| {
                 var msg_buf: [128]u8 = undefined;
                 const formatted = std.fmt.bufPrint(&msg_buf, "  [{s}]", .{msg}) catch msg;
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, formatted), .style = .{ .fg = Color.magenta } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, formatted), .style = .{ .fg = Color.magenta } });
             }
 
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
         }
 
-        _ = try win.print(segments.items, .{ .row_offset = 0 });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(0 )});
     }
 
     pub fn printHeaderLine(app: *App, win: vaxis.Window, row: usize, text: []const u8, style: vaxis.Style) !void {
@@ -776,7 +776,7 @@ pub const UI = struct {
             .text = buffer[0..width],
             .style = style,
         }};
-        _ = try win.print(&seg, .{ .row_offset = row, .col_offset = 0 });
+        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0 )});
     }
 
     /// Render the review log popup
@@ -790,8 +790,8 @@ pub const UI = struct {
         const popup_win = win.child(.{
             .x_off = x_offset,
             .y_off = y_offset,
-            .width = .{ .limit = popup_width },
-            .height = .{ .limit = popup_height },
+            .width = @intCast(popup_width),
+            .height = @intCast(popup_height),
             .border = .{
                 .where = .all,
                 .style = .{
@@ -816,7 +816,7 @@ pub const UI = struct {
         var title_seg = [_]vaxis.Cell.Segment{
             .{ .text = title, .style = .{ .fg = .{ .index = 6 }, .bold = true } },
         };
-        _ = try popup_win.print(&title_seg, .{ .row_offset = 0 });
+        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0 )});
 
         // Get log content
         const content = app.state.review_log_content orelse "No review log yet. Press R to start a review.";
@@ -826,20 +826,20 @@ pub const UI = struct {
         const wrap_width = if (popup_width > 3) popup_width - 3 else 1; // Account for left margin and right padding
 
         // Build wrapped lines
-        var wrapped_lines = std.ArrayList([]const u8).init(app.allocator);
-        defer wrapped_lines.deinit();
+        var wrapped_lines: std.ArrayList([]const u8) = .{};
+        defer wrapped_lines.deinit(app.allocator);
 
         var source_line_iter = std.mem.splitScalar(u8, content, '\n');
         while (source_line_iter.next()) |source_line| {
             if (source_line.len == 0) {
                 // Empty line
-                wrapped_lines.append("") catch continue;
+                wrapped_lines.append(app.allocator, "") catch continue;
             } else {
                 // Wrap long lines
                 var remaining = source_line;
                 while (remaining.len > 0) {
                     const chunk_len = @min(remaining.len, wrap_width);
-                    wrapped_lines.append(remaining[0..chunk_len]) catch break;
+                    wrapped_lines.append(app.allocator, remaining[0..chunk_len]) catch break;
                     remaining = remaining[chunk_len..];
                 }
             }
@@ -870,7 +870,7 @@ pub const UI = struct {
             var line_seg = [_]vaxis.Cell.Segment{
                 .{ .text = line, .style = .{ .fg = .{ .index = 7 } } },
             };
-            _ = try popup_win.print(&line_seg, .{ .row_offset = row, .col_offset = 1 });
+            _ = popup_win.print(&line_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 )});
             row += 1;
         }
 
@@ -879,7 +879,7 @@ pub const UI = struct {
             var up_seg = [_]vaxis.Cell.Segment{
                 .{ .text = "▲ (more above)", .style = .{ .fg = .{ .index = 8 } } },
             };
-            _ = try popup_win.print(&up_seg, .{ .row_offset = 1 });
+            _ = popup_win.print(&up_seg, .{ .row_offset = @intCast(1 )});
         }
 
         const total_lines = wrapped_lines.items.len;
@@ -887,7 +887,7 @@ pub const UI = struct {
             var down_seg = [_]vaxis.Cell.Segment{
                 .{ .text = "▼ (more below)", .style = .{ .fg = .{ .index = 8 } } },
             };
-            _ = try popup_win.print(&down_seg, .{ .row_offset = popup_height - 2 });
+            _ = popup_win.print(&down_seg, .{ .row_offset = @intCast(popup_height - 2 )});
         }
     }
 
@@ -901,7 +901,7 @@ pub const UI = struct {
             var seg = [_]vaxis.Cell.Segment{
                 .{ .text = "│", .style = divider_style },
             };
-            _ = try win.print(&seg, .{ .row_offset = row });
+            _ = win.print(&seg, .{ .row_offset = @intCast(row )});
         }
     }
 
@@ -926,13 +926,13 @@ pub const UI = struct {
         var title_bg_seg = [_]vaxis.Cell.Segment{
             .{ .text = fill_text, .style = title_style },
         };
-        _ = try win.print(&title_bg_seg, .{ .row_offset = 0 });
+        _ = win.print(&title_bg_seg, .{ .row_offset = @intCast(0 )});
 
         // Print title text
         var title_seg = [_]vaxis.Cell.Segment{
             .{ .text = title, .style = title_style },
         };
-        _ = try win.print(&title_seg, .{ .row_offset = 0 });
+        _ = win.print(&title_seg, .{ .row_offset = @intCast(0 )});
 
         // Show status indicator if review is running
         if (app.review_process) |proc| {
@@ -959,7 +959,7 @@ pub const UI = struct {
             var status_seg = [_]vaxis.Cell.Segment{
                 .{ .text = status_text, .style = status_style },
             };
-            _ = try win.print(&status_seg, .{ .row_offset = 0, .col_offset = status_col });
+            _ = win.print(&status_seg, .{ .row_offset = 0, .col_offset = @intCast(status_col )});
         }
 
         // Get log content
@@ -970,18 +970,18 @@ pub const UI = struct {
         const wrap_width = if (win.width > 2) win.width - 2 else 1; // Leave margin on left (for divider overflow) and right
 
         // Build wrapped lines
-        var wrapped_lines = std.ArrayList([]const u8).init(app.allocator);
-        defer wrapped_lines.deinit();
+        var wrapped_lines: std.ArrayList([]const u8) = .{};
+        defer wrapped_lines.deinit(app.allocator);
 
         var source_line_iter = std.mem.splitScalar(u8, content, '\n');
         while (source_line_iter.next()) |source_line| {
             if (source_line.len == 0) {
-                wrapped_lines.append("") catch continue;
+                wrapped_lines.append(app.allocator, "") catch continue;
             } else {
                 var remaining = source_line;
                 while (remaining.len > 0) {
                     const chunk_len = @min(remaining.len, wrap_width);
-                    wrapped_lines.append(remaining[0..chunk_len]) catch break;
+                    wrapped_lines.append(app.allocator, remaining[0..chunk_len]) catch break;
                     remaining = remaining[chunk_len..];
                 }
             }
@@ -1024,7 +1024,7 @@ pub const UI = struct {
                 var line_seg = [_]vaxis.Cell.Segment{
                     .{ .text = line, .style = .{ .fg = .{ .index = 7 } } },
                 };
-                _ = try win.print(&line_seg, .{ .row_offset = row, .col_offset = 1 });
+                _ = win.print(&line_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 )});
                 row += 1;
             }
         }
@@ -1039,7 +1039,7 @@ pub const UI = struct {
             var indicator_seg = [_]vaxis.Cell.Segment{
                 .{ .text = indicator, .style = .{ .fg = .{ .index = 8 } } },
             };
-            _ = try win.print(&indicator_seg, .{ .row_offset = win.height - 1, .col_offset = indicator_col });
+            _ = win.print(&indicator_seg, .{ .row_offset = @intCast(win.height - 1), .col_offset = @intCast(indicator_col )});
         }
     }
 };

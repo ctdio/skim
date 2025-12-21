@@ -13,8 +13,8 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     const popup_win = win.child(.{
         .x_off = x_offset,
         .y_off = y_offset,
-        .width = .{ .limit = popup_width },
-        .height = .{ .limit = popup_height },
+        .width = @intCast(popup_width),
+        .height = @intCast(popup_height),
         .border = .{
             .where = .all,
             .style = .{
@@ -35,14 +35,14 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     popup_win.fill(bg_cell);
 
     // Build all content lines first
-    var content_lines = std.ArrayList(ContentLine).init(app.allocator);
-    defer content_lines.deinit();
+    var content_lines: std.ArrayList(ContentLine) = .{};
+    defer content_lines.deinit(app.allocator);
 
     // Title
-    try content_lines.append(.{ .text = "Skim - Keybindings", .style = .{ .fg = .{ .index = 6 }, .bold = true } });
+    try content_lines.append(app.allocator, .{ .text = "Skim - Keybindings", .style = .{ .fg = .{ .index = 6 }, .bold = true } });
 
     // Separator
-    try content_lines.append(.{ .text = null, .style = .{}, .is_separator = true });
+    try content_lines.append(app.allocator, .{ .text = null, .style = .{}, .is_separator = true });
 
     const section_style = vaxis.Style{
         .fg = .{ .index = 3 }, // yellow
@@ -56,7 +56,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     };
 
     // NORMAL MODE section
-    try content_lines.append(.{ .text = "NORMAL MODE", .style = section_style });
+    try content_lines.append(app.allocator, .{ .text = "NORMAL MODE", .style = section_style });
 
     const normal_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "h/l", .desc = "Previous/Next file" },
@@ -90,12 +90,12 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     };
 
     for (normal_bindings) |binding| {
-        try content_lines.append(.{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(.{ .text = "", .style = .{} }); // Blank line
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{} }); // Blank line
 
     // SEARCH MODE section
-    try content_lines.append(.{ .text = "SEARCH MODE", .style = section_style });
+    try content_lines.append(app.allocator, .{ .text = "SEARCH MODE", .style = section_style });
 
     const search_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Type", .desc = "Enter search query (smart case)" },
@@ -105,12 +105,12 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     };
 
     for (search_bindings) |binding| {
-        try content_lines.append(.{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(.{ .text = "", .style = .{} }); // Blank line
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{} }); // Blank line
 
     // COMMAND PALETTE section
-    try content_lines.append(.{ .text = "COMMAND PALETTE", .style = section_style });
+    try content_lines.append(app.allocator, .{ .text = "COMMAND PALETTE", .style = section_style });
 
     const palette_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Type", .desc = "Filter files (default mode)" },
@@ -122,12 +122,12 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     };
 
     for (palette_bindings) |binding| {
-        try content_lines.append(.{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(.{ .text = "", .style = .{} }); // Blank line
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{} }); // Blank line
 
     // VISUAL MODE section
-    try content_lines.append(.{ .text = "VISUAL MODE", .style = section_style });
+    try content_lines.append(app.allocator, .{ .text = "VISUAL MODE", .style = section_style });
 
     const visual_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "j/k", .desc = "Extend selection" },
@@ -136,12 +136,12 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     };
 
     for (visual_bindings) |binding| {
-        try content_lines.append(.{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(.{ .text = "", .style = .{} }); // Blank line
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{} }); // Blank line
 
     // COMMENT MODE section
-    try content_lines.append(.{ .text = "COMMENT MODE", .style = section_style });
+    try content_lines.append(app.allocator, .{ .text = "COMMENT MODE", .style = section_style });
 
     const comment_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Enter", .desc = "Save comment" },
@@ -151,12 +151,12 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     };
 
     for (comment_bindings) |binding| {
-        try content_lines.append(.{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
 
     // Footer
-    try content_lines.append(.{ .text = "", .style = .{} }); // Blank line
-    try content_lines.append(.{ .text = "j/k or ↑↓: Scroll  |  Ctrl-d/u: Page down/up  |  g/G: Top/Bottom  |  ? or ESC: Close", .style = .{ .fg = .{ .index = 8 } } });
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{} }); // Blank line
+    try content_lines.append(app.allocator, .{ .text = "j/k or ↑↓: Scroll  |  Ctrl-d/u: Page down/up  |  g/G: Top/Bottom  |  ? or ESC: Close", .style = .{ .fg = .{ .index = 8 } } });
 
     // Calculate visible range based on scroll offset
     const scroll_offset = app.state.help_scroll_offset;
@@ -172,7 +172,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         var indicator_seg = [_]vaxis.Cell.Segment{
             .{ .text = indicator, .style = .{ .fg = .{ .index = 8 } } },
         };
-        _ = try popup_win.print(&indicator_seg, .{ .row_offset = current_row });
+        _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row) });
         current_row += 1;
     }
 
@@ -194,7 +194,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
                 var sep_segments = [_]vaxis.Cell.Segment{
                     .{ .text = sep_text, .style = .{ .fg = .{ .index = 8 } } },
                 };
-                _ = try popup_win.print(&sep_segments, .{ .row_offset = current_row });
+                _ = popup_win.print(&sep_segments, .{ .row_offset = @intCast(current_row) });
             }
         } else if (line.key) |key| {
             // Render keybinding
@@ -204,13 +204,13 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
                 .{ .text = "  ", .style = .{} },
                 .{ .text = line.desc.?, .style = line.desc_style.? },
             };
-            _ = try popup_win.print(&segments, .{ .row_offset = current_row });
+            _ = popup_win.print(&segments, .{ .row_offset = @intCast(current_row) });
         } else if (line.text) |text| {
             // Render regular text
             var text_seg = [_]vaxis.Cell.Segment{
                 .{ .text = text, .style = line.style },
             };
-            _ = try popup_win.print(&text_seg, .{ .row_offset = current_row });
+            _ = popup_win.print(&text_seg, .{ .row_offset = @intCast(current_row) });
         }
 
         current_row += 1;
@@ -222,7 +222,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         var indicator_seg = [_]vaxis.Cell.Segment{
             .{ .text = indicator, .style = .{ .fg = .{ .index = 8 } } },
         };
-        _ = try popup_win.print(&indicator_seg, .{ .row_offset = current_row });
+        _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row) });
     }
 }
 

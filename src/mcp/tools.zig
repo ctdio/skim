@@ -106,21 +106,22 @@ pub fn listClients(ctx: *Context, _: ?std.json.Value) Result {
     }
 
     // Build response text
-    var output = std.ArrayList(u8).init(ctx.allocator);
-    defer output.deinit();
+    // Zig 0.15: ArrayList is unmanaged
+    var output: std.ArrayList(u8) = .{};
+    defer output.deinit(ctx.allocator);
 
-    output.appendSlice("Connected skim clients:\n") catch
+    output.appendSlice(ctx.allocator, "Connected skim clients:\n") catch
         return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
 
     for (entries) |entry| {
-        output.writer().print("- {s} ({s} in {s})\n", .{
+        output.writer(ctx.allocator).print("- {s} ({s} in {s})\n", .{
             entry.id,
             entry.diff_ref,
             entry.cwd,
         }) catch return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
     }
 
-    const text = output.toOwnedSlice() catch
+    const text = output.toOwnedSlice(ctx.allocator) catch
         return Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
 
     const content = ctx.allocator.alloc(framework.Content, 1) catch {

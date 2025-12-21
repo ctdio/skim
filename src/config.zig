@@ -28,7 +28,7 @@ pub fn getReviewCommand(allocator: Allocator) !?[]const u8 {
     // Fall back to config file
     const config = load(allocator) catch |err| {
         // Config file doesn't exist or is invalid - that's fine
-        std.log.debug("Could not load config: {}", .{err});
+        std.log.debug("Could not load config: {any}", .{err});
         return null;
     };
 
@@ -100,8 +100,8 @@ pub const ReviewContext = struct {
 /// Supported variables: {client_id}, {repo}, {diff_ref}, {adapter_port}
 /// Returns owned string that must be freed by caller.
 pub fn substituteTemplateVars(allocator: Allocator, command: []const u8, ctx: ReviewContext) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
-    errdefer result.deinit();
+    var result: std.ArrayList(u8) = .{};
+    errdefer result.deinit(allocator);
 
     var i: usize = 0;
     while (i < command.len) {
@@ -112,28 +112,28 @@ pub fn substituteTemplateVars(allocator: Allocator, command: []const u8, ctx: Re
                 const var_name = command[i + 1 .. close_pos];
 
                 if (std.mem.eql(u8, var_name, "client_id")) {
-                    try result.appendSlice(ctx.client_id);
+                    try result.appendSlice(allocator, ctx.client_id);
                 } else if (std.mem.eql(u8, var_name, "repo")) {
-                    try result.appendSlice(ctx.repo);
+                    try result.appendSlice(allocator, ctx.repo);
                 } else if (std.mem.eql(u8, var_name, "diff_ref")) {
-                    try result.appendSlice(ctx.diff_ref);
+                    try result.appendSlice(allocator, ctx.diff_ref);
                 } else if (std.mem.eql(u8, var_name, "adapter_port")) {
                     var port_buf: [8]u8 = undefined;
                     const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{ctx.adapter_port}) catch unreachable;
-                    try result.appendSlice(port_str);
+                    try result.appendSlice(allocator, port_str);
                 } else {
                     // Unknown variable - keep as-is
-                    try result.appendSlice(command[i .. close_pos + 1]);
+                    try result.appendSlice(allocator, command[i .. close_pos + 1]);
                 }
                 i = close_pos + 1;
                 continue;
             }
         }
-        try result.append(command[i]);
+        try result.append(allocator, command[i]);
         i += 1;
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }
 
 // =============================================================================

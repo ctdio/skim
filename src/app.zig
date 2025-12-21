@@ -67,6 +67,9 @@ const PendingJob = struct {
     old_content: []const u8, // Owned OLD file content
 };
 
+// Static buffer for vaxis Tty writer (must persist for lifetime of Tty)
+var tty_static_buffer: [4096]u8 = undefined;
+
 pub const App = struct {
     allocator: Allocator,
     vx: Vaxis,
@@ -237,11 +240,12 @@ pub const App = struct {
     const CTRL_C_TIMEOUT_NS = 1 * std.time.ns_per_s; // 1 second window
 
     pub fn init(allocator: Allocator, config: anytype) !App {
-        var tty = try vaxis.Tty.init();
+        // Use static buffer for Tty (must persist for lifetime of Tty)
+        var tty = try vaxis.Tty.init(&tty_static_buffer);
         errdefer tty.deinit();
 
         var vx = try Vaxis.init(allocator, .{});
-        errdefer vx.deinit(allocator, tty.anyWriter());
+        errdefer vx.deinit(allocator, tty.writer());
 
         // Get git repository root (for resolving file paths)
         const git_repo_root = try git.getRepoRoot(allocator);
@@ -312,7 +316,7 @@ pub const App = struct {
                 .branch_selection = 0,
                 .branch_search_query = undefined,
                 .branch_search_len = 0,
-                .filtered_branches = std.ArrayList(usize).init(allocator),
+                .filtered_branches = .{},
                 .help_scroll_offset = 0,
                 .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
                 .review_log_scroll = 0,
@@ -402,7 +406,7 @@ pub const App = struct {
             self.allocator.free(branch);
         }
         self.allocator.free(self.state.branch_list);
-        self.state.filtered_branches.deinit();
+        self.state.filtered_branches.deinit(self.allocator);
         self.state.expanded_comments.deinit();
         self.state.branch_stats_cache.deinit();
         // Clean up cached default branch name
@@ -434,7 +438,7 @@ pub const App = struct {
             self.allocator.free(content);
         }
         self.syntax_highlighter.deinit();
-        self.vx.deinit(self.allocator, self.tty.anyWriter());
+        self.vx.deinit(self.allocator, self.tty.writer());
         self.tty.deinit();
     }
 
@@ -575,14 +579,12 @@ pub const App = struct {
 
     pub fn run(self: *App) !void {
         // Set up the terminal
-        var buffered_writer = self.tty.bufferedWriter();
+        const writer = self.tty.writer();
 
-        try self.vx.enterAltScreen(buffered_writer.writer().any());
+        try self.vx.enterAltScreen(writer);
 
         // Query terminal capabilities (50ms timeout - enough for modern terminals)
-        try self.vx.queryTerminal(buffered_writer.writer().any(), 50 * std.time.ns_per_ms);
-
-        try buffered_writer.flush();
+        try self.vx.queryTerminal(writer, 50 * std.time.ns_per_ms);
 
         var loop: vaxis.Loop(Event) = .{
             .tty = &self.tty,
@@ -604,14 +606,14 @@ pub const App = struct {
                     std.log.debug("MCP: Connection successful, connected={}", .{m.connected});
                     self.mcp = m;
                     // Small delay to ensure daemon has finished accepting
-                    std.time.sleep(10 * std.time.ns_per_ms);
+                    std.Thread.sleep(10 * std.time.ns_per_ms);
                     // Send hello message to register with server
                     self.sendMcpHello() catch |err| {
-                        std.log.debug("MCP: Failed to send hello: {}", .{err});
+                        std.log.debug("MCP: Failed to send hello: {any}", .{err});
                     };
                     std.log.debug("MCP: Hello sent, connected={}", .{m.connected});
                 } else |err| {
-                    std.log.debug("MCP: Connection failed after retries: {}", .{err});
+                    std.log.debug("MCP: Connection failed after retries: {any}", .{err});
                     // Server not available - keep client for potential reconnection
                     self.mcp = m;
                 }
@@ -638,7 +640,7 @@ pub const App = struct {
             } else {
                 // If we need to render, have an active job, or connected to MCP,
                 // check for events without blocking. Sleep briefly to avoid busy-looping.
-                std.time.sleep(10 * std.time.ns_per_ms); // 10ms delay (100Hz) - enough for responsive MCP
+                std.Thread.sleep(10 * std.time.ns_per_ms); // 10ms delay (100Hz) - enough for responsive MCP
             }
 
             // Check if we need to suspend for editor
@@ -647,20 +649,18 @@ pub const App = struct {
                 loop.stop();
 
                 // Exit alt screen
-                try self.vx.exitAltScreen(buffered_writer.writer().any());
-                try buffered_writer.flush();
+                try self.vx.exitAltScreen(self.tty.writer());
 
                 // Open editor (blocks until editor exits)
                 if (self.editor_file_path) |file_path| {
                     defer self.allocator.free(file_path);
                     editor.openInEditor(self.allocator, file_path, self.editor_line_number) catch |err| {
-                        std.log.err("Failed to open editor: {}", .{err});
+                        std.log.err("Failed to open editor: {any}", .{err});
                     };
                 }
 
                 // Re-enter alt screen
-                try self.vx.enterAltScreen(buffered_writer.writer().any());
-                try buffered_writer.flush();
+                try self.vx.enterAltScreen(self.tty.writer());
 
                 // Restart the event loop
                 try loop.start();
@@ -692,8 +692,7 @@ pub const App = struct {
             if (had_events or self.needs_render or first_render) {
                 const win = self.vx.window();
                 try self.render(win);
-                try self.vx.render(buffered_writer.writer().any());
-                try buffered_writer.flush();
+                try self.vx.render(self.tty.writer());
                 // Don't clear needs_render if we're about to suspend for editor
                 // This prevents blocking on the next pollEvent()
                 if (!self.should_suspend_for_editor) {
@@ -707,10 +706,10 @@ pub const App = struct {
 
             // Check for completed highlighting results
             if (self.highlight_worker) |worker| {
-                var results = std.ArrayList(state_helpers.HighlightResult).init(self.allocator);
-                defer results.deinit();
+                var results: std.ArrayList(state_helpers.HighlightResult) = .{};
+                defer results.deinit(self.allocator);
 
-                worker.pollResults(&results) catch {};
+                worker.pollResults(self.allocator, &results) catch {};
 
                 for (results.items) |result| {
                     const file_idx = result.file_idx;
@@ -756,7 +755,7 @@ pub const App = struct {
                 if (mcp.needsReconnect()) {
                     if (mcp.tryReconnect()) {
                         // Small delay to ensure daemon has finished accepting
-                        std.time.sleep(10 * std.time.ns_per_ms);
+                        std.Thread.sleep(10 * std.time.ns_per_ms);
                         // Reconnected - send hello again to re-register
                         self.sendMcpHello() catch {};
                     }
@@ -852,14 +851,13 @@ pub const App = struct {
         }
 
         // Exit alt screen before returning
-        try self.vx.exitAltScreen(buffered_writer.writer().any());
-        try buffered_writer.flush();
+        try self.vx.exitAltScreen(self.tty.writer());
     }
 
     fn handleEvent(self: *App, event: Event) !void {
         switch (event) {
             .key_press => |key| try self.handleKey(key),
-            .winsize => |ws| try self.vx.resize(self.allocator, self.tty.anyWriter(), ws),
+            .winsize => |ws| try self.vx.resize(self.allocator, self.tty.writer(), ws),
             else => {},
         }
     }
@@ -966,7 +964,7 @@ pub const App = struct {
             self.convertHunkViewMode(),
             self.shouldApplyHunkFiltering(),
         ) catch |err| {
-            std.log.err("Failed to rebuild LineMap on view toggle: {}", .{err});
+            std.log.err("Failed to rebuild LineMap on view toggle: {any}", .{err});
             return;
         };
 
@@ -1766,7 +1764,7 @@ pub const App = struct {
         } else {
             // GUI editor: just spawn it without suspending TUI
             editor.openInEditor(self.allocator, absolute_path, line_number) catch |err| {
-                std.log.err("Failed to open editor: {}", .{err});
+                std.log.err("Failed to open editor: {any}", .{err});
             };
         }
     }
@@ -1871,7 +1869,7 @@ pub const App = struct {
         // If no query, show all branches
         if (query.len == 0) {
             for (self.state.branch_list, 0..) |_, idx| {
-                try self.state.filtered_branches.append(idx);
+                try self.state.filtered_branches.append(self.allocator, idx);
             }
             return;
         }
@@ -1879,7 +1877,7 @@ pub const App = struct {
         // Case-insensitive search
         for (self.state.branch_list, 0..) |branch, idx| {
             if (self.matchesBranchQuery(branch, query)) {
-                try self.state.filtered_branches.append(idx);
+                try self.state.filtered_branches.append(self.allocator, idx);
             }
         }
 
@@ -2231,8 +2229,8 @@ pub const App = struct {
         const selection = self.getVisualSelection() orelse return;
 
         // Build text from selected lines
-        var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
+        var buffer: std.ArrayList(u8) = .{};
+        defer buffer.deinit(self.allocator);
 
         var line_idx = selection.start;
         while (line_idx <= selection.end) : (line_idx += 1) {
@@ -2245,43 +2243,43 @@ pub const App = struct {
             switch (record.line_type) {
                 .file_header => {
                     const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-                    try buffer.appendSlice("File: ");
-                    try buffer.appendSlice(file_path);
-                    try buffer.append('\n');
+                    try buffer.appendSlice(self.allocator, "File: ");
+                    try buffer.appendSlice(self.allocator, file_path);
+                    try buffer.append(self.allocator, '\n');
                 },
                 .hunk_header => |hunk_info| {
                     const hunk = &file.hunks[hunk_info.hunk_idx];
-                    try buffer.appendSlice("@@ -");
+                    try buffer.appendSlice(self.allocator, "@@ -");
                     var num_buf: [32]u8 = undefined;
                     const old_start_str = try std.fmt.bufPrint(&num_buf, "{d}", .{hunk.header.old_start});
-                    try buffer.appendSlice(old_start_str);
-                    try buffer.append(',');
+                    try buffer.appendSlice(self.allocator, old_start_str);
+                    try buffer.append(self.allocator, ',');
                     const old_count_str = try std.fmt.bufPrint(&num_buf, "{d}", .{hunk.header.old_count});
-                    try buffer.appendSlice(old_count_str);
-                    try buffer.appendSlice(" +");
+                    try buffer.appendSlice(self.allocator, old_count_str);
+                    try buffer.appendSlice(self.allocator, " +");
                     const new_start_str = try std.fmt.bufPrint(&num_buf, "{d}", .{hunk.header.new_start});
-                    try buffer.appendSlice(new_start_str);
-                    try buffer.append(',');
+                    try buffer.appendSlice(self.allocator, new_start_str);
+                    try buffer.append(self.allocator, ',');
                     const new_count_str = try std.fmt.bufPrint(&num_buf, "{d}", .{hunk.header.new_count});
-                    try buffer.appendSlice(new_count_str);
-                    try buffer.appendSlice(" @@\n");
+                    try buffer.appendSlice(self.allocator, new_count_str);
+                    try buffer.appendSlice(self.allocator, " @@\n");
                 },
                 .code_line => |code| {
                     const line = &file.hunks[code.hunk_idx].lines[code.line_idx_in_hunk];
                     // Add line type prefix
                     switch (line.line_type) {
-                        .add => try buffer.append('+'),
-                        .delete => try buffer.append('-'),
-                        .context => try buffer.append(' '),
+                        .add => try buffer.append(self.allocator, '+'),
+                        .delete => try buffer.append(self.allocator, '-'),
+                        .context => try buffer.append(self.allocator, ' '),
                     }
-                    try buffer.appendSlice(line.content);
-                    try buffer.append('\n');
+                    try buffer.appendSlice(self.allocator, line.content);
+                    try buffer.append(self.allocator, '\n');
                 },
                 .comment_line => |comment_info| {
                     if (self.state.comment_store.getComment(comment_info.comment_idx)) |comment| {
-                        try buffer.appendSlice("Comment: ");
-                        try buffer.appendSlice(comment.text);
-                        try buffer.append('\n');
+                        try buffer.appendSlice(self.allocator, "Comment: ");
+                        try buffer.appendSlice(self.allocator, comment.text);
+                        try buffer.append(self.allocator, '\n');
                     }
                 },
                 .spacer => {
@@ -2316,8 +2314,8 @@ pub const App = struct {
             const header_win = win.child(.{
                 .x_off = 0,
                 .y_off = 0,
-                .width = .{ .limit = win.width },
-                .height = .{ .limit = Layout.header_height },
+                .width = @intCast(win.width),
+                .height = @intCast(Layout.header_height),
             });
             try UI.renderHeader(self, header_win);
 
@@ -2331,26 +2329,26 @@ pub const App = struct {
                 const content_win = win.child(.{
                     .x_off = 0,
                     .y_off = Layout.header_height,
-                    .width = .{ .limit = diff_width },
-                    .height = .{ .limit = content_height },
+                    .width = @intCast(diff_width),
+                    .height = @intCast(content_height),
                 });
                 try self.renderContent(content_win);
 
                 // Vertical divider
                 const divider_win = win.child(.{
-                    .x_off = diff_width,
+                    .x_off = @intCast(diff_width),
                     .y_off = Layout.header_height,
-                    .width = .{ .limit = divider_width },
-                    .height = .{ .limit = content_height },
+                    .width = @intCast(divider_width),
+                    .height = @intCast(content_height),
                 });
                 try UI.renderVerticalDivider(divider_win);
 
                 // Review panel on right
                 const panel_win = win.child(.{
-                    .x_off = diff_width + divider_width,
+                    .x_off = @intCast(diff_width + divider_width),
                     .y_off = Layout.header_height,
-                    .width = .{ .limit = panel_width },
-                    .height = .{ .limit = content_height },
+                    .width = @intCast(panel_width),
+                    .height = @intCast(content_height),
                 });
                 try UI.renderReviewPanel(self, panel_win);
             } else {
@@ -2358,8 +2356,8 @@ pub const App = struct {
                 const content_win = win.child(.{
                     .x_off = 0,
                     .y_off = Layout.header_height,
-                    .width = .{ .limit = win.width },
-                    .height = .{ .limit = content_height },
+                    .width = @intCast(win.width),
+                    .height = @intCast(content_height),
                 });
                 try self.renderContent(content_win);
             }
@@ -2368,8 +2366,8 @@ pub const App = struct {
             const status_win = win.child(.{
                 .x_off = 0,
                 .y_off = win.height - Layout.status_height,
-                .width = .{ .limit = win.width },
-                .height = .{ .limit = Layout.status_height },
+                .width = @intCast(win.width),
+                .height = @intCast(Layout.status_height),
             });
             try UI.renderStatus(self, status_win);
         }
@@ -2483,8 +2481,8 @@ pub const App = struct {
         const file_highlights = highlights.?;
 
         // Find highlights that overlap with this line
-        var relevant_highlights = std.ArrayList(syntax.Highlight).init(self.allocator);
-        defer relevant_highlights.deinit();
+        var relevant_highlights: std.ArrayList(syntax.Highlight) = .{};
+        defer relevant_highlights.deinit(self.allocator);
 
         const line_start = line_byte_offset;
         const line_end = line_byte_offset + text.len;
@@ -2503,7 +2501,7 @@ pub const App = struct {
                 // Skip empty or invalid highlights
                 if (safe_start >= safe_end) continue;
 
-                try relevant_highlights.append(.{
+                try relevant_highlights.append(self.allocator, .{
                     .start_byte = safe_start,
                     .end_byte = safe_end,
                     .category = h.category,
@@ -2523,8 +2521,8 @@ pub const App = struct {
         }
 
         // Build segments by splitting text at highlight boundaries
-        var segments = std.ArrayList(vaxis.Cell.Segment).init(self.allocator);
-        errdefer segments.deinit();
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        errdefer segments.deinit(self.allocator);
 
         var pos: usize = 0;
         while (pos < text.len) {
@@ -2591,7 +2589,7 @@ pub const App = struct {
                     },
                 }
 
-                try segments.append(.{
+                try segments.append(self.allocator, .{
                     .text = chunk,
                     .style = style,
                 });
@@ -2603,7 +2601,7 @@ pub const App = struct {
                 if (pos >= text.len) break;
                 const safe_next_start = @min(next_start, text.len);
                 const chunk = text[pos..safe_next_start];
-                try segments.append(.{
+                try segments.append(self.allocator, .{
                     .text = chunk,
                     .style = base_style,
                 });
@@ -2612,7 +2610,7 @@ pub const App = struct {
             }
         }
 
-        const owned_segments = try segments.toOwnedSlice();
+        const owned_segments = try segments.toOwnedSlice(self.allocator);
         return try self.applySearchHighlighting(owned_segments, text, full_line_text, text_offset, global_line);
     }
 
@@ -2666,8 +2664,8 @@ pub const App = struct {
         const is_case_sensitive = search.isCaseSensitive(query);
 
         // Find all matches in the chunk_text (this is the actual text to render)
-        var chunk_matches = std.ArrayList(struct { start: usize, end: usize }).init(self.allocator);
-        defer chunk_matches.deinit();
+        var chunk_matches: std.ArrayList(struct { start: usize, end: usize }) = .{};
+        defer chunk_matches.deinit(self.allocator);
 
         var search_pos: usize = 0;
         while (search_pos <= chunk_text.len - query.len) {
@@ -2678,7 +2676,7 @@ pub const App = struct {
                 std.ascii.eqlIgnoreCase(slice, query);
 
             if (is_match) {
-                try chunk_matches.append(.{ .start = search_pos, .end = search_pos + query.len });
+                try chunk_matches.append(self.allocator, .{ .start = search_pos, .end = search_pos + query.len });
                 search_pos += query.len;
             } else {
                 search_pos += 1;
@@ -2692,8 +2690,8 @@ pub const App = struct {
         }
 
         // Now map the matches from chunk_text coordinates to segment coordinates
-        var result_segments = std.ArrayList(vaxis.Cell.Segment).init(self.allocator);
-        errdefer result_segments.deinit();
+        var result_segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        errdefer result_segments.deinit(self.allocator);
 
         var text_pos: usize = 0; // Current position in chunk_text
         for (segments) |seg| {
@@ -2701,21 +2699,21 @@ pub const App = struct {
             const seg_end = text_pos + seg.text.len;
 
             // Find matches that overlap with this segment
-            var seg_matches = std.ArrayList(struct { start: usize, end: usize }).init(self.allocator);
-            defer seg_matches.deinit();
+            var seg_matches: std.ArrayList(struct { start: usize, end: usize }) = .{};
+            defer seg_matches.deinit(self.allocator);
 
             for (chunk_matches.items) |match| {
                 if (match.end > seg_start and match.start < seg_end) {
                     // Match overlaps this segment - convert to segment-local coordinates
                     const local_start = if (match.start > seg_start) match.start - seg_start else 0;
                     const local_end = @min(match.end, seg_end) - seg_start;
-                    try seg_matches.append(.{ .start = local_start, .end = local_end });
+                    try seg_matches.append(self.allocator, .{ .start = local_start, .end = local_end });
                 }
             }
 
             if (seg_matches.items.len == 0) {
                 // No matches in this segment - add as-is
-                try result_segments.append(seg);
+                try result_segments.append(self.allocator, seg);
             } else {
                 // Split segment at match boundaries
                 var pos: usize = 0;
@@ -2723,7 +2721,7 @@ pub const App = struct {
                     // Add text before match (if any)
                     if (match.start > pos) {
                         const before_text = seg.text[pos..match.start];
-                        try result_segments.append(.{
+                        try result_segments.append(self.allocator, .{
                             .text = before_text,
                             .style = seg.style,
                         });
@@ -2735,7 +2733,7 @@ pub const App = struct {
                     match_style.bg = rendering_common.Color.search_match_bg;
                     match_style.fg = rendering_common.Color.search_match_fg;
                     match_style.bold = true;
-                    try result_segments.append(.{
+                    try result_segments.append(self.allocator, .{
                         .text = match_text,
                         .style = match_style,
                     });
@@ -2746,7 +2744,7 @@ pub const App = struct {
                 // Add text after last match (if any)
                 if (pos < seg.text.len) {
                     const after_text = seg.text[pos..];
-                    try result_segments.append(.{
+                    try result_segments.append(self.allocator, .{
                         .text = after_text,
                         .style = seg.style,
                     });
@@ -2756,7 +2754,7 @@ pub const App = struct {
             text_pos += seg.text.len;
         }
 
-        const result = try result_segments.toOwnedSlice();
+        const result = try result_segments.toOwnedSlice(self.allocator);
         return result;
     }
 
@@ -2776,7 +2774,7 @@ pub const App = struct {
             .add_comment => |ac| {
                 // Delegate to handler - returns comment_idx if successful
                 const result = mcp_handlers.handleAddComment(self.allocator, mcp, ac, self.state.files, &self.state.comment_store) catch |err| {
-                    std.log.warn("MCP add_comment failed: {}", .{err});
+                    std.log.warn("MCP add_comment failed: {any}", .{err});
                     return;
                 };
                 if (result) |_| {
@@ -2789,7 +2787,7 @@ pub const App = struct {
                         self.convertHunkViewMode(),
                         self.shouldApplyHunkFiltering(),
                     ) catch |err| {
-                        std.log.err("Failed to rebuild LineMap: {}", .{err});
+                        std.log.err("Failed to rebuild LineMap: {any}", .{err});
                         return;
                     };
                     self.needs_render = true;
@@ -2797,17 +2795,17 @@ pub const App = struct {
             },
             .get_comments => {
                 mcp_handlers.handleGetComments(self.allocator, mcp, &self.state.comment_store) catch |err| {
-                    std.log.warn("MCP get_comments failed: {}", .{err});
+                    std.log.warn("MCP get_comments failed: {any}", .{err});
                 };
             },
             .get_diff_context => {
                 mcp_handlers.handleGetDiffContext(self.allocator, mcp, self.state.files, self.state.diff_source, self.state.git_repo_root) catch |err| {
-                    std.log.warn("MCP get_diff_context failed: {}", .{err});
+                    std.log.warn("MCP get_diff_context failed: {any}", .{err});
                 };
             },
             .get_file_diff => |gfd| {
                 mcp_handlers.handleGetFileDiff(self.allocator, mcp, self.state.files, gfd.file) catch |err| {
-                    std.log.warn("MCP get_file_diff failed: {}", .{err});
+                    std.log.warn("MCP get_file_diff failed: {any}", .{err});
                 };
             },
             .welcome => |w| {
@@ -2853,7 +2851,7 @@ pub const App = struct {
 
         // Get the review command from config
         const review_command = app_config.getReviewCommand(self.allocator) catch |err| {
-            std.log.err("Failed to get review command: {}", .{err});
+            std.log.err("Failed to get review command: {any}", .{err});
             self.showStatusMessage("Failed to load review config");
             return;
         };
@@ -2875,7 +2873,7 @@ pub const App = struct {
 
         // Start the review process
         self.review_process = review.start(self.allocator, review_command.?, ctx) catch |err| {
-            std.log.err("Failed to start review: {}", .{err});
+            std.log.err("Failed to start review: {any}", .{err});
             self.showStatusMessage("Failed to start review");
             return;
         };

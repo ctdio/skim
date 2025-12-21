@@ -768,7 +768,7 @@ pub const CommentEditor = struct {
 
                     // Also copy to system clipboard
                     copyToSystemClipboard(state.text_buffer[start..end], allocator) catch |err| {
-                        std.log.err("Failed to copy to system clipboard: {}", .{err});
+                        std.log.err("Failed to copy to system clipboard: {any}", .{err});
                     };
                 }
 
@@ -1131,7 +1131,7 @@ pub const CommentEditor = struct {
 
                     // Also copy to system clipboard
                     copyToSystemClipboard(state.text_buffer[range_start..range_end], allocator) catch |err| {
-                        std.log.err("Failed to copy to system clipboard: {}", .{err});
+                        std.log.err("Failed to copy to system clipboard: {any}", .{err});
                     };
                 }
             },
@@ -1144,7 +1144,7 @@ pub const CommentEditor = struct {
 
                     // Also copy to system clipboard
                     copyToSystemClipboard(state.text_buffer[range_start..range_end], allocator) catch |err| {
-                        std.log.err("Failed to copy to system clipboard: {}", .{err});
+                        std.log.err("Failed to copy to system clipboard: {any}", .{err});
                     };
                 }
 
@@ -1167,7 +1167,7 @@ pub const CommentEditor = struct {
 
                     // Also copy to system clipboard
                     copyToSystemClipboard(state.text_buffer[range_start..range_end], allocator) catch |err| {
-                        std.log.err("Failed to copy to system clipboard: {}", .{err});
+                        std.log.err("Failed to copy to system clipboard: {any}", .{err});
                     };
                 }
 

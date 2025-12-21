@@ -60,8 +60,9 @@ pub const Daemon = struct {
             .adapter_port = adapter_port,
             .tui_clients = registry.ClientRegistry.init(allocator),
             .adapters = AdapterRegistry.init(allocator),
-            .pending_tui_connections = std.ArrayList(PendingConnection).init(allocator),
-            .pending_adapter_connections = std.ArrayList(PendingConnection).init(allocator),
+            // Zig 0.15: ArrayList is unmanaged
+            .pending_tui_connections = .{},
+            .pending_adapter_connections = .{},
             .pending_requests = std.AutoHashMap([36]u8, PendingRequest).init(allocator),
             .mcp_server = try tools.createServer(allocator),
             .last_heartbeat_check = 0,
@@ -78,12 +79,12 @@ pub const Daemon = struct {
         for (self.pending_tui_connections.items) |*pending| {
             pending.stream.close();
         }
-        self.pending_tui_connections.deinit();
+        self.pending_tui_connections.deinit(self.allocator);
 
         for (self.pending_adapter_connections.items) |*pending| {
             pending.stream.close();
         }
-        self.pending_adapter_connections.deinit();
+        self.pending_adapter_connections.deinit(self.allocator);
 
         // Clean up pending requests
         var req_it = self.pending_requests.valueIterator();
@@ -167,7 +168,7 @@ pub const Daemon = struct {
             self.heartbeatCheck();
 
             // Small sleep to avoid busy-waiting
-            std.time.sleep(1 * std.time.ns_per_ms);
+            std.Thread.sleep(1 * std.time.ns_per_ms);
         }
     }
 
@@ -182,11 +183,11 @@ pub const Daemon = struct {
                 else => return err,
             };
 
-            std.log.info("New TUI connection from {}", .{conn.address});
+            std.log.info("New TUI connection from {any}", .{conn.address});
             try setNonBlocking(conn.stream.handle);
             setKeepalive(conn.stream.handle);
 
-            try self.pending_tui_connections.append(.{
+            try self.pending_tui_connections.append(self.allocator, .{
                 .stream = conn.stream,
                 .recv_buffer = undefined,
                 .recv_len = 0,
@@ -238,7 +239,7 @@ pub const Daemon = struct {
                         std.log.info("TUI client registered: {s}", .{hello.id});
 
                         const client = self.tui_clients.add(pending.stream, hello) catch |err| {
-                            std.log.err("Failed to register TUI client: {}", .{err});
+                            std.log.err("Failed to register TUI client: {any}", .{err});
                             pending.stream.close();
                             _ = self.pending_tui_connections.swapRemove(i);
                             continue;
@@ -271,8 +272,8 @@ pub const Daemon = struct {
     }
 
     fn pollTuiClients(self: *Self) !void {
-        var to_remove = std.ArrayList(registry.SessionId).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayList(registry.SessionId) = .{};
+        defer to_remove.deinit(self.allocator);
 
         var it = self.tui_clients.iterator();
         while (it.next()) |client_ptr| {
@@ -282,7 +283,7 @@ pub const Daemon = struct {
                 error.WouldBlock => continue,
                 error.ConnectionResetByPeer, error.BrokenPipe => {
                     std.log.info("TUI client {s} disconnected", .{client.id});
-                    try to_remove.append(client.id);
+                    try to_remove.append(self.allocator, client.id);
                     continue;
                 },
                 else => return err,
@@ -290,7 +291,7 @@ pub const Daemon = struct {
 
             if (bytes_read == 0) {
                 std.log.info("TUI client {s} closed connection", .{client.id});
-                try to_remove.append(client.id);
+                try to_remove.append(self.allocator, client.id);
                 continue;
             }
 
@@ -340,7 +341,7 @@ pub const Daemon = struct {
 
     fn handleTuiMessage(self: *Self, client: *registry.ClientInfo, line: []const u8) !void {
         const msg = protocol.decode(self.allocator, line) catch |err| {
-            std.log.warn("Failed to parse TUI message: {}", .{err});
+            std.log.warn("Failed to parse TUI message: {any}", .{err});
             return;
         };
         defer self.freeProtocolMessage(msg);
@@ -385,11 +386,11 @@ pub const Daemon = struct {
                 else => return err,
             };
 
-            std.log.info("New adapter connection from {}", .{conn.address});
+            std.log.info("New adapter connection from {any}", .{conn.address});
             try setNonBlocking(conn.stream.handle);
             setKeepalive(conn.stream.handle);
 
-            try self.pending_adapter_connections.append(.{
+            try self.pending_adapter_connections.append(self.allocator, .{
                 .stream = conn.stream,
                 .recv_buffer = undefined,
                 .recv_len = 0,
@@ -440,7 +441,7 @@ pub const Daemon = struct {
                         std.log.info("Adapter registered: {s}", .{hello.adapter_id});
 
                         const adapter = self.adapters.add(pending.stream, hello.adapter_id) catch |err| {
-                            std.log.err("Failed to register adapter: {}", .{err});
+                            std.log.err("Failed to register adapter: {any}", .{err});
                             pending.stream.close();
                             _ = self.pending_adapter_connections.swapRemove(i);
                             continue;
@@ -515,8 +516,8 @@ pub const Daemon = struct {
     }
 
     fn pollAdapters(self: *Self) !void {
-        var to_remove = std.ArrayList(registry.SessionId).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayList(registry.SessionId) = .{};
+        defer to_remove.deinit(self.allocator);
 
         var it = self.adapters.iterator();
         while (it.next()) |adapter_ptr| {
@@ -526,7 +527,7 @@ pub const Daemon = struct {
                 error.WouldBlock => continue,
                 error.ConnectionResetByPeer, error.BrokenPipe => {
                     std.log.info("Adapter {s} disconnected", .{adapter.id});
-                    try to_remove.append(adapter.id);
+                    try to_remove.append(self.allocator, adapter.id);
                     continue;
                 },
                 else => return err,
@@ -534,7 +535,7 @@ pub const Daemon = struct {
 
             if (bytes_read == 0) {
                 std.log.info("Adapter {s} closed connection", .{adapter.id});
-                try to_remove.append(adapter.id);
+                try to_remove.append(self.allocator, adapter.id);
                 continue;
             }
 
@@ -582,7 +583,7 @@ pub const Daemon = struct {
 
     fn handleAdapterMessage(self: *Self, adapter: *AdapterInfo, line: []const u8) !void {
         var msg = internal_protocol.decodeAdapterMessage(self.allocator, line) catch |err| {
-            std.log.warn("Failed to parse adapter message: {}", .{err});
+            std.log.warn("Failed to parse adapter message: {any}", .{err});
             return;
         };
         defer internal_protocol.freeAdapterMessage(self.allocator, &msg);
@@ -666,30 +667,30 @@ pub const Daemon = struct {
     }
 
     fn handleListClients(self: *Self, adapter: *AdapterInfo, req: internal_protocol.McpRequestPayload) !void {
-        var output = std.ArrayList(u8).init(self.allocator);
-        defer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        defer output.deinit(self.allocator);
 
-        try output.appendSlice("{\"content\":[{\"type\":\"text\",\"text\":\"");
+        try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
 
         const entries = try self.tui_clients.list(self.allocator);
         defer self.allocator.free(entries);
 
         if (entries.len == 0) {
-            try output.appendSlice("No skim clients connected.");
+            try output.appendSlice(self.allocator, "No skim clients connected.");
         } else {
-            try output.appendSlice("Connected skim clients:\\n");
+            try output.appendSlice(self.allocator, "Connected skim clients:\\n");
             for (entries) |entry| {
-                try output.appendSlice("- ");
-                try output.appendSlice(&entry.id.*);
-                try output.appendSlice(" (");
-                try writeJsonEscaped(output.writer(), entry.diff_ref);
-                try output.appendSlice(" in ");
-                try writeJsonEscaped(output.writer(), entry.cwd);
-                try output.appendSlice(")\\n");
+                try output.appendSlice(self.allocator, "- ");
+                try output.appendSlice(self.allocator, &entry.id.*);
+                try output.appendSlice(self.allocator, " (");
+                try writeJsonEscaped(output.writer(self.allocator), entry.diff_ref);
+                try output.appendSlice(self.allocator, " in ");
+                try writeJsonEscaped(output.writer(self.allocator), entry.cwd);
+                try output.appendSlice(self.allocator, ")\\n");
             }
         }
 
-        try output.appendSlice("\"}]}");
+        try output.appendSlice(self.allocator, "\"}]}");
 
         try self.sendMcpResponse(adapter, req.request_id, req.mcp_id, output.items);
     }
@@ -782,7 +783,7 @@ pub const Daemon = struct {
         defer self.allocator.free(msg);
 
         client.stream.writeAll(msg) catch |err| {
-            std.log.err("Failed to send to TUI: {}", .{err});
+            std.log.err("Failed to send to TUI: {any}", .{err});
             _ = self.pending_requests.remove(request_id);
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
             return;
@@ -838,7 +839,7 @@ pub const Daemon = struct {
         defer self.allocator.free(msg);
 
         client.stream.writeAll(msg) catch |err| {
-            std.log.err("Failed to send to TUI: {}", .{err});
+            std.log.err("Failed to send to TUI: {any}", .{err});
             _ = self.pending_requests.remove(request_id);
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
             return;
@@ -894,7 +895,7 @@ pub const Daemon = struct {
         defer self.allocator.free(msg);
 
         client.stream.writeAll(msg) catch |err| {
-            std.log.err("Failed to send to TUI: {}", .{err});
+            std.log.err("Failed to send to TUI: {any}", .{err});
             _ = self.pending_requests.remove(request_id);
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
             return;
@@ -955,7 +956,7 @@ pub const Daemon = struct {
         defer self.allocator.free(msg);
 
         client.stream.writeAll(msg) catch |err| {
-            std.log.err("Failed to send to TUI: {}", .{err});
+            std.log.err("Failed to send to TUI: {any}", .{err});
             _ = self.pending_requests.remove(request_id);
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
             return;
@@ -996,16 +997,16 @@ pub const Daemon = struct {
                     else
                         result.@"error" orelse "Failed to add comment";
 
-                    var output = std.ArrayList(u8).init(self.allocator);
-                    defer output.deinit();
+                    var output: std.ArrayList(u8) = .{};
+                    defer output.deinit(self.allocator);
 
-                    try output.appendSlice("{\"content\":[{\"type\":\"text\",\"text\":\"");
-                    try output.appendSlice(response_text);
-                    try output.appendSlice("\"}]");
+                    try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+                    try output.appendSlice(self.allocator, response_text);
+                    try output.appendSlice(self.allocator, "\"}]");
                     if (!result.success) {
-                        try output.appendSlice(",\"isError\":true");
+                        try output.appendSlice(self.allocator, ",\"isError\":true");
                     }
-                    try output.appendSlice("}");
+                    try output.appendSlice(self.allocator, "}");
 
                     try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
                 }
@@ -1038,28 +1039,28 @@ pub const Daemon = struct {
 
                 // Find adapter and send response
                 if (self.adapters.get(entry.value.adapter_id)) |adapter| {
-                    var output = std.ArrayList(u8).init(self.allocator);
-                    defer output.deinit();
+                    var output: std.ArrayList(u8) = .{};
+                    defer output.deinit(self.allocator);
 
-                    try output.appendSlice("{\"content\":[{\"type\":\"text\",\"text\":\"");
+                    try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
 
                     if (result.comments.len == 0) {
-                        try output.appendSlice("No comments.");
+                        try output.appendSlice(self.allocator, "No comments.");
                     } else {
-                        try output.appendSlice("Comments:\\n");
+                        try output.appendSlice(self.allocator, "Comments:\\n");
                         for (result.comments) |comment| {
-                            try output.appendSlice("- ");
-                            try writeJsonEscaped(output.writer(), comment.file_path);
-                            try output.writer().print(":{d} [{s}]: ", .{
+                            try output.appendSlice(self.allocator, "- ");
+                            try writeJsonEscaped(output.writer(self.allocator), comment.file_path);
+                            try output.writer(self.allocator).print(":{d} [{s}]: ", .{
                                 comment.line,
                                 comment.line_type,
                             });
-                            try writeJsonEscaped(output.writer(), comment.text);
-                            try output.appendSlice("\\n");
+                            try writeJsonEscaped(output.writer(self.allocator), comment.text);
+                            try output.appendSlice(self.allocator, "\\n");
                         }
                     }
 
-                    try output.appendSlice("\"}]}");
+                    try output.appendSlice(self.allocator, "\"}]}");
 
                     try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
                 }
@@ -1092,36 +1093,36 @@ pub const Daemon = struct {
 
                 // Find adapter and send response
                 if (self.adapters.get(entry.value.adapter_id)) |adapter| {
-                    var output = std.ArrayList(u8).init(self.allocator);
-                    defer output.deinit();
+                    var output: std.ArrayList(u8) = .{};
+                    defer output.deinit(self.allocator);
 
                     // Build JSON response with diff context metadata
-                    try output.appendSlice("{\"content\":[{\"type\":\"text\",\"text\":\"");
+                    try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
 
                     // Header with diff mode and project info
-                    try output.appendSlice("Diff Context:\\n");
-                    try output.appendSlice("  Mode: ");
-                    try writeJsonEscaped(output.writer(), result.diff_ref);
-                    try output.appendSlice("\\n  Project: ");
-                    try writeJsonEscaped(output.writer(), result.cwd);
-                    try output.appendSlice("\\n\\n");
+                    try output.appendSlice(self.allocator, "Diff Context:\\n");
+                    try output.appendSlice(self.allocator, "  Mode: ");
+                    try writeJsonEscaped(output.writer(self.allocator), result.diff_ref);
+                    try output.appendSlice(self.allocator, "\\n  Project: ");
+                    try writeJsonEscaped(output.writer(self.allocator), result.cwd);
+                    try output.appendSlice(self.allocator, "\\n\\n");
 
                     if (result.files.len == 0) {
-                        try output.appendSlice("No files in diff.");
+                        try output.appendSlice(self.allocator, "No files in diff.");
                     } else {
-                        try output.writer().print("Files ({d}):\\n", .{result.files.len});
+                        try output.writer(self.allocator).print("Files ({d}):\\n", .{result.files.len});
                         for (result.files) |file| {
                             // Format: path [status] (+additions/-deletions, N hunks)
-                            try output.appendSlice("  ");
-                            try writeJsonEscaped(output.writer(), file.path);
+                            try output.appendSlice(self.allocator, "  ");
+                            try writeJsonEscaped(output.writer(self.allocator), file.path);
                             if (!std.mem.eql(u8, file.old_path, file.path) and file.old_path.len > 0) {
-                                try output.appendSlice(" (was: ");
-                                try writeJsonEscaped(output.writer(), file.old_path);
-                                try output.appendSlice(")");
+                                try output.appendSlice(self.allocator, " (was: ");
+                                try writeJsonEscaped(output.writer(self.allocator), file.old_path);
+                                try output.appendSlice(self.allocator, ")");
                             }
-                            try output.appendSlice(" [");
-                            try output.appendSlice(file.status);
-                            try output.writer().print("] (+{d}/-{d}, {d} hunks)\\n", .{
+                            try output.appendSlice(self.allocator, " [");
+                            try output.appendSlice(self.allocator, file.status);
+                            try output.writer(self.allocator).print("] (+{d}/-{d}, {d} hunks)\\n", .{
                                 file.additions,
                                 file.deletions,
                                 file.hunk_count,
@@ -1129,7 +1130,7 @@ pub const Daemon = struct {
                         }
                     }
 
-                    try output.appendSlice("\"}]}");
+                    try output.appendSlice(self.allocator, "\"}]}");
 
                     try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
                 }
@@ -1162,46 +1163,46 @@ pub const Daemon = struct {
 
                 // Find adapter and send response
                 if (self.adapters.get(entry.value.adapter_id)) |adapter| {
-                    var output = std.ArrayList(u8).init(self.allocator);
-                    defer output.deinit();
+                    var output: std.ArrayList(u8) = .{};
+                    defer output.deinit(self.allocator);
 
                     // Build response with file diff content
-                    try output.appendSlice("{\"content\":[{\"type\":\"text\",\"text\":\"");
+                    try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
 
                     // File header
-                    try output.appendSlice("File: ");
-                    try writeJsonEscaped(output.writer(), result.file);
+                    try output.appendSlice(self.allocator, "File: ");
+                    try writeJsonEscaped(output.writer(self.allocator), result.file);
                     if (!std.mem.eql(u8, result.old_file, result.file) and result.old_file.len > 0) {
-                        try output.appendSlice(" (was: ");
-                        try writeJsonEscaped(output.writer(), result.old_file);
-                        try output.appendSlice(")");
+                        try output.appendSlice(self.allocator, " (was: ");
+                        try writeJsonEscaped(output.writer(self.allocator), result.old_file);
+                        try output.appendSlice(self.allocator, ")");
                     }
-                    try output.appendSlice("\\nStatus: ");
-                    try output.appendSlice(result.status);
-                    try output.appendSlice("\\n\\n");
+                    try output.appendSlice(self.allocator, "\\nStatus: ");
+                    try output.appendSlice(self.allocator, result.status);
+                    try output.appendSlice(self.allocator, "\\n\\n");
 
                     // Output hunks
                     for (result.hunks) |hunk| {
                         // Hunk header
-                        try writeJsonEscaped(output.writer(), hunk.header);
-                        try output.appendSlice("\\n");
+                        try writeJsonEscaped(output.writer(self.allocator), hunk.header);
+                        try output.appendSlice(self.allocator, "\\n");
 
                         // Lines
                         for (hunk.lines) |line| {
                             // Prefix based on line type
                             if (std.mem.eql(u8, line.line_type, "add")) {
-                                try output.appendSlice("+");
+                                try output.appendSlice(self.allocator, "+");
                             } else if (std.mem.eql(u8, line.line_type, "delete")) {
-                                try output.appendSlice("-");
+                                try output.appendSlice(self.allocator, "-");
                             } else {
-                                try output.appendSlice(" ");
+                                try output.appendSlice(self.allocator, " ");
                             }
-                            try writeJsonEscaped(output.writer(), line.content);
-                            try output.appendSlice("\\n");
+                            try writeJsonEscaped(output.writer(self.allocator), line.content);
+                            try output.appendSlice(self.allocator, "\\n");
                         }
                     }
 
-                    try output.appendSlice("\"}]}");
+                    try output.appendSlice(self.allocator, "\"}]}");
 
                     try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
                 }
@@ -1210,13 +1211,13 @@ pub const Daemon = struct {
     }
 
     fn cancelPendingRequestsForAdapter(self: *Self, adapter_id: registry.SessionId) void {
-        var to_remove = std.ArrayList([36]u8).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayList([36]u8) = .{};
+        defer to_remove.deinit(self.allocator);
 
         var it = self.pending_requests.iterator();
         while (it.next()) |entry| {
             if (std.mem.eql(u8, &entry.value_ptr.adapter_id, &adapter_id)) {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
 
@@ -1236,13 +1237,13 @@ pub const Daemon = struct {
         const now = std.time.timestamp();
         const timeout_seconds: i64 = 30;
 
-        var to_remove = std.ArrayList([36]u8).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayList([36]u8) = .{};
+        defer to_remove.deinit(self.allocator);
 
         var it = self.pending_requests.iterator();
         while (it.next()) |entry| {
             if (now - entry.value_ptr.created_at > timeout_seconds) {
-                to_remove.append(entry.key_ptr.*) catch continue;
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
 
@@ -1273,8 +1274,8 @@ pub const Daemon = struct {
         if (now - self.last_heartbeat_check < check_interval) return;
         self.last_heartbeat_check = now;
 
-        var to_remove = std.ArrayList(registry.SessionId).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayList(registry.SessionId) = .{};
+        defer to_remove.deinit(self.allocator);
 
         // First pass: send pings and identify stale clients
         var it = self.tui_clients.iterator();
@@ -1287,7 +1288,7 @@ pub const Daemon = struct {
                     client.id,
                     now - client.last_seen,
                 });
-                to_remove.append(client.id) catch continue;
+                to_remove.append(self.allocator, client.id) catch continue;
                 continue;
             }
 
@@ -1296,7 +1297,7 @@ pub const Daemon = struct {
             defer self.allocator.free(ping);
             client.stream.writeAll(ping) catch |err| {
                 std.log.warn("Failed to ping TUI client {s}: {}, marking for removal", .{ client.id, err });
-                to_remove.append(client.id) catch continue;
+                to_remove.append(self.allocator, client.id) catch continue;
             };
         }
 
@@ -1337,12 +1338,12 @@ pub const Daemon = struct {
     }
 
     fn sendToolError(self: *Self, adapter: *AdapterInfo, request_id: []const u8, mcp_id: internal_protocol.McpId, message: []const u8) !void {
-        var output = std.ArrayList(u8).init(self.allocator);
-        defer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        defer output.deinit(self.allocator);
 
-        try output.appendSlice("{\"content\":[{\"type\":\"text\",\"text\":\"Error: ");
-        try output.appendSlice(message);
-        try output.appendSlice("\"}],\"isError\":true}");
+        try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"Error: ");
+        try output.appendSlice(self.allocator, message);
+        try output.appendSlice(self.allocator, "\"}],\"isError\":true}");
 
         try self.sendMcpResponse(adapter, request_id, mcp_id, output.items);
     }
@@ -1568,7 +1569,7 @@ fn setNonBlocking(handle: posix.fd_t) !void {
 fn setKeepalive(handle: posix.socket_t) void {
     const enable: c_int = 1;
     posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&enable)) catch |err| {
-        std.log.warn("Failed to set SO_KEEPALIVE: {}", .{err});
+        std.log.warn("Failed to set SO_KEEPALIVE: {any}", .{err});
     };
 
     // Set aggressive keepalive parameters to detect dead connections faster
@@ -1599,7 +1600,8 @@ fn getCurrentPid() i32 {
         return @intCast(std.os.linux.getpid());
     } else {
         // Use extern for macOS and other POSIX systems
-        const c_getpid = @extern(*const fn () callconv(.C) c_int, .{ .name = "getpid" });
+        // Zig 0.15: callconv is lowercase
+        const c_getpid = @extern(*const fn () callconv(.c) c_int, .{ .name = "getpid" });
         return @intCast(c_getpid());
     }
 }

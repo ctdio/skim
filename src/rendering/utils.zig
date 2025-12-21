@@ -164,22 +164,22 @@ pub const RenderUtils = struct {
 
     /// Render sidebar border
     pub fn renderSidebar(win: vaxis.Window, row: usize) !void {
-        const sidebar_style = .{ .fg = Color.dim };
+        const sidebar_style: vaxis.Cell.Style = .{ .fg = Color.dim };
         var sidebar_seg = [_]vaxis.Cell.Segment{.{
             .text = "┃",
             .style = sidebar_style,
         }};
-        _ = try win.print(&sidebar_seg, .{ .row_offset = row, .col_offset = 0 });
+        _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0 ) });
     }
 
     /// Render middle divider for side-by-side view
     pub fn renderMiddleDivider(win: vaxis.Window, row: usize, col: usize) !void {
-        const divider_style = .{ .fg = Color.dim };
+        const divider_style: vaxis.Cell.Style = .{ .fg = Color.dim };
         var divider_seg = [_]vaxis.Cell.Segment{.{
             .text = FrameChars.vertical,
             .style = divider_style,
         }};
-        _ = try win.print(&divider_seg, .{ .row_offset = row, .col_offset = col });
+        _ = win.print(&divider_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col)  });
     }
 
     /// Render continuation row borders (sidebar + optional middle divider)
@@ -336,7 +336,7 @@ pub const RenderUtils = struct {
                     .{ .text = number_text, .style = number_style },
                     .{ .text = sign_text, .style = sign_style },
                 };
-                _ = try win.print(&segments, .{ .row_offset = row, .col_offset = col_offset });
+                _ = win.print(&segments, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
             } else {
                 if (is_cursor or is_in_visual) {
                     const spaces_slice = try frameTextSlice(app, gutter_width);
@@ -345,7 +345,7 @@ pub const RenderUtils = struct {
                         .text = spaces_slice,
                         .style = base_style,
                     }};
-                    _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
+                    _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
                 }
             }
         } else {
@@ -356,7 +356,7 @@ pub const RenderUtils = struct {
                 .text = spaces_slice,
                 .style = empty_gutter_style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
+            _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
         }
 
         // Render spacing after gutter with appropriate diff background color
@@ -376,7 +376,7 @@ pub const RenderUtils = struct {
             .text = spacing,
             .style = spacing_style,
         }};
-        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = col_offset + gutter_width });
+        _ = win.print(&spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset + gutter_width ) });
     }
 
     // Frame buffer management
@@ -594,7 +594,7 @@ pub const RenderUtils = struct {
                         .text = blame_text,
                         .style = blame_style,
                     }};
-                    _ = try win.print(&blame_seg, .{ .row_offset = row, .col_offset = col_offset });
+                    _ = win.print(&blame_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
                 } else {
                     // No blame info - render empty space
                     const spaces = try frameTextSlice(app, blame_width);
@@ -603,7 +603,7 @@ pub const RenderUtils = struct {
                         .text = spaces,
                         .style = blame_style,
                     }};
-                    _ = try win.print(&blame_seg, .{ .row_offset = row, .col_offset = col_offset });
+                    _ = win.print(&blame_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
                 }
             } else {
                 // No line number - render empty blame space
@@ -613,7 +613,7 @@ pub const RenderUtils = struct {
                     .text = spaces,
                     .style = if (show_number) base_style else empty_gutter_style,
                 }};
-                _ = try win.print(&blame_seg, .{ .row_offset = row, .col_offset = col_offset });
+                _ = win.print(&blame_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
             }
             col_offset += blame_width;
         }
@@ -693,7 +693,7 @@ pub const RenderUtils = struct {
                     .{ .text = number_text, .style = number_style },
                     .{ .text = sign_text, .style = sign_style },
                 };
-                _ = try win.print(&segments, .{ .row_offset = row, .col_offset = col_offset });
+                _ = win.print(&segments, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
             } else {
                 // For hunk headers or other lines without file line numbers, always show empty gutter
                 const spaces_slice = try frameTextSlice(app, lineno_width);
@@ -702,7 +702,7 @@ pub const RenderUtils = struct {
                     .text = spaces_slice,
                     .style = base_style,
                 }};
-                _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
+                _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
             }
         } else {
             // For wrapped continuation lines, show empty gutter with diff background
@@ -712,7 +712,7 @@ pub const RenderUtils = struct {
                 .text = spaces_slice,
                 .style = empty_gutter_style,
             }};
-            _ = try win.print(&seg, .{ .row_offset = row, .col_offset = col_offset });
+            _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
         }
 
         // Render spacing after gutter with appropriate diff background color
@@ -732,7 +732,7 @@ pub const RenderUtils = struct {
             .text = spacing,
             .style = spacing_style,
         }};
-        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = 1 + gutter_width });
+        _ = win.print(&spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 + gutter_width ) });
     }
 
     pub fn renderGutterSpacing(
@@ -756,20 +756,20 @@ pub const RenderUtils = struct {
             .text = spacing,
             .style = spacing_style,
         }};
-        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = col_offset });
+        _ = win.print(&spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
     }
 
     /// Wrap text to fit within max_width (in display cells), breaking at word boundaries when possible
     /// Properly handles UTF-8 multi-byte characters.
     pub fn wrapText(allocator: std.mem.Allocator, text: []const u8, max_width: usize) !std.ArrayList([]const u8) {
-        var lines = std.ArrayList([]const u8).init(allocator);
-        errdefer lines.deinit();
+        var lines: std.ArrayList([]const u8) = .{};
+        errdefer lines.deinit(allocator);
 
         if (max_width == 0) return lines;
 
         // Handle empty text - still return one empty line
         if (text.len == 0) {
-            try lines.append(text);
+            try lines.append(allocator, text);
             return lines;
         }
 
@@ -780,7 +780,7 @@ pub const RenderUtils = struct {
 
             // If remaining text fits, add it as-is
             if (remaining_display_width <= max_width) {
-                try lines.append(remaining);
+                try lines.append(allocator, remaining);
                 break;
             }
 
@@ -808,7 +808,7 @@ pub const RenderUtils = struct {
             }
 
             // Add this segment
-            try lines.append(remaining[0..break_byte_pos]);
+            try lines.append(allocator, remaining[0..break_byte_pos]);
 
             // Move past the break point and any spaces
             byte_start += break_byte_pos;
@@ -848,17 +848,17 @@ pub const RenderUtils = struct {
         const label_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true };
         const hints_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true };
 
-        var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
-        defer segments.deinit();
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        defer segments.deinit(app.allocator);
 
         var current_row = row;
 
         // Line 1: ┃ (top spacer)
-        try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+        try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
         const top_spacer = try frameTextSlice(app, content_width - 1);
         @memset(top_spacer, ' ');
-        try segments.append(.{ .text = top_spacer, .style = .{ .bg = Color.comment_hover_bg } });
-        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        try segments.append(app.allocator, .{ .text = top_spacer, .style = .{ .bg = Color.comment_hover_bg } });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start ) });
         current_row += 1;
 
         // Render gutter for label line
@@ -894,20 +894,20 @@ pub const RenderUtils = struct {
         const total_fixed = border_and_label_len + spacing.len + hints.len;
         const available_for_spacer = content_width -| total_fixed;
 
-        try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
-        try segments.append(.{ .text = label, .style = label_style });
+        try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
+        try segments.append(app.allocator, .{ .text = label, .style = label_style });
 
         // Spacer between label and hints
         if (available_for_spacer > 0) {
             const spacer = try frameTextSlice(app, available_for_spacer);
             @memset(spacer, ' ');
-            try segments.append(.{ .text = spacer, .style = .{ .bg = Color.comment_hover_bg } });
+            try segments.append(app.allocator, .{ .text = spacer, .style = .{ .bg = Color.comment_hover_bg } });
         }
 
-        try segments.append(.{ .text = try copyFrameText(app, spacing), .style = .{ .bg = Color.comment_hover_bg } });
-        try segments.append(.{ .text = try copyFrameText(app, hints), .style = hints_style });
+        try segments.append(app.allocator, .{ .text = try copyFrameText(app, spacing), .style = .{ .bg = Color.comment_hover_bg } });
+        try segments.append(app.allocator, .{ .text = try copyFrameText(app, hints), .style = hints_style });
 
-        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start ) });
         current_row += 1;
 
         // Line 3+: ┃ > [text] (multiple lines if newlines present)
@@ -923,7 +923,7 @@ pub const RenderUtils = struct {
 
             // Wrap this line if it's too long
             var wrapped_lines = try wrapText(app.allocator, text_line, text_area_width);
-            defer wrapped_lines.deinit();
+            defer wrapped_lines.deinit(app.allocator);
 
             // Track offset within the current text_line for wrapped segments
             var segment_offset: usize = 0;
@@ -936,12 +936,12 @@ pub const RenderUtils = struct {
                 try renderEmptyCommentGutter(app, win, current_row, true, gutter_width);
 
                 segments.clearRetainingCapacity();
-                try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+                try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
 
                 if (is_first_line) {
-                    try segments.append(.{ .text = try copyFrameText(app, " > "), .style = text_style });
+                    try segments.append(app.allocator, .{ .text = try copyFrameText(app, " > "), .style = text_style });
                 } else {
-                    try segments.append(.{ .text = try copyFrameText(app, "   "), .style = text_style });
+                    try segments.append(app.allocator, .{ .text = try copyFrameText(app, "   "), .style = text_style });
                 }
 
                 const display_text = blk: {
@@ -956,8 +956,8 @@ pub const RenderUtils = struct {
                     break :blk buf;
                 };
 
-                try segments.append(.{ .text = display_text, .style = text_style });
-                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+                try segments.append(app.allocator, .{ .text = display_text, .style = text_style });
+                _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start ) });
 
                 // Draw cursor and visual selection if in this wrapped segment
                 const segment_start = char_offset + segment_offset;
@@ -990,7 +990,7 @@ pub const RenderUtils = struct {
                                     .text = try copyFrameText(app, highlight_text),
                                     .style = .{ .fg = Color.white, .bg = Color.blue },
                                 }};
-                                _ = try win.print(&highlight_seg, .{ .row_offset = current_row, .col_offset = highlight_col_start });
+                                _ = win.print(&highlight_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(highlight_col_start ) });
                             }
                         }
                     }
@@ -1003,7 +1003,7 @@ pub const RenderUtils = struct {
                         const cursor_col = content_start + 4 + cursor_pos_in_segment; // +4 for "┃ > " or "┃   "
 
                         // Set the terminal cursor position and shape
-                        win.showCursor(cursor_col, current_row);
+                        win.showCursor(@intCast(cursor_col), @intCast(current_row));
 
                         switch (input.vim_mode) {
                             .normal, .visual => {
@@ -1041,11 +1041,11 @@ pub const RenderUtils = struct {
 
         // Last line: ┃ (bottom spacer)
         segments.clearRetainingCapacity();
-        try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+        try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
         const bottom_spacer = try frameTextSlice(app, content_width - 1);
         @memset(bottom_spacer, ' ');
-        try segments.append(.{ .text = bottom_spacer, .style = .{ .bg = Color.comment_hover_bg } });
-        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        try segments.append(app.allocator, .{ .text = bottom_spacer, .style = .{ .bg = Color.comment_hover_bg } });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start ) });
         current_row += 1;
 
         return current_row - row; // Return actual number of rows used
@@ -1099,17 +1099,17 @@ pub const RenderUtils = struct {
         else
             .{ .bg = Color.comment_bg };
 
-        var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
-        defer segments.deinit();
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        defer segments.deinit(app.allocator);
 
         var current_row = row;
 
         // Line 1: ┃ (top spacer)
-        try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+        try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
         const top_spacer = try frameTextSlice(app, content_width - 1);
         @memset(top_spacer, ' ');
-        try segments.append(.{ .text = top_spacer, .style = bg_style });
-        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        try segments.append(app.allocator, .{ .text = top_spacer, .style = bg_style });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start ) });
         current_row += 1;
 
         // Render gutter for label line
@@ -1126,28 +1126,28 @@ pub const RenderUtils = struct {
             const total_fixed = border_and_label.len + spacing.len + hints.len;
             const available_for_spacer = content_width -| total_fixed;
 
-            try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
-            try segments.append(.{ .text = try copyFrameText(app, " Comment"), .style = label_style });
+            try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
+            try segments.append(app.allocator, .{ .text = try copyFrameText(app, " Comment"), .style = label_style });
 
             // Spacer between label and hints
             if (available_for_spacer > 0) {
                 const spacer = try frameTextSlice(app, available_for_spacer);
                 @memset(spacer, ' ');
-                try segments.append(.{ .text = spacer, .style = bg_style });
+                try segments.append(app.allocator, .{ .text = spacer, .style = bg_style });
             }
 
-            try segments.append(.{ .text = try copyFrameText(app, spacing), .style = bg_style });
-            try segments.append(.{ .text = try copyFrameText(app, hints), .style = hints_style });
+            try segments.append(app.allocator, .{ .text = try copyFrameText(app, spacing), .style = bg_style });
+            try segments.append(app.allocator, .{ .text = try copyFrameText(app, hints), .style = hints_style });
         } else {
             // Just label when not focused
-            try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
-            try segments.append(.{ .text = try copyFrameText(app, " Comment"), .style = label_style });
+            try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
+            try segments.append(app.allocator, .{ .text = try copyFrameText(app, " Comment"), .style = label_style });
             const label_spacer = try frameTextSlice(app, content_width - 9); // -9 for "┃ Comment"
             @memset(label_spacer, ' ');
-            try segments.append(.{ .text = label_spacer, .style = bg_style });
+            try segments.append(app.allocator, .{ .text = label_spacer, .style = bg_style });
         }
 
-        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start ) });
         current_row += 1;
 
         // Render comment text lines with word wrapping
@@ -1163,7 +1163,7 @@ pub const RenderUtils = struct {
             var count_iter = std.mem.splitScalar(u8, comment.text, '\n');
             while (count_iter.next()) |text_line| {
                 var wrapped = try wrapText(app.allocator, text_line, text_area_width);
-                defer wrapped.deinit();
+                defer wrapped.deinit(app.allocator);
                 total_text_lines += wrapped.items.len;
             }
         }
@@ -1173,7 +1173,7 @@ pub const RenderUtils = struct {
 
             // Wrap this line if it's too long
             var wrapped_lines = try wrapText(app.allocator, text_line, text_area_width);
-            defer wrapped_lines.deinit();
+            defer wrapped_lines.deinit(app.allocator);
 
             // Render each wrapped segment
             for (wrapped_lines.items) |wrapped_segment| {
@@ -1189,11 +1189,11 @@ pub const RenderUtils = struct {
                 try renderEmptyCommentGutter(app, win, current_row, is_cursor, gutter_width);
 
                 segments.clearRetainingCapacity();
-                try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+                try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
                 if (is_first_line) {
-                    try segments.append(.{ .text = try copyFrameText(app, " > "), .style = text_style });
+                    try segments.append(app.allocator, .{ .text = try copyFrameText(app, " > "), .style = text_style });
                 } else {
-                    try segments.append(.{ .text = try copyFrameText(app, "   "), .style = text_style });
+                    try segments.append(app.allocator, .{ .text = try copyFrameText(app, "   "), .style = text_style });
                 }
 
                 const display_text = blk: {
@@ -1208,8 +1208,8 @@ pub const RenderUtils = struct {
                     break :blk buf;
                 };
 
-                try segments.append(.{ .text = display_text, .style = text_style });
-                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+                try segments.append(app.allocator, .{ .text = display_text, .style = text_style });
+                _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start ) });
                 current_row += 1;
                 text_lines_rendered += 1;
                 is_first_line = false;
@@ -1224,7 +1224,7 @@ pub const RenderUtils = struct {
                 try renderEmptyCommentGutter(app, win, current_row, is_cursor, gutter_width);
 
                 segments.clearRetainingCapacity();
-                try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+                try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
 
                 const remaining = total_text_lines - max_lines;
                 var more_buf: [64]u8 = undefined;
@@ -1245,8 +1245,8 @@ pub const RenderUtils = struct {
                     break :blk buf;
                 };
 
-                try segments.append(.{ .text = display_text, .style = hints_style });
-                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+                try segments.append(app.allocator, .{ .text = display_text, .style = hints_style });
+                _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start ) });
                 current_row += 1;
             }
         }
@@ -1260,11 +1260,11 @@ pub const RenderUtils = struct {
 
         // Line N: ┃ (bottom spacer)
         segments.clearRetainingCapacity();
-        try segments.append(.{ .text = try copyFrameText(app, "┃"), .style = border_style });
+        try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
         const bottom_spacer = try frameTextSlice(app, content_width - 1);
         @memset(bottom_spacer, ' ');
-        try segments.append(.{ .text = bottom_spacer, .style = bg_style });
-        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = content_start });
+        try segments.append(app.allocator, .{ .text = bottom_spacer, .style = bg_style });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start ) });
         current_row += 1;
 
         return current_row - row;
@@ -1292,7 +1292,7 @@ pub const RenderUtils = struct {
             .text = gutter_spaces,
             .style = gutter_style,
         }};
-        _ = try win.print(&gutter_seg, .{ .row_offset = row, .col_offset = 1 });
+        _ = win.print(&gutter_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 ) });
 
         // Render gutter spacing with comment hover background
         const spacing_style: vaxis.Style = if (is_cursor)
@@ -1305,7 +1305,7 @@ pub const RenderUtils = struct {
             .text = spacing,
             .style = spacing_style,
         }};
-        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = 1 + gutter_width });
+        _ = win.print(&spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 + gutter_width ) });
     }
 
     /// Render empty gutter for continuation lines of comment boxes
@@ -1330,7 +1330,7 @@ pub const RenderUtils = struct {
             .text = gutter_spaces,
             .style = gutter_style,
         }};
-        _ = try win.print(&gutter_seg, .{ .row_offset = row, .col_offset = 1 });
+        _ = win.print(&gutter_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 ) });
 
         // Render gutter spacing with comment hover background
         const spacing_style: vaxis.Style = if (is_cursor)
@@ -1343,7 +1343,7 @@ pub const RenderUtils = struct {
             .text = spacing,
             .style = spacing_style,
         }};
-        _ = try win.print(&spacing_seg, .{ .row_offset = row, .col_offset = 1 + gutter_width });
+        _ = win.print(&spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 + gutter_width ) });
     }
 
     /// Check if there's a comment at this file/hunk/line location

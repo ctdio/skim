@@ -7,6 +7,9 @@ const registry = @import("registry.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// Write buffer for file operations (Zig 0.15 requires buffer for file.writer())
+var file_write_buffer: [256]u8 = undefined;
+
 /// A connection that hasn't sent a hello yet
 const PendingConnection = struct {
     stream: net.Stream,
@@ -39,7 +42,8 @@ pub const McpServer = struct {
             .tcp_listener = null,
             .port = port,
             .clients = registry.ClientRegistry.init(allocator),
-            .pending_connections = std.ArrayList(PendingConnection).init(allocator),
+            // Zig 0.15: ArrayList is unmanaged
+            .pending_connections = .{},
             .running = false,
             .mcp_initialized = false,
             .stdin_buffer = undefined,
@@ -55,7 +59,7 @@ pub const McpServer = struct {
         for (self.pending_connections.items) |*pending| {
             pending.stream.close();
         }
-        self.pending_connections.deinit();
+        self.pending_connections.deinit(self.allocator);
         self.clients.deinit();
         self.allocator.destroy(self);
     }
@@ -112,7 +116,7 @@ pub const McpServer = struct {
             try self.pollSkimClients();
 
             // Small sleep to avoid busy-waiting
-            std.time.sleep(1 * std.time.ns_per_ms);
+            std.Thread.sleep(1 * std.time.ns_per_ms);
         }
     }
 
@@ -129,7 +133,7 @@ pub const McpServer = struct {
                 else => return err,
             };
 
-            std.log.info("New client connection from {}", .{conn.address});
+            std.log.info("New client connection from {any}", .{conn.address});
 
             // Set non-blocking mode on client socket
             const flags = try posix.fcntl(conn.stream.handle, posix.F.GETFL, @as(usize, 0));
@@ -138,7 +142,7 @@ pub const McpServer = struct {
             _ = try posix.fcntl(conn.stream.handle, posix.F.SETFL, new_flags);
 
             // Add to pending connections - will be registered when hello is received
-            try self.pending_connections.append(.{
+            try self.pending_connections.append(self.allocator, .{
                 .stream = conn.stream,
                 .recv_buffer = undefined,
                 .recv_len = 0,
@@ -210,7 +214,7 @@ pub const McpServer = struct {
 
                         // Register the client
                         const client = self.clients.add(pending.stream, hello) catch |err| {
-                            std.log.err("Failed to register client: {}", .{err});
+                            std.log.err("Failed to register client: {any}", .{err});
                             pending.stream.close();
                             _ = self.pending_connections.swapRemove(i);
                             continue;
@@ -243,8 +247,8 @@ pub const McpServer = struct {
     }
 
     fn pollSkimClients(self: *McpServer) !void {
-        var to_remove = std.ArrayList(registry.SessionId).init(self.allocator);
-        defer to_remove.deinit();
+        var to_remove: std.ArrayList(registry.SessionId) = .{};
+        defer to_remove.deinit(self.allocator);
 
         var it = self.clients.iterator();
         while (it.next()) |client_ptr| {
@@ -255,7 +259,7 @@ pub const McpServer = struct {
                 error.WouldBlock => continue,
                 error.ConnectionResetByPeer, error.BrokenPipe => {
                     std.log.info("Client {s} disconnected", .{client.id});
-                    try to_remove.append(client.id);
+                    try to_remove.append(self.allocator, client.id);
                     continue;
                 },
                 else => return err,
@@ -263,7 +267,7 @@ pub const McpServer = struct {
 
             if (bytes_read == 0) {
                 std.log.info("Client {s} closed connection", .{client.id});
-                try to_remove.append(client.id);
+                try to_remove.append(self.allocator, client.id);
                 continue;
             }
 
@@ -311,7 +315,7 @@ pub const McpServer = struct {
 
     fn handleClientMessage(self: *McpServer, client: *registry.ClientInfo, line: []const u8) !void {
         const msg = protocol.decode(self.allocator, line) catch |err| {
-            std.log.warn("Failed to parse client message: {}", .{err});
+            std.log.warn("Failed to parse client message: {any}", .{err});
             return;
         };
         defer {
@@ -357,7 +361,7 @@ pub const McpServer = struct {
 
     fn setStdinNonBlocking(self: *McpServer, non_blocking: bool) !void {
         _ = self;
-        const stdin_fd = std.io.getStdIn().handle;
+        const stdin_fd = std.fs.File.stdin().handle;
         const flags = try posix.fcntl(stdin_fd, posix.F.GETFL, @as(usize, 0));
         const O_NONBLOCK: usize = 0x0004; // darwin/macOS
         const new_flags: usize = if (non_blocking)
@@ -368,7 +372,7 @@ pub const McpServer = struct {
     }
 
     fn pollMcpStdin(self: *McpServer) !void {
-        const stdin = std.io.getStdIn();
+        const stdin = std.fs.File.stdin();
 
         // Try to read (non-blocking)
         const bytes_read = stdin.read(self.stdin_buffer[self.stdin_len..]) catch |err| switch (err) {
@@ -414,7 +418,10 @@ pub const McpServer = struct {
     }
 
     fn handleMcpRequest(self: *McpServer, line: []const u8) !void {
-        const stdout = std.io.getStdOut().writer();
+        // Zig 0.15: std.fs.File.stdout() and buffered writer
+        var stdout_buffer: [4096]u8 = undefined;
+        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        const stdout = &file_writer.interface;
 
         // Parse JSON-RPC request
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch {
@@ -529,32 +536,32 @@ pub const McpServer = struct {
     fn handleListClients(self: *McpServer, writer: anytype, id: ?std.json.Value) !void {
         _ = id;
 
-        var output = std.ArrayList(u8).init(self.allocator);
-        defer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        defer output.deinit(self.allocator);
 
-        try output.appendSlice("{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"");
+        try output.appendSlice(self.allocator, "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"");
 
         // Build client list
         const entries = try self.clients.list(self.allocator);
         defer self.allocator.free(entries);
 
         if (entries.len == 0) {
-            try output.appendSlice("No skim clients connected.");
+            try output.appendSlice(self.allocator, "No skim clients connected.");
         } else {
-            try output.appendSlice("Connected skim clients:\\n");
+            try output.appendSlice(self.allocator, "Connected skim clients:\\n");
             for (entries) |entry| {
-                try output.appendSlice("- ");
-                try output.appendSlice(&entry.id.*);
-                try output.appendSlice(" (");
-                try output.appendSlice(entry.diff_ref);
-                try output.appendSlice(" in ");
-                try output.appendSlice(entry.cwd);
-                try output.appendSlice(")\\n");
+                try output.appendSlice(self.allocator, "- ");
+                try output.appendSlice(self.allocator, &entry.id.*);
+                try output.appendSlice(self.allocator, " (");
+                try output.appendSlice(self.allocator, entry.diff_ref);
+                try output.appendSlice(self.allocator, " in ");
+                try output.appendSlice(self.allocator, entry.cwd);
+                try output.appendSlice(self.allocator, ")\\n");
             }
         }
 
-        try output.appendSlice("\"}]}}");
-        try output.append('\n');
+        try output.appendSlice(self.allocator, "\"}]}}");
+        try output.append(self.allocator, '\n');
 
         try writer.writeAll(output.items);
     }
@@ -632,7 +639,7 @@ pub const McpServer = struct {
         defer self.allocator.free(msg);
 
         client.stream.writeAll(msg) catch |err| {
-            std.log.err("Failed to send to client: {}", .{err});
+            std.log.err("Failed to send to client: {any}", .{err});
             try self.sendToolError(writer, "Failed to send to client");
             return;
         };
@@ -674,7 +681,7 @@ pub const McpServer = struct {
         defer self.allocator.free(msg);
 
         client.stream.writeAll(msg) catch |err| {
-            std.log.err("Failed to send to client: {}", .{err});
+            std.log.err("Failed to send to client: {any}", .{err});
             try self.sendToolError(writer, "Failed to send to client");
             return;
         };
@@ -687,30 +694,30 @@ pub const McpServer = struct {
     fn sendMcpError(self: *McpServer, writer: anytype, id: ?std.json.Value, code: i32, message: []const u8) !void {
         _ = id;
 
-        var output = std.ArrayList(u8).init(self.allocator);
-        defer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        defer output.deinit(self.allocator);
 
-        const w = output.writer();
+        const w = output.writer(self.allocator);
         try w.print("{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":{d},\"message\":\"{s}\"}}}}\n", .{ code, message });
 
         try writer.writeAll(output.items);
     }
 
     fn sendToolError(self: *McpServer, writer: anytype, message: []const u8) !void {
-        var output = std.ArrayList(u8).init(self.allocator);
-        defer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        defer output.deinit(self.allocator);
 
-        const w = output.writer();
+        const w = output.writer(self.allocator);
         try w.print("{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Error: {s}\"}}],\"isError\":true}}}}\n", .{message});
 
         try writer.writeAll(output.items);
     }
 
     fn sendToolSuccess(self: *McpServer, writer: anytype, message: []const u8) !void {
-        var output = std.ArrayList(u8).init(self.allocator);
-        defer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        defer output.deinit(self.allocator);
 
-        const w = output.writer();
+        const w = output.writer(self.allocator);
         try w.print("{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}}}\n", .{message});
 
         try writer.writeAll(output.items);
@@ -739,7 +746,9 @@ pub const McpServer = struct {
         defer file.close();
 
         const pid = getCurrentPid();
-        try file.writer().print("{{\"port\":{d},\"pid\":{d}}}\n", .{ self.port, pid });
+        var file_writer = file.writer(&file_write_buffer);
+        defer file_writer.interface.flush() catch {};
+        try file_writer.interface.print("{{\"port\":{d},\"pid\":{d}}}\n", .{ self.port, pid });
     }
 
     fn deleteDiscoveryFile(self: *McpServer) void {
@@ -763,7 +772,7 @@ fn getCurrentPid() i32 {
         return @intCast(std.os.linux.getpid());
     } else {
         // macOS and other POSIX systems
-        const c_getpid = @extern(*const fn () callconv(.C) c_int, .{ .name = "getpid" });
+        const c_getpid = @extern(*const fn () callconv(.c) c_int, .{ .name = "getpid" });
         return @intCast(c_getpid());
     }
 }

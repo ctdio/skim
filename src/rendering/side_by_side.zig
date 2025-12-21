@@ -38,7 +38,7 @@ pub const SideBySideRenderer = struct {
         const left_content_width = available_width / 2;
         const right_content_width = available_width - left_content_width;
 
-        const sidebar_style = .{ .fg = Color.dim };
+        const sidebar_style: vaxis.Cell.Style = .{ .fg = Color.dim };
         const middle_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing + left_content_width;
 
         var row: usize = 0;
@@ -70,12 +70,12 @@ pub const SideBySideRenderer = struct {
                     .text = "┃",
                     .style = sidebar_style,
                 }};
-                _ = try win.print(&left_seg, .{ .row_offset = row, .col_offset = 0 });
+                _ = win.print(&left_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0 )});
                 var middle_seg = [_]vaxis.Cell.Segment{.{
                     .text = FrameChars.vertical,
                     .style = sidebar_style,
                 }};
-                _ = try win.print(&middle_seg, .{ .row_offset = row, .col_offset = middle_col });
+                _ = win.print(&middle_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(middle_col )});
             }
 
             // Render based on line type
@@ -131,7 +131,7 @@ pub const SideBySideRenderer = struct {
                                             .text = "┃",
                                             .style = sidebar_style,
                                         }};
-                                        _ = try win.print(&left_seg_cmt, .{ .row_offset = comment_start_row + comment_row_idx, .col_offset = 0 });
+                                        _ = win.print(&left_seg_cmt, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0 )});
                                         // No middle divider for comment boxes - they span full width
                                     }
                                     row += comment_rows;
@@ -172,7 +172,7 @@ pub const SideBySideRenderer = struct {
                                 .text = "┃",
                                 .style = sidebar_style,
                             }};
-                            _ = try win.print(&comment_sidebar, .{ .row_offset = comment_start_row + comment_row_idx, .col_offset = 0 });
+                            _ = win.print(&comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0 )});
                         }
                         row += comment_rows;
                     }
@@ -189,7 +189,7 @@ pub const SideBySideRenderer = struct {
                                 .text = fill_text,
                                 .style = .{ .bg = Color.cursor_bg },
                             }};
-                            _ = try win.print(&fill_seg, .{ .row_offset = row, .col_offset = fill_start });
+                            _ = win.print(&fill_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(fill_start )});
                         }
                     }
                     row += 1;
@@ -203,12 +203,12 @@ pub const SideBySideRenderer = struct {
                 .text = "┃",
                 .style = sidebar_style,
             }};
-            _ = try win.print(&left_seg, .{ .row_offset = row, .col_offset = 0 });
+            _ = win.print(&left_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0 )});
             var middle_seg = [_]vaxis.Cell.Segment{.{
                 .text = FrameChars.vertical,
                 .style = sidebar_style,
             }};
-            _ = try win.print(&middle_seg, .{ .row_offset = row, .col_offset = middle_col });
+            _ = win.print(&middle_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(middle_col )});
         }
 
         // Update current_file_idx based on what's at the top of viewport (for sticky header)
@@ -284,7 +284,7 @@ pub const SideBySideRenderer = struct {
                     .text = fill_text,
                     .style = fill_style,
                 }};
-                _ = try win.print(&fill_seg, .{ .row_offset = current_row, .col_offset = fill_start });
+                _ = win.print(&fill_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(fill_start )});
             }
 
             // Render left gutter with spaces (no bar)
@@ -298,7 +298,7 @@ pub const SideBySideRenderer = struct {
                 .text = left_gutter_spaces,
                 .style = left_gutter_style,
             }};
-            _ = try win.print(&left_gutter_seg, .{ .row_offset = current_row, .col_offset = 1 });
+            _ = win.print(&left_gutter_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(1 )});
 
             // Render spacing after left gutter
             try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, null);
@@ -325,7 +325,7 @@ pub const SideBySideRenderer = struct {
                             .text = range_text,
                             .style = range_style,
                         }};
-                        _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = left_content_start });
+                        _ = win.print(&seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_content_start )});
                     } else {
                         // Mixed: range + context - split at the boundary
                         const range_codepoints = range_display_len - display_start;
@@ -340,7 +340,7 @@ pub const SideBySideRenderer = struct {
                             .{ .text = range_text, .style = range_style },
                             .{ .text = context_text, .style = context_style },
                         };
-                        _ = try win.print(&segments, .{ .row_offset = current_row, .col_offset = left_content_start });
+                        _ = win.print(&segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_content_start )});
                     }
                 } else {
                     // Pure context
@@ -349,7 +349,7 @@ pub const SideBySideRenderer = struct {
                         .text = context_text,
                         .style = context_style,
                     }};
-                    _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = left_content_start });
+                    _ = win.print(&seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_content_start )});
                 }
             }
 
@@ -364,7 +364,7 @@ pub const SideBySideRenderer = struct {
                 .text = right_gutter_spaces,
                 .style = right_gutter_style,
             }};
-            _ = try win.print(&right_gutter_seg, .{ .row_offset = current_row, .col_offset = right_col });
+            _ = win.print(&right_gutter_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_col )});
 
             // Render spacing after right gutter
             try RenderUtils.renderGutterSpacing(app, win, current_row, right_col + gutter_width, is_cursor, null);
@@ -382,7 +382,7 @@ pub const SideBySideRenderer = struct {
                             .text = range_text,
                             .style = range_style,
                         }};
-                        _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = right_content_start });
+                        _ = win.print(&seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_content_start )});
                     } else {
                         // Mixed: range + context
                         const range_codepoints = range_display_len - display_start;
@@ -397,7 +397,7 @@ pub const SideBySideRenderer = struct {
                             .{ .text = range_text, .style = range_style },
                             .{ .text = context_text, .style = context_style },
                         };
-                        _ = try win.print(&segments, .{ .row_offset = current_row, .col_offset = right_content_start });
+                        _ = win.print(&segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_content_start )});
                     }
                 } else {
                     // Pure context
@@ -406,7 +406,7 @@ pub const SideBySideRenderer = struct {
                         .text = context_text,
                         .style = context_style,
                     }};
-                    _ = try win.print(&seg, .{ .row_offset = current_row, .col_offset = right_content_start });
+                    _ = win.print(&seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_content_start )});
                 }
             }
 
@@ -491,12 +491,12 @@ pub const SideBySideRenderer = struct {
                         if (left_current_width < available_to_divider) {
                             const padded_segments = try RenderUtils.padSegments(app, app.allocator, left_segments, left_current_width, available_to_divider, style);
                             defer app.allocator.free(padded_segments);
-                            _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = left_start_col });
+                            _ = win.print(padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_start_col )});
                         } else {
-                            _ = try win.print(left_segments, .{ .row_offset = current_row, .col_offset = left_start_col });
+                            _ = win.print(left_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_start_col )});
                         }
                     } else {
-                        _ = try win.print(left_segments, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
+                        _ = win.print(left_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(1 + gutter_width + Layout.gutter_spacing )});
                     }
 
                     left_byte_offset_in_content += left_chunk.len;
@@ -522,12 +522,12 @@ pub const SideBySideRenderer = struct {
                         if (right_current_width < available_to_edge) {
                             const padded_segments = try RenderUtils.padSegments(app, app.allocator, right_segments, right_current_width, available_to_edge, style);
                             defer app.allocator.free(padded_segments);
-                            _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = right_start_col });
+                            _ = win.print(padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_start_col )});
                         } else {
-                            _ = try win.print(right_segments, .{ .row_offset = current_row, .col_offset = right_start_col });
+                            _ = win.print(right_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_start_col )});
                         }
                     } else {
-                        _ = try win.print(right_segments, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
+                        _ = win.print(right_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_col + gutter_width + Layout.gutter_spacing )});
                     }
 
                     right_byte_offset_in_content += right_chunk.len;
@@ -576,9 +576,9 @@ pub const SideBySideRenderer = struct {
                     if (current_width < available_to_divider) {
                         const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, current_width, available_to_divider, style);
                         defer app.allocator.free(padded_segments);
-                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = left_start_col });
+                        _ = win.print(padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_start_col )});
                     } else {
-                        _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = left_start_col });
+                        _ = win.print(segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_start_col )});
                     }
 
                     // Right side empty with cursor highlight if needed
@@ -590,7 +590,7 @@ pub const SideBySideRenderer = struct {
                             .text = blank,
                             .style = .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg },
                         }};
-                        _ = try win.print(&blank_seg, .{ .row_offset = current_row, .col_offset = right_col + gutter_width + Layout.gutter_spacing });
+                        _ = win.print(&blank_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_col + gutter_width + Layout.gutter_spacing )});
                     }
 
                     byte_offset_in_content += chunk.len;
@@ -626,7 +626,7 @@ pub const SideBySideRenderer = struct {
                             .text = blank,
                             .style = .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg },
                         }};
-                        _ = try win.print(&blank_seg, .{ .row_offset = current_row, .col_offset = 1 + gutter_width + Layout.gutter_spacing });
+                        _ = win.print(&blank_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(1 + gutter_width + Layout.gutter_spacing )});
                     }
 
                     // Render right side
@@ -649,9 +649,9 @@ pub const SideBySideRenderer = struct {
                     if (current_width < available_to_edge) {
                         const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, current_width, available_to_edge, style);
                         defer app.allocator.free(padded_segments);
-                        _ = try win.print(padded_segments, .{ .row_offset = current_row, .col_offset = right_start_col });
+                        _ = win.print(padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_start_col )});
                     } else {
-                        _ = try win.print(segments, .{ .row_offset = current_row, .col_offset = right_start_col });
+                        _ = win.print(segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_start_col )});
                     }
 
                     byte_offset_in_content += chunk.len;
@@ -709,8 +709,8 @@ pub const SideBySideRenderer = struct {
         const label_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true };
         const hints_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true };
 
-        var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
-        defer segments.deinit();
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        defer segments.deinit(app.allocator);
 
         var current_row = row;
 
@@ -721,20 +721,20 @@ pub const SideBySideRenderer = struct {
         const total_fixed = border_and_label.len + spacing.len + hints.len; // Total chars we're rendering
         const available_for_spacer = layout.width -| total_fixed;
 
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
 
         // Spacer between label and hints
         if (available_for_spacer > 0) {
             const spacer = try RenderUtils.frameTextSlice(app, available_for_spacer);
             @memset(spacer, ' ');
-            try segments.append(.{ .text = spacer, .style = .{ .bg = Color.comment_hover_bg } });
+            try segments.append(app.allocator, .{ .text = spacer, .style = .{ .bg = Color.comment_hover_bg } });
         }
 
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, spacing), .style = .{ .bg = Color.comment_hover_bg } });
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, hints), .style = hints_style });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, spacing), .style = .{ .bg = Color.comment_hover_bg } });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, hints), .style = hints_style });
 
-        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col )});
         current_row += 1;
 
         // Line 2+: ┃ > [text] (multiple lines if newlines present)
@@ -750,7 +750,7 @@ pub const SideBySideRenderer = struct {
 
             // Wrap this line if it's too long
             var wrapped_lines = try RenderUtils.wrapText(app.allocator, text_line, text_area_width);
-            defer wrapped_lines.deinit();
+            defer wrapped_lines.deinit(app.allocator);
 
             // Track offset within the current text_line for wrapped segments
             var segment_offset: usize = 0;
@@ -760,12 +760,12 @@ pub const SideBySideRenderer = struct {
                 if (current_row >= win.height) break;
 
                 segments.clearRetainingCapacity();
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
 
                 if (is_first_line) {
-                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " > "), .style = text_style });
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " > "), .style = text_style });
                 } else {
-                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "   "), .style = text_style });
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "   "), .style = text_style });
                 }
 
                 const display_text = blk: {
@@ -780,8 +780,8 @@ pub const SideBySideRenderer = struct {
                     break :blk buf;
                 };
 
-                try segments.append(.{ .text = display_text, .style = text_style });
-                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+                try segments.append(app.allocator, .{ .text = display_text, .style = text_style });
+                _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col )});
 
                 // Draw cursor and visual selection if in this wrapped segment
                 const segment_start = char_offset + segment_offset;
@@ -814,7 +814,7 @@ pub const SideBySideRenderer = struct {
                                     .text = try RenderUtils.copyFrameText(app, highlight_text),
                                     .style = .{ .fg = Color.white, .bg = Color.blue },
                                 }};
-                                _ = try win.print(&highlight_seg, .{ .row_offset = current_row, .col_offset = highlight_col_start });
+                                _ = win.print(&highlight_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(highlight_col_start )});
                             }
                         }
                     }
@@ -827,7 +827,7 @@ pub const SideBySideRenderer = struct {
                         const cursor_col = layout.start_col + 4 + cursor_pos_in_segment; // +4 for "┃ > " or "┃   "
 
                         // Set the terminal cursor position and shape
-                        win.showCursor(cursor_col, current_row);
+                        win.showCursor(@intCast(cursor_col), @intCast(current_row));
 
                         switch (input.vim_mode) {
                             .normal, .visual => {
@@ -861,11 +861,11 @@ pub const SideBySideRenderer = struct {
 
         // Last line: ┃ (bottom spacer)
         segments.clearRetainingCapacity();
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
         const bottom_spacer = try RenderUtils.frameTextSlice(app, layout.width - 1);
         @memset(bottom_spacer, ' ');
-        try segments.append(.{ .text = bottom_spacer, .style = .{ .bg = Color.comment_hover_bg } });
-        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+        try segments.append(app.allocator, .{ .text = bottom_spacer, .style = .{ .bg = Color.comment_hover_bg } });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col )});
         current_row += 1;
 
         return current_row - row; // Return actual number of rows used
@@ -939,8 +939,8 @@ pub const SideBySideRenderer = struct {
         else
             .{};
 
-        var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
-        defer segments.deinit();
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        defer segments.deinit(app.allocator);
 
         var current_row = row;
 
@@ -954,28 +954,28 @@ pub const SideBySideRenderer = struct {
             const total_fixed = border_and_label.len + spacing.len + hints.len;
             const available_for_spacer = layout.width -| total_fixed;
 
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
 
             // Spacer between label and hints
             if (available_for_spacer > 0) {
                 const spacer = try RenderUtils.frameTextSlice(app, available_for_spacer);
                 @memset(spacer, ' ');
-                try segments.append(.{ .text = spacer, .style = bg_style });
+                try segments.append(app.allocator, .{ .text = spacer, .style = bg_style });
             }
 
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, spacing), .style = bg_style });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, hints), .style = hints_style });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, spacing), .style = bg_style });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, hints), .style = hints_style });
         } else {
             // Just label when not focused
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
-            try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
             const label_spacer = try RenderUtils.frameTextSlice(app, layout.width - 9); // -9 for "┃ Comment"
             @memset(label_spacer, ' ');
-            try segments.append(.{ .text = label_spacer, .style = bg_style });
+            try segments.append(app.allocator, .{ .text = label_spacer, .style = bg_style });
         }
 
-        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col )});
         current_row += 1;
 
         // Render comment text lines with word wrapping
@@ -991,7 +991,7 @@ pub const SideBySideRenderer = struct {
             var count_iter = std.mem.splitScalar(u8, comment.text, '\n');
             while (count_iter.next()) |text_line| {
                 var wrapped = try RenderUtils.wrapText(app.allocator, text_line, text_area_width);
-                defer wrapped.deinit();
+                defer wrapped.deinit(app.allocator);
                 total_text_lines += wrapped.items.len;
             }
         }
@@ -1001,7 +1001,7 @@ pub const SideBySideRenderer = struct {
 
             // Wrap this line if it's too long
             var wrapped_lines = try RenderUtils.wrapText(app.allocator, text_line, text_area_width);
-            defer wrapped_lines.deinit();
+            defer wrapped_lines.deinit(app.allocator);
 
             // Render each wrapped segment
             for (wrapped_lines.items) |wrapped_segment| {
@@ -1014,11 +1014,11 @@ pub const SideBySideRenderer = struct {
                 }
 
                 segments.clearRetainingCapacity();
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
                 if (is_first_line) {
-                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, " > "), .style = text_style });
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " > "), .style = text_style });
                 } else {
-                    try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "   "), .style = text_style });
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "   "), .style = text_style });
                 }
 
                 const display_text = blk: {
@@ -1033,8 +1033,8 @@ pub const SideBySideRenderer = struct {
                     break :blk buf;
                 };
 
-                try segments.append(.{ .text = display_text, .style = text_style });
-                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+                try segments.append(app.allocator, .{ .text = display_text, .style = text_style });
+                _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col )});
                 current_row += 1;
                 text_lines_rendered += 1;
                 is_first_line = false;
@@ -1047,7 +1047,7 @@ pub const SideBySideRenderer = struct {
         if (truncated and total_text_lines > max_lines) {
             if (current_row < win.height) {
                 segments.clearRetainingCapacity();
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
 
                 const remaining = total_text_lines - max_lines;
                 var more_buf: [64]u8 = undefined;
@@ -1068,8 +1068,8 @@ pub const SideBySideRenderer = struct {
                     break :blk buf;
                 };
 
-                try segments.append(.{ .text = display_text, .style = hints_style });
-                _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+                try segments.append(app.allocator, .{ .text = display_text, .style = hints_style });
+                _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col )});
                 current_row += 1;
             }
         }
@@ -1080,11 +1080,11 @@ pub const SideBySideRenderer = struct {
 
         // Line N: ┃ (bottom spacer)
         segments.clearRetainingCapacity();
-        try segments.append(.{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
         const bottom_spacer = try RenderUtils.frameTextSlice(app, layout.width - 1);
         @memset(bottom_spacer, ' ');
-        try segments.append(.{ .text = bottom_spacer, .style = bg_style });
-        _ = try win.print(segments.items, .{ .row_offset = current_row, .col_offset = layout.start_col });
+        try segments.append(app.allocator, .{ .text = bottom_spacer, .style = bg_style });
+        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col )});
         current_row += 1;
 
         return current_row - row;

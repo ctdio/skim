@@ -65,8 +65,8 @@ pub const CommandPaletteState = struct {
         return .{
             .query_buffer = undefined,
             .query_len = 0,
-            .commands = std.ArrayList(Command).init(allocator),
-            .filtered_commands = std.ArrayList(usize).init(allocator),
+            .commands = .{},
+            .filtered_commands = .{},
             .selected_idx = 0,
             .scroll_offset = 0,
             .allocator = allocator,
@@ -80,8 +80,8 @@ pub const CommandPaletteState = struct {
                 self.allocator.free(cmd.display_name);
             }
         }
-        self.commands.deinit();
-        self.filtered_commands.deinit();
+        self.commands.deinit(self.allocator);
+        self.filtered_commands.deinit(self.allocator);
     }
 
     pub fn reset(self: *CommandPaletteState) void {
@@ -125,7 +125,7 @@ pub const CommandPaletteState = struct {
             const display_path = truncatePath(self.allocator, path, 70) catch path;
             const owns_display = !std.mem.eql(u8, path, display_path);
 
-            try self.commands.append(.{
+            try self.commands.append(self.allocator, .{
                 .name = path,
                 .display_name = display_path,
                 .description = "Jump to file",
@@ -138,7 +138,7 @@ pub const CommandPaletteState = struct {
         }
 
         // Add built-in commands (no stats for non-file commands)
-        try self.commands.append(.{
+        try self.commands.append(self.allocator, .{
             .name = "Toggle View Mode",
             .display_name = "Toggle View Mode",
             .description = "Switch between unified and side-by-side",
@@ -149,7 +149,7 @@ pub const CommandPaletteState = struct {
             .deletions = 0,
         });
 
-        try self.commands.append(.{
+        try self.commands.append(self.allocator, .{
             .name = "Refresh Diff",
             .display_name = "Refresh Diff",
             .description = "Reload the diff from git",
@@ -160,7 +160,7 @@ pub const CommandPaletteState = struct {
             .deletions = 0,
         });
 
-        try self.commands.append(.{
+        try self.commands.append(self.allocator, .{
             .name = "Show Help",
             .display_name = "Show Help",
             .description = "Display help overlay",
@@ -171,7 +171,7 @@ pub const CommandPaletteState = struct {
             .deletions = 0,
         });
 
-        try self.commands.append(.{
+        try self.commands.append(self.allocator, .{
             .name = "Daemon Status",
             .display_name = "Daemon Status",
             .description = "Show daemon connection status",
@@ -182,7 +182,7 @@ pub const CommandPaletteState = struct {
             .deletions = 0,
         });
 
-        try self.commands.append(.{
+        try self.commands.append(self.allocator, .{
             .name = "Quit",
             .display_name = "Quit",
             .description = "Exit Skim",
@@ -194,7 +194,7 @@ pub const CommandPaletteState = struct {
         });
 
         // Diff mode switching commands with stats
-        try self.commands.append(.{
+        try self.commands.append(self.allocator, .{
             .name = "diff:working",
             .display_name = "diff:working",
             .description = "Switch to working directory changes",
@@ -205,7 +205,7 @@ pub const CommandPaletteState = struct {
             .deletions = working_stats.deletions,
         });
 
-        try self.commands.append(.{
+        try self.commands.append(self.allocator, .{
             .name = "diff:staged",
             .display_name = "diff:staged",
             .description = "Switch to staged changes",
@@ -216,7 +216,7 @@ pub const CommandPaletteState = struct {
             .deletions = staged_stats.deletions,
         });
 
-        try self.commands.append(.{
+        try self.commands.append(self.allocator, .{
             .name = "diff:main",
             .display_name = "diff:main",
             .description = "Compare against main branch",
@@ -251,7 +251,7 @@ pub const CommandPaletteState = struct {
                     cmd.category == .file; // Show only files
 
                 if (show) {
-                    try self.filtered_commands.append(idx);
+                    try self.filtered_commands.append(self.allocator, idx);
                 }
             }
         } else {
@@ -266,7 +266,7 @@ pub const CommandPaletteState = struct {
                     (containsIgnoreCase(cmd.name, search_query) or
                     containsIgnoreCase(cmd.description, search_query)))
                 {
-                    try self.filtered_commands.append(idx);
+                    try self.filtered_commands.append(self.allocator, idx);
                 }
             }
         }
@@ -324,13 +324,13 @@ fn truncatePath(allocator: Allocator, path: []const u8, max_length: usize) ![]co
     if (path.len <= max_length) return path;
 
     // Split path by '/'
-    var components = std.ArrayList([]const u8).init(allocator);
-    defer components.deinit();
+    var components: std.ArrayList([]const u8) = .{};
+    defer components.deinit(allocator);
 
     var iter = std.mem.splitScalar(u8, path, '/');
     while (iter.next()) |component| {
         if (component.len > 0) {
-            try components.append(component);
+            try components.append(allocator, component);
         }
     }
 
@@ -340,24 +340,24 @@ fn truncatePath(allocator: Allocator, path: []const u8, max_length: usize) ![]co
     const keep_full = 2;
     const truncate_count = components.items.len - keep_full;
 
-    var result = std.ArrayList(u8).init(allocator);
-    errdefer result.deinit();
+    var result: std.ArrayList(u8) = .{};
+    errdefer result.deinit(allocator);
 
     for (components.items, 0..) |component, i| {
-        if (i > 0) try result.append('/');
+        if (i > 0) try result.append(allocator, '/');
 
         if (i < truncate_count) {
             // Truncate to first character
             if (component.len > 0) {
-                try result.append(component[0]);
+                try result.append(allocator, component[0]);
             }
         } else {
             // Keep full
-            try result.appendSlice(component);
+            try result.appendSlice(allocator, component);
         }
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }
 
 // Case-insensitive substring search
@@ -391,8 +391,8 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     const palette_win = win.child(.{
         .x_off = x_offset,
         .y_off = y_offset,
-        .width = .{ .limit = palette_width },
-        .height = .{ .limit = palette_height },
+        .width = @intCast(palette_width),
+        .height = @intCast(palette_height),
         .border = .{
             .where = .all,
             .style = .{
@@ -436,7 +436,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     var title_segments = [_]vaxis.Cell.Segment{
         .{ .text = title, .style = title_style },
     };
-    _ = try palette_win.print(&title_segments, .{});
+    _ = palette_win.print(&title_segments, .{});
 
     // Line 1: Input field
     const input_style = vaxis.Style{
@@ -446,10 +446,10 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         .{ .text = "> ", .style = .{ .fg = .{ .index = 6 } } }, // cyan prompt
         .{ .text = query, .style = input_style },
     };
-    _ = try palette_win.print(&input_segments, .{ .row_offset = 1 });
+    _ = palette_win.print(&input_segments, .{ .row_offset = 1  });
 
     // Show cursor after the query text
-    palette_win.showCursor(2 + query.len, 1);
+    palette_win.showCursor(@intCast(2 + query.len), 1);
 
     // Line 2: Separator (account for border width like help.zig does)
     const sep_style = vaxis.Style{
@@ -463,7 +463,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         var sep_segments = [_]vaxis.Cell.Segment{
             .{ .text = sep_text, .style = sep_style },
         };
-        _ = try palette_win.print(&sep_segments, .{ .row_offset = 2 });
+        _ = palette_win.print(&sep_segments, .{ .row_offset = 2  });
     }
 
     // Lines 3+: Command list
@@ -475,7 +475,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         var no_results_segments = [_]vaxis.Cell.Segment{
             .{ .text = no_results, .style = no_results_style },
         };
-        _ = try palette_win.print(&no_results_segments, .{ .row_offset = 3 });
+        _ = palette_win.print(&no_results_segments, .{ .row_offset = 3  });
     } else {
         const start_idx = state.scroll_offset;
         const end_idx = @min(start_idx + CommandPaletteState.max_visible_items, state.filtered_commands.items.len);
@@ -508,13 +508,13 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
             const spacing = "  ";
 
             // Build left-side segments (indicator, name, description)
-            var segments = std.ArrayList(vaxis.Cell.Segment).init(app.allocator);
-            defer segments.deinit();
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            defer segments.deinit(app.allocator);
 
-            try segments.append(.{ .text = indicator, .style = indicator_style });
-            try segments.append(.{ .text = cmd.display_name, .style = name_style });
-            try segments.append(.{ .text = spacing, .style = .{} });
-            try segments.append(.{ .text = cmd.description, .style = desc_style });
+            try segments.append(app.allocator, .{ .text = indicator, .style = indicator_style });
+            try segments.append(app.allocator, .{ .text = cmd.display_name, .style = name_style });
+            try segments.append(app.allocator, .{ .text = spacing, .style = .{} });
+            try segments.append(app.allocator, .{ .text = cmd.description, .style = desc_style });
 
             // Add colored stats for file commands and diff commands (right-justified)
             if ((cmd.category == .file or cmd.category == .diff) and (cmd.additions > 0 or cmd.deletions > 0)) {
@@ -543,21 +543,21 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
                 var padding_buf: [100]u8 = undefined;
                 @memset(&padding_buf, ' ');
                 const padding = padding_buf[0..@min(padding_needed, padding_buf.len)];
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, padding), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, padding), .style = .{} });
 
                 // Add colored stats segments
                 const additions_text = try std.fmt.allocPrint(app.allocator, "+{d}", .{cmd.additions});
                 defer app.allocator.free(additions_text);
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, additions_text), .style = .{ .fg = .{ .index = 2 }, .bold = true } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, additions_text), .style = .{ .fg = .{ .index = 2 }, .bold = true } });
 
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, ", "), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ", "), .style = .{} });
 
                 const deletions_text = try std.fmt.allocPrint(app.allocator, "-{d}", .{cmd.deletions});
                 defer app.allocator.free(deletions_text);
-                try segments.append(.{ .text = try RenderUtils.copyFrameText(app, deletions_text), .style = .{ .fg = .{ .index = 1 }, .bold = true } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, deletions_text), .style = .{ .fg = .{ .index = 1 }, .bold = true } });
             }
 
-            _ = try palette_win.print(segments.items, .{ .row_offset = row });
+            _ = palette_win.print(segments.items, .{ .row_offset = @intCast(row ) });
         }
 
         // Show scroll indicator if there are more items
@@ -570,7 +570,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
                 .{ .text = more_text, .style = more_style },
             };
             const last_row = 3 + CommandPaletteState.max_visible_items;
-            _ = try palette_win.print(&more_segments, .{ .row_offset = last_row });
+            _ = palette_win.print(&more_segments, .{ .row_offset = @intCast(last_row ) });
         }
     }
 }

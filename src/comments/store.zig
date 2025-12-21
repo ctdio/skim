@@ -34,7 +34,7 @@ pub const CommentStore = struct {
 
     pub fn init(allocator: Allocator) CommentStore {
         return .{
-            .comments = std.ArrayList(Comment).init(allocator),
+            .comments = .{},
             .allocator = allocator,
         };
     }
@@ -43,7 +43,7 @@ pub const CommentStore = struct {
         for (self.comments.items) |*comment| {
             comment.deinit(self.allocator);
         }
-        self.comments.deinit();
+        self.comments.deinit(self.allocator);
     }
 
     /// Add a new comment (single line or range)
@@ -70,7 +70,7 @@ pub const CommentStore = struct {
             .old_lineno = old_lineno,
             .new_lineno = new_lineno,
         };
-        try self.comments.append(comment);
+        try self.comments.append(self.allocator, comment);
     }
 
     /// Add a new range comment (for visual selections)
@@ -99,7 +99,7 @@ pub const CommentStore = struct {
             .old_lineno = old_lineno,
             .new_lineno = new_lineno,
         };
-        try self.comments.append(comment);
+        try self.comments.append(self.allocator, comment);
     }
 
     /// Update an existing comment's text
@@ -178,17 +178,17 @@ pub const CommentStore = struct {
         context_lines_before: usize,
         context_lines_after: usize,
     ) ![]const u8 {
-        var output = std.ArrayList(u8).init(allocator);
-        errdefer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(allocator);
 
-        const writer = output.writer();
+        const writer = output.writer(allocator);
 
         try writer.writeAll("<code_review>\n");
 
         if (self.comments.items.len == 0) {
             try writer.writeAll("No comments.\n");
             try writer.writeAll("</code_review>\n");
-            return output.toOwnedSlice();
+            return output.toOwnedSlice(allocator);
         }
 
         var current_file: ?[]const u8 = null;
@@ -233,7 +233,7 @@ pub const CommentStore = struct {
         }
 
         try writer.writeAll("</code_review>\n");
-        return output.toOwnedSlice();
+        return output.toOwnedSlice(allocator);
     }
 
     pub fn exportSingleCommentWithContext(
@@ -248,10 +248,10 @@ pub const CommentStore = struct {
             return error.InvalidCommentIndex;
         }
 
-        var output = std.ArrayList(u8).init(allocator);
-        errdefer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(allocator);
 
-        const writer = output.writer();
+        const writer = output.writer(allocator);
         const comment = &self.comments.items[comment_idx];
 
         try writer.writeAll("<code_review>\n");
@@ -286,7 +286,7 @@ pub const CommentStore = struct {
         try writer.writeAll("---\n");
 
         try writer.writeAll("</code_review>\n");
-        return output.toOwnedSlice();
+        return output.toOwnedSlice(allocator);
     }
 
     fn renderCommentContext(
@@ -371,17 +371,17 @@ pub const CommentStore = struct {
 
     /// Simple export without context (backwards compatibility)
     pub fn exportToMarkdown(self: *const CommentStore, allocator: Allocator) ![]const u8 {
-        var output = std.ArrayList(u8).init(allocator);
-        errdefer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(allocator);
 
-        const writer = output.writer();
+        const writer = output.writer(allocator);
 
         try writer.writeAll("<code_review>\n");
 
         if (self.comments.items.len == 0) {
             try writer.writeAll("No comments.\n");
             try writer.writeAll("</code_review>\n");
-            return output.toOwnedSlice();
+            return output.toOwnedSlice(allocator);
         }
 
         var current_file: ?[]const u8 = null;
@@ -421,7 +421,7 @@ pub const CommentStore = struct {
         }
 
         try writer.writeAll("</code_review>\n");
-        return output.toOwnedSlice();
+        return output.toOwnedSlice(allocator);
     }
 };
 

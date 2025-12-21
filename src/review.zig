@@ -176,8 +176,8 @@ pub fn formatElapsedTime(allocator: Allocator, process: *const ReviewProcess) ![
 /// Also handles malformed sequences where ESC is missing (e.g., "[2m" without ESC).
 /// Returns owned slice that must be freed by caller.
 fn stripAnsiCodes(allocator: Allocator, input: []const u8) ![]u8 {
-    var result = std.ArrayList(u8).init(allocator);
-    errdefer result.deinit();
+    var result: std.ArrayList(u8) = .{};
+    errdefer result.deinit(allocator);
 
     var i: usize = 0;
     while (i < input.len) {
@@ -253,11 +253,11 @@ fn stripAnsiCodes(allocator: Allocator, input: []const u8) ![]u8 {
         }
 
         // Regular character - keep it
-        try result.append(input[i]);
+        try result.append(allocator, input[i]);
         i += 1;
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }
 
 // =============================================================================

@@ -50,16 +50,16 @@ pub fn main() !void {
     std.log.info("Rendering: {s}", .{file_path});
 
     // Build file content (what ensureHighlights does)
-    var content = std.ArrayList(u8).init(allocator);
-    defer content.deinit();
+    var content: std.ArrayList(u8) = .{};
+    defer content.deinit(allocator);
 
     for (file.hunks) |hunk| {
         for (hunk.lines) |line| {
             switch (line.line_type) {
                 .delete => {},
                 .add, .context => {
-                    try content.appendSlice(line.content);
-                    try content.append('\n');
+                    try content.appendSlice(allocator, line.content);
+                    try content.append(allocator, '\n');
                 },
             }
         }

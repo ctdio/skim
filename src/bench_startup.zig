@@ -64,13 +64,13 @@ pub fn main() !void {
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
         // Build file content from hunks
-        var content = std.ArrayList(u8).init(allocator);
-        defer content.deinit();
+        var content: std.ArrayList(u8) = .{};
+        defer content.deinit(allocator);
 
         for (file.hunks) |hunk| {
             for (hunk.lines) |line| {
-                try content.appendSlice(line.content);
-                try content.append('\n');
+                try content.appendSlice(allocator, line.content);
+                try content.append(allocator, '\n');
             }
         }
 

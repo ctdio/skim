@@ -8,6 +8,9 @@ const internal_protocol = @import("internal_protocol.zig");
 const discovery = @import("discovery.zig");
 const registry = @import("registry.zig");
 
+/// Write buffer for stdout (Zig 0.15 requires buffer for file.writer())
+var stdout_buffer: [4096]u8 = undefined;
+
 // =============================================================================
 // MCP Adapter
 // =============================================================================
@@ -83,8 +86,8 @@ pub const McpAdapter = struct {
     /// Main adapter loop
     pub fn run(self: *Self) !void {
         // Set stdin to non-blocking
-        try setNonBlocking(std.io.getStdIn().handle);
-        defer setBlocking(std.io.getStdIn().handle) catch {};
+        try setNonBlocking(std.fs.File.stdin().handle);
+        defer setBlocking(std.fs.File.stdin().handle) catch {};
 
         self.running = true;
 
@@ -96,7 +99,7 @@ pub const McpAdapter = struct {
             try self.pollDaemon();
 
             // Small sleep to avoid busy-waiting
-            std.time.sleep(1 * std.time.ns_per_ms);
+            std.Thread.sleep(1 * std.time.ns_per_ms);
         }
     }
 
@@ -105,7 +108,7 @@ pub const McpAdapter = struct {
     // =========================================================================
 
     fn pollStdin(self: *Self) !void {
-        const stdin = std.io.getStdIn();
+        const stdin = std.fs.File.stdin();
 
         const bytes_read = stdin.read(self.stdin_buffer[self.stdin_len..]) catch |err| switch (err) {
             error.WouldBlock => return,
@@ -150,7 +153,9 @@ pub const McpAdapter = struct {
     }
 
     fn handleMcpRequest(self: *Self, line: []const u8) !void {
-        const stdout = std.io.getStdOut().writer();
+        // Zig 0.15: need mutable writer for writeAll methods
+        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        const stdout = &file_writer.interface;
 
         // Parse JSON-RPC request
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch {
@@ -191,8 +196,8 @@ pub const McpAdapter = struct {
 
     fn forwardToDaemon(self: *Self, method: []const u8, id: ?std.json.Value, params: ?std.json.Value) !void {
         const stream = self.daemon_stream orelse {
-            const stdout = std.io.getStdOut().writer();
-            try self.sendMcpError(stdout, id, -32001, "Not connected to daemon");
+            var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+            try self.sendMcpError(&file_writer.interface, id, -32001, "Not connected to daemon");
             return;
         };
 
@@ -220,10 +225,12 @@ pub const McpAdapter = struct {
         defer if (params_str) |p| self.allocator.free(p);
 
         if (params) |p| {
-            var output = std.ArrayList(u8).init(self.allocator);
-            errdefer output.deinit();
-            try std.json.stringify(p, .{}, output.writer());
-            params_str = try output.toOwnedSlice();
+            // Zig 0.15: use Writer.Allocating for Stringify
+            var alloc_writer: std.io.Writer.Allocating = .init(self.allocator);
+            errdefer alloc_writer.deinit();
+            var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
+            stringify.write(p) catch return;
+            params_str = self.allocator.dupe(u8, alloc_writer.written()) catch return;
         }
 
         // Encode and send
@@ -240,9 +247,9 @@ pub const McpAdapter = struct {
         defer setNonBlocking(stream.handle) catch {};
 
         stream.writeAll(msg) catch |err| {
-            std.log.err("Failed to send to daemon: {}", .{err});
-            const stdout = std.io.getStdOut().writer();
-            try self.sendMcpError(stdout, id, -32000, "Failed to communicate with daemon");
+            std.log.err("Failed to send to daemon: {any}", .{err});
+            var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+            try self.sendMcpError(&file_writer.interface, id, -32000, "Failed to communicate with daemon");
         };
     }
 
@@ -303,12 +310,14 @@ pub const McpAdapter = struct {
 
     fn handleDaemonMessage(self: *Self, line: []const u8) !void {
         var msg = internal_protocol.decodeDaemonMessage(self.allocator, line) catch |err| {
-            std.log.warn("Failed to parse daemon message: {}", .{err});
+            std.log.warn("Failed to parse daemon message: {any}", .{err});
             return;
         };
         defer internal_protocol.freeDaemonMessage(self.allocator, &msg);
 
-        const stdout = std.io.getStdOut().writer();
+        // Zig 0.15: std.fs.File.stdout() and buffered writer (uses global stdout_buffer)
+        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        const stdout = &file_writer.interface;
 
         switch (msg) {
             .adapter_welcome => |welcome| {
@@ -339,7 +348,7 @@ pub const McpAdapter = struct {
 
         // Write the MCP ID from the response
         switch (response.mcp_id) {
-            .number => |n| try std.fmt.formatInt(n, 10, .lower, .{}, writer),
+            .number => |n| try writer.print("{d}", .{n}),
             .string => |s| {
                 try writer.writeByte('"');
                 try writer.writeAll(s);
@@ -355,7 +364,7 @@ pub const McpAdapter = struct {
 
         if (response.@"error") |err| {
             try writer.writeAll(",\"error\":{\"code\":");
-            try std.fmt.formatInt(err.code, 10, .lower, .{}, writer);
+            try writer.print("{d}", .{err.code});
             try writer.writeAll(",\"message\":\"");
             try writer.writeAll(err.message);
             try writer.writeAll("\"}");
@@ -373,7 +382,7 @@ pub const McpAdapter = struct {
         _ = id;
 
         try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":");
-        try std.fmt.formatInt(code, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{code});
         try writer.writeAll(",\"message\":\"");
         try writer.writeAll(message);
         try writer.writeAll("\"}}\n");
@@ -397,9 +406,11 @@ pub fn runAdapter(allocator: Allocator, port: u16) !void {
             // For now, fall through to error
         }
 
-        const stdout = std.io.getStdOut().writer();
+        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        defer file_writer.interface.flush() catch {};
+        const stdout = &file_writer.interface;
         try stdout.writeAll("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32001,\"message\":\"skim daemon not running. Start with: skim daemon start\"}}\n");
-        std.log.err("Failed to connect to daemon: {}", .{err});
+        std.log.err("Failed to connect to daemon: {any}", .{err});
         return;
     };
 
@@ -430,7 +441,7 @@ fn setBlocking(handle: posix.fd_t) !void {
 fn setKeepalive(handle: posix.socket_t) void {
     const enable: c_int = 1;
     posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&enable)) catch |err| {
-        std.log.warn("Failed to set SO_KEEPALIVE: {}", .{err});
+        std.log.warn("Failed to set SO_KEEPALIVE: {any}", .{err});
     };
 
     // Set aggressive keepalive parameters to detect dead connections faster

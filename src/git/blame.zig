@@ -41,20 +41,20 @@ pub const BlameData = struct {
 /// For new files (additions), we blame against HEAD
 /// For deleted lines, we blame against the parent commit
 pub fn getBlame(allocator: Allocator, file_path: []const u8, ref: ?[]const u8) !BlameData {
-    var args = std.ArrayList([]const u8).init(allocator);
-    defer args.deinit();
+    var args: std.ArrayList([]const u8) = .{};
+    defer args.deinit(allocator);
 
-    try args.append("git");
-    try args.append("blame");
-    try args.append("--porcelain");
+    try args.append(allocator, "git");
+    try args.append(allocator, "blame");
+    try args.append(allocator, "--porcelain");
 
     // If a ref is specified, blame at that ref
     if (ref) |r| {
-        try args.append(r);
-        try args.append("--");
+        try args.append(allocator, r);
+        try args.append(allocator, "--");
     }
 
-    try args.append(file_path);
+    try args.append(allocator, file_path);
 
     var child = std.process.Child.init(args.items, allocator);
     child.stdout_behavior = .Pipe;
@@ -96,12 +96,12 @@ pub fn getBlame(allocator: Allocator, file_path: []const u8, ref: ?[]const u8) !
 /// ...
 /// \t<line-content>
 fn parseBlameOutput(allocator: Allocator, output: []const u8) !BlameData {
-    var lines_list = std.ArrayList(BlameLine).init(allocator);
+    var lines_list: std.ArrayList(BlameLine) = .{};
     errdefer {
         for (lines_list.items) |*line| {
             line.deinit(allocator);
         }
-        lines_list.deinit();
+        lines_list.deinit(allocator);
     }
 
     // Track commit info by hash (commits can be referenced multiple times)
@@ -206,7 +206,7 @@ fn parseBlameOutput(allocator: Allocator, output: []const u8) !BlameData {
                     break :blk commit_times.get(commit_slice) orelse 0;
                 };
 
-                try lines_list.append(.{
+                try lines_list.append(allocator, .{
                     .commit_hash = short_hash,
                     .author = author,
                     .username = username,
@@ -313,7 +313,7 @@ fn parseBlameOutput(allocator: Allocator, output: []const u8) !BlameData {
     }
 
     return BlameData{
-        .lines = try lines_list.toOwnedSlice(),
+        .lines = try lines_list.toOwnedSlice(allocator),
         .allocator = allocator,
     };
 }

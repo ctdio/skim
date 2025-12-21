@@ -1,16 +1,74 @@
 .{
-    .name = "skim",
+    .name = .skim,
     .version = "0.1.0",
-    .minimum_zig_version = "0.13.0",
+    .fingerprint = 0x9b7039a4e0a0e64f,
+    .minimum_zig_version = "0.15.1",
 
     .dependencies = .{
+        // TUI library - use main branch for Zig 0.15 support
         .vaxis = .{
-            .url = "https://github.com/rockorager/libvaxis/archive/refs/tags/v0.5.1.tar.gz",
-            .hash = "1220de23a3240e503397ea579de4fd85db422f537e10036ef74717c50164475813ce",
+            .url = "git+https://github.com/rockorager/libvaxis#main",
+            .hash = "12206dc5c12448011bfc45db9bc036e05589142edf5e2594571f58dde14bf32c44a2",
         },
-        .zts = .{
-            .url = "git+https://github.com/lfcm64/z-tree-sitter#90c687ce0c00cd9585cda5c529e3675380357029",
-            .hash = "12205e50a5dcc02940500ed84fa03752a5e0e7859fbd16c17db015d8adec1f174b08",
+
+        // Official tree-sitter Zig bindings (latest commit with Zig 0.15 support)
+        .@"tree-sitter" = .{
+            .url = "git+https://github.com/tree-sitter/zig-tree-sitter#5373b8395bcf6cf17e6a02be1a9996bedb34abf6",
+            .hash = "1220eee6888a2ca7df62176f5a912ec5ce4e86cc920e59052f115377dd468af33851",
+        },
+
+        // Language grammars - will be compiled from C sources
+        .@"tree-sitter-javascript" = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-javascript#58404d8cf191d69f2674a8fd507bd5776f46cb11",
+            .hash = "1220e93803fee98310789da741eb57d4ea54b2142bf74ddb9c81d44cf3d21fe61dfd",
+        },
+        .@"tree-sitter-typescript" = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-typescript#75b3874edb2dc714fb1fd77a32013d0f8699989f",
+            .hash = "1220d32d2b4783fd137a05a2697f8dd69af379e1f3269f71f5beb3c68b147bca8521",
+        },
+        .@"tree-sitter-python" = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-python#26855eabccb19c6abf499fbc5b8dc7cc9ab8bc64",
+            .hash = "1220bdb47e6d61201836c3162e83e24b1726907bc884c9dece89b112c77d36f1087b",
+        },
+        .@"tree-sitter-rust" = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-rust#261b20226c04ef601adbdf185a800512a5f66291",
+            .hash = "122037c1dfc996c9b07ae753486d8931ac952142acdee530f393960fc2fc82f0cda4",
+        },
+        .@"tree-sitter-go" = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-go#2346a3ab1bb3857b48b29d779a1ef9799a248cd7",
+            .hash = "1220edb5baef6f02d6141d093e996eff62ad096bbbfffefd123213b2d96ede0846f1",
+        },
+        .@"tree-sitter-zig" = .{
+            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-zig#6479aa13f32f701c383083d8b28360ebd682fb7d",
+            .hash = "1220ac0ff5c11c2e22e86eab9c2b19d5d663ec22d14c2d3db681010cc97e7e9a2a0c",
+        },
+        .@"tree-sitter-c" = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-c#ae19b676b13bdcc13b7665397e6d9b14975473dd",
+            .hash = "1220ed4593596ca89d0096272f57f2a6a91b47e4ae4dd77b36d1a4c82eaeaa731f80",
+        },
+        .@"tree-sitter-cpp" = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-cpp#12bd6f7e96080d2e70ec51d4068f2f66120dde35",
+            .hash = "1220d18ddc4a14f8d8d5ef361118bb6704386317e69ac68812ebdc815592a05f3d48",
+        },
+        .@"tree-sitter-json" = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-json#001c28d7a29832b06b0e831ec77845553c89b56d",
+            .hash = "1220fa9232b71d7ea501ff3d7213ea4b9cc89b4b4ba6f0502ceb57c058b9b71e4ada",
+        },
+        .@"tree-sitter-toml" = .{
+            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-toml#64b56832c2cffe41758f28e05c756a3a98d16f41",
+            .hash = "12205b2792d6b3061b54f85055d992611f732b1999ee86ff45234824d111af8867b3",
+        },
+        .@"tree-sitter-markdown" = .{
+            .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-markdown#2dfd57f547f06ca5631a80f601e129d73fc8e9f0",
+            .hash = "1220597a53bc3222d1c2e2c3d56937e2a1c76d7b52e145b72a1cac71bb7b1111d596",
+        },
+        .@"tree-sitter-css" = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-css#dda5cfc5722c429eaba1c910ca32c2c0c5bb1a3f",
+            .hash = "12208fdd8329303a11cb264f39d0cdd67fb3753651593737bae7f3e4831a50b74081",
+        },
+        .@"tree-sitter-bash" = .{
+            .url = "git+https://github.com/tree-sitter/tree-sitter-bash#a06c2e4415e9bc0346c6b86d401879ffb44058f7",
+            .hash = "1220b2fdc5e521b53c9ea0731b132510756890b64962b9885eda334c6cb03b4b879b",
         },
     },
 

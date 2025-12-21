@@ -34,8 +34,8 @@ pub const HighlightWorker = struct {
         worker.* = .{
             .allocator = allocator,
             .thread = undefined, // Will be set below
-            .job_queue = std.ArrayList(HighlightJob).init(allocator),
-            .result_queue = std.ArrayList(HighlightResult).init(allocator),
+            .job_queue = .{},
+            .result_queue = .{},
             .mutex = std.Thread.Mutex{},
             .should_stop = false,
             .highlighter = try syntax.SyntaxHighlighter.init(allocator),
@@ -58,7 +58,7 @@ pub const HighlightWorker = struct {
         self.thread.join();
 
         // Clean up queues
-        self.job_queue.deinit();
+        self.job_queue.deinit(self.allocator);
 
         // Free any remaining results
         for (self.result_queue.items) |result| {
@@ -66,7 +66,7 @@ pub const HighlightWorker = struct {
                 self.highlighter.freeHighlights(highlights);
             }
         }
-        self.result_queue.deinit();
+        self.result_queue.deinit(self.allocator);
 
         self.highlighter.deinit();
         self.allocator.destroy(self);
@@ -76,17 +76,17 @@ pub const HighlightWorker = struct {
     pub fn submitJob(self: *HighlightWorker, job: HighlightJob) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        try self.job_queue.append(job);
+        try self.job_queue.append(self.allocator, job);
     }
 
     // Check for completed results (non-blocking)
-    pub fn pollResults(self: *HighlightWorker, out_results: *std.ArrayList(HighlightResult)) !void {
+    pub fn pollResults(self: *HighlightWorker, allocator: std.mem.Allocator, out_results: *std.ArrayList(HighlightResult)) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         // Transfer all completed results to caller
         for (self.result_queue.items) |result| {
-            try out_results.append(result);
+            try out_results.append(allocator, result);
         }
         self.result_queue.clearRetainingCapacity();
     }
@@ -118,7 +118,7 @@ pub const HighlightWorker = struct {
 
                 // Store result
                 self.mutex.lock();
-                self.result_queue.append(.{
+                self.result_queue.append(self.allocator, .{
                     .file_idx = job.file_idx,
                     .highlights = highlights,
                     .old_highlights = old_highlights,
@@ -127,7 +127,7 @@ pub const HighlightWorker = struct {
                 self.mutex.unlock();
             } else {
                 // No jobs available, sleep briefly to avoid busy-wait
-                std.time.sleep(1 * std.time.ns_per_ms);
+                std.Thread.sleep(1 * std.time.ns_per_ms);
             }
         }
     }

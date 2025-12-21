@@ -211,7 +211,11 @@ pub fn writeDiscoveryFile(allocator: Allocator, info: DaemonInfo) !void {
     const file = try std.fs.createFileAbsolute(file_path, .{});
     defer file.close();
 
-    try file.writer().print(
+    // Zig 0.15: file.writer() requires a buffer
+    var write_buffer: [256]u8 = undefined;
+    var file_writer = file.writer(&write_buffer);
+    defer file_writer.interface.flush() catch {};
+    try file_writer.interface.print(
         \\{{"version":1,"tui_port":{d},"adapter_port":{d},"pid":{d}}}
     , .{ info.tui_port, info.adapter_port, info.pid });
 }
@@ -263,10 +267,10 @@ pub fn isAutoStartEnabled() bool {
 
 /// Format daemon status for display
 pub fn formatStatus(allocator: Allocator, status: DaemonStatus) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
 
     switch (status) {
         .running => |info| {
@@ -335,7 +339,7 @@ pub fn formatStatus(allocator: Allocator, status: DaemonStatus) ![]u8 {
         },
     }
 
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 // =============================================================================

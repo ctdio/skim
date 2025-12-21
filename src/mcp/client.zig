@@ -36,7 +36,7 @@ pub const McpClient = struct {
             .session_id = null,
             .last_connect_port = null,
             .last_reconnect_attempt = 0,
-            .message_queue = std.ArrayList(protocol.ParsedMessage).init(allocator),
+            .message_queue = .{},
             .queue_mutex = .{},
             .reader_thread = null,
             .shutdown_flag = std.atomic.Value(bool).init(false),
@@ -52,7 +52,7 @@ pub const McpClient = struct {
         for (self.message_queue.items) |*msg| {
             freeMessageStatic(self.allocator, msg);
         }
-        self.message_queue.deinit();
+        self.message_queue.deinit(self.allocator);
         self.queue_mutex.unlock();
 
         if (self.session_id) |id| {
@@ -88,7 +88,7 @@ pub const McpClient = struct {
             self.connect(port) catch |err| {
                 if (retries + 1 < max_retries) {
                     // Wait before retry (50ms, 100ms, 150ms...)
-                    std.time.sleep((retries + 1) * 50 * std.time.ns_per_ms);
+                    std.Thread.sleep((retries + 1) * 50 * std.time.ns_per_ms);
                     continue;
                 }
                 return err;
@@ -258,10 +258,10 @@ pub const McpClient = struct {
         self.queue_mutex.lock();
         defer self.queue_mutex.unlock();
 
-        const messages = self.message_queue.toOwnedSlice() catch {
+        const messages = self.message_queue.toOwnedSlice(self.allocator) catch {
             return &[_]protocol.ParsedMessage{};
         };
-        self.message_queue = std.ArrayList(protocol.ParsedMessage).init(self.allocator);
+        self.message_queue = .{};
         return messages;
     }
 
@@ -357,7 +357,7 @@ pub const McpClient = struct {
             const bytes_read = stream.read(recv_buffer[recv_len..]) catch |err| {
                 switch (err) {
                     error.ConnectionResetByPeer, error.BrokenPipe => {
-                        std.log.debug("MCP reader: connection error: {}", .{err});
+                        std.log.debug("MCP reader: connection error: {any}", .{err});
                         // Signal that reconnection is needed (unless shutting down)
                         if (!self.shutdown_flag.load(.acquire)) {
                             self.connected = false;
@@ -367,7 +367,7 @@ pub const McpClient = struct {
                     else => {
                         // Socket was likely closed by main thread during shutdown
                         if (!self.shutdown_flag.load(.acquire)) {
-                            std.log.debug("MCP reader: read error: {}", .{err});
+                            std.log.debug("MCP reader: read error: {any}", .{err});
                             self.connected = false;
                             self.needs_reconnect.store(true, .release);
                         }
@@ -406,7 +406,7 @@ pub const McpClient = struct {
 
                         // Add to queue (thread-safe)
                         self.queue_mutex.lock();
-                        self.message_queue.append(msg) catch {
+                        self.message_queue.append(self.allocator, msg) catch {
                             // Queue full or OOM, drop message
                             freeMessageStatic(self.allocator, @constCast(&msg));
                         };
@@ -440,7 +440,7 @@ pub const McpClient = struct {
 fn setKeepalive(handle: posix.socket_t) void {
     const enable: c_int = 1;
     posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&enable)) catch |err| {
-        std.log.warn("Failed to set SO_KEEPALIVE: {}", .{err});
+        std.log.warn("Failed to set SO_KEEPALIVE: {any}", .{err});
     };
 
     // Set aggressive keepalive parameters to detect dead connections faster

@@ -122,12 +122,13 @@ pub const Server = struct {
         return .{
             .allocator = allocator,
             .config = config,
-            .tools = std.ArrayList(ToolDef).init(allocator),
+            // Zig 0.15: ArrayList is unmanaged
+            .tools = .{},
         };
     }
 
     pub fn deinit(self: *Server) void {
-        self.tools.deinit();
+        self.tools.deinit(self.allocator);
     }
 
     /// Register a tool with the server
@@ -144,7 +145,7 @@ pub const Server = struct {
             \\{"type":"object","properties":{},"required":[]}
         ;
 
-        try self.tools.append(.{
+        try self.tools.append(self.allocator, .{
             .name = name,
             .description = description,
             .input_schema = schema,
@@ -221,67 +222,68 @@ pub const Server = struct {
 
     /// Encode the initialize response
     pub fn encodeInitializeResponse(self: *Server, allocator: Allocator) ![]u8 {
-        var output = std.ArrayList(u8).init(allocator);
-        errdefer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(allocator);
 
-        try output.appendSlice("{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"");
-        try output.appendSlice(self.config.name);
-        try output.appendSlice("\",\"version\":\"");
-        try output.appendSlice(self.config.version);
-        try output.appendSlice("\"}}");
+        try output.appendSlice(allocator, "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"");
+        try output.appendSlice(allocator, self.config.name);
+        try output.appendSlice(allocator, "\",\"version\":\"");
+        try output.appendSlice(allocator, self.config.version);
+        try output.appendSlice(allocator, "\"}}");
 
-        return output.toOwnedSlice();
+        return output.toOwnedSlice(allocator);
     }
 
     /// Encode the tools/list response
     pub fn encodeToolsListResponse(self: *Server, allocator: Allocator) ![]u8 {
-        var output = std.ArrayList(u8).init(allocator);
-        errdefer output.deinit();
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(allocator);
 
-        try output.appendSlice("{\"tools\":[");
+        try output.appendSlice(allocator, "{\"tools\":[");
 
         for (self.tools.items, 0..) |t, i| {
-            if (i > 0) try output.append(',');
-            try output.appendSlice("{\"name\":\"");
-            try output.appendSlice(t.name);
-            try output.appendSlice("\",\"description\":\"");
-            try output.appendSlice(t.description);
-            try output.appendSlice("\",\"inputSchema\":");
-            try output.appendSlice(t.input_schema);
-            try output.append('}');
+            if (i > 0) try output.append(allocator, ',');
+            try output.appendSlice(allocator, "{\"name\":\"");
+            try output.appendSlice(allocator, t.name);
+            try output.appendSlice(allocator, "\",\"description\":\"");
+            try output.appendSlice(allocator, t.description);
+            try output.appendSlice(allocator, "\",\"inputSchema\":");
+            try output.appendSlice(allocator, t.input_schema);
+            try output.append(allocator, '}');
         }
 
-        try output.appendSlice("]}");
+        try output.appendSlice(allocator, "]}");
 
-        return output.toOwnedSlice();
+        return output.toOwnedSlice(allocator);
     }
 
     /// Encode a tool result as JSON
     pub fn encodeToolResult(self: *Server, allocator: Allocator, result: Result) ![]u8 {
         _ = self;
-        var output = std.ArrayList(u8).init(allocator);
-        errdefer output.deinit();
+        // Zig 0.15: ArrayList is unmanaged
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(allocator);
 
         switch (result) {
             .success => |s| {
-                try output.appendSlice("{\"content\":[");
+                try output.appendSlice(allocator, "{\"content\":[");
                 for (s.content, 0..) |c, i| {
-                    if (i > 0) try output.append(',');
-                    try output.appendSlice("{\"type\":\"");
-                    try output.appendSlice(@tagName(c.type));
-                    try output.appendSlice("\"");
+                    if (i > 0) try output.append(allocator, ',');
+                    try output.appendSlice(allocator, "{\"type\":\"");
+                    try output.appendSlice(allocator, @tagName(c.type));
+                    try output.appendSlice(allocator, "\"");
                     if (c.text) |text| {
-                        try output.appendSlice(",\"text\":\"");
-                        try writeJsonEscaped(output.writer(), text);
-                        try output.append('"');
+                        try output.appendSlice(allocator, ",\"text\":\"");
+                        try writeJsonEscaped(output.writer(allocator), text);
+                        try output.append(allocator, '"');
                     }
-                    try output.append('}');
+                    try output.append(allocator, '}');
                 }
-                try output.append(']');
+                try output.append(allocator, ']');
                 if (s.is_error) {
-                    try output.appendSlice(",\"isError\":true");
+                    try output.appendSlice(allocator, ",\"isError\":true");
                 }
-                try output.append('}');
+                try output.append(allocator, '}');
             },
             .failure => {
                 // This shouldn't be encoded as a tool result
@@ -290,7 +292,7 @@ pub const Server = struct {
             },
         }
 
-        return output.toOwnedSlice();
+        return output.toOwnedSlice(allocator);
     }
 };
 
@@ -301,7 +303,8 @@ pub const Server = struct {
 /// Generate a JSON schema string from a Zig struct type at compile time
 fn generateJsonSchema(comptime T: type) []const u8 {
     const info = @typeInfo(T);
-    if (info != .Struct) {
+    // Zig 0.15: type info enum values are lowercase strings
+    if (info != .@"struct") {
         @compileError("JSON schema can only be generated for struct types");
     }
 
@@ -310,7 +313,7 @@ fn generateJsonSchema(comptime T: type) []const u8 {
     comptime var first_prop = true;
     comptime var first_req = true;
 
-    inline for (info.Struct.fields) |field| {
+    inline for (info.@"struct".fields) |field| {
         if (!first_prop) {
             schema = schema ++ ",";
         }
@@ -321,7 +324,8 @@ fn generateJsonSchema(comptime T: type) []const u8 {
         schema = schema ++ "}";
 
         // All fields are required unless they have a default value
-        if (field.default_value == null) {
+        // Zig 0.15: default_value is now default_value_ptr
+        if (field.default_value_ptr == null) {
             if (!first_req) {
                 required = required ++ ",";
             }
@@ -338,17 +342,18 @@ fn generateJsonSchema(comptime T: type) []const u8 {
 fn jsonTypeFor(comptime T: type) []const u8 {
     const info = @typeInfo(T);
 
+    // Zig 0.15: type info enum values are lowercase strings
     return switch (info) {
-        .Int, .ComptimeInt => "\"type\":\"integer\"",
-        .Float, .ComptimeFloat => "\"type\":\"number\"",
-        .Bool => "\"type\":\"boolean\"",
-        .Pointer => |ptr| {
-            if (ptr.size == .Slice and ptr.child == u8) {
+        .int, .comptime_int => "\"type\":\"integer\"",
+        .float, .comptime_float => "\"type\":\"number\"",
+        .bool => "\"type\":\"boolean\"",
+        .pointer => |ptr| {
+            if (ptr.size == .slice and ptr.child == u8) {
                 return "\"type\":\"string\"";
             }
             return "\"type\":\"object\"";
         },
-        .Optional => |opt| jsonTypeFor(opt.child),
+        .optional => |opt| jsonTypeFor(opt.child),
         else => "\"type\":\"object\"",
     };
 }
@@ -387,15 +392,17 @@ pub fn parseParams(comptime T: type, allocator: Allocator, value: ?std.json.Valu
     if (val != .object) return error.InvalidParams;
 
     var result: T = undefined;
-    const info = @typeInfo(T).Struct;
+    // Zig 0.15: type info enum values are lowercase strings
+    const info = @typeInfo(T).@"struct";
 
     inline for (info.fields) |field| {
         const json_val = val.object.get(field.name);
 
         if (json_val) |v| {
             @field(result, field.name) = try parseValue(field.type, allocator, v);
-        } else if (field.default_value) |default| {
-            @field(result, field.name) = @as(*const field.type, @ptrCast(@alignCast(default))).*;
+        } else if (field.defaultValue()) |default| {
+            // Zig 0.15: use defaultValue() method instead of default_value field
+            @field(result, field.name) = default;
         } else {
             return error.MissingField;
         }
@@ -407,29 +414,30 @@ pub fn parseParams(comptime T: type, allocator: Allocator, value: ?std.json.Valu
 fn parseValue(comptime T: type, allocator: Allocator, value: std.json.Value) !T {
     const info = @typeInfo(T);
 
+    // Zig 0.15: type info enum values are lowercase
     switch (info) {
-        .Int => {
+        .int => {
             return switch (value) {
                 .integer => |i| @intCast(i),
                 .number_string => |s| try std.fmt.parseInt(T, s, 10),
                 else => error.InvalidType,
             };
         },
-        .Float => {
+        .float => {
             return switch (value) {
                 .float => |f| @floatCast(f),
                 .integer => |i| @floatFromInt(i),
                 else => error.InvalidType,
             };
         },
-        .Bool => {
+        .bool => {
             return switch (value) {
                 .bool => |b| b,
                 else => error.InvalidType,
             };
         },
-        .Pointer => |ptr| {
-            if (ptr.size == .Slice and ptr.child == u8) {
+        .pointer => |ptr| {
+            if (ptr.size == .slice and ptr.child == u8) {
                 return switch (value) {
                     .string => |s| try allocator.dupe(u8, s),
                     else => error.InvalidType,
@@ -437,7 +445,7 @@ fn parseValue(comptime T: type, allocator: Allocator, value: std.json.Value) !T 
             }
             return error.UnsupportedType;
         },
-        .Optional => |opt| {
+        .optional => |opt| {
             if (value == .null) return null;
             return try parseValue(opt.child, allocator, value);
         },

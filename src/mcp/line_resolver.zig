@@ -118,21 +118,21 @@ pub const LineResolver = struct {
         const file_idx = self.findFile(file_path) orelse return null;
         const file = &self.files[file_idx];
 
-        var new_lines = std.ArrayList(u32).init(allocator);
-        var old_lines = std.ArrayList(u32).init(allocator);
-        errdefer new_lines.deinit();
-        errdefer old_lines.deinit();
+        var new_lines: std.ArrayList(u32) = .{};
+        var old_lines: std.ArrayList(u32) = .{};
+        errdefer new_lines.deinit(allocator);
+        errdefer old_lines.deinit(allocator);
 
         for (file.hunks) |hunk| {
             for (hunk.lines) |line| {
-                if (line.new_lineno) |n| try new_lines.append(n);
-                if (line.old_lineno) |o| try old_lines.append(o);
+                if (line.new_lineno) |n| try new_lines.append(allocator, n);
+                if (line.old_lineno) |o| try old_lines.append(allocator, o);
             }
         }
 
         return .{
-            .new_lines = try new_lines.toOwnedSlice(),
-            .old_lines = try old_lines.toOwnedSlice(),
+            .new_lines = try new_lines.toOwnedSlice(allocator),
+            .old_lines = try old_lines.toOwnedSlice(allocator),
         };
     }
 };

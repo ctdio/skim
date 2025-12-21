@@ -122,13 +122,14 @@ pub const ClientRegistry = struct {
 
     /// List all connected clients
     pub fn list(self: *ClientRegistry, allocator: Allocator) ![]ClientListEntry {
-        var entries = std.ArrayList(ClientListEntry).init(allocator);
-        errdefer entries.deinit();
+        // Zig 0.15: ArrayList is unmanaged
+        var entries: std.ArrayList(ClientListEntry) = .{};
+        errdefer entries.deinit(allocator);
 
         var it = self.clients.valueIterator();
         while (it.next()) |client_ptr| {
             const client = client_ptr.*;
-            try entries.append(.{
+            try entries.append(allocator, .{
                 .id = &client.id,
                 .cwd = client.cwd,
                 .diff_ref = client.diff_ref,
@@ -137,7 +138,7 @@ pub const ClientRegistry = struct {
             });
         }
 
-        return entries.toOwnedSlice();
+        return entries.toOwnedSlice(allocator);
     }
 
     /// Entry for client listing
@@ -168,15 +169,15 @@ pub const ClientRegistry = struct {
 
     /// Get all client streams for broadcasting
     pub fn getAllStreams(self: *ClientRegistry, allocator: Allocator) ![]net.Stream {
-        var streams = std.ArrayList(net.Stream).init(allocator);
-        errdefer streams.deinit();
+        var streams: std.ArrayList(net.Stream) = .{};
+        errdefer streams.deinit(allocator);
 
         var it = self.clients.valueIterator();
         while (it.next()) |client_ptr| {
-            try streams.append(client_ptr.*.stream);
+            try streams.append(allocator, client_ptr.*.stream);
         }
 
-        return streams.toOwnedSlice();
+        return streams.toOwnedSlice(allocator);
     }
 
     /// Iterator over all clients

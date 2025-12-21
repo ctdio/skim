@@ -158,16 +158,16 @@ pub const StateHelpers = struct {
 
         // Build the NEW file content from hunks
         // Skip deletions (old file), include additions and context (new file)
-        var content = std.ArrayList(u8).init(app.allocator);
-        defer content.deinit();
+        var content: std.ArrayList(u8) = .{};
+        defer content.deinit(app.allocator);
 
         for (file.hunks) |hunk| {
             for (hunk.lines) |line| {
                 switch (line.line_type) {
                     .delete => {}, // Skip deletions - not in new file
                     .add, .context => {
-                        try content.appendSlice(line.content);
-                        try content.append('\n');
+                        try content.appendSlice(app.allocator, line.content);
+                        try content.append(app.allocator, '\n');
                     },
                 }
             }

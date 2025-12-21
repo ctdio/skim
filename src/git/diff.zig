@@ -19,31 +19,31 @@ pub const DiffSource = union(enum) {
 
 /// Execute git diff and return the output as a string
 pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
-    var args = std.ArrayList([]const u8).init(allocator);
-    defer args.deinit();
+    var args: std.ArrayList([]const u8) = .{};
+    defer args.deinit(allocator);
 
-    try args.append("git");
-    try args.append("diff");
-    try args.append("--no-color");
-    try args.append("--no-ext-diff");
-    try args.append("-U10"); // 10 lines of context
+    try args.append(allocator, "git");
+    try args.append(allocator, "diff");
+    try args.append(allocator, "--no-color");
+    try args.append(allocator, "--no-ext-diff");
+    try args.append(allocator, "-U10"); // 10 lines of context
 
     switch (source) {
         .working_dir => |wd| {
             if (wd.staged) {
-                try args.append("--cached");
+                try args.append(allocator, "--cached");
             } else if (isInMergeConflict(allocator)) {
                 // During merge conflicts, git diff outputs combined diff format which
                 // our parser doesn't understand. Use HEAD to get unified diff format
                 // that shows conflict markers as additions.
-                try args.append("HEAD");
+                try args.append(allocator, "HEAD");
             }
         },
         .single_ref => |sr| {
             if (sr.staged) {
-                try args.append("--cached");
+                try args.append(allocator, "--cached");
             }
-            try args.append(sr.ref);
+            try args.append(allocator, sr.ref);
         },
         .two_refs => |tr| {
             if (tr.use_merge_base) {
@@ -51,10 +51,10 @@ pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
                 const range = try std.fmt.bufPrint(&range_buf, "{s}...{s}", .{ tr.ref1, tr.ref2 });
                 const range_owned = try allocator.dupe(u8, range);
                 errdefer allocator.free(range_owned);
-                try args.append(range_owned);
+                try args.append(allocator, range_owned);
             } else {
-                try args.append(tr.ref1);
-                try args.append(tr.ref2);
+                try args.append(allocator, tr.ref1);
+                try args.append(allocator, tr.ref2);
             }
         },
     }
@@ -127,24 +127,24 @@ pub const DiffStats = struct {
 
 /// Get quick diff stats using --shortstat (very fast)
 pub fn getDiffStats(allocator: Allocator, source: DiffSource) !DiffStats {
-    var args = std.ArrayList([]const u8).init(allocator);
-    defer args.deinit();
+    var args: std.ArrayList([]const u8) = .{};
+    defer args.deinit(allocator);
 
-    try args.append("git");
-    try args.append("diff");
-    try args.append("--shortstat");
+    try args.append(allocator, "git");
+    try args.append(allocator, "diff");
+    try args.append(allocator, "--shortstat");
 
     switch (source) {
         .working_dir => |wd| {
             if (wd.staged) {
-                try args.append("--cached");
+                try args.append(allocator, "--cached");
             }
         },
         .single_ref => |sr| {
             if (sr.staged) {
-                try args.append("--cached");
+                try args.append(allocator, "--cached");
             }
-            try args.append(sr.ref);
+            try args.append(allocator, sr.ref);
         },
         .two_refs => |tr| {
             if (tr.use_merge_base) {
@@ -152,10 +152,10 @@ pub fn getDiffStats(allocator: Allocator, source: DiffSource) !DiffStats {
                 const range = try std.fmt.bufPrint(&range_buf, "{s}...{s}", .{ tr.ref1, tr.ref2 });
                 const range_owned = try allocator.dupe(u8, range);
                 errdefer allocator.free(range_owned);
-                try args.append(range_owned);
+                try args.append(allocator, range_owned);
             } else {
-                try args.append(tr.ref1);
-                try args.append(tr.ref2);
+                try args.append(allocator, tr.ref1);
+                try args.append(allocator, tr.ref2);
             }
         },
     }
@@ -245,24 +245,24 @@ pub fn getDiffStats(allocator: Allocator, source: DiffSource) !DiffStats {
 
 /// Get list of changed files (fast, without full diff)
 pub fn getChangedFiles(allocator: Allocator, source: DiffSource) ![]FileStatus {
-    var args = std.ArrayList([]const u8).init(allocator);
-    defer args.deinit();
+    var args: std.ArrayList([]const u8) = .{};
+    defer args.deinit(allocator);
 
-    try args.append("git");
-    try args.append("diff");
-    try args.append("--name-status");
+    try args.append(allocator, "git");
+    try args.append(allocator, "diff");
+    try args.append(allocator, "--name-status");
 
     switch (source) {
         .working_dir => |wd| {
             if (wd.staged) {
-                try args.append("--cached");
+                try args.append(allocator, "--cached");
             }
         },
         .single_ref => |sr| {
             if (sr.staged) {
-                try args.append("--cached");
+                try args.append(allocator, "--cached");
             }
-            try args.append(sr.ref);
+            try args.append(allocator, sr.ref);
         },
         .two_refs => |tr| {
             if (tr.use_merge_base) {
@@ -270,10 +270,10 @@ pub fn getChangedFiles(allocator: Allocator, source: DiffSource) ![]FileStatus {
                 const range = try std.fmt.bufPrint(&range_buf, "{s}...{s}", .{ tr.ref1, tr.ref2 });
                 const range_owned = try allocator.dupe(u8, range);
                 errdefer allocator.free(range_owned);
-                try args.append(range_owned);
+                try args.append(allocator, range_owned);
             } else {
-                try args.append(tr.ref1);
-                try args.append(tr.ref2);
+                try args.append(allocator, tr.ref1);
+                try args.append(allocator, tr.ref2);
             }
         },
     }
@@ -321,12 +321,12 @@ pub const FileStatus = struct {
 };
 
 fn parseFileStatus(allocator: Allocator, output: []const u8) ![]FileStatus {
-    var files = std.ArrayList(FileStatus).init(allocator);
+    var files: std.ArrayList(FileStatus) = .{};
     errdefer {
         for (files.items) |*file| {
             file.deinit(allocator);
         }
-        files.deinit();
+        files.deinit(allocator);
     }
 
     var lines = std.mem.tokenizeScalar(u8, output, '\n');
@@ -345,13 +345,13 @@ fn parseFileStatus(allocator: Allocator, output: []const u8) ![]FileStatus {
             else => continue,
         };
 
-        try files.append(.{
+        try files.append(allocator, .{
             .status = status,
             .path = try allocator.dupe(u8, path),
         });
     }
 
-    return files.toOwnedSlice();
+    return files.toOwnedSlice(allocator);
 }
 
 /// Get list of all branches (local and remote)
@@ -372,23 +372,23 @@ pub fn getBranches(allocator: Allocator) ![][]const u8 {
         return error.GitCommandFailed;
     }
 
-    var branches = std.ArrayList([]const u8).init(allocator);
+    var branches: std.ArrayList([]const u8) = .{};
     errdefer {
         for (branches.items) |branch| {
             allocator.free(branch);
         }
-        branches.deinit();
+        branches.deinit(allocator);
     }
 
     var lines = std.mem.tokenizeScalar(u8, stdout, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len > 0) {
-            try branches.append(try allocator.dupe(u8, trimmed));
+            try branches.append(allocator, try allocator.dupe(u8, trimmed));
         }
     }
 
-    return branches.toOwnedSlice();
+    return branches.toOwnedSlice(allocator);
 }
 
 /// Detect the default branch (main or master) by checking which exists
@@ -505,12 +505,12 @@ pub fn getUntrackedFiles(allocator: Allocator) ![][]const u8 {
     const output = try runGitCommand(allocator, args);
     defer allocator.free(output);
 
-    var files = std.ArrayList([]const u8).init(allocator);
+    var files: std.ArrayList([]const u8) = .{};
     errdefer {
         for (files.items) |file| {
             allocator.free(file);
         }
-        files.deinit();
+        files.deinit(allocator);
     }
 
     var lines = std.mem.tokenizeScalar(u8, output, '\n');
@@ -518,11 +518,11 @@ pub fn getUntrackedFiles(allocator: Allocator) ![][]const u8 {
         // Untracked files start with "?? "
         if (line.len > 3 and std.mem.startsWith(u8, line, "?? ")) {
             const path = line[3..];
-            try files.append(try allocator.dupe(u8, path));
+            try files.append(allocator, try allocator.dupe(u8, path));
         }
     }
 
-    return files.toOwnedSlice();
+    return files.toOwnedSlice(allocator);
 }
 
 /// Generate a synthetic diff for an untracked file (as if diffing /dev/null to the file)
@@ -632,17 +632,17 @@ pub fn getDiffWithUntracked(allocator: Allocator, source: DiffSource) !DiffWithU
     }
 
     // Build combined diff text
-    var combined = std.ArrayList(u8).init(allocator);
-    errdefer combined.deinit();
+    var combined: std.ArrayList(u8) = .{};
+    errdefer combined.deinit(allocator);
 
-    try combined.appendSlice(tracked_diff);
+    try combined.appendSlice(allocator, tracked_diff);
     allocator.free(tracked_diff);
 
     // Keep track of which untracked files we successfully got diffs for
-    var successful_paths = std.ArrayList([]const u8).init(allocator);
+    var successful_paths: std.ArrayList([]const u8) = .{};
     errdefer {
         for (successful_paths.items) |p| allocator.free(p);
-        successful_paths.deinit();
+        successful_paths.deinit(allocator);
     }
 
     for (untracked_files) |file_path| {
@@ -656,10 +656,10 @@ pub fn getDiffWithUntracked(allocator: Allocator, source: DiffSource) !DiffWithU
         if (untracked_diff.len > 0) {
             // Add newline separator if needed
             if (combined.items.len > 0 and combined.items[combined.items.len - 1] != '\n') {
-                try combined.append('\n');
+                try combined.append(allocator, '\n');
             }
-            try combined.appendSlice(untracked_diff);
-            try successful_paths.append(file_path);
+            try combined.appendSlice(allocator, untracked_diff);
+            try successful_paths.append(allocator, file_path);
         } else {
             allocator.free(file_path);
         }
@@ -667,8 +667,8 @@ pub fn getDiffWithUntracked(allocator: Allocator, source: DiffSource) !DiffWithU
     allocator.free(untracked_files);
 
     return DiffWithUntrackedResult{
-        .diff_text = try combined.toOwnedSlice(),
-        .untracked_paths = try successful_paths.toOwnedSlice(),
+        .diff_text = try combined.toOwnedSlice(allocator),
+        .untracked_paths = try successful_paths.toOwnedSlice(allocator),
     };
 }
 

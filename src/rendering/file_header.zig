@@ -75,8 +75,8 @@ pub const FileHeader = struct {
                 .{ .text = del_copy, .style = del_style },
                 .{ .text = untracked_text, .style = untracked_style },
             };
-            _ = try win.print(&segments, .{
-                .row_offset = row,
+            _ = win.print(&segments, .{
+                .row_offset = @intCast(row),
                 .col_offset = 0,
             });
         } else {
@@ -85,8 +85,8 @@ pub const FileHeader = struct {
                 .{ .text = add_copy, .style = add_style },
                 .{ .text = del_copy, .style = del_style },
             };
-            _ = try win.print(&segments, .{
-                .row_offset = row,
+            _ = win.print(&segments, .{
+                .row_offset = @intCast(row),
                 .col_offset = 0,
             });
         }

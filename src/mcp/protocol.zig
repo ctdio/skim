@@ -243,7 +243,7 @@ pub const JsonRpcId = union(enum) {
                 try writer.writeAll(s);
                 try writer.writeByte('"');
             },
-            .number => |n| try std.fmt.formatInt(n, 10, .lower, .{}, writer),
+            .number => |n| try writer.print("{d}", .{n}),
             .null_value => try writer.writeAll("null"),
         }
     }
@@ -271,10 +271,10 @@ pub const InputSchema = struct {
 
 /// Encode a hello message
 pub fn encodeHello(allocator: Allocator, payload: HelloPayload) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"hello\"");
     try writer.writeAll(",\"id\":\"");
     try writer.writeAll(payload.id);
@@ -291,56 +291,56 @@ pub fn encodeHello(allocator: Allocator, payload: HelloPayload) ![]u8 {
         try writer.writeAll("\",\"old_path\":\"");
         try writeJsonEscaped(writer, file.old_path);
         try writer.writeAll("\",\"hunk_count\":");
-        try std.fmt.formatInt(file.hunk_count, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{file.hunk_count});
         try writer.writeByte('}');
     }
 
     try writer.writeAll("]}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode a welcome message
 pub fn encodeWelcome(allocator: Allocator, id: []const u8) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"welcome\",\"id\":\"");
     try writer.writeAll(id);
     try writer.writeAll("\"}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode an add_comment message
 pub fn encodeAddComment(allocator: Allocator, payload: AddCommentPayload) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"add_comment\",\"file\":\"");
     try writeJsonEscaped(writer, payload.file);
     try writer.writeAll("\",\"line\":");
-    try std.fmt.formatInt(payload.line, 10, .lower, .{}, writer);
+    try writer.print("{d}", .{payload.line});
     try writer.writeAll(",\"line_type\":\"");
     try writeJsonEscaped(writer, payload.line_type);
     try writer.writeAll("\",\"text\":\"");
     try writeJsonEscaped(writer, payload.text);
     try writer.writeAll("\"}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode a comment_added response
 pub fn encodeCommentAdded(allocator: Allocator, success: bool, comment_idx: ?usize, err_msg: ?[]const u8) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"comment_added\",\"success\":");
     try writer.writeAll(if (success) "true" else "false");
 
     if (comment_idx) |idx| {
         try writer.writeAll(",\"comment_idx\":");
-        try std.fmt.formatInt(idx, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{idx});
     }
 
     if (err_msg) |msg| {
@@ -350,34 +350,34 @@ pub fn encodeCommentAdded(allocator: Allocator, success: bool, comment_idx: ?usi
     }
 
     try writer.writeAll("}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode a get_comments request
 pub fn encodeGetComments(allocator: Allocator) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    try output.appendSlice("{\"event\":\"get_comments\"}\n");
-    return output.toOwnedSlice();
+    try output.appendSlice(allocator, "{\"event\":\"get_comments\"}\n");
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode a comments response
 pub fn encodeComments(allocator: Allocator, comments: []const CommentInfo) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"comments\",\"comments\":[");
 
     for (comments, 0..) |comment, i| {
         if (i > 0) try writer.writeByte(',');
         try writer.writeAll("{\"idx\":");
-        try std.fmt.formatInt(comment.idx, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{comment.idx});
         try writer.writeAll(",\"file_path\":\"");
         try writeJsonEscaped(writer, comment.file_path);
         try writer.writeAll("\",\"line\":");
-        try std.fmt.formatInt(comment.line, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{comment.line});
         try writer.writeAll(",\"text\":\"");
         try writeJsonEscaped(writer, comment.text);
         try writer.writeAll("\",\"line_type\":\"");
@@ -388,65 +388,65 @@ pub fn encodeComments(allocator: Allocator, comments: []const CommentInfo) ![]u8
     }
 
     try writer.writeAll("]}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode an error message
 pub fn encodeError(allocator: Allocator, code: []const u8, message: []const u8) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"error\",\"code\":\"");
     try writer.writeAll(code);
     try writer.writeAll("\",\"message\":\"");
     try writeJsonEscaped(writer, message);
     try writer.writeAll("\"}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode ping
 pub fn encodePing(allocator: Allocator) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
-    try output.appendSlice("{\"event\":\"ping\"}\n");
-    return output.toOwnedSlice();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, "{\"event\":\"ping\"}\n");
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode pong
 pub fn encodePong(allocator: Allocator) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
-    try output.appendSlice("{\"event\":\"pong\"}\n");
-    return output.toOwnedSlice();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, "{\"event\":\"pong\"}\n");
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode a get_diff_context request
 pub fn encodeGetDiffContext(allocator: Allocator) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
-    try output.appendSlice("{\"event\":\"get_diff_context\"}\n");
-    return output.toOwnedSlice();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, "{\"event\":\"get_diff_context\"}\n");
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode a get_file_diff request
 pub fn encodeGetFileDiff(allocator: Allocator, file: []const u8) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"get_file_diff\",\"file\":\"");
     try writeJsonEscaped(writer, file);
     try writer.writeAll("\"}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode a diff_context response
 pub fn encodeDiffContext(allocator: Allocator, payload: DiffContextPayload) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"diff_context\",\"diff_ref\":\"");
     try writeJsonEscaped(writer, payload.diff_ref);
     try writer.writeAll("\",\"cwd\":\"");
@@ -462,24 +462,24 @@ pub fn encodeDiffContext(allocator: Allocator, payload: DiffContextPayload) ![]u
         try writer.writeAll("\",\"status\":\"");
         try writer.writeAll(file.status);
         try writer.writeAll("\",\"additions\":");
-        try std.fmt.formatInt(file.additions, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{file.additions});
         try writer.writeAll(",\"deletions\":");
-        try std.fmt.formatInt(file.deletions, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{file.deletions});
         try writer.writeAll(",\"hunk_count\":");
-        try std.fmt.formatInt(file.hunk_count, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{file.hunk_count});
         try writer.writeByte('}');
     }
 
     try writer.writeAll("]}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 /// Encode a file_diff response
 pub fn encodeFileDiff(allocator: Allocator, payload: FileDiffPayload) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"file_diff\",\"file\":\"");
     try writeJsonEscaped(writer, payload.file);
     try writer.writeAll("\",\"old_file\":\"");
@@ -493,13 +493,13 @@ pub fn encodeFileDiff(allocator: Allocator, payload: FileDiffPayload) ![]u8 {
         try writer.writeAll("{\"header\":\"");
         try writeJsonEscaped(writer, hunk.header);
         try writer.writeAll("\",\"old_start\":");
-        try std.fmt.formatInt(hunk.old_start, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{hunk.old_start});
         try writer.writeAll(",\"old_count\":");
-        try std.fmt.formatInt(hunk.old_count, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{hunk.old_count});
         try writer.writeAll(",\"new_start\":");
-        try std.fmt.formatInt(hunk.new_start, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{hunk.new_start});
         try writer.writeAll(",\"new_count\":");
-        try std.fmt.formatInt(hunk.new_count, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{hunk.new_count});
         try writer.writeAll(",\"lines\":[");
 
         for (hunk.lines, 0..) |line, line_idx| {
@@ -511,11 +511,11 @@ pub fn encodeFileDiff(allocator: Allocator, payload: FileDiffPayload) ![]u8 {
             try writer.writeByte('"');
             if (line.old_lineno) |n| {
                 try writer.writeAll(",\"old_lineno\":");
-                try std.fmt.formatInt(n, 10, .lower, .{}, writer);
+                try writer.print("{d}", .{n});
             }
             if (line.new_lineno) |n| {
                 try writer.writeAll(",\"new_lineno\":");
-                try std.fmt.formatInt(n, 10, .lower, .{}, writer);
+                try writer.print("{d}", .{n});
             }
             try writer.writeByte('}');
         }
@@ -524,7 +524,7 @@ pub fn encodeFileDiff(allocator: Allocator, payload: FileDiffPayload) ![]u8 {
     }
 
     try writer.writeAll("]}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 // =============================================================================

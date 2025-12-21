@@ -14,8 +14,8 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     const popup_win = win.child(.{
         .x_off = x_offset,
         .y_off = y_offset,
-        .width = .{ .limit = popup_width },
-        .height = .{ .limit = popup_height },
+        .width = @intCast(popup_width),
+        .height = @intCast(popup_height),
         .border = .{
             .where = .all,
             .style = .{
@@ -47,7 +47,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     var title_seg = [_]vaxis.Cell.Segment{
         .{ .text = "Daemon Connection", .style = title_style },
     };
-    _ = try popup_win.print(&title_seg, .{ .row_offset = row });
+    _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(row) });
     row += 1;
 
     // Separator
@@ -60,7 +60,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
         var sep_seg = [_]vaxis.Cell.Segment{
             .{ .text = sep_text, .style = .{ .fg = .{ .index = 8 } } },
         };
-        _ = try popup_win.print(&sep_seg, .{ .row_offset = row });
+        _ = popup_win.print(&sep_seg, .{ .row_offset = @intCast(row) });
     }
     row += 2;
 
@@ -71,7 +71,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
             .{ .text = "  Status:     ", .style = label_style },
             .{ .text = if (mcp.connected) "Connected" else "Disconnected", .style = if (mcp.connected) connected_style else disconnected_style },
         };
-        _ = try popup_win.print(&status_seg, .{ .row_offset = row });
+        _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row) });
         row += 1;
 
         // Port
@@ -81,7 +81,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
             .{ .text = "  Port:       ", .style = label_style },
             .{ .text = port_str, .style = value_style },
         };
-        _ = try popup_win.print(&port_seg, .{ .row_offset = row });
+        _ = popup_win.print(&port_seg, .{ .row_offset = @intCast(row) });
         row += 1;
 
         // Session ID
@@ -90,13 +90,13 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
                 .{ .text = "  Session:    ", .style = label_style },
                 .{ .text = session_id, .style = value_style },
             };
-            _ = try popup_win.print(&session_seg, .{ .row_offset = row });
+            _ = popup_win.print(&session_seg, .{ .row_offset = @intCast(row) });
         } else {
             var session_seg = [_]vaxis.Cell.Segment{
                 .{ .text = "  Session:    ", .style = label_style },
                 .{ .text = "(none)", .style = .{ .fg = .{ .index = 8 } } },
             };
-            _ = try popup_win.print(&session_seg, .{ .row_offset = row });
+            _ = popup_win.print(&session_seg, .{ .row_offset = @intCast(row) });
         }
         row += 2;
 
@@ -104,38 +104,38 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
         var desc_seg = [_]vaxis.Cell.Segment{
             .{ .text = "  The daemon allows AI agents to interact with", .style = .{ .fg = .{ .index = 8 } } },
         };
-        _ = try popup_win.print(&desc_seg, .{ .row_offset = row });
+        _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row) });
         row += 1;
 
         var desc2_seg = [_]vaxis.Cell.Segment{
             .{ .text = "  your code review session via MCP.", .style = .{ .fg = .{ .index = 8 } } },
         };
-        _ = try popup_win.print(&desc2_seg, .{ .row_offset = row });
+        _ = popup_win.print(&desc2_seg, .{ .row_offset = @intCast(row) });
     } else {
         // No MCP client
         var status_seg = [_]vaxis.Cell.Segment{
             .{ .text = "  Status:     ", .style = label_style },
             .{ .text = "Not Connected", .style = disconnected_style },
         };
-        _ = try popup_win.print(&status_seg, .{ .row_offset = row });
+        _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row) });
         row += 2;
 
         var info_seg = [_]vaxis.Cell.Segment{
             .{ .text = "  Daemon not running or not reachable.", .style = .{ .fg = .{ .index = 8 } } },
         };
-        _ = try popup_win.print(&info_seg, .{ .row_offset = row });
+        _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(row) });
         row += 2;
 
         var start_seg = [_]vaxis.Cell.Segment{
             .{ .text = "  To start the daemon:", .style = .{ .fg = .{ .index = 8 } } },
         };
-        _ = try popup_win.print(&start_seg, .{ .row_offset = row });
+        _ = popup_win.print(&start_seg, .{ .row_offset = @intCast(row) });
         row += 1;
 
         var cmd_seg = [_]vaxis.Cell.Segment{
             .{ .text = "    skim daemon start", .style = .{ .fg = .{ .index = 6 } } },
         };
-        _ = try popup_win.print(&cmd_seg, .{ .row_offset = row });
+        _ = popup_win.print(&cmd_seg, .{ .row_offset = @intCast(row) });
     }
 
     // Footer
@@ -143,5 +143,5 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     var footer_seg = [_]vaxis.Cell.Segment{
         .{ .text = "  Press ESC or q to close", .style = .{ .fg = .{ .index = 8 } } },
     };
-    _ = try popup_win.print(&footer_seg, .{ .row_offset = row });
+    _ = popup_win.print(&footer_seg, .{ .row_offset = @intCast(row) });
 }

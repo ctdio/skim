@@ -62,6 +62,9 @@ pub fn deinit() void {
     initialized = false;
 }
 
+/// Buffer for log file writing (Zig 0.15 requires buffer for file.writer())
+var write_buffer: [4096]u8 = undefined;
+
 /// Custom log function that writes to file instead of stderr
 pub fn logFn(
     comptime level: std.log.Level,
@@ -73,7 +76,9 @@ pub fn logFn(
     defer log_mutex.unlock();
 
     const file = log_file orelse return;
-    const writer = file.writer();
+    var file_writer = file.writer(&write_buffer);
+    defer file_writer.interface.flush() catch {};
+    const writer = &file_writer.interface;
 
     // Get timestamp
     const timestamp = std.time.timestamp();

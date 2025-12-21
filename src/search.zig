@@ -16,14 +16,14 @@ pub const SearchState = struct {
         return .{
             .query_buffer = undefined,
             .query_len = 0,
-            .matches = std.ArrayList(usize).init(allocator),
+            .matches = .{},
             .current_match_idx = null,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *SearchState) void {
-        self.matches.deinit();
+        self.matches.deinit(self.allocator);
     }
 
     pub fn reset(self: *SearchState) void {
@@ -80,7 +80,7 @@ pub fn performSearch(
 
         // Search for query in line content
         if (searchInLine(line_content, query, is_case_sensitive)) {
-            try search_state.matches.append(line_idx);
+            try search_state.matches.append(search_state.allocator, line_idx);
         }
     }
 }

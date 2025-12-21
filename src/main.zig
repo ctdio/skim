@@ -175,7 +175,7 @@ fn runDaemonCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
                 std.debug.print("Stopping daemon (PID {d})...\n", .{info.pid});
                 std.posix.kill(info.pid, std.posix.SIG.TERM) catch {};
                 // Wait a bit for it to stop
-                std.time.sleep(500 * std.time.ns_per_ms);
+                std.Thread.sleep(500 * std.time.ns_per_ms);
             },
             else => {},
         }
@@ -236,8 +236,13 @@ fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     try adapter.runAdapter(allocator, port);
 }
 
+/// Write buffer for stdout (Zig 0.15 requires buffer for file.writer())
+var stdout_buffer: [4096]u8 = undefined;
+
 fn printDaemonHelp() !void {
-    const stdout = std.io.getStdOut().writer();
+    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    defer file_writer.interface.flush() catch {};
+    const stdout = &file_writer.interface;
     try stdout.writeAll(
         \\skim daemon - Manage the skim MCP daemon
         \\
@@ -266,7 +271,9 @@ fn printDaemonHelp() !void {
 }
 
 fn printMcpHelp() !void {
-    const stdout = std.io.getStdOut().writer();
+    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    defer file_writer.interface.flush() catch {};
+    const stdout = &file_writer.interface;
     try stdout.writeAll(
         \\skim mcp - Run as MCP adapter (for AI agents)
         \\
@@ -324,8 +331,9 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
     var staged = false;
     var mcp_port: ?u16 = null;
     var serve_port: ?u16 = null;
-    var positional_args = std.ArrayList([]const u8).init(allocator);
-    defer positional_args.deinit();
+    // Zig 0.15: ArrayList is now unmanaged, pass allocator to methods
+    var positional_args: std.ArrayList([]const u8) = .{};
+    defer positional_args.deinit(allocator);
 
     // Parse flags and collect positional arguments
     var i: usize = 1;
@@ -368,7 +376,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
             try printHelp();
             std.process.exit(1);
         } else {
-            try positional_args.append(arg);
+            try positional_args.append(allocator, arg);
         }
     }
 
@@ -416,7 +424,9 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
 }
 
 fn printHelp() !void {
-    const stdout = std.io.getStdOut().writer();
+    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    defer file_writer.interface.flush() catch {};
+    const stdout = &file_writer.interface;
     try stdout.writeAll(
         \\skim - Lightning-fast code review TUI
         \\
@@ -473,7 +483,9 @@ fn printHelp() !void {
 }
 
 fn printVersion() !void {
-    const stdout = std.io.getStdOut().writer();
+    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    defer file_writer.interface.flush() catch {};
+    const stdout = &file_writer.interface;
     try stdout.writeAll("skim 0.1.0\n");
 }
 
@@ -483,7 +495,7 @@ fn getCurrentPid() i32 {
         return @intCast(std.os.linux.getpid());
     } else {
         // Use extern for macOS and other POSIX systems
-        const c_getpid = @extern(*const fn () callconv(.C) c_int, .{ .name = "getpid" });
+        const c_getpid = @extern(*const fn () callconv(.c) c_int, .{ .name = "getpid" });
         return @intCast(c_getpid());
     }
 }
@@ -555,8 +567,8 @@ fn daemonize(allocator: std.mem.Allocator, tui_port: u16, adapter_port: u16) !i3
     // Write our PID to the pipe
     const daemon_pid = getCurrentPid();
     var pid_str: [16]u8 = undefined;
-    const pid_len = std.fmt.formatIntBuf(&pid_str, daemon_pid, 10, .lower, .{});
-    _ = posix.write(pipe_write, pid_str[0..pid_len]) catch {};
+    const pid_slice = std.fmt.bufPrint(&pid_str, "{d}", .{daemon_pid}) catch "";
+    _ = posix.write(pipe_write, pid_slice) catch {};
     posix.close(pipe_write);
 
     // Redirect stdin/stdout/stderr to /dev/null

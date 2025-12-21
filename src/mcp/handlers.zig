@@ -18,13 +18,13 @@ pub fn sendHello(
     diff_source: DiffSource,
 ) !void {
     // Build file info list
-    var file_infos = std.ArrayList(mcp_protocol.FileInfo).init(allocator);
-    defer file_infos.deinit();
+    var file_infos: std.ArrayList(mcp_protocol.FileInfo) = .{};
+    defer file_infos.deinit(allocator);
 
     for (files) |file| {
         const path = if (file.new_path.len > 0) file.new_path else file.old_path;
         const old_path = file.old_path;
-        try file_infos.append(.{
+        try file_infos.append(allocator, .{
             .path = path,
             .old_path = old_path,
             .hunk_count = file.hunks.len,
@@ -78,10 +78,10 @@ pub fn handleAddComment(
             allocator.free(info.old_lines);
         };
 
-        var error_msg = std.ArrayList(u8).init(allocator);
-        defer error_msg.deinit();
+        var error_msg: std.ArrayList(u8) = .{};
+        defer error_msg.deinit(allocator);
 
-        const writer = error_msg.writer();
+        const writer = error_msg.writer(allocator);
         try writer.print("Line {d} not found in {s} version of {s}", .{
             ac.line,
             ac.line_type,
@@ -102,7 +102,7 @@ pub fn handleAddComment(
             }
         }
 
-        const error_str = try error_msg.toOwnedSlice();
+        const error_str = try error_msg.toOwnedSlice(allocator);
         defer allocator.free(error_str);
 
         try mcp.sendCommentAdded(false, null, error_str);
@@ -175,8 +175,8 @@ pub fn handleGetComments(
     mcp: *mcp_client.McpClient,
     comment_store: *comments.CommentStore,
 ) !void {
-    var comment_infos = std.ArrayList(mcp_protocol.CommentInfo).init(allocator);
-    defer comment_infos.deinit();
+    var comment_infos: std.ArrayList(mcp_protocol.CommentInfo) = .{};
+    defer comment_infos.deinit(allocator);
 
     const all_comments = comment_store.comments.items;
     for (all_comments, 0..) |comment, idx| {
@@ -184,7 +184,7 @@ pub fn handleGetComments(
         const line_number: u32 = if (comment.new_lineno) |new| new else comment.old_lineno orelse 0;
         const line_type_flag: []const u8 = if (comment.new_lineno != null) "new" else "old";
 
-        try comment_infos.append(.{
+        try comment_infos.append(allocator, .{
             .idx = idx,
             .file_path = comment.file_path,
             .line = line_number,
@@ -205,8 +205,8 @@ pub fn handleGetDiffContext(
     diff_source: DiffSource,
     git_repo_root: []const u8,
 ) !void {
-    var file_summaries = std.ArrayList(mcp_protocol.DiffFileSummary).init(allocator);
-    defer file_summaries.deinit();
+    var file_summaries: std.ArrayList(mcp_protocol.DiffFileSummary) = .{};
+    defer file_summaries.deinit(allocator);
 
     for (files) |file| {
         var additions: usize = 0;
@@ -226,7 +226,7 @@ pub fn handleGetDiffContext(
         // Determine file status
         const status: []const u8 = getFileStatus(file);
 
-        try file_summaries.append(.{
+        try file_summaries.append(allocator, .{
             .path = if (file.new_path.len > 0 and !std.mem.eql(u8, file.new_path, "/dev/null"))
                 file.new_path
             else
@@ -289,19 +289,19 @@ pub fn handleGetFileDiff(
     const status: []const u8 = getFileStatus(file.*);
 
     // Build hunk info array
-    var hunks = std.ArrayList(mcp_protocol.DiffHunkInfo).init(allocator);
+    var hunks: std.ArrayList(mcp_protocol.DiffHunkInfo) = .{};
     defer {
         for (hunks.items) |hunk| {
             allocator.free(hunk.header);
             allocator.free(hunk.lines);
         }
-        hunks.deinit();
+        hunks.deinit(allocator);
     }
 
     for (file.hunks) |hunk| {
         // Build lines array for this hunk
-        var lines = std.ArrayList(mcp_protocol.DiffLineInfo).init(allocator);
-        errdefer lines.deinit();
+        var lines: std.ArrayList(mcp_protocol.DiffLineInfo) = .{};
+        errdefer lines.deinit(allocator);
 
         for (hunk.lines) |line| {
             const line_type_str: []const u8 = switch (line.line_type) {
@@ -310,7 +310,7 @@ pub fn handleGetFileDiff(
                 .context => "context",
             };
 
-            try lines.append(.{
+            try lines.append(allocator, .{
                 .line_type = line_type_str,
                 .content = line.content,
                 .old_lineno = line.old_lineno,
@@ -329,13 +329,13 @@ pub fn handleGetFileDiff(
         const header_str = try allocator.dupe(u8, header_slice);
         errdefer allocator.free(header_str);
 
-        try hunks.append(.{
+        try hunks.append(allocator, .{
             .header = header_str,
             .old_start = hunk.header.old_start,
             .old_count = hunk.header.old_count,
             .new_start = hunk.header.new_start,
             .new_count = hunk.header.new_count,
-            .lines = try lines.toOwnedSlice(),
+            .lines = try lines.toOwnedSlice(allocator),
         });
     }
 

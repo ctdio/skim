@@ -47,7 +47,7 @@ pub const McpId = union(enum) {
                 try writeJsonEscaped(writer, s);
                 try writer.writeByte('"');
             },
-            .number => |n| try std.fmt.formatInt(n, 10, .lower, .{}, writer),
+            .number => |n| try writer.print("{d}", .{n}),
             .null_value => try writer.writeAll("null"),
         }
     }
@@ -137,28 +137,29 @@ pub const ParsedDaemonMessage = union(enum) {
 // =============================================================================
 
 pub fn encodeAdapterHello(allocator: Allocator, adapter_id: []const u8) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    // Zig 0.15: ArrayList is unmanaged, pass allocator to methods
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"adapter_hello\",\"adapter_id\":\"");
     try writer.writeAll(adapter_id);
     try writer.writeAll("\"}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 pub fn encodeAdapterGoodbye(allocator: Allocator) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
-    try output.appendSlice("{\"event\":\"adapter_goodbye\"}\n");
-    return output.toOwnedSlice();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, "{\"event\":\"adapter_goodbye\"}\n");
+    return output.toOwnedSlice(allocator);
 }
 
 pub fn encodeMcpRequest(allocator: Allocator, payload: McpRequestPayload) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"mcp_request\",\"request_id\":\"");
     try writer.writeAll(payload.request_id);
     try writer.writeAll("\",\"mcp_id\":");
@@ -173,14 +174,14 @@ pub fn encodeMcpRequest(allocator: Allocator, payload: McpRequestPayload) ![]u8 
     }
 
     try writer.writeAll("}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 pub fn encodeStatusQuery(allocator: Allocator) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
-    try output.appendSlice("{\"event\":\"status_query\"}\n");
-    return output.toOwnedSlice();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, "{\"event\":\"status_query\"}\n");
+    return output.toOwnedSlice(allocator);
 }
 
 // =============================================================================
@@ -188,10 +189,10 @@ pub fn encodeStatusQuery(allocator: Allocator) ![]u8 {
 // =============================================================================
 
 pub fn encodeAdapterWelcome(allocator: Allocator, adapter_id: []const u8, clients: []const ClientSummary) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"adapter_welcome\",\"adapter_id\":\"");
     try writer.writeAll(adapter_id);
     try writer.writeAll("\",\"clients\":[");
@@ -205,19 +206,19 @@ pub fn encodeAdapterWelcome(allocator: Allocator, adapter_id: []const u8, client
         try writer.writeAll("\",\"diff_ref\":\"");
         try writeJsonEscaped(writer, client.diff_ref);
         try writer.writeAll("\",\"file_count\":");
-        try std.fmt.formatInt(client.file_count, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{client.file_count});
         try writer.writeByte('}');
     }
 
     try writer.writeAll("]}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 pub fn encodeMcpResponse(allocator: Allocator, request_id: []const u8, mcp_id: McpId, result: ?[]const u8, err: ?McpErrorPayload) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"mcp_response\",\"request_id\":\"");
     try writer.writeAll(request_id);
     try writer.writeAll("\",\"mcp_id\":");
@@ -230,21 +231,21 @@ pub fn encodeMcpResponse(allocator: Allocator, request_id: []const u8, mcp_id: M
 
     if (err) |e| {
         try writer.writeAll(",\"error\":{\"code\":");
-        try std.fmt.formatInt(e.code, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{e.code});
         try writer.writeAll(",\"message\":\"");
         try writeJsonEscaped(writer, e.message);
         try writer.writeAll("\"}");
     }
 
     try writer.writeAll("}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 pub fn encodeClientUpdate(allocator: Allocator, action: ClientAction, client: ClientSummary) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"client_update\",\"action\":\"");
     try writer.writeAll(switch (action) {
         .connected => "connected",
@@ -257,16 +258,16 @@ pub fn encodeClientUpdate(allocator: Allocator, action: ClientAction, client: Cl
     try writer.writeAll("\",\"diff_ref\":\"");
     try writeJsonEscaped(writer, client.diff_ref);
     try writer.writeAll("\",\"file_count\":");
-    try std.fmt.formatInt(client.file_count, 10, .lower, .{}, writer);
+    try writer.print("{d}", .{client.file_count});
     try writer.writeAll("}}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 pub fn encodeStatusResponse(allocator: Allocator, clients: []const ClientSummary, adapter_count: usize) ![]u8 {
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
 
-    const writer = output.writer();
+    const writer = output.writer(allocator);
     try writer.writeAll("{\"event\":\"status_response\",\"clients\":[");
 
     for (clients, 0..) |client, i| {
@@ -278,14 +279,14 @@ pub fn encodeStatusResponse(allocator: Allocator, clients: []const ClientSummary
         try writer.writeAll("\",\"diff_ref\":\"");
         try writeJsonEscaped(writer, client.diff_ref);
         try writer.writeAll("\",\"file_count\":");
-        try std.fmt.formatInt(client.file_count, 10, .lower, .{}, writer);
+        try writer.print("{d}", .{client.file_count});
         try writer.writeByte('}');
     }
 
     try writer.writeAll("],\"adapter_count\":");
-    try std.fmt.formatInt(adapter_count, 10, .lower, .{}, writer);
+    try writer.print("{d}", .{adapter_count});
     try writer.writeAll("}\n");
-    return output.toOwnedSlice();
+    return output.toOwnedSlice(allocator);
 }
 
 // =============================================================================
@@ -339,10 +340,12 @@ pub fn decodeAdapterMessage(allocator: Allocator, json_line: []const u8) !Parsed
 
         // Stringify params if present
         const params_str: ?[]const u8 = if (msg.params) |p| blk: {
-            var params_output = std.ArrayList(u8).init(allocator);
-            errdefer params_output.deinit();
-            std.json.stringify(p, .{}, params_output.writer()) catch return error.InvalidParams;
-            break :blk try params_output.toOwnedSlice();
+            var params_output: std.ArrayList(u8) = .{};
+            errdefer params_output.deinit(allocator);
+            const writer = params_output.writer(allocator);
+            // Zig 0.15: use json.fmt for stringifying
+            writer.print("{f}", .{std.json.fmt(p, .{})}) catch return error.InvalidParams;
+            break :blk params_output.toOwnedSlice(allocator) catch return error.InvalidParams;
         } else null;
 
         return .{ .mcp_request = .{
@@ -427,10 +430,12 @@ pub fn decodeDaemonMessage(allocator: Allocator, json_line: []const u8) !ParsedD
 
         // Stringify result if present
         const result_str: ?[]const u8 = if (msg.result) |r| blk: {
-            var result_output = std.ArrayList(u8).init(allocator);
-            errdefer result_output.deinit();
-            std.json.stringify(r, .{}, result_output.writer()) catch return error.InvalidResult;
-            break :blk try result_output.toOwnedSlice();
+            // Zig 0.15: use Writer.Allocating for Stringify
+            var alloc_writer: std.io.Writer.Allocating = .init(allocator);
+            errdefer alloc_writer.deinit();
+            var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
+            stringify.write(r) catch return error.InvalidResult;
+            break :blk try allocator.dupe(u8, alloc_writer.written());
         } else null;
 
         const err_payload: ?McpErrorPayload = if (msg.@"error") |e| .{

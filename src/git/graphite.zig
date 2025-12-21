@@ -203,22 +203,22 @@ fn buildStackFromJson(allocator: Allocator, json_str: []const u8, current_branch
     }
 
     // Build the stack: walk from current branch up to trunk
-    var stack_list = std.ArrayList(GraphiteBranch).init(allocator);
+    var stack_list: std.ArrayList(GraphiteBranch) = .{};
     errdefer {
         for (stack_list.items) |b| {
             allocator.free(b.name);
             if (b.parent_ref) |p| allocator.free(p);
         }
-        stack_list.deinit();
+        stack_list.deinit(allocator);
     }
 
     // Walk up to trunk
-    var ancestors = std.ArrayList([]const u8).init(allocator);
-    defer ancestors.deinit();
+    var ancestors: std.ArrayList([]const u8) = .{};
+    defer ancestors.deinit(allocator);
 
     var walker: []const u8 = current_branch;
     while (true) {
-        try ancestors.append(walker);
+        try ancestors.append(allocator, walker);
         if (branch_map.get(walker)) |info| {
             if (info.is_trunk or info.parent_ref == null) break;
             walker = info.parent_ref.?;
@@ -239,7 +239,7 @@ fn buildStackFromJson(allocator: Allocator, json_str: []const u8, current_branch
 
         const info = branch_map.get(branch_name) orelse continue;
 
-        try stack_list.append(.{
+        try stack_list.append(allocator, .{
             .name = try allocator.dupe(u8, branch_name),
             .is_trunk = info.is_trunk,
             .needs_restack = info.needs_restack,
@@ -249,8 +249,8 @@ fn buildStackFromJson(allocator: Allocator, json_str: []const u8, current_branch
 
     // Now walk down from current to find children (branches where parent = current)
     // This is more complex - need to find all descendants
-    var descendants = std.ArrayList([]const u8).init(allocator);
-    defer descendants.deinit();
+    var descendants: std.ArrayList([]const u8) = .{};
+    defer descendants.deinit(allocator);
 
     try findDescendants(allocator, &branch_map, current_branch, &descendants);
 
@@ -258,7 +258,7 @@ fn buildStackFromJson(allocator: Allocator, json_str: []const u8, current_branch
     for (descendants.items) |branch_name| {
         const info = branch_map.get(branch_name) orelse continue;
 
-        try stack_list.append(.{
+        try stack_list.append(allocator, .{
             .name = try allocator.dupe(u8, branch_name),
             .is_trunk = info.is_trunk,
             .needs_restack = info.needs_restack,
@@ -271,7 +271,7 @@ fn buildStackFromJson(allocator: Allocator, json_str: []const u8, current_branch
     }
 
     return GraphiteStack{
-        .branches = try stack_list.toOwnedSlice(),
+        .branches = try stack_list.toOwnedSlice(allocator),
         .current_idx = current_idx,
     };
 }
@@ -285,22 +285,22 @@ const BranchInfo = struct {
 /// Find all descendants of a branch (children, grandchildren, etc.)
 fn findDescendants(allocator: Allocator, branch_map: *std.StringHashMap(BranchInfo), parent: []const u8, result: *std.ArrayList([]const u8)) !void {
     // Find immediate children
-    var children = std.ArrayList([]const u8).init(allocator);
-    defer children.deinit();
+    var children: std.ArrayList([]const u8) = .{};
+    defer children.deinit(allocator);
 
     var it = branch_map.iterator();
     while (it.next()) |entry| {
         const info = entry.value_ptr.*;
         if (info.parent_ref) |p| {
             if (std.mem.eql(u8, p, parent)) {
-                try children.append(entry.key_ptr.*);
+                try children.append(allocator, entry.key_ptr.*);
             }
         }
     }
 
     // Add children and recurse
     for (children.items) |child| {
-        try result.append(child);
+        try result.append(allocator, child);
         try findDescendants(allocator, branch_map, child, result);
     }
 }

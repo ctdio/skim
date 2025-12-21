@@ -75,12 +75,12 @@ pub const Line = struct {
 
 /// Parse unified diff format into structured data
 pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
-    var files = std.ArrayList(FileDiff).init(allocator);
+    var files: std.ArrayList(FileDiff) = .{};
     errdefer {
         for (files.items) |*file| {
             file.deinit(allocator);
         }
-        files.deinit();
+        files.deinit(allocator);
     }
 
     var lines = std.mem.tokenizeScalar(u8, diff_text, '\n');
@@ -95,14 +95,14 @@ pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
             // Save previous file if exists
             if (current_file) |*file| {
                 if (current_hunk) |*hunk| {
-                    try file.hunks.append(try hunk.finalize());
+                    try file.hunks.append(allocator, try hunk.finalize(allocator));
                     current_hunk = null;
                 }
-                try files.append(try file.finalize(allocator));
+                try files.append(allocator, try file.finalize(allocator));
             }
 
             // Start new file
-            current_file = PartialFileDiff.init(allocator);
+            current_file = PartialFileDiff.init();
         } else if (std.mem.startsWith(u8, line, "--- ")) {
             if (current_file) |*file| {
                 const path = parsePath(line[4..]);
@@ -117,7 +117,7 @@ pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
             // Save previous hunk if exists
             if (current_hunk) |*hunk| {
                 if (current_file) |*file| {
-                    try file.hunks.append(try hunk.finalize());
+                    try file.hunks.append(allocator, try hunk.finalize(allocator));
                 }
             }
 
@@ -140,7 +140,7 @@ pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
             const old_lineno: ?u32 = if (line_type != .add) hunk.old_lineno else null;
             const new_lineno: ?u32 = if (line_type != .delete) hunk.new_lineno else null;
 
-            try hunk.lines.append(.{
+            try hunk.lines.append(allocator, .{
                 .line_type = line_type,
                 .content = try allocator.dupe(u8, content),
                 .old_lineno = old_lineno,
@@ -162,14 +162,14 @@ pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
     // Finalize last hunk and file
     if (current_hunk) |*hunk| {
         if (current_file) |*file| {
-            try file.hunks.append(try hunk.finalize());
+            try file.hunks.append(allocator, try hunk.finalize(allocator));
         }
     }
     if (current_file) |*file| {
-        try files.append(try file.finalize(allocator));
+        try files.append(allocator, try file.finalize(allocator));
     }
 
-    return files.toOwnedSlice();
+    return files.toOwnedSlice(allocator);
 }
 
 const PartialFileDiff = struct {
@@ -177,11 +177,11 @@ const PartialFileDiff = struct {
     new_path: ?[]const u8,
     hunks: std.ArrayList(Hunk),
 
-    fn init(allocator: Allocator) PartialFileDiff {
+    fn init() PartialFileDiff {
         return .{
             .old_path = null,
             .new_path = null,
-            .hunks = std.ArrayList(Hunk).init(allocator),
+            .hunks = .{},
         };
     }
 
@@ -189,7 +189,7 @@ const PartialFileDiff = struct {
         return FileDiff{
             .old_path = self.old_path orelse try allocator.dupe(u8, ""),
             .new_path = self.new_path orelse try allocator.dupe(u8, ""),
-            .hunks = try self.hunks.toOwnedSlice(),
+            .hunks = try self.hunks.toOwnedSlice(allocator),
             .highlights = null, // Will be populated on first render
             .old_highlights = null, // Will be populated on first render
             .is_untracked = false, // Will be set to true for untracked files after parsing
@@ -203,10 +203,10 @@ const PartialHunk = struct {
     old_lineno: u32,
     new_lineno: u32,
 
-    fn finalize(self: *PartialHunk) !Hunk {
+    fn finalize(self: *PartialHunk, allocator: Allocator) !Hunk {
         return Hunk{
             .header = self.header,
-            .lines = try self.lines.toOwnedSlice(),
+            .lines = try self.lines.toOwnedSlice(allocator),
         };
     }
 };
@@ -253,7 +253,7 @@ fn parseHunkHeader(allocator: Allocator, line: []const u8) !PartialHunk {
             .new_count = new_range.count,
             .context = try allocator.dupe(u8, context_slice),
         },
-        .lines = std.ArrayList(Line).init(allocator),
+        .lines = .{},
         .old_lineno = old_range.start,
         .new_lineno = new_range.start,
     };
