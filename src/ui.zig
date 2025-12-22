@@ -588,6 +588,17 @@ pub const UI = struct {
             .mcp_status => "-- MCP STATUS --",
             .review_log => "-- REVIEW LOG --",
             .graphite_stack => "-- GRAPHITE STACK --",
+            .agent => blk: {
+                // Show vim mode when in agent mode
+                if (app.state.agent_state) |agent_state| {
+                    break :blk switch (agent_state.input.vim_mode) {
+                        .normal => "-- NORMAL (agent) --",
+                        .insert => "-- INSERT (agent) --",
+                        .visual => "-- VISUAL (agent) --",
+                    };
+                }
+                break :blk "-- AGENT --";
+            },
         };
 
         const view_str = switch (app.state.view_mode) {
@@ -620,6 +631,16 @@ pub const UI = struct {
             .mcp_status => "q/ESC:Close",
             .review_log => "j/k:Scroll  |  d/u:Page  |  Tab:Style  |  q:Exit  |  L:Close",
             .graphite_stack => "j/k:Move  |  Enter:Select  |  ESC:Back  |  [s/]s:Navigate",
+            .agent => blk: {
+                if (app.state.agent_state) |agent_state| {
+                    break :blk switch (agent_state.input.vim_mode) {
+                        .normal => "i:Insert  |  z:Full  |  q:Close  |  Tab:Back",
+                        .insert => "INSERT  |  Enter:Send  |  ESC:Normal",
+                        .visual => "VISUAL  |  ESC:Exit",
+                    };
+                }
+                break :blk "Tab:Close";
+            },
         };
 
         // Get global position info

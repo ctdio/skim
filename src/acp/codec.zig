@@ -53,6 +53,42 @@ pub const ErrorCode = struct {
 };
 
 // =============================================================================
+// Parsed Permission Request
+// =============================================================================
+
+/// Parsed permission option from agent
+pub const ParsedPermissionOption = struct {
+    option_id: []const u8,
+    name: []const u8,
+    kind: types.PermissionKind,
+
+    pub fn deinit(self: *ParsedPermissionOption, allocator: Allocator) void {
+        allocator.free(self.option_id);
+        allocator.free(self.name);
+    }
+};
+
+/// Parsed permission request from agent
+pub const ParsedPermissionRequest = struct {
+    session_id: []const u8,
+    tool_call_id: []const u8,
+    title: []const u8,
+    description: ?[]const u8,
+    options: []ParsedPermissionOption,
+
+    pub fn deinit(self: *ParsedPermissionRequest, allocator: Allocator) void {
+        allocator.free(self.session_id);
+        allocator.free(self.tool_call_id);
+        allocator.free(self.title);
+        if (self.description) |d| allocator.free(d);
+        for (self.options) |*opt| {
+            opt.deinit(allocator);
+        }
+        allocator.free(self.options);
+    }
+};
+
+// =============================================================================
 // Decoded Message Types
 // =============================================================================
 
@@ -270,7 +306,7 @@ pub const Encoder = struct {
 
         try writer.writeAll("{\"sessionId\":\"");
         try writeJsonEscaped(writer, params.session_id);
-        try writer.writeAll("\",\"content\":[");
+        try writer.writeAll("\",\"prompt\":[");
 
         for (params.content, 0..) |block, i| {
             if (i > 0) try writer.writeByte(',');
@@ -290,6 +326,10 @@ pub const Encoder = struct {
                         try writer.writeByte('"');
                     }
                     try writer.writeByte('}');
+                },
+                .diff => {
+                    // Diff content is only received from agents, not sent
+                    // Skip silently (shouldn't happen in practice)
                 },
             }
         }
@@ -527,10 +567,23 @@ pub const Decoder = struct {
         };
     }
 
-    /// Parse session/update params from JSON (for notifications)
-    pub fn parseSessionUpdateParams(self: *Decoder, json: []const u8) !protocol.SessionUpdateParams {
-        _ = self;
-        const parsed = try std.json.parseFromSlice(RawSessionUpdate, std.heap.page_allocator, json, .{
+    /// Parse session/request_permission params from JSON
+    pub fn parseRequestPermissionParams(self: *Decoder, json: []const u8) !ParsedPermissionRequest {
+        const RawOption = struct {
+            optionId: []const u8,
+            name: []const u8,
+            kind: ?[]const u8 = null,
+        };
+
+        const RawParams = struct {
+            sessionId: []const u8,
+            toolCallId: []const u8,
+            title: []const u8,
+            description: ?[]const u8 = null,
+            options: ?[]const RawOption = null,
+        };
+
+        const parsed = try std.json.parseFromSlice(RawParams, self.allocator, json, .{
             .ignore_unknown_fields = true,
             .allocate = .alloc_always,
         });
@@ -538,15 +591,334 @@ pub const Decoder = struct {
 
         const r = parsed.value;
 
+        // Parse options
+        var options: std.ArrayList(ParsedPermissionOption) = .{};
+        errdefer {
+            for (options.items) |*opt| {
+                self.allocator.free(opt.option_id);
+                self.allocator.free(opt.name);
+            }
+            options.deinit(self.allocator);
+        }
+
+        if (r.options) |raw_opts| {
+            for (raw_opts) |opt| {
+                try options.append(self.allocator, .{
+                    .option_id = try self.allocator.dupe(u8, opt.optionId),
+                    .name = try self.allocator.dupe(u8, opt.name),
+                    .kind = if (opt.kind) |k| types.PermissionKind.fromString(k) orelse .allow_once else .allow_once,
+                });
+            }
+        }
+
+        return .{
+            .session_id = try self.allocator.dupe(u8, r.sessionId),
+            .tool_call_id = try self.allocator.dupe(u8, r.toolCallId),
+            .title = try self.allocator.dupe(u8, r.title),
+            .description = if (r.description) |d| try self.allocator.dupe(u8, d) else null,
+            .options = try options.toOwnedSlice(self.allocator),
+        };
+    }
+
+    /// Parse session/update params from JSON (for notifications)
+    pub fn parseSessionUpdateParams(self: *Decoder, json: []const u8) !protocol.SessionUpdateParams {
+        // Log raw JSON for debugging
+        std.log.debug("parseSessionUpdateParams raw JSON: {s}", .{json});
+
+        const parsed = try std.json.parseFromSlice(RawSessionUpdate, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        });
+        defer parsed.deinit();
+
+        const r = parsed.value;
+        std.log.debug("parsed: update present={}, message present={}", .{ r.update != null, r.message != null });
+
+        // Parse message content if present
+        var message_result: ?protocol.MessageUpdate = null;
+        var tool_call_result: ?protocol.ToolCall = null;
+        var tool_call_update_result: ?protocol.ToolCallUpdate = null;
+        var update_type: protocol.SessionUpdateType = .unknown;
+
+        // Handle Claude Code ACP format: update.content
+        if (r.update) |upd| {
+            // Get the update type (agent_message_chunk, agent_thought_chunk, tool_call, etc.)
+            if (upd.sessionUpdate) |session_update_type| {
+                update_type = protocol.SessionUpdateType.fromString(session_update_type);
+                std.log.debug("Session update type: {s}", .{session_update_type});
+            }
+
+            // Extract tool name from _meta.claudeCode
+            var tool_name: ?[]const u8 = null;
+            var tool_response_stdout: ?[]const u8 = null;
+            var tool_response_stderr: ?[]const u8 = null;
+            var tool_response_interrupted: bool = false;
+
+            if (upd._meta) |meta| {
+                if (meta.claudeCode) |cc| {
+                    if (cc.toolName) |tn| {
+                        tool_name = self.allocator.dupe(u8, tn) catch null;
+                    }
+                    if (cc.toolResponse) |tr| {
+                        if (tr.stdout) |s| {
+                            tool_response_stdout = self.allocator.dupe(u8, s) catch null;
+                        }
+                        if (tr.stderr) |s| {
+                            tool_response_stderr = self.allocator.dupe(u8, s) catch null;
+                        }
+                        tool_response_interrupted = tr.interrupted orelse false;
+                    }
+                }
+            }
+
+            // Extract command from rawInput for Bash tools
+            var command: ?[]const u8 = null;
+            var description: ?[]const u8 = null;
+
+            if (upd.rawInput) |raw_input| {
+                if (raw_input == .object) {
+                    if (raw_input.object.get("command")) |cmd| {
+                        if (cmd == .string) {
+                            command = self.allocator.dupe(u8, cmd.string) catch null;
+                        }
+                    }
+                    if (raw_input.object.get("description")) |desc| {
+                        if (desc == .string) {
+                            description = self.allocator.dupe(u8, desc.string) catch null;
+                        }
+                    }
+                }
+            }
+
+            // Handle tool_call_update (completion/status update)
+            if (update_type == .tool_call_update) {
+                const tool_call_id = if (upd.toolCallId) |id|
+                    self.allocator.dupe(u8, id) catch ""
+                else
+                    "";
+
+                // Parse content blocks for tool_call_update
+                // Structure: [{"type":"content","content":{"type":"text","text":"..."}}]
+                var update_content: []const protocol.ContentBlock = &.{};
+                if (upd.content) |content_val| {
+                    if (content_val == .array) {
+                        var text_blocks: std.ArrayList(protocol.ContentBlock) = .{};
+                        for (content_val.array.items) |item| {
+                            if (item != .object) continue;
+                            const obj = item.object;
+
+                            // Check for type:"content" wrapper
+                            if (obj.get("type")) |type_val| {
+                                if (type_val == .string and std.mem.eql(u8, type_val.string, "content")) {
+                                    // Get nested content.text
+                                    if (obj.get("content")) |inner| {
+                                        if (inner == .object) {
+                                            if (inner.object.get("type")) |inner_type| {
+                                                if (inner_type == .string and std.mem.eql(u8, inner_type.string, "text")) {
+                                                    if (inner.object.get("text")) |text_val| {
+                                                        if (text_val == .string) {
+                                                            const text_copy = self.allocator.dupe(u8, text_val.string) catch continue;
+                                                            text_blocks.append(self.allocator, .{ .text = .{ .text = text_copy } }) catch {
+                                                                self.allocator.free(text_copy);
+                                                            };
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (text_blocks.items.len > 0) {
+                            update_content = text_blocks.toOwnedSlice(self.allocator) catch &.{};
+                        }
+                    }
+                }
+
+                tool_call_update_result = .{
+                    .tool_call_id = tool_call_id,
+                    .status = if (upd.status) |s|
+                        types.ToolCallStatus.fromString(s)
+                    else
+                        null,
+                    .tool_name = tool_name,
+                    .stdout = tool_response_stdout,
+                    .stderr = tool_response_stderr,
+                    .interrupted = tool_response_interrupted,
+                    .content = update_content,
+                };
+            }
+
+            // Handle content for text streaming or tool_call with diffs
+            if (upd.content) |content_val| {
+                switch (content_val) {
+                    .object => |obj| {
+                        // Single content object - check for text
+                        if (obj.get("type")) |type_val| {
+                            if (type_val == .string and std.mem.eql(u8, type_val.string, "text")) {
+                                if (obj.get("text")) |text_val| {
+                                    if (text_val == .string and text_val.string.len > 0) {
+                                        std.log.debug("Found text in update.content: {s}", .{text_val.string});
+                                        const text_copy = self.allocator.dupe(u8, text_val.string) catch return error.OutOfMemory;
+                                        const content_arr = self.allocator.alloc(protocol.ContentBlock, 1) catch {
+                                            self.allocator.free(text_copy);
+                                            return error.OutOfMemory;
+                                        };
+                                        content_arr[0] = .{ .text = .{ .text = text_copy } };
+                                        message_result = .{ .content = content_arr };
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    .array => |arr| {
+                        // Array of content blocks - check for diffs (tool_call)
+                        var diff_count: usize = 0;
+                        for (arr.items) |item| {
+                            if (item == .object) {
+                                if (item.object.get("type")) |type_val| {
+                                    if (type_val == .string and std.mem.eql(u8, type_val.string, "diff")) {
+                                        diff_count += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (diff_count > 0) {
+                            std.log.debug("Found {d} diff content blocks in tool_call", .{diff_count});
+                            const content_arr = self.allocator.alloc(protocol.ContentBlock, diff_count) catch return error.OutOfMemory;
+                            var i: usize = 0;
+
+                            for (arr.items) |item| {
+                                if (item != .object) continue;
+                                const obj = item.object;
+
+                                if (obj.get("type")) |type_val| {
+                                    if (type_val != .string or !std.mem.eql(u8, type_val.string, "diff")) continue;
+
+                                    const path = if (obj.get("path")) |v| if (v == .string) v.string else "" else "";
+                                    const old_text = if (obj.get("oldText")) |v| if (v == .string) v.string else "" else "";
+                                    const new_text = if (obj.get("newText")) |v| if (v == .string) v.string else "" else "";
+
+                                    const path_copy = self.allocator.dupe(u8, path) catch continue;
+                                    const old_copy = self.allocator.dupe(u8, old_text) catch {
+                                        self.allocator.free(path_copy);
+                                        continue;
+                                    };
+                                    const new_copy = self.allocator.dupe(u8, new_text) catch {
+                                        self.allocator.free(path_copy);
+                                        self.allocator.free(old_copy);
+                                        continue;
+                                    };
+
+                                    content_arr[i] = .{
+                                        .diff = .{
+                                            .path = path_copy,
+                                            .old_text = old_copy,
+                                            .new_text = new_copy,
+                                        },
+                                    };
+                                    i += 1;
+                                }
+                            }
+
+                            if (i > 0) {
+                                // Build tool_call with diff content
+                                const tool_call_id = if (upd.toolCallId) |id|
+                                    self.allocator.dupe(u8, id) catch ""
+                                else
+                                    "";
+                                const title = if (upd.title) |t|
+                                    self.allocator.dupe(u8, t) catch null
+                                else
+                                    null;
+
+                                tool_call_result = .{
+                                    .tool_call_id = tool_call_id,
+                                    .title = title,
+                                    .kind = if (upd.kind) |k|
+                                        if (std.mem.eql(u8, k, "edit")) .edit else .other
+                                    else
+                                        .other,
+                                    .status = if (upd.status) |s|
+                                        types.ToolCallStatus.fromString(s) orelse .pending
+                                    else
+                                        .pending,
+                                    .content = content_arr[0..i],
+                                    .tool_name = tool_name,
+                                    .command = command,
+                                    .description = description,
+                                };
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
+
+            // Build tool_call for non-diff tools (like Bash) when we have a tool_call update type
+            if (update_type == .tool_call and tool_call_result == null and upd.toolCallId != null) {
+                const tool_call_id = self.allocator.dupe(u8, upd.toolCallId.?) catch "";
+                const title = if (upd.title) |t|
+                    self.allocator.dupe(u8, t) catch null
+                else
+                    null;
+
+                tool_call_result = .{
+                    .tool_call_id = tool_call_id,
+                    .title = title,
+                    .kind = if (upd.kind) |k| blk: {
+                        if (std.mem.eql(u8, k, "edit")) break :blk types.ToolCallKind.edit;
+                        if (std.mem.eql(u8, k, "execute")) break :blk types.ToolCallKind.execute;
+                        break :blk types.ToolCallKind.other;
+                    } else .other,
+                    .status = if (upd.status) |s|
+                        types.ToolCallStatus.fromString(s) orelse .pending
+                    else
+                        .pending,
+                    .tool_name = tool_name,
+                    .command = command,
+                    .description = description,
+                };
+            }
+        }
+
+        // Fallback: handle legacy message format if update wasn't present
+        if (message_result == null and tool_call_result == null) {
+            if (r.message) |msg| {
+                if (msg.content) |content_blocks| {
+                    var text_count: usize = 0;
+                    for (content_blocks) |block| {
+                        if (std.mem.eql(u8, block.type, "text") and block.text != null) {
+                            text_count += 1;
+                        }
+                    }
+
+                    if (text_count > 0) {
+                        const content = self.allocator.alloc(protocol.ContentBlock, text_count) catch return error.OutOfMemory;
+                        var i: usize = 0;
+                        for (content_blocks) |block| {
+                            if (std.mem.eql(u8, block.type, "text")) {
+                                if (block.text) |text| {
+                                    const text_copy = self.allocator.dupe(u8, text) catch continue;
+                                    content[i] = .{ .text = .{ .text = text_copy } };
+                                    i += 1;
+                                }
+                            }
+                        }
+                        message_result = .{ .content = content[0..i] };
+                    }
+                }
+            }
+        }
+
         return .{
             .session_id = r.sessionId,
-            .message = if (r.message != null) blk: {
-                break :blk .{
-                    .content = &.{}, // Simplified - just text for now
-                };
-            } else null,
-            .tool_call = null, // Would need more parsing
-            .tool_call_update = null, // Would need more parsing
+            .update_type = update_type,
+            .message = message_result,
+            .tool_call = tool_call_result,
+            .tool_call_update = tool_call_update_result,
         };
     }
 
@@ -591,6 +963,31 @@ const RawInitializeResult = struct {
 
 const RawSessionUpdate = struct {
     sessionId: []const u8,
+    // Claude Code ACP uses "update" with nested content
+    update: ?struct {
+        sessionUpdate: ?[]const u8 = null,
+        toolCallId: ?[]const u8 = null,
+        title: ?[]const u8 = null,
+        kind: ?[]const u8 = null,
+        status: ?[]const u8 = null,
+        // content can be object (for text) or array (for tool_call with diffs)
+        content: ?std.json.Value = null,
+        // rawInput contains tool-specific parameters (command for Bash, file_path for Edit, etc.)
+        rawInput: ?std.json.Value = null,
+        // _meta contains Claude Code specific metadata
+        _meta: ?struct {
+            claudeCode: ?struct {
+                toolName: ?[]const u8 = null,
+                toolResponse: ?struct {
+                    stdout: ?[]const u8 = null,
+                    stderr: ?[]const u8 = null,
+                    interrupted: ?bool = null,
+                    isImage: ?bool = null,
+                } = null,
+            } = null,
+        } = null,
+    } = null,
+    // Legacy format (may not be used)
     message: ?struct {
         type: []const u8 = "message_update",
         content: ?[]const struct {

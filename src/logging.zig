@@ -38,12 +38,15 @@ pub fn init(component: Component) void {
     };
 
     const log_path = std.fmt.allocPrint(std.heap.page_allocator, "{s}/.skim/{s}", .{ home, log_name }) catch return;
-    defer std.heap.page_allocator.free(log_path);
 
     // Open log file (append mode)
     log_file = fs.createFileAbsolute(log_path, .{
         .truncate = false,
-    }) catch return;
+    }) catch {
+        std.heap.page_allocator.free(log_path);
+        return;
+    };
+    std.heap.page_allocator.free(log_path);
 
     // Seek to end for append
     if (log_file) |f| {

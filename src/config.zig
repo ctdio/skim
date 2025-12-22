@@ -7,6 +7,12 @@ const Allocator = std.mem.Allocator;
 
 pub const Config = struct {
     review_command: ?[]const u8 = null,
+    agent_panel_side: AgentPanelSide = .right,
+
+    pub const AgentPanelSide = enum {
+        left,
+        right,
+    };
 };
 
 // =============================================================================
@@ -65,6 +71,7 @@ pub fn load(allocator: Allocator) !Config {
             try allocator.dupe(u8, cmd)
         else
             null,
+        .agent_panel_side = parsed.value.agent_panel_side,
     };
 }
 

@@ -19,10 +19,18 @@ pub const ResourceLinkContent = struct {
     name: ?[]const u8 = null,
 };
 
-/// Content block union - skim only supports text and resource_link
+/// Diff content block (from agent tool calls)
+pub const DiffContent = struct {
+    path: []const u8,
+    old_text: []const u8,
+    new_text: []const u8,
+};
+
+/// Content block union - skim supports text, resource_link, and diff
 pub const ContentBlock = union(enum) {
     text: TextContent,
     resource_link: ResourceLinkContent,
+    diff: DiffContent,
 };
 
 // =============================================================================
@@ -132,6 +140,10 @@ pub const ToolCall = struct {
     content: []const ContentBlock = &.{},
     raw_input: ?[]const u8 = null,
     raw_output: ?[]const u8 = null,
+    // Claude Code specific fields
+    tool_name: ?[]const u8 = null, // "Bash", "Edit", "Read", etc.
+    command: ?[]const u8 = null, // For Bash tools: the command being executed
+    description: ?[]const u8 = null, // For Bash tools: short description
 };
 
 /// Tool call update in session/update notification
@@ -139,11 +151,34 @@ pub const ToolCallUpdate = struct {
     tool_call_id: types.ToolCallId,
     status: ?types.ToolCallStatus = null,
     content: []const ContentBlock = &.{},
+    // Claude Code specific fields for tool responses
+    tool_name: ?[]const u8 = null,
+    stdout: ?[]const u8 = null, // For Bash tools: command output
+    stderr: ?[]const u8 = null, // For Bash tools: error output
+    interrupted: bool = false, // For Bash tools: was the command interrupted
+};
+
+/// Type of session update notification
+pub const SessionUpdateType = enum {
+    agent_message_chunk,
+    agent_thought_chunk,
+    tool_call,
+    tool_call_update,
+    unknown,
+
+    pub fn fromString(s: []const u8) SessionUpdateType {
+        if (std.mem.eql(u8, s, "agent_message_chunk")) return .agent_message_chunk;
+        if (std.mem.eql(u8, s, "agent_thought_chunk")) return .agent_thought_chunk;
+        if (std.mem.eql(u8, s, "tool_call")) return .tool_call;
+        if (std.mem.eql(u8, s, "tool_call_update")) return .tool_call_update;
+        return .unknown;
+    }
 };
 
 /// Parameters for session/update notification
 pub const SessionUpdateParams = struct {
     session_id: types.SessionId,
+    update_type: SessionUpdateType = .unknown,
     message: ?MessageUpdate = null,
     tool_call: ?ToolCall = null,
     tool_call_update: ?ToolCallUpdate = null,

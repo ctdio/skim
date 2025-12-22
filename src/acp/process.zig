@@ -78,7 +78,7 @@ pub const AgentProcess = struct {
     /// Write data to agent's stdin
     pub fn write(self: *AgentProcess, data: []const u8) !void {
         if (self.status != .running) return error.ProcessNotRunning;
-        std.log.debug("ACP Process: writing {d} bytes to stdin", .{data.len});
+        std.log.debug("ACP Process: writing {d} bytes to stdin: {s}", .{ data.len, data });
         try self.stdin.writeAll(data);
         std.log.debug("ACP Process: write completed", .{});
     }
@@ -117,7 +117,7 @@ pub const AgentProcess = struct {
             return null;
         }
 
-        // Use poll to check if data is available (500ms timeout)
+        // Use poll to check if data is available (non-blocking, timeout=0)
         var fds = [_]posix.pollfd{
             .{
                 .fd = self.stdout.handle,
@@ -126,14 +126,13 @@ pub const AgentProcess = struct {
             },
         };
 
-        const poll_result = posix.poll(&fds, 500) catch |err| {
+        const poll_result = posix.poll(&fds, 0) catch |err| {
             std.log.debug("ACP Process: poll error: {}", .{err});
             return null;
         };
 
         if (poll_result == 0) {
-            std.log.debug("ACP Process: poll timeout (500ms), no data", .{});
-            return null; // Timeout
+            return null; // No data available
         }
 
         std.log.debug("ACP Process: poll returned {d}, revents=0x{x}", .{ poll_result, fds[0].revents });
@@ -274,16 +273,20 @@ fn needsPtyWrapper(command: []const u8) bool {
 
 /// Build argv, optionally wrapped with `script` to force PTY/line-buffered output.
 /// This fixes stdout buffering issues with Node.js processes connected to pipes.
-/// On macOS: script -q /dev/null <command>
+/// On macOS: script -qF /dev/null <command>
+/// The -F flag forces flush after each write, -q suppresses script messages.
+/// Note: script echoes input, so the transport layer must filter echoed commands.
 fn buildArgvWithStdbuf(allocator: Allocator, command: []const u8, args: []const []const u8) ![]const []const u8 {
     const builtin = @import("builtin");
 
     // Only use script wrapper for commands that need it (Node.js-based agents)
     if (builtin.os.tag == .macos and needsPtyWrapper(command)) {
-        // macOS: script -q /dev/null command args...
+        // macOS: script -qF /dev/null command args...
+        // -q = quiet (no "Script started" message)
+        // -F = flush output after each write
         var argv = try allocator.alloc([]const u8, 4 + args.len);
         argv[0] = "script";
-        argv[1] = "-q";
+        argv[1] = "-qF";
         argv[2] = "/dev/null";
         argv[3] = command;
         for (args, 0..) |arg, i| {

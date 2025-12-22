@@ -184,8 +184,24 @@ pub const Client = struct {
 
                 if (r.result_json) |result_json| {
                     const result = self.transport.decoder.parseSessionNewResult(result_json) catch return error.ProtocolError;
+                    // Decoder already duplicates the session_id, so we own this memory
                     self.session_id = result.session_id;
                     self.state = .session_active;
+                    std.log.info("ACP Client: session created with id: {s}", .{result.session_id});
+
+                    // Drain and process any requests the agent sent during session creation
+                    const pending = self.transport.poll() catch return result.session_id;
+                    for (pending) |msg| {
+                        switch (msg) {
+                            .request => |req| {
+                                std.log.info("ACP Client: processing queued request after session creation: {s}", .{req.method});
+                                self.handleAgentRequest(req) catch {};
+                            },
+                            else => {},
+                        }
+                    }
+                    self.transport.clearMessages();
+
                     return result.session_id;
                 } else {
                     return error.SessionFailed;
@@ -195,17 +211,13 @@ pub const Client = struct {
         }
     }
 
-    /// Send a prompt and process streaming updates
-    /// Returns when the agent completes the turn.
-    /// Calls the callback for each session/update notification.
-    pub fn prompt(
-        self: *Client,
-        text: []const u8,
-        callback: *const fn (update: protocol.SessionUpdateParams, ctx: ?*anyopaque) void,
-        callback_ctx: ?*anyopaque,
-    ) Error!types.StopReason {
+    /// Send a prompt without blocking.
+    /// Returns the request ID for tracking the response.
+    /// Use processMessages() to poll for responses.
+    pub fn sendPromptAsync(self: *Client, text: []const u8) Error!i64 {
         if (self.state != .session_active) return error.NoActiveSession;
         const sid = self.session_id orelse return error.NoActiveSession;
+        std.log.debug("ACP Client: sendPromptAsync with session_id={s}, text_len={d}", .{ sid, text.len });
 
         // Build prompt content
         const content = [_]protocol.ContentBlock{
@@ -220,36 +232,110 @@ pub const Client = struct {
         const params_json = self.transport.encoder.encodeSessionPromptParams(params) catch return error.ProtocolError;
         defer self.allocator.free(params_json);
 
+        std.log.info("ACP Client: session/prompt params: {s}", .{params_json});
+
         const request_id = self.nextRequestId();
+        std.log.info("ACP Client: Sending session/prompt request id={d}", .{request_id});
+        _ = try self.transport.sendRequest(request_id, "session/prompt", params_json);
+
+        return request_id;
+    }
+
+    /// Process result for a completed prompt
+    pub const PromptResult = struct {
+        stop_reason: types.StopReason,
+        completed: bool,
+    };
+
+    /// Send a prompt and process streaming updates
+    /// Returns when the agent completes the turn.
+    /// Calls the callback for each session/update notification.
+    pub fn prompt(
+        self: *Client,
+        text: []const u8,
+        callback: *const fn (update: protocol.SessionUpdateParams, ctx: ?*anyopaque) void,
+        callback_ctx: ?*anyopaque,
+    ) Error!types.StopReason {
+        if (self.state != .session_active) return error.NoActiveSession;
+        const sid = self.session_id orelse return error.NoActiveSession;
+        std.log.debug("ACP Client: prompt called with session_id={s}, text_len={d}", .{ sid, text.len });
+
+        // Build prompt content
+        const content = [_]protocol.ContentBlock{
+            .{ .text = .{ .text = text } },
+        };
+
+        const params = protocol.SessionPromptParams{
+            .session_id = sid,
+            .content = &content,
+        };
+
+        const params_json = self.transport.encoder.encodeSessionPromptParams(params) catch return error.ProtocolError;
+        defer self.allocator.free(params_json);
+
+        std.log.info("ACP Client: session/prompt params: {s}", .{params_json});
+
+        const request_id = self.nextRequestId();
+        std.log.info("ACP Client: Sending session/prompt request id={d}", .{request_id});
         _ = try self.transport.sendRequest(request_id, "session/prompt", params_json);
 
         // Process messages until we get the response
+        var loop_count: u32 = 0;
         while (true) {
             const messages = try self.transport.poll();
+
+            if (messages.len > 0) {
+                std.log.debug("ACP Client: prompt loop got {d} messages", .{messages.len});
+            }
+
+            loop_count += 1;
+            if (loop_count % 1000 == 0) {
+                std.log.debug("ACP Client: prompt loop iteration {d}, waiting for response...", .{loop_count});
+            }
 
             for (messages) |msg| {
                 switch (msg) {
                     .notification => |n| {
+                        std.log.debug("ACP Client: got notification: {s}", .{n.method});
                         if (std.mem.eql(u8, n.method, "session/update")) {
                             if (n.params_json) |pjson| {
-                                const update = self.transport.decoder.parseSessionUpdateParams(pjson) catch continue;
+                                std.log.debug("ACP Client: parsing session/update", .{});
+                                const update = self.transport.decoder.parseSessionUpdateParams(pjson) catch |err| {
+                                    std.log.err("ACP Client: failed to parse session/update: {any}", .{err});
+                                    continue;
+                                };
                                 callback(update, callback_ctx);
                             }
                         }
                     },
                     .response => |r| {
+                        std.log.debug("ACP Client: got response", .{});
                         if (r.id) |id| {
                             switch (id) {
-                                .integer => |int_id| {
+                                .number => |int_id| {
+                                    std.log.debug("ACP Client: response id={d}, waiting for={d}", .{ int_id, request_id });
                                     if (int_id == request_id) {
-                                        // Got response
-                                        self.transport.clearMessages();
-                                        if (r.error_msg != null) return error.PromptFailed;
-
+                                        std.log.info("ACP Client: matched response for prompt request", .{});
+                                        // Got response - handle before clearing
+                                        if (r.error_msg) |err| {
+                                            // Log before clearing messages (which frees memory)
+                                            std.log.err("ACP Client: prompt got error from agent: code={d} message={s}", .{ err.code, err.message });
+                                            self.transport.clearMessages();
+                                            return error.PromptFailed;
+                                        }
                                         if (r.result_json) |result_json| {
-                                            const result = self.transport.decoder.parseSessionPromptResult(result_json) catch return error.ProtocolError;
+                                            std.log.debug("ACP Client: parsing prompt result: {s}", .{result_json});
+                                            const result = self.transport.decoder.parseSessionPromptResult(result_json) catch |err| {
+                                                std.log.err("ACP Client: failed to parse prompt result: {any}", .{err});
+                                                self.transport.clearMessages();
+                                                return error.ProtocolError;
+                                            };
+                                            std.log.info("ACP Client: prompt completed with stop_reason: {s}", .{result.stop_reason.toString()});
+                                            self.transport.clearMessages();
                                             return result.stop_reason;
                                         }
+                                        std.log.warn("ACP Client: response has no result_json", .{});
+                                        self.transport.clearMessages();
                                         return error.ProtocolError;
                                     }
                                 },
@@ -258,6 +344,7 @@ pub const Client = struct {
                         }
                     },
                     .request => |req| {
+                        std.log.debug("ACP Client: got request: {s}", .{req.method});
                         // Handle requests from agent (e.g., permission requests, file reads)
                         try self.handleAgentRequest(req);
                     },
@@ -284,9 +371,28 @@ pub const Client = struct {
         try self.transport.sendNotification("session/cancel", params_json);
     }
 
+    /// Check if a method is one we send (client->agent), not agent->client
+    /// These get echoed back when using `script` PTY wrapper
+    fn isClientMethod(method: []const u8) bool {
+        return std.mem.eql(u8, method, "initialize") or
+            std.mem.eql(u8, method, "session/new") or
+            std.mem.eql(u8, method, "session/prompt") or
+            std.mem.eql(u8, method, "session/cancel") or
+            std.mem.eql(u8, method, "session/resume") or
+            std.mem.eql(u8, method, "session/fork");
+    }
+
     /// Handle a request from the agent
-    fn handleAgentRequest(self: *Client, request: codec.DecodedMessage.Request) Error!void {
-        const id = request.id orelse return;
+    fn handleAgentRequest(self: *Client, request: codec.Request) Error!void {
+        const id = request.id;
+
+        // Filter out echoed commands from script PTY wrapper
+        if (isClientMethod(request.method)) {
+            std.log.debug("ACP Client: ignoring echoed command: {s}", .{request.method});
+            return;
+        }
+
+        std.log.info("ACP Client: handling agent request: method={s}", .{request.method});
 
         if (std.mem.eql(u8, request.method, "fs/read_text_file")) {
             // Handle file read request
@@ -325,8 +431,17 @@ pub const Client = struct {
                 \\{"selected_option": "allow_once"}
             ;
             try self.transport.sendResponse(id, result_json);
+        } else if (std.mem.eql(u8, request.method, "fs/write_text_file")) {
+            // Reject file writes for now (read-only mode)
+            std.log.warn("ACP Client: rejecting fs/write_text_file request (read-only)", .{});
+            try self.transport.sendErrorResponse(id, -32001, "File writes not supported");
+        } else if (std.mem.startsWith(u8, request.method, "terminal/")) {
+            // Terminal operations not supported
+            std.log.warn("ACP Client: rejecting terminal request: {s}", .{request.method});
+            try self.transport.sendErrorResponse(id, -32001, "Terminal not supported");
         } else {
-            // Unknown method
+            // Unknown method - log it clearly
+            std.log.warn("ACP Client: unknown method from agent: {s}", .{request.method});
             try self.transport.sendErrorResponse(id, -32601, "Method not found");
         }
     }
@@ -353,6 +468,10 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        // Free owned session_id if present
+        if (self.session_id) |sid| {
+            self.allocator.free(sid);
+        }
         self.transport.deinit();
         self.agent.deinit();
         self.allocator.destroy(self);

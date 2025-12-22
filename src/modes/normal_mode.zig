@@ -176,10 +176,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // Start Ctrl+w chord for window navigation
                 app.state.pending_ctrl_w = true;
             },
-            'a' => {
-                // Ctrl+a: Connect to ACP agent
-                try app.startAcpSession();
-            },
             else => {},
         }
         return;
@@ -203,11 +199,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
-    // Handle Shift+Tab before the main switch
-    if (key.mods.shift and key.codepoint == '\t') {
-        try app.cycleHunkViewModePrev();
-        return;
-    }
 
     switch (key.codepoint) {
         'j' => {
@@ -240,7 +231,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         },
         '\r' => try app.startCommentInput(), // Enter to create/edit comment
         's' => app.toggleViewMode(),
-        '\t' => try app.cycleHunkViewMode(), // Tab to cycle hunk view mode forward
+        '\t' => try app.toggleAgentPanel(), // Tab to toggle agent panel
+        '<' => try app.cycleHunkViewModePrev(), // < for previous hunk view mode
+        '>' => try app.cycleHunkViewMode(), // > for next hunk view mode
         'r' => try app.refresh(),
         'y' => try app.yankCurrentCommentToClipboard(),
         'Y' => try app.yankAllCommentsToClipboard(),

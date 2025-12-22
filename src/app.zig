@@ -36,6 +36,8 @@ const mcp_status_mode = @import("modes/mcp_status_mode.zig");
 const mcp_status = @import("mcp_status.zig");
 const review_log_mode = @import("modes/review_log_mode.zig");
 const graphite_mode = @import("modes/graphite_mode.zig");
+const agent_mode = @import("modes/agent_mode.zig");
+const agent = @import("agent/agent.zig");
 const app_config = @import("config.zig");
 const review = @import("review.zig");
 const graphite = @import("git/graphite.zig");
@@ -108,6 +110,7 @@ pub const App = struct {
         mcp_status, // MCP server connection status
         review_log, // Review log viewer
         graphite_stack, // Graphite stack picker
+        agent, // Agent chat panel
     };
 
     // Character find commands for NORMAL mode (f/t/F/T)
@@ -167,6 +170,7 @@ pub const App = struct {
 
         // Temporary status message
         status_message: ?[]const u8, // Message to show in status bar
+        status_message_owned: ?[]const u8, // Owned copy (for freeing)
         status_message_time: i64, // When message was set (for auto-clear)
 
         // Blame view
@@ -186,6 +190,9 @@ pub const App = struct {
         graphite_available: bool, // Is gt CLI installed?
         graphite_stack: ?graphite.GraphiteStack, // Current stack (null if not graphite repo)
         graphite_stack_selection: usize, // Selected index in stack picker
+
+        // Agent panel state
+        agent_state: ?agent.AgentState, // Agent chat panel state
 
         const ViewMode = enum {
             unified,
@@ -367,6 +374,7 @@ pub const App = struct {
                 .review_panel_style = .sidebar,
                 .pending_ctrl_w = false,
                 .status_message = null,
+                .status_message_owned = null,
                 .status_message_time = 0,
                 .show_blame = false,
                 .menu_stats_cached = false,
@@ -380,6 +388,7 @@ pub const App = struct {
                 .graphite_available = false,
                 .graphite_stack = null,
                 .graphite_stack_selection = 0,
+                .agent_state = null, // Lazy initialization on first toggle
             },
             .should_quit = false,
             .should_suspend_for_editor = false,
@@ -682,11 +691,14 @@ pub const App = struct {
             // AND not connected to MCP (reader thread may queue messages anytime)
             // AND not needing MCP reconnection (reconnect logic must run periodically)
             // AND no active review process streaming to the panel
+            // AND no ACP connection in progress or active session
             // This allows async operations to trigger immediate renders
             const mcp_active = if (self.mcp) |mcp| mcp.connected or mcp.needsReconnect() else false;
             const has_active_review = if (self.review_process) |proc| proc.status == .running and self.state.review_panel_open else false;
             const stats_loading = self.state.menu_stats_loading;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !has_active_review and !stats_loading;
+            const agent_panel_visible = if (self.state.agent_state) |as| as.visible else false;
+            const acp_active = self.acp_connect_thread != null or (if (self.acp_manager) |mgr| mgr.status == .prompting or (agent_panel_visible and mgr.status == .session_active) else false);
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !has_active_review and !stats_loading and !acp_active;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -967,6 +979,15 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
+                .agent => {
+                    // Close agent panel and return to normal mode
+                    if (self.state.agent_state) |*agent_state| {
+                        agent_state.visible = false;
+                    }
+                    self.mode = .normal;
+                    self.needs_render = true;
+                    return;
+                },
                 .normal, .comment => {
                     // In normal/comment modes, double-press to quit
                     const now: i64 = @intCast(std.time.nanoTimestamp());
@@ -994,6 +1015,7 @@ pub const App = struct {
             .mcp_status => try mcp_status_mode.handleKey(self, key),
             .review_log => try review_log_mode.handleKey(self, key),
             .graphite_stack => try graphite_mode.handleKey(self, key),
+            .agent => try agent_mode.handleKey(self, key),
         }
     }
 
@@ -1043,6 +1065,39 @@ pub const App = struct {
         if (self.state.show_blame) {
             self.fetchBlameForVisibleFiles();
         }
+    }
+
+    /// Toggle the agent chat panel visibility and focus
+    pub fn toggleAgentPanel(self: *App) !void {
+        // Initialize agent state if first time opening
+        if (self.state.agent_state == null) {
+            // Load panel side from config
+            const config = app_config.load(self.allocator) catch app_config.Config{};
+            const panel_side: agent.AgentState.PanelSide = switch (config.agent_panel_side) {
+                .left => .left,
+                .right => .right,
+            };
+            self.state.agent_state = agent.AgentState.init(self.allocator, panel_side);
+        }
+
+        var agent_state = &(self.state.agent_state.?);
+
+        if (agent_state.visible) {
+            // Hide panel, return to normal mode
+            agent_state.visible = false;
+            self.mode = .normal;
+        } else {
+            // Show panel, enter agent mode
+            agent_state.visible = true;
+            self.mode = .agent;
+
+            // Auto-connect to ACP agent if not connected
+            if (self.acp_manager == null or self.acp_manager.?.status == .disconnected) {
+                try self.startAcpSession();
+            }
+        }
+
+        self.needs_render = true;
     }
 
     /// Fetch blame data for all visible files (cached per file path)
@@ -2374,8 +2429,72 @@ pub const App = struct {
             });
             try UI.renderHeader(self, header_win);
 
-            // Split content area if review panel is open in sidebar mode
-            if (self.state.review_panel_open and self.state.review_panel_style == .sidebar) {
+            // Check if agent panel should be shown (visible and not full-screen)
+            const show_agent_panel = if (self.state.agent_state) |as| as.visible and !as.full_screen else false;
+
+            // Split content area based on panels
+            if (show_agent_panel) {
+                const agent_state = self.state.agent_state.?;
+                const panel_width = win.width * 3 / 10; // 30% for agent panel
+                const divider_width: usize = 1;
+                const diff_width = win.width - panel_width - divider_width;
+
+                if (agent_state.panel_side == .left) {
+                    // Agent panel on left
+                    const agent_win = win.child(.{
+                        .x_off = 0,
+                        .y_off = Layout.header_height,
+                        .width = @intCast(panel_width),
+                        .height = @intCast(content_height),
+                    });
+                    try agent.renderAgentPanel(self, agent_win);
+
+                    // Vertical divider
+                    const divider_win = win.child(.{
+                        .x_off = @intCast(panel_width),
+                        .y_off = Layout.header_height,
+                        .width = @intCast(divider_width),
+                        .height = @intCast(content_height),
+                    });
+                    try UI.renderVerticalDivider(divider_win);
+
+                    // Diff content on right
+                    const content_win = win.child(.{
+                        .x_off = @intCast(panel_width + divider_width),
+                        .y_off = Layout.header_height,
+                        .width = @intCast(diff_width),
+                        .height = @intCast(content_height),
+                    });
+                    try self.renderContent(content_win);
+                } else {
+                    // Agent panel on right (default)
+                    const content_win = win.child(.{
+                        .x_off = 0,
+                        .y_off = Layout.header_height,
+                        .width = @intCast(diff_width),
+                        .height = @intCast(content_height),
+                    });
+                    try self.renderContent(content_win);
+
+                    // Vertical divider
+                    const divider_win = win.child(.{
+                        .x_off = @intCast(diff_width),
+                        .y_off = Layout.header_height,
+                        .width = @intCast(divider_width),
+                        .height = @intCast(content_height),
+                    });
+                    try UI.renderVerticalDivider(divider_win);
+
+                    // Agent panel on right
+                    const agent_win = win.child(.{
+                        .x_off = @intCast(diff_width + divider_width),
+                        .y_off = Layout.header_height,
+                        .width = @intCast(panel_width),
+                        .height = @intCast(content_height),
+                    });
+                    try agent.renderAgentPanel(self, agent_win);
+                }
+            } else if (self.state.review_panel_open and self.state.review_panel_style == .sidebar) {
                 const panel_width = @min(win.width / 3, 80); // Max 80 chars or 1/3 of screen
                 const divider_width: usize = 1;
                 const diff_width = win.width - panel_width - divider_width;
@@ -2450,6 +2569,13 @@ pub const App = struct {
         // Render graphite stack dialog if in graphite_stack mode
         if (self.mode == .graphite_stack) {
             try UI.renderGraphiteStackDialog(self, win);
+        }
+
+        // Render agent panel full-screen if in full-screen mode
+        if (self.state.agent_state) |as| {
+            if (as.visible and as.full_screen) {
+                try agent.renderAgentPanel(self, win);
+            }
         }
     }
 
@@ -2996,12 +3122,12 @@ pub const App = struct {
 
         // Find an available agent
         std.log.info("ACP: Looking for available agent...", .{});
-        const agent = acp.findAvailableAgent() orelse {
+        const agent_info = acp.findAvailableAgent() orelse {
             std.log.warn("ACP: No agent found in PATH", .{});
             self.showStatusMessage("No ACP agent found (claude-code-acp)");
             return;
         };
-        std.log.info("ACP: Found agent: {s}", .{agent.name});
+        std.log.info("ACP: Found agent: {s}", .{agent_info.name});
 
         // Create and initialize the manager
         const mgr = try self.allocator.create(acp.AcpManager);
@@ -3016,8 +3142,8 @@ pub const App = struct {
         const ctx = try self.allocator.create(AcpConnectContext);
         ctx.* = .{
             .app = self,
-            .agent_command = agent.command,
-            .agent_args = agent.args,
+            .agent_command = agent_info.command,
+            .agent_args = agent_info.args,
             .cwd = self.state.git_repo_root,
         };
 
@@ -3057,6 +3183,7 @@ pub const App = struct {
     pub fn pollAcpUpdates(self: *App) void {
         // Check if connection thread completed
         if (self.acp_connect_thread != null) {
+            std.log.debug("pollAcpUpdates: connect thread still active", .{});
             if (self.acp_manager) |mgr| {
                 // Check if connection finished (status changed from connecting)
                 if (mgr.status != .connecting) {
@@ -3071,6 +3198,16 @@ pub const App = struct {
                         const msg = std.fmt.allocPrint(self.allocator, "Connected to {s}", .{mgr.getAgentDisplayName()}) catch "Connected";
                         defer if (!std.mem.eql(u8, msg, "Connected")) self.allocator.free(msg);
                         self.showStatusMessage(msg);
+
+                        // Add welcome message to agent chat
+                        if (self.state.agent_state) |*agent_state| {
+                            const welcome_msg = std.fmt.allocPrint(self.allocator, "Connected to {s}. You can start chatting!", .{mgr.getAgentDisplayName()}) catch "Connected! You can start chatting.";
+                            defer if (!std.mem.eql(u8, welcome_msg, "Connected! You can start chatting.")) self.allocator.free(welcome_msg);
+                            agent_state.addMessage(.system, welcome_msg) catch {};
+                        }
+
+                        // Send any prompts that were queued while connecting
+                        mgr.sendNextQueuedPrompt();
                     } else if (mgr.status == .failed) {
                         self.showStatusMessage("Failed to connect to agent");
                         // Clean up failed manager
@@ -3083,11 +3220,19 @@ pub const App = struct {
             }
         }
 
-        const mgr = self.acp_manager orelse return;
+        const mgr = self.acp_manager orelse {
+            std.log.debug("pollAcpUpdates: no acp_manager", .{});
+            return;
+        };
 
         // Poll for new messages
-        const messages = mgr.poll() catch return;
+        const messages = mgr.poll() catch |err| {
+            std.log.debug("pollAcpUpdates: poll error: {}", .{err});
+            return;
+        };
         if (messages.len == 0) return;
+
+        std.log.info("pollAcpUpdates: got {d} messages to process", .{messages.len});
 
         // Process each message
         for (messages) |msg| {
@@ -3095,6 +3240,17 @@ pub const App = struct {
                 .agent_text => {
                     // Log agent text for debugging
                     std.log.info("Agent response: {s}", .{msg.text});
+
+                    // Forward to agent state message history
+                    if (self.state.agent_state) |*agent_state| {
+                        std.log.debug("Appending to agent_state, messages count={d}", .{agent_state.messages.items.len});
+                        agent_state.appendToLastAgentMessage(msg.text) catch |err| {
+                            std.log.err("Failed to append agent message: {any}", .{err});
+                        };
+                    } else {
+                        std.log.warn("agent_state is null, cannot append message", .{});
+                    }
+
                     // Show truncated message in status bar
                     const preview = if (msg.text.len > 50) msg.text[0..50] else msg.text;
                     const status_msg = std.fmt.allocPrint(self.allocator, "Agent: {s}...", .{preview}) catch "Agent responded";
@@ -3102,19 +3258,92 @@ pub const App = struct {
                     self.showStatusMessage(status_msg);
                     self.needs_render = true;
                 },
-                .tool_start => {
+                .agent_thinking => {
+                    // Log thinking for debugging
+                    std.log.debug("Agent thinking: {s}", .{msg.text});
+
+                    // Forward to agent state as thinking message
+                    if (self.state.agent_state) |*agent_state| {
+                        agent_state.appendToLastThinkingMessage(msg.text) catch |err| {
+                            std.log.err("Failed to append thinking message: {any}", .{err});
+                        };
+                    }
+
+                    // Don't show thinking in status bar - just trigger render
+                    self.needs_render = true;
+                },
+                .tool_call => {
+                    // Forward to agent state with full tool info
+                    if (self.state.agent_state) |*agent_state| {
+                        agent_state.addToolMessage(
+                            msg.tool_call_id orelse "",
+                            msg.tool_name,
+                            msg.text,
+                            msg.tool_command,
+                        ) catch |err| {
+                            std.log.err("Failed to add tool message: {any}", .{err});
+                        };
+                    }
+
                     // Show tool execution in status bar
-                    const status_msg = std.fmt.allocPrint(self.allocator, "Agent: {s}...", .{msg.text}) catch "Agent working...";
+                    const tool_name = msg.tool_name orelse "Tool";
+                    const status_msg = std.fmt.allocPrint(self.allocator, "Agent: {s}...", .{tool_name}) catch "Agent working...";
                     defer if (!std.mem.eql(u8, status_msg, "Agent working...")) self.allocator.free(status_msg);
                     self.showStatusMessage(status_msg);
                     self.needs_render = true;
                 },
-                .tool_complete => {
-                    // Show completion status
-                    self.showStatusMessage("Agent: tool completed");
+                .tool_update => {
+                    // Update existing tool message with status and output
+                    if (self.state.agent_state) |*agent_state| {
+                        const status: agent.Message.ToolStatus = switch (msg.tool_status) {
+                            .pending => .pending,
+                            .in_progress => .running,
+                            .completed => .completed,
+                            .failed => .failed,
+                        };
+                        agent_state.updateToolMessage(
+                            msg.tool_call_id orelse "",
+                            status,
+                            msg.tool_stdout,
+                            msg.tool_stderr,
+                        ) catch |err| {
+                            std.log.err("Failed to update tool message: {any}", .{err});
+                        };
+                    }
+
+                    // Show completion/failure status
+                    if (msg.tool_status == .completed) {
+                        self.showStatusMessage("Agent: tool completed");
+                    } else if (msg.tool_status == .failed) {
+                        self.showStatusMessage("Agent: tool failed");
+                    }
+                    self.needs_render = true;
+                },
+                .tool_diff => {
+                    // Forward diff to agent state
+                    if (self.state.agent_state) |*agent_state| {
+                        agent_state.addDiffMessage(
+                            msg.text,
+                            msg.diff_path orelse "",
+                            msg.diff_old orelse "",
+                            msg.diff_new orelse "",
+                        ) catch |err| {
+                            std.log.err("Failed to add diff message: {any}", .{err});
+                        };
+                    }
+
+                    // Show status
+                    self.showStatusMessage("Agent: edit pending");
                     self.needs_render = true;
                 },
                 .error_msg => {
+                    // Forward to agent state
+                    if (self.state.agent_state) |*agent_state| {
+                        const err_msg = std.fmt.allocPrint(self.allocator, "[Error: {s}]", .{msg.text}) catch "[Error]";
+                        defer self.allocator.free(err_msg);
+                        agent_state.addMessage(.system, err_msg) catch {};
+                    }
+
                     // Show error
                     const status_msg = std.fmt.allocPrint(self.allocator, "Agent error: {s}", .{msg.text}) catch "Agent error";
                     defer if (!std.mem.eql(u8, status_msg, "Agent error")) self.allocator.free(status_msg);
@@ -3248,8 +3477,21 @@ pub const App = struct {
     }
 
     /// Show a temporary status message (displayed for 3 seconds)
+    /// Note: This duplicates the message, so caller can free their copy.
     fn showStatusMessage(self: *App, message: []const u8) void {
-        self.state.status_message = message;
+        // Free previous allocated message if any
+        if (self.state.status_message_owned) |old| {
+            self.allocator.free(old);
+            self.state.status_message_owned = null;
+        }
+
+        // Duplicate the message so it persists
+        const owned = self.allocator.dupe(u8, message) catch {
+            self.state.status_message = null;
+            return;
+        };
+        self.state.status_message_owned = owned;
+        self.state.status_message = owned;
         self.state.status_message_time = std.time.timestamp();
         self.needs_render = true;
     }
@@ -3259,6 +3501,11 @@ pub const App = struct {
         if (self.state.status_message != null) {
             const elapsed = std.time.timestamp() - self.state.status_message_time;
             if (elapsed >= 3) {
+                // Free owned message if any
+                if (self.state.status_message_owned) |owned| {
+                    self.allocator.free(owned);
+                    self.state.status_message_owned = null;
+                }
                 self.state.status_message = null;
                 self.needs_render = true;
             }
