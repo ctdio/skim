@@ -176,6 +176,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // Start Ctrl+w chord for window navigation
                 app.state.pending_ctrl_w = true;
             },
+            'a' => {
+                // Ctrl+a: Connect to ACP agent
+                try app.startAcpSession();
+            },
             else => {},
         }
         return;

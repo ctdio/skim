@@ -75,6 +75,7 @@ pub const Client = struct {
         if (self.state != .disconnected) return error.AlreadyInitialized;
 
         self.state = .connecting;
+        std.log.debug("ACP Client: Starting initialize handshake", .{});
 
         // Build initialize params
         const params = protocol.InitializeParams{
@@ -83,16 +84,30 @@ pub const Client = struct {
             .client_info = capabilities.skimClientInfo(),
         };
 
-        const params_json = self.transport.encoder.encodeInitializeParams(params) catch return error.ProtocolError;
+        const params_json = self.transport.encoder.encodeInitializeParams(params) catch |err| {
+            std.log.err("ACP Client: Failed to encode params: {any}", .{err});
+            return error.ProtocolError;
+        };
         defer self.allocator.free(params_json);
+
+        std.log.debug("ACP Client: Sending initialize request", .{});
 
         // Send initialize request
         const request_id = self.nextRequestId();
-        _ = try self.transport.sendRequest(request_id, "initialize", params_json);
+        _ = self.transport.sendRequest(request_id, "initialize", params_json) catch |err| {
+            std.log.err("ACP Client: Failed to send request: {any}", .{err});
+            return err;
+        };
 
-        // Wait for response
-        const response = try self.transport.waitForResponse(request_id, 30000); // 30s timeout
+        std.log.debug("ACP Client: Waiting for response (3s timeout)...", .{});
+
+        // Wait for response (short timeout - if agent doesn't respond quickly, it's not ACP-compatible)
+        const response = self.transport.waitForResponse(request_id, 3000) catch |err| { // 3s timeout
+            std.log.err("ACP Client: waitForResponse failed: {any}", .{err});
+            return err;
+        };
         if (response == null) {
+            std.log.err("ACP Client: Initialize timed out - no response from agent", .{});
             self.state = .failed;
             return error.Timeout;
         }
@@ -134,6 +149,14 @@ pub const Client = struct {
         if (self.state != .initialized and self.state != .session_active) return error.NotInitialized;
         if (self.session_id != null) return error.SessionAlreadyActive;
 
+        // Give the agent a moment to fully initialize after handshake
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+
+        // Drain any pending notifications from the agent
+        _ = try self.transport.poll();
+        self.transport.clearMessages();
+        std.log.debug("ACP Client: drained pending messages after initialize", .{});
+
         const params = protocol.SessionNewParams{
             .cwd = cwd,
             .mcp_servers = &.{},
@@ -142,11 +165,14 @@ pub const Client = struct {
         const params_json = self.transport.encoder.encodeSessionNewParams(params) catch return error.ProtocolError;
         defer self.allocator.free(params_json);
 
+        std.log.debug("ACP Client: session/new params: {s}", .{params_json});
+
         const request_id = self.nextRequestId();
+        std.log.debug("ACP Client: Sending session/new request id={d}", .{request_id});
         _ = try self.transport.sendRequest(request_id, "session/new", params_json);
 
-        // Wait for response
-        const response = try self.transport.waitForResponse(request_id, 30000);
+        // Wait for response (session creation can take longer - agent spawns subprocess)
+        const response = try self.transport.waitForResponse(request_id, 30000); // 30s timeout
         if (response == null) return error.Timeout;
 
         var resp = response.?;
@@ -239,7 +265,7 @@ pub const Client = struct {
             }
 
             self.transport.clearMessages();
-            std.time.sleep(1 * std.time.ns_per_ms);
+            std.Thread.sleep(1 * std.time.ns_per_ms);
         }
     }
 

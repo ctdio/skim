@@ -15,6 +15,7 @@ pub const codec = @import("codec.zig");
 pub const process = @import("process.zig");
 pub const transport = @import("transport.zig");
 pub const client = @import("client.zig");
+pub const manager = @import("manager.zig");
 
 // Convenience re-exports for common types
 pub const PROTOCOL_VERSION = types.PROTOCOL_VERSION;
@@ -35,6 +36,11 @@ pub const AgentProcess = process.AgentProcess;
 pub const SpawnConfig = process.SpawnConfig;
 pub const StdioTransport = transport.StdioTransport;
 pub const Client = client.Client;
+
+// Phase 3: TUI integration
+pub const AcpManager = manager.AcpManager;
+pub const isAgentAvailable = manager.isAgentAvailable;
+pub const findAvailableAgent = manager.findAvailableAgent;
 
 // =============================================================================
 // Tests

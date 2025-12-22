@@ -62,8 +62,8 @@ pub fn deinit() void {
     initialized = false;
 }
 
-/// Buffer for log file writing (Zig 0.15 requires buffer for file.writer())
-var write_buffer: [4096]u8 = undefined;
+/// Buffer for formatting log messages
+var format_buffer: [8192]u8 = undefined;
 
 /// Custom log function that writes to file instead of stderr
 pub fn logFn(
@@ -76,9 +76,6 @@ pub fn logFn(
     defer log_mutex.unlock();
 
     const file = log_file orelse return;
-    var file_writer = file.writer(&write_buffer);
-    defer file_writer.interface.flush() catch {};
-    const writer = &file_writer.interface;
 
     // Get timestamp
     const timestamp = std.time.timestamp();
@@ -96,8 +93,12 @@ pub fn logFn(
 
     const scope_str = if (scope == .default) "" else @tagName(scope);
 
+    // Format the entire log line into buffer
+    var fbs = std.io.fixedBufferStream(&format_buffer);
+    const writer = fbs.writer();
+
     // Write timestamp and level
-    writer.print("[{d:0>2}:{d:0>2}:{d:0>2}] [{s}]", .{ hours, minutes, seconds, level_str }) catch return;
+    writer.print("[+{d}:+{d}:+{d}] [{s}]", .{ hours, minutes, seconds, level_str }) catch return;
 
     // Write scope if not default
     if (scope_str.len > 0) {
@@ -108,6 +109,10 @@ pub fn logFn(
     writer.print(" ", .{}) catch return;
     writer.print(format, args) catch return;
     writer.print("\n", .{}) catch return;
+
+    // Write directly to file
+    const written = fbs.getWritten();
+    _ = file.write(written) catch return;
 }
 
 /// Get the path to a log file

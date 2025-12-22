@@ -139,7 +139,7 @@ pub const Encoder = struct {
             try writer.writeAll(params);
         }
 
-        try writer.writeAll("}\n");
+        try writer.writeAll("}");
         return output.toOwnedSlice(self.allocator);
     }
 
@@ -159,7 +159,7 @@ pub const Encoder = struct {
             try writer.writeAll(",\"result\":null");
         }
 
-        try writer.writeAll("}\n");
+        try writer.writeAll("}");
         return output.toOwnedSlice(self.allocator);
     }
 
@@ -178,7 +178,7 @@ pub const Encoder = struct {
             try writer.writeAll(params);
         }
 
-        try writer.writeAll("}\n");
+        try writer.writeAll("}");
         return output.toOwnedSlice(self.allocator);
     }
 
@@ -197,7 +197,7 @@ pub const Encoder = struct {
         try self.writeId(writer, id);
         try writer.print(",\"error\":{{\"code\":{d},\"message\":\"", .{code});
         try writeJsonEscaped(writer, message);
-        try writer.writeAll("\"}}\n");
+        try writer.writeAll("\"}}");
 
         return output.toOwnedSlice(self.allocator);
     }

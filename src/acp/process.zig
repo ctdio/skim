@@ -31,11 +31,11 @@ pub const AgentProcess = struct {
         const self = try allocator.create(AgentProcess);
         errdefer allocator.destroy(self);
 
-        // Build argv: command + args
-        const argv = try buildArgv(allocator, config.command, config.args);
+        // Build argv with 'script' wrapper to force PTY/line-buffered output
+        // This fixes Node.js stdout buffering when connected to pipes
+        const argv = try buildArgvWithStdbuf(allocator, config.command, config.args);
         defer allocator.free(argv);
 
-        // Initialize child process
         self.* = .{
             .allocator = allocator,
             .child = std.process.Child.init(argv, allocator),
@@ -45,17 +45,24 @@ pub const AgentProcess = struct {
             .status = .running,
         };
 
-        // Set working directory if provided
         if (config.cwd) |cwd| {
             self.child.cwd = cwd;
         }
 
-        // Configure stdio
+        // Log if the CLAUDE_CODE_OAUTH_TOKEN is available (for debugging)
+        if (std.posix.getenv("CLAUDE_CODE_OAUTH_TOKEN")) |_| {
+            std.log.info("ACP: CLAUDE_CODE_OAUTH_TOKEN is present in environment", .{});
+        } else {
+            std.log.warn("ACP: CLAUDE_CODE_OAUTH_TOKEN NOT found in environment!", .{});
+        }
+
+        // Log file descriptors for debugging
+        std.log.info("ACP: Spawning with stdin_behavior=Pipe, stdout_behavior=Pipe", .{});
+
         self.child.stdin_behavior = .Pipe;
         self.child.stdout_behavior = .Pipe;
         self.child.stderr_behavior = .Pipe;
 
-        // Spawn the process
         self.child.spawn() catch |err| {
             std.log.err("Failed to spawn agent process: {}", .{err});
             return error.SpawnFailed;
@@ -65,36 +72,94 @@ pub const AgentProcess = struct {
         self.stdout = self.child.stdout.?;
         self.stderr = self.child.stderr;
 
-        // Set stdout to non-blocking for async reads
-        setNonBlocking(self.stdout) catch |err| {
-            std.log.warn("Failed to set stdout non-blocking: {}", .{err});
-        };
-
         return self;
     }
 
     /// Write data to agent's stdin
     pub fn write(self: *AgentProcess, data: []const u8) !void {
         if (self.status != .running) return error.ProcessNotRunning;
+        std.log.debug("ACP Process: writing {d} bytes to stdin", .{data.len});
         try self.stdin.writeAll(data);
+        std.log.debug("ACP Process: write completed", .{});
+    }
+
+    /// Check and log stderr output (for debugging)
+    pub fn checkStderr(self: *AgentProcess) void {
+        const stderr_file = self.stderr orelse return;
+
+        var buffer: [4096]u8 = undefined;
+
+        // Use poll to check if stderr has data
+        var fds = [_]posix.pollfd{
+            .{
+                .fd = stderr_file.handle,
+                .events = posix.POLL.IN,
+                .revents = 0,
+            },
+        };
+
+        const poll_result = posix.poll(&fds, 0) catch return;
+        if (poll_result == 0) return;
+
+        if (fds[0].revents & posix.POLL.IN != 0) {
+            const n = stderr_file.read(&buffer) catch return;
+            if (n > 0) {
+                std.log.debug("ACP Process STDERR: {s}", .{buffer[0..n]});
+            }
+        }
     }
 
     /// Read available data from agent's stdout (non-blocking)
     /// Returns null if no data available, empty slice on EOF
     pub fn readAvailable(self: *AgentProcess, buffer: []u8) !?[]u8 {
-        if (self.status != .running) return null;
+        if (self.status != .running) {
+            std.log.debug("ACP Process: readAvailable skipped - not running", .{});
+            return null;
+        }
+
+        // Use poll to check if data is available (500ms timeout)
+        var fds = [_]posix.pollfd{
+            .{
+                .fd = self.stdout.handle,
+                .events = posix.POLL.IN,
+                .revents = 0,
+            },
+        };
+
+        const poll_result = posix.poll(&fds, 500) catch |err| {
+            std.log.debug("ACP Process: poll error: {}", .{err});
+            return null;
+        };
+
+        if (poll_result == 0) {
+            std.log.debug("ACP Process: poll timeout (500ms), no data", .{});
+            return null; // Timeout
+        }
+
+        std.log.debug("ACP Process: poll returned {d}, revents=0x{x}", .{ poll_result, fds[0].revents });
+
+        if (fds[0].revents & posix.POLL.IN == 0) {
+            if (fds[0].revents & posix.POLL.HUP != 0) {
+                std.log.debug("ACP Process: HUP received", .{});
+                self.status = .exited;
+                return buffer[0..0];
+            }
+            std.log.debug("ACP Process: poll returned but no IN flag", .{});
+            return null;
+        }
 
         const n = self.stdout.read(buffer) catch |err| {
-            if (err == error.WouldBlock) return null;
+            std.log.debug("ACP Process: read error: {}", .{err});
             return err;
         };
 
         if (n == 0) {
-            // EOF - agent closed stdout
+            std.log.debug("ACP Process: EOF received", .{});
             self.status = .exited;
             return buffer[0..0];
         }
 
+        std.log.debug("ACP Process: read {d} bytes", .{n});
         return buffer[0..n];
     }
 
@@ -104,30 +169,36 @@ pub const AgentProcess = struct {
     }
 
     /// Terminate the agent process gracefully
+    /// Kills the entire process group to ensure child subprocesses are also terminated
     pub fn terminate(self: *AgentProcess) void {
         if (self.status != .running) return;
 
-        // Close stdin to signal EOF to agent
-        // Null out child.stdin to prevent wait() from double-closing
         if (self.child.stdin) |_| {
             self.stdin.close();
             self.child.stdin = null;
         }
 
-        // Try graceful termination with SIGTERM
-        _ = posix.kill(self.child.id, posix.SIG.TERM) catch {};
-
-        // Wait briefly for exit
+        // Kill entire process group (negative PID) to terminate child subprocesses
+        // claude-code-acp spawns a Node.js subprocess that would otherwise become orphaned
+        // Use child.id as pgid since child processes typically inherit parent's pgid
+        _ = posix.kill(-self.child.id, posix.SIG.TERM) catch {
+            // Fallback to killing just the direct child if process group kill fails
+            _ = posix.kill(self.child.id, posix.SIG.TERM) catch {};
+        };
         _ = self.child.wait() catch {};
         self.status = .exited;
     }
 
     /// Force kill the agent process
+    /// Kills the entire process group to ensure child subprocesses are also terminated
     pub fn kill(self: *AgentProcess) void {
         if (self.status != .running) return;
 
-        _ = posix.kill(self.child.id, posix.SIG.KILL) catch {};
-
+        // Kill entire process group (negative PID) to terminate child subprocesses
+        _ = posix.kill(-self.child.id, posix.SIG.KILL) catch {
+            // Fallback to killing just the direct child if process group kill fails
+            _ = posix.kill(self.child.id, posix.SIG.KILL) catch {};
+        };
         _ = self.child.wait() catch {};
         self.status = .crashed;
     }
@@ -185,10 +256,44 @@ pub const SpawnConfig = struct {
 fn buildArgv(allocator: Allocator, command: []const u8, args: []const []const u8) ![]const []const u8 {
     var argv = try allocator.alloc([]const u8, 1 + args.len);
     argv[0] = command;
-    for (args, 1..) |arg, i| {
-        argv[i] = arg;
+    for (args, 0..) |arg, i| {
+        argv[1 + i] = arg;
     }
     return argv;
+}
+
+/// Check if a command needs PTY wrapping for stdout buffering fix.
+/// This is needed for Node.js processes (like claude-code-acp) which fully buffer stdout
+/// when connected to pipes instead of TTY.
+fn needsPtyWrapper(command: []const u8) bool {
+    // Only wrap known ACP agent commands that are Node.js-based
+    return std.mem.indexOf(u8, command, "claude-code-acp") != null or
+        std.mem.indexOf(u8, command, "gemini-cli") != null or
+        std.mem.indexOf(u8, command, "codex") != null;
+}
+
+/// Build argv, optionally wrapped with `script` to force PTY/line-buffered output.
+/// This fixes stdout buffering issues with Node.js processes connected to pipes.
+/// On macOS: script -q /dev/null <command>
+fn buildArgvWithStdbuf(allocator: Allocator, command: []const u8, args: []const []const u8) ![]const []const u8 {
+    const builtin = @import("builtin");
+
+    // Only use script wrapper for commands that need it (Node.js-based agents)
+    if (builtin.os.tag == .macos and needsPtyWrapper(command)) {
+        // macOS: script -q /dev/null command args...
+        var argv = try allocator.alloc([]const u8, 4 + args.len);
+        argv[0] = "script";
+        argv[1] = "-q";
+        argv[2] = "/dev/null";
+        argv[3] = command;
+        for (args, 0..) |arg, i| {
+            argv[4 + i] = arg;
+        }
+        return argv;
+    } else {
+        // No wrapper needed for this command, or on Linux
+        return buildArgv(allocator, command, args);
+    }
 }
 
 fn setNonBlocking(file: std.fs.File) !void {

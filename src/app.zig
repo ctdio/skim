@@ -39,6 +39,7 @@ const graphite_mode = @import("modes/graphite_mode.zig");
 const app_config = @import("config.zig");
 const review = @import("review.zig");
 const graphite = @import("git/graphite.zig");
+const acp = @import("acp/acp.zig");
 
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
@@ -93,6 +94,8 @@ pub const App = struct {
     mcp_port: ?u16, // Port to connect to MCP server
     review_process: ?*review.ReviewProcess, // Background review process
     blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
+    acp_manager: ?*acp.AcpManager, // ACP agent session manager
+    acp_connect_thread: ?std.Thread, // Background thread for ACP connection
 
     const Mode = enum {
         normal, // Normal navigation and viewing
@@ -395,6 +398,8 @@ pub const App = struct {
             .mcp_port = if (@hasField(@TypeOf(config), "mcp_port")) config.mcp_port else null,
             .review_process = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+            .acp_manager = null,
+            .acp_connect_thread = null,
         };
 
         // Graphite detection is lazy - happens on first access to avoid blocking startup
@@ -462,6 +467,16 @@ pub const App = struct {
         // Clean up review process
         if (self.review_process) |proc| {
             proc.deinit();
+        }
+        // Clean up ACP connection thread
+        if (self.acp_connect_thread) |thread| {
+            thread.detach();
+            self.acp_connect_thread = null;
+        }
+        // Clean up ACP manager
+        if (self.acp_manager) |mgr| {
+            mgr.deinit();
+            self.allocator.destroy(mgr);
         }
         // Clean up blame cache
         var blame_iter = self.blame_cache.iterator();
@@ -724,6 +739,9 @@ pub const App = struct {
             // Check review process status and clear expired messages
             self.checkReviewStatus();
             self.clearExpiredStatusMessage();
+
+            // Poll ACP agent for updates
+            self.pollAcpUpdates();
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
@@ -2917,6 +2935,197 @@ pub const App = struct {
 
         self.showStatusMessage("Review started...");
         self.needs_render = true;
+    }
+
+    /// Context for ACP connection thread
+    const AcpConnectContext = struct {
+        app: *App,
+        agent_command: []const u8,
+        agent_args: []const []const u8,
+        cwd: []const u8,
+    };
+
+    /// Background thread function for ACP connection
+    fn acpConnectThreadFn(ctx: *AcpConnectContext) void {
+        std.log.info("ACP: Background connection thread started", .{});
+
+        const mgr = ctx.app.acp_manager orelse {
+            std.log.err("ACP: No manager in thread context", .{});
+            return;
+        };
+
+        // Connect to agent (spawn + initialize)
+        mgr.connect(ctx.agent_command, ctx.agent_args, ctx.cwd) catch |err| {
+            std.log.err("ACP: Connect failed: {}", .{err});
+            return;
+        };
+        std.log.info("ACP: Connected, now creating session...", .{});
+
+        // Create session
+        mgr.createSession(ctx.cwd) catch |err| {
+            std.log.err("ACP: CreateSession failed: {}", .{err});
+            return;
+        };
+        std.log.info("ACP: Session created successfully!", .{});
+    }
+
+    /// Start an ACP agent session (non-blocking)
+    pub fn startAcpSession(self: *App) !void {
+        std.log.info("ACP: startAcpSession called", .{});
+
+        // Check if connection already in progress
+        if (self.acp_connect_thread != null) {
+            std.log.info("ACP: Connection already in progress", .{});
+            self.showStatusMessage("Connection already in progress...");
+            return;
+        }
+
+        // Check if already connected
+        if (self.acp_manager) |mgr| {
+            if (mgr.isConnected()) {
+                std.log.info("ACP: Already connected", .{});
+                self.showStatusMessage("Agent already connected");
+                return;
+            }
+            // Previous session died, clean it up
+            std.log.info("ACP: Cleaning up dead session", .{});
+            mgr.deinit();
+            self.allocator.destroy(mgr);
+            self.acp_manager = null;
+        }
+
+        // Find an available agent
+        std.log.info("ACP: Looking for available agent...", .{});
+        const agent = acp.findAvailableAgent() orelse {
+            std.log.warn("ACP: No agent found in PATH", .{});
+            self.showStatusMessage("No ACP agent found (claude-code-acp)");
+            return;
+        };
+        std.log.info("ACP: Found agent: {s}", .{agent.name});
+
+        // Create and initialize the manager
+        const mgr = try self.allocator.create(acp.AcpManager);
+        mgr.* = acp.AcpManager.init(self.allocator);
+        mgr.status = .connecting;
+        self.acp_manager = mgr;
+
+        self.showStatusMessage("Connecting to agent...");
+        self.needs_render = true;
+
+        // Store connection context (static lifetime for thread)
+        const ctx = try self.allocator.create(AcpConnectContext);
+        ctx.* = .{
+            .app = self,
+            .agent_command = agent.command,
+            .agent_args = agent.args,
+            .cwd = self.state.git_repo_root,
+        };
+
+        // Spawn background thread for connection
+        self.acp_connect_thread = std.Thread.spawn(.{}, acpConnectThreadFn, .{ctx}) catch |err| {
+            std.log.err("Failed to spawn ACP connect thread: {any}", .{err});
+            self.showStatusMessage("Failed to start connection");
+            self.allocator.destroy(ctx);
+            mgr.deinit();
+            self.allocator.destroy(mgr);
+            self.acp_manager = null;
+            return;
+        };
+    }
+
+    /// Disconnect from the ACP agent
+    pub fn stopAcpSession(self: *App) void {
+        if (self.acp_manager) |mgr| {
+            mgr.deinit();
+            self.allocator.destroy(mgr);
+            self.acp_manager = null;
+            self.showStatusMessage("Disconnected from agent");
+            self.needs_render = true;
+        }
+    }
+
+    /// Check ACP agent status
+    pub fn getAcpStatus(self: *App) ?acp.AcpManager.Status {
+        if (self.acp_manager) |mgr| {
+            return mgr.status;
+        }
+        return null;
+    }
+
+    /// Poll ACP agent for updates
+    /// Phase 3: Just log messages and show status. Phase 4 will add smart comment placement.
+    pub fn pollAcpUpdates(self: *App) void {
+        // Check if connection thread completed
+        if (self.acp_connect_thread != null) {
+            if (self.acp_manager) |mgr| {
+                // Check if connection finished (status changed from connecting)
+                if (mgr.status != .connecting) {
+                    // Thread is done, clean it up
+                    if (self.acp_connect_thread) |thread| {
+                        thread.join();
+                        self.acp_connect_thread = null;
+                    }
+
+                    // Update UI based on result
+                    if (mgr.status == .session_active) {
+                        const msg = std.fmt.allocPrint(self.allocator, "Connected to {s}", .{mgr.getAgentDisplayName()}) catch "Connected";
+                        defer if (!std.mem.eql(u8, msg, "Connected")) self.allocator.free(msg);
+                        self.showStatusMessage(msg);
+                    } else if (mgr.status == .failed) {
+                        self.showStatusMessage("Failed to connect to agent");
+                        // Clean up failed manager
+                        mgr.deinit();
+                        self.allocator.destroy(mgr);
+                        self.acp_manager = null;
+                    }
+                    self.needs_render = true;
+                }
+            }
+        }
+
+        const mgr = self.acp_manager orelse return;
+
+        // Poll for new messages
+        const messages = mgr.poll() catch return;
+        if (messages.len == 0) return;
+
+        // Process each message
+        for (messages) |msg| {
+            switch (msg.kind) {
+                .agent_text => {
+                    // Log agent text for debugging
+                    std.log.info("Agent response: {s}", .{msg.text});
+                    // Show truncated message in status bar
+                    const preview = if (msg.text.len > 50) msg.text[0..50] else msg.text;
+                    const status_msg = std.fmt.allocPrint(self.allocator, "Agent: {s}...", .{preview}) catch "Agent responded";
+                    defer if (!std.mem.eql(u8, status_msg, "Agent responded")) self.allocator.free(status_msg);
+                    self.showStatusMessage(status_msg);
+                    self.needs_render = true;
+                },
+                .tool_start => {
+                    // Show tool execution in status bar
+                    const status_msg = std.fmt.allocPrint(self.allocator, "Agent: {s}...", .{msg.text}) catch "Agent working...";
+                    defer if (!std.mem.eql(u8, status_msg, "Agent working...")) self.allocator.free(status_msg);
+                    self.showStatusMessage(status_msg);
+                    self.needs_render = true;
+                },
+                .tool_complete => {
+                    // Show completion status
+                    self.showStatusMessage("Agent: tool completed");
+                    self.needs_render = true;
+                },
+                .error_msg => {
+                    // Show error
+                    const status_msg = std.fmt.allocPrint(self.allocator, "Agent error: {s}", .{msg.text}) catch "Agent error";
+                    defer if (!std.mem.eql(u8, status_msg, "Agent error")) self.allocator.free(status_msg);
+                    self.showStatusMessage(status_msg);
+                    self.needs_render = true;
+                },
+            }
+        }
+
+        // Clear processed messages
+        mgr.clearMessages();
     }
 
     /// Toggle the review log side panel

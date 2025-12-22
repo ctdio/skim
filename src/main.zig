@@ -45,6 +45,8 @@ pub fn main() !void {
     logging.init(.tui);
     defer logging.deinit();
 
+    std.log.info("TUI starting up", .{});
+
     const config = try parseArgs(allocator, args);
     defer config.deinit();
 
