@@ -3,11 +3,18 @@ const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const state = @import("state.zig");
 const AgentState = state.AgentState;
+const OwnedPlanEntry = state.OwnedPlanEntry;
 const Message = state.Message;
+const MAX_SLASH_MENU_VISIBLE = state.MAX_SLASH_MENU_VISIBLE;
 const InputEditor = @import("input_editor.zig").InputEditor;
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const diff_algo = @import("diff.zig");
 const DiffLine = diff_algo.DiffLine;
+const chat_line_map = @import("chat_line_map.zig");
+const ChatLineMap = chat_line_map.ChatLineMap;
+const ChatLineRecord = chat_line_map.ChatLineRecord;
+const SideLineKind = chat_line_map.SideLineKind;
+const protocol = @import("../acp/protocol.zig");
 
 // Import skim's color palette for consistent styling
 const rendering_common = @import("../rendering/common.zig");
@@ -15,6 +22,86 @@ const Color = rendering_common.Color;
 
 // Gutter width for line numbers in side-by-side diff view
 const GUTTER_WIDTH: usize = 5;
+
+// Maximum height for the expandable input area (excluding separator and footer)
+const MAX_INPUT_LINES: usize = 30;
+// Maximum number of input lines to track (must be >= MAX_INPUT_LINES)
+const MAX_TRACKED_LINES: usize = 100;
+
+// Maximum number of plan entries to show (additional entries show "+N more")
+const MAX_PLAN_ENTRIES: usize = 5;
+
+// Maximum width for slash command menu
+const MAX_SLASH_MENU_WIDTH: usize = 120;
+
+// =============================================================================
+// Input Line Utilities
+// =============================================================================
+
+/// Information about lines in the input text
+const InputLineInfo = struct {
+    line_count: usize,
+    cursor_row: usize,
+    cursor_col: usize,
+    lines: [MAX_TRACKED_LINES]LineSpan,
+};
+
+const LineSpan = struct {
+    start: usize,
+    end: usize,
+};
+
+/// Analyze input text to get line information
+fn getInputLineInfo(text: []const u8, cursor_pos: usize) InputLineInfo {
+    var info = InputLineInfo{
+        .line_count = 1,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .lines = undefined,
+    };
+
+    // Initialize first line
+    info.lines[0] = .{ .start = 0, .end = 0 };
+
+    var current_line: usize = 0;
+    var line_start: usize = 0;
+
+    for (text, 0..) |c, i| {
+        if (c == '\n') {
+            // End current line (only if within bounds)
+            if (current_line < MAX_TRACKED_LINES) {
+                info.lines[current_line].end = i;
+            }
+
+            // Check if cursor is on this line
+            if (cursor_pos >= line_start and cursor_pos <= i) {
+                info.cursor_row = @min(current_line, MAX_TRACKED_LINES - 1);
+                info.cursor_col = cursor_pos - line_start;
+            }
+
+            // Start new line
+            current_line += 1;
+            if (current_line < MAX_TRACKED_LINES) {
+                info.lines[current_line] = .{ .start = i + 1, .end = i + 1 };
+            }
+            line_start = i + 1;
+            info.line_count += 1;
+        }
+    }
+
+    // Handle last line
+    if (current_line < MAX_TRACKED_LINES) {
+        info.lines[current_line].end = text.len;
+    }
+
+    // Check if cursor is on the last line (clamp to max tracked line)
+    if (cursor_pos >= line_start) {
+        info.cursor_row = @min(current_line, MAX_TRACKED_LINES - 1);
+        info.cursor_col = cursor_pos - line_start;
+    }
+
+    return info;
+}
 
 // =============================================================================
 // Agent Panel Renderer
@@ -29,11 +116,28 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 
     win.clear();
 
-    // Layout: title (1 row) + messages (variable) + input area (4 rows)
+    // Calculate dynamic input height based on content
+    const text = agent_state.input.getText();
+    const line_info = getInputLineInfo(text, agent_state.input.vim.cursor_pos);
+    const visible_lines = @max(3, @min(line_info.line_count, MAX_INPUT_LINES));
+
+    // Calculate plan height (only if visible and has entries)
+    const plan_entry_count = agent_state.plan_entries.items.len;
+    const plan_height: usize = if (agent_state.plan_visible and plan_entry_count > 0) blk: {
+        // Header (1) + entries (up to MAX_PLAN_ENTRIES) + optional "+N more" line (1)
+        const visible_entries = @min(plan_entry_count, MAX_PLAN_ENTRIES);
+        const has_more = plan_entry_count > MAX_PLAN_ENTRIES;
+        break :blk 1 + visible_entries + @as(usize, if (has_more) 1 else 0);
+    } else 0;
+
+    // Calculate input area height (always shows normal input)
+    const input_height: usize = 1 + visible_lines + 1; // Separator + visible lines + footer
+
+    // Layout: title (1 row) + messages (variable) + plan (conditional) + input area (dynamic)
     const title_height: usize = 1;
-    const input_height: usize = 4; // Separator + input + blank + footer
-    const messages_height = if (win.height > title_height + input_height)
-        win.height - title_height - input_height
+    const fixed_height = title_height + plan_height + input_height;
+    const messages_height = if (win.height > fixed_height)
+        win.height - fixed_height
     else
         1;
 
@@ -49,14 +153,37 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     });
     try renderMessages(app, messages_win, agent_state);
 
+    // Render plan area (if visible and has entries)
+    if (plan_height > 0) {
+        const plan_win = win.child(.{
+            .x_off = 0,
+            .y_off = @intCast(title_height + messages_height),
+            .width = win.width,
+            .height = @intCast(plan_height),
+        });
+        renderPlanArea(plan_win, agent_state.plan_entries.items);
+    }
+
     // Render input area
     const input_win = win.child(.{
         .x_off = 0,
-        .y_off = @intCast(title_height + messages_height),
+        .y_off = @intCast(title_height + messages_height + plan_height),
         .width = win.width,
         .height = @intCast(input_height),
     });
-    try renderInputArea(app, input_win, agent_state.*, is_focused);
+    try renderInputArea(app, input_win, agent_state, is_focused, line_info);
+
+    // Render slash command menu as overlay (if visible)
+    if (agent_state.slash_menu_visible) {
+        try renderSlashMenu(win, agent_state, title_height + messages_height + plan_height);
+    }
+
+    // Render permission prompt as overlay (if pending)
+    if (app.acp_manager) |mgr| {
+        if (mgr.getPendingPermission()) |perm| {
+            try renderPermissionOverlay(win, perm, title_height + messages_height);
+        }
+    }
 }
 
 fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
@@ -130,216 +257,47 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
 fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void {
     if (win.height == 0) return;
 
-    // If no messages, show placeholder
+    // Clear the message area to remove any overlay artifacts
+    win.clear();
+
+    // Check if agent is currently thinking
+    const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
+
+    // If no messages, show placeholder and thinking indicator if active
     if (agent_state.messages.items.len == 0) {
-        const placeholder = "No messages yet. Type a prompt and press Enter to send.";
-        const placeholder_style = vaxis.Style{
-            .fg = .{ .index = 8 }, // dark gray
-            .italic = true,
-        };
-        var seg = [_]vaxis.Cell.Segment{
-            .{ .text = placeholder, .style = placeholder_style },
-        };
-        _ = win.print(&seg, .{ .row_offset = @intCast(win.height / 2), .col_offset = 1 });
+        if (!is_thinking) {
+            const placeholder = "No messages yet. Type a prompt and press Enter to send.";
+            const placeholder_style = vaxis.Style{
+                .fg = .{ .index = 8 }, // dark gray
+                .italic = true,
+            };
+            var seg = [_]vaxis.Cell.Segment{
+                .{ .text = placeholder, .style = placeholder_style },
+            };
+            _ = win.print(&seg, .{ .row_offset = @intCast(win.height / 2), .col_offset = 1 });
+        }
+        // Show thinking indicator at bottom when thinking (even with no messages)
+        if (is_thinking and win.height > 0) {
+            renderThinkingIndicator(win, win.height - 1);
+        }
         return;
     }
 
-    // Build wrapped message lines
-    var lines: std.ArrayList(MessageLine) = .{};
-    defer lines.deinit(app.allocator);
-
-    const wrap_width = if (win.width > 4) win.width - 4 else 1; // Leave margins
-
-    for (agent_state.messages.items) |msg| {
-        // Add role header (skip for tool messages - they have their own icon-based header)
-        if (msg.role != .tool) {
-            try lines.append(app.allocator, .{
-                .text = msg.role.label(),
-                .style = switch (msg.role) {
-                    .user => vaxis.Style{ .fg = .{ .index = 6 }, .bold = true }, // cyan
-                    .agent => vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }, // magenta
-                    .thinking => vaxis.Style{ .fg = .{ .index = 8 }, .italic = true }, // dark gray italic
-                    .system => vaxis.Style{ .fg = .{ .index = 3 }, .bold = true }, // yellow
-                    .diff => vaxis.Style{ .fg = .{ .index = 4 }, .bold = true }, // blue
-                    .tool => vaxis.Style{ .fg = .{ .index = 2 }, .bold = true }, // green for tools
-                },
-                .indent = 1,
-            });
-        }
-
-        // Handle diff messages specially
-        if (msg.role == .diff) {
-            // Render skim-style file header: "path/to/file.ext  +N -M"
-            if (msg.diff_path) |path| {
-                if (msg.diff_old) |old_text| {
-                    if (msg.diff_new) |new_text| {
-                        // Compute stats for file header
-                        var diff_result = diff_algo.computeDiff(app.allocator, old_text, new_text) catch {
-                            // Fallback to just showing filename
-                            try lines.append(app.allocator, .{
-                                .text = std.fs.path.basename(path),
-                                .style = vaxis.Style{ .fg = Color.white, .bold = true },
-                                .indent = 0,
-                            });
-                            continue;
-                        };
-                        defer diff_result.deinit();
-
-                        // File header on one line: "path/to/file.ext  +N -M"
-                        // This matches skim's file header format
-                        var header_buf: [512]u8 = undefined;
-                        const header_text = std.fmt.bufPrint(&header_buf, "{s}  +{d} -{d}", .{
-                            path,
-                            diff_result.additions,
-                            diff_result.deletions,
-                        }) catch path;
-
-                        try lines.append(app.allocator, .{
-                            .text = header_text,
-                            .style = vaxis.Style{ .fg = Color.white, .bold = true },
-                            .indent = 0,
-                        });
-
-                        // Blank line before diff content
-                        try lines.append(app.allocator, .{
-                            .text = "",
-                            .style = .{},
-                            .indent = 0,
-                        });
-
-                        // Render diff lines with view mode
-                        try renderDiffLines(app.allocator, &lines, old_text, new_text, wrap_width, agent_state.diff_view_mode);
-                    }
-                }
-            }
-        } else if (msg.role == .tool) {
-            // Claude Code style: ⏺ ToolName(args)
-            const tool_name = msg.tool_name orelse "Tool";
-            const status_icon: []const u8 = switch (msg.tool_status) {
-                .pending => "○", // hollow circle for pending
-                .running => "◐", // half circle for running
-                .completed => "⏺", // filled circle for completed
-                .failed => "✗", // X for failed
-            };
-            const status_style: vaxis.Style = switch (msg.tool_status) {
-                .pending => .{ .fg = .{ .index = 3 } }, // yellow
-                .running => .{ .fg = .{ .index = 6 } }, // cyan
-                .completed => .{ .fg = .{ .index = 2 } }, // green
-                .failed => .{ .fg = .{ .index = 1 } }, // red
-            };
-
-            // Format: ⏺ Bash(command) or ⏺ Read(file_path)
-            var header_buf: [512]u8 = undefined;
-            const header_text = blk: {
-                if (msg.tool_command) |cmd| {
-                    // For Bash: show command (truncate if long)
-                    const max_cmd = @min(cmd.len, 60);
-                    const truncated = if (cmd.len > 60) "..." else "";
-                    break :blk std.fmt.bufPrint(&header_buf, "{s} {s}({s}{s})", .{
-                        status_icon,
-                        tool_name,
-                        cmd[0..max_cmd],
-                        truncated,
-                    }) catch tool_name;
-                } else {
-                    // For other tools: show title (usually contains file path)
-                    const title = msg.content;
-                    break :blk std.fmt.bufPrint(&header_buf, "{s} {s}", .{
-                        status_icon,
-                        title,
-                    }) catch tool_name;
-                }
-            };
-            try lines.append(app.allocator, .{
-                .text = header_text,
-                .style = status_style,
-                .indent = 1,
-            });
-
-            // Show result summary: ⎿  (No content) or ⎿  Success
-            if (msg.tool_status == .completed or msg.tool_status == .failed) {
-                var result_buf: [128]u8 = undefined;
-                const result_text = blk: {
-                    if (msg.tool_status == .failed) {
-                        if (msg.tool_stderr) |stderr| {
-                            // Show first line of error
-                            var stderr_iter = std.mem.splitScalar(u8, stderr, '\n');
-                            if (stderr_iter.next()) |first_line| {
-                                const max_len = @min(first_line.len, 80);
-                                break :blk std.fmt.bufPrint(&result_buf, "⎿  {s}", .{first_line[0..max_len]}) catch "⎿  Failed";
-                            }
-                        }
-                        break :blk "⎿  Failed";
-                    } else {
-                        // Completed
-                        if (msg.tool_stdout) |stdout| {
-                            if (stdout.len == 0) {
-                                break :blk "⎿  (No content)";
-                            }
-                            // Count lines for summary
-                            var line_count: usize = 0;
-                            var iter = std.mem.splitScalar(u8, stdout, '\n');
-                            while (iter.next()) |_| line_count += 1;
-                            if (line_count > 1) {
-                                break :blk std.fmt.bufPrint(&result_buf, "⎿  ({d} lines)", .{line_count}) catch "⎿  Done";
-                            } else {
-                                // Single line - show it (truncated)
-                                const max_len = @min(stdout.len, 60);
-                                const truncated = if (stdout.len > 60) "..." else "";
-                                break :blk std.fmt.bufPrint(&result_buf, "⎿  {s}{s}", .{ stdout[0..max_len], truncated }) catch "⎿  Done";
-                            }
-                        }
-                        break :blk "⎿  Done";
-                    }
-                };
-                try lines.append(app.allocator, .{
-                    .text = result_text,
-                    .style = vaxis.Style{ .fg = .{ .index = 8 } }, // dim
-                    .indent = 1,
-                });
-            }
-        } else {
-            // Content style (dimmer for thinking)
-            const content_style = switch (msg.role) {
-                .thinking => vaxis.Style{ .fg = .{ .index = 8 }, .italic = true }, // dark gray italic
-                else => vaxis.Style{ .fg = .{ .index = 7 } },
-            };
-
-            // Wrap and add content lines
-            var content_iter = std.mem.splitScalar(u8, msg.content, '\n');
-            while (content_iter.next()) |line| {
-                if (line.len == 0) {
-                    try lines.append(app.allocator, .{
-                        .text = "",
-                        .style = .{},
-                        .indent = 2,
-                    });
-                } else {
-                    var remaining = line;
-                    while (remaining.len > 0) {
-                        const chunk_len = @min(remaining.len, wrap_width);
-                        try lines.append(app.allocator, .{
-                            .text = remaining[0..chunk_len],
-                            .style = content_style,
-                            .indent = 2,
-                        });
-                        remaining = remaining[chunk_len..];
-                    }
-                }
-            }
-        }
-
-        // Add blank line between messages
-        try lines.append(app.allocator, .{
-            .text = "",
-            .style = .{},
-            .indent = 0,
-        });
-    }
+    // Get the pre-computed line map (builds if dirty)
+    const wrap_width = if (win.width > 4) win.width - 4 else 1;
+    const line_map = agent_state.ensureLineMap(wrap_width) catch {
+        // Fallback: show error message
+        var err_seg = [_]vaxis.Cell.Segment{
+            .{ .text = "Error building line map", .style = .{ .fg = .{ .index = 1 } } },
+        };
+        _ = win.print(&err_seg, .{ .row_offset = 0, .col_offset = 1 });
+        return;
+    };
 
     // Calculate scroll offset
-    const max_scroll = if (lines.items.len > win.height)
-        lines.items.len - win.height
+    const total_lines = line_map.getTotalLines();
+    const max_scroll = if (total_lines > win.height)
+        total_lines - win.height
     else
         0;
 
@@ -354,28 +312,29 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
     // Render visible lines
     const start = scroll;
-    const end = @min(start + win.height, lines.items.len);
+    const end = @min(start + win.height, total_lines);
 
     var row: usize = 0;
-    for (lines.items[start..end]) |line| {
+    for (start..end) |line_idx| {
         if (row >= win.height) break;
 
-        var col_offset: usize = line.indent;
+        const record = line_map.getLineRecord(line_idx) orelse continue;
+
+        var col_offset: usize = record.indent;
 
         // Fill background for diff lines (entire row) before printing anything
-        if (line.fill_bg) {
+        if (record.fill_bg) {
             for (0..win.width) |col| {
                 win.writeCell(@intCast(col), @intCast(row), .{
                     .char = .{ .grapheme = " ", .width = 1 },
-                    .style = line.style,
+                    .style = record.style,
                 });
             }
         }
 
         // Handle unified diff lines - render gutter at render time
-        if (line.diff_kind) |kind| {
+        if (record.diff_kind) |kind| {
             // Format: "┃ NNN+ " where NNN is line number, + is sign
-            // Gutter style
             const gutter_style: vaxis.Style = switch (kind) {
                 .context => .{ .fg = Color.dim },
                 .add => .{ .fg = Color.diff_sign_add, .bg = Color.diff_add_bg },
@@ -389,34 +348,32 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             col_offset += 2;
 
-            // Print line number (formatted at render time)
-            var num_buf: [8]u8 = undefined;
-            const num_text = if (line.diff_line_num) |n|
-                std.fmt.bufPrint(&num_buf, "{d:>3}", .{n}) catch "   "
-            else
-                "   ";
+            // Print line number (use pre-formatted string to avoid buffer reuse issues)
+            const num_text = record.diff_line_num_str orelse "   ";
             var num_seg = [_]vaxis.Cell.Segment{
                 .{ .text = num_text, .style = gutter_style },
             };
             _ = win.print(&num_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             col_offset += 3;
 
-            // Print sign
-            if (line.diff_sign) |sign| {
-                var sign_buf: [1]u8 = .{sign};
-                var sign_seg = [_]vaxis.Cell.Segment{
-                    .{ .text = &sign_buf, .style = gutter_style },
-                };
-                _ = win.print(&sign_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
-            }
+            // Print sign (use static string to avoid buffer reuse issues)
+            const sign_text: []const u8 = if (record.diff_sign) |sign| switch (sign) {
+                '+' => "+",
+                '-' => "-",
+                else => " ",
+            } else " ";
+            var sign_seg = [_]vaxis.Cell.Segment{
+                .{ .text = sign_text, .style = gutter_style },
+            };
+            _ = win.print(&sign_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             col_offset += 1;
 
             // Space after sign
             col_offset += 1;
-        } else if (line.sbs_left_kind) |left_kind| {
+        } else if (record.sbs_left_kind) |left_kind| {
             // Handle side-by-side diff lines
-            const right_kind = line.sbs_right_kind orelse .empty;
-            const left_width = line.sbs_left_width;
+            const right_kind = record.sbs_right_kind orelse .empty;
+            const left_width = record.sbs_left_width;
 
             // Left gutter style
             const left_gutter_style: vaxis.Style = switch (left_kind) {
@@ -439,12 +396,8 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             col_offset += 2;
 
-            // Left line number
-            var left_num_buf: [8]u8 = undefined;
-            const left_num_text = if (line.sbs_left_num) |n|
-                std.fmt.bufPrint(&left_num_buf, "{d:>3}", .{n}) catch "   "
-            else
-                "   ";
+            // Left line number (use pre-formatted string to avoid buffer reuse issues)
+            const left_num_text = record.sbs_left_num_str orelse "   ";
             var left_num_seg = [_]vaxis.Cell.Segment{
                 .{ .text = left_num_text, .style = left_gutter_style },
             };
@@ -455,7 +408,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             col_offset += 2;
 
             // Left content (truncate to width)
-            if (line.sbs_left_content) |content| {
+            if (record.sbs_left_content) |content| {
                 const left_content = if (content.len > left_width) content[0..left_width] else content;
                 const left_style: vaxis.Style = if (left_kind == .delete)
                     .{ .fg = Color.white, .bg = Color.diff_delete_bg }
@@ -475,12 +428,8 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             _ = win.print(&div_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             col_offset += 1;
 
-            // Right line number
-            var right_num_buf: [8]u8 = undefined;
-            const right_num_text = if (line.sbs_right_num) |n|
-                std.fmt.bufPrint(&right_num_buf, "{d:>3}", .{n}) catch "   "
-            else
-                "   ";
+            // Right line number (use pre-formatted string to avoid buffer reuse issues)
+            const right_num_text = record.sbs_right_num_str orelse "   ";
             var right_num_seg = [_]vaxis.Cell.Segment{
                 .{ .text = right_num_text, .style = right_gutter_style },
             };
@@ -491,7 +440,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             col_offset += 2;
 
             // Right content
-            if (line.sbs_right_content) |content| {
+            if (record.sbs_right_content) |content| {
                 const right_style: vaxis.Style = if (right_kind == .add)
                     .{ .fg = Color.white, .bg = Color.diff_add_bg }
                 else
@@ -501,14 +450,13 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 };
                 _ = win.print(&right_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             }
-            // Don't update col_offset, we're done with this line
 
             row += 1;
             continue; // Skip normal text rendering for sbs lines
-        } else if (line.prefix) |prefix| {
+        } else if (record.prefix) |prefix| {
             // Print regular prefix if present
             var prefix_seg = [_]vaxis.Cell.Segment{
-                .{ .text = prefix, .style = line.prefix_style orelse line.style },
+                .{ .text = prefix, .style = record.prefix_style orelse record.style },
             };
             _ = win.print(&prefix_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             col_offset += prefix.len;
@@ -516,51 +464,339 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
         // Print text
         var seg = [_]vaxis.Cell.Segment{
-            .{ .text = line.text, .style = line.style },
+            .{ .text = record.text, .style = record.style },
         };
         _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
         row += 1;
     }
+
+    // Show thinking indicator at the bottom of the message area (just above input)
+    if (is_thinking and win.height > 0) {
+        renderThinkingIndicator(win, win.height - 1);
+    }
 }
 
-const MessageLine = struct {
-    text: []const u8,
-    style: vaxis.Style,
-    indent: usize,
-    prefix: ?[]const u8 = null, // Optional prefix (e.g., "┃" for diffs)
-    prefix_style: ?vaxis.Style = null,
-    fill_bg: bool = false, // Fill entire row with background color
-    // For unified diff lines: store line number as integer to avoid memory issues
-    diff_line_num: ?usize = null, // Line number (formatted at render time)
-    diff_sign: ?u8 = null, // '+', '-', or ' '
-    diff_kind: ?DiffLine.Kind = null, // For styling
-    // For side-by-side diff lines
-    sbs_left_num: ?usize = null,
-    sbs_left_content: ?[]const u8 = null,
-    sbs_left_kind: ?SideLineKind = null,
-    sbs_right_num: ?usize = null,
-    sbs_right_content: ?[]const u8 = null,
-    sbs_right_kind: ?SideLineKind = null,
-    sbs_left_width: usize = 0, // Content width for left side
-};
+/// Render a shimmering "Generating..." indicator
+fn renderThinkingIndicator(win: vaxis.Window, row: usize) void {
+    if (win.width < 20 or row >= win.height) return;
 
-const SideLineKind = enum { context, add, delete, empty };
+    const now = std.time.milliTimestamp();
+    const text = "Generating...";
+    const shimmer_speed: i64 = 80;
+    const phase: usize = @intCast(@mod(@divFloor(now, shimmer_speed), 10));
 
-fn renderInputArea(app: *App, win: vaxis.Window, agent_state: AgentState, is_focused: bool) !void {
-    if (win.height == 0) return;
+    var col: usize = 2;
+    for (text, 0..) |_, idx| {
+        if (col >= win.width) break;
 
-    // Check for pending permission prompt
-    if (app.acp_manager) |mgr| {
-        if (mgr.getPendingPermission()) |perm| {
-            try renderPermissionPrompt(win, perm, is_focused);
-            return;
+        // Wave of brightness that travels across the text
+        const pos_offset = (idx + phase) % 10;
+        const brightness: u8 = switch (pos_offset) {
+            0 => 255,
+            1 => 230,
+            2 => 190,
+            3 => 150,
+            4, 5 => 120,
+            6 => 150,
+            7 => 190,
+            8 => 230,
+            9 => 255,
+            else => 120,
+        };
+
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = text[idx .. idx + 1], .width = 1 },
+            .style = .{ .fg = .{ .rgb = .{ brightness, brightness, brightness } } },
+        });
+        col += 1;
+    }
+}
+
+// =============================================================================
+// Slash Command Menu
+// =============================================================================
+
+/// Render the slash command menu as a popup above the input area
+fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize) !void {
+    // Get filtered commands
+    var indices: [32]usize = undefined;
+    const filtered_count = agent_state.getFilteredCommandIndices(&indices);
+
+    if (filtered_count == 0) return;
+
+    // Calculate menu dimensions with scroll support
+    const visible_count = @min(filtered_count, MAX_SLASH_MENU_VISIBLE);
+    const max_scroll = if (filtered_count > visible_count) filtered_count - visible_count else 0;
+    const scroll_offset = @min(agent_state.slash_menu_scroll_offset, max_scroll);
+    const menu_height = visible_count + 2; // +2 for top/bottom border
+    const menu_width = @min(win.width -| 4, MAX_SLASH_MENU_WIDTH); // leave some margin
+
+    // Position menu just above the input area
+    const menu_y = if (input_top > menu_height) input_top - menu_height else 0;
+    const menu_x: usize = 2; // Small left margin
+
+    // Create menu window
+    const menu_win = win.child(.{
+        .x_off = @intCast(menu_x),
+        .y_off = @intCast(menu_y),
+        .width = @intCast(menu_width),
+        .height = @intCast(menu_height),
+    });
+
+    // Draw menu background and border (neutral colors)
+    const border_style = vaxis.Style{ .fg = .{ .index = 8 } }; // gray
+    const bg_style = vaxis.Style{ .bg = .{ .index = 0 } }; // black background
+
+    // Fill background
+    for (0..menu_height) |row| {
+        for (0..menu_width) |col| {
+            menu_win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = " ", .width = 1 },
+                .style = bg_style,
+            });
         }
     }
 
+    // Top border: ┌─ Commands ─────────────────────────────┐
+    // Add scroll indicator (▲) if there are items above
+    const has_more_above = scroll_offset > 0;
+    menu_win.writeCell(0, 0, .{ .char = .{ .grapheme = "┌", .width = 1 }, .style = border_style });
+    menu_win.writeCell(@intCast(menu_width - 1), 0, .{ .char = .{ .grapheme = "┐", .width = 1 }, .style = border_style });
+
+    // Draw header: "─ Commands " then fill rest with "─", add scroll indicator at end
+    const header_parts = [_][]const u8{ "─", " ", "C", "o", "m", "m", "a", "n", "d", "s", " " };
+    for (1..menu_width - 1) |col| {
+        const char_idx = col - 1;
+        // Show ▲ indicator near the right if there are more items above
+        const char: []const u8 = if (has_more_above and col == menu_width - 4)
+            "▲"
+        else if (char_idx < header_parts.len)
+            header_parts[char_idx]
+        else
+            "─";
+        menu_win.writeCell(@intCast(col), 0, .{
+            .char = .{ .grapheme = char, .width = 1 },
+            .style = border_style,
+        });
+    }
+
+    // Bottom border - add scroll indicator (▼) if there are items below
+    const has_more_below = scroll_offset + visible_count < filtered_count;
+    menu_win.writeCell(0, @intCast(menu_height - 1), .{ .char = .{ .grapheme = "└", .width = 1 }, .style = border_style });
+    menu_win.writeCell(@intCast(menu_width - 1), @intCast(menu_height - 1), .{ .char = .{ .grapheme = "┘", .width = 1 }, .style = border_style });
+    for (1..menu_width - 1) |col| {
+        // Show ▼ indicator near the right if there are more items below
+        const char: []const u8 = if (has_more_below and col == menu_width - 4) "▼" else "─";
+        menu_win.writeCell(@intCast(col), @intCast(menu_height - 1), .{
+            .char = .{ .grapheme = char, .width = 1 },
+            .style = border_style,
+        });
+    }
+
+    // Side borders
+    for (1..menu_height - 1) |row| {
+        menu_win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
+        menu_win.writeCell(@intCast(menu_width - 1), @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
+    }
+
+    // Clamp selection to valid range
+    const selection = @min(agent_state.slash_menu_selection, filtered_count - 1);
+
+    // Render command items (with scroll offset applied)
+    for (0..visible_count) |i| {
+        const item_idx = scroll_offset + i;
+        if (item_idx >= filtered_count) break;
+
+        const cmd_idx = indices[item_idx];
+        const cmd = &agent_state.available_commands.items[cmd_idx];
+        const is_selected = (item_idx == selection);
+        const row = i + 1; // +1 for top border
+
+        // Style based on selection (neutral colors)
+        const name_style: vaxis.Style = if (is_selected)
+            .{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 }, .bold = true } // inverted white
+        else
+            .{ .fg = .{ .index = 7 }, .bold = true }; // white
+
+        const desc_style: vaxis.Style = if (is_selected)
+            .{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 } } // inverted
+        else
+            .{ .fg = .{ .index = 8 } }; // dim
+
+        // Fill row background if selected
+        if (is_selected) {
+            for (1..menu_width - 1) |col| {
+                menu_win.writeCell(@intCast(col), @intCast(row), .{
+                    .char = .{ .grapheme = " ", .width = 1 },
+                    .style = .{ .bg = .{ .index = 7 } }, // white background
+                });
+            }
+        }
+
+        // Format: " /command  description"
+        var col: usize = 2;
+
+        // Print "/" prefix
+        var slash_seg = [_]vaxis.Cell.Segment{
+            .{ .text = "/", .style = name_style },
+        };
+        _ = menu_win.print(&slash_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
+        col += 1;
+
+        // Print command name (truncate if needed)
+        const max_name_len = @min(cmd.name.len, 20);
+        const name_text = cmd.name[0..max_name_len];
+        var name_seg = [_]vaxis.Cell.Segment{
+            .{ .text = name_text, .style = name_style },
+        };
+        _ = menu_win.print(&name_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
+        col += max_name_len + 2; // +2 for spacing
+
+        // Print description (truncate to fit)
+        const remaining_width = if (menu_width > col + 3) menu_width - col - 3 else 0;
+        if (remaining_width > 0 and cmd.description.len > 0) {
+            const desc_len = @min(cmd.description.len, remaining_width);
+            const desc_text = cmd.description[0..desc_len];
+            var desc_seg = [_]vaxis.Cell.Segment{
+                .{ .text = desc_text, .style = desc_style },
+            };
+            _ = menu_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
+        }
+    }
+}
+
+// =============================================================================
+// Plan Area
+// =============================================================================
+
+/// Render the agent plan area (todo list from agent)
+fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry) void {
+    if (win.height == 0 or entries.len == 0) return;
+
+    var row: usize = 0;
+
+    // Header line: "── Todos ──"
+    const header_style = vaxis.Style{ .fg = .{ .index = 8 }, .bold = true };
+
+    // Draw leading dashes at columns 1-2
+    win.writeCell(1, @intCast(row), .{
+        .char = .{ .grapheme = "─", .width = 1 },
+        .style = header_style,
+    });
+    win.writeCell(2, @intCast(row), .{
+        .char = .{ .grapheme = "─", .width = 1 },
+        .style = header_style,
+    });
+
+    // Draw " Todos " text starting at column 3
+    const title_text = " Todos ";
+    var title_seg = [_]vaxis.Cell.Segment{
+        .{ .text = title_text, .style = header_style },
+    };
+    _ = win.print(&title_seg, .{ .row_offset = @intCast(row), .col_offset = 3 });
+
+    // Fill rest of header with ─ (starting after "── Todos " = 3 + 7 = 10)
+    const header_end: usize = 10;
+    if (win.width > header_end) {
+        for (header_end..win.width) |col| {
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = "─", .width = 1 },
+                .style = header_style,
+            });
+        }
+    }
+    row += 1;
+
+    // Render entries (up to MAX_PLAN_ENTRIES)
+    const visible_count = @min(entries.len, MAX_PLAN_ENTRIES);
+    for (entries[0..visible_count]) |entry| {
+        if (row >= win.height) break;
+
+        // Status icon
+        const status_icon: []const u8 = switch (entry.status) {
+            .pending => "○",
+            .in_progress => "◉",
+            .completed => "✓",
+        };
+
+        // Status color
+        const status_style: vaxis.Style = switch (entry.status) {
+            .pending => .{ .fg = .{ .index = 8 } }, // dim
+            .in_progress => .{ .fg = .{ .index = 3 }, .bold = true }, // yellow
+            .completed => .{ .fg = .{ .index = 2 } }, // green
+        };
+
+        // Content style (strikethrough for completed)
+        const content_style: vaxis.Style = switch (entry.status) {
+            .completed => .{ .fg = .{ .index = 8 } }, // dim for completed
+            else => .{ .fg = .{ .index = 7 } }, // normal
+        };
+
+        // Print status icon
+        var icon_seg = [_]vaxis.Cell.Segment{
+            .{ .text = status_icon, .style = status_style },
+        };
+        _ = win.print(&icon_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
+
+        // Print content (truncate if needed)
+        const max_content_len = if (win.width > 6) win.width - 6 else 1;
+        const content = if (entry.content.len > max_content_len)
+            entry.content[0..max_content_len]
+        else
+            entry.content;
+
+        var content_seg = [_]vaxis.Cell.Segment{
+            .{ .text = content, .style = content_style },
+        };
+        _ = win.print(&content_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
+
+        row += 1;
+    }
+
+    // "+N more" line if there are hidden entries
+    if (entries.len > MAX_PLAN_ENTRIES and row < win.height) {
+        var more_buf: [16]u8 = undefined;
+        const remaining = entries.len - MAX_PLAN_ENTRIES;
+        const more_text = std.fmt.bufPrint(&more_buf, "+{d} more", .{remaining}) catch "+? more";
+
+        const more_style = vaxis.Style{ .fg = .{ .index = 8 }, .italic = true };
+        var more_seg = [_]vaxis.Cell.Segment{
+            .{ .text = more_text, .style = more_style },
+        };
+        _ = win.print(&more_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
+    }
+}
+
+fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_focused: bool, line_info: InputLineInfo) !void {
+    if (win.height == 0) return;
+
+    const text = agent_state.input.getText();
+    const total_lines = @min(line_info.line_count, MAX_TRACKED_LINES);
+    const visible_lines = @min(total_lines, MAX_INPUT_LINES);
+
+    // Calculate scroll offset to keep cursor in view
+    var scroll_offset = agent_state.input_scroll_offset;
+    const cursor_row = line_info.cursor_row;
+
+    // Scroll up if cursor is above visible area
+    if (cursor_row < scroll_offset) {
+        scroll_offset = cursor_row;
+    }
+    // Scroll down if cursor is below visible area (keep 1 line margin at bottom)
+    if (cursor_row >= scroll_offset + visible_lines) {
+        scroll_offset = cursor_row - visible_lines + 1;
+    }
+    // Clamp scroll offset to valid range
+    const max_scroll = if (total_lines > visible_lines) total_lines - visible_lines else 0;
+    scroll_offset = @min(scroll_offset, max_scroll);
+
+    // Update stored scroll offset
+    agent_state.input_scroll_offset = scroll_offset;
+
     // Layout:
     // Row 0: Separator line
-    // Row 1: Prompt "> " and input text
-    // Row 2: Footer with mode (left) and keybindings (right) - like vim
+    // Rows 1..visible_lines: Input lines with "> " prompt on first line
+    // Last row: Footer with mode (left) and keybindings (right)
 
     // Row 0: Separator line
     const separator_style = vaxis.Style{ .fg = .{ .index = 8 } };
@@ -571,76 +807,171 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: AgentState, is_foc
         });
     }
 
-    // Row 1: Prompt and input
     const prompt_style = vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }; // magenta
-    var prompt_seg = [_]vaxis.Cell.Segment{
-        .{ .text = "> ", .style = prompt_style },
-    };
-    _ = win.print(&prompt_seg, .{ .row_offset = 1, .col_offset = 1 });
-
-    // Input text
-    const text = agent_state.input.getText();
-    const input_col: usize = 3;
-    const max_input_width = if (win.width > input_col + 2) win.width - input_col - 2 else 1;
-    const cursor_pos = agent_state.input.cursor_pos;
-    const text_start = if (cursor_pos > max_input_width - 1)
-        cursor_pos - (max_input_width - 1)
-    else
-        0;
-    const visible_text = if (text_start < text.len)
-        text[text_start..@min(text_start + max_input_width, text.len)]
-    else
-        "";
-
     const text_style = vaxis.Style{ .fg = .{ .index = 7 } };
-    var text_seg = [_]vaxis.Cell.Segment{
-        .{ .text = visible_text, .style = text_style },
-    };
-    _ = win.print(&text_seg, .{ .row_offset = 1, .col_offset = @intCast(input_col) });
+    const input_col: usize = 3; // After "> "
+    const max_input_width = if (win.width > input_col + 1) win.width - input_col - 1 else 1;
 
-    // Cursor
-    if (is_focused) {
-        const cursor_screen_pos = cursor_pos - text_start;
-        const cursor_col = input_col + cursor_screen_pos;
+    // Render each visible line
+    for (0..visible_lines) |display_idx| {
+        const line_idx = scroll_offset + display_idx;
+        if (line_idx >= total_lines) break;
 
-        if (cursor_col < win.width) {
-            const cursor_char = if (cursor_pos < text.len)
-                text[cursor_pos .. cursor_pos + 1]
-            else
-                " ";
+        const row = display_idx + 1; // +1 for separator
 
-            const cursor_style = if (agent_state.input.vim_mode == .insert)
-                vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 } }
-            else
-                vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 }, .bold = true };
+        // First line in buffer (line_idx == 0) gets the prompt "> "
+        if (line_idx == 0) {
+            var prompt_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "> ", .style = prompt_style },
+            };
+            _ = win.print(&prompt_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+        } else {
+            // Continuation lines get "  " for alignment
+            var cont_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "  ", .style = text_style },
+            };
+            _ = win.print(&cont_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+        }
 
-            win.writeCell(@intCast(cursor_col), 1, .{
-                .char = .{ .grapheme = cursor_char, .width = 1 },
-                .style = cursor_style,
-            });
+        // Get this line's content
+        const line_span = line_info.lines[line_idx];
+        const line_text = if (line_span.start < text.len)
+            text[line_span.start..@min(line_span.end, text.len)]
+        else
+            "";
+
+        // Calculate horizontal scroll for this line (only if cursor is on this line)
+        var text_start: usize = 0;
+        if (line_idx == line_info.cursor_row and line_info.cursor_col >= max_input_width) {
+            text_start = line_info.cursor_col - (max_input_width - 1);
+        }
+
+        // Get visible portion of line
+        const visible_text = if (text_start < line_text.len)
+            line_text[text_start..@min(text_start + max_input_width, line_text.len)]
+        else
+            "";
+
+        // Check for visual mode selection highlighting
+        const vim_mode = agent_state.input.vim.vim_mode;
+        const visual_anchor = agent_state.input.vim.visual_anchor;
+
+        if (vim_mode == .visual) {
+            if (visual_anchor) |anchor| {
+                // Calculate visual selection range
+                const cursor = agent_state.input.vim.cursor_pos;
+                const sel_start = @min(anchor, cursor);
+                const sel_end = @max(anchor, cursor);
+
+                // Visual selection style - cyan background for visibility on black
+                const visual_style = vaxis.Style{
+                    .fg = .{ .index = 0 }, // black text
+                    .bg = .{ .index = 6 }, // cyan background
+                    .bold = true,
+                };
+
+                // Render each character, applying visual style where needed
+                const line_start_abs = line_span.start;
+                for (visible_text, 0..) |_, char_idx| {
+                    const abs_pos = line_start_abs + text_start + char_idx;
+                    const col = input_col + char_idx;
+                    if (col >= win.width) break;
+
+                    // Is this character in the visual selection?
+                    const in_selection = abs_pos >= sel_start and abs_pos <= sel_end;
+                    const style = if (in_selection) visual_style else text_style;
+
+                    win.writeCell(@intCast(col), @intCast(row), .{
+                        .char = .{ .grapheme = visible_text[char_idx .. char_idx + 1], .width = 1 },
+                        .style = style,
+                    });
+                }
+            } else {
+                // No anchor yet, render normally
+                var text_seg = [_]vaxis.Cell.Segment{
+                    .{ .text = visible_text, .style = text_style },
+                };
+                _ = win.print(&text_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(input_col) });
+            }
+        } else {
+            // Normal rendering for non-visual modes
+            var text_seg = [_]vaxis.Cell.Segment{
+                .{ .text = visible_text, .style = text_style },
+            };
+            _ = win.print(&text_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(input_col) });
+        }
+
+        // Render cursor if it's on this line
+        if (is_focused and line_idx == line_info.cursor_row) {
+            const cursor_screen_col = line_info.cursor_col - text_start;
+            const cursor_col = input_col + cursor_screen_col;
+
+            if (cursor_col < win.width) {
+                const cursor_char = if (line_info.cursor_col < line_text.len)
+                    line_text[line_info.cursor_col .. line_info.cursor_col + 1]
+                else
+                    " ";
+
+                const cursor_style = if (agent_state.input.vim.vim_mode == .insert)
+                    vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 } }
+                else
+                    vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 }, .bold = true };
+
+                win.writeCell(@intCast(cursor_col), @intCast(row), .{
+                    .char = .{ .grapheme = cursor_char, .width = 1 },
+                    .style = cursor_style,
+                });
+            }
         }
     }
 
-    // Row 3: Footer with mode (left) and keybindings (right) - vim style
-    if (win.height > 3) {
+    // Footer row: mode (left), session mode (center), and keybindings (right)
+    // Always at bottom of window (win.height - 1)
+    const footer_row = win.height - 1;
+    if (win.height > 1) {
         // Mode text like vim: -- INSERT -- or -- NORMAL --
-        const mode_text = switch (agent_state.input.vim_mode) {
+        const mode_text = switch (agent_state.input.vim.vim_mode) {
             .normal => "-- NORMAL --",
             .insert => "-- INSERT --",
             .visual => "-- VISUAL --",
+            .command => "-- COMMAND --",
         };
         const mode_style = vaxis.Style{ .bold = true };
 
         var mode_seg = [_]vaxis.Cell.Segment{
             .{ .text = mode_text, .style = mode_style },
         };
-        _ = win.print(&mode_seg, .{ .row_offset = 3, .col_offset = 0 });
+        _ = win.print(&mode_seg, .{ .row_offset = @intCast(footer_row), .col_offset = 0 });
 
-        // Keybindings on the right
-        const keybindings = switch (agent_state.input.vim_mode) {
-            .insert => "Enter:send  ESC:normal",
-            .normal => "i:insert  q:close  v:view  z:fullscreen",
+        // Session mode display (after vim mode) - only if modes are available
+        var session_mode_buf: [32]u8 = undefined;
+        var session_mode_text: ?[]const u8 = null;
+
+        if (app.acp_manager) |mgr| {
+            if (mgr.hasModes()) {
+                const mode_name = mgr.getCurrentModeName();
+                if (mode_name.len > 0) {
+                    session_mode_text = std.fmt.bufPrint(&session_mode_buf, " [{s}]", .{mode_name}) catch null;
+                }
+            }
+        }
+
+        if (session_mode_text) |sm_text| {
+            const sm_style = vaxis.Style{ .fg = .{ .index = 6 }, .bold = true }; // cyan
+            var sm_seg = [_]vaxis.Cell.Segment{
+                .{ .text = sm_text, .style = sm_style },
+            };
+            _ = win.print(&sm_seg, .{ .row_offset = @intCast(footer_row), .col_offset = 13 });
+        }
+
+        // Keybindings on the right (include mode hint if modes available)
+        // In normal mode, 'm' cycles modes (S-Tab in insert mode for terminals with kitty keyboard)
+        const has_modes = if (app.acp_manager) |mgr| mgr.hasModes() else false;
+        const keybindings = switch (agent_state.input.vim.vim_mode) {
+            .insert => if (has_modes) "S-Tab:mode  Enter:send  ESC:normal" else "S-Enter:newline  Enter:send  ESC:normal",
+            .normal => if (has_modes) "m:mode  i:insert  q:close  ,d:diff" else "i:insert  q:close  ,d:diff  z:full",
             .visual => "ESC:exit",
+            .command => "Enter:execute  ESC:cancel",
         };
         const kb_style = vaxis.Style{ .fg = .{ .index = 8 } };
         const kb_len = keybindings.len;
@@ -649,301 +980,150 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: AgentState, is_foc
         var kb_seg = [_]vaxis.Cell.Segment{
             .{ .text = keybindings, .style = kb_style },
         };
-        _ = win.print(&kb_seg, .{ .row_offset = 3, .col_offset = @intCast(kb_col) });
+        _ = win.print(&kb_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(kb_col) });
     }
 }
 
 // =============================================================================
-// Diff Rendering - Skim Style
+// Permission Prompt Overlay
 // =============================================================================
-// Renders diffs exactly like skim's main diff view:
-// - Sidebar `┃` on left
-// - Line number followed by sign (e.g., `187+`)
-// - Hunk header with `↕ old_range → new_range`
-// - Proper background colors for add/delete lines
 
-/// Render diff lines using skim's exact visual style
-fn renderDiffLines(
-    allocator: std.mem.Allocator,
-    lines: *std.ArrayList(MessageLine),
-    old_text: []const u8,
-    new_text: []const u8,
-    wrap_width: usize,
-    view_mode: AgentState.DiffViewMode,
-) !void {
-    // Compute line-level diff
-    var diff_result = try diff_algo.computeDiff(allocator, old_text, new_text);
-    defer diff_result.deinit();
+/// Render the permission prompt as an overlay popup above the input/plan area
+fn renderPermissionOverlay(win: vaxis.Window, perm: *AcpManager.PendingPermission, overlay_bottom: usize) !void {
+    // Calculate menu dimensions
+    const desc_rows: usize = if (perm.description != null) 1 else 0;
+    const menu_height = 2 + desc_rows + perm.options.len + 2; // border + badge/title + desc + options + hint + border
+    const menu_width = @min(win.width -| 4, 70);
 
-    // Calculate line ranges for hunk header
-    var old_start: usize = 0;
-    var old_end: usize = 0;
-    var new_start: usize = 0;
-    var new_end: usize = 0;
+    // Position menu just above the overlay_bottom position
+    const menu_y = if (overlay_bottom > menu_height) overlay_bottom - menu_height else 0;
+    const menu_x: usize = 2; // Small left margin
 
-    for (diff_result.lines) |line| {
-        if (line.old_line_num) |n| {
-            if (old_start == 0) old_start = n;
-            old_end = n;
-        }
-        if (line.new_line_num) |n| {
-            if (new_start == 0) new_start = n;
-            new_end = n;
-        }
-    }
-
-    // Add hunk header: "┃       ↕ old_start-old_end → new_start-new_end"
-    var hunk_buf: [128]u8 = undefined;
-    const hunk_text = std.fmt.bufPrint(&hunk_buf, "┃       ↕ {d}-{d} → {d}-{d}", .{
-        old_start,
-        old_end,
-        new_start,
-        new_end,
-    }) catch "┃       ↕ changes";
-
-    try lines.append(allocator, .{
-        .text = hunk_text,
-        .style = .{ .fg = Color.dim },
-        .indent = 0,
+    // Create menu window
+    const menu_win = win.child(.{
+        .x_off = @intCast(menu_x),
+        .y_off = @intCast(menu_y),
+        .width = @intCast(menu_width),
+        .height = @intCast(menu_height),
     });
 
-    switch (view_mode) {
-        .unified => try renderUnifiedDiff(allocator, lines, diff_result.lines, wrap_width),
-        .side_by_side => try renderSideBySideDiff(allocator, lines, diff_result.lines, wrap_width),
-    }
-}
+    // Draw menu background and border
+    const border_style = vaxis.Style{ .fg = .{ .index = 3 } }; // yellow
+    const bg_style = vaxis.Style{ .bg = .{ .index = 0 } }; // black background
 
-/// Render diff in unified view (like skim's unified mode)
-/// Format: ┃ 187+ content here (sign immediately after number)
-fn renderUnifiedDiff(
-    allocator: std.mem.Allocator,
-    lines: *std.ArrayList(MessageLine),
-    diff_lines: []const DiffLine,
-    wrap_width: usize,
-) !void {
-    _ = wrap_width; // We'll render full lines, let the terminal wrap
-
-    for (diff_lines) |diff_line| {
-        // Get line number
-        const line_num: ?usize = switch (diff_line.kind) {
-            .context, .delete => diff_line.old_line_num,
-            .add => diff_line.new_line_num,
-        };
-        const sign: u8 = switch (diff_line.kind) {
-            .context => ' ',
-            .add => '+',
-            .delete => '-',
-        };
-
-        // Styles
-        const line_style: vaxis.Style = switch (diff_line.kind) {
-            .context => .{ .fg = Color.white },
-            .add => .{ .fg = Color.white, .bg = Color.diff_add_bg },
-            .delete => .{ .fg = Color.white, .bg = Color.diff_delete_bg },
-        };
-
-        const should_fill = diff_line.kind != .context;
-
-        // Store content directly (it's already allocated in diff_result)
-        // The rendering loop will format: ┃ NNN+ content
-        try lines.append(allocator, .{
-            .text = diff_line.content,
-            .style = line_style,
-            .indent = 0,
-            .prefix = null,
-            .prefix_style = null,
-            .fill_bg = should_fill,
-            .diff_line_num = line_num,
-            .diff_sign = sign,
-            .diff_kind = diff_line.kind,
-        });
-    }
-}
-
-/// Render diff in side-by-side view (like skim's side-by-side mode)
-/// Format: ┃ NNN  left_content        │ NNN  right_content
-fn renderSideBySideDiff(
-    allocator: std.mem.Allocator,
-    lines: *std.ArrayList(MessageLine),
-    diff_lines: []const DiffLine,
-    wrap_width: usize,
-) !void {
-    // Layout: "┃ NNN  " = 6 chars for left gutter, "│ NNN  " = 6 chars for right gutter
-    const gutter_size: usize = 6;
-    const divider_size: usize = 1;
-    const total_gutter = gutter_size * 2 + divider_size; // 13 chars for gutters + divider
-    const remaining = if (wrap_width > total_gutter) wrap_width - total_gutter else 2;
-    const left_content_width = remaining / 2;
-
-    // Collect left (old) and right (new) lines separately
-    var left_lines: std.ArrayList(SideLine) = .{};
-    defer left_lines.deinit(allocator);
-    var right_lines: std.ArrayList(SideLine) = .{};
-    defer right_lines.deinit(allocator);
-
-    for (diff_lines) |diff_line| {
-        switch (diff_line.kind) {
-            .context => {
-                // Context lines appear on both sides
-                try left_lines.append(allocator, .{
-                    .content = diff_line.content,
-                    .line_num = diff_line.old_line_num,
-                    .kind = .context,
-                });
-                try right_lines.append(allocator, .{
-                    .content = diff_line.content,
-                    .line_num = diff_line.new_line_num,
-                    .kind = .context,
-                });
-            },
-            .delete => {
-                // Deleted lines only on left
-                try left_lines.append(allocator, .{
-                    .content = diff_line.content,
-                    .line_num = diff_line.old_line_num,
-                    .kind = .delete,
-                });
-                try right_lines.append(allocator, .{
-                    .content = "",
-                    .line_num = null,
-                    .kind = .empty,
-                });
-            },
-            .add => {
-                // Added lines only on right
-                try left_lines.append(allocator, .{
-                    .content = "",
-                    .line_num = null,
-                    .kind = .empty,
-                });
-                try right_lines.append(allocator, .{
-                    .content = diff_line.content,
-                    .line_num = diff_line.new_line_num,
-                    .kind = .add,
-                });
-            },
+    // Fill background
+    for (0..menu_height) |row| {
+        for (0..menu_width) |col| {
+            menu_win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = " ", .width = 1 },
+                .style = bg_style,
+            });
         }
     }
 
-    // Render paired lines - store data for render-time formatting
-    const max_lines = @max(left_lines.items.len, right_lines.items.len);
-    for (0..max_lines) |i| {
-        const left = if (i < left_lines.items.len) left_lines.items[i] else SideLine{ .content = "", .line_num = null, .kind = .empty };
-        const right = if (i < right_lines.items.len) right_lines.items[i] else SideLine{ .content = "", .line_num = null, .kind = .empty };
+    // Top border: ┌─ Permission ─────────────────────────────┐
+    menu_win.writeCell(0, 0, .{ .char = .{ .grapheme = "┌", .width = 1 }, .style = border_style });
+    menu_win.writeCell(@intCast(menu_width - 1), 0, .{ .char = .{ .grapheme = "┐", .width = 1 }, .style = border_style });
 
-        // Determine if this line has changes
-        const has_change = left.kind == .delete or right.kind == .add;
-
-        // Convert SideLine.Kind to SideLineKind
-        const left_kind: SideLineKind = switch (left.kind) {
-            .context => .context,
-            .add => .add,
-            .delete => .delete,
-            .empty => .empty,
-        };
-        const right_kind: SideLineKind = switch (right.kind) {
-            .context => .context,
-            .add => .add,
-            .delete => .delete,
-            .empty => .empty,
-        };
-
-        // Store data for render-time formatting (avoid stack buffer issues)
-        try lines.append(allocator, .{
-            .text = "", // Not used for sbs lines
-            .style = .{ .fg = Color.white },
-            .indent = 0,
-            .fill_bg = has_change,
-            .sbs_left_num = left.line_num,
-            .sbs_left_content = left.content,
-            .sbs_left_kind = left_kind,
-            .sbs_right_num = right.line_num,
-            .sbs_right_content = right.content,
-            .sbs_right_kind = right_kind,
-            .sbs_left_width = left_content_width,
+    // Draw header: "─ Permission " then fill rest with "─"
+    const header_text = "─ Permission ";
+    for (1..menu_width - 1) |col| {
+        const char_idx = col - 1;
+        const char: []const u8 = if (char_idx < header_text.len) header_text[char_idx .. char_idx + 1] else "─";
+        menu_win.writeCell(@intCast(col), 0, .{
+            .char = .{ .grapheme = char, .width = 1 },
+            .style = border_style,
         });
     }
-}
 
-const SideLine = struct {
-    content: []const u8,
-    line_num: ?usize,
-    kind: enum { context, add, delete, empty },
-};
-
-// =============================================================================
-// Permission Prompt
-// =============================================================================
-
-/// Render the permission prompt in the input area
-fn renderPermissionPrompt(win: vaxis.Window, perm: *AcpManager.PendingPermission, is_focused: bool) !void {
-    _ = is_focused;
-
-    // Separator line
-    const separator_style = vaxis.Style{ .fg = .{ .index = 8 } };
-    for (0..win.width) |col| {
-        win.writeCell(@intCast(col), 0, .{
+    // Bottom border
+    menu_win.writeCell(0, @intCast(menu_height - 1), .{ .char = .{ .grapheme = "└", .width = 1 }, .style = border_style });
+    menu_win.writeCell(@intCast(menu_width - 1), @intCast(menu_height - 1), .{ .char = .{ .grapheme = "┘", .width = 1 }, .style = border_style });
+    for (1..menu_width - 1) |col| {
+        menu_win.writeCell(@intCast(col), @intCast(menu_height - 1), .{
             .char = .{ .grapheme = "─", .width = 1 },
-            .style = separator_style,
+            .style = border_style,
         });
     }
 
-    // Permission badge
-    const badge_style = vaxis.Style{
-        .fg = .{ .index = 0 },
-        .bg = .{ .index = 3 }, // yellow background
-        .bold = true,
-    };
-    var badge_seg = [_]vaxis.Cell.Segment{
-        .{ .text = " PERMISSION ", .style = badge_style },
-    };
-    _ = win.print(&badge_seg, .{ .row_offset = 1, .col_offset = 1 });
+    // Side borders
+    for (1..menu_height - 1) |row| {
+        menu_win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
+        menu_win.writeCell(@intCast(menu_width - 1), @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
+    }
 
-    // Title
+    // Row 1: Title
+    var row: usize = 1;
     const title_style = vaxis.Style{
         .fg = .{ .index = 7 },
         .bold = true,
     };
+    const max_title_len = if (menu_width > 6) menu_width - 6 else 1;
+    const truncated_title = if (perm.title.len > max_title_len) perm.title[0..max_title_len] else perm.title;
     var title_seg = [_]vaxis.Cell.Segment{
-        .{ .text = perm.title, .style = title_style },
+        .{ .text = truncated_title, .style = title_style },
     };
-    _ = win.print(&title_seg, .{ .row_offset = 1, .col_offset = 14 });
+    _ = menu_win.print(&title_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
+    row += 1;
 
     // Description (if present)
-    var row: usize = 2;
     if (perm.description) |desc| {
         const desc_style = vaxis.Style{
             .fg = .{ .index = 8 },
             .italic = true,
         };
-        // Truncate if too long
-        const max_len = if (win.width > 4) win.width - 4 else 1;
-        const truncated = if (desc.len > max_len) desc[0..max_len] else desc;
+        const max_desc_len = if (menu_width > 6) menu_width - 6 else 1;
+        const truncated_desc = if (desc.len > max_desc_len) desc[0..max_desc_len] else desc;
         var desc_seg = [_]vaxis.Cell.Segment{
-            .{ .text = truncated, .style = desc_style },
+            .{ .text = truncated_desc, .style = desc_style },
         };
-        _ = win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
+        _ = menu_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
         row += 1;
     }
 
-    // Options hint
-    const hint_style = vaxis.Style{
-        .fg = .{ .index = 2 }, // green
-        .bold = true,
-    };
-    var allow_seg = [_]vaxis.Cell.Segment{
-        .{ .text = " y ", .style = vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 2 }, .bold = true } },
-        .{ .text = " Allow  ", .style = hint_style },
-    };
-    _ = win.print(&allow_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+    // Render options
+    for (perm.options, 0..) |opt, i| {
+        const is_selected = i == perm.selected_index;
 
-    const deny_style = vaxis.Style{
-        .fg = .{ .index = 1 }, // red
-        .bold = true,
+        // Fill row background if selected
+        if (is_selected) {
+            for (1..menu_width - 1) |col| {
+                menu_win.writeCell(@intCast(col), @intCast(row), .{
+                    .char = .{ .grapheme = " ", .width = 1 },
+                    .style = .{ .bg = .{ .index = 3 } }, // yellow background
+                });
+            }
+        }
+
+        // Selection indicator
+        const indicator = if (is_selected) "▸ " else "  ";
+        const indicator_style = vaxis.Style{
+            .fg = .{ .index = if (is_selected) 0 else 8 }, // black if selected
+            .bg = if (is_selected) .{ .index = 3 } else .{ .index = 0 },
+            .bold = is_selected,
+        };
+
+        // Option style based on selection
+        const option_style = if (is_selected) vaxis.Style{
+            .fg = .{ .index = 0 }, // black on yellow
+            .bg = .{ .index = 3 },
+            .bold = true,
+        } else vaxis.Style{
+            .fg = .{ .index = 7 }, // normal
+        };
+
+        var segs = [_]vaxis.Cell.Segment{
+            .{ .text = indicator, .style = indicator_style },
+            .{ .text = opt.name, .style = option_style },
+        };
+        _ = menu_win.print(&segs, .{ .row_offset = @intCast(row), .col_offset = 2 });
+        row += 1;
+    }
+
+    // Hint line
+    const hint_style = vaxis.Style{ .fg = .{ .index = 8 } };
+    var hint_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "↑↓ navigate  Enter confirm  Esc cancel", .style = hint_style },
     };
-    var deny_seg = [_]vaxis.Cell.Segment{
-        .{ .text = " n ", .style = vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 1 }, .bold = true } },
-        .{ .text = " Deny", .style = deny_style },
-    };
-    _ = win.print(&deny_seg, .{ .row_offset = @intCast(row), .col_offset = 13 });
+    _ = menu_win.print(&hint_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
 }

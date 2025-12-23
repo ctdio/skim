@@ -198,17 +198,29 @@ pub const SideBySideRenderer = struct {
         }
 
         // Clear any remaining rows at the bottom of the screen
+        // IMPORTANT: Must fill the entire row, not just the dividers, because vaxis
+        // uses differential rendering and won't clear cells that haven't changed
         while (row < win.height) : (row += 1) {
+            // Fill the entire row with spaces first to clear old content
+            const fill_text = try RenderUtils.frameTextSlice(app, win.width);
+            @memset(fill_text, ' ');
+            var fill_seg = [_]vaxis.Cell.Segment{.{
+                .text = fill_text,
+                .style = .{},
+            }};
+            _ = win.print(&fill_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
+
+            // Then render the dividers
             var left_seg = [_]vaxis.Cell.Segment{.{
                 .text = "┃",
                 .style = sidebar_style,
             }};
-            _ = win.print(&left_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0 )});
+            _ = win.print(&left_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
             var middle_seg = [_]vaxis.Cell.Segment{.{
                 .text = FrameChars.vertical,
                 .style = sidebar_style,
             }};
-            _ = win.print(&middle_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(middle_col )});
+            _ = win.print(&middle_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(middle_col) });
         }
 
         // Update current_file_idx based on what's at the top of viewport (for sticky header)
@@ -738,7 +750,7 @@ pub const SideBySideRenderer = struct {
         current_row += 1;
 
         // Line 2+: ┃ > [text] (multiple lines if newlines present)
-        const input_text = input.text_buffer[0..input.text_len];
+        const input_text = input.vim.text_buffer[0..input.vim.text_len];
         const text_area_width = layout.width - 4; // -4 for "┃ > " or "┃   "
 
         var line_iter = std.mem.splitScalar(u8, input_text, '\n');
@@ -788,10 +800,10 @@ pub const SideBySideRenderer = struct {
                 const segment_end = segment_start + wrapped_segment.len;
 
                 // Handle visual mode selection highlighting
-                if (input.vim_mode == .visual and input.visual_anchor != null) {
-                    const anchor = input.visual_anchor.?;
-                    const selection_start = @min(anchor, input.cursor_pos);
-                    const selection_end = @max(anchor, input.cursor_pos);
+                if (input.vim.vim_mode == .visual and input.vim.visual_anchor != null) {
+                    const anchor = input.vim.visual_anchor.?;
+                    const selection_start = @min(anchor, input.vim.cursor_pos);
+                    const selection_end = @max(anchor, input.vim.cursor_pos);
 
                     // Highlight any part of selection in this segment
                     if (selection_start < segment_end and selection_end >= segment_start) {
@@ -821,15 +833,15 @@ pub const SideBySideRenderer = struct {
                 }
 
                 // Draw cursor if it's in this wrapped segment
-                if (input.cursor_pos >= segment_start and input.cursor_pos <= segment_end) {
-                    const cursor_pos_in_segment = input.cursor_pos - segment_start;
+                if (input.vim.cursor_pos >= segment_start and input.vim.cursor_pos <= segment_end) {
+                    const cursor_pos_in_segment = input.vim.cursor_pos - segment_start;
                     if (cursor_pos_in_segment < text_area_width) {
                         const cursor_col = layout.start_col + 4 + cursor_pos_in_segment; // +4 for "┃ > " or "┃   "
 
                         // Set the terminal cursor position and shape
                         win.showCursor(@intCast(cursor_col), @intCast(current_row));
 
-                        switch (input.vim_mode) {
+                        switch (input.vim.vim_mode) {
                             .normal, .visual => {
                                 // Block cursor for normal/visual mode
                                 win.setCursorShape(.block);

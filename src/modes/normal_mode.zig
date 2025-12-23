@@ -145,6 +145,33 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
+    // If waiting for second key after leader (,)
+    if (app.state.pending_leader) {
+        app.state.pending_leader = false;
+        // ESC cancels pending leader
+        if (key.codepoint == 27) { // ESC
+            return;
+        }
+        switch (key.codepoint) {
+            'a' => {
+                // Toggle agent panel
+                try app.toggleAgentPanel();
+            },
+            'd' => {
+                // Focus diff - if in agent mode, return to normal
+                if (app.state.agent_state) |*agent_state| {
+                    if (agent_state.visible) {
+                        agent_state.visible = false;
+                        app.mode = .normal;
+                        app.needs_render = true;
+                    }
+                }
+            },
+            else => {},
+        }
+        return;
+    }
+
     // Handle Ctrl+key combinations first (before regular key handling)
     if (key.mods.ctrl) {
         switch (key.codepoint) {
@@ -231,9 +258,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         },
         '\r' => try app.startCommentInput(), // Enter to create/edit comment
         's' => app.toggleViewMode(),
-        '\t' => try app.toggleAgentPanel(), // Tab to toggle agent panel
-        '<' => try app.cycleHunkViewModePrev(), // < for previous hunk view mode
-        '>' => try app.cycleHunkViewMode(), // > for next hunk view mode
+        '\t' => {
+            // Tab cycles hunk view mode, Shift+Tab goes backwards
+            if (key.mods.shift) {
+                try app.cycleHunkViewModePrev();
+            } else {
+                try app.cycleHunkViewMode();
+            }
+        },
         'r' => try app.refresh(),
         'y' => try app.yankCurrentCommentToClipboard(),
         'Y' => try app.yankAllCommentsToClipboard(),
@@ -266,17 +298,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.executeFindInLine(last.command, last.char);
             }
         },
-        ',' => { // Repeat last find in opposite direction
-            if (app.state.last_find) |last| {
-                const opposite_cmd = switch (last.command) {
-                    .f => FindCommand.F,
-                    .F => FindCommand.f,
-                    .t => FindCommand.T,
-                    .T => FindCommand.t,
-                };
-                app.executeFindInLine(opposite_cmd, last.char);
-            }
-        },
+        ',' => app.state.pending_leader = true, // Leader key - wait for command
         'z' => app.state.pending_z = true, // Wait for second z for zz (center cursor)
         '[' => app.state.pending_bracket = true, // Wait for second character (like [h)
         ']' => app.state.pending_close_bracket = true, // Wait for second character (like ]h)

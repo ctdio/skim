@@ -98,6 +98,7 @@ pub const App = struct {
     blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
     acp_manager: ?*acp.AcpManager, // ACP agent session manager
     acp_connect_thread: ?std.Thread, // Background thread for ACP connection
+    in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
 
     const Mode = enum {
         normal, // Normal navigation and viewing
@@ -167,6 +168,7 @@ pub const App = struct {
         review_panel_open: bool, // Whether the review log side panel is visible
         review_panel_style: ReviewPanelStyle, // Sidebar or dialog style
         pending_ctrl_w: bool, // Waiting for second key in Ctrl+w chord
+        pending_leader: bool, // Waiting for second key after leader (,)
 
         // Temporary status message
         status_message: ?[]const u8, // Message to show in status bar
@@ -263,6 +265,8 @@ pub const App = struct {
                 .report_all_as_ctl_seqs = true,
                 .report_text = true,
             },
+            // Enable system clipboard allocator for paste support (OSC 52)
+            .system_clipboard_allocator = allocator,
         });
         errdefer vx.deinit(allocator, tty.writer());
 
@@ -373,6 +377,7 @@ pub const App = struct {
                 .review_panel_open = false,
                 .review_panel_style = .sidebar,
                 .pending_ctrl_w = false,
+                .pending_leader = false,
                 .status_message = null,
                 .status_message_owned = null,
                 .status_message_time = 0,
@@ -409,6 +414,7 @@ pub const App = struct {
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
             .acp_manager = null,
             .acp_connect_thread = null,
+            .in_bracketed_paste = false,
         };
 
         // Graphite detection is lazy - happens on first access to avoid blocking startup
@@ -755,6 +761,13 @@ pub const App = struct {
             // Poll ACP agent for updates
             self.pollAcpUpdates();
 
+            // Force re-render while agent is thinking (for smooth animation)
+            if (self.acp_manager) |mgr| {
+                if (mgr.status == .prompting) {
+                    self.needs_render = true;
+                }
+            }
+
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
                 const win = self.vx.window();
@@ -925,6 +938,56 @@ pub const App = struct {
         switch (event) {
             .key_press => |key| try self.handleKey(key),
             .winsize => |ws| try self.vx.resize(self.allocator, self.tty.writer(), ws),
+            .paste_start => {
+                self.in_bracketed_paste = true;
+            },
+            .paste_end => {
+                self.in_bracketed_paste = false;
+            },
+            .paste => |text| {
+                // Handle OSC 52 paste: insert full text into active input
+                try self.handlePastedText(text);
+                // Free the text allocated by vaxis
+                self.allocator.free(text);
+            },
+            else => {},
+        }
+    }
+
+    fn handlePastedText(self: *App, text: []const u8) !void {
+        switch (self.mode) {
+            .agent => {
+                if (self.state.agent_state) |*agent_state| {
+                    // Insert pasted text into input editor
+                    for (text) |char| {
+                        if (char == '\r') continue; // Skip carriage returns
+                        agent.InputEditor.insertCharPublic(&agent_state.input, char);
+                    }
+                    self.needs_render = true;
+                }
+            },
+            .comment => {
+                // Insert into comment editor
+                if (self.state.active_comment_input) |*input| {
+                    for (text) |char| {
+                        if (char == '\r') continue;
+                        comment_editor.CommentEditor.insertCharPublic(input, char);
+                    }
+                    self.needs_render = true;
+                }
+            },
+            .search => {
+                // Insert into search input
+                for (text) |char| {
+                    if (char >= 32 and char < 127) {
+                        if (self.state.search_state.query_len < self.state.search_state.query_buffer.len - 1) {
+                            self.state.search_state.query_buffer[self.state.search_state.query_len] = char;
+                            self.state.search_state.query_len += 1;
+                        }
+                    }
+                }
+                self.needs_render = true;
+            },
             else => {},
         }
     }
@@ -1534,36 +1597,14 @@ pub const App = struct {
             .target_end_hunk_idx = null, // Single-line comment
             .target_end_line_idx = null, // Single-line comment
             .editing_comment_idx = existing_comment_idx,
-            .text_buffer = undefined,
-            .text_len = 0,
-            .cursor_pos = 0,
-            .vim_mode = .insert, // Start in insert mode for user-friendliness
-            .visual_anchor = null,
-            .pending_find = null,
-            .pending_operator = null,
-            .pending_replace = false,
-            .pending_z = false,
-            .pending_text_object = null,
-            .yank_buffer = undefined,
-            .yank_len = 0,
-            .count_prefix = null,
-            .undo_stack = undefined,
-            .undo_count = 0,
-            .undo_index = 0,
-            .last_find = null,
-            .last_change = null,
-            .command_buffer = undefined,
-            .command_len = 0,
+            .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
         };
-        @memset(&input.text_buffer, 0);
 
         // If editing existing comment, load its text
         if (existing_comment_idx) |idx| {
             if (self.state.comment_store.getComment(idx)) |comment| {
-                const copy_len = @min(comment.text.len, input.text_buffer.len);
-                @memcpy(input.text_buffer[0..copy_len], comment.text[0..copy_len]);
-                input.text_len = copy_len;
-                input.cursor_pos = copy_len; // Start cursor at end
+                input.vim.setText(comment.text);
+                input.vim.cursor_pos = input.vim.text_len; // Start cursor at end
             }
         }
 
@@ -1608,35 +1649,15 @@ pub const App = struct {
         const is_single_line = (start_line == end_line);
 
         // Initialize input buffer for range comment
-        var input = comment_editor.CommentEditor.State{
+        const input = comment_editor.CommentEditor.State{
             .target_file_path = file_path,
             .target_hunk_idx = start_code.hunk_idx,
             .target_line_idx = start_code.line_idx_in_hunk,
             .target_end_hunk_idx = if (is_single_line) null else end_code.hunk_idx,
             .target_end_line_idx = if (is_single_line) null else end_code.line_idx_in_hunk,
             .editing_comment_idx = null, // Always creating new comment from visual mode
-            .text_buffer = undefined,
-            .text_len = 0,
-            .cursor_pos = 0,
-            .vim_mode = .insert, // Start in insert mode for user-friendliness
-            .visual_anchor = null,
-            .pending_find = null,
-            .pending_operator = null,
-            .pending_replace = false,
-            .pending_z = false,
-            .pending_text_object = null,
-            .yank_buffer = undefined,
-            .yank_len = 0,
-            .count_prefix = null,
-            .undo_stack = undefined,
-            .undo_count = 0,
-            .undo_index = 0,
-            .last_find = null,
-            .last_change = null,
-            .command_buffer = undefined,
-            .command_len = 0,
+            .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
         };
-        @memset(&input.text_buffer, 0);
 
         self.state.active_comment_input = input;
         self.mode = .comment;
@@ -1656,7 +1677,7 @@ pub const App = struct {
         if (self.state.active_comment_input == null) return;
 
         const input = self.state.active_comment_input.?;
-        if (input.text_len == 0) {
+        if (input.vim.text_len == 0) {
             // Empty comment - delete if editing existing, otherwise do nothing
             if (input.editing_comment_idx) |idx| {
                 try self.state.comment_store.deleteComment(idx);
@@ -1664,7 +1685,7 @@ pub const App = struct {
             return;
         }
 
-        const comment_text = input.text_buffer[0..input.text_len];
+        const comment_text = input.vim.text_buffer[0..input.vim.text_len];
 
         // Get line context for the comment
         const file = &self.state.files[self.state.current_file_idx];
@@ -3210,6 +3231,10 @@ pub const App = struct {
                         mgr.sendNextQueuedPrompt();
                     } else if (mgr.status == .failed) {
                         self.showStatusMessage("Failed to connect to agent");
+                        // Add error message to chat history so user can see what happened
+                        if (self.state.agent_state) |*agent_state| {
+                            agent_state.addMessage(.system, "Connection failed. Press 'a' to close this panel and try again.") catch {};
+                        }
                         // Clean up failed manager
                         mgr.deinit();
                         self.allocator.destroy(mgr);
@@ -3350,6 +3375,34 @@ pub const App = struct {
                     self.showStatusMessage(status_msg);
                     self.needs_render = true;
                 },
+                .plan_update => {
+                    // Update agent plan
+                    if (self.state.agent_state) |*agent_state| {
+                        if (msg.plan_entries) |entries| {
+                            std.log.info("Updating agent plan with {d} entries", .{entries.len});
+                            agent_state.updatePlan(entries) catch |err| {
+                                std.log.err("Failed to update agent plan: {any}", .{err});
+                            };
+                        }
+                    }
+
+                    // Show status
+                    self.showStatusMessage("Agent: plan updated");
+                    self.needs_render = true;
+                },
+                .commands_update => {
+                    // Update available slash commands
+                    if (self.state.agent_state) |*agent_state| {
+                        if (msg.available_commands) |commands| {
+                            std.log.info("Updating available commands: {d}", .{commands.len});
+                            agent_state.updateAvailableCommands(commands) catch |err| {
+                                std.log.err("Failed to update commands: {any}", .{err});
+                            };
+                        }
+                    }
+                    self.needs_render = true;
+                },
+                // Note: If agent doesn't send commands, we add mock ones in startAcpSession
             }
         }
 

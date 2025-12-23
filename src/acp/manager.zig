@@ -19,6 +19,10 @@ pub const AcpManager = struct {
     agent_name: ?[]const u8,
     session_id: ?[]const u8,
 
+    // Session modes
+    available_modes: std.ArrayListUnmanaged(OwnedModeInfo),
+    current_mode_id: ?[]const u8,
+
     // Message callbacks
     on_message: ?*const fn (text: []const u8, ctx: ?*anyopaque) void,
     on_tool_call: ?*const fn (tool: ToolCallInfo, ctx: ?*anyopaque) void,
@@ -43,6 +47,19 @@ pub const AcpManager = struct {
         failed,
     };
 
+    /// Owned mode info - strings need to be freed
+    pub const OwnedModeInfo = struct {
+        id: []const u8,
+        name: ?[]const u8,
+        description: ?[]const u8,
+
+        pub fn deinit(self: *OwnedModeInfo, allocator: Allocator) void {
+            allocator.free(self.id);
+            if (self.name) |n| allocator.free(n);
+            if (self.description) |d| allocator.free(d);
+        }
+    };
+
     pub const PendingMessage = struct {
         kind: Kind,
         text: []const u8, // Owned - title for tool messages, text for others
@@ -57,6 +74,10 @@ pub const AcpManager = struct {
         tool_stdout: ?[]const u8 = null,
         tool_stderr: ?[]const u8 = null,
         tool_status: types.ToolCallStatus = .pending,
+        // For plan messages
+        plan_entries: ?[]protocol.PlanEntry = null,
+        // For commands update
+        available_commands: ?[]protocol.AvailableCommand = null,
 
         pub const Kind = enum {
             agent_text,
@@ -65,6 +86,8 @@ pub const AcpManager = struct {
             tool_update, // Tool call status/output update
             tool_diff,
             error_msg,
+            plan_update, // Agent plan update
+            commands_update, // Available slash commands update
         };
 
         pub fn deinit(self: *PendingMessage, allocator: Allocator) void {
@@ -77,6 +100,20 @@ pub const AcpManager = struct {
             if (self.tool_command) |c| allocator.free(c);
             if (self.tool_stdout) |s| allocator.free(s);
             if (self.tool_stderr) |s| allocator.free(s);
+            if (self.plan_entries) |entries| {
+                for (entries) |entry| {
+                    allocator.free(entry.content);
+                }
+                allocator.free(entries);
+            }
+            if (self.available_commands) |commands| {
+                for (commands) |cmd| {
+                    allocator.free(cmd.name);
+                    allocator.free(cmd.description);
+                    if (cmd.input) |input| allocator.free(input.hint);
+                }
+                allocator.free(commands);
+            }
         }
     };
 
@@ -135,6 +172,8 @@ pub const AcpManager = struct {
             .status = .disconnected,
             .agent_name = null,
             .session_id = null,
+            .available_modes = .{},
+            .current_mode_id = null,
             .on_message = null,
             .on_tool_call = null,
             .callback_ctx = null,
@@ -200,6 +239,35 @@ pub const AcpManager = struct {
         self.session_id = self.allocator.dupe(u8, sid) catch null;
         self.status = .session_active;
         std.log.info("ACP: Session created: {s}", .{sid});
+
+        // Copy session modes from client
+        if (acp.getSessionModes()) |modes| {
+            self.clearModes();
+
+            // Copy current mode id
+            if (modes.current_mode_id) |id| {
+                self.current_mode_id = self.allocator.dupe(u8, id) catch null;
+            }
+
+            // Copy available modes
+            for (modes.available_modes) |mode| {
+                const owned_mode = OwnedModeInfo{
+                    .id = self.allocator.dupe(u8, mode.id) catch continue,
+                    .name = if (mode.name) |n| self.allocator.dupe(u8, n) catch null else null,
+                    .description = if (mode.description) |d| self.allocator.dupe(u8, d) catch null else null,
+                };
+                self.available_modes.append(self.allocator, owned_mode) catch {
+                    self.allocator.free(owned_mode.id);
+                    if (owned_mode.name) |n| self.allocator.free(n);
+                    if (owned_mode.description) |d| self.allocator.free(d);
+                };
+            }
+
+            std.log.info("ACP: Loaded {d} session modes, current={s}", .{
+                self.available_modes.items.len,
+                self.current_mode_id orelse "(none)",
+            });
+        }
     }
 
     /// Send a prompt to the agent (non-blocking).
@@ -283,10 +351,54 @@ pub const AcpManager = struct {
         return self.queued_prompts.items.len;
     }
 
+    /// Cancel the current prompt (send interrupt to agent).
+    /// Returns true if cancellation was sent, false if no prompt was active.
+    pub fn cancelPrompt(self: *AcpManager) bool {
+        const acp = self.acp_client orelse return false;
+
+        // Only cancel if we're currently prompting
+        if (self.pending_prompt_id == null or self.status != .prompting) {
+            std.log.debug("ACP Manager: cancelPrompt called but no active prompt", .{});
+            return false;
+        }
+
+        std.log.info("ACP Manager: sending session/cancel", .{});
+
+        acp.cancelPrompt() catch |err| {
+            std.log.err("ACP Manager: failed to send cancel: {any}", .{err});
+            return false;
+        };
+
+        // Clear pending prompt - we'll receive a cancelled stop_reason in the response
+        self.pending_prompt_id = null;
+        self.status = .session_active;
+
+        return true;
+    }
+
+    /// Check if agent is currently processing a prompt
+    pub fn isPrompting(self: *AcpManager) bool {
+        return self.status == .prompting and self.pending_prompt_id != null;
+    }
+
     /// Poll for new messages from the agent (non-blocking).
     /// Returns slice of pending messages. Call clearMessages() after processing.
     pub fn poll(self: *AcpManager) Error![]PendingMessage {
         const acp = self.acp_client orelse return self.pending_messages.items;
+
+        // Check if agent process died unexpectedly
+        if (!acp.isAlive() and self.status != .failed) {
+            std.log.warn("ACP Manager: agent process died unexpectedly", .{});
+            self.status = .failed;
+            const err_text = self.allocator.dupe(u8, "Agent stopped. Press 'a' to close panel and retry.") catch return self.pending_messages.items;
+            self.pending_messages.append(self.allocator, .{
+                .kind = .error_msg,
+                .text = err_text,
+            }) catch {
+                self.allocator.free(err_text);
+            };
+            return self.pending_messages.items;
+        }
 
         // Poll the transport for new messages
         const messages = acp.transport.poll() catch return self.pending_messages.items;
@@ -299,6 +411,12 @@ pub const AcpManager = struct {
         for (messages) |msg| {
             switch (msg) {
                 .notification => |n| {
+                    std.log.info("ACP Manager: notification '{s}'", .{n.method});
+                    if (n.params_json) |pjson| {
+                        // Log first 300 chars of params for debugging
+                        const log_len = @min(pjson.len, 300);
+                        std.log.info("ACP Manager: params[0..{d}]: {s}", .{ log_len, pjson[0..log_len] });
+                    }
                     if (std.mem.eql(u8, n.method, "session/update")) {
                         if (n.params_json) |pjson| {
                             self.processSessionUpdate(pjson) catch {};
@@ -451,7 +569,8 @@ pub const AcpManager = struct {
             std.mem.eql(u8, method, "session/prompt") or
             std.mem.eql(u8, method, "session/cancel") or
             std.mem.eql(u8, method, "session/resume") or
-            std.mem.eql(u8, method, "session/fork");
+            std.mem.eql(u8, method, "session/fork") or
+            std.mem.eql(u8, method, "session/set_mode");
     }
 
     /// Clear processed messages
@@ -487,6 +606,96 @@ pub const AcpManager = struct {
         };
     }
 
+    // =========================================================================
+    // Session Modes
+    // =========================================================================
+
+    /// Check if agent supports session modes
+    pub fn hasModes(self: *AcpManager) bool {
+        return self.available_modes.items.len > 0;
+    }
+
+    /// Get the current mode ID
+    pub fn getCurrentModeId(self: *AcpManager) ?[]const u8 {
+        return self.current_mode_id;
+    }
+
+    /// Get the current mode name for display
+    pub fn getCurrentModeName(self: *AcpManager) []const u8 {
+        const current_id = self.current_mode_id orelse return "";
+        for (self.available_modes.items) |mode| {
+            if (std.mem.eql(u8, mode.id, current_id)) {
+                return mode.name orelse mode.id;
+            }
+        }
+        return current_id;
+    }
+
+    /// Get available modes
+    pub fn getAvailableModes(self: *AcpManager) []const OwnedModeInfo {
+        return self.available_modes.items;
+    }
+
+    /// Set the session mode
+    pub fn setMode(self: *AcpManager, mode_id: []const u8) Error!void {
+        const acp = self.acp_client orelse return error.NotConnected;
+        const sid = self.session_id orelse return error.NoSession;
+
+        std.log.info("ACP Manager: setting mode to '{s}'", .{mode_id});
+
+        const params = protocol.SessionSetModeParams{
+            .session_id = sid,
+            .mode_id = mode_id,
+        };
+
+        const params_json = acp.transport.encoder.encodeSessionSetModeParams(params) catch return error.PromptFailed;
+        defer self.allocator.free(params_json);
+
+        // Send as notification (no response expected for mode change)
+        acp.transport.sendNotification("session/set_mode", params_json) catch |err| {
+            std.log.err("ACP Manager: failed to send set_mode: {any}", .{err});
+            return error.PromptFailed;
+        };
+
+        // Update local state immediately (agent will confirm via session/update)
+        if (self.current_mode_id) |old| {
+            self.allocator.free(old);
+        }
+        self.current_mode_id = self.allocator.dupe(u8, mode_id) catch null;
+    }
+
+    /// Cycle to the next mode (for Shift+Tab)
+    /// Returns the name of the new mode, or null if no modes available
+    pub fn cycleToNextMode(self: *AcpManager) ?[]const u8 {
+        if (self.available_modes.items.len == 0) return null;
+
+        const current_id = self.current_mode_id orelse {
+            // No current mode, select the first one
+            const first = self.available_modes.items[0];
+            self.setMode(first.id) catch return null;
+            return first.name orelse first.id;
+        };
+
+        // Find current mode index
+        var current_idx: ?usize = null;
+        for (self.available_modes.items, 0..) |mode, i| {
+            if (std.mem.eql(u8, mode.id, current_id)) {
+                current_idx = i;
+                break;
+            }
+        }
+
+        // Cycle to next mode
+        const next_idx = if (current_idx) |idx|
+            (idx + 1) % self.available_modes.items.len
+        else
+            0;
+
+        const next_mode = self.available_modes.items[next_idx];
+        self.setMode(next_mode.id) catch return null;
+        return next_mode.name orelse next_mode.id;
+    }
+
     /// Check if there's a pending permission request
     pub fn hasPendingPermission(self: *AcpManager) bool {
         return self.pending_permission != null;
@@ -505,16 +714,19 @@ pub const AcpManager = struct {
         const acp = self.acp_client orelse return error.NotConnected;
         var perm = self.pending_permission orelse return;
 
-        // Get the selected option
+        // Get the selected option (use agent-provided optionId, or ACP standard fallbacks)
         const option_id = if (perm.options.len > 0)
             perm.options[perm.selected_index].option_id
         else if (allow)
             "allow_once"
         else
-            "deny";
+            "reject_once";
 
-        // Build and send response
-        const result_json = try std.fmt.allocPrint(self.allocator, "{{\"selectedOption\":\"{s}\"}}", .{option_id});
+        // Build and send response per ACP spec: {"selectedOption": "option_id"}
+        const result_json = acp.transport.encoder.encodePermissionResult(option_id) catch |err| {
+            std.log.err("ACP Manager: failed to encode permission result: {any}", .{err});
+            return error.PromptFailed;
+        };
         defer self.allocator.free(result_json);
 
         std.log.info("ACP Manager: responding to permission with '{s}'", .{option_id});
@@ -530,10 +742,13 @@ pub const AcpManager = struct {
         const acp = self.acp_client orelse return error.NotConnected;
         var perm = self.pending_permission orelse return;
 
-        // Send cancelled response
-        const result_json =
-            \\{"outcome":"cancelled"}
-        ;
+        // Send cancelled response using encoder (null = cancelled)
+        const result_json = acp.transport.encoder.encodePermissionResult(null) catch |err| {
+            std.log.err("ACP Manager: failed to encode cancel result: {any}", .{err});
+            return error.PromptFailed;
+        };
+        defer self.allocator.free(result_json);
+
         std.log.info("ACP Manager: cancelling permission request", .{});
         try acp.transport.sendResponse(perm.request_id, result_json);
 
@@ -559,10 +774,23 @@ pub const AcpManager = struct {
             self.session_id = null;
         }
 
+        self.clearModes();
         self.clearMessages();
         self.clearQueuedPrompts();
         self.pending_prompt_id = null;
         self.status = .disconnected;
+    }
+
+    /// Clear session modes
+    fn clearModes(self: *AcpManager) void {
+        for (self.available_modes.items) |*mode| {
+            mode.deinit(self.allocator);
+        }
+        self.available_modes.clearRetainingCapacity();
+        if (self.current_mode_id) |id| {
+            self.allocator.free(id);
+            self.current_mode_id = null;
+        }
     }
 
     /// Clear queued prompts
@@ -577,6 +805,7 @@ pub const AcpManager = struct {
         self.disconnect();
         self.pending_messages.deinit(self.allocator);
         self.queued_prompts.deinit(self.allocator);
+        self.available_modes.deinit(self.allocator);
         if (self.pending_permission) |*perm| {
             perm.deinit(self.allocator);
         }
@@ -674,35 +903,68 @@ pub const AcpManager = struct {
                 }
             }
 
-            // If no diff, create a tool_call message with metadata
+            // If no diff, create or update a tool_call message with metadata
             if (!has_diff) {
-                const text = self.allocator.dupe(u8, title) catch return;
-                const id_copy = self.allocator.dupe(u8, tc.tool_call_id) catch {
-                    self.allocator.free(text);
-                    return;
-                };
-                const name_copy: ?[]const u8 = if (tc.tool_name) |n|
-                    self.allocator.dupe(u8, n) catch null
-                else
-                    null;
-                const cmd_copy: ?[]const u8 = if (tc.command) |c|
-                    self.allocator.dupe(u8, c) catch null
-                else
-                    null;
+                // Check if we already have a pending message for this tool_call_id
+                // (ACP sends tool_call twice: once without params, once with params)
+                var existing: ?*PendingMessage = null;
+                for (self.pending_messages.items) |*pm| {
+                    if (pm.kind == .tool_call) {
+                        if (pm.tool_call_id) |existing_id| {
+                            if (std.mem.eql(u8, existing_id, tc.tool_call_id)) {
+                                existing = pm;
+                                break;
+                            }
+                        }
+                    }
+                }
 
-                self.pending_messages.append(self.allocator, .{
-                    .kind = .tool_call,
-                    .text = text,
-                    .tool_call_id = id_copy,
-                    .tool_name = name_copy,
-                    .tool_command = cmd_copy,
-                    .tool_status = tc.status,
-                }) catch {
-                    self.allocator.free(text);
-                    self.allocator.free(id_copy);
-                    if (name_copy) |n| self.allocator.free(n);
-                    if (cmd_copy) |c| self.allocator.free(c);
-                };
+                if (existing) |pm| {
+                    // Update existing message with new info
+                    // Update title if we got a more specific one
+                    if (!std.mem.eql(u8, title, pm.text)) {
+                        const new_text = self.allocator.dupe(u8, title) catch return;
+                        self.allocator.free(pm.text);
+                        pm.text = new_text;
+                    }
+                    // Update command if provided
+                    if (tc.command) |cmd| {
+                        if (pm.tool_command == null) {
+                            pm.tool_command = self.allocator.dupe(u8, cmd) catch null;
+                        }
+                    }
+                    // Update status
+                    pm.tool_status = tc.status;
+                } else {
+                    // Create new pending message
+                    const text = self.allocator.dupe(u8, title) catch return;
+                    const id_copy = self.allocator.dupe(u8, tc.tool_call_id) catch {
+                        self.allocator.free(text);
+                        return;
+                    };
+                    const name_copy: ?[]const u8 = if (tc.tool_name) |n|
+                        self.allocator.dupe(u8, n) catch null
+                    else
+                        null;
+                    const cmd_copy: ?[]const u8 = if (tc.command) |c|
+                        self.allocator.dupe(u8, c) catch null
+                    else
+                        null;
+
+                    self.pending_messages.append(self.allocator, .{
+                        .kind = .tool_call,
+                        .text = text,
+                        .tool_call_id = id_copy,
+                        .tool_name = name_copy,
+                        .tool_command = cmd_copy,
+                        .tool_status = tc.status,
+                    }) catch {
+                        self.allocator.free(text);
+                        self.allocator.free(id_copy);
+                        if (name_copy) |n| self.allocator.free(n);
+                        if (cmd_copy) |c| self.allocator.free(c);
+                    };
+                }
             }
         }
 
@@ -756,6 +1018,134 @@ pub const AcpManager = struct {
                 if (name_copy) |n| self.allocator.free(n);
                 if (output_text) |s| self.allocator.free(s);
                 if (stderr_copy) |s| self.allocator.free(s);
+            };
+        }
+
+        // Handle plan updates
+        if (update.plan) |plan| {
+            std.log.debug("ACP Manager: plan update with {d} entries", .{plan.entries.len});
+
+            // Copy plan entries
+            const entries_copy = self.allocator.alloc(protocol.PlanEntry, plan.entries.len) catch return;
+            var copied_count: usize = 0;
+
+            for (plan.entries) |entry| {
+                const content_copy = self.allocator.dupe(u8, entry.content) catch {
+                    // Clean up already copied entries on error
+                    for (entries_copy[0..copied_count]) |e| {
+                        self.allocator.free(e.content);
+                    }
+                    self.allocator.free(entries_copy);
+                    return;
+                };
+                entries_copy[copied_count] = .{
+                    .content = content_copy,
+                    .priority = entry.priority,
+                    .status = entry.status,
+                };
+                copied_count += 1;
+            }
+
+            self.pending_messages.append(self.allocator, .{
+                .kind = .plan_update,
+                .text = self.allocator.dupe(u8, "Plan update") catch {
+                    for (entries_copy[0..copied_count]) |e| {
+                        self.allocator.free(e.content);
+                    }
+                    self.allocator.free(entries_copy);
+                    return;
+                },
+                .plan_entries = entries_copy[0..copied_count],
+            }) catch {
+                for (entries_copy[0..copied_count]) |e| {
+                    self.allocator.free(e.content);
+                }
+                self.allocator.free(entries_copy);
+            };
+        }
+
+        // Handle current mode updates
+        if (update.current_mode_update) |mode_update| {
+            std.log.info("ACP Manager: mode update to '{s}'", .{mode_update.mode_id});
+
+            // Update local state
+            if (self.current_mode_id) |old| {
+                self.allocator.free(old);
+            }
+            self.current_mode_id = self.allocator.dupe(u8, mode_update.mode_id) catch null;
+        }
+
+        // Handle available commands updates (slash commands)
+        if (update.available_commands) |cmds_update| {
+            std.log.info("ACP Manager: available_commands update with {d} commands", .{cmds_update.commands.len});
+
+            // Copy commands
+            const commands_copy = self.allocator.alloc(protocol.AvailableCommand, cmds_update.commands.len) catch return;
+            var copied_count: usize = 0;
+
+            for (cmds_update.commands) |cmd| {
+                const name_copy = self.allocator.dupe(u8, cmd.name) catch {
+                    // Clean up on error
+                    for (commands_copy[0..copied_count]) |c| {
+                        self.allocator.free(c.name);
+                        self.allocator.free(c.description);
+                        if (c.input) |i| self.allocator.free(i.hint);
+                    }
+                    self.allocator.free(commands_copy);
+                    return;
+                };
+                const desc_copy = self.allocator.dupe(u8, cmd.description) catch {
+                    self.allocator.free(name_copy);
+                    for (commands_copy[0..copied_count]) |c| {
+                        self.allocator.free(c.name);
+                        self.allocator.free(c.description);
+                        if (c.input) |i| self.allocator.free(i.hint);
+                    }
+                    self.allocator.free(commands_copy);
+                    return;
+                };
+                const input_copy: ?protocol.AvailableCommandInput = if (cmd.input) |input| blk: {
+                    const hint_copy = self.allocator.dupe(u8, input.hint) catch {
+                        self.allocator.free(name_copy);
+                        self.allocator.free(desc_copy);
+                        for (commands_copy[0..copied_count]) |c| {
+                            self.allocator.free(c.name);
+                            self.allocator.free(c.description);
+                            if (c.input) |i| self.allocator.free(i.hint);
+                        }
+                        self.allocator.free(commands_copy);
+                        return;
+                    };
+                    break :blk .{ .hint = hint_copy };
+                } else null;
+
+                commands_copy[copied_count] = .{
+                    .name = name_copy,
+                    .description = desc_copy,
+                    .input = input_copy,
+                };
+                copied_count += 1;
+            }
+
+            self.pending_messages.append(self.allocator, .{
+                .kind = .commands_update,
+                .text = self.allocator.dupe(u8, "Commands update") catch {
+                    for (commands_copy[0..copied_count]) |c| {
+                        self.allocator.free(c.name);
+                        self.allocator.free(c.description);
+                        if (c.input) |i| self.allocator.free(i.hint);
+                    }
+                    self.allocator.free(commands_copy);
+                    return;
+                },
+                .available_commands = commands_copy[0..copied_count],
+            }) catch {
+                for (commands_copy[0..copied_count]) |c| {
+                    self.allocator.free(c.name);
+                    self.allocator.free(c.description);
+                    if (c.input) |i| self.allocator.free(i.hint);
+                }
+                self.allocator.free(commands_copy);
             };
         }
     }

@@ -178,12 +178,24 @@ pub const UnifiedRenderer = struct {
 
         // Clear any remaining rows at the bottom of the screen
         // This ensures old content doesn't linger when we scroll/jump
+        // IMPORTANT: Must fill the entire row, not just the sidebar, because vaxis
+        // uses differential rendering and won't clear cells that haven't changed
         while (row < win.height) : (row += 1) {
+            // Fill the entire row with spaces first to clear old content
+            const fill_text = try RenderUtils.frameTextSlice(app, win.width);
+            @memset(fill_text, ' ');
+            var fill_seg = [_]vaxis.Cell.Segment{.{
+                .text = fill_text,
+                .style = .{},
+            }};
+            _ = win.print(&fill_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
+
+            // Then render the sidebar
             var sidebar_seg = [_]vaxis.Cell.Segment{.{
                 .text = "┃",
                 .style = sidebar_style,
             }};
-            _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0 )});
+            _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
         }
 
         // Update current_file_idx based on what's at the top of viewport (for sticky header)

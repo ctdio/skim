@@ -89,9 +89,23 @@ pub const SessionNewParams = struct {
     mcp_servers: []const McpServerConfig = &.{},
 };
 
+/// Information about an available session mode
+pub const ModeInfo = struct {
+    id: []const u8,
+    name: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+};
+
+/// Session modes configuration
+pub const SessionModes = struct {
+    current_mode_id: ?[]const u8 = null,
+    available_modes: []const ModeInfo = &.{},
+};
+
 /// Result from session/new response
 pub const SessionNewResult = struct {
     session_id: types.SessionId,
+    modes: ?SessionModes = null,
 };
 
 // =============================================================================
@@ -112,6 +126,56 @@ pub const SessionPromptResult = struct {
 /// Parameters for session/cancel request
 pub const SessionCancelParams = struct {
     session_id: types.SessionId,
+};
+
+/// Parameters for session/set_mode request
+pub const SessionSetModeParams = struct {
+    session_id: types.SessionId,
+    mode_id: []const u8,
+};
+
+// =============================================================================
+// Agent Plan
+// =============================================================================
+
+/// Priority level for plan entries
+pub const PlanEntryPriority = enum {
+    high,
+    medium,
+    low,
+
+    pub fn fromString(s: []const u8) PlanEntryPriority {
+        if (std.mem.eql(u8, s, "high")) return .high;
+        if (std.mem.eql(u8, s, "medium")) return .medium;
+        if (std.mem.eql(u8, s, "low")) return .low;
+        return .medium; // Default to medium
+    }
+};
+
+/// Status of a plan entry
+pub const PlanEntryStatus = enum {
+    pending,
+    in_progress,
+    completed,
+
+    pub fn fromString(s: []const u8) PlanEntryStatus {
+        if (std.mem.eql(u8, s, "pending")) return .pending;
+        if (std.mem.eql(u8, s, "in_progress")) return .in_progress;
+        if (std.mem.eql(u8, s, "completed")) return .completed;
+        return .pending; // Default to pending
+    }
+};
+
+/// A single entry in the agent's plan (todo item)
+pub const PlanEntry = struct {
+    content: []const u8,
+    priority: PlanEntryPriority = .medium,
+    status: PlanEntryStatus = .pending,
+};
+
+/// Plan update in session/update notification
+pub const PlanUpdate = struct {
+    entries: []const PlanEntry,
 };
 
 // =============================================================================
@@ -164,6 +228,9 @@ pub const SessionUpdateType = enum {
     agent_thought_chunk,
     tool_call,
     tool_call_update,
+    plan,
+    current_mode_update,
+    available_commands_update,
     unknown,
 
     pub fn fromString(s: []const u8) SessionUpdateType {
@@ -171,8 +238,41 @@ pub const SessionUpdateType = enum {
         if (std.mem.eql(u8, s, "agent_thought_chunk")) return .agent_thought_chunk;
         if (std.mem.eql(u8, s, "tool_call")) return .tool_call;
         if (std.mem.eql(u8, s, "tool_call_update")) return .tool_call_update;
+        if (std.mem.eql(u8, s, "plan")) return .plan;
+        if (std.mem.eql(u8, s, "current_mode_update")) return .current_mode_update;
+        if (std.mem.eql(u8, s, "available_commands_update")) return .available_commands_update;
         return .unknown;
     }
+};
+
+/// Current mode update in session/update notification
+pub const CurrentModeUpdate = struct {
+    mode_id: []const u8,
+};
+
+// =============================================================================
+// Slash Commands
+// =============================================================================
+
+/// Input specification for a slash command
+pub const AvailableCommandInput = struct {
+    /// Hint to display when input hasn't been provided
+    hint: []const u8,
+};
+
+/// A slash command advertised by the agent
+pub const AvailableCommand = struct {
+    /// Command identifier (e.g., "web", "test", "plan")
+    name: []const u8,
+    /// Human-readable description of what the command does
+    description: []const u8,
+    /// Optional input specification
+    input: ?AvailableCommandInput = null,
+};
+
+/// Available commands update in session/update notification
+pub const AvailableCommandsUpdate = struct {
+    commands: []const AvailableCommand,
 };
 
 /// Parameters for session/update notification
@@ -182,6 +282,9 @@ pub const SessionUpdateParams = struct {
     message: ?MessageUpdate = null,
     tool_call: ?ToolCall = null,
     tool_call_update: ?ToolCallUpdate = null,
+    plan: ?PlanUpdate = null,
+    current_mode_update: ?CurrentModeUpdate = null,
+    available_commands: ?AvailableCommandsUpdate = null,
 };
 
 // =============================================================================

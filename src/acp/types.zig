@@ -120,12 +120,13 @@ pub const ToolCallKind = enum {
     }
 };
 
-/// Permission option kinds
+/// Permission option kinds (per ACP spec)
+/// A hint to help Clients choose appropriate icons and UI treatment for each option.
 pub const PermissionKind = enum {
-    allow_once,
-    allow_always,
-    reject_once,
-    reject_always,
+    allow_once, // Allow this operation only this time
+    allow_always, // Allow this operation and remember the choice
+    reject_once, // Reject this operation only this time
+    reject_always, // Reject this operation and remember the choice
 
     pub fn fromString(s: []const u8) ?PermissionKind {
         const map = std.StaticStringMap(PermissionKind).initComptime(.{

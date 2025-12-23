@@ -64,6 +64,14 @@ pub const Color = struct {
     pub const conflict_theirs_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 55, 40, 70 } }; // Dark purple background #372846
     pub const conflict_base_fg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 139, 148, 158 } }; // Gray #8B949E (|||||||)
     pub const conflict_base_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 45, 45, 50 } }; // Dark gray background #2D2D32
+
+    // Chat/Agent panel colors - neutral, easy-to-read palette
+    pub const chat_user: vaxis.Cell.Color = .{ .rgb = [3]u8{ 139, 148, 158 } }; // Muted gray #8B949E
+    pub const chat_agent: vaxis.Cell.Color = .{ .rgb = [3]u8{ 200, 200, 200 } }; // Light gray #C8C8C8
+    pub const chat_thinking: vaxis.Cell.Color = .{ .rgb = [3]u8{ 110, 118, 129 } }; // Dim gray #6E7681
+    pub const chat_system: vaxis.Cell.Color = .{ .rgb = [3]u8{ 180, 160, 100 } }; // Muted yellow #B4A064
+    pub const chat_tool: vaxis.Cell.Color = .{ .rgb = [3]u8{ 139, 148, 158 } }; // Muted gray #8B949E
+    pub const chat_content: vaxis.Cell.Color = .{ .rgb = [3]u8{ 200, 200, 200 } }; // Light gray for content #C8C8C8
 };
 
 // Layout constants

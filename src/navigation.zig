@@ -321,7 +321,7 @@ pub const Navigation = struct {
         var height: usize = 4;
 
         // Count newlines in the text
-        const text = input.text_buffer[0..input.text_len];
+        const text = input.vim.text_buffer[0..input.vim.text_len];
         var newline_count: usize = 0;
         for (text) |ch| {
             if (ch == '\n') {

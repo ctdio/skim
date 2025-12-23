@@ -26,6 +26,9 @@ pub const Client = struct {
     // Active session
     session_id: ?types.SessionId,
 
+    // Session modes (from session/new response)
+    session_modes: ?protocol.SessionModes,
+
     pub const State = enum {
         disconnected,
         connecting,
@@ -65,6 +68,7 @@ pub const Client = struct {
             .agent_info = null,
             .agent_capabilities = null,
             .session_id = null,
+            .session_modes = null,
         };
 
         return self;
@@ -186,10 +190,21 @@ pub const Client = struct {
                     const result = self.transport.decoder.parseSessionNewResult(result_json) catch return error.ProtocolError;
                     // Decoder already duplicates the session_id, so we own this memory
                     self.session_id = result.session_id;
+                    self.session_modes = result.modes;
                     self.state = .session_active;
                     std.log.info("ACP Client: session created with id: {s}", .{result.session_id});
 
-                    // Drain and process any requests the agent sent during session creation
+                    // Log available modes
+                    if (result.modes) |modes| {
+                        std.log.info("ACP Client: session has {d} available modes, current={s}", .{
+                            modes.available_modes.len,
+                            modes.current_mode_id orelse "(none)",
+                        });
+                    }
+
+                    // Process any requests the agent sent during session creation
+                    // NOTE: Don't clear messages here - notifications (like available_commands_update)
+                    // need to be processed by the manager's poll loop
                     const pending = self.transport.poll() catch return result.session_id;
                     for (pending) |msg| {
                         switch (msg) {
@@ -197,10 +212,14 @@ pub const Client = struct {
                                 std.log.info("ACP Client: processing queued request after session creation: {s}", .{req.method});
                                 self.handleAgentRequest(req) catch {};
                             },
+                            .notification => |n| {
+                                std.log.info("ACP Client: notification pending after session creation: {s}", .{n.method});
+                                // Leave notifications for the manager to process
+                            },
                             else => {},
                         }
                     }
-                    self.transport.clearMessages();
+                    // Don't clear - let manager poll and process notifications
 
                     return result.session_id;
                 } else {
@@ -379,7 +398,8 @@ pub const Client = struct {
             std.mem.eql(u8, method, "session/prompt") or
             std.mem.eql(u8, method, "session/cancel") or
             std.mem.eql(u8, method, "session/resume") or
-            std.mem.eql(u8, method, "session/fork");
+            std.mem.eql(u8, method, "session/fork") or
+            std.mem.eql(u8, method, "session/set_mode");
     }
 
     /// Handle a request from the agent
@@ -459,6 +479,11 @@ pub const Client = struct {
     /// Get agent capabilities (available after initialization)
     pub fn getAgentCapabilities(self: *Client) ?capabilities.AgentCapabilities {
         return self.agent_capabilities;
+    }
+
+    /// Get session modes (available after session creation)
+    pub fn getSessionModes(self: *Client) ?protocol.SessionModes {
+        return self.session_modes;
     }
 
     fn nextRequestId(self: *Client) i64 {

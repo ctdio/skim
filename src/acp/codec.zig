@@ -351,6 +351,21 @@ pub const Encoder = struct {
         return output.toOwnedSlice(self.allocator);
     }
 
+    /// Encode session/set_mode params to JSON
+    pub fn encodeSessionSetModeParams(self: *Encoder, params: protocol.SessionSetModeParams) ![]u8 {
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(self.allocator);
+        const writer = output.writer(self.allocator);
+
+        try writer.writeAll("{\"sessionId\":\"");
+        try writeJsonEscaped(writer, params.session_id);
+        try writer.writeAll("\",\"modeId\":\"");
+        try writeJsonEscaped(writer, params.mode_id);
+        try writer.writeAll("\"}");
+
+        return output.toOwnedSlice(self.allocator);
+    }
+
     /// Encode fs/read_text_file result to JSON
     pub fn encodeReadTextFileResult(self: *Encoder, result: protocol.ReadTextFileResult) ![]u8 {
         var output: std.ArrayList(u8) = .{};
@@ -364,18 +379,20 @@ pub const Encoder = struct {
         return output.toOwnedSlice(self.allocator);
     }
 
-    /// Encode permission response to JSON
+    /// Encode permission response to JSON per ACP spec:
+    /// https://agentclientprotocol.com/protocol/tool-calls#requesting-permission
+    /// Result: {"outcome":{"outcome":"selected","optionId":"..."}} or {"outcome":{"outcome":"cancelled"}}
     pub fn encodePermissionResult(self: *Encoder, selected_option: ?[]const u8) ![]u8 {
         var output: std.ArrayList(u8) = .{};
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
         if (selected_option) |option| {
-            try writer.writeAll("{\"selectedOption\":\"");
+            try writer.writeAll("{\"outcome\":{\"outcome\":\"selected\",\"optionId\":\"");
             try writeJsonEscaped(writer, option);
-            try writer.writeAll("\"}");
+            try writer.writeAll("\"}}");
         } else {
-            try writer.writeAll("{\"outcome\":\"cancelled\"}");
+            try writer.writeAll("{\"outcome\":{\"outcome\":\"cancelled\"}}");
         }
 
         return output.toOwnedSlice(self.allocator);
@@ -517,16 +534,70 @@ pub const Decoder = struct {
 
     /// Parse session/new result from JSON
     pub fn parseSessionNewResult(self: *Decoder, json: []const u8) !protocol.SessionNewResult {
-        const parsed = try std.json.parseFromSlice(struct {
+        // Log raw response for debugging mode support
+        std.log.debug("parseSessionNewResult raw JSON: {s}", .{json});
+
+        const RawMode = struct {
+            id: []const u8,
+            name: ?[]const u8 = null,
+            description: ?[]const u8 = null,
+        };
+
+        const RawModes = struct {
+            currentModeId: ?[]const u8 = null,
+            availableModes: ?[]const RawMode = null,
+        };
+
+        const RawResult = struct {
             sessionId: []const u8,
-        }, self.allocator, json, .{
+            modes: ?RawModes = null,
+        };
+
+        const parsed = try std.json.parseFromSlice(RawResult, self.allocator, json, .{
             .ignore_unknown_fields = true,
             .allocate = .alloc_always,
         });
         defer parsed.deinit();
 
+        const r = parsed.value;
+
+        // Parse modes if present
+        var modes: ?protocol.SessionModes = null;
+        if (r.modes) |raw_modes| {
+            var available_modes: std.ArrayListUnmanaged(protocol.ModeInfo) = .{};
+            errdefer {
+                for (available_modes.items) |*m| {
+                    self.allocator.free(m.id);
+                    if (m.name) |n| self.allocator.free(n);
+                    if (m.description) |d| self.allocator.free(d);
+                }
+                available_modes.deinit(self.allocator);
+            }
+
+            if (raw_modes.availableModes) |raw_avail| {
+                for (raw_avail) |rm| {
+                    try available_modes.append(self.allocator, .{
+                        .id = try self.allocator.dupe(u8, rm.id),
+                        .name = if (rm.name) |n| try self.allocator.dupe(u8, n) else null,
+                        .description = if (rm.description) |d| try self.allocator.dupe(u8, d) else null,
+                    });
+                }
+            }
+
+            modes = .{
+                .current_mode_id = if (raw_modes.currentModeId) |id| try self.allocator.dupe(u8, id) else null,
+                .available_modes = try available_modes.toOwnedSlice(self.allocator),
+            };
+
+            std.log.info("ACP: session modes - current={s}, available={d}", .{
+                modes.?.current_mode_id orelse "none",
+                modes.?.available_modes.len,
+            });
+        }
+
         return .{
-            .session_id = try self.allocator.dupe(u8, parsed.value.sessionId),
+            .session_id = try self.allocator.dupe(u8, r.sessionId),
+            .modes = modes,
         };
     }
 
@@ -568,6 +639,7 @@ pub const Decoder = struct {
     }
 
     /// Parse session/request_permission params from JSON
+    /// Handles Claude Code ACP format where toolCallId/title are nested inside toolCall object
     pub fn parseRequestPermissionParams(self: *Decoder, json: []const u8) !ParsedPermissionRequest {
         const RawOption = struct {
             optionId: []const u8,
@@ -575,10 +647,20 @@ pub const Decoder = struct {
             kind: ?[]const u8 = null,
         };
 
+        // Claude Code ACP format: toolCallId and title are inside toolCall object
+        const RawToolCall = struct {
+            toolCallId: []const u8,
+            title: ?[]const u8 = null,
+            rawInput: ?std.json.Value = null,
+        };
+
         const RawParams = struct {
             sessionId: []const u8,
-            toolCallId: []const u8,
-            title: []const u8,
+            // Flat format (legacy)
+            toolCallId: ?[]const u8 = null,
+            title: ?[]const u8 = null,
+            // Nested format (Claude Code ACP)
+            toolCall: ?RawToolCall = null,
             description: ?[]const u8 = null,
             options: ?[]const RawOption = null,
         };
@@ -590,6 +672,21 @@ pub const Decoder = struct {
         defer parsed.deinit();
 
         const r = parsed.value;
+
+        // Extract toolCallId and title from either flat or nested format
+        const tool_call_id: []const u8 = if (r.toolCall) |tc|
+            tc.toolCallId
+        else if (r.toolCallId) |id|
+            id
+        else
+            return error.MissingField;
+
+        const title: []const u8 = if (r.toolCall) |tc|
+            tc.title orelse "Tool call"
+        else if (r.title) |t|
+            t
+        else
+            "Tool call";
 
         // Parse options
         var options: std.ArrayList(ParsedPermissionOption) = .{};
@@ -613,8 +710,8 @@ pub const Decoder = struct {
 
         return .{
             .session_id = try self.allocator.dupe(u8, r.sessionId),
-            .tool_call_id = try self.allocator.dupe(u8, r.toolCallId),
-            .title = try self.allocator.dupe(u8, r.title),
+            .tool_call_id = try self.allocator.dupe(u8, tool_call_id),
+            .title = try self.allocator.dupe(u8, title),
             .description = if (r.description) |d| try self.allocator.dupe(u8, d) else null,
             .options = try options.toOwnedSlice(self.allocator),
         };
@@ -645,7 +742,7 @@ pub const Decoder = struct {
             // Get the update type (agent_message_chunk, agent_thought_chunk, tool_call, etc.)
             if (upd.sessionUpdate) |session_update_type| {
                 update_type = protocol.SessionUpdateType.fromString(session_update_type);
-                std.log.debug("Session update type: {s}", .{session_update_type});
+                std.log.info("Codec: sessionUpdate type string: '{s}' -> {s}", .{ session_update_type, @tagName(update_type) });
             }
 
             // Extract tool name from _meta.claudeCode
@@ -671,15 +768,22 @@ pub const Decoder = struct {
                 }
             }
 
-            // Extract command from rawInput for Bash tools
+            // Extract command/file_path from rawInput for tool calls
             var command: ?[]const u8 = null;
             var description: ?[]const u8 = null;
 
             if (upd.rawInput) |raw_input| {
                 if (raw_input == .object) {
+                    // Bash tool: extract command
                     if (raw_input.object.get("command")) |cmd| {
                         if (cmd == .string) {
                             command = self.allocator.dupe(u8, cmd.string) catch null;
+                        }
+                    }
+                    // Read tool: extract file_path (use command field for display)
+                    if (raw_input.object.get("file_path")) |fp| {
+                        if (fp == .string) {
+                            command = self.allocator.dupe(u8, fp.string) catch null;
                         }
                     }
                     if (raw_input.object.get("description")) |desc| {
@@ -913,12 +1017,139 @@ pub const Decoder = struct {
             }
         }
 
+        // Handle plan updates
+        var plan_result: ?protocol.PlanUpdate = null;
+        if (update_type == .plan) {
+            if (r.update) |upd| {
+                if (upd.entries) |raw_entries| {
+                    std.log.debug("Parsing plan with {d} entries", .{raw_entries.len});
+
+                    const plan_entries = self.allocator.alloc(protocol.PlanEntry, raw_entries.len) catch return error.OutOfMemory;
+                    var entry_count: usize = 0;
+
+                    for (raw_entries) |raw_entry| {
+                        const content_copy = self.allocator.dupe(u8, raw_entry.content) catch continue;
+                        plan_entries[entry_count] = .{
+                            .content = content_copy,
+                            .priority = if (raw_entry.priority) |p|
+                                protocol.PlanEntryPriority.fromString(p)
+                            else
+                                .medium,
+                            .status = if (raw_entry.status) |s|
+                                protocol.PlanEntryStatus.fromString(s)
+                            else
+                                .pending,
+                        };
+                        entry_count += 1;
+                    }
+
+                    plan_result = .{ .entries = plan_entries[0..entry_count] };
+                }
+            }
+        }
+
+        // Handle current mode updates
+        var mode_update_result: ?protocol.CurrentModeUpdate = null;
+        if (update_type == .current_mode_update) {
+            // Check update.modeId first (nested format)
+            if (r.update) |upd| {
+                if (upd.modeId) |mode_id| {
+                    std.log.debug("Mode update from update.modeId: {s}", .{mode_id});
+                    mode_update_result = .{
+                        .mode_id = self.allocator.dupe(u8, mode_id) catch "",
+                    };
+                }
+            }
+            // Fallback to top-level currentModeUpdate
+            if (mode_update_result == null and r.currentModeUpdate != null) {
+                const mode_id = r.currentModeUpdate.?.modeId;
+                std.log.debug("Mode update from currentModeUpdate: {s}", .{mode_id});
+                mode_update_result = .{
+                    .mode_id = self.allocator.dupe(u8, mode_id) catch "",
+                };
+            }
+        }
+
+        // Handle available commands updates (slash commands)
+        var commands_result: ?protocol.AvailableCommandsUpdate = null;
+        if (update_type == .available_commands_update) {
+            std.log.info("Codec: processing available_commands_update", .{});
+            // Check update.availableCommands (nested format from agent)
+            if (r.update) |upd| {
+                if (upd.availableCommands) |raw_commands| {
+                    std.log.debug("Available commands update from update.commands: {d} commands", .{raw_commands.len});
+                    const commands = self.allocator.alloc(protocol.AvailableCommand, raw_commands.len) catch return error.OutOfMemory;
+                    var cmd_count: usize = 0;
+
+                    for (raw_commands) |raw_cmd| {
+                        const name_copy = self.allocator.dupe(u8, raw_cmd.name) catch continue;
+                        const desc_copy = self.allocator.dupe(u8, raw_cmd.description) catch {
+                            self.allocator.free(name_copy);
+                            continue;
+                        };
+                        const input_copy: ?protocol.AvailableCommandInput = if (raw_cmd.input) |input| blk: {
+                            const hint_copy = self.allocator.dupe(u8, input.hint) catch {
+                                self.allocator.free(name_copy);
+                                self.allocator.free(desc_copy);
+                                continue;
+                            };
+                            break :blk .{ .hint = hint_copy };
+                        } else null;
+
+                        commands[cmd_count] = .{
+                            .name = name_copy,
+                            .description = desc_copy,
+                            .input = input_copy,
+                        };
+                        cmd_count += 1;
+                    }
+
+                    commands_result = .{ .commands = commands[0..cmd_count] };
+                }
+            }
+            // Fallback to top-level availableCommandsUpdate
+            if (commands_result == null and r.availableCommandsUpdate != null) {
+                const raw_commands = r.availableCommandsUpdate.?.commands;
+                std.log.debug("Available commands update from availableCommandsUpdate: {d} commands", .{raw_commands.len});
+                const commands = self.allocator.alloc(protocol.AvailableCommand, raw_commands.len) catch return error.OutOfMemory;
+                var cmd_count: usize = 0;
+
+                for (raw_commands) |raw_cmd| {
+                    const name_copy = self.allocator.dupe(u8, raw_cmd.name) catch continue;
+                    const desc_copy = self.allocator.dupe(u8, raw_cmd.description) catch {
+                        self.allocator.free(name_copy);
+                        continue;
+                    };
+                    const input_copy: ?protocol.AvailableCommandInput = if (raw_cmd.input) |input| blk: {
+                        const hint_copy = self.allocator.dupe(u8, input.hint) catch {
+                            self.allocator.free(name_copy);
+                            self.allocator.free(desc_copy);
+                            continue;
+                        };
+                        break :blk .{ .hint = hint_copy };
+                    } else null;
+
+                    commands[cmd_count] = .{
+                        .name = name_copy,
+                        .description = desc_copy,
+                        .input = input_copy,
+                    };
+                    cmd_count += 1;
+                }
+
+                commands_result = .{ .commands = commands[0..cmd_count] };
+            }
+        }
+
         return .{
             .session_id = r.sessionId,
             .update_type = update_type,
             .message = message_result,
             .tool_call = tool_call_result,
             .tool_call_update = tool_call_update_result,
+            .plan = plan_result,
+            .current_mode_update = mode_update_result,
+            .available_commands = commands_result,
         };
     }
 
@@ -961,6 +1192,23 @@ const RawInitializeResult = struct {
     } = null,
 };
 
+/// Raw plan entry for JSON parsing
+const RawPlanEntry = struct {
+    content: []const u8,
+    priority: ?[]const u8 = null,
+    status: ?[]const u8 = null,
+};
+
+const RawAvailableCommandInput = struct {
+    hint: []const u8,
+};
+
+const RawAvailableCommand = struct {
+    name: []const u8,
+    description: []const u8,
+    input: ?RawAvailableCommandInput = null,
+};
+
 const RawSessionUpdate = struct {
     sessionId: []const u8,
     // Claude Code ACP uses "update" with nested content
@@ -974,6 +1222,12 @@ const RawSessionUpdate = struct {
         content: ?std.json.Value = null,
         // rawInput contains tool-specific parameters (command for Bash, file_path for Edit, etc.)
         rawInput: ?std.json.Value = null,
+        // entries for plan updates
+        entries: ?[]const RawPlanEntry = null,
+        // Mode update for current_mode_update notifications
+        modeId: ?[]const u8 = null,
+        // Available commands for slash command menu (camelCase from agent)
+        availableCommands: ?[]const RawAvailableCommand = null,
         // _meta contains Claude Code specific metadata
         _meta: ?struct {
             claudeCode: ?struct {
@@ -997,6 +1251,14 @@ const RawSessionUpdate = struct {
     } = null,
     toolCall: ?std.json.Value = null,
     toolCallUpdate: ?std.json.Value = null,
+    // Top-level currentModeUpdate (some agents may use this)
+    currentModeUpdate: ?struct {
+        modeId: []const u8,
+    } = null,
+    // Top-level availableCommandsUpdate (some agents may use this)
+    availableCommandsUpdate: ?struct {
+        commands: []const RawAvailableCommand,
+    } = null,
 };
 
 // =============================================================================

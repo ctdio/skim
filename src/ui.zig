@@ -551,7 +551,7 @@ pub const UI = struct {
                 // Show vim mode when in comment mode
                 if (app.state.active_comment_input) |input| {
                     // Check if waiting for find character
-                    if (input.pending_find) |find_cmd| {
+                    if (input.vim.pending_find) |find_cmd| {
                         const find_str = switch (find_cmd) {
                             .f => "-- f? --",
                             .t => "-- t? --",
@@ -562,7 +562,7 @@ pub const UI = struct {
                     }
 
                     // Check if waiting for motion after operator
-                    if (input.pending_operator) |operator| {
+                    if (input.vim.pending_operator) |operator| {
                         const operator_str = switch (operator) {
                             .d => "-- d (motion) --",
                             .y => "-- y (motion) --",
@@ -571,7 +571,7 @@ pub const UI = struct {
                         break :blk operator_str;
                     }
 
-                    break :blk switch (input.vim_mode) {
+                    break :blk switch (input.vim.vim_mode) {
                         .normal => "-- NORMAL (comment) --",
                         .insert => "-- INSERT (comment) --",
                         .visual => "-- VISUAL (comment) --",
@@ -591,10 +591,11 @@ pub const UI = struct {
             .agent => blk: {
                 // Show vim mode when in agent mode
                 if (app.state.agent_state) |agent_state| {
-                    break :blk switch (agent_state.input.vim_mode) {
+                    break :blk switch (agent_state.input.vim.vim_mode) {
                         .normal => "-- NORMAL (agent) --",
                         .insert => "-- INSERT (agent) --",
                         .visual => "-- VISUAL (agent) --",
+                        .command => "-- COMMAND (agent) --",
                     };
                 }
                 break :blk "-- AGENT --";
@@ -614,7 +615,7 @@ pub const UI = struct {
             .normal => "j/k:Move  |  ? for help",
             .comment => blk: {
                 if (app.state.active_comment_input) |input| {
-                    break :blk switch (input.vim_mode) {
+                    break :blk switch (input.vim.vim_mode) {
                         .normal => "i:Insert  |  :wq:Save  |  ESC:Cancel",
                         .insert => "INSERT  |  ESC:Normal",
                         .visual => "VISUAL  |  ESC:Exit",
@@ -633,13 +634,14 @@ pub const UI = struct {
             .graphite_stack => "j/k:Move  |  Enter:Select  |  ESC:Back  |  [s/]s:Navigate",
             .agent => blk: {
                 if (app.state.agent_state) |agent_state| {
-                    break :blk switch (agent_state.input.vim_mode) {
-                        .normal => "i:Insert  |  z:Full  |  q:Close  |  Tab:Back",
+                    break :blk switch (agent_state.input.vim.vim_mode) {
+                        .normal => "i:Insert  |  z:Full  |  q:Close  |  ,d:Diff",
                         .insert => "INSERT  |  Enter:Send  |  ESC:Normal",
                         .visual => "VISUAL  |  ESC:Exit",
+                        .command => "Enter:Execute  |  ESC:Cancel",
                     };
                 }
-                break :blk "Tab:Close";
+                break :blk ",d:Close";
             },
         };
 
@@ -654,11 +656,11 @@ pub const UI = struct {
         defer segments.deinit(app.allocator);
 
         if (app.mode == .comment and app.state.active_comment_input != null and
-            app.state.active_comment_input.?.vim_mode == .command)
+            app.state.active_comment_input.?.vim.vim_mode == .command)
         {
             // In command mode, show command line like vim
             const input = app.state.active_comment_input.?;
-            const command = input.command_buffer[0..input.command_len];
+            const command = input.vim.command_buffer[0..input.vim.command_len];
 
             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ":"), .style = .{ .bold = true } });
             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, command), .style = .{} });
