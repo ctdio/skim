@@ -38,6 +38,9 @@ pub const AcpManager = struct {
     // Permission request awaiting user response
     pending_permission: ?PendingPermission,
 
+    // Request ID counter for JSON-RPC requests
+    next_request_id: i64,
+
     pub const Status = enum {
         disconnected,
         discovering, // Looking for available agent in PATH
@@ -182,7 +185,15 @@ pub const AcpManager = struct {
             .pending_prompt_id = null,
             .queued_prompts = .{},
             .pending_permission = null,
+            .next_request_id = 1000, // Start high to avoid collision with client IDs
         };
+    }
+
+    /// Get next request ID for JSON-RPC requests
+    fn nextRequestId(self: *AcpManager) i64 {
+        const id = self.next_request_id;
+        self.next_request_id += 1;
+        return id;
     }
 
     /// Spawn and connect to an agent
@@ -425,6 +436,15 @@ pub const AcpManager = struct {
                     }
                 },
                 .response => |r| {
+                    // Log ALL responses for debugging
+                    if (r.id) |id| {
+                        switch (id) {
+                            .number => |n| std.log.debug("ACP Manager: received response for id={d}", .{n}),
+                            .string => |s| std.log.debug("ACP Manager: received response for id={s}", .{s}),
+                            .null_value => std.log.debug("ACP Manager: received response with null id", .{}),
+                        }
+                    }
+
                     // Check if this is a response to our pending prompt
                     if (self.pending_prompt_id) |expected_id| {
                         if (r.id) |id| {
@@ -653,8 +673,9 @@ pub const AcpManager = struct {
         const params_json = acp.transport.encoder.encodeSessionSetModeParams(params) catch return error.PromptFailed;
         defer self.allocator.free(params_json);
 
-        // Send as notification (no response expected for mode change)
-        acp.transport.sendNotification("session/set_mode", params_json) catch |err| {
+        // Send as request per ACP spec (session/set_mode is a request, not notification)
+        const request_id = self.nextRequestId();
+        _ = acp.transport.sendRequest(request_id, "session/set_mode", params_json) catch |err| {
             std.log.err("ACP Manager: failed to send set_mode: {any}", .{err});
             return error.PromptFailed;
         };

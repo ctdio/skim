@@ -265,10 +265,14 @@ fn buildArgv(allocator: Allocator, command: []const u8, args: []const []const u8
 /// This is needed for Node.js processes (like claude-code-acp) which fully buffer stdout
 /// when connected to pipes instead of TTY.
 fn needsPtyWrapper(command: []const u8) bool {
+    // TEMPORARILY DISABLED: Testing if script wrapper causes mode setting issues
+    // The script wrapper echoes input which may interfere with request/response handling
+    _ = command;
+    return false;
     // Only wrap known ACP agent commands that are Node.js-based
-    return std.mem.indexOf(u8, command, "claude-code-acp") != null or
-        std.mem.indexOf(u8, command, "gemini-cli") != null or
-        std.mem.indexOf(u8, command, "codex") != null;
+    // return std.mem.indexOf(u8, command, "claude-code-acp") != null or
+    //     std.mem.indexOf(u8, command, "gemini-cli") != null or
+    //     std.mem.indexOf(u8, command, "codex") != null;
 }
 
 /// Build argv, optionally wrapped with `script` to force PTY/line-buffered output.
