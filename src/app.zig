@@ -99,6 +99,7 @@ pub const App = struct {
     acp_manager: ?*acp.AcpManager, // ACP agent session manager
     acp_connect_thread: ?std.Thread, // Background thread for ACP connection
     in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
+    agent_only: bool, // Start in agent-only mode (no diff view)
 
     const Mode = enum {
         normal, // Normal navigation and viewing
@@ -415,6 +416,7 @@ pub const App = struct {
             .acp_manager = null,
             .acp_connect_thread = null,
             .in_bracketed_paste = false,
+            .agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false,
         };
 
         // Graphite detection is lazy - happens on first access to avoid blocking startup
@@ -687,6 +689,27 @@ pub const App = struct {
             } else |_| {
                 // Allocation failed - continue without MCP
             }
+        }
+
+        // If agent-only mode, start with agent panel open and in full-screen mode
+        if (self.agent_only) {
+            // Initialize agent state
+            const config = app_config.load(self.allocator) catch app_config.Config{};
+            const panel_side: agent.AgentState.PanelSide = switch (config.agent_panel_side) {
+                .left => .left,
+                .right => .right,
+            };
+            self.state.agent_state = agent.AgentState.init(self.allocator, panel_side);
+
+            var agent_state = &(self.state.agent_state.?);
+            agent_state.visible = true;
+            agent_state.full_screen = true;
+            self.mode = .agent;
+
+            // Start ACP session
+            self.startAcpSession() catch |err| {
+                std.log.err("Failed to start ACP session: {any}", .{err});
+            };
         }
 
         var first_render = true;

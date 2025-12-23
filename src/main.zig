@@ -47,6 +47,55 @@ pub fn main() !void {
             logging.init(.mcp);
             defer logging.deinit();
             return runMcpCommand(allocator, args);
+        } else if (std.mem.eql(u8, args[1], "diff")) {
+            // `skim diff [args]` is an alias for `skim [args]`
+            // Strip the "diff" subcommand and parse remaining args
+            logging.init(.tui);
+            defer logging.deinit();
+
+            std.log.info("TUI starting up (diff subcommand)", .{});
+
+            // Create a new args slice without the "diff" subcommand
+            var diff_args = try allocator.alloc([]const u8, args.len - 1);
+            defer allocator.free(diff_args);
+            diff_args[0] = args[0]; // Keep program name
+            for (args[2..], 0..) |arg, i| {
+                diff_args[i + 1] = arg;
+            }
+
+            const config = try parseArgs(allocator, diff_args);
+            defer config.deinit();
+
+            var app = try App.init(allocator, config);
+            defer app.deinit();
+
+            try app.run();
+            return;
+        } else if (std.mem.eql(u8, args[1], "agent")) {
+            // `skim agent` starts the agent panel directly
+            if (!app_config.isAcpEnabled(allocator)) {
+                printAcpDisabledMessage();
+                std.process.exit(1);
+            }
+            logging.init(.tui);
+            defer logging.deinit();
+
+            std.log.info("TUI starting up (agent mode)", .{});
+
+            const config = Config{
+                .allocator = allocator,
+                .diff_source = .{ .working_dir = .{ .staged = false } },
+                .mcp_port = null,
+                .serve_port = null,
+                .agent_only = true,
+            };
+            defer config.deinit();
+
+            var app = try App.init(allocator, config);
+            defer app.deinit();
+
+            try app.run();
+            return;
         }
     }
 
@@ -264,6 +313,20 @@ fn printMcpDisabledMessage() void {
     , .{});
 }
 
+fn printAcpDisabledMessage() void {
+    std.debug.print(
+        \\ACP (Agent Client Protocol) is experimental and disabled by default.
+        \\
+        \\To enable, add to ~/.skim/config.json:
+        \\  {{
+        \\    "experimental": {{
+        \\      "acp_enabled": true
+        \\    }}
+        \\  }}
+        \\
+    , .{});
+}
+
 fn printDaemonHelp() !void {
     var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
     defer file_writer.interface.flush() catch {};
@@ -337,6 +400,7 @@ const Config = struct {
     diff_source: DiffSource,
     mcp_port: ?u16, // Port to connect to MCP server
     serve_port: ?u16, // Port to run MCP server on
+    agent_only: bool, // Start in agent-only mode (no diff view)
 
     fn deinit(self: *const Config) void {
         switch (self.diff_source) {
@@ -372,7 +436,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
             i += 1;
             if (i >= args.len) {
                 std.debug.print("--connect requires a port number\n", .{});
-                try printHelp();
+                try printHelp(allocator);
                 std.process.exit(1);
             }
             mcp_port = std.fmt.parseInt(u16, args[i], 10) catch {
@@ -391,14 +455,14 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
                 serve_port = 9999; // Default port
             }
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try printHelp();
+            try printHelp(allocator);
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
             try printVersion();
             std.process.exit(0);
         } else if (arg[0] == '-') {
             std.debug.print("Unknown option: {s}\n", .{arg});
-            try printHelp();
+            try printHelp(allocator);
             std.process.exit(1);
         } else {
             try positional_args.append(allocator, arg);
@@ -436,7 +500,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
         break :blk DiffSource{ .two_refs = .{ .ref1 = ref1, .ref2 = ref2, .use_merge_base = false } };
     } else {
         std.debug.print("Too many arguments. Expected at most 2 refs.\n", .{});
-        try printHelp();
+        try printHelp(allocator);
         std.process.exit(1);
     };
 
@@ -445,28 +509,69 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
         .diff_source = diff_source,
         .mcp_port = mcp_port,
         .serve_port = serve_port,
+        .agent_only = false,
     };
 }
 
-fn printHelp() !void {
+fn printHelp(allocator: std.mem.Allocator) !void {
     var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
     defer file_writer.interface.flush() catch {};
     const stdout = &file_writer.interface;
+
+    const mcp_enabled = app_config.isMcpEnabled(allocator);
+    const acp_enabled = app_config.isAcpEnabled(allocator);
+
+    // Base usage
     try stdout.writeAll(
         \\skim - Lightning-fast code review TUI
         \\
         \\USAGE:
         \\    skim [OPTIONS] [<ref> | <ref1> <ref2> | <ref1>..<ref2> | <ref1>...<ref2>]
-        \\    skim daemon <start|stop|status|restart>
-        \\    skim mcp
+        \\    skim diff [OPTIONS] [<refs>]
+        \\
+    );
+
+    // Experimental subcommands in usage
+    if (acp_enabled) {
+        try stdout.writeAll("    skim agent\n");
+    }
+    if (mcp_enabled) {
+        try stdout.writeAll(
+            \\    skim daemon <start|stop|status|restart>
+            \\    skim mcp
+            \\
+        );
+    }
+
+    // Subcommands section
+    try stdout.writeAll(
         \\
         \\SUBCOMMANDS:
-        \\    daemon             Manage the MCP daemon (for AI agent integration)
-        \\    mcp                Run as MCP adapter (for Claude Desktop, Cursor, etc.)
+        \\    diff               Review diffs (same as running skim directly)
+        \\
+    );
+    if (acp_enabled) {
+        try stdout.writeAll("    agent              Start the AI agent panel directly (ACP mode)\n");
+    }
+    if (mcp_enabled) {
+        try stdout.writeAll(
+            \\    daemon             Manage the MCP daemon (for AI agent integration)
+            \\    mcp                Run as MCP adapter (for Claude Desktop, Cursor, etc.)
+            \\
+        );
+    }
+
+    // Options
+    try stdout.writeAll(
         \\
         \\OPTIONS:
         \\    --staged, --cached    Review staged changes (or staged vs. ref if ref provided)
-        \\    --connect <port>      Override MCP client port (default: 9999, auto-connects)
+        \\
+    );
+    if (mcp_enabled) {
+        try stdout.writeAll("    --connect <port>      Override MCP client port (default: 9999, auto-connects)\n");
+    }
+    try stdout.writeAll(
         \\    -h, --help            Print this help message
         \\    -v, --version         Print version information
         \\
@@ -481,6 +586,7 @@ fn printHelp() !void {
         \\
         \\EXAMPLES:
         \\    skim                      # Working directory changes
+        \\    skim diff main            # Working dir vs. main branch (same as 'skim main')
         \\    skim --staged             # Staged changes
         \\    skim main                 # Working dir vs. main branch
         \\    skim --staged main        # Staged vs. main branch
@@ -489,10 +595,28 @@ fn printHelp() !void {
         \\    skim main...feature       # Changes on feature since diverging from main
         \\    skim HEAD~5               # Working dir vs. 5 commits ago
         \\
-        \\AI INTEGRATION:
-        \\    skim daemon start         # Start MCP daemon
-        \\    skim daemon status        # Check daemon status
-        \\    skim mcp                  # Run MCP adapter (for agent configs)
+    );
+    if (acp_enabled) {
+        try stdout.writeAll("    skim agent                # Open AI agent directly\n");
+    }
+
+    // AI integration section (only if any experimental feature is enabled)
+    if (acp_enabled or mcp_enabled) {
+        try stdout.writeAll("\nAI INTEGRATION:\n");
+        if (acp_enabled) {
+            try stdout.writeAll("    skim agent                # Open AI agent panel (full-screen)\n");
+        }
+        if (mcp_enabled) {
+            try stdout.writeAll(
+                \\    skim daemon start         # Start MCP daemon
+                \\    skim daemon status        # Check daemon status
+                \\    skim mcp                  # Run MCP adapter (for agent configs)
+                \\
+            );
+        }
+    }
+
+    try stdout.writeAll(
         \\
         \\KEYBINDINGS:
         \\    h/l or Ctrl-n/p    Navigate files
@@ -732,4 +856,24 @@ test "parse args: connect with staged" {
     try std.testing.expect(config.diff_source.working_dir.staged == true);
     try std.testing.expect(config.mcp_port != null);
     try std.testing.expectEqual(@as(u16, 8080), config.mcp_port.?);
+}
+
+test "parse args: agent_only is false by default" {
+    const allocator = std.testing.allocator;
+    const args = &[_][]const u8{"skim"};
+
+    const config = try parseArgs(allocator, args);
+    defer config.deinit();
+
+    try std.testing.expect(config.agent_only == false);
+}
+
+test "parse args: agent_only is false for single ref" {
+    const allocator = std.testing.allocator;
+    const args = &[_][]const u8{ "skim", "main" };
+
+    const config = try parseArgs(allocator, args);
+    defer config.deinit();
+
+    try std.testing.expect(config.agent_only == false);
 }
