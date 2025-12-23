@@ -40,6 +40,7 @@ pub const AcpManager = struct {
 
     pub const Status = enum {
         disconnected,
+        discovering, // Looking for available agent in PATH
         connecting,
         connected,
         session_active,
@@ -598,6 +599,7 @@ pub const AcpManager = struct {
     pub fn getStatusString(self: *AcpManager) []const u8 {
         return switch (self.status) {
             .disconnected => "Disconnected",
+            .discovering => "Discovering...",
             .connecting => "Connecting...",
             .connected => "Connected",
             .session_active => "Ready",

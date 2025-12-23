@@ -4,6 +4,7 @@ const App = @import("../app.zig").App;
 const FindCommand = @import("../app.zig").App.FindCommand;
 const navigation = @import("../navigation.zig");
 const Navigation = navigation.Navigation;
+const app_config = @import("../config.zig");
 
 /// Handle keyboard input when in normal mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -124,8 +125,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         };
         switch (effective_key) {
             'l' => {
-                // Focus right (review panel) - enter review_log mode
-                if (app.state.review_panel_open) {
+                // Focus right (review panel) - enter review_log mode (MCP feature)
+                if (app_config.isMcpEnabled(app.allocator) and app.state.review_panel_open) {
                     app.mode = .review_log;
                     app.needs_render = true;
                 }
@@ -134,8 +135,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // Focus left (diff) - already in normal mode, no-op
             },
             'w' => {
-                // Cycle focus - enter review_log mode if panel is open
-                if (app.state.review_panel_open) {
+                // Cycle focus - enter review_log mode if panel is open (MCP feature)
+                if (app_config.isMcpEnabled(app.allocator) and app.state.review_panel_open) {
                     app.mode = .review_log;
                     app.needs_render = true;
                 }
@@ -154,16 +155,20 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
         switch (key.codepoint) {
             'a' => {
-                // Toggle agent panel
-                try app.toggleAgentPanel();
+                // Toggle agent panel (ACP feature)
+                if (app_config.isAcpEnabled(app.allocator)) {
+                    try app.toggleAgentPanel();
+                }
             },
             'd' => {
-                // Focus diff - if in agent mode, return to normal
-                if (app.state.agent_state) |*agent_state| {
-                    if (agent_state.visible) {
-                        agent_state.visible = false;
-                        app.mode = .normal;
-                        app.needs_render = true;
+                // Focus diff - if in agent mode, return to normal (ACP feature)
+                if (app_config.isAcpEnabled(app.allocator)) {
+                    if (app.state.agent_state) |*agent_state| {
+                        if (agent_state.visible) {
+                            agent_state.visible = false;
+                            app.mode = .normal;
+                            app.needs_render = true;
+                        }
                     }
                 }
             },
@@ -313,8 +318,18 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.updateCurrentFileAndTriggerHighlighting();
         },
         '?' => app.mode = .help, // Show help overlay
-        'R' => try app.startReview(), // Start AI review
-        'L' => try app.toggleReviewPanel(), // Toggle review log side panel
+        'R' => {
+            // Start AI review (MCP feature)
+            if (app_config.isMcpEnabled(app.allocator)) {
+                try app.startReview();
+            }
+        },
+        'L' => {
+            // Toggle review log side panel (MCP feature)
+            if (app_config.isMcpEnabled(app.allocator)) {
+                try app.toggleReviewPanel();
+            }
+        },
         'a' => try app.stageCurrentFile(), // Stage the current file (git add)
         'A' => try app.stageAllFiles(), // Stage all files (git add -A)
         'o' => app.toggleCommentUnderCursorExpanded(), // Toggle comment expand/collapse

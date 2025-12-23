@@ -661,8 +661,8 @@ pub const App = struct {
         try loop.start();
         defer loop.stop();
 
-        // Auto-connect to MCP server (default port 9999, or override with mcp_port)
-        {
+        // Auto-connect to MCP server (only if MCP is enabled)
+        if (app_config.isMcpEnabled(self.allocator)) {
             const mcp_port = self.mcp_port orelse 9999;
             std.log.debug("MCP: Attempting to connect to port {d}", .{mcp_port});
             if (self.allocator.create(mcp_client.McpClient)) |m| {
@@ -703,15 +703,16 @@ pub const App = struct {
             const has_active_review = if (self.review_process) |proc| proc.status == .running and self.state.review_panel_open else false;
             const stats_loading = self.state.menu_stats_loading;
             const agent_panel_visible = if (self.state.agent_state) |as| as.visible else false;
-            const acp_active = self.acp_connect_thread != null or (if (self.acp_manager) |mgr| mgr.status == .prompting or (agent_panel_visible and mgr.status == .session_active) else false);
+            // Consider ACP "active" during connection phases and communication
+            // This ensures non-blocking event loop while connecting (for responsive UI)
+            // Note: .connected is included because createSession() runs AFTER connect() sets .connected
+            const acp_active = if (self.acp_manager) |mgr| mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected or mgr.status == .prompting or (agent_panel_visible and mgr.status == .session_active) else false;
             const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !has_active_review and !stats_loading and !acp_active;
             if (should_poll) {
                 loop.pollEvent();
-            } else {
-                // If we need to render, have an active job, or connected to MCP,
-                // check for events without blocking. Sleep briefly to avoid busy-looping.
-                std.Thread.sleep(10 * std.time.ns_per_ms); // 10ms delay (100Hz) - enough for responsive MCP
             }
+            // When not blocking (acp_active, mcp_active, etc.), events are still
+            // captured by the vaxis reader thread and available via tryEvent()
 
             // Check if we need to suspend for editor
             if (self.should_suspend_for_editor) {
@@ -761,9 +762,10 @@ pub const App = struct {
             // Poll ACP agent for updates
             self.pollAcpUpdates();
 
-            // Force re-render while agent is thinking (for smooth animation)
+            // Force re-render while agent is discovering/connecting/thinking
+            // This keeps the UI responsive during connection
             if (self.acp_manager) |mgr| {
-                if (mgr.status == .prompting) {
+                if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected or mgr.status == .prompting) {
                     self.needs_render = true;
                 }
             }
@@ -1132,6 +1134,12 @@ pub const App = struct {
 
     /// Toggle the agent chat panel visibility and focus
     pub fn toggleAgentPanel(self: *App) !void {
+        // Check if ACP is enabled
+        if (!app_config.isAcpEnabled(self.allocator)) {
+            self.showStatusMessage("ACP is experimental. Enable in ~/.skim/config.json");
+            return;
+        }
+
         // Initialize agent state if first time opening
         if (self.state.agent_state == null) {
             // Load panel side from config
@@ -3087,8 +3095,6 @@ pub const App = struct {
     /// Context for ACP connection thread
     const AcpConnectContext = struct {
         app: *App,
-        agent_command: []const u8,
-        agent_args: []const []const u8,
         cwd: []const u8,
     };
 
@@ -3101,8 +3107,24 @@ pub const App = struct {
             return;
         };
 
+        // Discover available agent (this was previously blocking the main thread)
+        std.log.info("ACP: Discovering available agents...", .{});
+        const agent_info = acp.findAvailableAgent() orelse {
+            std.log.warn("ACP: No agent found in PATH", .{});
+            // Add error message to chat so user knows what happened
+            if (ctx.app.state.agent_state) |*agent_state| {
+                agent_state.addMessage(.system, "No ACP agent found. Install claude-code-acp and try again.") catch {};
+            }
+            mgr.status = .failed;
+            return;
+        };
+        std.log.info("ACP: Found agent: {s}", .{agent_info.name});
+
+        // Update status to connecting
+        mgr.status = .connecting;
+
         // Connect to agent (spawn + initialize)
-        mgr.connect(ctx.agent_command, ctx.agent_args, ctx.cwd) catch |err| {
+        mgr.connect(agent_info.command, agent_info.args, ctx.cwd) catch |err| {
             std.log.err("ACP: Connect failed: {}", .{err});
             return;
         };
@@ -3110,14 +3132,20 @@ pub const App = struct {
 
         // Create session
         mgr.createSession(ctx.cwd) catch |err| {
-            std.log.err("ACP: CreateSession failed: {}", .{err});
+            std.log.err("ACP: CreateSession failed: {}, status now={s}", .{ err, mgr.getStatusString() });
             return;
         };
-        std.log.info("ACP: Session created successfully!", .{});
+        std.log.info("ACP: Session created successfully! status={s}", .{mgr.getStatusString()});
     }
 
     /// Start an ACP agent session (non-blocking)
     pub fn startAcpSession(self: *App) !void {
+        // Check if ACP is enabled
+        if (!app_config.isAcpEnabled(self.allocator)) {
+            self.showStatusMessage("ACP is experimental. Enable in ~/.skim/config.json");
+            return;
+        }
+
         std.log.info("ACP: startAcpSession called", .{});
 
         // Check if connection already in progress
@@ -3141,30 +3169,20 @@ pub const App = struct {
             self.acp_manager = null;
         }
 
-        // Find an available agent
-        std.log.info("ACP: Looking for available agent...", .{});
-        const agent_info = acp.findAvailableAgent() orelse {
-            std.log.warn("ACP: No agent found in PATH", .{});
-            self.showStatusMessage("No ACP agent found (claude-code-acp)");
-            return;
-        };
-        std.log.info("ACP: Found agent: {s}", .{agent_info.name});
-
-        // Create and initialize the manager
+        // Create and initialize the manager with discovering status
+        // Agent discovery happens in background thread to avoid blocking UI
         const mgr = try self.allocator.create(acp.AcpManager);
         mgr.* = acp.AcpManager.init(self.allocator);
-        mgr.status = .connecting;
+        mgr.status = .discovering;
         self.acp_manager = mgr;
 
-        self.showStatusMessage("Connecting to agent...");
+        self.showStatusMessage("Discovering agent...");
         self.needs_render = true;
 
         // Store connection context (static lifetime for thread)
         const ctx = try self.allocator.create(AcpConnectContext);
         ctx.* = .{
             .app = self,
-            .agent_command = agent_info.command,
-            .agent_args = agent_info.args,
             .cwd = self.state.git_repo_root,
         };
 
@@ -3204,15 +3222,20 @@ pub const App = struct {
     pub fn pollAcpUpdates(self: *App) void {
         // Check if connection thread completed
         if (self.acp_connect_thread != null) {
-            std.log.debug("pollAcpUpdates: connect thread still active", .{});
             if (self.acp_manager) |mgr| {
-                // Check if connection finished (status changed from connecting)
-                if (mgr.status != .connecting) {
+                // Check if connection finished
+                // NOTE: Thread sets status to .connected BEFORE calling createSession(),
+                // so we also wait for .connected to change to .session_active or .failed
+                const thread_still_working = mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected;
+                std.log.debug("pollAcpUpdates: thread active, status={s}, still_working={}", .{ mgr.getStatusString(), thread_still_working });
+                if (!thread_still_working) {
                     // Thread is done, clean it up
+                    std.log.info("pollAcpUpdates: thread finished! status={s}, joining...", .{mgr.getStatusString()});
                     if (self.acp_connect_thread) |thread| {
                         thread.join();
                         self.acp_connect_thread = null;
                     }
+                    std.log.info("pollAcpUpdates: thread joined successfully", .{});
 
                     // Update UI based on result
                     if (mgr.status == .session_active) {
@@ -3243,6 +3266,12 @@ pub const App = struct {
                     self.needs_render = true;
                 }
             }
+        }
+
+        // Don't poll while connection thread is active - it would clear messages
+        // that waitForResponse() in the background thread needs
+        if (self.acp_connect_thread != null) {
+            return;
         }
 
         const mgr = self.acp_manager orelse {

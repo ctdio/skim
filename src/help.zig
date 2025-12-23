@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 
 const App = @import("app.zig").App;
+const app_config = @import("config.zig");
 
 pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     // Calculate popup dimensions - larger for help content
@@ -58,7 +59,8 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     // NORMAL MODE section
     try content_lines.append(app.allocator, .{ .text = "NORMAL MODE", .style = section_style });
 
-    const normal_bindings = [_]struct { key: []const u8, desc: []const u8 }{
+    // Core bindings (always shown)
+    const core_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "h/l", .desc = "Previous/Next file" },
         .{ .key = "j/k", .desc = "Cursor down/up" },
         .{ .key = "g/G", .desc = "Jump to top/bottom" },
@@ -81,17 +83,44 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "v/V", .desc = "Enter visual mode" },
         .{ .key = "s", .desc = "Toggle unified/side-by-side" },
         .{ .key = "Tab/S-Tab", .desc = "Cycle hunk view (+/-/all)" },
-        .{ .key = ",a", .desc = "Toggle agent panel" },
-        .{ .key = ",d", .desc = "Focus diff (from agent)" },
-        .{ .key = "r", .desc = "Refresh diff" },
-        .{ .key = "R", .desc = "Start AI review" },
-        .{ .key = "L", .desc = "Toggle review panel" },
-        .{ .key = "Ctrl-w l/h/w", .desc = "Focus panel/diff/cycle" },
+    };
+
+    for (core_bindings) |binding| {
+        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+    }
+
+    // ACP bindings (only if ACP is enabled)
+    if (app_config.isAcpEnabled(app.allocator)) {
+        const acp_bindings = [_]struct { key: []const u8, desc: []const u8 }{
+            .{ .key = ",a", .desc = "Toggle agent panel" },
+            .{ .key = ",d", .desc = "Focus diff (from agent)" },
+        };
+        for (acp_bindings) |binding| {
+            try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+        }
+    }
+
+    // Always show refresh
+    try content_lines.append(app.allocator, .{ .key = "r", .desc = "Refresh diff", .key_style = key_style, .desc_style = desc_style });
+
+    // MCP bindings (only if MCP is enabled)
+    if (app_config.isMcpEnabled(app.allocator)) {
+        const mcp_bindings = [_]struct { key: []const u8, desc: []const u8 }{
+            .{ .key = "R", .desc = "Start AI review" },
+            .{ .key = "L", .desc = "Toggle review panel" },
+            .{ .key = "Ctrl-w l/h/w", .desc = "Focus panel/diff/cycle" },
+        };
+        for (mcp_bindings) |binding| {
+            try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+        }
+    }
+
+    // Final bindings (always shown)
+    const final_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Ctrl-g", .desc = "Open file in $EDITOR" },
         .{ .key = "Ctrl-C x2", .desc = "Force quit" },
     };
-
-    for (normal_bindings) |binding| {
+    for (final_bindings) |binding| {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
     try content_lines.append(app.allocator, .{ .text = "", .style = .{} }); // Blank line

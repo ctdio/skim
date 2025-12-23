@@ -7,6 +7,7 @@ const Daemon = @import("mcp/daemon.zig").Daemon;
 const adapter = @import("mcp/adapter.zig");
 const discovery = @import("mcp/discovery.zig");
 const logging = @import("logging.zig");
+const app_config = @import("config.zig");
 
 /// Override std.log to use file-based logging
 pub const std_options = std.Options{
@@ -31,10 +32,18 @@ pub fn main() !void {
     // Check for subcommands first
     if (args.len >= 2) {
         if (std.mem.eql(u8, args[1], "daemon")) {
+            if (!app_config.isMcpEnabled(allocator)) {
+                printMcpDisabledMessage();
+                std.process.exit(1);
+            }
             logging.init(.daemon);
             defer logging.deinit();
             return runDaemonCommand(allocator, args);
         } else if (std.mem.eql(u8, args[1], "mcp")) {
+            if (!app_config.isMcpEnabled(allocator)) {
+                printMcpDisabledMessage();
+                std.process.exit(1);
+            }
             logging.init(.mcp);
             defer logging.deinit();
             return runMcpCommand(allocator, args);
@@ -240,6 +249,20 @@ fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
 /// Write buffer for stdout (Zig 0.15 requires buffer for file.writer())
 var stdout_buffer: [4096]u8 = undefined;
+
+fn printMcpDisabledMessage() void {
+    std.debug.print(
+        \\MCP features are experimental and disabled by default.
+        \\
+        \\To enable, add to ~/.skim/config.json:
+        \\  {{
+        \\    "experimental": {{
+        \\      "mcp_enabled": true
+        \\    }}
+        \\  }}
+        \\
+    , .{});
+}
 
 fn printDaemonHelp() !void {
     var file_writer = std.fs.File.stdout().writer(&stdout_buffer);

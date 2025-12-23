@@ -7,11 +7,17 @@ const Allocator = std.mem.Allocator;
 
 pub const Config = struct {
     review_command: ?[]const u8 = null,
-    agent_panel_side: AgentPanelSide = .right,
+    agent_panel_side: AgentPanelSide = .left,
+    experimental: Experimental = .{},
 
     pub const AgentPanelSide = enum {
         left,
         right,
+    };
+
+    pub const Experimental = struct {
+        mcp_enabled: bool = false,
+        acp_enabled: bool = false,
     };
 };
 
@@ -72,6 +78,7 @@ pub fn load(allocator: Allocator) !Config {
         else
             null,
         .agent_panel_side = parsed.value.agent_panel_side,
+        .experimental = parsed.value.experimental,
     };
 }
 
@@ -89,6 +96,24 @@ pub fn getSkimDir(allocator: Allocator) ![]u8 {
     defer allocator.free(home);
 
     return std.fmt.allocPrint(allocator, "{s}/.skim", .{home});
+}
+
+// =============================================================================
+// Feature Checks
+// =============================================================================
+
+/// Check if MCP features are enabled in config.
+/// Returns false if config cannot be loaded.
+pub fn isMcpEnabled(allocator: Allocator) bool {
+    const config = load(allocator) catch return false;
+    return config.experimental.mcp_enabled;
+}
+
+/// Check if ACP features are enabled in config.
+/// Returns false if config cannot be loaded.
+pub fn isAcpEnabled(allocator: Allocator) bool {
+    const config = load(allocator) catch return false;
+    return config.experimental.acp_enabled;
 }
 
 // =============================================================================
@@ -184,4 +209,50 @@ test "substitute unknown vars preserved" {
     defer allocator.free(result);
 
     try std.testing.expectEqualStrings("cmd {unknown} test", result);
+}
+
+test "experimental features default to false" {
+    const config = Config{};
+    try std.testing.expectEqual(false, config.experimental.mcp_enabled);
+    try std.testing.expectEqual(false, config.experimental.acp_enabled);
+}
+
+test "parse experimental config from json" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{
+        \\  "experimental": {
+        \\    "mcp_enabled": true,
+        \\    "acp_enabled": true
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(Config, allocator, json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(true, parsed.value.experimental.mcp_enabled);
+    try std.testing.expectEqual(true, parsed.value.experimental.acp_enabled);
+}
+
+test "parse config without experimental section uses defaults" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{
+        \\  "agent_panel_side": "left"
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(Config, allocator, json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(false, parsed.value.experimental.mcp_enabled);
+    try std.testing.expectEqual(false, parsed.value.experimental.acp_enabled);
+    try std.testing.expectEqual(Config.AgentPanelSide.left, parsed.value.agent_panel_side);
 }

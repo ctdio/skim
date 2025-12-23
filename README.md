@@ -175,20 +175,56 @@ Edit comments on specific lines:
 | `ESC` | Cancel and return to NORMAL mode |
 | `Backspace` | Delete character before cursor |
 
-## AI Agent Integration
+## Experimental Features
+
+Skim includes experimental AI agent integration features that are **disabled by default**. These features are under active development and their interfaces are **not stable** - they may change significantly or be removed entirely in future versions.
+
+> **⚠️ Warning:** Do not build workflows or tooling that depend on these experimental interfaces. They are provided for testing and feedback purposes only.
+
+### Enabling Experimental Features
+
+Create or edit `~/.skim/config.json`:
+
+```json
+{
+  "experimental": {
+    "mcp_enabled": true,
+    "acp_enabled": true
+  }
+}
+```
+
+| Feature | Description |
+|---------|-------------|
+| `mcp_enabled` | MCP daemon, adapter, review commands (`R`, `L` keys), review panel |
+| `acp_enabled` | Agent panel (`,a` key), ACP protocol integration |
+
+When disabled:
+- Related keybindings are inactive
+- Commands don't appear in the command palette
+- Help screen only shows stable keybindings
+
+---
+
+## AI Agent Integration (Experimental)
+
+> **Note:** This feature requires `"mcp_enabled": true` in your config. See [Experimental Features](#experimental-features).
 
 Skim includes an MCP (Model Context Protocol) server that allows AI agents like Claude to review your code changes. The agent can read diff context, add comments to specific lines, and the comments appear in real-time in your TUI.
 
 ### Quick Start for AI Reviews
 
 ```bash
-# 1. Start the skim daemon (runs in background)
+# 1. Enable MCP in config (~/.skim/config.json)
+# { "experimental": { "mcp_enabled": true } }
+
+# 2. Start the skim daemon (runs in background)
 skim daemon start
 
-# 2. Open your diff in skim
+# 3. Open your diff in skim
 skim --staged
 
-# 3. Press 'R' to start an AI review (requires SKIM_REVIEW_COMMAND configured)
+# 4. Press 'R' to start an AI review (requires SKIM_REVIEW_COMMAND configured)
 # Or press 'L' to view the review log panel
 ```
 
@@ -254,6 +290,8 @@ The skim MCP server exposes these tools to AI agents:
 
 ### Configuring the Review Command
 
+> The review command requires `mcp_enabled: true` to be set.
+
 Set the `SKIM_REVIEW_COMMAND` environment variable or create `~/.skim/config.json`:
 
 **Environment variable:**
@@ -264,7 +302,10 @@ export SKIM_REVIEW_COMMAND='claude --mcp skim "Review this diff for bugs and sty
 **Config file (`~/.skim/config.json`):**
 ```json
 {
-  "review_command": "your-review-command --client {client_id} --repo {repo}"
+  "review_command": "your-review-command --client {client_id} --repo {repo}",
+  "experimental": {
+    "mcp_enabled": true
+  }
 }
 ```
 
@@ -286,6 +327,8 @@ export SKIM_REVIEW_COMMAND='my-review-tool --session {client_id} --cwd {repo} --
 
 ### Review Keybindings
 
+> These keybindings only work when `mcp_enabled` is set to `true`.
+
 | Key | Action |
 |-----|--------|
 | `R` | Start AI review (runs SKIM_REVIEW_COMMAND) |
@@ -301,6 +344,63 @@ Skim writes logs to `~/.skim/`:
 - `daemon.log` - Daemon process logs
 - `mcp.log` - MCP adapter logs
 - `review.log` - Review command output
+
+---
+
+## Agent Panel (Experimental)
+
+> **Note:** This feature requires `"acp_enabled": true` in your config. See [Experimental Features](#experimental-features).
+
+The Agent Panel provides a built-in chat interface for interacting with AI coding agents directly within skim. It uses the ACP (Agent Client Protocol) to communicate with compatible agents like Claude Code.
+
+### Quick Start
+
+```bash
+# 1. Enable ACP in config (~/.skim/config.json)
+# { "experimental": { "acp_enabled": true } }
+
+# 2. Ensure an ACP-compatible agent is in your PATH (e.g., claude-code-acp)
+
+# 3. Open your diff in skim
+skim --staged
+
+# 4. Press ',a' (comma then 'a') to toggle the agent panel
+```
+
+### Agent Panel Keybindings
+
+> These keybindings only work when `acp_enabled` is set to `true`.
+
+| Key | Action |
+|-----|--------|
+| `,a` | Toggle agent panel visibility |
+| `,d` | Focus diff (close agent panel) |
+
+### Configuration
+
+You can configure which side the agent panel appears on:
+
+```json
+{
+  "agent_panel_side": "right",
+  "experimental": {
+    "acp_enabled": true
+  }
+}
+```
+
+| Option | Values | Default |
+|--------|--------|---------|
+| `agent_panel_side` | `"left"`, `"right"` | `"right"` |
+
+### ACP Protocol
+
+The Agent Client Protocol (ACP) is an experimental protocol for communication between skim and AI coding agents. The protocol and its implementation are subject to change.
+
+**Supported agents:**
+- Agents implementing the ACP stdio transport (e.g., `claude-code-acp`)
+
+---
 
 ## Architecture
 
@@ -318,7 +418,7 @@ src/
 ├── git/                  # Git command execution and parsing
 ├── rendering/            # Unified and side-by-side renderers
 ├── modes/                # Mode handlers (normal, comment, search, etc.)
-├── mcp/                  # MCP server and daemon
+├── mcp/                  # MCP server and daemon (experimental)
 │   ├── daemon.zig        # Central daemon server
 │   ├── client.zig        # TUI-side MCP client
 │   ├── adapter.zig       # stdio MCP adapter for AI agents
@@ -326,6 +426,13 @@ src/
 │   ├── tools.zig         # MCP tool implementations
 │   ├── discovery.zig     # Daemon discovery via ~/.skim/daemon.json
 │   └── framework.zig     # MCP JSON-RPC framework
+├── acp/                  # Agent Client Protocol (experimental)
+│   ├── manager.zig       # ACP session lifecycle management
+│   ├── client.zig        # Agent connection client
+│   ├── transport.zig     # stdio transport layer
+│   ├── protocol.zig      # ACP message protocol
+│   ├── codec.zig         # JSON-RPC encoder/decoder
+│   └── types.zig         # Protocol types and constants
 └── syntax.zig            # Tree-sitter syntax highlighting
 ```
 

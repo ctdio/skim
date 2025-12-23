@@ -131,7 +131,9 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     } else 0;
 
     // Calculate input area height (always shows normal input)
-    const input_height: usize = 1 + visible_lines + 1; // Separator + visible lines + footer
+    // In sidebar mode, skip the footer (main status bar is visible)
+    const footer_height: usize = if (agent_state.full_screen) 1 else 0;
+    const input_height: usize = 1 + visible_lines + footer_height; // Separator + visible lines + footer (if full-screen)
 
     // Layout: title (1 row) + messages (variable) + plan (conditional) + input area (dynamic)
     const title_height: usize = 1;
@@ -194,8 +196,9 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     const status_text = if (app.acp_manager) |mgr| blk: {
         const base_status = switch (mgr.status) {
             .disconnected => " Disconnected",
+            .discovering => " Discovering...",
             .connecting => " Connecting...",
-            .connected => " Connected",
+            .connected => " Creating session...",
             .session_active => " Active",
             .prompting => " Thinking...",
             .failed => " Failed",
@@ -231,8 +234,8 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     const status_style = vaxis.Style{
         .fg = if (app.acp_manager) |mgr|
             switch (mgr.status) {
-                .connected, .session_active => .{ .index = 2 }, // green
-                .connecting, .prompting => .{ .index = 3 }, // yellow
+                .session_active => .{ .index = 2 }, // green
+                .discovering, .connecting, .connected, .prompting => .{ .index = 3 }, // yellow (still loading)
                 .disconnected => .{ .index = 7 }, // white
                 .failed => .{ .index = 1 }, // red
             }
@@ -260,13 +263,33 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     // Clear the message area to remove any overlay artifacts
     win.clear();
 
-    // Check if agent is currently thinking
+    // Check agent connection status
     const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
+    // Note: .connected is included because createSession() still runs after connect() sets .connected
+    const is_loading = if (app.acp_manager) |mgr| mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected else false;
 
-    // If no messages, show placeholder and thinking indicator if active
+    // If no messages, show status-aware placeholder
     if (agent_state.messages.items.len == 0) {
-        if (!is_thinking) {
-            const placeholder = "No messages yet. Type a prompt and press Enter to send.";
+        if (is_loading) {
+            // Show prominent loading status in center
+            const loading_text = if (app.acp_manager) |mgr| switch (mgr.status) {
+                .discovering => "Discovering agent...",
+                .connecting => "Connecting to agent...",
+                .connected => "Creating session...",
+                else => "Initializing...",
+            } else "Initializing...";
+            const loading_style = vaxis.Style{
+                .fg = .{ .index = 3 }, // yellow
+                .bold = true,
+            };
+            var seg = [_]vaxis.Cell.Segment{
+                .{ .text = loading_text, .style = loading_style },
+            };
+            const text_len = loading_text.len;
+            const col = if (win.width > text_len) (win.width - text_len) / 2 else 0;
+            _ = win.print(&seg, .{ .row_offset = @intCast(win.height / 2), .col_offset = @intCast(col) });
+        } else if (!is_thinking) {
+            const placeholder = "Type a prompt and press Enter to send.";
             const placeholder_style = vaxis.Style{
                 .fg = .{ .index = 8 }, // dark gray
                 .italic = true,
@@ -274,7 +297,9 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             var seg = [_]vaxis.Cell.Segment{
                 .{ .text = placeholder, .style = placeholder_style },
             };
-            _ = win.print(&seg, .{ .row_offset = @intCast(win.height / 2), .col_offset = 1 });
+            const text_len = placeholder.len;
+            const col = if (win.width > text_len) (win.width - text_len) / 2 else 0;
+            _ = win.print(&seg, .{ .row_offset = @intCast(win.height / 2), .col_offset = @intCast(col) });
         }
         // Show thinking indicator at bottom when thinking (even with no messages)
         if (is_thinking and win.height > 0) {
@@ -926,7 +951,9 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     }
 
     // Footer row: mode (left), session mode (center), and keybindings (right)
-    // Always at bottom of window (win.height - 1)
+    // Only render footer in full-screen mode (sidebar mode uses the main status bar)
+    if (!agent_state.full_screen) return;
+
     const footer_row = win.height - 1;
     if (win.height > 1) {
         // Mode text like vim: -- INSERT -- or -- NORMAL --

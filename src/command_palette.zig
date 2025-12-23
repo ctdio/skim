@@ -7,6 +7,7 @@ const DiffSource = git.DiffSource;
 const DiffStats = git.DiffStats;
 const state_helpers = @import("state.zig");
 const render_utils = @import("rendering/utils.zig");
+const app_config = @import("config.zig");
 
 const Allocator = std.mem.Allocator;
 const StateHelpers = state_helpers.StateHelpers;
@@ -171,16 +172,19 @@ pub const CommandPaletteState = struct {
             .deletions = 0,
         });
 
-        try self.commands.append(self.allocator, .{
-            .name = "Daemon Status",
-            .display_name = "Daemon Status",
-            .description = "Show daemon connection status",
-            .action = .show_mcp_status,
-            .category = .help,
-            .owns_display_name = false,
-            .additions = 0,
-            .deletions = 0,
-        });
+        // Only show daemon status command if MCP is enabled
+        if (app_config.isMcpEnabled(self.allocator)) {
+            try self.commands.append(self.allocator, .{
+                .name = "Daemon Status",
+                .display_name = "Daemon Status",
+                .description = "Show daemon connection status",
+                .action = .show_mcp_status,
+                .category = .help,
+                .owns_display_name = false,
+                .additions = 0,
+                .deletions = 0,
+            });
+        }
 
         try self.commands.append(self.allocator, .{
             .name = "Quit",
