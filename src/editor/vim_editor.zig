@@ -1028,7 +1028,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             state.cursor_pos = pos;
         }
 
-        fn findNextWordStart(state: State) usize {
+        pub fn findNextWordStart(state: State) usize {
             var pos = state.cursor_pos;
 
             while (pos < state.text_len and !isWordBoundary(state.text_buffer[pos])) {
@@ -1042,7 +1042,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             return pos;
         }
 
-        fn findPrevWordStart(state: State) usize {
+        pub fn findPrevWordStart(state: State) usize {
             if (state.cursor_pos == 0) return 0;
 
             var pos = state.cursor_pos - 1;
@@ -1058,21 +1058,35 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             return pos;
         }
 
-        fn findWordEnd(state: State) usize {
+        pub fn findWordEnd(state: State) usize {
+            if (state.text_len == 0) return 0;
+
             var pos = state.cursor_pos;
 
-            if (pos < state.text_len and isWordBoundary(state.text_buffer[pos])) {
-                while (pos < state.text_len and isWordBoundary(state.text_buffer[pos])) {
-                    pos += 1;
-                }
+            // 'e' always moves forward at least one position (if not at end)
+            if (pos < state.text_len) {
+                pos += 1;
             }
 
+            // Skip any whitespace/boundaries
+            while (pos < state.text_len and isWordBoundary(state.text_buffer[pos])) {
+                pos += 1;
+            }
+
+            // Skip word characters to find end of word
             while (pos < state.text_len and !isWordBoundary(state.text_buffer[pos])) {
                 pos += 1;
             }
 
-            if (pos > state.cursor_pos) {
+            // We're now one past the end of the word (or at text_len)
+            // Back up to be ON the last char of the word
+            if (pos > 0) {
                 pos -= 1;
+            }
+
+            // Don't move backward from original position (edge case: at end of buffer)
+            if (pos < state.cursor_pos) {
+                return state.cursor_pos;
             }
 
             return pos;
@@ -1358,4 +1372,114 @@ test "VimEditor clear" {
 
     try std.testing.expect(state.isEmpty());
     try std.testing.expectEqual(@as(usize, 0), state.cursor_pos);
+}
+
+test "findNextWordStart (w) moves to next word" {
+    var state = TestEditor.State.init();
+    state.setText("hello world");
+    state.cursor_pos = 0; // on 'h'
+
+    // w from 'h' should go to 'w'
+    const pos = TestEditor.findNextWordStart(state);
+    try std.testing.expectEqual(@as(usize, 6), pos);
+}
+
+test "findNextWordStart (w) from middle of word" {
+    var state = TestEditor.State.init();
+    state.setText("hello world");
+    state.cursor_pos = 2; // on 'l'
+
+    // w from middle of 'hello' should go to 'w'
+    const pos = TestEditor.findNextWordStart(state);
+    try std.testing.expectEqual(@as(usize, 6), pos);
+}
+
+test "findNextWordStart (w) from end of word" {
+    var state = TestEditor.State.init();
+    state.setText("hello world");
+    state.cursor_pos = 4; // on 'o' (end of hello)
+
+    // w from 'o' should go to 'w'
+    const pos = TestEditor.findNextWordStart(state);
+    try std.testing.expectEqual(@as(usize, 6), pos);
+}
+
+test "findNextWordStart (w) from space" {
+    var state = TestEditor.State.init();
+    state.setText("hello world");
+    state.cursor_pos = 5; // on ' '
+
+    // w from space should go to 'w'
+    const pos = TestEditor.findNextWordStart(state);
+    try std.testing.expectEqual(@as(usize, 6), pos);
+}
+
+test "findPrevWordStart (b) moves to previous word" {
+    var state = TestEditor.State.init();
+    state.setText("hello world");
+    state.cursor_pos = 6; // on 'w'
+
+    // b from 'w' should go to 'h'
+    const pos = TestEditor.findPrevWordStart(state);
+    try std.testing.expectEqual(@as(usize, 0), pos);
+}
+
+test "findPrevWordStart (b) from middle of word" {
+    var state = TestEditor.State.init();
+    state.setText("hello world");
+    state.cursor_pos = 8; // on 'r'
+
+    // b from middle of 'world' should go to 'w'
+    const pos = TestEditor.findPrevWordStart(state);
+    try std.testing.expectEqual(@as(usize, 6), pos);
+}
+
+test "findPrevWordStart (b) from space" {
+    var state = TestEditor.State.init();
+    state.setText("hello world");
+    state.cursor_pos = 5; // on ' '
+
+    // b from space should go to 'h'
+    const pos = TestEditor.findPrevWordStart(state);
+    try std.testing.expectEqual(@as(usize, 0), pos);
+}
+
+test "findWordEnd (e) moves to end of word" {
+    var state = TestEditor.State.init();
+    state.setText("hello world");
+    state.cursor_pos = 0; // on 'h'
+
+    // e from 'h' should go to 'o' (end of hello)
+    const pos = TestEditor.findWordEnd(state);
+    try std.testing.expectEqual(@as(usize, 4), pos);
+}
+
+test "findWordEnd (e) from end of word moves to next word end" {
+    var state = TestEditor.State.init();
+    state.setText("hello world");
+    state.cursor_pos = 4; // on 'o' (end of hello)
+
+    // e from 'o' should go to 'd' (end of world)
+    const pos = TestEditor.findWordEnd(state);
+    try std.testing.expectEqual(@as(usize, 10), pos);
+}
+
+test "findWordEnd (e) from space" {
+    var state = TestEditor.State.init();
+    state.setText("hello world");
+    state.cursor_pos = 5; // on ' '
+
+    // e from space should go to 'd' (end of world)
+    const pos = TestEditor.findWordEnd(state);
+    try std.testing.expectEqual(@as(usize, 10), pos);
+}
+
+test "findWordEnd (e) at last word stays at end" {
+    var state = TestEditor.State.init();
+    state.setText("hello");
+    state.cursor_pos = 4; // on 'o' (last char)
+
+    // e from last char should stay there
+    const pos = TestEditor.findWordEnd(state);
+    try std.testing.expectEqual(@as(usize, 4), pos);
 }
