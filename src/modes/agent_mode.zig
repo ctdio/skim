@@ -448,37 +448,17 @@ fn updateSlashMenuVisibility(app: *App, agent_state: *agent.AgentState) void {
     const should_show = agent_state.shouldShowSlashMenu();
 
     if (should_show and !agent_state.slash_menu_visible) {
-        // Before showing menu, poll for any pending ACP updates to ensure we have latest commands
-        // This fixes race condition where agent sends commands but we haven't polled yet
-        // Poll multiple times with small delays to give transport time to receive notifications
+        // Before showing menu, poll once for any pending ACP updates
+        // Commands will appear on next render if they arrive after this poll
         if (cmd_count <= 1) { // Only local commands present
             std.log.debug("Slash menu: only {d} commands, polling ACP for updates", .{cmd_count});
+            app.pollAcpUpdates();
 
-            // Try up to 5 times with 10ms delays to catch pending notifications
-            var poll_attempts: u8 = 0;
-            while (poll_attempts < 5 and agent_state.available_commands.items.len <= 1) : (poll_attempts += 1) {
-                app.pollAcpUpdates();
-
-                // Check if we got commands
-                if (agent_state.available_commands.items.len > 1) {
-                    std.log.info("Slash menu: got {d} commands after {d} poll attempts", .{
-                        agent_state.available_commands.items.len,
-                        poll_attempts + 1,
-                    });
-                    break;
-                }
-
-                // Small delay to let transport receive notifications
-                if (poll_attempts < 4) {
-                    std.Thread.sleep(10 * std.time.ns_per_ms);
-                }
-            }
-
-            if (agent_state.available_commands.items.len <= 1) {
-                std.log.warn("Slash menu: still only {d} commands after {d} attempts", .{
-                    agent_state.available_commands.items.len,
-                    poll_attempts,
-                });
+            const updated_count = agent_state.available_commands.items.len;
+            if (updated_count > 1) {
+                std.log.info("Slash menu: got {d} commands after poll", .{updated_count});
+            } else {
+                std.log.debug("Slash menu: no new commands yet, will appear when agent sends them", .{});
             }
         }
 
