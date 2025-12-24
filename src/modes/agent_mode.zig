@@ -195,6 +195,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     // 'z' in normal vim mode - toggle full screen
     if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'z') {
         agent_state.toggleFullScreen();
+        // When exiting fullscreen, return focus to diff
+        if (!agent_state.full_screen) {
+            app.mode = .normal;
+        }
         app.needs_render = true;
         return;
     }

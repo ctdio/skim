@@ -2579,13 +2579,93 @@ pub const App = struct {
         // Content height without dividers (continuous mode)
         const content_height = win.height - Layout.header_height - Layout.status_height;
 
+        // Check if agent panel should be shown (visible and not full-screen)
+        // Don't show when in agent_selection mode (selecting which agent to connect to)
+        const show_agent_panel = if (self.state.agent_state) |as|
+            as.visible and !as.full_screen and self.mode != .agent_selection
+        else
+            false;
+
         // Render header and content (or empty/branch menu if no files)
         if (self.state.files.len == 0) {
             // No files - show empty state or branch selection menu
-            if (self.mode == .branch_selection) {
-                try UI.renderBranchSelectionMenu(self, win);
+            // If agent panel is visible, render it as sidebar with empty menu in main area
+            if (show_agent_panel) {
+                const agent_state = self.state.agent_state.?;
+                const panel_width = win.width * 3 / 10; // 30% for agent panel
+                const divider_width: usize = 1;
+                const diff_width = win.width - panel_width - divider_width;
+
+                if (agent_state.panel_side == .left) {
+                    // Agent panel on left
+                    const agent_win = win.child(.{
+                        .x_off = 0,
+                        .y_off = Layout.header_height,
+                        .width = @intCast(panel_width),
+                        .height = @intCast(content_height),
+                    });
+                    try agent.renderAgentPanel(self, agent_win);
+
+                    // Vertical divider
+                    const divider_win = win.child(.{
+                        .x_off = @intCast(panel_width),
+                        .y_off = Layout.header_height,
+                        .width = @intCast(divider_width),
+                        .height = @intCast(content_height),
+                    });
+                    try UI.renderVerticalDivider(divider_win);
+
+                    // Empty menu on right
+                    const content_win = win.child(.{
+                        .x_off = @intCast(panel_width + divider_width),
+                        .y_off = 0,
+                        .width = @intCast(diff_width),
+                        .height = @intCast(win.height),
+                    });
+                    if (self.mode == .branch_selection) {
+                        try UI.renderBranchSelectionMenu(self, content_win);
+                    } else {
+                        try UI.renderEmptyMenu(self, content_win);
+                    }
+                } else {
+                    // Empty menu on left
+                    const content_win = win.child(.{
+                        .x_off = 0,
+                        .y_off = 0,
+                        .width = @intCast(diff_width),
+                        .height = @intCast(win.height),
+                    });
+                    if (self.mode == .branch_selection) {
+                        try UI.renderBranchSelectionMenu(self, content_win);
+                    } else {
+                        try UI.renderEmptyMenu(self, content_win);
+                    }
+
+                    // Vertical divider
+                    const divider_win = win.child(.{
+                        .x_off = @intCast(diff_width),
+                        .y_off = Layout.header_height,
+                        .width = @intCast(divider_width),
+                        .height = @intCast(content_height),
+                    });
+                    try UI.renderVerticalDivider(divider_win);
+
+                    // Agent panel on right
+                    const agent_win = win.child(.{
+                        .x_off = @intCast(diff_width + divider_width),
+                        .y_off = Layout.header_height,
+                        .width = @intCast(panel_width),
+                        .height = @intCast(content_height),
+                    });
+                    try agent.renderAgentPanel(self, agent_win);
+                }
             } else {
-                try UI.renderEmptyMenu(self, win);
+                // No agent panel - full screen empty menu
+                if (self.mode == .branch_selection) {
+                    try UI.renderBranchSelectionMenu(self, win);
+                } else {
+                    try UI.renderEmptyMenu(self, win);
+                }
             }
         } else {
             // Normal rendering with header, content, and status bar
@@ -2596,13 +2676,6 @@ pub const App = struct {
                 .height = @intCast(Layout.header_height),
             });
             try UI.renderHeader(self, header_win);
-
-            // Check if agent panel should be shown (visible and not full-screen)
-            // Don't show when in agent_selection mode (selecting which agent to connect to)
-            const show_agent_panel = if (self.state.agent_state) |as|
-                as.visible and !as.full_screen and self.mode != .agent_selection
-            else
-                false;
 
             // Split content area based on panels
             if (show_agent_panel) {
