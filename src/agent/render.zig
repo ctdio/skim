@@ -310,7 +310,6 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 
     // Calculate dynamic input height based on content or mode
     const text = agent_state.input.getText();
-    const line_info = getInputLineInfo(text, agent_state.input.vim.cursor_pos);
 
     // Check if there's a pending permission
     const pending_permission = if (app.acp_manager) |mgr| mgr.getPendingPermission() else null;
@@ -324,7 +323,14 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         // Separator (1) + title (1) + description (0 or 1) + options + footer (1)
         const desc_rows: usize = if (perm.description != null) 1 else 0;
         break :blk 3 + desc_rows + perm.options.len;
-    } else @max(3, @min(line_info.line_count, MAX_INPUT_LINES));
+    } else blk: {
+        // Count logical lines (newline-separated) for initial height estimate
+        var line_count: usize = 1;
+        for (text) |c| {
+            if (c == '\n') line_count += 1;
+        }
+        break :blk @max(3, @min(line_count, MAX_INPUT_LINES));
+    };
 
     // Calculate plan height (only if visible and has entries)
     const plan_entry_count = agent_state.plan_entries.items.len;
@@ -347,6 +353,9 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         win.height - fixed_height
     else
         1;
+
+    // Store viewport height for smart scrolling in key handlers
+    agent_state.last_messages_viewport_height = messages_height;
 
     // Render title bar
     try renderTitleBar(app, win, is_focused);
@@ -378,7 +387,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         .width = win.width,
         .height = @intCast(input_height),
     });
-    try renderInputArea(app, input_win, agent_state, is_focused, line_info, pending_permission);
+    try renderInputArea(app, input_win, agent_state, is_focused, pending_permission);
 
     // Render slash command menu as overlay (if visible)
     if (agent_state.slash_menu_visible) {
@@ -748,8 +757,9 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
         renderScrollbar(win, scrollbar_info);
     }
 
-    // Show thinking indicator at the very bottom of the message area (no overlap with content)
-    if (is_thinking and win.height > 0) {
+    // Show thinking indicator at the bottom of the message area
+    // Use a row that has actual content to overlay (avoid overlapping with plan/input)
+    if (is_thinking and win.height > 1) {
         renderThinkingIndicator(win, win.height - 1);
     }
 }
@@ -956,6 +966,14 @@ fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry) void {
     // Header line: "── Todos ──"
     const header_style = vaxis.Style{ .fg = .{ .index = 8 }, .bold = true };
 
+    // Clear entire header row first to avoid artifacts
+    for (0..win.width) |col| {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{},
+        });
+    }
+
     // Draw leading dashes at columns 1-2
     win.writeCell(1, @intCast(row), .{
         .char = .{ .grapheme = "─", .width = 1 },
@@ -989,6 +1007,14 @@ fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry) void {
     const visible_count = @min(entries.len, MAX_PLAN_ENTRIES);
     for (entries[0..visible_count]) |entry| {
         if (row >= win.height) break;
+
+        // Clear entire row first to avoid artifacts
+        for (0..win.width) |col| {
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = " ", .width = 1 },
+                .style = .{},
+            });
+        }
 
         // Status icon
         const status_icon: []const u8 = switch (entry.status) {
@@ -1033,6 +1059,14 @@ fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry) void {
 
     // "+N more" line if there are hidden entries
     if (entries.len > MAX_PLAN_ENTRIES and row < win.height) {
+        // Clear row first
+        for (0..win.width) |col| {
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = " ", .width = 1 },
+                .style = .{},
+            });
+        }
+
         var more_buf: [16]u8 = undefined;
         const remaining = entries.len - MAX_PLAN_ENTRIES;
         const more_text = std.fmt.bufPrint(&more_buf, "+{d} more", .{remaining}) catch "+? more";
@@ -1045,7 +1079,7 @@ fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry) void {
     }
 }
 
-fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_focused: bool, line_info: InputLineInfo, pending_permission: ?*AcpManager.PendingPermission) !void {
+fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_focused: bool, pending_permission: ?*AcpManager.PendingPermission) !void {
     if (win.height == 0) return;
 
     // Check if we're in model selection mode - render inline picker instead
@@ -1080,17 +1114,44 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
     const visible_lines = @min(total_display_lines, MAX_INPUT_LINES);
 
+    // Calculate cursor's actual display row (accounting for wrapping)
+    const cursor_pos = agent_state.input.vim.cursor_pos;
+    var cursor_display_row: usize = 0;
+    var pos: usize = 0;
+    var line_iter_cursor = std.mem.splitScalar(u8, text, '\n');
+    while (line_iter_cursor.next()) |text_line| {
+        const line_start = pos;
+        const line_end = pos + text_line.len;
+
+        if (cursor_pos >= line_start and cursor_pos <= line_end) {
+            // Cursor is on this logical line, calculate wrapped row
+            const offset_in_line = cursor_pos - line_start;
+            const wrapped_rows_before = offset_in_line / max_input_width_for_calc;
+            cursor_display_row += wrapped_rows_before;
+            break;
+        }
+
+        // Count wrapped rows for this line
+        if (text_line.len == 0) {
+            cursor_display_row += 1;
+        } else {
+            const chunks = (text_line.len + max_input_width_for_calc - 1) / max_input_width_for_calc;
+            cursor_display_row += chunks;
+        }
+
+        pos = line_end + 1; // +1 for newline
+    }
+
     // Calculate scroll offset to keep cursor in view
     var scroll_offset = agent_state.input_scroll_offset;
-    const cursor_row = line_info.cursor_row;
 
     // Scroll up if cursor is above visible area
-    if (cursor_row < scroll_offset) {
-        scroll_offset = cursor_row;
+    if (cursor_display_row < scroll_offset) {
+        scroll_offset = cursor_display_row;
     }
-    // Scroll down if cursor is below visible area (keep 1 line margin at bottom)
-    if (cursor_row >= scroll_offset + visible_lines) {
-        scroll_offset = cursor_row - visible_lines + 1;
+    // Scroll down if cursor is below visible area
+    if (cursor_display_row >= scroll_offset + visible_lines) {
+        scroll_offset = cursor_display_row - visible_lines + 1;
     }
     // Clamp scroll offset to valid range
     const max_scroll = if (total_display_lines > visible_lines) total_display_lines - visible_lines else 0;
@@ -1120,106 +1181,126 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
     // Split text by newlines and wrap each line
     var line_iter = std.mem.splitScalar(u8, text, '\n');
-    var display_row: usize = 0;
+    var display_row: usize = 0; // Physical display row (including wrapping)
+    var visible_row: usize = 0; // Row within the visible window
     var char_offset: usize = 0; // Track absolute position in buffer
     var is_first_line = true;
 
     while (line_iter.next()) |text_line| {
-        if (display_row >= visible_lines) break;
+        // Stop if we've filled the visible area
+        if (visible_row >= visible_lines) break;
 
         // Wrap this line by splitting at max_input_width boundaries
         var line_pos: usize = 0;
         while (line_pos < text_line.len or (line_pos == 0 and text_line.len == 0)) {
-            if (display_row >= visible_lines) break;
-
-            const row = display_row + 1; // +1 for separator
+            // Stop if we've filled the visible area
+            if (visible_row >= visible_lines) break;
 
             // Calculate how much of the line to show on this display row
             const remaining = text_line[line_pos..];
             const chunk_len = @min(remaining.len, max_input_width);
             const chunk = remaining[0..chunk_len];
 
-            // First line gets the prompt "> ", others get "  " for alignment
-            if (is_first_line) {
-                var prompt_seg = [_]vaxis.Cell.Segment{
-                    .{ .text = "> ", .style = prompt_style },
-                };
-                _ = win.print(&prompt_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
-                is_first_line = false;
+            // Skip rows that are scrolled out of view
+            if (display_row >= scroll_offset) {
+                const row = visible_row + 1; // +1 for separator
+
+                // First line gets the prompt "> ", others get "  " for alignment
+                if (is_first_line) {
+                    var prompt_seg = [_]vaxis.Cell.Segment{
+                        .{ .text = "> ", .style = prompt_style },
+                    };
+                    _ = win.print(&prompt_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+                    is_first_line = false;
+                } else {
+                    var cont_seg = [_]vaxis.Cell.Segment{
+                        .{ .text = "  ", .style = text_style },
+                    };
+                    _ = win.print(&cont_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+                }
             } else {
-                var cont_seg = [_]vaxis.Cell.Segment{
-                    .{ .text = "  ", .style = text_style },
-                };
-                _ = win.print(&cont_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+                // Still need to track is_first_line even for scrolled rows
+                if (is_first_line) is_first_line = false;
             }
 
             // Determine segment start and end positions in the full buffer
             const segment_start = char_offset;
             const segment_end = segment_start + chunk_len;
 
-            // Check for visual mode selection highlighting
-            const vim_mode = agent_state.input.vim.vim_mode;
-            const visual_anchor = agent_state.input.vim.visual_anchor;
+            // Only render if in visible area
+            if (display_row >= scroll_offset) {
+                const row = visible_row + 1; // +1 for separator
 
-            if (vim_mode == .visual and visual_anchor != null) {
-                const anchor = visual_anchor.?;
-                const cursor = agent_state.input.vim.cursor_pos;
-                const sel_start = @min(anchor, cursor);
-                const sel_end = @max(anchor, cursor);
+                // Check for visual mode selection highlighting
+                const vim_mode = agent_state.input.vim.vim_mode;
+                const visual_anchor = agent_state.input.vim.visual_anchor;
 
-                // Visual selection style
-                const visual_style = vaxis.Style{
-                    .fg = .{ .index = 0 },
-                    .bg = .{ .index = 6 },
-                    .bold = true,
-                };
+                if (vim_mode == .visual and visual_anchor != null) {
+                    const anchor = visual_anchor.?;
+                    const cursor = agent_state.input.vim.cursor_pos;
+                    const sel_start = @min(anchor, cursor);
+                    const sel_end = @max(anchor, cursor);
 
-                // Render each character with appropriate style
-                for (chunk, 0..) |_, char_idx| {
-                    const abs_pos = segment_start + char_idx;
-                    const col = input_col + char_idx;
-                    if (col >= win.width) break;
+                    // Visual selection style
+                    const visual_style = vaxis.Style{
+                        .fg = .{ .index = 0 },
+                        .bg = .{ .index = 6 },
+                        .bold = true,
+                    };
 
-                    const in_selection = abs_pos >= sel_start and abs_pos <= sel_end;
-                    const style = if (in_selection) visual_style else text_style;
+                    // Render each character with appropriate style
+                    for (chunk, 0..) |_, char_idx| {
+                        const abs_pos = segment_start + char_idx;
+                        const col = input_col + char_idx;
+                        if (col >= win.width) break;
 
-                    win.writeCell(@intCast(col), @intCast(row), .{
-                        .char = .{ .grapheme = chunk[char_idx .. char_idx + 1], .width = 1 },
-                        .style = style,
-                    });
-                }
-            } else {
-                // Normal rendering
-                var text_seg = [_]vaxis.Cell.Segment{
-                    .{ .text = chunk, .style = text_style },
-                };
-                _ = win.print(&text_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(input_col) });
-            }
+                        const in_selection = abs_pos >= sel_start and abs_pos <= sel_end;
+                        const style = if (in_selection) visual_style else text_style;
 
-            // Render cursor if it's in this segment
-            if (is_focused) {
-                const cursor_pos = agent_state.input.vim.cursor_pos;
-                if (cursor_pos >= segment_start and cursor_pos <= segment_end) {
-                    const cursor_screen_col = cursor_pos - segment_start;
-                    const cursor_col = input_col + cursor_screen_col;
-
-                    if (cursor_col < win.width) {
-                        const cursor_char = if (cursor_screen_col < chunk.len)
-                            chunk[cursor_screen_col .. cursor_screen_col + 1]
-                        else
-                            " ";
-
-                        const cursor_style = if (agent_state.input.vim.vim_mode == .insert)
-                            vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 } }
-                        else
-                            vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 }, .bold = true };
-
-                        win.writeCell(@intCast(cursor_col), @intCast(row), .{
-                            .char = .{ .grapheme = cursor_char, .width = 1 },
-                            .style = cursor_style,
+                        win.writeCell(@intCast(col), @intCast(row), .{
+                            .char = .{ .grapheme = chunk[char_idx .. char_idx + 1], .width = 1 },
+                            .style = style,
                         });
                     }
+                } else {
+                    // Normal rendering
+                    var text_seg = [_]vaxis.Cell.Segment{
+                        .{ .text = chunk, .style = text_style },
+                    };
+                    _ = win.print(&text_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(input_col) });
                 }
+
+                // Set terminal cursor if it's in this segment
+                if (is_focused) {
+                    const vim_cursor_pos = agent_state.input.vim.cursor_pos;
+                    if (vim_cursor_pos >= segment_start and vim_cursor_pos <= segment_end) {
+                        const cursor_screen_col = vim_cursor_pos - segment_start;
+                        const cursor_col = input_col + cursor_screen_col;
+
+                        if (cursor_col < win.width) {
+                            // Show terminal cursor at position
+                            win.showCursor(@intCast(cursor_col), @intCast(row));
+
+                            // Set cursor shape based on vim mode (matching comment editor)
+                            switch (agent_state.input.vim.vim_mode) {
+                                .normal, .visual => {
+                                    // Block cursor for normal/visual mode
+                                    win.setCursorShape(.block);
+                                },
+                                .insert => {
+                                    // Beam/line cursor for insert mode
+                                    win.setCursorShape(.beam);
+                                },
+                                .command => {
+                                    // Command mode - hide cursor
+                                    win.hideCursor();
+                                },
+                            }
+                        }
+                    }
+                }
+
+                visible_row += 1;
             }
 
             char_offset += chunk_len;

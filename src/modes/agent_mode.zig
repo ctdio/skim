@@ -62,7 +62,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             // Ctrl+D - page down
             if (key.mods.ctrl and key.codepoint == 'd') {
                 agent_state.follow_bottom = false;
-                agent_state.scrollDown(10);
+                const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
+                agent_state.scrollDown(scroll_amount);
                 app.needs_render = true;
                 return;
             }
@@ -70,7 +71,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             // Ctrl+U - page up
             if (key.mods.ctrl and key.codepoint == 'u') {
                 agent_state.follow_bottom = false;
-                agent_state.scrollUp(10);
+                const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
+                agent_state.scrollUp(scroll_amount);
                 app.needs_render = true;
                 return;
             }
@@ -279,7 +281,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     // Ctrl+D - page down (works in all modes)
     if (key.mods.ctrl and key.codepoint == 'd') {
         agent_state.follow_bottom = false; // Disable follow mode
-        agent_state.scrollDown(10);
+        const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
+        agent_state.scrollDown(scroll_amount);
         app.needs_render = true;
         return;
     }
@@ -287,7 +290,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     // Ctrl+U - page up (works in all modes)
     if (key.mods.ctrl and key.codepoint == 'u') {
         agent_state.follow_bottom = false; // Disable follow mode
-        agent_state.scrollUp(10);
+        const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
+        agent_state.scrollUp(scroll_amount);
         app.needs_render = true;
         return;
     }

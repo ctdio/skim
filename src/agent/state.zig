@@ -77,6 +77,8 @@ pub const AgentState = struct {
     input_scroll_offset: usize, // Vertical scroll offset for multi-line input
     // Interrupt tracking (double-ESC to cancel)
     last_esc_timestamp: i64, // Timestamp of last ESC press (ms since epoch)
+    // Viewport tracking for smart scrolling
+    last_messages_viewport_height: usize, // Height of messages area from last render
 
     pub const PanelSide = enum {
         left,
@@ -115,6 +117,7 @@ pub const AgentState = struct {
             .slash_menu_scroll_offset = 0,
             .input_scroll_offset = 0,
             .last_esc_timestamp = 0,
+            .last_messages_viewport_height = 20, // Reasonable default
         };
     }
 
