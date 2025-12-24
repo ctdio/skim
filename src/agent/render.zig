@@ -83,10 +83,11 @@ fn renderScrollbar(win: vaxis.Window, info: ScrollbarInfo) void {
         var char: []const u8 = undefined;
         var style: vaxis.Style = undefined;
 
-        if (row == 0 and info.show_top_arrow) {
+        // Inset arrows by 1 row to avoid covering content at edges
+        if (row == 1 and info.show_top_arrow) {
             char = "▴"; // Smaller, subtler arrow
             style = arrow_style;
-        } else if (row == win.height - 1 and info.show_bottom_arrow) {
+        } else if (row == win.height - 2 and info.show_bottom_arrow and win.height > 2) {
             char = "▾"; // Smaller, subtler arrow
             style = arrow_style;
         } else if (row >= info.thumb_start and row < info.thumb_end) {
@@ -1273,7 +1274,14 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                 // Set terminal cursor if it's in this segment
                 if (is_focused) {
                     const vim_cursor_pos = agent_state.input.vim.cursor_pos;
-                    if (vim_cursor_pos >= segment_start and vim_cursor_pos <= segment_end) {
+                    // For empty lines (chunk_len == 0), cursor should be shown if it's exactly at segment_start
+                    // For non-empty lines, cursor should be shown if it's within the segment
+                    const cursor_in_segment = if (chunk_len == 0)
+                        vim_cursor_pos == segment_start
+                    else
+                        vim_cursor_pos >= segment_start and vim_cursor_pos < segment_end;
+
+                    if (cursor_in_segment) {
                         const cursor_screen_col = vim_cursor_pos - segment_start;
                         const cursor_col = input_col + cursor_screen_col;
 
@@ -1317,6 +1325,19 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                 char_offset += 1; // Skip the '\n'
             }
         }
+    }
+
+    // Render scrollbar if input area is scrollable
+    if (total_display_lines > visible_lines) {
+        const scrollbar_info = calculateScrollbar(visible_lines, total_display_lines, scroll_offset);
+        // Render scrollbar in input area (offset by 1 for separator line)
+        const scrollbar_win = win.child(.{
+            .x_off = 0,
+            .y_off = 1, // Skip separator line
+            .width = win.width,
+            .height = @intCast(visible_lines),
+        });
+        renderScrollbar(scrollbar_win, scrollbar_info);
     }
 
     // Footer row: mode (left), session mode (center), and keybindings (right)
