@@ -356,15 +356,23 @@ The Agent Panel provides a built-in chat interface for interacting with AI codin
 ### Quick Start
 
 ```bash
-# 1. Enable ACP in config (~/.skim/config.json)
-# { "experimental": { "acp_enabled": true } }
+# 1. Configure agents in ~/.skim/config.json:
+# {
+#   "experimental": { "acp_enabled": true },
+#   "agents": [
+#     {
+#       "name": "Claude Code",
+#       "command": "claude-code-acp",
+#       "default": true,
+#       "model": "sonnet"
+#     }
+#   ]
+# }
 
-# 2. Ensure an ACP-compatible agent is in your PATH (e.g., claude-code-acp)
-
-# 3. Open your diff in skim
+# 2. Open your diff in skim
 skim --staged
 
-# 4. Press ',a' (comma then 'a') to toggle the agent panel
+# 3. Press ',a' (comma then 'a') to toggle the agent panel
 ```
 
 ### Agent Panel Keybindings
@@ -378,16 +386,55 @@ skim --staged
 
 ### Configuration
 
-You can configure which side the agent panel appears on:
+Configure agents and panel settings in `~/.skim/config.json`:
 
 ```json
 {
-  "agent_panel_side": "right",
   "experimental": {
     "acp_enabled": true
-  }
+  },
+  "agent_panel_side": "right",
+  "agents": [
+    {
+      "name": "Claude Code",
+      "command": "claude-code-acp",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "default": true,
+      "args": ["--verbose"],
+      "model": "sonnet",
+      "mode": "plan"
+    },
+    {
+      "name": "Codex",
+      "command": "codex-acp",
+      "api_key_env": "OPENAI_API_KEY"
+    }
+  ]
 }
 ```
+
+#### Agent Configuration Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Display name shown in selection menu |
+| `command` | string | Yes | CLI command to spawn the agent |
+| `api_key_env` | string | No | Environment variable containing API key (for status display) |
+| `default` | bool | No | Auto-connect to this agent (default: `false`) |
+| `args` | string[] | No | Additional CLI arguments to pass to the agent |
+| `model` | string | No | AI model to use (e.g., `"sonnet"`, `"opus"`) |
+| `mode` | string | No | Agent session mode (e.g., `"plan"`, `"code"`, `"bypassPermissions"`) |
+
+#### Agent Selection Behavior
+
+- **No agents configured**: Shows error message in agent panel
+- **Single agent**: Auto-connects immediately
+- **Multiple agents with default**: Auto-connects to the agent marked `"default": true`
+- **Multiple agents, no default**: Shows selection menu (navigate with `j`/`k`, select with `Enter`)
+
+You can switch agents anytime via the command palette (`Ctrl-p`, then `>Switch Agent`).
+
+#### Other Options
 
 | Option | Values | Default |
 |--------|--------|---------|
@@ -398,7 +445,7 @@ You can configure which side the agent panel appears on:
 The Agent Client Protocol (ACP) is an experimental protocol for communication between skim and AI coding agents. The protocol and its implementation are subject to change.
 
 **Supported agents:**
-- Agents implementing the ACP stdio transport (e.g., `claude-code-acp`)
+- Agents implementing the ACP stdio transport (e.g., `claude-code-acp`, `codex-acp`, `gemini --experimental-acp`)
 
 ---
 

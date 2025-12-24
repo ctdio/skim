@@ -38,6 +38,7 @@ pub const CommandAction = union(enum) {
     quit: void,
     switch_diff_mode: DiffMode,
     show_mcp_status: void,
+    switch_agent: void,
 };
 
 pub const Command = struct {
@@ -172,7 +173,7 @@ pub const CommandPaletteState = struct {
             .deletions = 0,
         });
 
-        // Only show daemon status command if MCP is enabled
+        // Only show daemon status and agent commands if MCP is enabled
         if (app_config.isMcpEnabled(self.allocator)) {
             try self.commands.append(self.allocator, .{
                 .name = "Daemon Status",
@@ -180,6 +181,17 @@ pub const CommandPaletteState = struct {
                 .description = "Show daemon connection status",
                 .action = .show_mcp_status,
                 .category = .help,
+                .owns_display_name = false,
+                .additions = 0,
+                .deletions = 0,
+            });
+
+            try self.commands.append(self.allocator, .{
+                .name = "Switch Agent",
+                .display_name = "Switch Agent",
+                .description = "Select a different AI agent",
+                .action = .switch_agent,
+                .category = .view,
                 .owns_display_name = false,
                 .additions = 0,
                 .deletions = 0,

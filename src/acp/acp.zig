@@ -39,8 +39,11 @@ pub const Client = client.Client;
 
 // Phase 3: TUI integration
 pub const AcpManager = manager.AcpManager;
-pub const isAgentAvailable = manager.isAgentAvailable;
-pub const findAvailableAgent = manager.findAvailableAgent;
+pub const AgentInfo = manager.AcpManager.AgentInfo;
+pub const ConfigAgent = manager.ConfigAgent;
+pub const loadAgentList = manager.loadAgentList;
+pub const freeAgentList = manager.freeAgentList;
+pub const findDefaultOrFirst = manager.findDefaultOrFirst;
 
 // =============================================================================
 // Tests

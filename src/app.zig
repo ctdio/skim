@@ -37,6 +37,7 @@ const mcp_status = @import("mcp_status.zig");
 const review_log_mode = @import("modes/review_log_mode.zig");
 const graphite_mode = @import("modes/graphite_mode.zig");
 const model_selection_mode = @import("modes/model_selection_mode.zig");
+const agent_selection_mode = @import("modes/agent_selection_mode.zig");
 const agent_mode = @import("modes/agent_mode.zig");
 const agent = @import("agent/agent.zig");
 const app_config = @import("config.zig");
@@ -78,6 +79,7 @@ var tty_static_buffer: [4096]u8 = undefined;
 pub const AcpConnectContext = struct {
     app: *App,
     cwd: []const u8,
+    agent: ?*const acp.AgentInfo, // Selected agent to connect to (null = use discovery)
 };
 
 pub const App = struct {
@@ -122,6 +124,7 @@ pub const App = struct {
         graphite_stack, // Graphite stack picker
         agent, // Agent chat panel
         model_selection, // AI model selection menu
+        agent_selection, // Agent selection menu (before connecting)
     };
 
     // Character find commands for NORMAL mode (f/t/F/T)
@@ -206,6 +209,10 @@ pub const App = struct {
 
         // Model selection state
         model_selection: usize, // Selected index in model picker
+
+        // Agent selection state (for choosing which agent to connect to)
+        configured_agents: ?[]acp.AgentInfo, // Available agents from config or fallback
+        agent_selection_idx: usize, // Selected index in agent picker
 
         // Agent panel state
         agent_state: ?agent.AgentState, // Agent chat panel state
@@ -409,6 +416,8 @@ pub const App = struct {
                 .graphite_stack = null,
                 .graphite_stack_selection = 0,
                 .model_selection = 0,
+                .configured_agents = null, // Loaded when agent panel opens
+                .agent_selection_idx = 0,
                 .agent_state = null, // Lazy initialization on first toggle
             },
             .should_quit = false,
@@ -1097,6 +1106,12 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
+                .agent_selection => {
+                    // Cancel agent selection, close panel
+                    self.mode = .normal;
+                    self.needs_render = true;
+                    return;
+                },
                 .agent => {
                     // Close agent panel and return to normal mode
                     if (self.state.agent_state) |*agent_state| {
@@ -1134,6 +1149,7 @@ pub const App = struct {
             .review_log => try review_log_mode.handleKey(self, key),
             .graphite_stack => try graphite_mode.handleKey(self, key),
             .model_selection => try model_selection_mode.handleKey(self, key),
+            .agent_selection => try agent_selection_mode.handleKey(self, key),
             .agent => try agent_mode.handleKey(self, key),
         }
     }
@@ -2038,6 +2054,16 @@ pub const App = struct {
             .show_mcp_status => {
                 self.mode = .mcp_status;
             },
+            .switch_agent => {
+                // Disconnect current agent if connected
+                if (self.acp_manager) |mgr| {
+                    mgr.disconnect();
+                    self.acp_manager = null;
+                }
+                // Reload agents and show selection
+                _ = self.loadConfiguredAgents();
+                self.mode = .agent_selection;
+            },
         }
     }
 
@@ -2518,7 +2544,11 @@ pub const App = struct {
             try UI.renderHeader(self, header_win);
 
             // Check if agent panel should be shown (visible and not full-screen)
-            const show_agent_panel = if (self.state.agent_state) |as| as.visible and !as.full_screen else false;
+            // Don't show when in agent_selection mode (selecting which agent to connect to)
+            const show_agent_panel = if (self.state.agent_state) |as|
+                as.visible and !as.full_screen and self.mode != .agent_selection
+            else
+                false;
 
             // Split content area based on panels
             if (show_agent_panel) {
@@ -2664,9 +2694,15 @@ pub const App = struct {
             try UI.renderModelSelectionDialog(self, win);
         }
 
+        // Render agent selection dialog if in agent_selection mode
+        if (self.mode == .agent_selection) {
+            try UI.renderAgentSelectionDialog(self, win);
+        }
+
         // Render agent panel full-screen if in full-screen mode
+        // Don't render during agent selection (dialog is shown instead)
         if (self.state.agent_state) |as| {
-            if (as.visible and as.full_screen) {
+            if (as.visible and as.full_screen and self.mode != .agent_selection) {
                 try agent.renderAgentPanel(self, win);
             }
         }
@@ -3165,18 +3201,16 @@ pub const App = struct {
             return;
         };
 
-        // Discover available agent (this was previously blocking the main thread)
-        std.log.info("ACP: Discovering available agents...", .{});
-        const agent_info = acp.findAvailableAgent() orelse {
-            std.log.warn("ACP: No agent found in PATH", .{});
-            // Add error message to chat so user knows what happened
+        // Get agent info from context (required - no auto-discovery)
+        const agent_info: acp.AgentInfo = if (ctx.agent) |a| a.* else {
+            std.log.err("ACP: No agent provided in context", .{});
             if (ctx.app.state.agent_state) |*agent_state| {
-                agent_state.addMessage(.system, "No ACP agent found. Install claude-code-acp and try again.") catch {};
+                agent_state.addMessage(.system, "No agent configured. Configure agents in ~/.skim/config.json") catch {};
             }
             mgr.status = .failed;
             return;
         };
-        std.log.info("ACP: Found agent: {s}", .{agent_info.name});
+        std.log.info("ACP: Using agent: {s}", .{agent_info.name});
 
         // Update status to connecting
         mgr.status = .connecting;
@@ -3194,9 +3228,23 @@ pub const App = struct {
             return;
         };
         std.log.info("ACP: Session created successfully! status={s}", .{mgr.getStatusString()});
+
+        // Apply configured mode if set (e.g., "plan", "bypassPermissions")
+        if (agent_info.mode) |mode_id| {
+            std.log.info("ACP: Applying configured mode: {s}", .{mode_id});
+            mgr.setMode(mode_id) catch |err| {
+                std.log.warn("ACP: Failed to set mode: {}", .{err});
+            };
+        }
+
+        // TODO: Apply configured model if set (requires ACP model selection support)
+        if (agent_info.model) |model_name| {
+            std.log.info("ACP: Configured model: {s} (model selection not yet implemented)", .{model_name});
+        }
     }
 
     /// Start an ACP agent session (non-blocking)
+    /// If agents are configured, may show selection menu first.
     pub fn startAcpSession(self: *App) !void {
         // Check if ACP is enabled
         if (!app_config.isAcpEnabled(self.allocator)) {
@@ -3227,14 +3275,68 @@ pub const App = struct {
             self.acp_manager = null;
         }
 
+        // Load configured agents (if not already loaded)
+        if (self.state.configured_agents == null) {
+            self.state.configured_agents = self.loadConfiguredAgents();
+        }
+
+        const agents = self.state.configured_agents orelse {
+            // No agents configured - show error in agent panel and stay in agent mode
+            std.log.warn("ACP: No agents configured in ~/.skim/config.json", .{});
+            if (self.state.agent_state) |*agent_state| {
+                agent_state.addMessage(.system, "No agents configured. Add agents to ~/.skim/config.json") catch {};
+            }
+            return;
+        };
+
+        // Decision logic for agent selection
+        if (agents.len == 0) {
+            std.log.warn("ACP: Empty agents list in config", .{});
+            if (self.state.agent_state) |*agent_state| {
+                agent_state.addMessage(.system, "No agents configured. Add agents to ~/.skim/config.json") catch {};
+            }
+            return;
+        }
+
+        if (agents.len == 1) {
+            // Single agent: auto-connect
+            std.log.info("ACP: Single agent configured, auto-connecting", .{});
+            try self.connectToAgent(&agents[0]);
+            return;
+        }
+
+        // Multiple agents: check for default
+        if (acp.findDefaultOrFirst(agents)) |default_agent| {
+            if (default_agent.is_default) {
+                // Default is explicitly set
+                std.log.info("ACP: Default agent found, auto-connecting to {s}", .{default_agent.name});
+                try self.connectToAgent(default_agent);
+                return;
+            }
+        }
+
+        // No default set with multiple agents: show selection menu
+        std.log.info("ACP: Multiple agents configured, showing selection menu", .{});
+        self.state.agent_selection_idx = 0;
+        self.mode = .agent_selection;
+        self.needs_render = true;
+    }
+
+    /// Connect to a specific agent.
+    /// Agent info is required - no auto-discovery.
+    pub fn connectToAgent(self: *App, agent_info: ?*const acp.AgentInfo) !void {
         // Create and initialize the manager with discovering status
-        // Agent discovery happens in background thread to avoid blocking UI
         const mgr = try self.allocator.create(acp.AcpManager);
         mgr.* = acp.AcpManager.init(self.allocator);
         mgr.status = .discovering;
         self.acp_manager = mgr;
 
-        self.showStatusMessage("Discovering agent...");
+        if (agent_info) |info| {
+            self.showStatusMessage("Connecting to agent...");
+            std.log.info("ACP: Connecting to {s}", .{info.name});
+        } else {
+            self.showStatusMessage("Discovering agent...");
+        }
         self.needs_render = true;
 
         // Store connection context (static lifetime for thread)
@@ -3242,6 +3344,7 @@ pub const App = struct {
         ctx.* = .{
             .app = self,
             .cwd = self.state.git_repo_root,
+            .agent = agent_info,
         };
 
         // Spawn background thread for connection
@@ -3257,6 +3360,58 @@ pub const App = struct {
 
         // Store context so it can be freed after thread joins
         self.acp_connect_ctx = ctx;
+    }
+
+    /// Connect to the currently selected agent in the selection menu
+    pub fn connectToSelectedAgent(self: *App) !void {
+        const agents = self.state.configured_agents orelse return;
+        if (self.state.agent_selection_idx >= agents.len) return;
+        try self.connectToAgent(&agents[self.state.agent_selection_idx]);
+    }
+
+    /// Load configured agents from config file.
+    /// Returns null if no agents are configured.
+    fn loadConfiguredAgents(self: *App) ?[]acp.AgentInfo {
+        // Try to load from config
+        const cfg_agents = app_config.getConfiguredAgents(self.allocator) catch null;
+
+        if (cfg_agents) |agents| {
+            if (agents.len > 0) {
+                // Convert to ACP ConfigAgent format for loadAgentList
+                const config_slice = self.allocator.alloc(acp.ConfigAgent, agents.len) catch {
+                    app_config.freeAgents(self.allocator, agents);
+                    return null;
+                };
+
+                for (agents, 0..) |cfg, i| {
+                    config_slice[i] = .{
+                        .name = cfg.name,
+                        .command = cfg.command,
+                        .api_key_env = cfg.api_key_env,
+                        .default = cfg.default,
+                        .args = cfg.args,
+                        .model = cfg.model,
+                        .mode = cfg.mode,
+                    };
+                }
+
+                // loadAgentList will dupe all strings
+                const result = (acp.loadAgentList(self.allocator, config_slice) catch null) orelse {
+                    self.allocator.free(config_slice);
+                    app_config.freeAgents(self.allocator, agents);
+                    return null;
+                };
+
+                // Clean up
+                self.allocator.free(config_slice);
+                app_config.freeAgents(self.allocator, agents);
+                return result;
+            }
+            app_config.freeAgents(self.allocator, agents);
+        }
+
+        // No agents configured
+        return null;
     }
 
     /// Disconnect from the ACP agent

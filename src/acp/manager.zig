@@ -156,17 +156,16 @@ pub const AcpManager = struct {
         PromptFailed,
     } || Allocator.Error;
 
-    /// Known agent commands to try
-    pub const KnownAgent = struct {
+    /// Agent info for connection - from config
+    pub const AgentInfo = struct {
         name: []const u8,
         command: []const u8,
         args: []const []const u8,
-    };
-
-    pub const known_agents = [_]KnownAgent{
-        .{ .name = "Claude Code ACP", .command = "claude-code-acp", .args = &.{} },
-        .{ .name = "Codex ACP", .command = "codex-acp", .args = &.{} },
-        .{ .name = "Gemini CLI", .command = "gemini", .args = &.{"--experimental-acp"} },
+        api_key_env: ?[]const u8 = null, // Environment variable containing API key (for status display)
+        model: ?[]const u8 = null, // AI model to use (e.g., "sonnet", "opus")
+        mode: ?[]const u8 = null, // Agent session mode (e.g., "plan", "code")
+        from_config: bool = false, // true if loaded from config
+        is_default: bool = false, // true if marked as default in config
     };
 
     pub fn init(allocator: Allocator) AcpManager {
@@ -1199,30 +1198,80 @@ pub const AcpManager = struct {
 };
 
 // =============================================================================
-// Agent Discovery
+// Agent Utilities
 // =============================================================================
 
-/// Check if an agent command is available in PATH
-pub fn isAgentAvailable(command: []const u8) bool {
-    const result = std.process.Child.run(.{
-        .allocator = std.heap.page_allocator,
-        .argv = &.{ "which", command },
-    }) catch return false;
-    defer {
-        std.heap.page_allocator.free(result.stdout);
-        std.heap.page_allocator.free(result.stderr);
+/// Config agent struct for loadAgentList parameter (mirrors config.AgentConfig)
+pub const ConfigAgent = struct {
+    name: []const u8,
+    command: []const u8,
+    api_key_env: ?[]const u8 = null,
+    default: bool = false,
+    args: ?[]const []const u8 = null,
+    model: ?[]const u8 = null,
+    mode: ?[]const u8 = null,
+};
+
+/// Load agent list from config agents.
+/// Returns null if no agents are configured.
+/// Returns owned slice that must be freed with freeAgentList().
+pub fn loadAgentList(allocator: Allocator, config_agents: ?[]const ConfigAgent) !?[]AcpManager.AgentInfo {
+    // Only use explicitly configured agents - no auto-discovery
+    const agents = config_agents orelse return null;
+    if (agents.len == 0) return null;
+
+    const result = try allocator.alloc(AcpManager.AgentInfo, agents.len);
+    errdefer allocator.free(result);
+
+    for (agents, 0..) |cfg, i| {
+        result[i] = .{
+            .name = try allocator.dupe(u8, cfg.name),
+            .command = try allocator.dupe(u8, cfg.command),
+            .args = if (cfg.args) |a| try dupeStringSlice(allocator, a) else &.{},
+            .api_key_env = if (cfg.api_key_env) |e| try allocator.dupe(u8, e) else null,
+            .model = if (cfg.model) |m| try allocator.dupe(u8, m) else null,
+            .mode = if (cfg.mode) |m| try allocator.dupe(u8, m) else null,
+            .from_config = true,
+            .is_default = cfg.default,
+        };
     }
-    return result.term == .Exited and result.term.Exited == 0;
+    return result;
 }
 
-/// Find first available agent from known list
-pub fn findAvailableAgent() ?AcpManager.KnownAgent {
-    for (AcpManager.known_agents) |agent| {
-        if (isAgentAvailable(agent.command)) {
-            return agent;
+/// Free an agent list returned by loadAgentList
+pub fn freeAgentList(allocator: Allocator, agents: []AcpManager.AgentInfo) void {
+    for (agents) |agent| {
+        allocator.free(agent.name);
+        allocator.free(agent.command);
+        if (agent.args.len > 0) {
+            for (agent.args) |arg| allocator.free(arg);
+            allocator.free(agent.args);
         }
+        if (agent.api_key_env) |e| allocator.free(e);
+        if (agent.model) |m| allocator.free(m);
+        if (agent.mode) |m| allocator.free(m);
     }
-    return null;
+    allocator.free(agents);
+}
+
+/// Find the default agent in a list (first one marked as default, or first one)
+pub fn findDefaultOrFirst(agents: []const AcpManager.AgentInfo) ?*const AcpManager.AgentInfo {
+    if (agents.len == 0) return null;
+    // First, look for explicitly marked default
+    for (agents) |*agent| {
+        if (agent.is_default) return agent;
+    }
+    // No default marked - return first agent
+    return &agents[0];
+}
+
+/// Duplicate a slice of strings
+fn dupeStringSlice(allocator: Allocator, strings: []const []const u8) ![]const []const u8 {
+    const result = try allocator.alloc([]const u8, strings.len);
+    for (strings, 0..) |s, i| {
+        result[i] = try allocator.dupe(u8, s);
+    }
+    return result;
 }
 
 // =============================================================================
