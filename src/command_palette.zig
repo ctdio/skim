@@ -386,8 +386,37 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 }
 
 pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
-    // Larger popup for better file path visibility (80% of screen width, up to 100 chars)
-    const palette_width = @min(100, (win.width * 80) / 100);
+    const state = &app.state.command_palette_state;
+
+    // Calculate required width based on visible commands
+    var max_content_width: usize = 60; // Minimum width
+    const calc_start_idx = state.scroll_offset;
+    const calc_end_idx = @min(calc_start_idx + CommandPaletteState.max_visible_items, state.filtered_commands.items.len);
+
+    for (calc_start_idx..calc_end_idx) |i| {
+        const cmd_idx = state.filtered_commands.items[i];
+        const cmd = &state.commands.items[cmd_idx];
+
+        // Calculate total width needed for this command: indicator + name + spacing + description + stats
+        const indicator_width: usize = 2; // "▶ " or "  "
+        const spacing_width: usize = 2; // "  "
+        const stats_width: usize = if ((cmd.category == .file or cmd.category == .diff) and (cmd.additions > 0 or cmd.deletions > 0))
+            32 // Approximate: " (+123, -456)" with padding
+        else
+            0;
+
+        const line_width = indicator_width + cmd.display_name.len + spacing_width + cmd.description.len + stats_width;
+        if (line_width > max_content_width) {
+            max_content_width = line_width;
+        }
+    }
+
+    // Add padding for borders and margins
+    const border_padding: usize = 4;
+    const desired_width = max_content_width + border_padding;
+
+    // Use calculated width, but cap at 95% of screen width to leave room for status bar
+    const palette_width = @min(desired_width, (win.width * 95) / 100);
     const palette_height = @min(25, win.height - 4);
     const x_offset = if (win.width > palette_width) (win.width - palette_width) / 2 else 0;
     const y_offset = if (win.height > palette_height) (win.height - palette_height) / 2 else 0;
@@ -416,8 +445,6 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         },
     };
     palette_win.fill(bg_cell);
-
-    const state = &app.state.command_palette_state;
 
     // Line 0: Title (dynamic based on mode) with stats
     const query = state.query_buffer[0..state.query_len];
@@ -481,15 +508,14 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         };
         _ = palette_win.print(&no_results_segments, .{ .row_offset = 3  });
     } else {
-        const start_idx = state.scroll_offset;
-        const end_idx = @min(start_idx + CommandPaletteState.max_visible_items, state.filtered_commands.items.len);
+        // Use the already-declared calc_start_idx and calc_end_idx from above (line 393)
 
-        for (start_idx..end_idx) |i| {
+        for (calc_start_idx..calc_end_idx) |i| {
             const cmd_idx = state.filtered_commands.items[i];
             const cmd = &state.commands.items[cmd_idx];
             const is_selected = (i == state.selected_idx);
 
-            const row = 3 + (i - start_idx);
+            const row = 3 + (i - calc_start_idx);
 
             // Selection indicator
             const indicator = if (is_selected) "▶ " else "  ";
@@ -565,7 +591,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         }
 
         // Show scroll indicator if there are more items
-        if (end_idx < state.filtered_commands.items.len) {
+        if (calc_end_idx < state.filtered_commands.items.len) {
             const more_text = "...";
             const more_style = vaxis.Style{
                 .fg = .{ .index = 8 }, // dim

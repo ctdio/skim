@@ -1187,9 +1187,17 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     var char_offset: usize = 0; // Track absolute position in buffer
     var is_first_line = true;
 
+    var line_num: usize = 0;
     while (line_iter.next()) |text_line| {
         // Stop if we've filled the visible area
         if (visible_row >= visible_lines) break;
+
+        // For lines after the first, account for the newline character before processing the line
+        // (splitScalar doesn't include the delimiter, so we need to manually track it)
+        if (line_num > 0) {
+            char_offset += 1; // Account for '\n' that ended previous line
+        }
+        line_num += 1;
 
         // Wrap this line by splitting at max_input_width boundaries
         var line_pos: usize = 0;
@@ -1272,25 +1280,34 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                 }
 
                 // Set terminal cursor if it's in this segment
-                if (is_focused) {
+                if (is_focused and agent_state.input.vim.vim_mode != .command) {
                     const vim_cursor_pos = agent_state.input.vim.cursor_pos;
+
+                    // Determine if cursor is in this segment
+                    // For empty text, show cursor at position 0
                     // For empty lines (chunk_len == 0), cursor should be shown if it's exactly at segment_start
-                    // For non-empty lines, cursor should be shown if it's within the segment
-                    const cursor_in_segment = if (chunk_len == 0)
+                    // For non-empty lines:
+                    //   - In normal/visual mode: cursor is ON the character (inclusive end)
+                    //   - In insert mode: cursor is BETWEEN characters (exclusive end)
+                    const cursor_in_segment = if (text.len == 0)
+                        vim_cursor_pos == 0 and segment_start == 0
+                    else if (chunk_len == 0)
                         vim_cursor_pos == segment_start
+                    else if (vim_mode == .normal or vim_mode == .visual)
+                        vim_cursor_pos >= segment_start and vim_cursor_pos < segment_end
                     else
-                        vim_cursor_pos >= segment_start and vim_cursor_pos < segment_end;
+                        vim_cursor_pos >= segment_start and vim_cursor_pos <= segment_end;
 
                     if (cursor_in_segment) {
-                        const cursor_screen_col = vim_cursor_pos - segment_start;
-                        const cursor_col = input_col + cursor_screen_col;
+                        const cursor_offset_in_segment = if (vim_cursor_pos >= segment_start)
+                            @min(vim_cursor_pos - segment_start, chunk_len)
+                        else
+                            0;
+                        const cursor_col = input_col + cursor_offset_in_segment;
 
                         if (cursor_col < win.width) {
-                            // Show terminal cursor at position
-                            win.showCursor(@intCast(cursor_col), @intCast(row));
-
-                            // Set cursor shape based on vim mode (matching comment editor)
-                            switch (agent_state.input.vim.vim_mode) {
+                            // Set cursor shape based on vim mode
+                            switch (vim_mode) {
                                 .normal, .visual => {
                                     // Block cursor for normal/visual mode
                                     win.setCursorShape(.block);
@@ -1300,10 +1317,12 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                                     win.setCursorShape(.beam);
                                 },
                                 .command => {
-                                    // Command mode - hide cursor
-                                    win.hideCursor();
+                                    // Should never reach here due to outer check
+                                    unreachable;
                                 },
                             }
+                            // Show terminal cursor at position
+                            win.showCursor(@intCast(cursor_col), @intCast(row));
                         }
                     }
                 }
@@ -1317,13 +1336,6 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
             // Break after rendering empty line
             if (text_line.len == 0) break;
-        }
-
-        // Account for newline character if not the last line
-        if (line_iter.index) |idx| {
-            if (idx < text.len) {
-                char_offset += 1; // Skip the '\n'
-            }
         }
     }
 
