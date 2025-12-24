@@ -619,9 +619,20 @@ pub fn VimEditor(comptime buffer_size: usize) type {
 
             switch (key.codepoint) {
                 127, 8 => {
-                    if (state.cursor_pos > 0) {
-                        try deleteChar(state, state.cursor_pos - 1);
-                        state.cursor_pos -= 1;
+                    // Alt+Backspace / Option+Backspace - delete word backward
+                    if (key.mods.alt) {
+                        pushUndo(state);
+                        const word_start = findDeleteWordStart(state.*);
+                        while (state.cursor_pos > word_start) {
+                            state.cursor_pos -= 1;
+                            try deleteChar(state, state.cursor_pos);
+                        }
+                    } else {
+                        // Regular backspace - delete single char
+                        if (state.cursor_pos > 0) {
+                            try deleteChar(state, state.cursor_pos - 1);
+                            state.cursor_pos -= 1;
+                        }
                     }
                 },
                 else => {
@@ -1053,6 +1064,27 @@ pub fn VimEditor(comptime buffer_size: usize) type {
 
             while (pos > 0 and !isWordBoundary(state.text_buffer[pos - 1])) {
                 pos -= 1;
+            }
+
+            return pos;
+        }
+
+        fn findDeleteWordStart(state: State) usize {
+            if (state.cursor_pos == 0) return 0;
+
+            var pos = state.cursor_pos;
+
+            // If we're at the start of a word, delete backwards including preceding whitespace
+            if (pos > 0 and !isWordBoundary(state.text_buffer[pos - 1])) {
+                // Delete the word
+                while (pos > 0 and !isWordBoundary(state.text_buffer[pos - 1])) {
+                    pos -= 1;
+                }
+            } else {
+                // Delete whitespace
+                while (pos > 0 and isWordBoundary(state.text_buffer[pos - 1])) {
+                    pos -= 1;
+                }
             }
 
             return pos;
