@@ -33,6 +33,10 @@ pub const InputEditor = struct {
             return self.vim.isEmpty();
         }
 
+        pub fn setText(self: *State, text: []const u8) void {
+            self.vim.setText(text);
+        }
+
         // Accessors for commonly used vim state fields
         pub fn getVimMode(self: *const State) VimMode {
             return self.vim.vim_mode;

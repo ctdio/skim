@@ -325,12 +325,24 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         const desc_rows: usize = if (perm.description != null) 1 else 0;
         break :blk 3 + desc_rows + perm.options.len;
     } else blk: {
-        // Count logical lines (newline-separated) for initial height estimate
-        var line_count: usize = 1;
-        for (text) |c| {
-            if (c == '\n') line_count += 1;
+        // Calculate wrapped line count accounting for panel width
+        // This ensures the input area expands properly in side-by-side mode
+        // Account for: prompt/continuation (3 chars) + scrollbar (1 char when visible) + margin (1 char)
+        const input_col: usize = 3; // After "> " or "  "
+        const max_input_width = if (win.width > input_col + 2) win.width - input_col - 2 else 1;
+        var total_display_lines: usize = 0;
+        var line_iter = std.mem.splitScalar(u8, text, '\n');
+        while (line_iter.next()) |text_line| {
+            if (text_line.len == 0) {
+                total_display_lines += 1; // Empty line still takes one display line
+            } else {
+                // Calculate how many chunks this line wraps into
+                const chunks = (text_line.len + max_input_width - 1) / max_input_width;
+                total_display_lines += chunks;
+            }
         }
-        break :blk @max(3, @min(line_count, MAX_INPUT_LINES));
+        if (total_display_lines == 0) total_display_lines = 1; // Always show at least one line
+        break :blk @max(3, @min(total_display_lines, MAX_INPUT_LINES));
     };
 
     // Calculate plan height (only if visible and has entries)
@@ -1096,10 +1108,12 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     }
 
     const text = agent_state.input.getText();
+    const input_col: usize = 3; // After "> " or "  "
 
     // Calculate how many display lines we'll have with wrapping
     // We need to do this before rendering to know the input area height
-    const max_input_width_for_calc = if (win.width > 4) win.width - 4 else 1;
+    // Account for: prompt/continuation (3 chars) + scrollbar (1 char when visible) + margin (1 char)
+    const max_input_width_for_calc = if (win.width > input_col + 2) win.width - input_col - 2 else 1;
     var total_display_lines: usize = 0;
     var line_iter_calc = std.mem.splitScalar(u8, text, '\n');
     while (line_iter_calc.next()) |text_line| {
@@ -1177,8 +1191,8 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
     const prompt_style = vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }; // magenta
     const text_style = vaxis.Style{ .fg = .{ .index = 7 } };
-    const input_col: usize = 3; // After "> "
-    const max_input_width = if (win.width > input_col + 1) win.width - input_col - 1 else 1;
+    // Use the same max_input_width as calculated earlier for consistency
+    const max_input_width = max_input_width_for_calc;
 
     // Split text by newlines and wrap each line
     var line_iter = std.mem.splitScalar(u8, text, '\n');

@@ -234,6 +234,61 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     }
 
 
+    // Ctrl+W chord for window navigation (vim-style)
+    if (key.mods.ctrl and key.codepoint == 'w') {
+        app.state.pending_ctrl_w = true;
+        return;
+    }
+
+    // Handle pending Ctrl+W chord
+    if (app.state.pending_ctrl_w) {
+        app.state.pending_ctrl_w = false;
+        // ESC cancels pending Ctrl+w
+        if (key.codepoint == 27) { // ESC
+            return;
+        }
+        // Support both Ctrl+w h and Ctrl+w Ctrl+h (vim-style)
+        // Ctrl+h sends 8 (backspace), Ctrl+l sends 12 (form feed), Ctrl+w sends 23
+        const effective_key: u21 = switch (key.codepoint) {
+            8 => 'h', // Ctrl+h
+            12 => 'l', // Ctrl+l
+            23 => 'w', // Ctrl+w
+            else => key.codepoint,
+        };
+
+        // Check agent panel position to determine correct navigation
+        const agent_on_left = agent_state.panel_side == .left;
+
+        switch (effective_key) {
+            'h' => {
+                // If agent is on right, focus left (diff)
+                // If agent is on left, already leftmost - no-op
+                if (!agent_on_left) {
+                    app.mode = .normal;
+                    app.needs_render = true;
+                }
+                return;
+            },
+            'l' => {
+                // If agent is on left, focus right (diff)
+                // If agent is on right, already rightmost - no-op
+                if (agent_on_left) {
+                    app.mode = .normal;
+                    app.needs_render = true;
+                }
+                return;
+            },
+            'w' => {
+                // Cycle windows: always return to diff
+                app.mode = .normal;
+                app.needs_render = true;
+                return;
+            },
+            else => {},
+        }
+        return;
+    }
+
     // Ctrl+E - close agent panel and return to diff (toggle)
     if (key.mods.ctrl and key.codepoint == 'e') {
         agent_state.visible = false;

@@ -1113,13 +1113,22 @@ pub const App = struct {
                     return;
                 },
                 .agent => {
-                    // Close agent panel and return to normal mode
+                    // In agent mode, respect vim mode state:
+                    // - Insert mode: first Ctrl+C exits to normal vim mode
+                    // - Normal vim mode: single Ctrl+C closes panel
                     if (self.state.agent_state) |*agent_state| {
-                        agent_state.visible = false;
+                        if (agent_state.input.vim.vim_mode == .insert) {
+                            // First Ctrl+C in insert mode - exit to normal vim mode
+                            // (handled by vim_editor, will be processed below)
+                            // Fall through to agent_mode.handleKey
+                        } else {
+                            // In normal vim mode - single Ctrl+C closes panel and returns to diff
+                            agent_state.visible = false;
+                            self.mode = .normal;
+                            self.needs_render = true;
+                            return;
+                        }
                     }
-                    self.mode = .normal;
-                    self.needs_render = true;
-                    return;
                 },
                 .normal, .comment => {
                     // In normal/comment modes, double-press to quit
@@ -1858,6 +1867,51 @@ pub const App = struct {
         defer self.allocator.free(output);
 
         try clipboard.copyToClipboard(self.allocator, output);
+    }
+
+    /// Yank all comments and send to agent panel input
+    pub fn yankCommentsToAgent(self: *App) !void {
+        // Check if ACP is enabled
+        if (!app_config.isAcpEnabled(self.allocator)) {
+            return;
+        }
+
+        // Generate export with context (10 lines before, 10 lines after for LLM context)
+        const output = try self.state.comment_store.exportWithContext(
+            self.allocator,
+            self.state.files,
+            10, // lines before
+            10, // lines after
+        );
+        defer self.allocator.free(output);
+
+        if (output.len == 0) {
+            self.showStatusMessage("No comments to send");
+            return;
+        }
+
+        // Open agent panel if not already open
+        if (self.state.agent_state) |*agent_state| {
+            if (!agent_state.visible) {
+                try self.toggleAgentPanel();
+            }
+            // Set the input text
+            agent_state.input.setText(output);
+            // Switch to insert mode so user can add context
+            agent_state.input.vim.vim_mode = .insert;
+            // Move cursor to end
+            agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
+        } else {
+            // No agent state yet, open panel first
+            try self.toggleAgentPanel();
+            if (self.state.agent_state) |*agent_state| {
+                agent_state.input.setText(output);
+                agent_state.input.vim.vim_mode = .insert;
+                agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
+            }
+        }
+
+        self.needs_render = true;
     }
 
     pub fn deleteCommentUnderCursor(self: *App) !void {

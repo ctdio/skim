@@ -31,6 +31,30 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // Any other key cancels the pending z, but still processes the key below
     }
 
+    // If waiting for second character after g (like gg for top, gY for yank to agent)
+    if (app.state.pending_g) {
+        app.state.pending_g = false;
+        // ESC cancels pending g
+        if (key.codepoint == 27) { // ESC
+            return;
+        }
+        // gg - scroll to top
+        if (key.codepoint == 'g') {
+            Navigation.scrollToTop(app);
+            app.state.cursor_column = 0;
+            app.updateCurrentFileAndTriggerHighlighting();
+            return;
+        }
+        // gY - yank all comments to agent input (ACP feature)
+        if (key.codepoint == 'Y') {
+            if (app_config.isAcpEnabled(app.allocator)) {
+                try app.yankCommentsToAgent();
+            }
+            return;
+        }
+        // Any other key cancels the pending g, but still processes the key below
+    }
+
     // If waiting for second character after [ (like [h for previous hunk)
     if (app.state.pending_bracket) {
         app.state.pending_bracket = false;
@@ -123,20 +147,39 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             23 => 'w', // Ctrl+w
             else => key.codepoint,
         };
+
+        // Check which panels are visible and their positions
+        const agent_panel_visible = if (app.state.agent_state) |as| as.visible else false;
+        const agent_on_left = if (app.state.agent_state) |as| as.panel_side == .left else false;
+        const review_panel_visible = app_config.isMcpEnabled(app.allocator) and app.state.review_panel_open;
+        // Review panel is always on the right
+
         switch (effective_key) {
             'l' => {
-                // Focus right (review panel) - enter review_log mode (MCP feature)
-                if (app_config.isMcpEnabled(app.allocator) and app.state.review_panel_open) {
+                // Focus right - check what's on the right
+                // Agent panel (if on right) takes priority, then review panel
+                if (app_config.isAcpEnabled(app.allocator) and agent_panel_visible and !agent_on_left) {
+                    app.mode = .agent;
+                    app.needs_render = true;
+                } else if (review_panel_visible) {
                     app.mode = .review_log;
                     app.needs_render = true;
                 }
             },
             'h' => {
-                // Focus left (diff) - already in normal mode, no-op
+                // Focus left - check if agent panel is on the left
+                if (app_config.isAcpEnabled(app.allocator) and agent_panel_visible and agent_on_left) {
+                    app.mode = .agent;
+                    app.needs_render = true;
+                }
+                // Otherwise no-op (diff is already focused)
             },
             'w' => {
-                // Cycle focus - enter review_log mode if panel is open (MCP feature)
-                if (app_config.isMcpEnabled(app.allocator) and app.state.review_panel_open) {
+                // Cycle focus - prioritize visible panels
+                if (app_config.isAcpEnabled(app.allocator) and agent_panel_visible) {
+                    app.mode = .agent;
+                    app.needs_render = true;
+                } else if (review_panel_visible) {
                     app.mode = .review_log;
                     app.needs_render = true;
                 }
@@ -228,9 +271,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.state.cursor_column = 0; // Reset column on file change
         },
         'g' => {
-            Navigation.scrollToTop(app);
-            app.state.cursor_column = 0; // Reset column on jump
-            app.updateCurrentFileAndTriggerHighlighting();
+            app.state.pending_g = true; // Wait for second character (gg, gY, etc.)
         },
         'G' => {
             Navigation.scrollToBottom(app);

@@ -383,6 +383,8 @@ skim --staged
 |-----|--------|
 | `,a` | Toggle agent panel visibility |
 | `,d` | Focus diff (close agent panel) |
+| `Ctrl-C` | In insert mode: exit to normal mode. In normal mode: close panel |
+| `Ctrl-C` × 2 | In normal mode (diff view): force quit |
 
 ### Configuration
 
