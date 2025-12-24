@@ -415,8 +415,10 @@ pub const AgentState = struct {
     /// Update scroll offset after rendering (to get actual clamped value)
     pub fn updateScrollOffset(self: *AgentState, actual_offset: usize, max_offset: usize) void {
         self.scroll_offset = actual_offset;
-        // Don't auto-enable follow mode - let user control it explicitly
-        _ = max_offset;
+        // Re-enable follow mode if scrolled to the bottom
+        if (actual_offset >= max_offset) {
+            self.follow_bottom = true;
+        }
     }
 
     /// Toggle visibility

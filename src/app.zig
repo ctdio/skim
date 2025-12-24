@@ -1241,6 +1241,10 @@ pub const App = struct {
             agent_state.visible = true;
             self.mode = .agent;
 
+            // Re-enable scroll following when reopening panel
+            // (user may have scrolled up before closing, we want to see new messages)
+            agent_state.scrollToBottom();
+
             // Add local slash commands (like /model)
             agent_state.addLocalSlashCommands() catch |err| {
                 std.log.err("Failed to add local slash commands: {any}", .{err});
