@@ -32,6 +32,24 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.state.model_selection = if (app.state.model_selection == 0) model_count - 1 else app.state.model_selection - 1;
                 return;
             },
+            'd' => {
+                // Allow scrolling conversation history during model selection
+                if (app.state.agent_state) |*agent_state| {
+                    agent_state.follow_bottom = false;
+                    agent_state.scrollDown(10);
+                    app.needs_render = true;
+                }
+                return;
+            },
+            'u' => {
+                // Allow scrolling conversation history during model selection
+                if (app.state.agent_state) |*agent_state| {
+                    agent_state.follow_bottom = false;
+                    agent_state.scrollUp(10);
+                    app.needs_render = true;
+                }
+                return;
+            },
             else => {},
         }
     }

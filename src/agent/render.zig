@@ -36,6 +36,75 @@ const MAX_PLAN_ENTRIES: usize = 5;
 const MAX_SLASH_MENU_WIDTH: usize = 120;
 
 // =============================================================================
+// Scrollbar
+// =============================================================================
+
+const ScrollbarInfo = struct {
+    thumb_start: usize,
+    thumb_end: usize,
+    show_top_arrow: bool,
+    show_bottom_arrow: bool,
+};
+
+fn calculateScrollbar(
+    viewport_height: usize,
+    total_lines: usize,
+    scroll_offset: usize,
+) ScrollbarInfo {
+    // Thumb size: proportional to viewport vs total
+    const thumb_size = @max(1, (viewport_height * viewport_height) / total_lines);
+
+    // Thumb position: proportional to scroll offset
+    const scrollable_range = if (total_lines > viewport_height)
+        total_lines - viewport_height
+    else
+        0;
+
+    const thumb_pos = if (scrollable_range > 0)
+        (scroll_offset * (viewport_height - thumb_size)) / scrollable_range
+    else
+        0;
+
+    return .{
+        .thumb_start = thumb_pos,
+        .thumb_end = thumb_pos + thumb_size,
+        .show_top_arrow = scroll_offset > 0,
+        .show_bottom_arrow = scroll_offset < scrollable_range,
+    };
+}
+
+fn renderScrollbar(win: vaxis.Window, info: ScrollbarInfo) void {
+    const col = win.width - 1; // Rightmost column
+    const track_style = vaxis.Style{ .fg = .{ .index = 8 }, .dim = true }; // very dim gray
+    const thumb_style = vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray (no bold)
+    const arrow_style = vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray
+
+    for (0..win.height) |row| {
+        var char: []const u8 = undefined;
+        var style: vaxis.Style = undefined;
+
+        if (row == 0 and info.show_top_arrow) {
+            char = "▴"; // Smaller, subtler arrow
+            style = arrow_style;
+        } else if (row == win.height - 1 and info.show_bottom_arrow) {
+            char = "▾"; // Smaller, subtler arrow
+            style = arrow_style;
+        } else if (row >= info.thumb_start and row < info.thumb_end) {
+            char = "│"; // Lighter bar for thumb
+            style = thumb_style;
+        } else {
+            char = "│"; // Light vertical line for track
+            style = track_style;
+        }
+
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = char, .width = 1 },
+            .style = style,
+        });
+    }
+}
+
+// =============================================================================
 // Unified Inline Menu Renderer
 // =============================================================================
 
@@ -438,7 +507,8 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     }
 
     // Get the pre-computed line map (builds if dirty)
-    const wrap_width = if (win.width > 4) win.width - 4 else 1;
+    // Reserve 4 cols for indent + 1 col for scrollbar
+    const wrap_width = if (win.width > 5) win.width - 5 else 1;
     const line_map = agent_state.ensureLineMap(wrap_width) catch {
         // Fallback: show error message
         var err_seg = [_]vaxis.Cell.Segment{
@@ -670,6 +740,12 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
         };
         _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
         row += 1;
+    }
+
+    // Render scrollbar if content is scrollable
+    if (total_lines > win.height) {
+        const scrollbar_info = calculateScrollbar(win.height, total_lines, scroll);
+        renderScrollbar(win, scrollbar_info);
     }
 
     // Show thinking indicator at the very bottom of the message area (no overlap with content)

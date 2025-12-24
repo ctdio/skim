@@ -153,6 +153,9 @@ pub const McpAdapter = struct {
     }
 
     fn handleMcpRequest(self: *Self, line: []const u8) !void {
+        // Log incoming MCP request
+        std.log.debug("MCP request from agent: {s}", .{line});
+
         // Zig 0.15: need mutable writer for writeAll methods
         var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
         const stdout = &file_writer.interface;
@@ -195,6 +198,8 @@ pub const McpAdapter = struct {
     }
 
     fn forwardToDaemon(self: *Self, method: []const u8, id: ?std.json.Value, params: ?std.json.Value) !void {
+        std.log.debug("Forwarding to daemon - method: {s}", .{method});
+
         const stream = self.daemon_stream orelse {
             var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
             try self.sendMcpError(&file_writer.interface, id, -32001, "Not connected to daemon");
@@ -342,6 +347,14 @@ pub const McpAdapter = struct {
     }
 
     fn writeMcpResponse(self: *Self, writer: anytype, response: internal_protocol.McpResponsePayload) !void {
+        // Log MCP response details
+        if (response.result) |result| {
+            std.log.debug("MCP response - result: {s}", .{result});
+        }
+        if (response.@"error") |err| {
+            std.log.debug("MCP response - error: code={d}, message={s}", .{err.code, err.message});
+        }
+
         _ = self;
 
         try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");

@@ -156,8 +156,10 @@ pub const AgentState = struct {
         // Mark line map dirty
         self.line_map_dirty = true;
 
-        // Auto-scroll to bottom on new message
-        self.scrollToBottom();
+        // Auto-scroll only if in follow mode
+        if (self.follow_bottom) {
+            self.scrollToBottom();
+        }
     }
 
     /// Add a diff message (from tool_call with edit content)
@@ -186,8 +188,10 @@ pub const AgentState = struct {
         // Mark line map dirty
         self.line_map_dirty = true;
 
-        // Auto-scroll to bottom on new message
-        self.scrollToBottom();
+        // Auto-scroll only if in follow mode
+        if (self.follow_bottom) {
+            self.scrollToBottom();
+        }
     }
 
     /// Append text to the last agent message (for streaming responses)
@@ -220,7 +224,10 @@ pub const AgentState = struct {
         // Mark line map dirty for streaming update
         self.line_map_dirty = true;
 
-        self.scrollToBottom();
+        // Auto-scroll only if in follow mode
+        if (self.follow_bottom) {
+            self.scrollToBottom();
+        }
     }
 
     /// Append text to the last thinking message (for streaming reasoning)
@@ -252,7 +259,10 @@ pub const AgentState = struct {
         // Mark line map dirty for streaming update
         self.line_map_dirty = true;
 
-        self.scrollToBottom();
+        // Auto-scroll only if in follow mode
+        if (self.follow_bottom) {
+            self.scrollToBottom();
+        }
     }
 
     /// Add a tool call message (or update existing if tool_call_id matches)
@@ -280,9 +290,11 @@ pub const AgentState = struct {
                         if (command != null and msg.tool_command == null) {
                             msg.tool_command = try self.allocator.dupe(u8, command.?);
                         }
-                        // Mark dirty and scroll
+                        // Mark dirty and scroll only if in follow mode
                         self.line_map_dirty = true;
-                        self.scrollToBottom();
+                        if (self.follow_bottom) {
+                            self.scrollToBottom();
+                        }
                         return;
                     }
                 }
@@ -321,7 +333,10 @@ pub const AgentState = struct {
         // Mark line map dirty
         self.line_map_dirty = true;
 
-        self.scrollToBottom();
+        // Auto-scroll only if in follow mode
+        if (self.follow_bottom) {
+            self.scrollToBottom();
+        }
     }
 
     /// Update an existing tool message with completion status and output
@@ -355,7 +370,10 @@ pub const AgentState = struct {
                         // Mark line map dirty
                         self.line_map_dirty = true;
 
-                        self.scrollToBottom();
+                        // Auto-scroll only if in follow mode
+                        if (self.follow_bottom) {
+                            self.scrollToBottom();
+                        }
                         return;
                     }
                 }
@@ -394,10 +412,8 @@ pub const AgentState = struct {
     /// Update scroll offset after rendering (to get actual clamped value)
     pub fn updateScrollOffset(self: *AgentState, actual_offset: usize, max_offset: usize) void {
         self.scroll_offset = actual_offset;
-        // Re-enable follow mode if scrolled to bottom
-        if (actual_offset >= max_offset) {
-            self.follow_bottom = true;
-        }
+        // Don't auto-enable follow mode - let user control it explicitly
+        _ = max_offset;
     }
 
     /// Toggle visibility

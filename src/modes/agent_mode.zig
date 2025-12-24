@@ -58,6 +58,23 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 return;
             }
 
+            // Allow scrolling during permission prompts
+            // Ctrl+D - page down
+            if (key.mods.ctrl and key.codepoint == 'd') {
+                agent_state.follow_bottom = false;
+                agent_state.scrollDown(10);
+                app.needs_render = true;
+                return;
+            }
+
+            // Ctrl+U - page up
+            if (key.mods.ctrl and key.codepoint == 'u') {
+                agent_state.follow_bottom = false;
+                agent_state.scrollUp(10);
+                app.needs_render = true;
+                return;
+            }
+
             // Ignore other keys when permission prompt is active
             return;
         }
@@ -105,7 +122,19 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // Enter - insert selected command and send immediately
         if (key.matches(vaxis.Key.enter, .{})) {
             if (agent_state.getSelectedCommand()) |cmd| {
-                // Build full command text
+                // Check if this is a local command (handled by skim, not agent)
+                if (state.AgentState.isLocalSlashCommand(cmd.name)) {
+                    // Handle local commands client-side
+                    try handleLocalCommand(app, agent_state, cmd.name);
+
+                    // Clear input and hide menu
+                    agent_state.input.clear();
+                    agent_state.hideSlashMenu();
+                    app.needs_render = true;
+                    return;
+                }
+
+                // Build full command text for agent commands
                 var cmd_text: std.ArrayList(u8) = .{};
                 defer cmd_text.deinit(app.allocator);
 
@@ -206,6 +235,32 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
+    // Vim navigation in normal mode: 'gg' to scroll to top, 'G' to scroll to bottom
+    if (agent_state.input.vim.vim_mode == .normal) {
+        // Handle 'gg' sequence
+        if (app.state.pending_g) {
+            app.state.pending_g = false;
+            if (key.codepoint == 'g') {
+                // gg - scroll to top, disable follow mode
+                agent_state.follow_bottom = false;
+                agent_state.scroll_offset = 0;
+                app.needs_render = true;
+                return;
+            }
+        } else if (key.codepoint == 'g' and !key.mods.ctrl and !key.mods.alt) {
+            // First 'g' - wait for second
+            app.state.pending_g = true;
+            return;
+        }
+
+        // 'G' - scroll to bottom, enable follow mode
+        if (key.codepoint == 'G') {
+            agent_state.scrollToBottom(); // Sets follow_bottom = true
+            app.needs_render = true;
+            return;
+        }
+    }
+
     // 'q' in normal vim mode with empty input - close panel
     if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'q' and agent_state.input.isEmpty()) {
         agent_state.visible = false;
@@ -223,6 +278,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Ctrl+D - page down (works in all modes)
     if (key.mods.ctrl and key.codepoint == 'd') {
+        agent_state.follow_bottom = false; // Disable follow mode
         agent_state.scrollDown(10);
         app.needs_render = true;
         return;
@@ -230,6 +286,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Ctrl+U - page up (works in all modes)
     if (key.mods.ctrl and key.codepoint == 'u') {
+        agent_state.follow_bottom = false; // Disable follow mode
         agent_state.scrollUp(10);
         app.needs_render = true;
         return;
@@ -322,6 +379,19 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Update slash menu visibility based on current input
     updateSlashMenuVisibility(app, agent_state);
+}
+
+/// Handle local slash commands (executed by skim, not sent to agent)
+fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: []const u8) !void {
+    if (std.mem.eql(u8, command_name, "model")) {
+        // Switch to model selection mode
+        app.mode = .model_selection;
+        try agent_state.addMessage(.system, "Switching to model selection...");
+        return;
+    }
+
+    // Unknown local command (shouldn't happen, but handle gracefully)
+    try agent_state.addMessage(.system, "Unknown local command");
 }
 
 /// Update slash menu visibility based on input content

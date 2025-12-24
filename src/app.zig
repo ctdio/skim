@@ -159,6 +159,7 @@ pub const App = struct {
         pending_find: ?FindCommand, // Waiting for character for f/t/F/T
         last_find: ?NormalModeLastFind, // Last f/t/F/T command for ; and , repeat
         pending_z: bool, // Waiting for second z for zz (center cursor)
+        pending_g: bool, // Waiting for second g for gg (agent mode: scroll to top)
         pending_bracket: bool, // Waiting for second character after [ (like [h)
         pending_close_bracket: bool, // Waiting for second character after ] (like ]h)
         empty_menu_selection: usize, // Selected index in empty state menu (0 = working, 1 = staged, 2 = main, 3 = branch, 4 = refresh, 5 = quit)
@@ -373,6 +374,7 @@ pub const App = struct {
                 .pending_find = null,
                 .last_find = null,
                 .pending_z = false,
+                .pending_g = false,
                 .pending_bracket = false,
                 .pending_close_bracket = false,
                 .empty_menu_selection = 0,
@@ -3399,6 +3401,14 @@ pub const App = struct {
                     self.needs_render = true;
                 },
                 .tool_call => {
+                    // Log tool call details
+                    std.log.info("Tool call: id={s}, name={s}, command={s}, text={s}", .{
+                        msg.tool_call_id orelse "(none)",
+                        msg.tool_name orelse "(none)",
+                        msg.tool_command orelse "(none)",
+                        msg.text,
+                    });
+
                     // Forward to agent state with full tool info
                     if (self.state.agent_state) |*agent_state| {
                         agent_state.addToolMessage(
@@ -3419,6 +3429,14 @@ pub const App = struct {
                     self.needs_render = true;
                 },
                 .tool_update => {
+                    // Log tool update details
+                    std.log.info("Tool update: id={s}, status={s}, stdout_len={d}, stderr_len={d}", .{
+                        msg.tool_call_id orelse "(none)",
+                        @tagName(msg.tool_status),
+                        if (msg.tool_stdout) |out| out.len else 0,
+                        if (msg.tool_stderr) |err_out| err_out.len else 0,
+                    });
+
                     // Update existing tool message with status and output
                     if (self.state.agent_state) |*agent_state| {
                         const status: agent.Message.ToolStatus = switch (msg.tool_status) {
@@ -3432,8 +3450,8 @@ pub const App = struct {
                             status,
                             msg.tool_stdout,
                             msg.tool_stderr,
-                        ) catch |err| {
-                            std.log.err("Failed to update tool message: {any}", .{err});
+                        ) catch |err_val| {
+                            std.log.err("Failed to update tool message: {any}", .{err_val});
                         };
                     }
 

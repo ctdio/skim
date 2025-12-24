@@ -605,6 +605,12 @@ pub const Daemon = struct {
     // =========================================================================
 
     fn handleMcpRequest(self: *Self, adapter: *AdapterInfo, req: internal_protocol.McpRequestPayload) !void {
+        // Log all incoming MCP requests
+        std.log.debug("Adapter {s} MCP request: {s}", .{&adapter.id, req.method});
+        if (req.params) |params| {
+            std.log.debug("  params: {s}", .{params});
+        }
+
         // Use framework for initialize and tools/list
         if (std.mem.eql(u8, req.method, "initialize")) {
             try self.handleInitialize(adapter, req);
@@ -650,6 +656,7 @@ pub const Daemon = struct {
         defer parsed.deinit();
 
         const tool_name = parsed.value.name;
+        std.log.debug("Executing tool: {s}", .{tool_name});
 
         if (std.mem.eql(u8, tool_name, "list_clients")) {
             try self.handleListClients(adapter, req);
