@@ -157,8 +157,8 @@ pub const Client = struct {
         std.Thread.sleep(100 * std.time.ns_per_ms);
 
         // Drain any pending notifications from the agent
-        _ = try self.transport.poll();
-        self.transport.clearMessages();
+        const drained = try self.transport.poll();
+        self.transport.freeMessages(drained);
         std.log.debug("ACP Client: drained pending messages after initialize", .{});
 
         const params = protocol.SessionNewParams{
@@ -202,24 +202,11 @@ pub const Client = struct {
                         });
                     }
 
-                    // Process any requests the agent sent during session creation
-                    // NOTE: Don't clear messages here - notifications (like available_commands_update)
-                    // need to be processed by the manager's poll loop
-                    const pending = self.transport.poll() catch return result.session_id;
-                    for (pending) |msg| {
-                        switch (msg) {
-                            .request => |req| {
-                                std.log.info("ACP Client: processing queued request after session creation: {s}", .{req.method});
-                                self.handleAgentRequest(req) catch {};
-                            },
-                            .notification => |n| {
-                                std.log.info("ACP Client: notification pending after session creation: {s}", .{n.method});
-                                // Leave notifications for the manager to process
-                            },
-                            else => {},
-                        }
-                    }
-                    // Don't clear - let manager poll and process notifications
+                    // NOTE: Don't poll here! The manager will poll and process all messages
+                    // (including session/update notifications with available_commands).
+                    // Polling here would consume messages from the transport queue, preventing
+                    // the manager from seeing them.
+                    std.log.info("ACP Client: session created, manager will poll for notifications", .{});
 
                     return result.session_id;
                 } else {
@@ -302,6 +289,7 @@ pub const Client = struct {
         var loop_count: u32 = 0;
         while (true) {
             const messages = try self.transport.poll();
+            defer self.transport.freeMessages(messages);
 
             if (messages.len > 0) {
                 std.log.debug("ACP Client: prompt loop got {d} messages", .{messages.len});
@@ -335,26 +323,21 @@ pub const Client = struct {
                                     std.log.debug("ACP Client: response id={d}, waiting for={d}", .{ int_id, request_id });
                                     if (int_id == request_id) {
                                         std.log.info("ACP Client: matched response for prompt request", .{});
-                                        // Got response - handle before clearing
+                                        // Got response - defer will free messages
                                         if (r.error_msg) |err| {
-                                            // Log before clearing messages (which frees memory)
                                             std.log.err("ACP Client: prompt got error from agent: code={d} message={s}", .{ err.code, err.message });
-                                            self.transport.clearMessages();
                                             return error.PromptFailed;
                                         }
                                         if (r.result_json) |result_json| {
                                             std.log.debug("ACP Client: parsing prompt result: {s}", .{result_json});
                                             const result = self.transport.decoder.parseSessionPromptResult(result_json) catch |err| {
                                                 std.log.err("ACP Client: failed to parse prompt result: {any}", .{err});
-                                                self.transport.clearMessages();
                                                 return error.ProtocolError;
                                             };
                                             std.log.info("ACP Client: prompt completed with stop_reason: {s}", .{result.stop_reason.toString()});
-                                            self.transport.clearMessages();
                                             return result.stop_reason;
                                         }
                                         std.log.warn("ACP Client: response has no result_json", .{});
-                                        self.transport.clearMessages();
                                         return error.ProtocolError;
                                     }
                                 },
@@ -370,7 +353,6 @@ pub const Client = struct {
                 }
             }
 
-            self.transport.clearMessages();
             std.Thread.sleep(1 * std.time.ns_per_ms);
         }
     }

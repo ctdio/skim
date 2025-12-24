@@ -31,25 +31,28 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
+    // Handle Enter key
+    if (key.matches(vaxis.Key.enter, .{})) {
+        // Save the command action before resetting state
+        const maybe_action = if (palette_state.getSelectedCommand()) |cmd| cmd.action else null;
+
+        // Exit command palette mode and reset state
+        app.mode = .normal;
+        palette_state.reset();
+        app.needs_render = true; // Force full redraw after closing popup
+
+        // Execute the command if there was one (may change mode again, e.g., to .help)
+        if (maybe_action) |action| {
+            try app.executeCommand(action);
+        }
+        return;
+    }
+
     switch (key.codepoint) {
         27 => { // ESC - cancel
             app.mode = .normal;
             palette_state.reset();
             app.needs_render = true; // Force full redraw after closing popup
-        },
-        '\r' => { // Enter - execute selected command
-            // Save the command action before resetting state
-            const maybe_action = if (palette_state.getSelectedCommand()) |cmd| cmd.action else null;
-
-            // Exit command palette mode and reset state
-            app.mode = .normal;
-            palette_state.reset();
-            app.needs_render = true; // Force full redraw after closing popup
-
-            // Execute the command if there was one (may change mode again, e.g., to .help)
-            if (maybe_action) |action| {
-                try app.executeCommand(action);
-            }
         },
         127, 8 => { // Backspace / Delete
             if (palette_state.query_len > 0) {

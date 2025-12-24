@@ -36,6 +36,7 @@ const mcp_status_mode = @import("modes/mcp_status_mode.zig");
 const mcp_status = @import("mcp_status.zig");
 const review_log_mode = @import("modes/review_log_mode.zig");
 const graphite_mode = @import("modes/graphite_mode.zig");
+const model_selection_mode = @import("modes/model_selection_mode.zig");
 const agent_mode = @import("modes/agent_mode.zig");
 const agent = @import("agent/agent.zig");
 const app_config = @import("config.zig");
@@ -73,6 +74,12 @@ const PendingJob = struct {
 // Static buffer for vaxis Tty writer (must persist for lifetime of Tty)
 var tty_static_buffer: [4096]u8 = undefined;
 
+/// Context for ACP connection thread
+pub const AcpConnectContext = struct {
+    app: *App,
+    cwd: []const u8,
+};
+
 pub const App = struct {
     allocator: Allocator,
     vx: Vaxis,
@@ -98,6 +105,7 @@ pub const App = struct {
     blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
     acp_manager: ?*acp.AcpManager, // ACP agent session manager
     acp_connect_thread: ?std.Thread, // Background thread for ACP connection
+    acp_connect_ctx: ?*AcpConnectContext, // Context for ACP connection thread (freed after join)
     in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
     agent_only: bool, // Start in agent-only mode (no diff view)
 
@@ -113,6 +121,7 @@ pub const App = struct {
         review_log, // Review log viewer
         graphite_stack, // Graphite stack picker
         agent, // Agent chat panel
+        model_selection, // AI model selection menu
     };
 
     // Character find commands for NORMAL mode (f/t/F/T)
@@ -193,6 +202,9 @@ pub const App = struct {
         graphite_available: bool, // Is gt CLI installed?
         graphite_stack: ?graphite.GraphiteStack, // Current stack (null if not graphite repo)
         graphite_stack_selection: usize, // Selected index in stack picker
+
+        // Model selection state
+        model_selection: usize, // Selected index in model picker
 
         // Agent panel state
         agent_state: ?agent.AgentState, // Agent chat panel state
@@ -394,6 +406,7 @@ pub const App = struct {
                 .graphite_available = false,
                 .graphite_stack = null,
                 .graphite_stack_selection = 0,
+                .model_selection = 0,
                 .agent_state = null, // Lazy initialization on first toggle
             },
             .should_quit = false,
@@ -415,6 +428,7 @@ pub const App = struct {
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
             .acp_manager = null,
             .acp_connect_thread = null,
+            .acp_connect_ctx = null,
             .in_bracketed_paste = false,
             .agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false,
         };
@@ -485,10 +499,14 @@ pub const App = struct {
         if (self.review_process) |proc| {
             proc.deinit();
         }
-        // Clean up ACP connection thread
+        // Clean up ACP connection thread and context
         if (self.acp_connect_thread) |thread| {
             thread.detach();
             self.acp_connect_thread = null;
+        }
+        if (self.acp_connect_ctx) |ctx| {
+            self.allocator.destroy(ctx);
+            self.acp_connect_ctx = null;
         }
         // Clean up ACP manager
         if (self.acp_manager) |mgr| {
@@ -705,6 +723,11 @@ pub const App = struct {
             agent_state.visible = true;
             agent_state.full_screen = true;
             self.mode = .agent;
+
+            // Add local slash commands (like /model)
+            agent_state.addLocalSlashCommands() catch |err| {
+                std.log.err("Failed to add local slash commands: {any}", .{err});
+            };
 
             // Start ACP session
             self.startAcpSession() catch |err| {
@@ -1067,6 +1090,11 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
+                .model_selection => {
+                    self.mode = .normal;
+                    self.needs_render = true;
+                    return;
+                },
                 .agent => {
                     // Close agent panel and return to normal mode
                     if (self.state.agent_state) |*agent_state| {
@@ -1103,6 +1131,7 @@ pub const App = struct {
             .mcp_status => try mcp_status_mode.handleKey(self, key),
             .review_log => try review_log_mode.handleKey(self, key),
             .graphite_stack => try graphite_mode.handleKey(self, key),
+            .model_selection => try model_selection_mode.handleKey(self, key),
             .agent => try agent_mode.handleKey(self, key),
         }
     }
@@ -1184,6 +1213,11 @@ pub const App = struct {
             // Show panel, enter agent mode
             agent_state.visible = true;
             self.mode = .agent;
+
+            // Add local slash commands (like /model)
+            agent_state.addLocalSlashCommands() catch |err| {
+                std.log.err("Failed to add local slash commands: {any}", .{err});
+            };
 
             // Auto-connect to ACP agent if not connected
             if (self.acp_manager == null or self.acp_manager.?.status == .disconnected) {
@@ -2623,6 +2657,11 @@ pub const App = struct {
             try UI.renderGraphiteStackDialog(self, win);
         }
 
+        // Render model selection dialog if in model_selection mode
+        if (self.mode == .model_selection) {
+            try UI.renderModelSelectionDialog(self, win);
+        }
+
         // Render agent panel full-screen if in full-screen mode
         if (self.state.agent_state) |as| {
             if (as.visible and as.full_screen) {
@@ -3115,12 +3154,6 @@ pub const App = struct {
         self.needs_render = true;
     }
 
-    /// Context for ACP connection thread
-    const AcpConnectContext = struct {
-        app: *App,
-        cwd: []const u8,
-    };
-
     /// Background thread function for ACP connection
     fn acpConnectThreadFn(ctx: *AcpConnectContext) void {
         std.log.info("ACP: Background connection thread started", .{});
@@ -3219,6 +3252,9 @@ pub const App = struct {
             self.acp_manager = null;
             return;
         };
+
+        // Store context so it can be freed after thread joins
+        self.acp_connect_ctx = ctx;
     }
 
     /// Disconnect from the ACP agent
@@ -3243,6 +3279,9 @@ pub const App = struct {
     /// Poll ACP agent for updates
     /// Phase 3: Just log messages and show status. Phase 4 will add smart comment placement.
     pub fn pollAcpUpdates(self: *App) void {
+        // Track if we clear the thread in this call (to avoid double-check)
+        var thread_was_cleared = false;
+
         // Check if connection thread completed
         if (self.acp_connect_thread != null) {
             if (self.acp_manager) |mgr| {
@@ -3257,6 +3296,12 @@ pub const App = struct {
                     if (self.acp_connect_thread) |thread| {
                         thread.join();
                         self.acp_connect_thread = null;
+                        thread_was_cleared = true;
+                    }
+                    // Free the connection context
+                    if (self.acp_connect_ctx) |ctx| {
+                        self.allocator.destroy(ctx);
+                        self.acp_connect_ctx = null;
                     }
                     std.log.info("pollAcpUpdates: thread joined successfully", .{});
 
@@ -3293,7 +3338,8 @@ pub const App = struct {
 
         // Don't poll while connection thread is active - it would clear messages
         // that waitForResponse() in the background thread needs
-        if (self.acp_connect_thread != null) {
+        // UNLESS we just cleared the thread in this same call
+        if (self.acp_connect_thread != null and !thread_was_cleared) {
             return;
         }
 
@@ -3307,7 +3353,10 @@ pub const App = struct {
             std.log.debug("pollAcpUpdates: poll error: {}", .{err});
             return;
         };
-        if (messages.len == 0) return;
+        if (messages.len == 0) {
+            std.log.debug("pollAcpUpdates: mgr.poll() returned 0 messages", .{});
+            return;
+        }
 
         std.log.info("pollAcpUpdates: got {d} messages to process", .{messages.len});
 

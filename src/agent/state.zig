@@ -7,6 +7,18 @@ const protocol = @import("../acp/protocol.zig");
 /// Maximum number of slash commands visible in menu at once
 pub const MAX_SLASH_MENU_VISIBLE: usize = 12;
 
+/// Local slash command definition (handled by skim, not sent to agent)
+pub const LocalSlashCommand = struct {
+    name: []const u8,
+    description: []const u8,
+    is_local: bool, // True = handled locally, false = sent to agent
+};
+
+/// Local slash commands that skim handles (not sent to agent)
+pub const local_slash_commands = [_]LocalSlashCommand{
+    .{ .name = "model", .description = "Switch AI model (opus/sonnet/haiku)", .is_local = true },
+};
+
 // =============================================================================
 // Plan Entry (Owned)
 // =============================================================================
@@ -133,6 +145,14 @@ pub const AgentState = struct {
             .timestamp = std.time.timestamp(),
         });
 
+        // Log memory usage every 10 messages to track growth
+        if (self.messages.items.len % 10 == 0) {
+            std.log.debug("Agent chat: {d} messages ({d} bytes content)", .{
+                self.messages.items.len,
+                self.estimateMemoryUsage(),
+            });
+        }
+
         // Mark line map dirty
         self.line_map_dirty = true;
 
@@ -185,12 +205,15 @@ pub const AgentState = struct {
             return;
         }
 
-        // Append to existing agent message
-        const new_content = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}{s}",
-            .{ last.content, text },
-        );
+        // Append to existing agent message using ArrayList for efficient growth
+        // This avoids reallocating the entire content on every append
+        var content_list: std.ArrayList(u8) = .{};
+        defer content_list.deinit(self.allocator);
+
+        try content_list.appendSlice(self.allocator, last.content);
+        try content_list.appendSlice(self.allocator, text);
+
+        const new_content = try content_list.toOwnedSlice(self.allocator);
         self.allocator.free(last.content);
         last.content = new_content;
 
@@ -215,12 +238,14 @@ pub const AgentState = struct {
             return;
         }
 
-        // Append to existing thinking message
-        const new_content = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}{s}",
-            .{ last.content, text },
-        );
+        // Append to existing thinking message using ArrayList for efficient growth
+        var content_list: std.ArrayList(u8) = .{};
+        defer content_list.deinit(self.allocator);
+
+        try content_list.appendSlice(self.allocator, last.content);
+        try content_list.appendSlice(self.allocator, text);
+
+        const new_content = try content_list.toOwnedSlice(self.allocator);
         self.allocator.free(last.content);
         last.content = new_content;
 
@@ -461,12 +486,20 @@ pub const AgentState = struct {
     // Slash Command Management
     // =========================================================================
 
-    /// Update available commands (replaces all existing commands)
+    /// Update available commands (replaces agent commands while preserving local commands)
     pub fn updateAvailableCommands(self: *AgentState, commands: []const protocol.AvailableCommand) !void {
-        // Clear existing commands
-        self.clearAvailableCommands();
+        // Remove only non-local commands (preserve local slash commands)
+        var i: usize = 0;
+        while (i < self.available_commands.items.len) {
+            if (!isLocalSlashCommand(self.available_commands.items[i].name)) {
+                var cmd = self.available_commands.orderedRemove(i);
+                cmd.deinit(self.allocator);
+            } else {
+                i += 1;
+            }
+        }
 
-        // Add new commands
+        // Add new commands from agent
         for (commands) |cmd| {
             const owned_name = try self.allocator.dupe(u8, cmd.name);
             errdefer self.allocator.free(owned_name);
@@ -494,6 +527,44 @@ pub const AgentState = struct {
             cmd.deinit(self.allocator);
         }
         self.available_commands.clearRetainingCapacity();
+    }
+
+    /// Add local slash commands (handled by skim, not sent to agent)
+    /// Should be called when agent panel opens or session starts
+    pub fn addLocalSlashCommands(self: *AgentState) !void {
+        for (local_slash_commands) |local_cmd| {
+            // Check if already added (avoid duplicates)
+            var already_exists = false;
+            for (self.available_commands.items) |existing| {
+                if (std.mem.eql(u8, existing.name, local_cmd.name)) {
+                    already_exists = true;
+                    break;
+                }
+            }
+            if (already_exists) continue;
+
+            const owned_name = try self.allocator.dupe(u8, local_cmd.name);
+            errdefer self.allocator.free(owned_name);
+
+            const owned_desc = try self.allocator.dupe(u8, local_cmd.description);
+            errdefer self.allocator.free(owned_desc);
+
+            try self.available_commands.append(self.allocator, .{
+                .name = owned_name,
+                .description = owned_desc,
+                .input_hint = null,
+            });
+        }
+    }
+
+    /// Check if a command is a local command (handled by skim)
+    pub fn isLocalSlashCommand(name: []const u8) bool {
+        for (local_slash_commands) |local_cmd| {
+            if (std.mem.eql(u8, local_cmd.name, name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Check if slash command menu should be shown based on input
@@ -647,6 +718,43 @@ pub const AgentState = struct {
     pub fn clearEscTimestamp(self: *AgentState) void {
         self.last_esc_timestamp = 0;
     }
+
+    /// Estimate memory usage of the agent state (for monitoring)
+    fn estimateMemoryUsage(self: *const AgentState) usize {
+        var total: usize = 0;
+
+        // Message content
+        for (self.messages.items) |msg| {
+            total += msg.content.len;
+            if (msg.diff_path) |p| total += p.len;
+            if (msg.diff_old) |o| total += o.len;
+            if (msg.diff_new) |n| total += n.len;
+            if (msg.tool_call_id) |id| total += id.len;
+            if (msg.tool_name) |n| total += n.len;
+            if (msg.tool_command) |c| total += c.len;
+            if (msg.tool_stdout) |s| total += s.len;
+            if (msg.tool_stderr) |s| total += s.len;
+        }
+
+        // Plan entries
+        for (self.plan_entries.items) |entry| {
+            total += entry.content.len;
+        }
+
+        // Available commands
+        for (self.available_commands.items) |cmd| {
+            total += cmd.name.len;
+            total += cmd.description.len;
+            if (cmd.input_hint) |h| total += h.len;
+        }
+
+        // ArrayList overhead (rough estimate)
+        total += self.messages.capacity * @sizeOf(Message);
+        total += self.plan_entries.capacity * @sizeOf(OwnedPlanEntry);
+        total += self.available_commands.capacity * @sizeOf(OwnedCommand);
+
+        return total;
+    }
 };
 
 // =============================================================================
@@ -686,12 +794,11 @@ pub const Message = struct {
 
         pub fn label(self: Role) []const u8 {
             return switch (self) {
-                .user => "You",
-                .agent => "Agent",
                 .thinking => "Thinking",
                 .system => "System",
                 .diff => "Edit",
                 .tool => "Tool",
+                else => "",
             };
         }
     };

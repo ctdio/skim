@@ -487,6 +487,97 @@ pub const UI = struct {
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1 )});
     }
 
+    pub fn renderModelSelectionDialog(app: *App, win: vaxis.Window) !void {
+        const model_selection_mode = @import("modes/model_selection_mode.zig");
+        const model_aliases = model_selection_mode.model_aliases;
+        const model_count = model_aliases.len;
+
+        // Calculate dialog dimensions
+        const title = " Switch Model ";
+        const instructions = "j/k:Navigate  Enter:Select  ESC:Cancel";
+
+        // Find max width needed for model entries
+        var max_entry_len: usize = 0;
+        for (model_aliases) |model| {
+            const entry_len = 4 + model.name.len + 3 + model.description.len; // "▶ " + name + " - " + desc
+            if (entry_len > max_entry_len) {
+                max_entry_len = entry_len;
+            }
+        }
+
+        const dialog_width = @max(@max(max_entry_len + 4, title.len + 4), instructions.len + 4);
+        const dialog_height = model_count + 5; // title + models + instructions + padding
+
+        const popup_width = @min(dialog_width, win.width - 4);
+        const popup_height = @min(dialog_height, win.height - 4);
+        const x_offset = if (win.width > popup_width) (win.width - popup_width) / 2 else 0;
+        const y_offset = if (win.height > popup_height) (win.height - popup_height) / 2 else 0;
+
+        const popup_win = win.child(.{
+            .x_off = x_offset,
+            .y_off = y_offset,
+            .width = @intCast(popup_width),
+            .height = @intCast(popup_height),
+            .border = .{
+                .where = .all,
+                .style = .{ .fg = Color.cyan },
+            },
+        });
+
+        popup_win.clear();
+
+        // Fill with solid background
+        const bg_cell = vaxis.Cell{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{ .bg = .{ .index = 0 } }, // black background
+        };
+        popup_win.fill(bg_cell);
+
+        // Title
+        const title_copy = try RenderUtils.copyFrameText(app, title);
+        var title_seg = [_]vaxis.Cell.Segment{.{
+            .text = title_copy,
+            .style = .{ .fg = Color.cyan, .bold = true },
+        }};
+        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
+
+        // Render model options
+        for (model_aliases, 0..) |model, idx| {
+            const row = idx + 2;
+            const is_selected = idx == app.state.model_selection;
+
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            defer segments.deinit(app.allocator);
+
+            // Selection caret
+            const caret = if (is_selected) "▶ " else "  ";
+            const caret_copy = try RenderUtils.copyFrameText(app, caret);
+            try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+
+            // Model name
+            const name_copy = try RenderUtils.copyFrameText(app, model.name);
+            try segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+
+            // Separator
+            const sep_copy = try RenderUtils.copyFrameText(app, " - ");
+            try segments.append(app.allocator, .{ .text = sep_copy, .style = .{ .fg = Color.dim } });
+
+            // Description
+            const desc_copy = try RenderUtils.copyFrameText(app, model.description);
+            try segments.append(app.allocator, .{ .text = desc_copy, .style = .{ .fg = Color.dim } });
+
+            _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row) });
+        }
+
+        // Instructions at bottom
+        const instr_copy = try RenderUtils.copyFrameText(app, instructions);
+        var instr_seg = [_]vaxis.Cell.Segment{.{
+            .text = instr_copy,
+            .style = .{ .fg = Color.dim },
+        }};
+        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
+    }
+
     pub fn renderHeader(app: *App, win: vaxis.Window) !void {
         if (win.height == 0 or win.width == 0) return;
         win.clear();
@@ -588,6 +679,7 @@ pub const UI = struct {
             .mcp_status => "-- MCP STATUS --",
             .review_log => "-- REVIEW LOG --",
             .graphite_stack => "-- GRAPHITE STACK --",
+            .model_selection => "-- MODEL SELECTION --",
             .agent => blk: {
                 // Show vim mode when in agent mode
                 if (app.state.agent_state) |agent_state| {
@@ -632,6 +724,7 @@ pub const UI = struct {
             .mcp_status => "q/ESC:Close",
             .review_log => "j/k:Scroll  |  d/u:Page  |  Tab:Style  |  q:Exit  |  L:Close",
             .graphite_stack => "j/k:Move  |  Enter:Select  |  ESC:Back  |  [s/]s:Navigate",
+            .model_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .agent => blk: {
                 if (app.state.agent_state) |agent_state| {
                     break :blk switch (agent_state.input.vim.vim_mode) {

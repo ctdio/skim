@@ -102,6 +102,49 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
 
+        // Enter - insert selected command and send immediately
+        if (key.matches(vaxis.Key.enter, .{})) {
+            if (agent_state.getSelectedCommand()) |cmd| {
+                // Build full command text
+                var cmd_text: std.ArrayList(u8) = .{};
+                defer cmd_text.deinit(app.allocator);
+
+                try cmd_text.append(app.allocator, '/');
+                try cmd_text.appendSlice(app.allocator, cmd.name);
+
+                const text = try cmd_text.toOwnedSlice(app.allocator);
+                defer app.allocator.free(text);
+
+                // Add to message history
+                try agent_state.addMessage(.user, text);
+
+                // Send to ACP agent
+                if (app.acp_manager) |mgr| {
+                    if (mgr.status == .disconnected) {
+                        try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
+                    } else if (mgr.status == .failed) {
+                        try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
+                    } else {
+                        const prompt_copy = try app.allocator.dupe(u8, text);
+                        defer app.allocator.free(prompt_copy);
+
+                        mgr.sendPrompt(prompt_copy) catch |err| {
+                            std.log.err("Agent: Failed to send prompt: {any}", .{err});
+                            try agent_state.addMessage(.system, "Failed to send prompt to agent");
+                        };
+                    }
+                } else {
+                    try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
+                }
+
+                // Clear input and hide menu
+                agent_state.input.clear();
+                agent_state.hideSlashMenu();
+                app.needs_render = true;
+            }
+            return;
+        }
+
         // Tab - insert selected command
         if (key.codepoint == vaxis.Key.tab and !key.mods.shift) {
             agent_state.insertSelectedCommand();
@@ -177,7 +220,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         app.needs_render = true;
         return;
     }
-
 
     // Ctrl+D - page down (works in all modes)
     if (key.mods.ctrl and key.codepoint == 'd') {
@@ -279,11 +321,11 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     }
 
     // Update slash menu visibility based on current input
-    updateSlashMenuVisibility(agent_state);
+    updateSlashMenuVisibility(app, agent_state);
 }
 
 /// Update slash menu visibility based on input content
-fn updateSlashMenuVisibility(agent_state: *agent.AgentState) void {
+fn updateSlashMenuVisibility(app: *App, agent_state: *agent.AgentState) void {
     if (agent_state.input.vim.vim_mode != .insert) {
         // Only show menu in insert mode
         agent_state.hideSlashMenu();
@@ -302,8 +344,42 @@ fn updateSlashMenuVisibility(agent_state: *agent.AgentState) void {
     const should_show = agent_state.shouldShowSlashMenu();
 
     if (should_show and !agent_state.slash_menu_visible) {
+        // Before showing menu, poll for any pending ACP updates to ensure we have latest commands
+        // This fixes race condition where agent sends commands but we haven't polled yet
+        // Poll multiple times with small delays to give transport time to receive notifications
+        if (cmd_count <= 1) { // Only local commands present
+            std.log.debug("Slash menu: only {d} commands, polling ACP for updates", .{cmd_count});
+
+            // Try up to 5 times with 10ms delays to catch pending notifications
+            var poll_attempts: u8 = 0;
+            while (poll_attempts < 5 and agent_state.available_commands.items.len <= 1) : (poll_attempts += 1) {
+                app.pollAcpUpdates();
+
+                // Check if we got commands
+                if (agent_state.available_commands.items.len > 1) {
+                    std.log.info("Slash menu: got {d} commands after {d} poll attempts", .{
+                        agent_state.available_commands.items.len,
+                        poll_attempts + 1,
+                    });
+                    break;
+                }
+
+                // Small delay to let transport receive notifications
+                if (poll_attempts < 4) {
+                    std.Thread.sleep(10 * std.time.ns_per_ms);
+                }
+            }
+
+            if (agent_state.available_commands.items.len <= 1) {
+                std.log.warn("Slash menu: still only {d} commands after {d} attempts", .{
+                    agent_state.available_commands.items.len,
+                    poll_attempts,
+                });
+            }
+        }
+
         // Show menu when "/" is typed at start
-        std.log.info("Showing slash menu with {d} commands", .{cmd_count});
+        std.log.info("Showing slash menu with {d} commands", .{agent_state.available_commands.items.len});
         agent_state.showSlashMenu();
     } else if (!should_show and agent_state.slash_menu_visible) {
         // Hide menu when "/" is deleted or input changes

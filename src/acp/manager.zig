@@ -484,7 +484,8 @@ pub const AcpManager = struct {
             }
         }
 
-        acp.transport.clearMessages();
+        // Free the messages we received from the transport
+        acp.transport.freeMessages(messages);
 
         // Always check if we can send queued prompts (safe to call repeatedly)
         self.sendNextQueuedPrompt();

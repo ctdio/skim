@@ -226,24 +226,43 @@ pub const StdioTransport = struct {
 
     /// Poll for available messages (non-blocking).
     /// Background thread handles reading; this just returns queued messages.
-    /// Returns slice of pending messages. Caller should process and call clearMessages().
+    /// Returns owned slice of messages - caller must call freeMessages() after processing.
+    /// This method moves messages out of the queue atomically, so the reader thread
+    /// can continue appending without affecting the returned slice.
     pub fn poll(self: *StdioTransport) Error![]codec.DecodedMessage {
-        // Just return pending messages - reading happens in background thread
         self.message_mutex.lock();
         defer self.message_mutex.unlock();
-        return self.pending_messages.items;
+
+        if (self.pending_messages.items.len == 0) {
+            return &[_]codec.DecodedMessage{};
+        }
+
+        // Take ownership of the items by copying to a new allocation
+        // This ensures the reader thread won't overwrite our data
+        const items = self.allocator.dupe(codec.DecodedMessage, self.pending_messages.items) catch {
+            return &[_]codec.DecodedMessage{};
+        };
+
+        // Clear the list so reader thread starts fresh
+        self.pending_messages.clearRetainingCapacity();
+
+        return items;
     }
 
-    /// Clear processed messages from the queue
+    /// Clear processed messages (no-op, kept for API compatibility).
+    /// Caller should use freeMessages() instead.
     pub fn clearMessages(self: *StdioTransport) void {
-        self.message_mutex.lock();
-        defer self.message_mutex.unlock();
+        _ = self;
+        // No-op - messages are now owned by caller after poll()
+    }
 
-        // Free any allocated data in messages
-        for (self.pending_messages.items) |*msg| {
+    /// Free a slice of messages returned by poll()
+    pub fn freeMessages(self: *StdioTransport, messages: []codec.DecodedMessage) void {
+        if (messages.len == 0) return;
+        for (messages) |*msg| {
             msg.deinit(self.allocator);
         }
-        self.pending_messages.clearRetainingCapacity();
+        self.allocator.free(messages);
     }
 
     /// Wait for a response with specific ID (blocking with timeout).
@@ -304,7 +323,13 @@ pub const StdioTransport = struct {
         // Stop reader thread first
         self.stopReaderThread();
 
-        self.clearMessages();
+        // Free any remaining messages in the queue
+        self.message_mutex.lock();
+        for (self.pending_messages.items) |*msg| {
+            msg.deinit(self.allocator);
+        }
+        self.message_mutex.unlock();
+
         self.pending_messages.deinit(self.allocator);
         self.read_buffer.deinit(self.allocator);
         self.decoder.deinit();

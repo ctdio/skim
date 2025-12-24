@@ -445,25 +445,6 @@ src/
 - Virtual scrolling (render visible lines only)
 - Daemon architecture for AI integration
 
-## Performance Targets
-
-| Metric | Target | Current |
-|--------|--------|---------|
-| Cold startup | <10ms | ✅ |
-| Binary size | <2MB | ✅ 209KB |
-| Memory usage | <50MB | ✅ |
-| Scrolling FPS | 60 | ✅ |
-
-## Contributing
-
-Priority areas:
-- Syntax highlighting query files for Python, Rust, Go, C, C++ (parsers ready, need .scm files)
-- Hunk navigation (n/N keys to jump between hunks)
-- Help overlay/documentation (show keybindings in-app)
-- Mouse support (click to position cursor, scroll to navigate)
-- Comment persistence (save/load comments between sessions)
-- Testing coverage (especially for new features)
-
 ## Credits
 
 Built with:

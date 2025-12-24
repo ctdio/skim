@@ -141,6 +141,14 @@ pub const ChatLineMap = struct {
         self.message_count = messages.len;
         self.diff_view_mode = diff_view_mode;
 
+        // Pre-allocate capacity to reduce reallocations during build
+        // Estimate: ~10 lines per message on average (header + content lines + spacing)
+        //           ~3 owned strings per message (header, content chunks, tool outputs)
+        const estimated_lines = messages.len * 10;
+        const estimated_strings = messages.len * 3;
+        try self.records.ensureTotalCapacity(self.allocator, estimated_lines);
+        try self.strings.ensureTotalCapacity(self.allocator, estimated_strings);
+
         var global_line: usize = 0;
 
         for (messages, 0..) |msg, msg_idx| {
@@ -164,8 +172,13 @@ pub const ChatLineMap = struct {
                         try self.addDiffContent(&global_line, msg_idx, msg, wrap_width, diff_view_mode);
                     }
                 },
+                .user, .agent => {
+                    // No role header for user/agent - styling makes it obvious
+                    // Content lines only
+                    try self.addMessageContent(&global_line, msg_idx, msg, wrap_width);
+                },
                 else => {
-                    // Role header
+                    // Role header for other types (thinking, system, etc.)
                     try self.addRoleHeader(&global_line, msg_idx, msg.role);
 
                     // Content lines
@@ -235,7 +248,12 @@ pub const ChatLineMap = struct {
                             try self.addDiffContent(&global_line, msg_idx, msg.*, wrap_width, diff_view_mode);
                         }
                     },
+                    .user, .agent => {
+                        // No role header for user/agent - styling makes it obvious
+                        try self.addMessageContent(&global_line, msg_idx, msg.*, wrap_width);
+                    },
                     else => {
+                        // Role header for other types (thinking, system, etc.)
                         try self.addRoleHeader(&global_line, msg_idx, msg.role);
                         try self.addMessageContent(&global_line, msg_idx, msg.*, wrap_width);
                     },
@@ -332,7 +350,12 @@ pub const ChatLineMap = struct {
                         try self.addDiffContent(&global_line, last_msg_idx, msg.*, wrap_width, diff_view_mode);
                     }
                 },
+                .user, .agent => {
+                    // No role header for user/agent - styling makes it obvious
+                    try self.addMessageContent(&global_line, last_msg_idx, msg.*, wrap_width);
+                },
                 else => {
+                    // Role header for other types (thinking, system, etc.)
                     try self.addRoleHeader(&global_line, last_msg_idx, msg.role);
                     try self.addMessageContent(&global_line, last_msg_idx, msg.*, wrap_width);
                 },
@@ -369,7 +392,7 @@ pub const ChatLineMap = struct {
 
     fn addRoleHeader(self: *ChatLineMap, global_line: *usize, msg_idx: usize, role: Message.Role) !void {
         const style: vaxis.Style = switch (role) {
-            .user => .{ .fg = Color.chat_user, .bold = true },
+            .user => .{ .fg = Color.chat_user, .bg = Color.comment_bg, .bold = true },
             .agent => .{ .fg = Color.chat_agent, .bold = true },
             .thinking => .{ .fg = Color.chat_thinking, .italic = true },
             .system => .{ .fg = Color.chat_system, .bold = true },
@@ -383,6 +406,7 @@ pub const ChatLineMap = struct {
             .text = role.label(),
             .style = style,
             .indent = 1,
+            .fill_bg = role == .user,
         });
         global_line.* += 1;
     }
@@ -472,9 +496,27 @@ pub const ChatLineMap = struct {
 
     fn addMessageContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize) !void {
         const content_style: vaxis.Style = switch (msg.role) {
+            .user => .{ .fg = Color.chat_content, .bg = Color.comment_bg },
             .thinking => .{ .fg = Color.chat_thinking, .italic = true },
             else => .{ .fg = Color.chat_content },
         };
+
+        const fill_bg = msg.role == .user;
+        // User messages indent to make room for bar, others start at column 1 for a small margin
+        const indent: usize = if (msg.role == .user) 2 else 1;
+
+        // Add padding at the top for user messages
+        if (msg.role == .user) {
+            try self.records.append(self.allocator, .{
+                .global_line = global_line.*,
+                .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = 0 } },
+                .text = "",
+                .style = content_style,
+                .indent = indent,
+                .fill_bg = fill_bg,
+            });
+            global_line.* += 1;
+        }
 
         var line_idx: usize = 0;
         var content_iter = std.mem.splitScalar(u8, msg.content, '\n');
@@ -484,8 +526,9 @@ pub const ChatLineMap = struct {
                     .global_line = global_line.*,
                     .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
                     .text = "",
-                    .style = .{},
-                    .indent = 2,
+                    .style = if (fill_bg) content_style else .{},
+                    .indent = indent,
+                    .fill_bg = fill_bg,
                 });
                 global_line.* += 1;
                 line_idx += 1;
@@ -502,13 +545,27 @@ pub const ChatLineMap = struct {
                         .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
                         .text = content_copy,
                         .style = content_style,
-                        .indent = 2,
+                        .indent = indent,
+                        .fill_bg = fill_bg,
                     });
                     global_line.* += 1;
                     line_idx += 1;
                     remaining = remaining[chunk_len..];
                 }
             }
+        }
+
+        // Add padding at the bottom for user messages
+        if (msg.role == .user) {
+            try self.records.append(self.allocator, .{
+                .global_line = global_line.*,
+                .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
+                .text = "",
+                .style = content_style,
+                .indent = indent,
+                .fill_bg = fill_bg,
+            });
+            global_line.* += 1;
         }
     }
 
