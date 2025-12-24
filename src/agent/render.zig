@@ -1398,7 +1398,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         const has_modes = if (app.acp_manager) |mgr| mgr.hasModes() else false;
         const keybindings = switch (agent_state.input.vim.vim_mode) {
             .insert => if (has_modes) "S-Tab:mode  Enter:send  ESC:normal" else "S-Enter:newline  Enter:send  ESC:normal",
-            .normal => if (has_modes) "m:mode  i:insert  q:close  ,d:diff" else "i:insert  q:close  ,d:diff  z:full",
+            .normal => if (has_modes) "m:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",
             .visual => "ESC:exit",
             .command => "Enter:execute  ESC:cancel",
         };

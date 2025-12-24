@@ -146,36 +146,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // If waiting for second key after leader (,)
-    if (app.state.pending_leader) {
-        app.state.pending_leader = false;
-        // ESC cancels pending leader
-        if (key.codepoint == 27) { // ESC
-            return;
-        }
-        switch (key.codepoint) {
-            'a' => {
-                // Toggle agent panel (ACP feature)
-                if (app_config.isAcpEnabled(app.allocator)) {
-                    try app.toggleAgentPanel();
-                }
-            },
-            'd' => {
-                // Focus diff - if in agent mode, return to normal (ACP feature)
-                if (app_config.isAcpEnabled(app.allocator)) {
-                    if (app.state.agent_state) |*agent_state| {
-                        if (agent_state.visible) {
-                            agent_state.visible = false;
-                            app.mode = .normal;
-                            app.needs_render = true;
-                        }
-                    }
-                }
-            },
-            else => {},
-        }
-        return;
-    }
 
     // Handle Ctrl+key combinations first (before regular key handling)
     if (key.mods.ctrl) {
@@ -202,6 +172,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 Navigation.pageUp(app);
                 app.state.cursor_column = 0; // Reset column on page navigation
                 app.updateCurrentFileAndTriggerHighlighting();
+            },
+            'e' => {
+                // Ctrl+E: Toggle agent panel (ACP feature)
+                if (app_config.isAcpEnabled(app.allocator)) {
+                    try app.toggleAgentPanel();
+                }
             },
             'g' => try app.openInEditor(),
             'w' => {
@@ -303,7 +279,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.executeFindInLine(last.command, last.char);
             }
         },
-        ',' => app.state.pending_leader = true, // Leader key - wait for command
         'z' => app.state.pending_z = true, // Wait for second z for zz (center cursor)
         '[' => app.state.pending_bracket = true, // Wait for second character (like [h)
         ']' => app.state.pending_close_bracket = true, // Wait for second character (like ]h)
@@ -357,6 +332,13 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
             },
             'p' => {
                 app.state.empty_menu_selection = if (app.state.empty_menu_selection == 0) menu_items_count - 1 else app.state.empty_menu_selection - 1;
+                return;
+            },
+            'e' => {
+                // Ctrl+E: Toggle agent panel (ACP feature)
+                if (app_config.isAcpEnabled(app.allocator)) {
+                    try app.toggleAgentPanel();
+                }
                 return;
             },
             else => {},

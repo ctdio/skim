@@ -191,36 +191,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
-    // Handle pending leader key in normal vim mode
-    if (app.state.pending_leader and agent_state.input.vim.vim_mode == .normal) {
-        app.state.pending_leader = false;
-        // ESC cancels pending leader
-        if (key.codepoint == 27) { // ESC
-            return;
-        }
-        switch (key.codepoint) {
-            'd' => {
-                // Focus diff - close agent panel, return to normal mode
-                agent_state.visible = false;
-                app.mode = .normal;
-                app.needs_render = true;
-            },
-            'a' => {
-                // ,a in agent mode just toggles (closes) the panel
-                agent_state.visible = false;
-                app.mode = .normal;
-                app.needs_render = true;
-            },
-            else => {},
-        }
-        return;
-    }
-
-    // ',' in normal vim mode - start leader key sequence
-    if (agent_state.input.vim.vim_mode == .normal and key.codepoint == ',') {
-        app.state.pending_leader = true;
-        return;
-    }
 
     // 'z' in normal vim mode - toggle full screen
     if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'z') {
@@ -263,8 +233,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
-    // 'q' in normal vim mode with empty input - close panel
-    if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'q' and agent_state.input.isEmpty()) {
+
+    // Ctrl+E - close agent panel and return to diff (toggle)
+    if (key.mods.ctrl and key.codepoint == 'e') {
         agent_state.visible = false;
         app.mode = .normal;
         app.needs_render = true;

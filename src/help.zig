@@ -92,8 +92,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     // ACP bindings (only if ACP is enabled)
     if (app_config.isAcpEnabled(app.allocator)) {
         const acp_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-            .{ .key = ",a", .desc = "Toggle agent panel" },
-            .{ .key = ",d", .desc = "Focus diff (from agent)" },
+            .{ .key = "Ctrl-e", .desc = "Toggle agent panel" },
         };
         for (acp_bindings) |binding| {
             try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
