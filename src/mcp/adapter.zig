@@ -331,6 +331,8 @@ pub const McpAdapter = struct {
             .mcp_response => |response| {
                 // Forward response to agent
                 try self.writeMcpResponse(stdout, response);
+                // CRITICAL: Flush buffered output so Claude Code receives the response
+                file_writer.interface.flush() catch {};
             },
             .client_update => |update| {
                 std.log.debug("Client {s}: {s}", .{
