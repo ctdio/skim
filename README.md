@@ -4,14 +4,13 @@ A keyboard-driven TUI for code reviews built in Zig. Fast, minimal, and focused 
 
 ## Features
 
-- Sub-10ms startup, 60 FPS scrolling, ~209KB binary
 - Vim-style modal interface (hjkl, Ctrl-n/p)
 - File-by-file diff navigation
 - Unified and side-by-side views
 - Tree-sitter syntax highlighting with async processing (JS/TS/Zig full support)
-- **Command palette: `Ctrl-p` for files, `:` for commands (vim-style), or type `>` to switch modes**
-- **Built-in help with `?` - comprehensive keybindings reference**
-- **Search with `/` - smart case matching across all files**
+- Command palette: `Ctrl-p` for files, `:` for commands (vim-style), or type `>` to switch modes
+- Built-in help with `?` - comprehensive keybindings reference
+- Search with `/` - smart case matching across all files
 - Live refresh (press 'r')
 - Full git diff compatibility (working dir, staged, branch comparisons)
 - Comment system with export to clipboard ('y' for current, 'Y' for all)
@@ -21,7 +20,7 @@ A keyboard-driven TUI for code reviews built in Zig. Fast, minimal, and focused 
 
 ### Prerequisites
 
-- Zig 0.13.0 or later
+- Zig 0.15.1
 - Git
 
 ### Building from Source
@@ -451,54 +450,10 @@ The Agent Client Protocol (ACP) is an experimental protocol for communication be
 
 ---
 
-## Architecture
-
-See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
-
-**Quick Overview:**
-```
-src/
-├── main.zig              # CLI entry point
-├── app.zig               # State machine, event handling
-├── line_map.zig          # Position registry (single source of truth)
-├── logging.zig           # File-based logging system
-├── review.zig            # Review process management
-├── config.zig            # Config loading and template substitution
-├── git/                  # Git command execution and parsing
-├── rendering/            # Unified and side-by-side renderers
-├── modes/                # Mode handlers (normal, comment, search, etc.)
-├── mcp/                  # MCP server and daemon (experimental)
-│   ├── daemon.zig        # Central daemon server
-│   ├── client.zig        # TUI-side MCP client
-│   ├── adapter.zig       # stdio MCP adapter for AI agents
-│   ├── protocol.zig      # TUI<->Daemon protocol
-│   ├── tools.zig         # MCP tool implementations
-│   ├── discovery.zig     # Daemon discovery via ~/.skim/daemon.json
-│   └── framework.zig     # MCP JSON-RPC framework
-├── acp/                  # Agent Client Protocol (experimental)
-│   ├── manager.zig       # ACP session lifecycle management
-│   ├── client.zig        # Agent connection client
-│   ├── transport.zig     # stdio transport layer
-│   ├── protocol.zig      # ACP message protocol
-│   ├── codec.zig         # JSON-RPC encoder/decoder
-│   └── types.zig         # Protocol types and constants
-└── syntax.zig            # Tree-sitter syntax highlighting
-```
-
-**Design Principles:**
-- Shell out to git (respects user config)
-- Single-pass O(n) diff parsing
-- Modal interface (vim-style)
-- LineMap system for accurate positioning
-- Async syntax highlighting (non-blocking)
-- Virtual scrolling (render visible lines only)
-- Daemon architecture for AI integration
-
 ## Credits
 
 Built with:
 - [libvaxis](https://github.com/rockorager/libvaxis) - TUI rendering library
-- [z-tree-sitter](https://github.com/lfcm64/z-tree-sitter) - Zig bindings for tree-sitter
 - [tree-sitter](https://tree-sitter.github.io/) - Parser generator for syntax highlighting
 - Language grammars from [tree-sitter-grammars](https://github.com/tree-sitter-grammars):
   - JavaScript/JSX, TypeScript/TSX
