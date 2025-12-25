@@ -411,6 +411,74 @@ pub const ChatLineMap = struct {
         global_line.* += 1;
     }
 
+    /// Helper to check if a character is a good break point for wrapping
+    fn isBreakableChar(c: u8) bool {
+        return c == ' ' or c == '/' or c == '-' or c == ',' or c == ')' or c == '(' or c == '"' or c == '\'';
+    }
+
+    /// Wrap a command string into multiple lines respecting word boundaries
+    /// Returns owned array of line strings (caller must free)
+    fn wrapCommandString(allocator: Allocator, cmd: []const u8, max_width: usize, max_lines: usize) ![][]const u8 {
+        var lines: std.ArrayList([]const u8) = .{};
+        errdefer lines.deinit(allocator);
+
+        if (cmd.len == 0) {
+            try lines.append(allocator, "");
+            return lines.toOwnedSlice(allocator);
+        }
+
+        var remaining = cmd;
+        var line_count: usize = 0;
+
+        while (remaining.len > 0 and line_count < max_lines) {
+            // Last line or command fits in remaining space
+            if (remaining.len <= max_width or line_count == max_lines - 1) {
+                // If this is the last allowed line and there's more content, truncate
+                if (line_count == max_lines - 1 and remaining.len > max_width) {
+                    const truncated = try std.fmt.allocPrint(allocator, "{s}...", .{remaining[0..@min(max_width - 3, remaining.len)]});
+                    try lines.append(allocator, truncated);
+                } else {
+                    try lines.append(allocator, remaining);
+                }
+                break;
+            }
+
+            // Find a good break point
+            var break_at = max_width;
+            const min_segment = max_width / 2; // Don't break too early
+
+            // Search backwards from max_width for a breakable character
+            while (break_at > min_segment) {
+                if (break_at > 0 and isBreakableChar(remaining[break_at - 1])) {
+                    // Break after the breakable character
+                    break;
+                }
+                break_at -= 1;
+            }
+
+            // If no good break point found, hard break at max_width
+            if (break_at <= min_segment) {
+                break_at = max_width;
+            }
+
+            try lines.append(allocator, remaining[0..break_at]);
+            remaining = remaining[break_at..];
+
+            // Trim leading spaces from next line
+            while (remaining.len > 0 and remaining[0] == ' ') {
+                remaining = remaining[1..];
+            }
+
+            line_count += 1;
+        }
+
+        if (lines.items.len == 0) {
+            try lines.append(allocator, "");
+        }
+
+        return lines.toOwnedSlice(allocator);
+    }
+
     fn addToolHeader(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message) !void {
         const tool_name = msg.tool_name orelse "Tool";
         const status_icon: []const u8 = switch (msg.tool_status) {
@@ -426,38 +494,82 @@ pub const ChatLineMap = struct {
             .failed => .{ .fg = .{ .index = 1 } }, // red
         };
 
-        // Format header text
-        const header_text = if (msg.tool_command) |cmd| blk: {
-            // For multiline commands, just show the first line
+        // Handle tool command with smart wrapping
+        if (msg.tool_command) |cmd| {
+            // For multiline commands, extract first line only
             const first_line = if (std.mem.indexOfScalar(u8, cmd, '\n')) |newline_pos|
                 cmd[0..newline_pos]
             else
                 cmd;
 
-            const max_cmd = @min(first_line.len, 60);
-            const truncated = if (cmd.len > max_cmd or cmd.len != first_line.len) "..." else "";
-            break :blk try std.fmt.allocPrint(self.allocator, "{s} {s}({s}{s})", .{
-                status_icon,
-                tool_name,
-                first_line[0..max_cmd],
-                truncated,
-            });
-        } else blk: {
-            break :blk try std.fmt.allocPrint(self.allocator, "{s} {s}", .{
+            // Calculate available width for command text
+            // Format: "{icon} {tool_name}({command})"
+            // Account for: status_icon (1-2 chars) + space + tool_name + "(" + ")"
+            const prefix_len = status_icon.len + 1 + tool_name.len + 1; // icon + space + name + (
+            const suffix_len = 1; // )
+
+            // Calculate max width for first line
+            // Use wrap_width with some safety margin
+            const available_width = if (self.wrap_width > prefix_len + suffix_len + 10)
+                self.wrap_width - prefix_len - suffix_len - 5 // 5 char safety margin
+            else
+                40; // Minimum reasonable width
+
+            // Wrap command into lines (max 4 lines total)
+            const max_lines: usize = 4;
+            const wrapped_lines = try wrapCommandString(self.allocator, first_line, available_width, max_lines);
+            defer self.allocator.free(wrapped_lines);
+
+            // Generate and store lines
+            for (wrapped_lines, 0..) |line, i| {
+                const is_first = i == 0;
+                const is_last = i == wrapped_lines.len - 1;
+
+                const line_text = if (is_first) blk: {
+                    // First line: "{icon} {tool_name}({command_part}"
+                    const closing = if (is_last) ")" else "";
+                    break :blk try std.fmt.allocPrint(self.allocator, "{s} {s}({s}{s}", .{
+                        status_icon,
+                        tool_name,
+                        line,
+                        closing,
+                    });
+                } else blk: {
+                    // Continuation line: "  │      {command_part})"
+                    const closing = if (is_last) ")" else "";
+                    break :blk try std.fmt.allocPrint(self.allocator, "  │      {s}{s}", .{
+                        line,
+                        closing,
+                    });
+                };
+
+                try self.strings.append(self.allocator, line_text);
+                try self.records.append(self.allocator, .{
+                    .global_line = global_line.*,
+                    .line_type = .{ .tool_header = .{ .msg_idx = msg_idx } },
+                    .text = line_text,
+                    .style = status_style,
+                    .indent = 1,
+                });
+                global_line.* += 1;
+            }
+        } else {
+            // No command, just show icon and content
+            const header_text = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{
                 status_icon,
                 msg.content,
             });
-        };
-        try self.strings.append(self.allocator, header_text);
+            try self.strings.append(self.allocator, header_text);
 
-        try self.records.append(self.allocator, .{
-            .global_line = global_line.*,
-            .line_type = .{ .tool_header = .{ .msg_idx = msg_idx } },
-            .text = header_text,
-            .style = status_style,
-            .indent = 1,
-        });
-        global_line.* += 1;
+            try self.records.append(self.allocator, .{
+                .global_line = global_line.*,
+                .line_type = .{ .tool_header = .{ .msg_idx = msg_idx } },
+                .text = header_text,
+                .style = status_style,
+                .indent = 1,
+            });
+            global_line.* += 1;
+        }
     }
 
     fn addToolResult(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message) !void {

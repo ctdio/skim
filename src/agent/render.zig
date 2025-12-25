@@ -1463,6 +1463,57 @@ fn renderInlineModelPicker(app: *App, win: vaxis.Window) !void {
 // Inline Permission Prompt
 // =============================================================================
 
+/// Helper function to wrap text and render it across multiple rows
+fn renderWrappedText(
+    win: vaxis.Window,
+    text: []const u8,
+    start_row: usize,
+    col_offset: usize,
+    max_width: usize,
+    style: vaxis.Style,
+) usize {
+    if (text.len == 0) return 0;
+
+    var row = start_row;
+    var pos: usize = 0;
+
+    while (pos < text.len) {
+        if (row >= win.height) break;
+
+        // Calculate how much text fits on this line
+        const remaining = text[pos..];
+        const chunk_len = @min(remaining.len, max_width);
+        var break_at = chunk_len;
+
+        // If we're not at the end, try to break at a word boundary
+        if (chunk_len < remaining.len and chunk_len > 10) {
+            // Search backwards for a space
+            var search_pos = chunk_len;
+            while (search_pos > chunk_len / 2) : (search_pos -= 1) {
+                if (remaining[search_pos - 1] == ' ') {
+                    break_at = search_pos;
+                    break;
+                }
+            }
+        }
+
+        const chunk = remaining[0..break_at];
+        var seg = [_]vaxis.Cell.Segment{
+            .{ .text = chunk, .style = style },
+        };
+        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+
+        pos += break_at;
+        // Skip leading space on next line
+        if (pos < text.len and text[pos] == ' ') {
+            pos += 1;
+        }
+        row += 1;
+    }
+
+    return row - start_row; // Return number of rows used
+}
+
 /// Render the permission prompt inline in place of the input area
 fn renderInlinePermissionPrompt(win: vaxis.Window, perm: *AcpManager.PendingPermission) !void {
     var row: usize = 0;
@@ -1477,22 +1528,17 @@ fn renderInlinePermissionPrompt(win: vaxis.Window, perm: *AcpManager.PendingPerm
     }
     row += 1;
 
-    // Row 1: Title (tool name)
+    // Row 1+: Title (wrapped if needed)
     const title_style = vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }; // magenta
-    var title_seg = [_]vaxis.Cell.Segment{
-        .{ .text = perm.title, .style = title_style },
-    };
-    _ = win.print(&title_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
-    row += 1;
+    const max_text_width = if (win.width > 3) win.width - 3 else 1; // Leave margin
+    const title_rows = renderWrappedText(win, perm.title, row, 1, max_text_width, title_style);
+    row += title_rows;
 
-    // Row 2: Description (if present)
+    // Row N+: Description (wrapped if present)
     if (perm.description) |desc| {
         const desc_style = vaxis.Style{ .fg = .{ .index = 8 }, .italic = true };
-        var desc_seg = [_]vaxis.Cell.Segment{
-            .{ .text = desc, .style = desc_style },
-        };
-        _ = win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
-        row += 1;
+        const desc_rows = renderWrappedText(win, desc, row, 1, max_text_width, desc_style);
+        row += desc_rows;
     }
 
     // Rows: Options
