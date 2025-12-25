@@ -428,12 +428,18 @@ pub const ChatLineMap = struct {
 
         // Format header text
         const header_text = if (msg.tool_command) |cmd| blk: {
-            const max_cmd = @min(cmd.len, 60);
-            const truncated = if (cmd.len > 60) "..." else "";
+            // For multiline commands, just show the first line
+            const first_line = if (std.mem.indexOfScalar(u8, cmd, '\n')) |newline_pos|
+                cmd[0..newline_pos]
+            else
+                cmd;
+
+            const max_cmd = @min(first_line.len, 60);
+            const truncated = if (cmd.len > max_cmd or cmd.len != first_line.len) "..." else "";
             break :blk try std.fmt.allocPrint(self.allocator, "{s} {s}({s}{s})", .{
                 status_icon,
                 tool_name,
-                cmd[0..max_cmd],
+                first_line[0..max_cmd],
                 truncated,
             });
         } else blk: {
