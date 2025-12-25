@@ -81,11 +81,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             // Send /model command to agent
             if (app.acp_manager) |mgr| {
                 var buf: [64]u8 = undefined;
-                const prompt = std.fmt.bufPrint(&buf, "/model {s}", .{selected_alias}) catch {
+                const raw_prompt = std.fmt.bufPrint(&buf, "/model {s}", .{selected_alias}) catch {
                     app.mode = .agent;
                     app.needs_render = true;
                     return;
                 };
+                const prompt = std.mem.trim(u8, raw_prompt, &std.ascii.whitespace);
                 mgr.sendPrompt(prompt) catch {};
             }
 

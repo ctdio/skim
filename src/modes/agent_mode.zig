@@ -143,8 +143,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 try cmd_text.append(app.allocator, '/');
                 try cmd_text.appendSlice(app.allocator, cmd.name);
 
-                const text = try cmd_text.toOwnedSlice(app.allocator);
-                defer app.allocator.free(text);
+                const raw_text = try cmd_text.toOwnedSlice(app.allocator);
+                defer app.allocator.free(raw_text);
+
+                const text = std.mem.trim(u8, raw_text, &std.ascii.whitespace);
 
                 // Add to message history
                 try agent_state.addMessage(.user, text);
@@ -365,7 +367,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     if (action) |act| {
         switch (act) {
             .send => {
-                const text = agent_state.input.getText();
+                const raw_text = agent_state.input.getText();
+                const text = std.mem.trim(u8, raw_text, &std.ascii.whitespace);
                 if (text.len > 0) {
                     // Add user message to history
                     try agent_state.addMessage(.user, text);
