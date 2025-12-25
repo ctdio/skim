@@ -326,26 +326,28 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // Cycle through session modes:
+    // Cycle through session modes (only in normal vim mode):
+    // - Tab (plain tab key in normal mode)
     // - Shift+Tab (requires kitty keyboard protocol - many terminals don't support this)
     // - Ctrl+Shift+M (works in most terminals)
     // - Alt+M (works in terminals that support meta key)
-    // - 'm' in normal mode only
-    const is_mode_cycle = key.matches(vaxis.Key.tab, .{ .shift = true }) or
-        (key.codepoint == 0x09 and key.mods.shift) or
-        (key.codepoint == 'm' and key.mods.ctrl and key.mods.shift) or
-        (key.codepoint == 0x0D and key.mods.ctrl and key.mods.shift) or // Ctrl+Shift+M as capital M
-        (key.codepoint == 'm' and key.mods.alt) or
-        (key.codepoint == 'M' and key.mods.alt) or
-        (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'm' and !key.mods.alt and !key.mods.ctrl);
+    if (agent_state.input.vim.vim_mode == .normal) {
+        const is_mode_cycle = key.matches(vaxis.Key.tab, .{}) or
+            key.matches(vaxis.Key.tab, .{ .shift = true }) or
+            (key.codepoint == 0x09 and key.mods.shift) or
+            (key.codepoint == 'm' and key.mods.ctrl and key.mods.shift) or
+            (key.codepoint == 0x0D and key.mods.ctrl and key.mods.shift) or // Ctrl+Shift+M as capital M
+            (key.codepoint == 'm' and key.mods.alt) or
+            (key.codepoint == 'M' and key.mods.alt);
 
-    if (is_mode_cycle) {
-        if (app.acp_manager) |mgr| {
-            if (mgr.cycleToNextMode()) |_| {
-                app.needs_render = true;
+        if (is_mode_cycle) {
+            if (app.acp_manager) |mgr| {
+                if (mgr.cycleToNextMode()) |_| {
+                    app.needs_render = true;
+                }
             }
+            return;
         }
-        return;
     }
 
     // During bracketed paste, Enter should insert newline, not send prompt

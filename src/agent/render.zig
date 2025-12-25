@@ -1408,11 +1408,11 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         }
 
         // Keybindings on the right (include mode hint if modes available)
-        // In normal mode, 'm' cycles modes (S-Tab in insert mode for terminals with kitty keyboard)
+        // Tab cycles modes only in normal mode
         const has_modes = if (app.acp_manager) |mgr| mgr.hasModes() else false;
         const keybindings = switch (agent_state.input.vim.vim_mode) {
-            .insert => if (has_modes) "S-Tab:mode  Enter:send  ESC:normal" else "S-Enter:newline  Enter:send  ESC:normal",
-            .normal => if (has_modes) "m:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",
+            .insert => "S-Enter:newline  Enter:send  ESC:normal",
+            .normal => if (has_modes) "Tab:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",
             .visual => "ESC:exit",
             .command => "Enter:execute  ESC:cancel",
         };
