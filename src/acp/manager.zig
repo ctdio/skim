@@ -323,22 +323,14 @@ pub const AcpManager = struct {
         if (self.queued_prompts.items.len == 0) return;
 
         // Only send when session is active and it's not the agent's turn
-        if (self.status != .session_active) {
-            std.log.debug("ACP Manager: not sending queued prompt, status={s}", .{self.getStatusString()});
-            return;
-        }
-        if (self.pending_prompt_id != null) {
-            std.log.debug("ACP Manager: not sending queued prompt, agent still responding", .{});
-            return;
-        }
+        if (self.status != .session_active) return;
+        if (self.pending_prompt_id != null) return;
 
         const acp = self.acp_client orelse return;
 
         // Pop first queued message
         const prompt_text = self.queued_prompts.orderedRemove(0);
         defer self.allocator.free(prompt_text);
-
-        std.log.info("ACP Manager: sending queued prompt, {d} remaining", .{self.queued_prompts.items.len});
 
         const request_id = acp.sendPromptAsync(prompt_text) catch |err| {
             std.log.err("ACP Manager: failed to send queued prompt: {any}", .{err});
@@ -369,11 +361,8 @@ pub const AcpManager = struct {
 
         // Only cancel if we're currently prompting
         if (self.pending_prompt_id == null or self.status != .prompting) {
-            std.log.debug("ACP Manager: cancelPrompt called but no active prompt", .{});
             return false;
         }
-
-        std.log.info("ACP Manager: sending session/cancel", .{});
 
         acp.cancelPrompt() catch |err| {
             std.log.err("ACP Manager: failed to send cancel: {any}", .{err});
@@ -414,20 +403,10 @@ pub const AcpManager = struct {
         // Poll the transport for new messages
         const messages = acp.transport.poll() catch return self.pending_messages.items;
 
-        if (messages.len > 0) {
-            std.log.debug("AcpManager.poll: got {d} messages from transport", .{messages.len});
-        }
-
         // Process messages
         for (messages) |msg| {
             switch (msg) {
                 .notification => |n| {
-                    std.log.info("ACP Manager: notification '{s}'", .{n.method});
-                    if (n.params_json) |pjson| {
-                        // Log first 300 chars of params for debugging
-                        const log_len = @min(pjson.len, 300);
-                        std.log.info("ACP Manager: params[0..{d}]: {s}", .{ log_len, pjson[0..log_len] });
-                    }
                     if (std.mem.eql(u8, n.method, "session/update")) {
                         if (n.params_json) |pjson| {
                             self.processSessionUpdate(pjson) catch {};
@@ -435,15 +414,6 @@ pub const AcpManager = struct {
                     }
                 },
                 .response => |r| {
-                    // Log ALL responses for debugging
-                    if (r.id) |id| {
-                        switch (id) {
-                            .number => |n| std.log.debug("ACP Manager: received response for id={d}", .{n}),
-                            .string => |s| std.log.debug("ACP Manager: received response for id={s}", .{s}),
-                            .null_value => std.log.debug("ACP Manager: received response with null id", .{}),
-                        }
-                    }
-
                     // Check if this is a response to our pending prompt
                     if (self.pending_prompt_id) |expected_id| {
                         if (r.id) |id| {
@@ -452,7 +422,6 @@ pub const AcpManager = struct {
                                 .string, .null_value => null,
                             };
                             if (response_id == expected_id) {
-                                std.log.info("ACP Manager: prompt completed, request_id={d}", .{expected_id});
                                 self.pending_prompt_id = null;
                                 self.status = .session_active;
 
@@ -503,8 +472,6 @@ pub const AcpManager = struct {
             return;
         }
 
-        std.log.info("ACP Manager: handling agent request: method={s}", .{request.method});
-
         if (std.mem.eql(u8, request.method, "fs/read_text_file")) {
             // Handle file read request
             if (request.params_json) |pjson| {
@@ -538,8 +505,6 @@ pub const AcpManager = struct {
         } else if (std.mem.eql(u8, request.method, "session/request_permission")) {
             // Parse permission request params
             if (request.params_json) |params_json| {
-                std.log.info("ACP Manager: permission request params: {s}", .{params_json});
-
                 const parsed = acp.transport.decoder.parseRequestPermissionParams(params_json) catch |err| {
                     std.log.err("ACP Manager: failed to parse permission params: {any}", .{err});
                     try acp.transport.sendErrorResponse(id, -32602, "Invalid permission params");
@@ -563,8 +528,6 @@ pub const AcpManager = struct {
                 // Just free the session_id and tool_call_id which we don't need
                 self.allocator.free(parsed.session_id);
                 self.allocator.free(parsed.tool_call_id);
-
-                std.log.info("ACP Manager: permission requested - '{s}'", .{parsed.title});
             } else {
                 try acp.transport.sendErrorResponse(id, -32602, "Missing permission params");
             }
@@ -849,17 +812,9 @@ pub const AcpManager = struct {
 
         // Handle message updates (agent text or thinking responses)
         if (update.message) |msg| {
-            std.log.debug("ACP Manager: got {s} with {d} content blocks", .{
-                if (msg_kind == .agent_thinking) "thinking" else "message",
-                msg.content.len,
-            });
             for (msg.content) |block| {
                 switch (block) {
                     .text => |t| {
-                        std.log.debug("ACP Manager: received {s}: {s}", .{
-                            if (msg_kind == .agent_thinking) "thinking" else "text",
-                            t.text,
-                        });
                         const text = self.allocator.dupe(u8, t.text) catch continue;
                         self.pending_messages.append(self.allocator, .{
                             .kind = msg_kind,
@@ -871,19 +826,11 @@ pub const AcpManager = struct {
                     .diff, .resource_link => {},
                 }
             }
-        } else {
-            std.log.debug("ACP Manager: session/update has no message", .{});
         }
 
         // Handle tool calls
         if (update.tool_call) |tc| {
             const title = tc.title orelse "Tool";
-
-            std.log.debug("ACP Manager: tool_call id={s} name={s} title={s}", .{
-                tc.tool_call_id,
-                tc.tool_name orelse "unknown",
-                title,
-            });
 
             // Check if tool_call has diff content
             var has_diff = false;
@@ -891,7 +838,6 @@ pub const AcpManager = struct {
                 if (block == .diff) {
                     has_diff = true;
                     const diff = block.diff;
-                    std.log.debug("ACP Manager: tool_call has diff for {s}", .{diff.path});
 
                     // Create diff message
                     const title_copy = self.allocator.dupe(u8, title) catch continue;
@@ -1007,12 +953,6 @@ pub const AcpManager = struct {
                 output_text = self.allocator.dupe(u8, tcu.stdout.?) catch null;
             }
 
-            std.log.debug("ACP Manager: tool_call_update id={s} status={s} output={s}", .{
-                tcu.tool_call_id,
-                if (tcu.status) |s| @tagName(s) else "null",
-                if (output_text) |s| s[0..@min(s.len, 50)] else "(none)",
-            });
-
             const id_copy = self.allocator.dupe(u8, tcu.tool_call_id) catch return;
             const text_copy = self.allocator.dupe(u8, tcu.tool_call_id) catch {
                 self.allocator.free(id_copy);
@@ -1046,8 +986,6 @@ pub const AcpManager = struct {
 
         // Handle plan updates
         if (update.plan) |plan| {
-            std.log.debug("ACP Manager: plan update with {d} entries", .{plan.entries.len});
-
             // Copy plan entries
             const entries_copy = self.allocator.alloc(protocol.PlanEntry, plan.entries.len) catch return;
             var copied_count: usize = 0;
@@ -1089,8 +1027,6 @@ pub const AcpManager = struct {
 
         // Handle current mode updates
         if (update.current_mode_update) |mode_update| {
-            std.log.info("ACP Manager: mode update to '{s}'", .{mode_update.mode_id});
-
             // Update local state
             if (self.current_mode_id) |old| {
                 self.allocator.free(old);
@@ -1117,8 +1053,6 @@ pub const AcpManager = struct {
 
         // Handle available commands updates (slash commands)
         if (update.available_commands) |cmds_update| {
-            std.log.info("ACP Manager: available_commands update with {d} commands", .{cmds_update.commands.len});
-
             // Copy commands
             const commands_copy = self.allocator.alloc(protocol.AvailableCommand, cmds_update.commands.len) catch return;
             var copied_count: usize = 0;

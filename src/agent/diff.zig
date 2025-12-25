@@ -33,7 +33,19 @@ pub const DiffResult = struct {
 
 /// Compute line-level diff between old_text and new_text.
 /// Returns a list of DiffLines with proper line numbers.
-pub fn computeDiff(allocator: Allocator, old_text: []const u8, new_text: []const u8) !DiffResult {
+/// old_start_line: Starting line number for old_text (defaults to 1 if null)
+/// new_start_line: Starting line number for new_text (defaults to 1 if null)
+pub fn computeDiff(
+    allocator: Allocator,
+    old_text: []const u8,
+    new_text: []const u8,
+    old_start_line: ?usize,
+    new_start_line: ?usize,
+) !DiffResult {
+    // Use provided starting line numbers, or default to 1
+    const old_start = old_start_line orelse 1;
+    const new_start = new_start_line orelse 1;
+
     // Split into lines
     var old_lines_list: std.ArrayList([]const u8) = .{};
     defer old_lines_list.deinit(allocator);
@@ -80,7 +92,7 @@ pub fn computeDiff(allocator: Allocator, old_text: []const u8, new_text: []const
                 .kind = .add,
                 .content = line,
                 .old_line_num = null,
-                .new_line_num = i + 1,
+                .new_line_num = new_start + i,
             });
             additions += 1;
         }
@@ -98,7 +110,7 @@ pub fn computeDiff(allocator: Allocator, old_text: []const u8, new_text: []const
             try result.append(allocator, .{
                 .kind = .delete,
                 .content = line,
-                .old_line_num = i + 1,
+                .old_line_num = old_start + i,
                 .new_line_num = null,
             });
             deletions += 1;
@@ -146,8 +158,8 @@ pub fn computeDiff(allocator: Allocator, old_text: []const u8, new_text: []const
             try diff_lines.append(allocator, .{
                 .kind = .context,
                 .content = old_lines[i - 1],
-                .old_line_num = i,
-                .new_line_num = j,
+                .old_line_num = old_start + i - 1,
+                .new_line_num = new_start + j - 1,
             });
             i -= 1;
             j -= 1;
@@ -157,7 +169,7 @@ pub fn computeDiff(allocator: Allocator, old_text: []const u8, new_text: []const
                 .kind = .add,
                 .content = new_lines[j - 1],
                 .old_line_num = null,
-                .new_line_num = j,
+                .new_line_num = new_start + j - 1,
             });
             additions += 1;
             j -= 1;
@@ -166,7 +178,7 @@ pub fn computeDiff(allocator: Allocator, old_text: []const u8, new_text: []const
             try diff_lines.append(allocator, .{
                 .kind = .delete,
                 .content = old_lines[i - 1],
-                .old_line_num = i,
+                .old_line_num = old_start + i - 1,
                 .new_line_num = null,
             });
             deletions += 1;
@@ -191,7 +203,7 @@ pub fn computeDiff(allocator: Allocator, old_text: []const u8, new_text: []const
 
 test "computeDiff empty to content" {
     const allocator = std.testing.allocator;
-    var result = try computeDiff(allocator, "", "line1\nline2");
+    var result = try computeDiff(allocator, "", "line1\nline2", null, null);
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), result.lines.len);
@@ -203,7 +215,7 @@ test "computeDiff empty to content" {
 
 test "computeDiff content to empty" {
     const allocator = std.testing.allocator;
-    var result = try computeDiff(allocator, "line1\nline2", "");
+    var result = try computeDiff(allocator, "line1\nline2", "", null, null);
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), result.lines.len);
@@ -215,7 +227,7 @@ test "computeDiff content to empty" {
 
 test "computeDiff modification" {
     const allocator = std.testing.allocator;
-    var result = try computeDiff(allocator, "line1\nline2\nline3", "line1\nmodified\nline3");
+    var result = try computeDiff(allocator, "line1\nline2\nline3", "line1\nmodified\nline3", null, null);
     defer result.deinit();
 
     // Should be: context(line1), delete(line2), add(modified), context(line3)
@@ -228,7 +240,7 @@ test "computeDiff modification" {
 
 test "computeDiff identical content" {
     const allocator = std.testing.allocator;
-    var result = try computeDiff(allocator, "same\ncontent", "same\ncontent");
+    var result = try computeDiff(allocator, "same\ncontent", "same\ncontent", null, null);
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), result.lines.len);
@@ -236,4 +248,34 @@ test "computeDiff identical content" {
     try std.testing.expectEqual(DiffLine.Kind.context, result.lines[1].kind);
     try std.testing.expectEqual(@as(usize, 0), result.additions);
     try std.testing.expectEqual(@as(usize, 0), result.deletions);
+}
+
+test "computeDiff with custom starting line numbers" {
+    const allocator = std.testing.allocator;
+    // Simulate a hunk starting at line 448 in the old file and line 448 in the new file
+    var result = try computeDiff(allocator, "line1\nline2\nline3", "line1\nmodified\nline3", 448, 448);
+    defer result.deinit();
+
+    // Should be: context(line1), delete(line2), add(modified), context(line3)
+    try std.testing.expectEqual(@as(usize, 4), result.lines.len);
+
+    // Context line 1 should be at line 448
+    try std.testing.expectEqual(DiffLine.Kind.context, result.lines[0].kind);
+    try std.testing.expectEqual(@as(?usize, 448), result.lines[0].old_line_num);
+    try std.testing.expectEqual(@as(?usize, 448), result.lines[0].new_line_num);
+
+    // Delete line 2 should be at old line 449
+    try std.testing.expectEqual(DiffLine.Kind.delete, result.lines[1].kind);
+    try std.testing.expectEqual(@as(?usize, 449), result.lines[1].old_line_num);
+    try std.testing.expectEqual(@as(?usize, null), result.lines[1].new_line_num);
+
+    // Add "modified" should be at new line 449
+    try std.testing.expectEqual(DiffLine.Kind.add, result.lines[2].kind);
+    try std.testing.expectEqual(@as(?usize, null), result.lines[2].old_line_num);
+    try std.testing.expectEqual(@as(?usize, 449), result.lines[2].new_line_num);
+
+    // Context line 3 should be at old line 450, new line 450
+    try std.testing.expectEqual(DiffLine.Kind.context, result.lines[3].kind);
+    try std.testing.expectEqual(@as(?usize, 450), result.lines[3].old_line_num);
+    try std.testing.expectEqual(@as(?usize, 450), result.lines[3].new_line_num);
 }

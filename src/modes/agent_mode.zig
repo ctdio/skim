@@ -340,16 +340,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'm' and !key.mods.alt and !key.mods.ctrl);
 
     if (is_mode_cycle) {
-        std.log.info("Agent: Mode cycle key detected (codepoint=0x{X}, alt={})", .{ key.codepoint, key.mods.alt });
         if (app.acp_manager) |mgr| {
-            if (mgr.cycleToNextMode()) |mode_name| {
-                std.log.info("Agent: Cycled to mode '{s}'", .{mode_name});
+            if (mgr.cycleToNextMode()) |_| {
                 app.needs_render = true;
-            } else {
-                std.log.info("Agent: No modes available to cycle", .{});
             }
-        } else {
-            std.log.info("Agent: No ACP manager", .{});
         }
         return;
     }
@@ -439,11 +433,7 @@ fn updateSlashMenuVisibility(app: *App, agent_state: *agent.AgentState) void {
     const text = agent_state.input.getText();
     const has_slash = text.len > 0 and text[0] == '/';
     const cmd_count = agent_state.available_commands.items.len;
-
-    // Debug log to help diagnose slash menu issues
-    if (has_slash) {
-        std.log.info("Slash typed: cmd_count={d} visible={}", .{ cmd_count, agent_state.slash_menu_visible });
-    }
+    _ = has_slash;
 
     const should_show = agent_state.shouldShowSlashMenu();
 
@@ -451,19 +441,9 @@ fn updateSlashMenuVisibility(app: *App, agent_state: *agent.AgentState) void {
         // Before showing menu, poll once for any pending ACP updates
         // Commands will appear on next render if they arrive after this poll
         if (cmd_count <= 1) { // Only local commands present
-            std.log.debug("Slash menu: only {d} commands, polling ACP for updates", .{cmd_count});
             app.pollAcpUpdates();
-
-            const updated_count = agent_state.available_commands.items.len;
-            if (updated_count > 1) {
-                std.log.info("Slash menu: got {d} commands after poll", .{updated_count});
-            } else {
-                std.log.debug("Slash menu: no new commands yet, will appear when agent sends them", .{});
-            }
         }
 
-        // Show menu when "/" is typed at start
-        std.log.info("Showing slash menu with {d} commands", .{agent_state.available_commands.items.len});
         agent_state.showSlashMenu();
     } else if (!should_show and agent_state.slash_menu_visible) {
         // Hide menu when "/" is deleted or input changes

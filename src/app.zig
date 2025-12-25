@@ -3577,10 +3577,8 @@ pub const App = struct {
                 // NOTE: Thread sets status to .connected BEFORE calling createSession(),
                 // so we also wait for .connected to change to .session_active or .failed
                 const thread_still_working = mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected;
-                std.log.debug("pollAcpUpdates: thread active, status={s}, still_working={}", .{ mgr.getStatusString(), thread_still_working });
                 if (!thread_still_working) {
                     // Thread is done, clean it up
-                    std.log.info("pollAcpUpdates: thread finished! status={s}, joining...", .{mgr.getStatusString()});
                     if (self.acp_connect_thread) |thread| {
                         thread.join();
                         self.acp_connect_thread = null;
@@ -3591,7 +3589,6 @@ pub const App = struct {
                         self.allocator.destroy(ctx);
                         self.acp_connect_ctx = null;
                     }
-                    std.log.info("pollAcpUpdates: thread joined successfully", .{});
 
                     // Update UI based on result
                     if (mgr.status == .session_active) {
@@ -3631,38 +3628,19 @@ pub const App = struct {
             return;
         }
 
-        const mgr = self.acp_manager orelse {
-            std.log.debug("pollAcpUpdates: no acp_manager", .{});
-            return;
-        };
+        const mgr = self.acp_manager orelse return;
 
         // Poll for new messages
-        const messages = mgr.poll() catch |err| {
-            std.log.debug("pollAcpUpdates: poll error: {}", .{err});
-            return;
-        };
-        if (messages.len == 0) {
-            std.log.debug("pollAcpUpdates: mgr.poll() returned 0 messages", .{});
-            return;
-        }
-
-        std.log.info("pollAcpUpdates: got {d} messages to process", .{messages.len});
+        const messages = mgr.poll() catch return;
+        if (messages.len == 0) return;
 
         // Process each message
         for (messages) |msg| {
             switch (msg.kind) {
                 .agent_text => {
-                    // Log agent text for debugging
-                    std.log.info("Agent response: {s}", .{msg.text});
-
                     // Forward to agent state message history
                     if (self.state.agent_state) |*agent_state| {
-                        std.log.debug("Appending to agent_state, messages count={d}", .{agent_state.messages.items.len});
-                        agent_state.appendToLastAgentMessage(msg.text) catch |err| {
-                            std.log.err("Failed to append agent message: {any}", .{err});
-                        };
-                    } else {
-                        std.log.warn("agent_state is null, cannot append message", .{});
+                        agent_state.appendToLastAgentMessage(msg.text) catch {};
                     }
 
                     // Show truncated message in status bar
@@ -3673,28 +3651,13 @@ pub const App = struct {
                     self.needs_render = true;
                 },
                 .agent_thinking => {
-                    // Log thinking for debugging
-                    std.log.debug("Agent thinking: {s}", .{msg.text});
-
                     // Forward to agent state as thinking message
                     if (self.state.agent_state) |*agent_state| {
-                        agent_state.appendToLastThinkingMessage(msg.text) catch |err| {
-                            std.log.err("Failed to append thinking message: {any}", .{err});
-                        };
+                        agent_state.appendToLastThinkingMessage(msg.text) catch {};
                     }
-
-                    // Don't show thinking in status bar - just trigger render
                     self.needs_render = true;
                 },
                 .tool_call => {
-                    // Log tool call details
-                    std.log.info("Tool call: id={s}, name={s}, command={s}, text={s}", .{
-                        msg.tool_call_id orelse "(none)",
-                        msg.tool_name orelse "(none)",
-                        msg.tool_command orelse "(none)",
-                        msg.text,
-                    });
-
                     // Forward to agent state with full tool info
                     if (self.state.agent_state) |*agent_state| {
                         agent_state.addToolMessage(
@@ -3702,9 +3665,7 @@ pub const App = struct {
                             msg.tool_name,
                             msg.text,
                             msg.tool_command,
-                        ) catch |err| {
-                            std.log.err("Failed to add tool message: {any}", .{err});
-                        };
+                        ) catch {};
                     }
 
                     // Show tool execution in status bar
@@ -3715,14 +3676,6 @@ pub const App = struct {
                     self.needs_render = true;
                 },
                 .tool_update => {
-                    // Log tool update details
-                    std.log.info("Tool update: id={s}, status={s}, stdout_len={d}, stderr_len={d}", .{
-                        msg.tool_call_id orelse "(none)",
-                        @tagName(msg.tool_status),
-                        if (msg.tool_stdout) |out| out.len else 0,
-                        if (msg.tool_stderr) |err_out| err_out.len else 0,
-                    });
-
                     // Update existing tool message with status and output
                     if (self.state.agent_state) |*agent_state| {
                         const status: agent.Message.ToolStatus = switch (msg.tool_status) {
@@ -3736,9 +3689,7 @@ pub const App = struct {
                             status,
                             msg.tool_stdout,
                             msg.tool_stderr,
-                        ) catch |err_val| {
-                            std.log.err("Failed to update tool message: {any}", .{err_val});
-                        };
+                        ) catch {};
                     }
 
                     // Show completion/failure status
@@ -3784,10 +3735,7 @@ pub const App = struct {
                     // Update agent plan
                     if (self.state.agent_state) |*agent_state| {
                         if (msg.plan_entries) |entries| {
-                            std.log.info("Updating agent plan with {d} entries", .{entries.len});
-                            agent_state.updatePlan(entries) catch |err| {
-                                std.log.err("Failed to update agent plan: {any}", .{err});
-                            };
+                            agent_state.updatePlan(entries) catch {};
                         }
                     }
 
@@ -3799,10 +3747,7 @@ pub const App = struct {
                     // Update available slash commands
                     if (self.state.agent_state) |*agent_state| {
                         if (msg.available_commands) |commands| {
-                            std.log.info("Updating available commands: {d}", .{commands.len});
-                            agent_state.updateAvailableCommands(commands) catch |err| {
-                                std.log.err("Failed to update commands: {any}", .{err});
-                            };
+                            agent_state.updateAvailableCommands(commands) catch {};
                         }
                     }
                     self.needs_render = true;

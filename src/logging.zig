@@ -1,6 +1,11 @@
 const std = @import("std");
 const fs = std.fs;
 
+/// Maximum log file size before rotation (5MB)
+const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
+/// Number of lines to keep after rotation
+const KEEP_LINES: usize = 1000;
+
 /// Log component type - determines which log file to use
 pub const Component = enum {
     tui,
@@ -12,6 +17,72 @@ pub const Component = enum {
 var log_file: ?fs.File = null;
 var log_mutex: std.Thread.Mutex = .{};
 var initialized: bool = false;
+
+/// Check if log file needs rotation (fast, synchronous)
+fn needsRotation(log_path: []const u8) bool {
+    const file = fs.openFileAbsolute(log_path, .{}) catch return false;
+    defer file.close();
+    const stat = file.stat() catch return false;
+    return stat.size >= MAX_LOG_SIZE;
+}
+
+/// Perform the actual rotation (called from background thread)
+fn doRotation(log_path_ptr: [*]const u8, log_path_len: usize) void {
+    const log_path = log_path_ptr[0..log_path_len];
+    const allocator = std.heap.page_allocator;
+
+    // Read entire file
+    const file = fs.openFileAbsolute(log_path, .{}) catch return;
+    const stat = file.stat() catch {
+        file.close();
+        return;
+    };
+    const content = file.readToEndAlloc(allocator, @intCast(stat.size)) catch {
+        file.close();
+        return;
+    };
+    file.close();
+    defer allocator.free(content);
+
+    // Find last KEEP_LINES lines by scanning backwards for newlines
+    var line_count: usize = 0;
+    var start_pos: usize = content.len;
+
+    while (start_pos > 0) {
+        start_pos -= 1;
+        if (content[start_pos] == '\n') {
+            line_count += 1;
+            if (line_count >= KEEP_LINES) {
+                start_pos += 1; // Move past the newline
+                break;
+            }
+        }
+    }
+
+    // Write truncated content to temp file, then rename
+    const tmp_path = std.fmt.allocPrint(allocator, "{s}.tmp", .{log_path}) catch return;
+    defer allocator.free(tmp_path);
+
+    const tmp_file = fs.createFileAbsolute(tmp_path, .{}) catch return;
+    tmp_file.writeAll(content[start_pos..]) catch {
+        tmp_file.close();
+        fs.deleteFileAbsolute(tmp_path) catch {};
+        return;
+    };
+    tmp_file.close();
+
+    // Atomic rename
+    fs.renameAbsolute(tmp_path, log_path) catch {
+        fs.deleteFileAbsolute(tmp_path) catch {};
+    };
+}
+
+/// Spawn background thread to rotate log file
+fn spawnRotation(log_path: []const u8) void {
+    // Copy path to heap for thread (will leak but rotation is rare)
+    const path_copy = std.heap.page_allocator.dupe(u8, log_path) catch return;
+    _ = std.Thread.spawn(.{}, doRotation, .{ path_copy.ptr, path_copy.len }) catch return;
+}
 
 /// Initialize logging for a specific component
 /// Creates ~/.skim/ directory if needed and opens the log file
@@ -39,13 +110,22 @@ pub fn init(component: Component) void {
 
     const log_path = std.fmt.allocPrint(std.heap.page_allocator, "{s}/.skim/{s}", .{ home, log_name }) catch return;
 
-    // Open log file (append mode)
+    // Check if rotation needed (fast stat), spawn async if so
+    const needs_rotate = needsRotation(log_path);
+
+    // Open log file immediately (don't block on rotation)
     log_file = fs.createFileAbsolute(log_path, .{
         .truncate = false,
     }) catch {
         std.heap.page_allocator.free(log_path);
         return;
     };
+
+    // Spawn rotation in background after opening file
+    // Our handle stays valid (points to old inode), new instances get rotated file
+    if (needs_rotate) {
+        spawnRotation(log_path);
+    }
     std.heap.page_allocator.free(log_path);
 
     // Seek to end for append

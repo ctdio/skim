@@ -534,9 +534,6 @@ pub const Decoder = struct {
 
     /// Parse session/new result from JSON
     pub fn parseSessionNewResult(self: *Decoder, json: []const u8) !protocol.SessionNewResult {
-        // Log raw response for debugging mode support
-        std.log.debug("parseSessionNewResult raw JSON: {s}", .{json});
-
         const RawMode = struct {
             id: []const u8,
             name: ?[]const u8 = null,
@@ -588,11 +585,6 @@ pub const Decoder = struct {
                 .current_mode_id = if (raw_modes.currentModeId) |id| try self.allocator.dupe(u8, id) else null,
                 .available_modes = try available_modes.toOwnedSlice(self.allocator),
             };
-
-            std.log.info("ACP: session modes - current={s}, available={d}", .{
-                modes.?.current_mode_id orelse "none",
-                modes.?.available_modes.len,
-            });
         }
 
         return .{
@@ -719,9 +711,6 @@ pub const Decoder = struct {
 
     /// Parse session/update params from JSON (for notifications)
     pub fn parseSessionUpdateParams(self: *Decoder, json: []const u8) !protocol.SessionUpdateParams {
-        // Log raw JSON for debugging
-        std.log.debug("parseSessionUpdateParams raw JSON: {s}", .{json});
-
         const parsed = try std.json.parseFromSlice(RawSessionUpdate, self.allocator, json, .{
             .ignore_unknown_fields = true,
             .allocate = .alloc_always,
@@ -729,7 +718,6 @@ pub const Decoder = struct {
         defer parsed.deinit();
 
         const r = parsed.value;
-        std.log.debug("parsed: update present={}, message present={}", .{ r.update != null, r.message != null });
 
         // Parse message content if present
         var message_result: ?protocol.MessageUpdate = null;
@@ -742,7 +730,6 @@ pub const Decoder = struct {
             // Get the update type (agent_message_chunk, agent_thought_chunk, tool_call, etc.)
             if (upd.sessionUpdate) |session_update_type| {
                 update_type = protocol.SessionUpdateType.fromString(session_update_type);
-                std.log.info("Codec: sessionUpdate type string: '{s}' -> {s}", .{ session_update_type, @tagName(update_type) });
             }
 
             // Extract tool name from _meta.claudeCode
@@ -863,7 +850,6 @@ pub const Decoder = struct {
                             if (type_val == .string and std.mem.eql(u8, type_val.string, "text")) {
                                 if (obj.get("text")) |text_val| {
                                     if (text_val == .string and text_val.string.len > 0) {
-                                        std.log.debug("Found text in update.content: {s}", .{text_val.string});
                                         const text_copy = self.allocator.dupe(u8, text_val.string) catch return error.OutOfMemory;
                                         const content_arr = self.allocator.alloc(protocol.ContentBlock, 1) catch {
                                             self.allocator.free(text_copy);
@@ -890,7 +876,6 @@ pub const Decoder = struct {
                         }
 
                         if (diff_count > 0) {
-                            std.log.debug("Found {d} diff content blocks in tool_call", .{diff_count});
                             const content_arr = self.allocator.alloc(protocol.ContentBlock, diff_count) catch return error.OutOfMemory;
                             var i: usize = 0;
 
@@ -1022,8 +1007,6 @@ pub const Decoder = struct {
         if (update_type == .plan) {
             if (r.update) |upd| {
                 if (upd.entries) |raw_entries| {
-                    std.log.debug("Parsing plan with {d} entries", .{raw_entries.len});
-
                     const plan_entries = self.allocator.alloc(protocol.PlanEntry, raw_entries.len) catch return error.OutOfMemory;
                     var entry_count: usize = 0;
 
@@ -1054,7 +1037,6 @@ pub const Decoder = struct {
             // Check update.modeId first (nested format)
             if (r.update) |upd| {
                 if (upd.modeId) |mode_id| {
-                    std.log.debug("Mode update from update.modeId: {s}", .{mode_id});
                     mode_update_result = .{
                         .mode_id = self.allocator.dupe(u8, mode_id) catch "",
                     };
@@ -1063,7 +1045,6 @@ pub const Decoder = struct {
             // Fallback to top-level currentModeUpdate
             if (mode_update_result == null and r.currentModeUpdate != null) {
                 const mode_id = r.currentModeUpdate.?.modeId;
-                std.log.debug("Mode update from currentModeUpdate: {s}", .{mode_id});
                 mode_update_result = .{
                     .mode_id = self.allocator.dupe(u8, mode_id) catch "",
                 };
@@ -1073,11 +1054,9 @@ pub const Decoder = struct {
         // Handle available commands updates (slash commands)
         var commands_result: ?protocol.AvailableCommandsUpdate = null;
         if (update_type == .available_commands_update) {
-            std.log.info("Codec: processing available_commands_update", .{});
             // Check update.availableCommands (nested format from agent)
             if (r.update) |upd| {
                 if (upd.availableCommands) |raw_commands| {
-                    std.log.debug("Available commands update from update.commands: {d} commands", .{raw_commands.len});
                     const commands = self.allocator.alloc(protocol.AvailableCommand, raw_commands.len) catch return error.OutOfMemory;
                     var cmd_count: usize = 0;
 
@@ -1110,7 +1089,6 @@ pub const Decoder = struct {
             // Fallback to top-level availableCommandsUpdate
             if (commands_result == null and r.availableCommandsUpdate != null) {
                 const raw_commands = r.availableCommandsUpdate.?.commands;
-                std.log.debug("Available commands update from availableCommandsUpdate: {d} commands", .{raw_commands.len});
                 const commands = self.allocator.alloc(protocol.AvailableCommand, raw_commands.len) catch return error.OutOfMemory;
                 var cmd_count: usize = 0;
 

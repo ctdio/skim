@@ -78,9 +78,7 @@ pub const AgentProcess = struct {
     /// Write data to agent's stdin
     pub fn write(self: *AgentProcess, data: []const u8) !void {
         if (self.status != .running) return error.ProcessNotRunning;
-        std.log.debug("ACP Process: writing {d} bytes to stdin: {s}", .{ data.len, data });
         try self.stdin.writeAll(data);
-        std.log.debug("ACP Process: write completed", .{});
     }
 
     /// Check and log stderr output (for debugging)
@@ -102,10 +100,7 @@ pub const AgentProcess = struct {
         if (poll_result == 0) return;
 
         if (fds[0].revents & posix.POLL.IN != 0) {
-            const n = stderr_file.read(&buffer) catch return;
-            if (n > 0) {
-                std.log.debug("ACP Process STDERR: {s}", .{buffer[0..n]});
-            }
+            _ = stderr_file.read(&buffer) catch return;
         }
     }
 
@@ -113,7 +108,6 @@ pub const AgentProcess = struct {
     /// Returns null if no data available, empty slice on EOF
     pub fn readAvailable(self: *AgentProcess, buffer: []u8) !?[]u8 {
         if (self.status != .running) {
-            std.log.debug("ACP Process: readAvailable skipped - not running", .{});
             return null;
         }
 
@@ -126,8 +120,7 @@ pub const AgentProcess = struct {
             },
         };
 
-        const poll_result = posix.poll(&fds, 0) catch |err| {
-            std.log.debug("ACP Process: poll error: {}", .{err});
+        const poll_result = posix.poll(&fds, 0) catch {
             return null;
         };
 
@@ -135,30 +128,23 @@ pub const AgentProcess = struct {
             return null; // No data available
         }
 
-        std.log.debug("ACP Process: poll returned {d}, revents=0x{x}", .{ poll_result, fds[0].revents });
-
         if (fds[0].revents & posix.POLL.IN == 0) {
             if (fds[0].revents & posix.POLL.HUP != 0) {
-                std.log.debug("ACP Process: HUP received", .{});
                 self.status = .exited;
                 return buffer[0..0];
             }
-            std.log.debug("ACP Process: poll returned but no IN flag", .{});
             return null;
         }
 
         const n = self.stdout.read(buffer) catch |err| {
-            std.log.debug("ACP Process: read error: {}", .{err});
             return err;
         };
 
         if (n == 0) {
-            std.log.debug("ACP Process: EOF received", .{});
             self.status = .exited;
             return buffer[0..0];
         }
 
-        std.log.debug("ACP Process: read {d} bytes", .{n});
         return buffer[0..n];
     }
 

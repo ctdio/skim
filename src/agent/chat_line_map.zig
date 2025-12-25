@@ -569,6 +569,71 @@ pub const ChatLineMap = struct {
         }
     }
 
+    /// Find starting line number by locating text in the actual file on disk
+    /// Tries new_text first (file already modified), then old_text (file not yet modified)
+    /// Returns null if file can't be read or neither text found
+    fn findStartingLineInFile(allocator: Allocator, file_path: []const u8, old_text: []const u8, new_text: []const u8) ?usize {
+        // Try to read the file
+        const file = std.fs.cwd().openFile(file_path, .{}) catch return null;
+        defer file.close();
+
+        const file_content = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch return null;
+        defer allocator.free(file_content);
+
+        // Try to find new_text first (file has already been modified)
+        // Then fall back to old_text (file not yet modified)
+        const search_text = if (new_text.len > 0 and std.mem.indexOf(u8, file_content, new_text) != null)
+            new_text
+        else if (old_text.len > 0)
+            old_text
+        else
+            return 1; // Both empty, start at line 1
+
+        const pos = std.mem.indexOf(u8, file_content, search_text) orelse return null;
+
+        // Count newlines before this position to get line number
+        var line_num: usize = 1;
+        for (file_content[0..pos]) |c| {
+            if (c == '\n') line_num += 1;
+        }
+
+        return line_num;
+    }
+
+    /// Parse hunk header from text to extract starting line numbers
+    /// Format: @@ -old_start,old_count +new_start,new_count @@
+    /// Returns null if no valid hunk header is found
+    fn parseHunkHeader(text: []const u8) ?struct { old_start: usize, new_start: usize } {
+        // Look for @@ marker
+        const start_marker = std.mem.indexOf(u8, text, "@@") orelse return null;
+        if (start_marker + 2 >= text.len) return null;
+
+        const after_first = text[start_marker + 2 ..];
+        const end_marker = std.mem.indexOf(u8, after_first, "@@") orelse return null;
+
+        // Extract the range portion between the two @@
+        const range_text = std.mem.trim(u8, after_first[0..end_marker], " \t");
+
+        // Parse old range (-old_start,old_count)
+        var tokens = std.mem.tokenizeScalar(u8, range_text, ' ');
+        const old_token = tokens.next() orelse return null;
+        const new_token = tokens.next() orelse return null;
+
+        if (old_token.len < 2 or old_token[0] != '-') return null;
+        if (new_token.len < 2 or new_token[0] != '+') return null;
+
+        // Extract start numbers (before comma)
+        const old_comma = std.mem.indexOfScalar(u8, old_token, ',');
+        const old_start_str = if (old_comma) |idx| old_token[1..idx] else old_token[1..];
+        const old_start = std.fmt.parseInt(usize, old_start_str, 10) catch return null;
+
+        const new_comma = std.mem.indexOfScalar(u8, new_token, ',');
+        const new_start_str = if (new_comma) |idx| new_token[1..idx] else new_token[1..];
+        const new_start = std.fmt.parseInt(usize, new_start_str, 10) catch return null;
+
+        return .{ .old_start = old_start, .new_start = new_start };
+    }
+
     fn addDiffContent(
         self: *ChatLineMap,
         global_line: *usize,
@@ -581,8 +646,20 @@ pub const ChatLineMap = struct {
         const old_text = msg.diff_old orelse return;
         const new_text = msg.diff_new orelse return;
 
+        // Try to find starting line number:
+        // 1. First try parsing hunk header from message content (e.g., "@@ -150,3 +150,26 @@")
+        // 2. If that fails, try to find the text in the actual file on disk
+        const hunk_info = parseHunkHeader(msg.content);
+        const file_start_line = if (hunk_info) |info|
+            info.old_start
+        else
+            findStartingLineInFile(self.allocator, path, old_text, new_text);
+
+        const old_start_line = file_start_line;
+        const new_start_line = file_start_line; // Same starting point for both
+
         // Compute diff
-        var diff_result = diff_algo.computeDiff(self.allocator, old_text, new_text) catch {
+        var diff_result = diff_algo.computeDiff(self.allocator, old_text, new_text, old_start_line, new_start_line) catch {
             // Fallback to just showing filename - duplicate to own the memory
             const basename_copy = try self.allocator.dupe(u8, std.fs.path.basename(path));
             try self.strings.append(self.allocator, basename_copy);

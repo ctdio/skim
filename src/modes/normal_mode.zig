@@ -64,7 +64,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
         // If h, jump to previous code change
         if (key.codepoint == 'h') {
-            std.log.debug("Jumping to previous code change", .{});
             Navigation.jumpToPreviousCodeChange(app);
             app.state.cursor_column = 0;
             app.updateCurrentFileAndTriggerHighlighting();
@@ -72,7 +71,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
         // If c, jump to previous comment
         if (key.codepoint == 'c') {
-            std.log.debug("Jumping to previous comment", .{});
             Navigation.jumpToPreviousComment(app);
             app.state.cursor_column = 0;
             app.updateCurrentFileAndTriggerHighlighting();
@@ -95,7 +93,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
         // If h, jump to next code change
         if (key.codepoint == 'h') {
-            std.log.debug("Jumping to next code change", .{});
             Navigation.jumpToNextCodeChange(app);
             app.state.cursor_column = 0;
             app.updateCurrentFileAndTriggerHighlighting();
@@ -103,7 +100,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
         // If c, jump to next comment
         if (key.codepoint == 'c') {
-            std.log.debug("Jumping to next comment", .{});
             Navigation.jumpToNextComment(app);
             app.state.cursor_column = 0;
             app.updateCurrentFileAndTriggerHighlighting();
