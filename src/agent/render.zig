@@ -1407,6 +1407,16 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
             _ = win.print(&sm_seg, .{ .row_offset = @intCast(footer_row), .col_offset = 13 });
         }
 
+        // Stash indicator (after session mode)
+        if (agent_state.hasStash()) {
+            const stash_col: usize = if (session_mode_text) |sm| 13 + sm.len else 13;
+            const stash_style = vaxis.Style{ .fg = .{ .index = 3 }, .bold = true }; // yellow
+            var stash_seg = [_]vaxis.Cell.Segment{
+                .{ .text = " [stashed]", .style = stash_style },
+            };
+            _ = win.print(&stash_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(stash_col) });
+        }
+
         // Keybindings on the right (include mode hint if modes available)
         // Tab cycles modes only in normal mode
         const has_modes = if (app.acp_manager) |mgr| mgr.hasModes() else false;

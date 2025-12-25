@@ -57,6 +57,9 @@ pub const AgentState = struct {
     allocator: Allocator,
     messages: std.ArrayList(Message),
     input: InputEditor.State,
+    // Prompt stashing (Ctrl+S to stash/unstash)
+    stash_buffer: [8192]u8,
+    stash_len: usize,
     scroll_offset: usize,
     follow_bottom: bool, // When true, auto-scroll to bottom on new messages
     visible: bool,
@@ -101,6 +104,8 @@ pub const AgentState = struct {
             .allocator = allocator,
             .messages = .{}, // Zig 0.15: ArrayList is unmanaged
             .input = InputEditor.State.init(),
+            .stash_buffer = undefined,
+            .stash_len = 0,
             .scroll_offset = 0,
             .follow_bottom = true,
             .visible = false,
@@ -410,6 +415,35 @@ pub const AgentState = struct {
     /// Scroll down by n lines
     pub fn scrollDown(self: *AgentState, lines: usize) void {
         self.scroll_offset +|= lines;
+    }
+
+    // =========================================================================
+    // Prompt Stashing
+    // =========================================================================
+
+    /// Stash the current input prompt
+    pub fn stashPrompt(self: *AgentState) void {
+        const text = self.input.getText();
+        const copy_len = @min(text.len, self.stash_buffer.len);
+        @memcpy(self.stash_buffer[0..copy_len], text[0..copy_len]);
+        self.stash_len = copy_len;
+    }
+
+    /// Unstash the saved prompt into input
+    pub fn unstashPrompt(self: *AgentState) void {
+        if (self.stash_len > 0) {
+            self.input.setText(self.stash_buffer[0..self.stash_len]);
+        }
+    }
+
+    /// Clear the stash buffer
+    pub fn clearStash(self: *AgentState) void {
+        self.stash_len = 0;
+    }
+
+    /// Check if stash has content
+    pub fn hasStash(self: *const AgentState) bool {
+        return self.stash_len > 0;
     }
 
     /// Update scroll offset after rendering (to get actual clamped value)

@@ -361,6 +361,31 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
+    // Ctrl+S: Stash/unstash prompt
+    if (key.mods.ctrl and key.codepoint == 's') {
+        const text = agent_state.input.getText();
+        const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
+
+        if (trimmed.len == 0) {
+            // Empty input - unstash if stash exists
+            if (agent_state.hasStash()) {
+                agent_state.unstashPrompt();
+                agent_state.clearStash();
+                // Position cursor at end of restored text
+                agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
+                // Switch to insert mode for immediate editing
+                agent_state.input.vim.vim_mode = .insert;
+            }
+            // Else: no-op (silent, no message)
+        } else {
+            // Non-empty input - stash and clear
+            agent_state.stashPrompt();
+            agent_state.input.clear();
+        }
+        app.needs_render = true;
+        return;
+    }
+
     // Delegate to input editor
     const action = try agent.InputEditor.handleKey(&agent_state.input, key, app.allocator);
 
@@ -396,6 +421,15 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
                     // Clear input for next prompt
                     agent_state.input.clear();
+
+                    // Auto-populate from stash if available
+                    if (agent_state.hasStash()) {
+                        agent_state.unstashPrompt();
+                        agent_state.clearStash();
+                        // Position cursor at end for immediate editing
+                        agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
+                        agent_state.input.vim.vim_mode = .insert;
+                    }
                 }
                 app.needs_render = true;
             },
