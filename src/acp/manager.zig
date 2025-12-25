@@ -1027,11 +1027,30 @@ pub const AcpManager = struct {
 
         // Handle current mode updates
         if (update.current_mode_update) |mode_update| {
+            std.log.info("ACP: Received current_mode_update: {s}", .{mode_update.mode_id});
+
+            // Check if we're exiting plan mode
+            const exiting_plan_mode = if (self.current_mode_id) |old_mode|
+                std.mem.eql(u8, old_mode, "plan") and !std.mem.eql(u8, mode_update.mode_id, "plan")
+            else
+                false;
+
             // Update local state
             if (self.current_mode_id) |old| {
                 self.allocator.free(old);
             }
             self.current_mode_id = self.allocator.dupe(u8, mode_update.mode_id) catch null;
+
+            // If exiting plan mode, clear plan entries
+            if (exiting_plan_mode) {
+                std.log.info("ACP: Exiting plan mode, clearing plan entries", .{});
+                // Send empty plan update to clear UI
+                self.pending_messages.append(self.allocator, .{
+                    .kind = .plan_update,
+                    .text = self.allocator.dupe(u8, "Plan cleared") catch "",
+                    .plan_entries = &.{}, // Empty slice
+                }) catch {};
+            }
 
             // Add a pending message to trigger UI update
             const mode_name = blk: {

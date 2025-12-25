@@ -1034,20 +1034,25 @@ pub const Decoder = struct {
         // Handle current mode updates
         var mode_update_result: ?protocol.CurrentModeUpdate = null;
         if (update_type == .current_mode_update) {
-            // Check update.modeId first (nested format)
+            // Check update.currentModeId first (nested format from Claude Code)
             if (r.update) |upd| {
-                if (upd.modeId) |mode_id| {
+                if (upd.currentModeId) |mode_id| {
+                    std.log.info("ACP Codec: Found currentModeId={s}", .{mode_id});
                     mode_update_result = .{
                         .mode_id = self.allocator.dupe(u8, mode_id) catch "",
                     };
                 }
             }
-            // Fallback to top-level currentModeUpdate
+            // Fallback to top-level currentModeUpdate (some agents may use this)
             if (mode_update_result == null and r.currentModeUpdate != null) {
                 const mode_id = r.currentModeUpdate.?.modeId;
+                std.log.info("ACP Codec: Found modeId at top-level={s}", .{mode_id});
                 mode_update_result = .{
                     .mode_id = self.allocator.dupe(u8, mode_id) catch "",
                 };
+            }
+            if (mode_update_result == null) {
+                std.log.warn("ACP Codec: current_mode_update notification had no currentModeId!", .{});
             }
         }
 
@@ -1202,8 +1207,8 @@ const RawSessionUpdate = struct {
         rawInput: ?std.json.Value = null,
         // entries for plan updates
         entries: ?[]const RawPlanEntry = null,
-        // Mode update for current_mode_update notifications
-        modeId: ?[]const u8 = null,
+        // Mode update for current_mode_update notifications (camelCase from agent!)
+        currentModeId: ?[]const u8 = null,
         // Available commands for slash command menu (camelCase from agent)
         availableCommands: ?[]const RawAvailableCommand = null,
         // _meta contains Claude Code specific metadata
