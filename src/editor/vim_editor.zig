@@ -191,6 +191,14 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 return .cancel;
             }
 
+            // Enter in normal mode - submit if there's content
+            if (key.matches(vaxis.Key.enter, .{})) {
+                if (state.text_len > 0) {
+                    return .save;
+                }
+                return null;
+            }
+
             // Handle pending replace
             if (state.pending_replace) {
                 if (key.codepoint >= 32 and key.codepoint < 127) {
@@ -1404,6 +1412,41 @@ test "VimEditor clear" {
 
     try std.testing.expect(state.isEmpty());
     try std.testing.expectEqual(@as(usize, 0), state.cursor_pos);
+}
+
+test "VimEditor Enter in normal mode with content sends" {
+    const allocator = std.testing.allocator;
+    var state = TestEditor.State.init();
+
+    // Add some text
+    TestEditor.insertCharPublic(&state, 'h');
+    TestEditor.insertCharPublic(&state, 'i');
+
+    // Switch to normal mode
+    state.vim_mode = .normal;
+
+    // Press Enter
+    const key = vaxis.Key{ .codepoint = vaxis.Key.enter };
+    const action = try TestEditor.handleKey(&state, key, allocator);
+
+    // Should return .save
+    try std.testing.expect(action != null);
+    try std.testing.expectEqual(TestEditor.SaveAction.save, action.?);
+}
+
+test "VimEditor Enter in normal mode without content does nothing" {
+    const allocator = std.testing.allocator;
+    var state = TestEditor.State.init();
+
+    // No text added - buffer is empty
+    state.vim_mode = .normal;
+
+    // Press Enter
+    const key = vaxis.Key{ .codepoint = vaxis.Key.enter };
+    const action = try TestEditor.handleKey(&state, key, allocator);
+
+    // Should return null (no action)
+    try std.testing.expect(action == null);
 }
 
 test "findNextWordStart (w) moves to next word" {
