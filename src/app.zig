@@ -3643,11 +3643,6 @@ pub const App = struct {
                         agent_state.appendToLastAgentMessage(msg.text) catch {};
                     }
 
-                    // Show truncated message in status bar
-                    const preview = if (msg.text.len > 50) msg.text[0..50] else msg.text;
-                    const status_msg = std.fmt.allocPrint(self.allocator, "Agent: {s}...", .{preview}) catch "Agent responded";
-                    defer if (!std.mem.eql(u8, status_msg, "Agent responded")) self.allocator.free(status_msg);
-                    self.showStatusMessage(status_msg);
                     self.needs_render = true;
                 },
                 .agent_thinking => {
@@ -3668,11 +3663,6 @@ pub const App = struct {
                         ) catch {};
                     }
 
-                    // Show tool execution in status bar
-                    const tool_name = msg.tool_name orelse "Tool";
-                    const status_msg = std.fmt.allocPrint(self.allocator, "Agent: {s}...", .{tool_name}) catch "Agent working...";
-                    defer if (!std.mem.eql(u8, status_msg, "Agent working...")) self.allocator.free(status_msg);
-                    self.showStatusMessage(status_msg);
                     self.needs_render = true;
                 },
                 .tool_update => {
@@ -3692,12 +3682,6 @@ pub const App = struct {
                         ) catch {};
                     }
 
-                    // Show completion/failure status
-                    if (msg.tool_status == .completed) {
-                        self.showStatusMessage("Agent: tool completed");
-                    } else if (msg.tool_status == .failed) {
-                        self.showStatusMessage("Agent: tool failed");
-                    }
                     self.needs_render = true;
                 },
                 .tool_diff => {
@@ -3713,8 +3697,6 @@ pub const App = struct {
                         };
                     }
 
-                    // Show status
-                    self.showStatusMessage("Agent: edit pending");
                     self.needs_render = true;
                 },
                 .error_msg => {
@@ -3725,10 +3707,6 @@ pub const App = struct {
                         agent_state.addMessage(.system, err_msg) catch {};
                     }
 
-                    // Show error
-                    const status_msg = std.fmt.allocPrint(self.allocator, "Agent error: {s}", .{msg.text}) catch "Agent error";
-                    defer if (!std.mem.eql(u8, status_msg, "Agent error")) self.allocator.free(status_msg);
-                    self.showStatusMessage(status_msg);
                     self.needs_render = true;
                 },
                 .plan_update => {
@@ -3739,8 +3717,6 @@ pub const App = struct {
                         }
                     }
 
-                    // Show status
-                    self.showStatusMessage("Agent: plan updated");
                     self.needs_render = true;
                 },
                 .commands_update => {
