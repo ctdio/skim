@@ -348,10 +348,9 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     // Calculate plan height (only if visible and has entries)
     const plan_entry_count = agent_state.plan_entries.items.len;
     const plan_height: usize = if (agent_state.plan_visible and plan_entry_count > 0) blk: {
-        // Header (1) + entries (up to MAX_PLAN_ENTRIES) + optional "+N more" line (1)
-        const visible_entries = @min(plan_entry_count, MAX_PLAN_ENTRIES);
-        const has_more = plan_entry_count > MAX_PLAN_ENTRIES;
-        break :blk 1 + visible_entries + @as(usize, if (has_more) 1 else 0);
+        // Header (1) + entries (all if expanded, 1 if collapsed)
+        const visible_entries: usize = if (agent_state.plan_expanded) plan_entry_count else 1;
+        break :blk 1 + visible_entries;
     } else 0;
 
     // Calculate input area height (always shows normal input)
@@ -390,7 +389,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
             .width = win.width,
             .height = @intCast(plan_height),
         });
-        renderPlanArea(plan_win, agent_state.plan_entries.items);
+        renderPlanArea(plan_win, agent_state.plan_entries.items, agent_state.plan_expanded);
     }
 
     // Render input area (or permission prompt if pending)
@@ -969,12 +968,10 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
 // =============================================================================
 
 /// Render the agent plan area (todo list from agent)
-fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry) void {
+fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry, expanded: bool) void {
     if (win.height == 0 or entries.len == 0) return;
 
     var row: usize = 0;
-
-    // Header line: "── Todos ──"
     const header_style = vaxis.Style{ .fg = .{ .index = 8 }, .bold = true };
 
     // Clear entire header row first to avoid artifacts
@@ -1002,10 +999,31 @@ fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry) void {
     };
     _ = win.print(&title_seg, .{ .row_offset = @intCast(row), .col_offset = 3 });
 
-    // Fill rest of header with ─ (starting after "── Todos " = 3 + 7 = 10)
+    // Add expansion indicator and "+N more" in header for collapsed view
     const header_end: usize = 10;
-    if (win.width > header_end) {
-        for (header_end..win.width) |col| {
+    const indicator_text: []const u8 = if (expanded) "[-]" else "[+]";
+    var indicator_seg = [_]vaxis.Cell.Segment{
+        .{ .text = indicator_text, .style = header_style },
+    };
+    _ = win.print(&indicator_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(header_end) });
+
+    // In collapsed view with multiple entries, show "+N more" after [+]
+    var more_end: usize = header_end + indicator_text.len;
+    if (!expanded and entries.len > 1) {
+        var more_buf: [16]u8 = undefined;
+        const remaining = entries.len - 1;
+        const more_text = std.fmt.bufPrint(&more_buf, " +{d}", .{remaining}) catch " +?";
+        var more_seg = [_]vaxis.Cell.Segment{
+            .{ .text = more_text, .style = header_style },
+        };
+        _ = win.print(&more_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(more_end) });
+        more_end += more_text.len;
+    }
+
+    // Fill rest of header with ─
+    const fill_start = more_end + 1;
+    if (win.width > fill_start) {
+        for (fill_start..win.width) |col| {
             win.writeCell(@intCast(col), @intCast(row), .{
                 .char = .{ .grapheme = "─", .width = 1 },
                 .style = header_style,
@@ -1014,80 +1032,84 @@ fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry) void {
     }
     row += 1;
 
-    // Render entries (up to MAX_PLAN_ENTRIES)
-    const visible_count = @min(entries.len, MAX_PLAN_ENTRIES);
-    for (entries[0..visible_count]) |entry| {
+    // In collapsed view, show only: active (in_progress) todo, or last completed if none active
+    if (!expanded) {
+        const entry = findActiveOrLastCompleted(entries);
+        renderPlanEntry(win, row, entry);
+        return;
+    }
+
+    // Expanded view: render all entries
+    for (entries) |entry| {
         if (row >= win.height) break;
-
-        // Clear entire row first to avoid artifacts
-        for (0..win.width) |col| {
-            win.writeCell(@intCast(col), @intCast(row), .{
-                .char = .{ .grapheme = " ", .width = 1 },
-                .style = .{},
-            });
-        }
-
-        // Status icon
-        const status_icon: []const u8 = switch (entry.status) {
-            .pending => "○",
-            .in_progress => "◉",
-            .completed => "✓",
-        };
-
-        // Status color
-        const status_style: vaxis.Style = switch (entry.status) {
-            .pending => .{ .fg = .{ .index = 8 } }, // dim
-            .in_progress => .{ .fg = .{ .index = 3 }, .bold = true }, // yellow
-            .completed => .{ .fg = .{ .index = 2 } }, // green
-        };
-
-        // Content style (strikethrough for completed)
-        const content_style: vaxis.Style = switch (entry.status) {
-            .completed => .{ .fg = .{ .index = 8 } }, // dim for completed
-            else => .{ .fg = .{ .index = 7 } }, // normal
-        };
-
-        // Print status icon
-        var icon_seg = [_]vaxis.Cell.Segment{
-            .{ .text = status_icon, .style = status_style },
-        };
-        _ = win.print(&icon_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
-
-        // Print content (truncate if needed)
-        const max_content_len = if (win.width > 6) win.width - 6 else 1;
-        const content = if (entry.content.len > max_content_len)
-            entry.content[0..max_content_len]
-        else
-            entry.content;
-
-        var content_seg = [_]vaxis.Cell.Segment{
-            .{ .text = content, .style = content_style },
-        };
-        _ = win.print(&content_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
-
+        renderPlanEntry(win, row, entry);
         row += 1;
     }
+}
 
-    // "+N more" line if there are hidden entries
-    if (entries.len > MAX_PLAN_ENTRIES and row < win.height) {
-        // Clear row first
-        for (0..win.width) |col| {
-            win.writeCell(@intCast(col), @intCast(row), .{
-                .char = .{ .grapheme = " ", .width = 1 },
-                .style = .{},
-            });
-        }
-
-        var more_buf: [16]u8 = undefined;
-        const remaining = entries.len - MAX_PLAN_ENTRIES;
-        const more_text = std.fmt.bufPrint(&more_buf, "+{d} more", .{remaining}) catch "+? more";
-
-        const more_style = vaxis.Style{ .fg = .{ .index = 8 }, .italic = true };
-        var more_seg = [_]vaxis.Cell.Segment{
-            .{ .text = more_text, .style = more_style },
-        };
-        _ = win.print(&more_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
+/// Find the active (in_progress) entry, or fallback to last completed entry
+fn findActiveOrLastCompleted(entries: []const OwnedPlanEntry) OwnedPlanEntry {
+    // First, look for in_progress
+    for (entries) |entry| {
+        if (entry.status == .in_progress) return entry;
     }
+    // Then, find last completed (iterate backwards)
+    var i = entries.len;
+    while (i > 0) {
+        i -= 1;
+        if (entries[i].status == .completed) return entries[i];
+    }
+    // Fallback to first entry
+    return entries[0];
+}
+
+/// Render a single plan entry at the given row
+fn renderPlanEntry(win: vaxis.Window, row: usize, entry: OwnedPlanEntry) void {
+    // Clear entire row first to avoid artifacts
+    for (0..win.width) |col| {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{},
+        });
+    }
+
+    // Status icon
+    const status_icon: []const u8 = switch (entry.status) {
+        .pending => "○",
+        .in_progress => "◉",
+        .completed => "✓",
+    };
+
+    // Status color
+    const status_style: vaxis.Style = switch (entry.status) {
+        .pending => .{ .fg = .{ .index = 8 } }, // dim
+        .in_progress => .{ .fg = .{ .index = 3 }, .bold = true }, // yellow
+        .completed => .{ .fg = .{ .index = 2 } }, // green
+    };
+
+    // Content style (dim for completed)
+    const content_style: vaxis.Style = switch (entry.status) {
+        .completed => .{ .fg = .{ .index = 8 } },
+        else => .{ .fg = .{ .index = 7 } },
+    };
+
+    // Print status icon
+    var icon_seg = [_]vaxis.Cell.Segment{
+        .{ .text = status_icon, .style = status_style },
+    };
+    _ = win.print(&icon_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
+
+    // Print content (truncate if needed)
+    const max_content_len = if (win.width > 6) win.width - 6 else 1;
+    const content = if (entry.content.len > max_content_len)
+        entry.content[0..max_content_len]
+    else
+        entry.content;
+
+    var content_seg = [_]vaxis.Cell.Segment{
+        .{ .text = content, .style = content_style },
+    };
+    _ = win.print(&content_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
 }
 
 fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_focused: bool, pending_permission: ?*AcpManager.PendingPermission) !void {

@@ -386,6 +386,13 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
+    // Ctrl+T: Toggle plan expansion (expand/collapse todo list)
+    if (key.mods.ctrl and key.codepoint == 't') {
+        agent_state.plan_expanded = !agent_state.plan_expanded;
+        app.needs_render = true;
+        return;
+    }
+
     // Delegate to input editor
     const action = try agent.InputEditor.handleKey(&agent_state.input, key, app.allocator);
 

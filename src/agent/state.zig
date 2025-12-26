@@ -71,6 +71,7 @@ pub const AgentState = struct {
     // Agent plan (todo list)
     plan_entries: std.ArrayList(OwnedPlanEntry),
     plan_visible: bool, // Whether to show the plan above input
+    plan_expanded: bool, // Whether to show all plan entries (true) or limited (false)
     // Slash commands
     available_commands: std.ArrayList(OwnedCommand),
     slash_menu_visible: bool,
@@ -116,6 +117,7 @@ pub const AgentState = struct {
             .line_map_dirty = true,
             .plan_entries = .{},
             .plan_visible = true, // Show plan by default when entries exist
+            .plan_expanded = true, // Show all entries by default
             .available_commands = .{},
             .slash_menu_visible = false,
             .slash_menu_selection = 0,
