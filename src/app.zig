@@ -3629,15 +3629,6 @@ pub const App = struct {
         const has_staged = if (self.state.agent_state) |as| as.hasStagedPrompt() else false;
         const agent_idle = mgr.status == .session_active and mgr.pending_prompt_id == null;
 
-        // Log when agent becomes idle (for debugging auto-send)
-        if (agent_idle) {
-            std.log.debug("Agent: idle check - has_staged={}, status={}, pending_id={?}", .{
-                has_staged,
-                @intFromEnum(mgr.status),
-                mgr.pending_prompt_id,
-            });
-        }
-
         if (has_staged and agent_idle) {
             if (self.state.agent_state) |*agent_state| {
                 // Take and send the staged message
