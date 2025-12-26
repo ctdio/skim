@@ -1364,7 +1364,12 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         });
     }
 
-    const prompt_style = vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }; // magenta
+    // Dim prompt when session is not ready
+    const session_ready = if (app.acp_manager) |mgr| mgr.status == .session_active or mgr.status == .prompting else false;
+    const prompt_style = if (session_ready)
+        vaxis.Style{ .fg = .{ .index = 5 }, .bold = true } // magenta when ready
+    else
+        vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray when not ready
     const text_style = vaxis.Style{ .fg = .{ .index = 7 } };
     // Use the same max_input_width as calculated earlier for consistency
     const max_input_width = max_input_width_for_calc;

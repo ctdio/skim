@@ -403,6 +403,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 const text = std.mem.trim(u8, raw_text, &std.ascii.whitespace);
                 const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
 
+                // Block prompt submission if session is not ready yet
+                if (app.acp_manager) |mgr| {
+                    if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected) {
+                        // Session not ready - ignore submission
+                        return;
+                    }
+                }
+
                 // Handle staged message scenarios first
                 if (is_thinking and agent_state.hasStagedPrompt()) {
                     if (text.len == 0) {
