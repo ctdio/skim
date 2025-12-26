@@ -158,7 +158,7 @@ pub const Server = struct {
         var ctx = Context.withUserData(self.allocator, self, user_data);
 
         if (std.mem.eql(u8, method, "initialize")) {
-            return self.handleInitialize();
+            return self.handleInitialize(params);
         } else if (std.mem.eql(u8, method, "tools/list")) {
             return self.handleToolsList();
         } else if (std.mem.eql(u8, method, "tools/call")) {
@@ -171,7 +171,22 @@ pub const Server = struct {
         return Result.mcpError(ErrorCode.method_not_found, "Method not found");
     }
 
-    fn handleInitialize(self: *Server) Result {
+    fn handleInitialize(self: *Server, params: ?std.json.Value) Result {
+        // Log client capabilities if provided
+        if (params) |p| {
+            if (p == .object) {
+                if (p.object.get("clientCapabilities")) |caps| {
+                    std.log.info("Client capabilities: {any}", .{caps});
+                }
+                if (p.object.get("clientInfo")) |info| {
+                    std.log.info("Client info: {any}", .{info});
+                }
+                if (p.object.get("protocolVersion")) |version| {
+                    std.log.info("Client protocol version: {any}", .{version});
+                }
+            }
+        }
+
         // Return static initialize response
         // The actual JSON encoding happens in the transport layer
         const content = self.allocator.alloc(Content, 1) catch

@@ -247,8 +247,8 @@ pub const Encoder = struct {
         try writer.writeAll("{\"protocolVersion\":");
         try writer.print("{d}", .{params.protocol_version});
 
-        // Client capabilities
-        try writer.writeAll(",\"clientCapabilities\":{\"fileSystem\":{\"readTextFile\":");
+        // Client capabilities (use "fs" not "fileSystem" per ACP spec)
+        try writer.writeAll(",\"clientCapabilities\":{\"fs\":{\"readTextFile\":");
         try writer.writeAll(if (params.client_capabilities.file_system.read_text_file) "true" else "false");
         try writer.writeAll(",\"writeTextFile\":");
         try writer.writeAll(if (params.client_capabilities.file_system.write_text_file) "true" else "false");
@@ -1325,6 +1325,10 @@ test "encode initialize request" {
     try std.testing.expect(std.mem.indexOf(u8, request, "\"jsonrpc\":\"2.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request, "\"method\":\"initialize\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request, "\"protocolVersion\":1") != null);
+    // Verify correct field names per ACP spec
+    try std.testing.expect(std.mem.indexOf(u8, params, "\"fs\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, params, "\"readTextFile\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, params, "\"writeTextFile\":") != null);
 }
 
 test "decode response with result" {

@@ -70,15 +70,15 @@ pub const PeerInfo = struct {
 // =============================================================================
 
 /// Returns skim's default client capabilities
-/// - Read-only file access (no writes - review mode)
-/// - No terminal access
+/// - Full file system access (read and write)
+/// - Terminal access for running commands
 pub fn skimClientCapabilities() ClientCapabilities {
     return .{
         .file_system = .{
             .read_text_file = true,
-            .write_text_file = false, // Review is read-only
+            .write_text_file = true, // Allow agents to write files
         },
-        .terminal = false, // No shell access
+        .terminal = true, // Allow agents to run commands
     };
 }
 
@@ -98,8 +98,8 @@ pub fn skimClientInfo() PeerInfo {
 test "skimClientCapabilities" {
     const caps = skimClientCapabilities();
     try std.testing.expect(caps.file_system.read_text_file);
-    try std.testing.expect(!caps.file_system.write_text_file);
-    try std.testing.expect(!caps.terminal);
+    try std.testing.expect(caps.file_system.write_text_file);
+    try std.testing.expect(caps.terminal);
 }
 
 test "skimClientInfo" {

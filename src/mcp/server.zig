@@ -467,7 +467,20 @@ pub const McpServer = struct {
 
     fn handleInitialize(self: *McpServer, writer: anytype, id: ?std.json.Value, params: ?std.json.Value) !void {
         _ = self;
-        _ = params;
+        // Log client capabilities if provided
+        if (params) |p| {
+            if (p == .object) {
+                if (p.object.get("clientCapabilities")) |caps| {
+                    std.log.info("Client capabilities: {any}", .{caps});
+                }
+                if (p.object.get("clientInfo")) |info| {
+                    std.log.info("Client info: {any}", .{info});
+                }
+                if (p.object.get("protocolVersion")) |version| {
+                    std.log.info("Client protocol version: {any}", .{version});
+                }
+            }
+        }
 
         // Build response dynamically since id is runtime value
         try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
