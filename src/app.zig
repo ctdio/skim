@@ -3506,8 +3506,17 @@ pub const App = struct {
 
         const mgr = self.acp_manager orelse return;
 
+        // Track status before polling to detect when agent finishes
+        const status_before = mgr.status;
+
         // Poll for new messages (this also updates status when agent finishes)
         const messages = mgr.poll() catch return;
+
+        // Trigger redraw if status changed (e.g., prompting -> session_active)
+        // This ensures the "Generating..." indicator is cleared when agent finishes
+        if (mgr.status != status_before) {
+            self.needs_render = true;
+        }
 
         // Process each message (if any)
         for (messages) |msg| {

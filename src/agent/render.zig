@@ -783,9 +783,20 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
     // Show thinking indicator at the bottom of the message area
     // Note: Staged message is now rendered in input area (dedicated space)
-    // Use a row that has actual content to overlay (avoid overlapping with plan/input)
-    if (is_thinking and win.height > 1) {
-        renderThinkingIndicator(win, win.height - 1);
+    // Clear the indicator row first to prevent lingering text when agent completes
+    if (win.height > 1) {
+        const indicator_row = win.height - 1;
+        // Clear the row where the indicator appears
+        for (0..win.width) |col| {
+            win.writeCell(@intCast(col), @intCast(indicator_row), .{
+                .char = .{ .grapheme = " ", .width = 1 },
+                .style = .{},
+            });
+        }
+        // Render indicator only if thinking
+        if (is_thinking) {
+            renderThinkingIndicator(win, indicator_row);
+        }
     }
 }
 
