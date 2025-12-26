@@ -1076,17 +1076,19 @@ pub const App = struct {
                 .agent => {
                     // In agent mode, respect vim mode state:
                     // - Insert mode: first Ctrl+C exits to normal vim mode
-                    // - Normal vim mode: single Ctrl+C closes panel
+                    // - Normal vim mode: double Ctrl+C exits the app
                     if (self.state.agent_state) |*agent_state| {
                         if (agent_state.input.vim.vim_mode == .insert) {
                             // First Ctrl+C in insert mode - exit to normal vim mode
                             // (handled by vim_editor, will be processed below)
                             // Fall through to agent_mode.handleKey
                         } else {
-                            // In normal vim mode - single Ctrl+C closes panel and returns to diff
-                            agent_state.visible = false;
-                            self.mode = .normal;
-                            self.needs_render = true;
+                            // In normal vim mode - require double Ctrl+C to exit app
+                            if (agent_state.recordCtrlCPress()) {
+                                // Double Ctrl+C detected - exit the app
+                                self.should_quit = true;
+                            }
+                            // Single Ctrl+C - wait for second press (do nothing)
                             return;
                         }
                     }

@@ -79,8 +79,9 @@ pub const AgentState = struct {
     slash_menu_scroll_offset: usize, // Scroll offset for menu pagination
     // Input area scrolling
     input_scroll_offset: usize, // Vertical scroll offset for multi-line input
-    // Interrupt tracking (double-ESC to cancel)
+    // Interrupt tracking (double-ESC to cancel, double Ctrl+C to exit)
     last_esc_timestamp: i64, // Timestamp of last ESC press (ms since epoch)
+    last_ctrl_c_timestamp: i64, // Timestamp of last Ctrl+C press (ms since epoch)
     // Viewport tracking for smart scrolling
     last_messages_viewport_height: usize, // Height of messages area from last render
     // Staged prompt (queued to send after agent completes)
@@ -127,6 +128,7 @@ pub const AgentState = struct {
             .slash_menu_scroll_offset = 0,
             .input_scroll_offset = 0,
             .last_esc_timestamp = 0,
+            .last_ctrl_c_timestamp = 0,
             .last_messages_viewport_height = 20, // Reasonable default
             .staged_prompt = undefined,
             .staged_prompt_len = 0,
@@ -806,11 +808,11 @@ pub const AgentState = struct {
     }
 
     // =========================================================================
-    // Interrupt (Double-ESC)
+    // Interrupt (Double-ESC, Double Ctrl+C)
     // =========================================================================
 
-    /// Threshold for double-ESC detection (5 seconds in milliseconds)
-    const DOUBLE_ESC_THRESHOLD_MS: i64 = 5000;
+    /// Threshold for double-key detection (5 seconds in milliseconds)
+    const DOUBLE_KEY_THRESHOLD_MS: i64 = 5000;
 
     /// Record an ESC key press and check if it's a double-ESC
     /// Returns true if this is a double-ESC (second ESC within threshold)
@@ -818,7 +820,7 @@ pub const AgentState = struct {
         const now_ms = std.time.milliTimestamp();
         const elapsed = now_ms - self.last_esc_timestamp;
 
-        if (self.last_esc_timestamp != 0 and elapsed <= DOUBLE_ESC_THRESHOLD_MS) {
+        if (self.last_esc_timestamp != 0 and elapsed <= DOUBLE_KEY_THRESHOLD_MS) {
             // Double-ESC detected - reset timestamp and return true
             self.last_esc_timestamp = 0;
             return true;
@@ -829,9 +831,31 @@ pub const AgentState = struct {
         return false;
     }
 
+    /// Record a Ctrl+C key press and check if it's a double Ctrl+C
+    /// Returns true if this is a double Ctrl+C (second Ctrl+C within threshold)
+    pub fn recordCtrlCPress(self: *AgentState) bool {
+        const now_ms = std.time.milliTimestamp();
+        const elapsed = now_ms - self.last_ctrl_c_timestamp;
+
+        if (self.last_ctrl_c_timestamp != 0 and elapsed <= DOUBLE_KEY_THRESHOLD_MS) {
+            // Double Ctrl+C detected - reset timestamp and return true
+            self.last_ctrl_c_timestamp = 0;
+            return true;
+        }
+
+        // First Ctrl+C - record timestamp
+        self.last_ctrl_c_timestamp = now_ms;
+        return false;
+    }
+
     /// Clear the ESC timestamp (e.g., when another key is pressed)
     pub fn clearEscTimestamp(self: *AgentState) void {
         self.last_esc_timestamp = 0;
+    }
+
+    /// Clear the Ctrl+C timestamp (e.g., when another key is pressed)
+    pub fn clearCtrlCTimestamp(self: *AgentState) void {
+        self.last_ctrl_c_timestamp = 0;
     }
 
     /// Estimate memory usage of the agent state (for monitoring)
