@@ -8,6 +8,27 @@ const capabilities = @import("capabilities.zig");
 const types = @import("types.zig");
 
 // =============================================================================
+// Terminal Entry for tracking spawned terminals
+// =============================================================================
+
+const TerminalEntry = struct {
+    allocator: Allocator,
+    child: std.process.Child,
+    output_buffer: std.ArrayListUnmanaged(u8),
+    output_byte_limit: u32,
+    exited: bool,
+    exit_code: ?u32,
+    signal: ?u32,
+
+    fn deinit(self: *TerminalEntry) void {
+        self.output_buffer.deinit(self.allocator);
+        // Don't need to do anything else - child process already cleaned up
+    }
+};
+
+const TerminalRegistry = std.StringHashMapUnmanaged(TerminalEntry);
+
+// =============================================================================
 // ACP Client
 // =============================================================================
 
@@ -28,6 +49,10 @@ pub const Client = struct {
 
     // Session modes (from session/new response)
     session_modes: ?protocol.SessionModes,
+
+    // Terminal registry for spawned commands
+    terminals: TerminalRegistry,
+    next_terminal_id: u64,
 
     pub const State = enum {
         disconnected,
@@ -69,6 +94,8 @@ pub const Client = struct {
             .agent_capabilities = null,
             .session_id = null,
             .session_modes = null,
+            .terminals = .{},
+            .next_terminal_id = 1,
         };
 
         return self;
@@ -291,22 +318,13 @@ pub const Client = struct {
             const messages = try self.transport.poll();
             defer self.transport.freeMessages(messages);
 
-            if (messages.len > 0) {
-                std.log.debug("ACP Client: prompt loop got {d} messages", .{messages.len});
-            }
-
             loop_count += 1;
-            if (loop_count % 1000 == 0) {
-                std.log.debug("ACP Client: prompt loop iteration {d}, waiting for response...", .{loop_count});
-            }
 
             for (messages) |msg| {
                 switch (msg) {
                     .notification => |n| {
-                        std.log.debug("ACP Client: got notification: {s}", .{n.method});
                         if (std.mem.eql(u8, n.method, "session/update")) {
                             if (n.params_json) |pjson| {
-                                std.log.debug("ACP Client: parsing session/update", .{});
                                 const update = self.transport.decoder.parseSessionUpdateParams(pjson) catch |err| {
                                     std.log.err("ACP Client: failed to parse session/update: {any}", .{err});
                                     continue;
@@ -316,20 +334,16 @@ pub const Client = struct {
                         }
                     },
                     .response => |r| {
-                        std.log.debug("ACP Client: got response", .{});
                         if (r.id) |id| {
                             switch (id) {
                                 .number => |int_id| {
-                                    std.log.debug("ACP Client: response id={d}, waiting for={d}", .{ int_id, request_id });
                                     if (int_id == request_id) {
-                                        std.log.info("ACP Client: matched response for prompt request", .{});
                                         // Got response - defer will free messages
                                         if (r.error_msg) |err| {
                                             std.log.err("ACP Client: prompt got error from agent: code={d} message={s}", .{ err.code, err.message });
                                             return error.PromptFailed;
                                         }
                                         if (r.result_json) |result_json| {
-                                            std.log.debug("ACP Client: parsing prompt result: {s}", .{result_json});
                                             const result = self.transport.decoder.parseSessionPromptResult(result_json) catch |err| {
                                                 std.log.err("ACP Client: failed to parse prompt result: {any}", .{err});
                                                 return error.ProtocolError;
@@ -434,13 +448,258 @@ pub const Client = struct {
             ;
             try self.transport.sendResponse(id, result_json);
         } else if (std.mem.eql(u8, request.method, "fs/write_text_file")) {
-            // Reject file writes for now (read-only mode)
-            std.log.warn("ACP Client: rejecting fs/write_text_file request (read-only)", .{});
-            try self.transport.sendErrorResponse(id, -32001, "File writes not supported");
-        } else if (std.mem.startsWith(u8, request.method, "terminal/")) {
-            // Terminal operations not supported
-            std.log.warn("ACP Client: rejecting terminal request: {s}", .{request.method});
-            try self.transport.sendErrorResponse(id, -32001, "Terminal not supported");
+            // Handle file write request
+            if (request.params_json) |pjson| {
+                const params = self.transport.decoder.parseWriteTextFileParams(pjson) catch {
+                    try self.transport.sendErrorResponse(id, -32600, "Invalid params");
+                    return;
+                };
+                defer {
+                    self.allocator.free(params.session_id);
+                    self.allocator.free(params.path);
+                    self.allocator.free(params.content);
+                }
+
+                std.log.info("ACP Client: writing file: {s} ({d} bytes)", .{ params.path, params.content.len });
+
+                // Create parent directories if needed
+                if (std.fs.path.dirname(params.path)) |dir| {
+                    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+                        error.PathAlreadyExists => {},
+                        else => {
+                            std.log.err("ACP Client: failed to create directory: {any}", .{err});
+                            try self.transport.sendErrorResponse(id, -32001, "Failed to create directory");
+                            return;
+                        },
+                    };
+                }
+
+                // Write file content
+                const file = std.fs.createFileAbsolute(params.path, .{ .truncate = true }) catch |err| {
+                    std.log.err("ACP Client: failed to create file: {any}", .{err});
+                    try self.transport.sendErrorResponse(id, -32001, "Failed to create file");
+                    return;
+                };
+                defer file.close();
+
+                file.writeAll(params.content) catch |err| {
+                    std.log.err("ACP Client: failed to write file: {any}", .{err});
+                    try self.transport.sendErrorResponse(id, -32002, "Write error");
+                    return;
+                };
+
+                // Return success
+                try self.transport.sendResponse(id, "{}");
+            } else {
+                try self.transport.sendErrorResponse(id, -32600, "Missing params");
+            }
+        } else if (std.mem.eql(u8, request.method, "terminal/create")) {
+            // Handle terminal create request
+            if (request.params_json) |pjson| {
+                const params = self.transport.decoder.parseTerminalCreateParams(pjson) catch {
+                    try self.transport.sendErrorResponse(id, -32600, "Invalid params");
+                    return;
+                };
+                defer params.deinit(self.allocator);
+
+                std.log.info("ACP Client: creating terminal for command: {s}", .{params.command});
+
+                // Build the full command string for shell execution
+                // We need to run through a shell to handle redirections, pipes, &&, etc.
+                var cmd_buf: std.ArrayListUnmanaged(u8) = .{};
+                defer cmd_buf.deinit(self.allocator);
+                cmd_buf.appendSlice(self.allocator, params.command) catch {
+                    try self.transport.sendErrorResponse(id, -32001, "Failed to build command");
+                    return;
+                };
+                for (params.args) |arg| {
+                    cmd_buf.append(self.allocator, ' ') catch {};
+                    // Simple shell escaping - wrap in single quotes, escape existing single quotes
+                    cmd_buf.append(self.allocator, '\'') catch {};
+                    for (arg) |c| {
+                        if (c == '\'') {
+                            cmd_buf.appendSlice(self.allocator, "'\\''") catch {};
+                        } else {
+                            cmd_buf.append(self.allocator, c) catch {};
+                        }
+                    }
+                    cmd_buf.append(self.allocator, '\'') catch {};
+                }
+
+                // Use /bin/sh -c to run the command with shell interpretation
+                const argv = [_][]const u8{ "/bin/sh", "-c", cmd_buf.items };
+
+                // Spawn process
+                var child = std.process.Child.init(&argv, self.allocator);
+                child.cwd = params.cwd;
+                child.stdout_behavior = .Pipe;
+                child.stderr_behavior = .Pipe;
+                child.spawn() catch |err| {
+                    std.log.err("ACP Client: failed to spawn terminal: {any}", .{err});
+                    try self.transport.sendErrorResponse(id, -32001, "Failed to spawn process");
+                    return;
+                };
+
+                // Generate terminal ID and store entry
+                const terminal_id = self.nextTerminalId();
+                const entry = TerminalEntry{
+                    .allocator = self.allocator,
+                    .child = child,
+                    .output_buffer = .{},
+                    .output_byte_limit = params.output_byte_limit orelse 1024 * 1024,
+                    .exited = false,
+                    .exit_code = null,
+                    .signal = null,
+                };
+                self.terminals.put(self.allocator, terminal_id, entry) catch {
+                    try self.transport.sendErrorResponse(id, -32001, "Failed to store terminal");
+                    return;
+                };
+
+                // Return terminal ID
+                const result_json = std.fmt.allocPrint(self.allocator, "{{\"terminal_id\":\"{s}\"}}", .{terminal_id}) catch {
+                    try self.transport.sendErrorResponse(id, -32001, "Failed to encode result");
+                    return;
+                };
+                defer self.allocator.free(result_json);
+                try self.transport.sendResponse(id, result_json);
+            } else {
+                try self.transport.sendErrorResponse(id, -32600, "Missing params");
+            }
+        } else if (std.mem.eql(u8, request.method, "terminal/output")) {
+            // Handle terminal output request
+            if (request.params_json) |pjson| {
+                const params = self.transport.decoder.parseTerminalOutputParams(pjson) catch {
+                    try self.transport.sendErrorResponse(id, -32600, "Invalid params");
+                    return;
+                };
+                defer params.deinit(self.allocator);
+
+                if (self.terminals.getPtr(params.terminal_id)) |entry| {
+                    // Poll for new output
+                    self.pollTerminalOutput(entry);
+
+                    // Build response
+                    const output = entry.output_buffer.items;
+                    const truncated = entry.output_buffer.items.len >= entry.output_byte_limit;
+
+                    var result_json: []const u8 = undefined;
+                    if (entry.exited) {
+                        if (entry.exit_code) |code| {
+                            result_json = std.fmt.allocPrint(self.allocator, "{{\"output\":\"{s}\",\"truncated\":{},\"exit_status\":{{\"exit_code\":{d}}}}}", .{ output, truncated, code }) catch {
+                                try self.transport.sendErrorResponse(id, -32001, "Failed to encode result");
+                                return;
+                            };
+                        } else if (entry.signal) |sig| {
+                            result_json = std.fmt.allocPrint(self.allocator, "{{\"output\":\"{s}\",\"truncated\":{},\"exit_status\":{{\"signal\":{d}}}}}", .{ output, truncated, sig }) catch {
+                                try self.transport.sendErrorResponse(id, -32001, "Failed to encode result");
+                                return;
+                            };
+                        } else {
+                            result_json = std.fmt.allocPrint(self.allocator, "{{\"output\":\"{s}\",\"truncated\":{}}}", .{ output, truncated }) catch {
+                                try self.transport.sendErrorResponse(id, -32001, "Failed to encode result");
+                                return;
+                            };
+                        }
+                    } else {
+                        result_json = std.fmt.allocPrint(self.allocator, "{{\"output\":\"{s}\",\"truncated\":{}}}", .{ output, truncated }) catch {
+                            try self.transport.sendErrorResponse(id, -32001, "Failed to encode result");
+                            return;
+                        };
+                    }
+                    defer self.allocator.free(result_json);
+                    try self.transport.sendResponse(id, result_json);
+                } else {
+                    try self.transport.sendErrorResponse(id, -32001, "Terminal not found");
+                }
+            } else {
+                try self.transport.sendErrorResponse(id, -32600, "Missing params");
+            }
+        } else if (std.mem.eql(u8, request.method, "terminal/wait_for_exit")) {
+            // Handle terminal wait request
+            if (request.params_json) |pjson| {
+                const params = self.transport.decoder.parseTerminalOutputParams(pjson) catch {
+                    try self.transport.sendErrorResponse(id, -32600, "Invalid params");
+                    return;
+                };
+                defer params.deinit(self.allocator);
+
+                if (self.terminals.getPtr(params.terminal_id)) |entry| {
+                    // Wait for process to exit (blocking)
+                    const term = entry.child.wait() catch {
+                        try self.transport.sendErrorResponse(id, -32001, "Wait failed");
+                        return;
+                    };
+
+                    var result_json: []const u8 = undefined;
+                    switch (term.term) {
+                        .Exited => |code| {
+                            entry.exited = true;
+                            entry.exit_code = code;
+                            result_json = std.fmt.allocPrint(self.allocator, "{{\"exit_code\":{d}}}", .{code}) catch {
+                                try self.transport.sendErrorResponse(id, -32001, "Failed to encode result");
+                                return;
+                            };
+                        },
+                        .Signal => |sig| {
+                            entry.exited = true;
+                            entry.signal = sig;
+                            result_json = std.fmt.allocPrint(self.allocator, "{{\"signal\":{d}}}", .{sig}) catch {
+                                try self.transport.sendErrorResponse(id, -32001, "Failed to encode result");
+                                return;
+                            };
+                        },
+                        else => {
+                            result_json = std.fmt.allocPrint(self.allocator, "{{}}", .{}) catch {
+                                try self.transport.sendErrorResponse(id, -32001, "Failed to encode result");
+                                return;
+                            };
+                        },
+                    }
+                    defer self.allocator.free(result_json);
+                    try self.transport.sendResponse(id, result_json);
+                } else {
+                    try self.transport.sendErrorResponse(id, -32001, "Terminal not found");
+                }
+            } else {
+                try self.transport.sendErrorResponse(id, -32600, "Missing params");
+            }
+        } else if (std.mem.eql(u8, request.method, "terminal/kill")) {
+            // Handle terminal kill request
+            if (request.params_json) |pjson| {
+                const params = self.transport.decoder.parseTerminalOutputParams(pjson) catch {
+                    try self.transport.sendErrorResponse(id, -32600, "Invalid params");
+                    return;
+                };
+                defer params.deinit(self.allocator);
+
+                if (self.terminals.getPtr(params.terminal_id)) |entry| {
+                    _ = entry.child.kill() catch {};
+                    try self.transport.sendResponse(id, "{}");
+                } else {
+                    try self.transport.sendErrorResponse(id, -32001, "Terminal not found");
+                }
+            } else {
+                try self.transport.sendErrorResponse(id, -32600, "Missing params");
+            }
+        } else if (std.mem.eql(u8, request.method, "terminal/release")) {
+            // Handle terminal release request - clean up resources
+            if (request.params_json) |pjson| {
+                const params = self.transport.decoder.parseTerminalOutputParams(pjson) catch {
+                    try self.transport.sendErrorResponse(id, -32600, "Invalid params");
+                    return;
+                };
+                defer params.deinit(self.allocator);
+
+                if (self.terminals.fetchRemove(params.terminal_id)) |kv| {
+                    self.allocator.free(kv.key);
+                    var entry = kv.value;
+                    entry.deinit();
+                }
+                try self.transport.sendResponse(id, "{}");
+            } else {
+                try self.transport.sendErrorResponse(id, -32600, "Missing params");
+            }
         } else {
             // Unknown method - log it clearly
             std.log.warn("ACP Client: unknown method from agent: {s}", .{request.method});
@@ -475,6 +734,14 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        // Clean up terminals
+        var term_it = self.terminals.iterator();
+        while (term_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit();
+        }
+        self.terminals.deinit(self.allocator);
+
         // Free owned session_id if present
         if (self.session_id) |sid| {
             self.allocator.free(sid);
@@ -482,6 +749,47 @@ pub const Client = struct {
         self.transport.deinit();
         self.agent.deinit();
         self.allocator.destroy(self);
+    }
+
+    fn nextTerminalId(self: *Client) []const u8 {
+        const id = std.fmt.allocPrint(self.allocator, "term_{d}", .{self.next_terminal_id}) catch return "term_error";
+        self.next_terminal_id += 1;
+        return id;
+    }
+
+    fn pollTerminalOutput(self: *Client, entry: *TerminalEntry) void {
+        _ = self;
+        if (entry.exited) return;
+
+        // Try to read any available output from stdout
+        if (entry.child.stdout) |stdout| {
+            var buf: [4096]u8 = undefined;
+            while (true) {
+                const n = stdout.read(&buf) catch break;
+                if (n == 0) break;
+
+                // Respect output limit
+                const remaining = entry.output_byte_limit -| @as(u32, @intCast(entry.output_buffer.items.len));
+                if (remaining == 0) break;
+
+                const to_add = @min(n, remaining);
+                entry.output_buffer.appendSlice(entry.allocator, buf[0..to_add]) catch break;
+            }
+        }
+
+        // Check if process has exited
+        const result = entry.child.wait() catch return;
+        switch (result.term) {
+            .Exited => |code| {
+                entry.exited = true;
+                entry.exit_code = code;
+            },
+            .Signal => |sig| {
+                entry.exited = true;
+                entry.signal = sig;
+            },
+            else => {},
+        }
     }
 };
 

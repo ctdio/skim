@@ -335,11 +335,78 @@ pub const ReadTextFileResult = struct {
 };
 
 /// Parameters for fs/write_text_file request (agent -> client)
-/// Note: Skim does not support this (read-only)
 pub const WriteTextFileParams = struct {
     session_id: types.SessionId,
     path: []const u8,
     content: []const u8,
+};
+
+// =============================================================================
+// Terminal (Request from Agent)
+// =============================================================================
+
+/// Environment variable for terminal
+pub const EnvVar = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// Parameters for terminal/create request (agent -> client)
+pub const TerminalCreateParams = struct {
+    session_id: types.SessionId,
+    command: []const u8,
+    args: []const []const u8 = &.{},
+    env: []const EnvVar = &.{},
+    cwd: ?[]const u8 = null,
+    output_byte_limit: ?u32 = null,
+};
+
+/// Result for terminal/create (client -> agent)
+pub const TerminalCreateResult = struct {
+    terminal_id: []const u8,
+};
+
+/// Parameters for terminal/output request (agent -> client)
+pub const TerminalOutputParams = struct {
+    session_id: types.SessionId,
+    terminal_id: []const u8,
+};
+
+/// Exit status for terminal
+pub const ExitStatus = struct {
+    exit_code: ?i32 = null,
+    signal: ?[]const u8 = null,
+};
+
+/// Result for terminal/output (client -> agent)
+pub const TerminalOutputResult = struct {
+    output: []const u8,
+    truncated: bool = false,
+    exit_status: ?ExitStatus = null,
+};
+
+/// Parameters for terminal/wait_for_exit request (agent -> client)
+pub const TerminalWaitParams = struct {
+    session_id: types.SessionId,
+    terminal_id: []const u8,
+};
+
+/// Result for terminal/wait_for_exit (client -> agent)
+pub const TerminalWaitResult = struct {
+    exit_code: ?i32 = null,
+    signal: ?[]const u8 = null,
+};
+
+/// Parameters for terminal/kill request (agent -> client)
+pub const TerminalKillParams = struct {
+    session_id: types.SessionId,
+    terminal_id: []const u8,
+};
+
+/// Parameters for terminal/release request (agent -> client)
+pub const TerminalReleaseParams = struct {
+    session_id: types.SessionId,
+    terminal_id: []const u8,
 };
 
 // =============================================================================

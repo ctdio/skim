@@ -89,6 +89,40 @@ pub const ParsedPermissionRequest = struct {
 };
 
 // =============================================================================
+// Parsed Terminal Types
+// =============================================================================
+
+/// Parsed terminal/create params
+pub const ParsedTerminalCreate = struct {
+    session_id: []const u8,
+    command: []const u8,
+    args: [][]const u8,
+    cwd: ?[]const u8,
+    output_byte_limit: ?u32,
+
+    pub fn deinit(self: *ParsedTerminalCreate, allocator: Allocator) void {
+        allocator.free(self.session_id);
+        allocator.free(self.command);
+        for (self.args) |arg| {
+            allocator.free(arg);
+        }
+        if (self.args.len > 0) allocator.free(self.args);
+        if (self.cwd) |c| allocator.free(c);
+    }
+};
+
+/// Parsed terminal ID params (for output, wait, kill, release)
+pub const ParsedTerminalId = struct {
+    session_id: []const u8,
+    terminal_id: []const u8,
+
+    pub fn deinit(self: *ParsedTerminalId, allocator: Allocator) void {
+        allocator.free(self.session_id);
+        allocator.free(self.terminal_id);
+    }
+};
+
+// =============================================================================
 // Decoded Message Types
 // =============================================================================
 
@@ -629,6 +663,100 @@ pub const Decoder = struct {
             .limit = parsed.value.limit,
         };
     }
+
+    /// Parse fs/write_text_file params from JSON
+    pub fn parseWriteTextFileParams(self: *Decoder, json: []const u8) !protocol.WriteTextFileParams {
+        const parsed = try std.json.parseFromSlice(struct {
+            sessionId: []const u8,
+            path: []const u8,
+            content: []const u8,
+        }, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        });
+        defer parsed.deinit();
+
+        return .{
+            .session_id = try self.allocator.dupe(u8, parsed.value.sessionId),
+            .path = try self.allocator.dupe(u8, parsed.value.path),
+            .content = try self.allocator.dupe(u8, parsed.value.content),
+        };
+    }
+
+    /// Parse terminal/create params from JSON
+    pub fn parseTerminalCreateParams(self: *Decoder, json: []const u8) !ParsedTerminalCreate {
+        const RawEnvVar = struct {
+            name: []const u8,
+            value: []const u8,
+        };
+
+        const parsed = try std.json.parseFromSlice(struct {
+            sessionId: []const u8,
+            command: []const u8,
+            args: ?[]const []const u8 = null,
+            env: ?[]const RawEnvVar = null,
+            cwd: ?[]const u8 = null,
+            outputByteLimit: ?u32 = null,
+        }, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        });
+        defer parsed.deinit();
+
+        // Duplicate strings we need to keep
+        const session_id = try self.allocator.dupe(u8, parsed.value.sessionId);
+        errdefer self.allocator.free(session_id);
+
+        const command = try self.allocator.dupe(u8, parsed.value.command);
+        errdefer self.allocator.free(command);
+
+        const cwd = if (parsed.value.cwd) |c| try self.allocator.dupe(u8, c) else null;
+        errdefer if (cwd) |c| self.allocator.free(c);
+
+        // Duplicate args array
+        var args: [][]const u8 = &.{};
+        if (parsed.value.args) |raw_args| {
+            const args_alloc = try self.allocator.alloc([]const u8, raw_args.len);
+            for (raw_args, 0..) |arg, i| {
+                args_alloc[i] = try self.allocator.dupe(u8, arg);
+            }
+            args = args_alloc;
+        }
+
+        return .{
+            .session_id = session_id,
+            .command = command,
+            .args = args,
+            .cwd = cwd,
+            .output_byte_limit = parsed.value.outputByteLimit,
+        };
+    }
+
+    /// Parse terminal/output params from JSON
+    pub fn parseTerminalOutputParams(self: *Decoder, json: []const u8) !ParsedTerminalId {
+        const parsed = try std.json.parseFromSlice(struct {
+            sessionId: []const u8,
+            terminalId: []const u8,
+        }, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        });
+        defer parsed.deinit();
+
+        return .{
+            .session_id = try self.allocator.dupe(u8, parsed.value.sessionId),
+            .terminal_id = try self.allocator.dupe(u8, parsed.value.terminalId),
+        };
+    }
+
+    /// Parse terminal/wait_for_exit params from JSON (same format as output)
+    pub const parseTerminalWaitParams = parseTerminalOutputParams;
+
+    /// Parse terminal/kill params from JSON (same format as output)
+    pub const parseTerminalKillParams = parseTerminalOutputParams;
+
+    /// Parse terminal/release params from JSON (same format as output)
+    pub const parseTerminalReleaseParams = parseTerminalOutputParams;
 
     /// Parse session/request_permission params from JSON
     /// Handles Claude Code ACP format where toolCallId/title are nested inside toolCall object

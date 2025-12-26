@@ -7,6 +7,29 @@ const types = @import("types.zig");
 const codec = @import("codec.zig");
 
 // =============================================================================
+// Terminal Registry
+// =============================================================================
+
+/// Terminal entry for tracking agent-spawned terminals
+const TerminalEntry = struct {
+    allocator: Allocator,
+    child: std.process.Child,
+    output_buffer: std.ArrayListUnmanaged(u8),
+    output_byte_limit: u32,
+    exited: bool,
+    exit_code: ?u32,
+    signal: ?u32,
+
+    fn deinit(self: *TerminalEntry) void {
+        self.output_buffer.deinit(self.allocator);
+        // Child process cleanup happens when terminated/killed
+    }
+};
+
+/// Registry mapping terminal IDs to their processes
+const TerminalRegistry = std.StringHashMapUnmanaged(TerminalEntry);
+
+// =============================================================================
 // ACP Manager
 // =============================================================================
 
@@ -40,6 +63,10 @@ pub const AcpManager = struct {
 
     // Request ID counter for JSON-RPC requests
     next_request_id: i64,
+
+    // Terminal registry for managing agent-spawned terminals
+    terminals: TerminalRegistry,
+    next_terminal_id: u64,
 
     pub const Status = enum {
         disconnected,
@@ -185,6 +212,8 @@ pub const AcpManager = struct {
             .queued_prompts = .{},
             .pending_permission = null,
             .next_request_id = 1000, // Start high to avoid collision with client IDs
+            .terminals = .{},
+            .next_terminal_id = 1,
         };
     }
 
@@ -540,13 +569,66 @@ pub const AcpManager = struct {
                 try acp.transport.sendErrorResponse(id, -32602, "Missing permission params");
             }
         } else if (std.mem.eql(u8, request.method, "fs/write_text_file")) {
-            // Reject file writes for now (read-only mode)
-            std.log.warn("ACP Manager: rejecting fs/write_text_file request (read-only)", .{});
-            try acp.transport.sendErrorResponse(id, -32001, "File writes not supported");
-        } else if (std.mem.startsWith(u8, request.method, "terminal/")) {
-            // Terminal operations not supported
-            std.log.warn("ACP Manager: rejecting terminal request: {s}", .{request.method});
-            try acp.transport.sendErrorResponse(id, -32001, "Terminal not supported");
+            // Handle file write request
+            if (request.params_json) |pjson| {
+                const params = acp.transport.decoder.parseWriteTextFileParams(pjson) catch {
+                    try acp.transport.sendErrorResponse(id, -32600, "Invalid params");
+                    return;
+                };
+                defer {
+                    self.allocator.free(params.session_id);
+                    self.allocator.free(params.path);
+                    self.allocator.free(params.content);
+                }
+
+                std.log.info("ACP Manager: writing file: {s} ({d} bytes)", .{ params.path, params.content.len });
+
+                // Create parent directories if needed
+                if (std.fs.path.dirname(params.path)) |dir| {
+                    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+                        error.PathAlreadyExists => {},
+                        else => {
+                            std.log.err("ACP Manager: failed to create directory: {any}", .{err});
+                            try acp.transport.sendErrorResponse(id, -32001, "Failed to create directory");
+                            return;
+                        },
+                    };
+                }
+
+                // Write file content
+                const file = std.fs.createFileAbsolute(params.path, .{ .truncate = true }) catch |err| {
+                    std.log.err("ACP Manager: failed to create file: {any}", .{err});
+                    try acp.transport.sendErrorResponse(id, -32001, "Failed to create file");
+                    return;
+                };
+                defer file.close();
+
+                file.writeAll(params.content) catch |err| {
+                    std.log.err("ACP Manager: failed to write file: {any}", .{err});
+                    try acp.transport.sendErrorResponse(id, -32002, "Write error");
+                    return;
+                };
+
+                // Return success (empty result is fine per ACP spec)
+                try acp.transport.sendResponse(id, "{}");
+            } else {
+                try acp.transport.sendErrorResponse(id, -32600, "Missing params");
+            }
+        } else if (std.mem.eql(u8, request.method, "terminal/create")) {
+            // Handle terminal/create request
+            try self.handleTerminalCreate(acp, id, request.params_json);
+        } else if (std.mem.eql(u8, request.method, "terminal/output")) {
+            // Handle terminal/output request
+            try self.handleTerminalOutput(acp, id, request.params_json);
+        } else if (std.mem.eql(u8, request.method, "terminal/wait_for_exit")) {
+            // Handle terminal/wait_for_exit request
+            try self.handleTerminalWait(acp, id, request.params_json);
+        } else if (std.mem.eql(u8, request.method, "terminal/kill")) {
+            // Handle terminal/kill request
+            try self.handleTerminalKill(acp, id, request.params_json);
+        } else if (std.mem.eql(u8, request.method, "terminal/release")) {
+            // Handle terminal/release request
+            try self.handleTerminalRelease(acp, id, request.params_json);
         } else {
             // Unknown method - log it clearly
             std.log.warn("ACP Manager: unknown method from agent: {s}", .{request.method});
@@ -563,6 +645,290 @@ pub const AcpManager = struct {
             std.mem.eql(u8, method, "session/resume") or
             std.mem.eql(u8, method, "session/fork") or
             std.mem.eql(u8, method, "session/set_mode");
+    }
+
+    // =========================================================================
+    // Terminal Handlers
+    // =========================================================================
+
+    /// Handle terminal/create request
+    fn handleTerminalCreate(self: *AcpManager, acp: *client.Client, id: codec.JsonRpcId, params_json: ?[]const u8) !void {
+        const pjson = params_json orelse {
+            try acp.transport.sendErrorResponse(id, -32600, "Missing params");
+            return;
+        };
+
+        var params = acp.transport.decoder.parseTerminalCreateParams(pjson) catch {
+            try acp.transport.sendErrorResponse(id, -32600, "Invalid params");
+            return;
+        };
+        defer params.deinit(self.allocator);
+
+        std.log.info("ACP Manager: terminal/create command={s} args={d}", .{ params.command, params.args.len });
+
+        // Generate terminal ID
+        const terminal_id = std.fmt.allocPrint(self.allocator, "term_{d}", .{self.next_terminal_id}) catch {
+            try acp.transport.sendErrorResponse(id, -32603, "Out of memory");
+            return;
+        };
+        self.next_terminal_id += 1;
+
+        // Build the full command string for shell execution
+        // We need to run through a shell to handle redirections, pipes, &&, etc.
+        var cmd_buf: std.ArrayListUnmanaged(u8) = .{};
+        defer cmd_buf.deinit(self.allocator);
+        cmd_buf.appendSlice(self.allocator, params.command) catch {
+            self.allocator.free(terminal_id);
+            try acp.transport.sendErrorResponse(id, -32603, "Out of memory");
+            return;
+        };
+        for (params.args) |arg| {
+            cmd_buf.append(self.allocator, ' ') catch {};
+            // Simple shell escaping - wrap in single quotes, escape existing single quotes
+            cmd_buf.append(self.allocator, '\'') catch {};
+            for (arg) |c| {
+                if (c == '\'') {
+                    cmd_buf.appendSlice(self.allocator, "'\\''") catch {};
+                } else {
+                    cmd_buf.append(self.allocator, c) catch {};
+                }
+            }
+            cmd_buf.append(self.allocator, '\'') catch {};
+        }
+
+        // Use /bin/sh -c to run the command with shell interpretation
+        const argv = [_][]const u8{ "/bin/sh", "-c", cmd_buf.items };
+
+        // Spawn child process
+        var child = std.process.Child.init(&argv, self.allocator);
+        child.cwd = params.cwd;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+
+        child.spawn() catch |err| {
+            std.log.err("ACP Manager: failed to spawn terminal: {any}", .{err});
+            self.allocator.free(terminal_id);
+            try acp.transport.sendErrorResponse(id, -32001, "Failed to spawn process");
+            return;
+        };
+
+        // Store in registry
+        const entry = TerminalEntry{
+            .child = child,
+            .output_buffer = .{},
+            .output_byte_limit = params.output_byte_limit orelse 1024 * 1024, // 1MB default
+            .exited = false,
+            .exit_code = null,
+            .signal = null,
+            .allocator = self.allocator,
+        };
+
+        self.terminals.put(self.allocator, terminal_id, entry) catch {
+            _ = child.kill() catch {};
+            self.allocator.free(terminal_id);
+            try acp.transport.sendErrorResponse(id, -32603, "Out of memory");
+            return;
+        };
+
+        // Send response
+        var response: std.ArrayListUnmanaged(u8) = .{};
+        defer response.deinit(self.allocator);
+        const writer = response.writer(self.allocator);
+        writer.print("{{\"terminalId\":\"{s}\"}}", .{terminal_id}) catch {
+            try acp.transport.sendErrorResponse(id, -32603, "Out of memory");
+            return;
+        };
+
+        try acp.transport.sendResponse(id, response.items);
+    }
+
+    /// Handle terminal/output request
+    fn handleTerminalOutput(self: *AcpManager, acp: *client.Client, id: codec.JsonRpcId, params_json: ?[]const u8) !void {
+        const pjson = params_json orelse {
+            try acp.transport.sendErrorResponse(id, -32600, "Missing params");
+            return;
+        };
+
+        var params = acp.transport.decoder.parseTerminalOutputParams(pjson) catch {
+            try acp.transport.sendErrorResponse(id, -32600, "Invalid params");
+            return;
+        };
+        defer params.deinit(self.allocator);
+
+        const entry = self.terminals.getPtr(params.terminal_id) orelse {
+            try acp.transport.sendErrorResponse(id, -32001, "Terminal not found");
+            return;
+        };
+
+        // Try to read available output (non-blocking)
+        self.pollTerminalOutput(entry);
+
+        // Build response
+        var response: std.ArrayListUnmanaged(u8) = .{};
+        defer response.deinit(self.allocator);
+        const writer = response.writer(self.allocator);
+
+        writer.writeAll("{\"output\":\"") catch return;
+        // Escape the output for JSON
+        for (entry.output_buffer.items) |c| {
+            switch (c) {
+                '"' => writer.writeAll("\\\"") catch return,
+                '\\' => writer.writeAll("\\\\") catch return,
+                '\n' => writer.writeAll("\\n") catch return,
+                '\r' => writer.writeAll("\\r") catch return,
+                '\t' => writer.writeAll("\\t") catch return,
+                else => {
+                    if (c < 0x20) {
+                        writer.print("\\u{x:0>4}", .{c}) catch return;
+                    } else {
+                        writer.writeByte(c) catch return;
+                    }
+                },
+            }
+        }
+        writer.writeAll("\",\"truncated\":") catch return;
+        writer.writeAll(if (entry.output_buffer.items.len >= entry.output_byte_limit) "true" else "false") catch return;
+
+        if (entry.exited) {
+            writer.writeAll(",\"exitStatus\":{") catch return;
+            if (entry.exit_code) |code| {
+                writer.print("\"exitCode\":{d}", .{code}) catch return;
+            } else {
+                writer.writeAll("\"exitCode\":null") catch return;
+            }
+            writer.writeAll("}") catch return;
+        }
+        writer.writeAll("}") catch return;
+
+        try acp.transport.sendResponse(id, response.items);
+    }
+
+    /// Handle terminal/wait_for_exit request
+    fn handleTerminalWait(self: *AcpManager, acp: *client.Client, id: codec.JsonRpcId, params_json: ?[]const u8) !void {
+        const pjson = params_json orelse {
+            try acp.transport.sendErrorResponse(id, -32600, "Missing params");
+            return;
+        };
+
+        var params = acp.transport.decoder.parseTerminalOutputParams(pjson) catch {
+            try acp.transport.sendErrorResponse(id, -32600, "Invalid params");
+            return;
+        };
+        defer params.deinit(self.allocator);
+
+        const entry = self.terminals.getPtr(params.terminal_id) orelse {
+            try acp.transport.sendErrorResponse(id, -32001, "Terminal not found");
+            return;
+        };
+
+        // Wait for process to exit (blocking)
+        if (!entry.exited) {
+            const term = entry.child.wait() catch {
+                try acp.transport.sendErrorResponse(id, -32001, "Wait failed");
+                return;
+            };
+            entry.exited = true;
+            entry.exit_code = switch (term) {
+                .Exited => |code| code,
+                else => null,
+            };
+            entry.signal = switch (term) {
+                .Signal => |sig| @intCast(sig),
+                else => null,
+            };
+        }
+
+        // Build response
+        var response: std.ArrayListUnmanaged(u8) = .{};
+        defer response.deinit(self.allocator);
+        const writer = response.writer(self.allocator);
+
+        writer.writeAll("{") catch return;
+        if (entry.exit_code) |code| {
+            writer.print("\"exitCode\":{d}", .{code}) catch return;
+        } else {
+            writer.writeAll("\"exitCode\":null") catch return;
+        }
+        if (entry.signal) |sig| {
+            writer.print(",\"signal\":{d}", .{sig}) catch return;
+        }
+        writer.writeAll("}") catch return;
+
+        try acp.transport.sendResponse(id, response.items);
+    }
+
+    /// Handle terminal/kill request
+    fn handleTerminalKill(self: *AcpManager, acp: *client.Client, id: codec.JsonRpcId, params_json: ?[]const u8) !void {
+        const pjson = params_json orelse {
+            try acp.transport.sendErrorResponse(id, -32600, "Missing params");
+            return;
+        };
+
+        var params = acp.transport.decoder.parseTerminalOutputParams(pjson) catch {
+            try acp.transport.sendErrorResponse(id, -32600, "Invalid params");
+            return;
+        };
+        defer params.deinit(self.allocator);
+
+        const entry = self.terminals.getPtr(params.terminal_id) orelse {
+            try acp.transport.sendErrorResponse(id, -32001, "Terminal not found");
+            return;
+        };
+
+        if (!entry.exited) {
+            _ = entry.child.kill() catch {};
+        }
+
+        try acp.transport.sendResponse(id, "{}");
+    }
+
+    /// Handle terminal/release request
+    fn handleTerminalRelease(self: *AcpManager, acp: *client.Client, id: codec.JsonRpcId, params_json: ?[]const u8) !void {
+        const pjson = params_json orelse {
+            try acp.transport.sendErrorResponse(id, -32600, "Missing params");
+            return;
+        };
+
+        var params = acp.transport.decoder.parseTerminalOutputParams(pjson) catch {
+            try acp.transport.sendErrorResponse(id, -32600, "Invalid params");
+            return;
+        };
+        defer params.deinit(self.allocator);
+
+        if (self.terminals.fetchRemove(params.terminal_id)) |kv| {
+            var entry = kv.value;
+            if (!entry.exited) {
+                _ = entry.child.kill() catch {};
+            }
+            entry.deinit();
+            self.allocator.free(kv.key);
+        }
+
+        try acp.transport.sendResponse(id, "{}");
+    }
+
+    /// Poll terminal for available output (non-blocking)
+    fn pollTerminalOutput(self: *AcpManager, entry: *TerminalEntry) void {
+        if (entry.exited) return;
+
+        // Check if stdout has data available
+        if (entry.child.stdout) |stdout| {
+            var buf: [4096]u8 = undefined;
+            // Non-blocking read using poll
+            var fds = [_]std.posix.pollfd{
+                .{ .fd = stdout.handle, .events = std.posix.POLL.IN, .revents = 0 },
+            };
+
+            const poll_result = std.posix.poll(&fds, 0) catch return;
+            if (poll_result > 0 and (fds[0].revents & std.posix.POLL.IN) != 0) {
+                const n = stdout.read(&buf) catch return;
+                if (n > 0 and entry.output_buffer.items.len < entry.output_byte_limit) {
+                    const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
+                    const to_add = @min(n, remaining);
+                    entry.output_buffer.appendSlice(self.allocator, buf[0..to_add]) catch {};
+                }
+            }
+        }
     }
 
     /// Clear processed messages
