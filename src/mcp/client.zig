@@ -328,8 +328,9 @@ pub const McpClient = struct {
                 for (fd.hunks) |hunk| {
                     allocator.free(hunk.header);
                     for (hunk.lines) |line| {
-                        allocator.free(line.line_type);
+                        allocator.free(line.change_type);
                         allocator.free(line.content);
+                        allocator.free(line.comment_line_type);
                     }
                     allocator.free(hunk.lines);
                 }

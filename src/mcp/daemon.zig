@@ -1414,10 +1414,10 @@ pub const Daemon = struct {
                     builder.maybeYield();
 
                     for (hunk.lines) |line| {
-                        // Prefix based on line type
-                        if (std.mem.eql(u8, line.line_type, "add")) {
+                        // Prefix based on change type
+                        if (std.mem.eql(u8, line.change_type, "add")) {
                             try writer.writeAll("+");
-                        } else if (std.mem.eql(u8, line.line_type, "delete")) {
+                        } else if (std.mem.eql(u8, line.change_type, "delete")) {
                             try writer.writeAll("-");
                         } else {
                             try writer.writeAll(" ");
@@ -1660,8 +1660,9 @@ pub const Daemon = struct {
                 for (fd.hunks) |hunk| {
                     self.allocator.free(hunk.header);
                     for (hunk.lines) |line| {
-                        self.allocator.free(line.line_type);
+                        self.allocator.free(line.change_type);
                         self.allocator.free(line.content);
+                        self.allocator.free(line.comment_line_type);
                     }
                     self.allocator.free(hunk.lines);
                 }

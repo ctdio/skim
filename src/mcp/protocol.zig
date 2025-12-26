@@ -91,10 +91,13 @@ pub const GetFileDiffPayload = struct {
 
 /// Line info for file_diff response
 pub const DiffLineInfo = struct {
-    line_type: []const u8, // "add", "delete", "context"
+    change_type: []const u8, // "add", "delete", "context" - type of diff change
     content: []const u8,
     old_lineno: ?u32,
     new_lineno: ?u32,
+    // Pre-computed hints for add_comment - use these values directly
+    comment_line: u32, // The line number to pass to add_comment
+    comment_line_type: []const u8, // "new" or "old" - the line_type to pass to add_comment
 };
 
 /// Hunk info for file_diff response
@@ -145,10 +148,12 @@ pub const RawDiffFileSummary = struct {
 
 /// Line info for raw message parsing (file_diff)
 pub const RawDiffLineInfo = struct {
-    line_type: []const u8,
+    change_type: []const u8,
     content: []const u8,
     old_lineno: ?u32 = null,
     new_lineno: ?u32 = null,
+    comment_line: u32 = 0,
+    comment_line_type: []const u8 = "new",
 };
 
 /// Hunk info for raw message parsing (file_diff)
@@ -504,8 +509,8 @@ pub fn encodeFileDiff(allocator: Allocator, payload: FileDiffPayload) ![]u8 {
 
         for (hunk.lines, 0..) |line, line_idx| {
             if (line_idx > 0) try writer.writeByte(',');
-            try writer.writeAll("{\"line_type\":\"");
-            try writer.writeAll(line.line_type);
+            try writer.writeAll("{\"change_type\":\"");
+            try writer.writeAll(line.change_type);
             try writer.writeAll("\",\"content\":\"");
             try writeJsonEscaped(writer, line.content);
             try writer.writeByte('"');
@@ -517,6 +522,12 @@ pub fn encodeFileDiff(allocator: Allocator, payload: FileDiffPayload) ![]u8 {
                 try writer.writeAll(",\"new_lineno\":");
                 try writer.print("{d}", .{n});
             }
+            // Pre-computed hints for add_comment
+            try writer.writeAll(",\"comment_line\":");
+            try writer.print("{d}", .{line.comment_line});
+            try writer.writeAll(",\"comment_line_type\":\"");
+            try writer.writeAll(line.comment_line_type);
+            try writer.writeByte('"');
             try writer.writeByte('}');
         }
 
@@ -688,8 +699,9 @@ pub fn decode(allocator: Allocator, json_line: []const u8) !ParsedMessage {
             for (duped_hunks[0..hunks_initialized]) |hunk| {
                 allocator.free(hunk.header);
                 for (hunk.lines) |line| {
-                    allocator.free(line.line_type);
+                    allocator.free(line.change_type);
                     allocator.free(line.content);
+                    allocator.free(line.comment_line_type);
                 }
                 allocator.free(hunk.lines);
             }
@@ -701,22 +713,27 @@ pub fn decode(allocator: Allocator, json_line: []const u8) !ParsedMessage {
             var lines_initialized: usize = 0;
             errdefer {
                 for (duped_lines[0..lines_initialized]) |line| {
-                    allocator.free(line.line_type);
+                    allocator.free(line.change_type);
                     allocator.free(line.content);
+                    allocator.free(line.comment_line_type);
                 }
                 allocator.free(duped_lines);
             }
 
             for (h.lines, 0..) |l, li| {
-                const line_type = try allocator.dupe(u8, l.line_type);
-                errdefer allocator.free(line_type);
+                const change_type = try allocator.dupe(u8, l.change_type);
+                errdefer allocator.free(change_type);
                 const content = try allocator.dupe(u8, l.content);
+                errdefer allocator.free(content);
+                const comment_line_type = try allocator.dupe(u8, l.comment_line_type);
 
                 duped_lines[li] = .{
-                    .line_type = line_type,
+                    .change_type = change_type,
                     .content = content,
                     .old_lineno = l.old_lineno,
                     .new_lineno = l.new_lineno,
+                    .comment_line = l.comment_line,
+                    .comment_line_type = comment_line_type,
                 };
                 lines_initialized = li + 1;
             }

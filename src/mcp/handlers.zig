@@ -304,17 +304,32 @@ pub fn handleGetFileDiff(
         errdefer lines.deinit(allocator);
 
         for (hunk.lines) |line| {
-            const line_type_str: []const u8 = switch (line.line_type) {
+            const change_type_str: []const u8 = switch (line.line_type) {
                 .add => "add",
                 .delete => "delete",
                 .context => "context",
             };
 
+            // Compute comment hints based on line type:
+            // - add: use new_lineno with line_type "new"
+            // - delete: use old_lineno with line_type "old"
+            // - context: prefer new_lineno (use "new"), fallback to old_lineno
+            const comment_hint: struct { line: u32, line_type: []const u8 } = switch (line.line_type) {
+                .add => .{ .line = line.new_lineno orelse 0, .line_type = "new" },
+                .delete => .{ .line = line.old_lineno orelse 0, .line_type = "old" },
+                .context => if (line.new_lineno) |n|
+                    .{ .line = n, .line_type = "new" }
+                else
+                    .{ .line = line.old_lineno orelse 0, .line_type = "old" },
+            };
+
             try lines.append(allocator, .{
-                .line_type = line_type_str,
+                .change_type = change_type_str,
                 .content = line.content,
                 .old_lineno = line.old_lineno,
                 .new_lineno = line.new_lineno,
+                .comment_line = comment_hint.line,
+                .comment_line_type = comment_hint.line_type,
             });
         }
 
