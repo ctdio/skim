@@ -234,17 +234,17 @@ pub const App = struct {
 
             pub fn next(self: HunkViewMode) HunkViewMode {
                 return switch (self) {
-                    .all => .old,
-                    .old => .new,
-                    .new => .all,
+                    .all => .new,
+                    .new => .old,
+                    .old => .all,
                 };
             }
 
             pub fn prev(self: HunkViewMode) HunkViewMode {
                 return switch (self) {
-                    .all => .new,
-                    .old => .all,
-                    .new => .old,
+                    .all => .old,
+                    .old => .new,
+                    .new => .all,
                 };
             }
 
