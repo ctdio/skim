@@ -414,6 +414,13 @@ pub const AcpManager = struct {
                     }
                 },
                 .response => |r| {
+                    // Log all responses to help debug
+                    const resp_id: ?i64 = if (r.id) |id| switch (id) {
+                        .number => |n| n,
+                        .string, .null_value => null,
+                    } else null;
+                    std.log.debug("ACP Manager: received response id={?}, pending_id={?}", .{ resp_id, self.pending_prompt_id });
+
                     // Check if this is a response to our pending prompt
                     if (self.pending_prompt_id) |expected_id| {
                         if (r.id) |id| {
@@ -422,6 +429,7 @@ pub const AcpManager = struct {
                                 .string, .null_value => null,
                             };
                             if (response_id == expected_id) {
+                                std.log.info("ACP Manager: prompt complete, transitioning to session_active", .{});
                                 self.pending_prompt_id = null;
                                 self.status = .session_active;
 

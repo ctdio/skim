@@ -83,6 +83,9 @@ pub const AgentState = struct {
     last_esc_timestamp: i64, // Timestamp of last ESC press (ms since epoch)
     // Viewport tracking for smart scrolling
     last_messages_viewport_height: usize, // Height of messages area from last render
+    // Staged prompt (queued to send after agent completes)
+    staged_prompt: [8192]u8,
+    staged_prompt_len: usize,
 
     pub const PanelSide = enum {
         left,
@@ -125,6 +128,8 @@ pub const AgentState = struct {
             .input_scroll_offset = 0,
             .last_esc_timestamp = 0,
             .last_messages_viewport_height = 20, // Reasonable default
+            .staged_prompt = undefined,
+            .staged_prompt_len = 0,
         };
     }
 
@@ -777,6 +782,40 @@ pub const AgentState = struct {
     }
 
     /// Estimate memory usage of the agent state (for monitoring)
+
+    // =========================================================================
+    // Staged Prompt (Message Queuing)
+    // =========================================================================
+
+    /// Stage a prompt to be sent after the agent completes its current turn
+    pub fn stagePrompt(self: *AgentState, text: []const u8) void {
+        const copy_len = @min(text.len, self.staged_prompt.len);
+        @memcpy(self.staged_prompt[0..copy_len], text[0..copy_len]);
+        self.staged_prompt_len = copy_len;
+    }
+
+    /// Check if there's a staged prompt
+    pub fn hasStagedPrompt(self: *const AgentState) bool {
+        return self.staged_prompt_len > 0;
+    }
+
+    /// Get the staged prompt text
+    pub fn getStagedPrompt(self: *const AgentState) []const u8 {
+        return self.staged_prompt[0..self.staged_prompt_len];
+    }
+
+    /// Clear the staged prompt
+    pub fn clearStagedPrompt(self: *AgentState) void {
+        self.staged_prompt_len = 0;
+    }
+
+    /// Take the staged prompt (returns it and clears it)
+    pub fn takeStagedPrompt(self: *AgentState) ?[]const u8 {
+        if (self.staged_prompt_len == 0) return null;
+        const text = self.staged_prompt[0..self.staged_prompt_len];
+        self.staged_prompt_len = 0;
+        return text;
+    }
     fn estimateMemoryUsage(self: *const AgentState) usize {
         var total: usize = 0;
 

@@ -401,41 +401,90 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             .send => {
                 const raw_text = agent_state.input.getText();
                 const text = std.mem.trim(u8, raw_text, &std.ascii.whitespace);
-                if (text.len > 0) {
-                    // Add user message to history
-                    try agent_state.addMessage(.user, text);
+                const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
 
-                    // Send to ACP agent (manager will queue if still connecting)
-                    if (app.acp_manager) |mgr| {
-                        if (mgr.status == .disconnected) {
-                            try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
-                        } else if (mgr.status == .failed) {
-                            try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
-                        } else {
-                            // Send prompt - manager will queue if session not ready yet
-                            const prompt_copy = try app.allocator.dupe(u8, text);
-                            defer app.allocator.free(prompt_copy);
-
-                            mgr.sendPrompt(prompt_copy) catch |err| {
-                                std.log.err("Agent: Failed to send prompt: {any}", .{err});
-                                try agent_state.addMessage(.system, "Failed to send prompt to agent");
-                            };
-                            // Queued status shown in input area, not as a message
+                // Handle staged message scenarios first
+                if (is_thinking and agent_state.hasStagedPrompt()) {
+                    if (text.len == 0) {
+                        // Empty prompt + staged message = interrupt and send immediately
+                        if (app.acp_manager) |mgr| {
+                            if (mgr.cancelPrompt()) {
+                                std.log.info("Agent: Interrupted via staged message immediate send", .{});
+                                try agent_state.addMessage(.system, "Interrupted");
+                            }
                         }
+
+                        // Send the staged message
+                        const staged = agent_state.getStagedPrompt();
+                        try agent_state.addMessage(.user, staged);
+
+                        if (app.acp_manager) |mgr| {
+                            if (mgr.status == .disconnected) {
+                                try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
+                            } else if (mgr.status == .failed) {
+                                try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
+                            } else {
+                                const prompt_copy = try app.allocator.dupe(u8, staged);
+                                defer app.allocator.free(prompt_copy);
+
+                                mgr.sendPrompt(prompt_copy) catch |err| {
+                                    std.log.err("Agent: Failed to send prompt: {any}", .{err});
+                                    try agent_state.addMessage(.system, "Failed to send prompt to agent");
+                                };
+                            }
+                        }
+
+                        agent_state.clearStagedPrompt();
                     } else {
-                        try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
+                        // Non-empty prompt + staged message = append to staged message
+                        const current_staged = agent_state.getStagedPrompt();
+                        var combined_buf: [8192]u8 = undefined;
+                        const combined = std.fmt.bufPrint(&combined_buf, "{s}\n{s}", .{ current_staged, text }) catch text;
+                        agent_state.stagePrompt(combined);
+                        agent_state.input.clear();
                     }
+                } else if (text.len > 0) {
+                    if (is_thinking) {
+                        // Agent thinking, no staged message - stage this one
+                        agent_state.stagePrompt(text);
+                        agent_state.input.clear();
+                    } else {
+                        // Agent not thinking - send normally
+                        // Add user message to history
+                        try agent_state.addMessage(.user, text);
 
-                    // Clear input for next prompt
-                    agent_state.input.clear();
+                        // Send to ACP agent (manager will queue if still connecting)
+                        if (app.acp_manager) |mgr| {
+                            if (mgr.status == .disconnected) {
+                                try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
+                            } else if (mgr.status == .failed) {
+                                try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
+                            } else {
+                                // Send prompt - manager will queue if session not ready yet
+                                const prompt_copy = try app.allocator.dupe(u8, text);
+                                defer app.allocator.free(prompt_copy);
 
-                    // Auto-populate from stash if available
-                    if (agent_state.hasStash()) {
-                        agent_state.unstashPrompt();
-                        agent_state.clearStash();
-                        // Position cursor at end for immediate editing
-                        agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
-                        agent_state.input.vim.vim_mode = .insert;
+                                mgr.sendPrompt(prompt_copy) catch |err| {
+                                    std.log.err("Agent: Failed to send prompt: {any}", .{err});
+                                    try agent_state.addMessage(.system, "Failed to send prompt to agent");
+                                };
+                                // Queued status shown in input area, not as a message
+                            }
+                        } else {
+                            try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
+                        }
+
+                        // Clear input for next prompt
+                        agent_state.input.clear();
+
+                        // Auto-populate from stash if available
+                        if (agent_state.hasStash()) {
+                            agent_state.unstashPrompt();
+                            agent_state.clearStash();
+                            // Position cursor at end for immediate editing
+                            agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
+                            agent_state.input.vim.vim_mode = .insert;
+                        }
                     }
                 }
                 app.needs_render = true;

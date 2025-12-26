@@ -3506,11 +3506,10 @@ pub const App = struct {
 
         const mgr = self.acp_manager orelse return;
 
-        // Poll for new messages
+        // Poll for new messages (this also updates status when agent finishes)
         const messages = mgr.poll() catch return;
-        if (messages.len == 0) return;
 
-        // Process each message
+        // Process each message (if any)
         for (messages) |msg| {
             switch (msg.kind) {
                 .agent_text => {
@@ -3610,6 +3609,49 @@ pub const App = struct {
 
         // Clear processed messages
         mgr.clearMessages();
+
+        // Check if agent just finished responding and there's a staged message to send
+        // The condition: agent is idle (session_active) and no pending prompt request
+        const has_staged = if (self.state.agent_state) |as| as.hasStagedPrompt() else false;
+        const agent_idle = mgr.status == .session_active and mgr.pending_prompt_id == null;
+
+        // Log when agent becomes idle (for debugging auto-send)
+        if (agent_idle) {
+            std.log.debug("Agent: idle check - has_staged={}, status={}, pending_id={?}", .{
+                has_staged,
+                @intFromEnum(mgr.status),
+                mgr.pending_prompt_id,
+            });
+        }
+
+        if (has_staged and agent_idle) {
+            if (self.state.agent_state) |*agent_state| {
+                // Take and send the staged message
+                if (agent_state.takeStagedPrompt()) |staged| {
+                    std.log.info("Agent: Auto-sending staged message ({d} bytes)", .{staged.len});
+
+                    // Add to message history
+                    agent_state.addMessage(.user, staged) catch {};
+
+                    // Send to agent
+                    const prompt_copy = self.allocator.dupe(u8, staged) catch return;
+                    defer self.allocator.free(prompt_copy);
+
+                    mgr.sendPrompt(prompt_copy) catch |err| {
+                        std.log.err("Agent: Failed to send staged prompt: {any}", .{err});
+                        agent_state.addMessage(.system, "Failed to send staged message") catch {};
+                    };
+
+                    self.needs_render = true;
+                }
+            }
+        } else if (has_staged) {
+            // Debug: log why we're not sending (agent not idle yet)
+            std.log.debug("Agent: Staged message waiting (status={}, pending_id={?})", .{
+                @intFromEnum(mgr.status),
+                mgr.pending_prompt_id,
+            });
+        }
     }
 
     /// Get the diff reference string for display

@@ -353,10 +353,24 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         break :blk 1 + visible_entries;
     } else 0;
 
+    // Calculate staged message height (shown above input when agent is thinking)
+    const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
+    const staged_height: usize = if (is_thinking and agent_state.hasStagedPrompt()) blk: {
+        // Count actual lines in staged message (up to 3) + label line + trailing line
+        const staged_text = agent_state.getStagedPrompt();
+        var line_count: usize = 0;
+        var iter = std.mem.splitScalar(u8, staged_text, '\n');
+        while (iter.next()) |_| {
+            line_count += 1;
+            if (line_count >= 3) break;
+        }
+        break :blk 1 + line_count + 1; // label + content lines + trailing
+    } else 0;
+
     // Calculate input area height (always shows normal input)
     // In sidebar mode, skip the footer (main status bar is visible)
     const footer_height: usize = if (agent_state.full_screen) 1 else 0;
-    const input_height: usize = 1 + visible_lines + footer_height; // Separator + visible lines + footer (if full-screen)
+    const input_height: usize = 1 + visible_lines + footer_height + staged_height; // Separator + visible lines + footer (if full-screen) + staged message
 
     // Layout: title (1 row) + messages (variable) + plan (conditional) + input area (dynamic)
     const title_height: usize = 1;
@@ -768,9 +782,117 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     }
 
     // Show thinking indicator at the bottom of the message area
+    // Note: Staged message is now rendered in input area (dedicated space)
     // Use a row that has actual content to overlay (avoid overlapping with plan/input)
     if (is_thinking and win.height > 1) {
         renderThinkingIndicator(win, win.height - 1);
+    }
+}
+
+/// Render a preview of the staged message (up to 3 lines)
+/// Uses the same visual style as user messages (with bar and background)
+fn renderStagedMessagePreview(win: vaxis.Window, text: []const u8, start_row: usize) void {
+    if (text.len == 0 or start_row >= win.height) return;
+
+    const max_preview_lines: usize = 3;
+    // Use user message style (same as user messages in chat)
+    const bar_style = vaxis.Style{ .fg = Color.chat_user, .bg = Color.comment_bg };
+    const text_style = vaxis.Style{ .fg = Color.white, .bg = Color.comment_bg };
+    const label_style = vaxis.Style{ .fg = Color.chat_user, .bg = Color.comment_bg, .bold = true };
+
+    var row: usize = start_row;
+
+    // Show label: "Queued:" with bar (same style as user messages)
+    // Fill background for this row
+    for (0..win.width) |col| {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{ .bg = Color.comment_bg },
+        });
+    }
+    // Draw bar
+    var bar_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "┃ ", .style = bar_style },
+    };
+    _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
+    // Draw label
+    var label_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "Queued:", .style = label_style },
+    };
+    _ = win.print(&label_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
+    row += 1;
+
+    // Extract up to 3 lines from staged text
+    var line_iter = std.mem.splitScalar(u8, text, '\n');
+    var lines_shown: usize = 0;
+
+    while (line_iter.next()) |line| {
+        if (lines_shown >= max_preview_lines or row >= win.height) break;
+
+        // Fill background for this row
+        for (0..win.width) |col| {
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = " ", .width = 1 },
+                .style = .{ .bg = Color.comment_bg },
+            });
+        }
+
+        // Draw bar
+        var line_bar_seg = [_]vaxis.Cell.Segment{
+            .{ .text = "┃ ", .style = bar_style },
+        };
+        _ = win.print(&line_bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
+
+        // Truncate line to fit window width (leave room for "┃ " prefix)
+        const max_line_len = if (win.width > 4) win.width - 4 else 1;
+        const display_line = if (line.len > max_line_len) line[0..max_line_len] else line;
+
+        // Print line content
+        var line_seg = [_]vaxis.Cell.Segment{
+            .{ .text = display_line, .style = text_style },
+        };
+        _ = win.print(&line_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
+
+        row += 1;
+        lines_shown += 1;
+    }
+
+    // If there are more lines, show "..." with same style
+    if (line_iter.next() != null and row < win.height) {
+        // Fill background
+        for (0..win.width) |col| {
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = " ", .width = 1 },
+                .style = .{ .bg = Color.comment_bg },
+            });
+        }
+        // Draw bar and ellipsis
+        var more_bar_seg = [_]vaxis.Cell.Segment{
+            .{ .text = "┃ ", .style = bar_style },
+        };
+        _ = win.print(&more_bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
+        var more_seg = [_]vaxis.Cell.Segment{
+            .{ .text = "...", .style = text_style },
+        };
+        _ = win.print(&more_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
+        row += 1;
+    }
+
+    // Add trailing empty line with background (matches chat message style)
+    if (row < win.height) {
+        // fill background
+        for (0..win.width) |col| {
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = " ", .width = 1 },
+                .style = .{ .bg = Color.comment_bg },
+            });
+        }
+
+        var final_bar_seg = [_]vaxis.Cell.Segment{
+            .{ .text = "┃ ", .style = bar_style },
+        };
+
+        _ = win.print(&final_bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
     }
 }
 
@@ -1195,15 +1317,37 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     // Update stored scroll offset
     agent_state.input_scroll_offset = scroll_offset;
 
+    // Calculate staged message height (if agent is thinking and has staged prompt)
+    const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
+    const staged_height: usize = if (is_thinking and agent_state.hasStagedPrompt()) blk: {
+        // Count actual lines in staged message (up to 3) + label line + trailing line
+        const staged_text = agent_state.getStagedPrompt();
+        var line_count: usize = 0;
+        var iter = std.mem.splitScalar(u8, staged_text, '\n');
+        while (iter.next()) |_| {
+            line_count += 1;
+            if (line_count >= 3) break;
+        }
+        break :blk 1 + line_count + 1; // label + content lines + trailing
+    } else 0;
+
     // Layout:
-    // Row 0: Separator line
-    // Rows 1..visible_lines: Input lines with "> " prompt on first line
+    // Rows 0..staged_height-1: Staged message preview (if agent is thinking)
+    // Row staged_height: Separator line
+    // Rows staged_height+1..: Input lines with "> " prompt on first line
     // Last row: Footer with mode (left) and keybindings (right)
 
-    // Row 0: Separator line
+    // Render staged message preview at the top (if present)
+    if (staged_height > 0) {
+        const staged_text = agent_state.getStagedPrompt();
+        renderStagedMessagePreview(win, staged_text, 0);
+    }
+
+    // Separator line (offset by staged_height)
+    const separator_row = staged_height;
     const separator_style = vaxis.Style{ .fg = .{ .index = 8 } };
     for (0..win.width) |col| {
-        win.writeCell(@intCast(col), 0, .{
+        win.writeCell(@intCast(col), @intCast(separator_row), .{
             .char = .{ .grapheme = "─", .width = 1 },
             .style = separator_style,
         });
@@ -1213,6 +1357,8 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     const text_style = vaxis.Style{ .fg = .{ .index = 7 } };
     // Use the same max_input_width as calculated earlier for consistency
     const max_input_width = max_input_width_for_calc;
+    // Content starts after staged message + separator
+    const content_start_row = staged_height + 1;
 
     // Split text by newlines and wrap each line
     var line_iter = std.mem.splitScalar(u8, text, '\n');
@@ -1246,7 +1392,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
             // Skip rows that are scrolled out of view
             if (display_row >= scroll_offset) {
-                const row = visible_row + 1; // +1 for separator
+                const row = visible_row + content_start_row;
 
                 // First line gets the prompt "> ", others get "  " for alignment
                 if (is_first_line) {
@@ -1272,7 +1418,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
             // Only render if in visible area
             if (display_row >= scroll_offset) {
-                const row = visible_row + 1; // +1 for separator
+                const row = visible_row + content_start_row;
 
                 // Check for visual mode selection highlighting
                 const vim_mode = agent_state.input.vim.vim_mode;
@@ -1376,10 +1522,10 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     // Render scrollbar if input area is scrollable
     if (total_display_lines > visible_lines) {
         const scrollbar_info = calculateScrollbar(visible_lines, total_display_lines, scroll_offset);
-        // Render scrollbar in input area (offset by 1 for separator line)
+        // Render scrollbar in input area (offset by staged message + separator)
         const scrollbar_win = win.child(.{
             .x_off = 0,
-            .y_off = 1, // Skip separator line
+            .y_off = @intCast(content_start_row),
             .width = win.width,
             .height = @intCast(visible_lines),
         });
