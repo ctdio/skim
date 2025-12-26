@@ -3588,7 +3588,10 @@ pub const App = struct {
                     // Update agent plan
                     if (self.state.agent_state) |*agent_state| {
                         if (msg.plan_entries) |entries| {
-                            agent_state.updatePlan(entries) catch {};
+                            std.log.debug("plan_update: received {d} entries", .{entries.len});
+                            agent_state.updatePlan(entries) catch |err| {
+                                std.log.err("plan_update: updatePlan failed: {}", .{err});
+                            };
                         }
                     }
 

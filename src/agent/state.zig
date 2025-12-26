@@ -516,6 +516,59 @@ pub const AgentState = struct {
                 .status = entry.status,
             });
         }
+
+        // Create a snapshot message for the chat
+        try self.addPlanSnapshotMessage();
+    }
+
+    /// Add a plan snapshot message to the chat history
+    fn addPlanSnapshotMessage(self: *AgentState) !void {
+        // Skip if no plan entries
+        if (self.plan_entries.items.len == 0) return;
+
+        std.log.debug("addPlanSnapshotMessage: creating snapshot with {d} entries", .{self.plan_entries.items.len});
+
+        // Create a copy of all plan entries for the snapshot
+        const snapshot_entries = try self.allocator.alloc(OwnedPlanEntry, self.plan_entries.items.len);
+        errdefer self.allocator.free(snapshot_entries);
+
+        for (self.plan_entries.items, 0..) |entry, i| {
+            const content_copy = try self.allocator.dupe(u8, entry.content);
+            errdefer {
+                // Clean up any entries we've already copied on error
+                for (snapshot_entries[0..i]) |*copied| {
+                    self.allocator.free(copied.content);
+                }
+                self.allocator.free(content_copy);
+            }
+
+            snapshot_entries[i] = .{
+                .content = content_copy,
+                .priority = entry.priority,
+                .status = entry.status,
+            };
+        }
+
+        // Add message with snapshot (content must be heap-allocated for deinit)
+        const owned_content = try self.allocator.dupe(u8, "");
+        errdefer self.allocator.free(owned_content);
+
+        try self.messages.append(self.allocator, .{
+            .role = .plan_snapshot,
+            .content = owned_content,
+            .timestamp = std.time.timestamp(),
+            .plan_snapshot_entries = snapshot_entries,
+        });
+
+        // Mark line map dirty
+        self.line_map_dirty = true;
+
+        std.log.debug("addPlanSnapshotMessage: added snapshot, total messages now {d}", .{self.messages.items.len});
+
+        // Auto-scroll only if in follow mode
+        if (self.follow_bottom) {
+            self.scrollToBottom();
+        }
     }
 
     /// Clear all plan entries
@@ -872,6 +925,8 @@ pub const Message = struct {
     tool_command: ?[]const u8 = null, // For Bash: the command
     tool_stdout: ?[]const u8 = null, // For Bash: command output
     tool_stderr: ?[]const u8 = null, // For Bash: error output
+    // For plan snapshot messages
+    plan_snapshot_entries: ?[]const OwnedPlanEntry = null,
 
     pub const ToolStatus = enum {
         pending,
@@ -887,6 +942,7 @@ pub const Message = struct {
         system,
         diff,
         tool, // Tool call (Bash, Read, etc.)
+        plan_snapshot, // Todo list snapshot
 
         pub fn label(self: Role) []const u8 {
             return switch (self) {
@@ -894,6 +950,7 @@ pub const Message = struct {
                 .system => "System",
                 .diff => "Edit",
                 .tool => "Tool",
+                .plan_snapshot => "Todos",
                 else => "",
             };
         }
@@ -909,6 +966,13 @@ pub const Message = struct {
         if (self.tool_command) |c| allocator.free(c);
         if (self.tool_stdout) |s| allocator.free(s);
         if (self.tool_stderr) |s| allocator.free(s);
+        if (self.plan_snapshot_entries) |entries| {
+            for (entries) |*entry| {
+                // Each entry owns its content
+                allocator.free(entry.content);
+            }
+            allocator.free(entries);
+        }
     }
 };
 

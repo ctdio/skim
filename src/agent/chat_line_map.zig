@@ -54,6 +54,12 @@ pub const ChatLineType = union(enum) {
         line_idx: usize,
     },
 
+    /// Plan snapshot entry line
+    plan_entry: struct {
+        msg_idx: usize,
+        entry_idx: usize,
+    },
+
     /// Blank spacer between messages
     spacer,
 };
@@ -172,6 +178,15 @@ pub const ChatLineMap = struct {
                         try self.addDiffContent(&global_line, msg_idx, msg, wrap_width, diff_view_mode);
                     }
                 },
+                .plan_snapshot => {
+                    // Plan snapshot header
+                    try self.addRoleHeader(&global_line, msg_idx, msg.role);
+
+                    // Plan entries
+                    if (msg.plan_snapshot_entries) |entries| {
+                        try self.addPlanSnapshotEntries(&global_line, msg_idx, entries);
+                    }
+                },
                 .user, .agent => {
                     // No role header for user/agent - styling makes it obvious
                     // Content lines only
@@ -246,6 +261,12 @@ pub const ChatLineMap = struct {
                         try self.addRoleHeader(&global_line, msg_idx, msg.role);
                         if (msg.diff_path != null and msg.diff_old != null and msg.diff_new != null) {
                             try self.addDiffContent(&global_line, msg_idx, msg.*, wrap_width, diff_view_mode);
+                        }
+                    },
+                    .plan_snapshot => {
+                        try self.addRoleHeader(&global_line, msg_idx, msg.role);
+                        if (msg.plan_snapshot_entries) |entries| {
+                            try self.addPlanSnapshotEntries(&global_line, msg_idx, entries);
                         }
                     },
                     .user, .agent => {
@@ -350,6 +371,12 @@ pub const ChatLineMap = struct {
                         try self.addDiffContent(&global_line, last_msg_idx, msg.*, wrap_width, diff_view_mode);
                     }
                 },
+                .plan_snapshot => {
+                    try self.addRoleHeader(&global_line, last_msg_idx, msg.role);
+                    if (msg.plan_snapshot_entries) |entries| {
+                        try self.addPlanSnapshotEntries(&global_line, last_msg_idx, entries);
+                    }
+                },
                 .user, .agent => {
                     // No role header for user/agent - styling makes it obvious
                     try self.addMessageContent(&global_line, last_msg_idx, msg.*, wrap_width);
@@ -398,6 +425,7 @@ pub const ChatLineMap = struct {
             .system => .{ .fg = Color.chat_system, .bold = true },
             .diff => .{ .fg = Color.white, .bold = true },
             .tool => .{ .fg = Color.chat_tool, .bold = true },
+            .plan_snapshot => .{ .fg = Color.dim, .bold = true },
         };
 
         try self.records.append(self.allocator, .{
@@ -682,6 +710,44 @@ pub const ChatLineMap = struct {
                 .style = content_style,
                 .indent = indent,
                 .fill_bg = fill_bg,
+            });
+            global_line.* += 1;
+        }
+    }
+
+    fn addPlanSnapshotEntries(self: *ChatLineMap, global_line: *usize, msg_idx: usize, entries: []const state.OwnedPlanEntry) !void {
+        for (entries, 0..) |entry, entry_idx| {
+            // Status icon with color
+            const status_icon: []const u8 = switch (entry.status) {
+                .pending => "○",
+                .in_progress => "◉",
+                .completed => "✓",
+            };
+            const icon_style: vaxis.Style = switch (entry.status) {
+                .pending => .{ .fg = Color.dim },
+                .in_progress => .{ .fg = .{ .index = 3 }, .bold = true }, // yellow
+                .completed => .{ .fg = .{ .index = 2 } }, // green
+            };
+
+            // Content style
+            const content_style: vaxis.Style = switch (entry.status) {
+                .pending => .{ .fg = Color.dim },
+                .in_progress => .{ .fg = Color.white },
+                .completed => .{ .fg = Color.dim },
+            };
+
+            // Copy content for the text (icon is rendered via prefix)
+            const entry_text = try self.allocator.dupe(u8, entry.content);
+            try self.strings.append(self.allocator, entry_text);
+
+            try self.records.append(self.allocator, .{
+                .global_line = global_line.*,
+                .line_type = .{ .plan_entry = .{ .msg_idx = msg_idx, .entry_idx = entry_idx } },
+                .text = entry_text,
+                .style = content_style,
+                .indent = 1,
+                .prefix = status_icon,
+                .prefix_style = icon_style,
             });
             global_line.* += 1;
         }

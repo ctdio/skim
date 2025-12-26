@@ -1360,6 +1360,7 @@ pub const AcpManager = struct {
 
         // Handle plan updates
         if (update.plan) |plan| {
+            std.log.info("ACP: Received plan update with {d} entries", .{plan.entries.len});
             // Copy plan entries
             const entries_copy = self.allocator.alloc(protocol.PlanEntry, plan.entries.len) catch return;
             var copied_count: usize = 0;
