@@ -198,18 +198,19 @@ pub const Encoder = struct {
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
-        try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
-        try writer.print("{d}", .{id});
-        try writer.writeAll(",\"method\":\"");
-        try writer.writeAll(method);
-        try writer.writeByte('"');
-
         if (params_json) |params| {
-            try writer.writeAll(",\"params\":");
-            try writer.writeAll(params);
+            try writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":{f},\"params\":{s}}}", .{
+                id,
+                std.json.fmt(method, .{}),
+                params,
+            });
+        } else {
+            try writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":{f}}}", .{
+                id,
+                std.json.fmt(method, .{}),
+            });
         }
 
-        try writer.writeAll("}");
         return output.toOwnedSlice(self.allocator);
     }
 
@@ -239,16 +240,17 @@ pub const Encoder = struct {
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
-        try writer.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"");
-        try writer.writeAll(method);
-        try writer.writeByte('"');
-
         if (params_json) |params| {
-            try writer.writeAll(",\"params\":");
-            try writer.writeAll(params);
+            try writer.print("{{\"jsonrpc\":\"2.0\",\"method\":{f},\"params\":{s}}}", .{
+                std.json.fmt(method, .{}),
+                params,
+            });
+        } else {
+            try writer.print("{{\"jsonrpc\":\"2.0\",\"method\":{f}}}", .{
+                std.json.fmt(method, .{}),
+            });
         }
 
-        try writer.writeAll("}");
         return output.toOwnedSlice(self.allocator);
     }
 
@@ -265,9 +267,10 @@ pub const Encoder = struct {
 
         try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
         try self.writeId(writer, id);
-        try writer.print(",\"error\":{{\"code\":{d},\"message\":\"", .{code});
-        try writeJsonEscaped(writer, message);
-        try writer.writeAll("\"}}");
+        try writer.print(",\"error\":{{\"code\":{d},\"message\":{f}}}}}", .{
+            code,
+            std.json.fmt(message, .{}),
+        });
 
         return output.toOwnedSlice(self.allocator);
     }
@@ -278,30 +281,21 @@ pub const Encoder = struct {
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
-        try writer.writeAll("{\"protocolVersion\":");
-        try writer.print("{d}", .{params.protocol_version});
+        try writer.print("{{\"protocolVersion\":{d}", .{params.protocol_version});
 
         // Client capabilities (use "fs" not "fileSystem" per ACP spec)
-        try writer.writeAll(",\"clientCapabilities\":{\"fs\":{\"readTextFile\":");
-        try writer.writeAll(if (params.client_capabilities.file_system.read_text_file) "true" else "false");
-        try writer.writeAll(",\"writeTextFile\":");
-        try writer.writeAll(if (params.client_capabilities.file_system.write_text_file) "true" else "false");
-        try writer.writeAll("},\"terminal\":");
-        try writer.writeAll(if (params.client_capabilities.terminal) "true" else "false");
-        try writer.writeByte('}');
+        try writer.print(",\"clientCapabilities\":{{\"fs\":{{\"readTextFile\":{},\"writeTextFile\":{}}},\"terminal\":{}}}", .{
+            params.client_capabilities.file_system.read_text_file,
+            params.client_capabilities.file_system.write_text_file,
+            params.client_capabilities.terminal,
+        });
 
         // Client info
-        try writer.writeAll(",\"clientInfo\":{\"name\":\"");
-        try writeJsonEscaped(writer, params.client_info.name);
-        try writer.writeByte('"');
+        try writer.print(",\"clientInfo\":{{\"name\":{f}", .{std.json.fmt(params.client_info.name, .{})});
         if (params.client_info.title) |title| {
-            try writer.writeAll(",\"title\":\"");
-            try writeJsonEscaped(writer, title);
-            try writer.writeByte('"');
+            try writer.print(",\"title\":{f}", .{std.json.fmt(title, .{})});
         }
-        try writer.writeAll(",\"version\":\"");
-        try writeJsonEscaped(writer, params.client_info.version);
-        try writer.writeAll("\"}}");
+        try writer.print(",\"version\":{f}}}}}", .{std.json.fmt(params.client_info.version, .{})});
 
         return output.toOwnedSlice(self.allocator);
     }
@@ -312,20 +306,16 @@ pub const Encoder = struct {
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
-        try writer.writeAll("{\"cwd\":\"");
-        try writeJsonEscaped(writer, params.cwd);
-        try writer.writeAll("\",\"mcpServers\":[");
+        try writer.print("{{\"cwd\":{f},\"mcpServers\":[", .{std.json.fmt(params.cwd, .{})});
 
         for (params.mcp_servers, 0..) |server, i| {
             if (i > 0) try writer.writeByte(',');
-            try writer.writeAll("{\"name\":\"");
-            try writeJsonEscaped(writer, server.name);
-            try writer.writeByte('"');
+            try writer.print("{{\"name\":{f}", .{std.json.fmt(server.name, .{})});
             if (server.transport_json) |transport| {
-                try writer.writeAll(",\"transport\":");
-                try writer.writeAll(transport);
+                try writer.print(",\"transport\":{s}}}", .{transport});
+            } else {
+                try writer.writeByte('}');
             }
-            try writer.writeByte('}');
         }
 
         try writer.writeAll("]}");
@@ -338,28 +328,21 @@ pub const Encoder = struct {
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
-        try writer.writeAll("{\"sessionId\":\"");
-        try writeJsonEscaped(writer, params.session_id);
-        try writer.writeAll("\",\"prompt\":[");
+        try writer.print("{{\"sessionId\":{f},\"prompt\":[", .{std.json.fmt(params.session_id, .{})});
 
         for (params.content, 0..) |block, i| {
             if (i > 0) try writer.writeByte(',');
             switch (block) {
                 .text => |t| {
-                    try writer.writeAll("{\"type\":\"text\",\"text\":\"");
-                    try writeJsonEscaped(writer, t.text);
-                    try writer.writeAll("\"}");
+                    try writer.print("{{\"type\":\"text\",\"text\":{f}}}", .{std.json.fmt(t.text, .{})});
                 },
                 .resource_link => |r| {
-                    try writer.writeAll("{\"type\":\"resourceLink\",\"uri\":\"");
-                    try writeJsonEscaped(writer, r.uri);
-                    try writer.writeByte('"');
+                    try writer.print("{{\"type\":\"resourceLink\",\"uri\":{f}", .{std.json.fmt(r.uri, .{})});
                     if (r.name) |name| {
-                        try writer.writeAll(",\"name\":\"");
-                        try writeJsonEscaped(writer, name);
-                        try writer.writeByte('"');
+                        try writer.print(",\"name\":{f}}}", .{std.json.fmt(name, .{})});
+                    } else {
+                        try writer.writeByte('}');
                     }
-                    try writer.writeByte('}');
                 },
                 .diff => {
                     // Diff content is only received from agents, not sent
@@ -378,9 +361,7 @@ pub const Encoder = struct {
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
-        try writer.writeAll("{\"sessionId\":\"");
-        try writeJsonEscaped(writer, params.session_id);
-        try writer.writeAll("\"}");
+        try writer.print("{{\"sessionId\":{f}}}", .{std.json.fmt(params.session_id, .{})});
 
         return output.toOwnedSlice(self.allocator);
     }
@@ -391,11 +372,10 @@ pub const Encoder = struct {
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
-        try writer.writeAll("{\"sessionId\":\"");
-        try writeJsonEscaped(writer, params.session_id);
-        try writer.writeAll("\",\"modeId\":\"");
-        try writeJsonEscaped(writer, params.mode_id);
-        try writer.writeAll("\"}");
+        try writer.print("{{\"sessionId\":{f},\"modeId\":{f}}}", .{
+            std.json.fmt(params.session_id, .{}),
+            std.json.fmt(params.mode_id, .{}),
+        });
 
         return output.toOwnedSlice(self.allocator);
     }
@@ -406,9 +386,7 @@ pub const Encoder = struct {
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
-        try writer.writeAll("{\"content\":\"");
-        try writeJsonEscaped(writer, result.content);
-        try writer.writeAll("\"}");
+        try writer.print("{{\"content\":{f}}}", .{std.json.fmt(result.content, .{})});
 
         return output.toOwnedSlice(self.allocator);
     }
@@ -422,9 +400,9 @@ pub const Encoder = struct {
         const writer = output.writer(self.allocator);
 
         if (selected_option) |option| {
-            try writer.writeAll("{\"outcome\":{\"outcome\":\"selected\",\"optionId\":\"");
-            try writeJsonEscaped(writer, option);
-            try writer.writeAll("\"}}");
+            try writer.print("{{\"outcome\":{{\"outcome\":\"selected\",\"optionId\":{f}}}}}", .{
+                std.json.fmt(option, .{}),
+            });
         } else {
             try writer.writeAll("{\"outcome\":{\"outcome\":\"cancelled\"}}");
         }
@@ -435,11 +413,7 @@ pub const Encoder = struct {
     fn writeId(self: *Encoder, writer: anytype, id: JsonRpcId) !void {
         _ = self;
         switch (id) {
-            .string => |s| {
-                try writer.writeByte('"');
-                try writeJsonEscaped(writer, s);
-                try writer.writeByte('"');
-            },
+            .string => |s| try writer.print("{f}", .{std.json.fmt(s, .{})}),
             .number => |n| try writer.print("{d}", .{n}),
             .null_value => try writer.writeAll("null"),
         }
@@ -1375,25 +1349,6 @@ const RawSessionUpdate = struct {
 // =============================================================================
 // Helper Functions
 // =============================================================================
-
-fn writeJsonEscaped(writer: anytype, str: []const u8) !void {
-    for (str) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => {
-                if (c < 0x20) {
-                    try writer.print("\\u{x:0>4}", .{c});
-                } else {
-                    try writer.writeByte(c);
-                }
-            },
-        }
-    }
-}
 
 // =============================================================================
 // Free Functions

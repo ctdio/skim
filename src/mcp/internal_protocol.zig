@@ -42,11 +42,7 @@ pub const McpId = union(enum) {
 
     pub fn format(self: McpId, writer: anytype) !void {
         switch (self) {
-            .string => |s| {
-                try writer.writeByte('"');
-                try writeJsonEscaped(writer, s);
-                try writer.writeByte('"');
-            },
+            .string => |s| try writer.print("{f}", .{std.json.fmt(s, .{})}),
             .number => |n| try writer.print("{d}", .{n}),
             .null_value => try writer.writeAll("null"),
         }
@@ -142,9 +138,7 @@ pub fn encodeAdapterHello(allocator: Allocator, adapter_id: []const u8) ![]u8 {
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"adapter_hello\",\"adapter_id\":\"");
-    try writer.writeAll(adapter_id);
-    try writer.writeAll("\"}\n");
+    try writer.print("{{\"event\":\"adapter_hello\",\"adapter_id\":{f}}}\n", .{std.json.fmt(adapter_id, .{})});
     return output.toOwnedSlice(allocator);
 }
 
@@ -160,13 +154,9 @@ pub fn encodeMcpRequest(allocator: Allocator, payload: McpRequestPayload) ![]u8 
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"mcp_request\",\"request_id\":\"");
-    try writer.writeAll(payload.request_id);
-    try writer.writeAll("\",\"mcp_id\":");
+    try writer.print("{{\"event\":\"mcp_request\",\"request_id\":{f},\"mcp_id\":", .{std.json.fmt(payload.request_id, .{})});
     try payload.mcp_id.format(writer);
-    try writer.writeAll(",\"method\":\"");
-    try writer.writeAll(payload.method);
-    try writer.writeByte('"');
+    try writer.print(",\"method\":{f}", .{std.json.fmt(payload.method, .{})});
 
     if (payload.params) |params| {
         try writer.writeAll(",\"params\":");
@@ -193,21 +183,16 @@ pub fn encodeAdapterWelcome(allocator: Allocator, adapter_id: []const u8, client
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"adapter_welcome\",\"adapter_id\":\"");
-    try writer.writeAll(adapter_id);
-    try writer.writeAll("\",\"clients\":[");
+    try writer.print("{{\"event\":\"adapter_welcome\",\"adapter_id\":{f},\"clients\":[", .{std.json.fmt(adapter_id, .{})});
 
     for (clients, 0..) |client, i| {
         if (i > 0) try writer.writeByte(',');
-        try writer.writeAll("{\"id\":\"");
-        try writer.writeAll(client.id);
-        try writer.writeAll("\",\"cwd\":\"");
-        try writeJsonEscaped(writer, client.cwd);
-        try writer.writeAll("\",\"diff_ref\":\"");
-        try writeJsonEscaped(writer, client.diff_ref);
-        try writer.writeAll("\",\"file_count\":");
-        try writer.print("{d}", .{client.file_count});
-        try writer.writeByte('}');
+        try writer.print("{{\"id\":{f},\"cwd\":{f},\"diff_ref\":{f},\"file_count\":{d}}}", .{
+            std.json.fmt(client.id, .{}),
+            std.json.fmt(client.cwd, .{}),
+            std.json.fmt(client.diff_ref, .{}),
+            client.file_count,
+        });
     }
 
     try writer.writeAll("]}\n");
@@ -219,9 +204,7 @@ pub fn encodeMcpResponse(allocator: Allocator, request_id: []const u8, mcp_id: M
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"mcp_response\",\"request_id\":\"");
-    try writer.writeAll(request_id);
-    try writer.writeAll("\",\"mcp_id\":");
+    try writer.print("{{\"event\":\"mcp_response\",\"request_id\":{f},\"mcp_id\":", .{std.json.fmt(request_id, .{})});
     try mcp_id.format(writer);
 
     if (result) |r| {
@@ -230,11 +213,10 @@ pub fn encodeMcpResponse(allocator: Allocator, request_id: []const u8, mcp_id: M
     }
 
     if (err) |e| {
-        try writer.writeAll(",\"error\":{\"code\":");
-        try writer.print("{d}", .{e.code});
-        try writer.writeAll(",\"message\":\"");
-        try writeJsonEscaped(writer, e.message);
-        try writer.writeAll("\"}");
+        try writer.print(",\"error\":{{\"code\":{d},\"message\":{f}}}", .{
+            e.code,
+            std.json.fmt(e.message, .{}),
+        });
     }
 
     try writer.writeAll("}\n");
@@ -246,20 +228,17 @@ pub fn encodeClientUpdate(allocator: Allocator, action: ClientAction, client: Cl
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"client_update\",\"action\":\"");
-    try writer.writeAll(switch (action) {
+    const action_str = switch (action) {
         .connected => "connected",
         .disconnected => "disconnected",
+    };
+    try writer.print("{{\"event\":\"client_update\",\"action\":{f},\"client\":{{\"id\":{f},\"cwd\":{f},\"diff_ref\":{f},\"file_count\":{d}}}}}\n", .{
+        std.json.fmt(action_str, .{}),
+        std.json.fmt(client.id, .{}),
+        std.json.fmt(client.cwd, .{}),
+        std.json.fmt(client.diff_ref, .{}),
+        client.file_count,
     });
-    try writer.writeAll("\",\"client\":{\"id\":\"");
-    try writer.writeAll(client.id);
-    try writer.writeAll("\",\"cwd\":\"");
-    try writeJsonEscaped(writer, client.cwd);
-    try writer.writeAll("\",\"diff_ref\":\"");
-    try writeJsonEscaped(writer, client.diff_ref);
-    try writer.writeAll("\",\"file_count\":");
-    try writer.print("{d}", .{client.file_count});
-    try writer.writeAll("}}\n");
     return output.toOwnedSlice(allocator);
 }
 
@@ -272,20 +251,15 @@ pub fn encodeStatusResponse(allocator: Allocator, clients: []const ClientSummary
 
     for (clients, 0..) |client, i| {
         if (i > 0) try writer.writeByte(',');
-        try writer.writeAll("{\"id\":\"");
-        try writer.writeAll(client.id);
-        try writer.writeAll("\",\"cwd\":\"");
-        try writeJsonEscaped(writer, client.cwd);
-        try writer.writeAll("\",\"diff_ref\":\"");
-        try writeJsonEscaped(writer, client.diff_ref);
-        try writer.writeAll("\",\"file_count\":");
-        try writer.print("{d}", .{client.file_count});
-        try writer.writeByte('}');
+        try writer.print("{{\"id\":{f},\"cwd\":{f},\"diff_ref\":{f},\"file_count\":{d}}}", .{
+            std.json.fmt(client.id, .{}),
+            std.json.fmt(client.cwd, .{}),
+            std.json.fmt(client.diff_ref, .{}),
+            client.file_count,
+        });
     }
 
-    try writer.writeAll("],\"adapter_count\":");
-    try writer.print("{d}", .{adapter_count});
-    try writer.writeAll("}\n");
+    try writer.print("],\"adapter_count\":{d}}}\n", .{adapter_count});
     return output.toOwnedSlice(allocator);
 }
 
@@ -546,29 +520,6 @@ pub fn freeDaemonMessage(allocator: Allocator, msg: *ParsedDaemonMessage) void {
             allocator.free(s.clients);
         },
         .unknown => |u| allocator.free(u),
-    }
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-fn writeJsonEscaped(writer: anytype, str: []const u8) !void {
-    for (str) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => {
-                if (c < 0x20) {
-                    try writer.print("\\u{x:0>4}", .{c});
-                } else {
-                    try writer.writeByte(c);
-                }
-            },
-        }
     }
 }
 

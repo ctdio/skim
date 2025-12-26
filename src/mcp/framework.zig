@@ -288,9 +288,7 @@ pub const Server = struct {
                     try output.appendSlice(allocator, @tagName(c.type));
                     try output.appendSlice(allocator, "\"");
                     if (c.text) |text| {
-                        try output.appendSlice(allocator, ",\"text\":\"");
-                        try writeJsonEscaped(output.writer(allocator), text);
-                        try output.append(allocator, '"');
+                        try output.writer(allocator).print(",\"text\":{f}", .{std.json.fmt(text, .{})});
                     }
                     try output.append(allocator, '}');
                 }
@@ -371,29 +369,6 @@ fn jsonTypeFor(comptime T: type) []const u8 {
         .optional => |opt| jsonTypeFor(opt.child),
         else => "\"type\":\"object\"",
     };
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => {
-                if (c < 0x20) {
-                    try writer.print("\\u{x:0>4}", .{c});
-                } else {
-                    try writer.writeByte(c);
-                }
-            },
-        }
-    }
 }
 
 // =============================================================================

@@ -280,24 +280,19 @@ pub fn encodeHello(allocator: Allocator, payload: HelloPayload) ![]u8 {
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"hello\"");
-    try writer.writeAll(",\"id\":\"");
-    try writer.writeAll(payload.id);
-    try writer.writeAll("\",\"cwd\":\"");
-    try writeJsonEscaped(writer, payload.cwd);
-    try writer.writeAll("\",\"diff_ref\":\"");
-    try writeJsonEscaped(writer, payload.diff_ref);
-    try writer.writeAll("\",\"files\":[");
+    try writer.print("{{\"event\":\"hello\",\"id\":{f},\"cwd\":{f},\"diff_ref\":{f},\"files\":[", .{
+        std.json.fmt(payload.id, .{}),
+        std.json.fmt(payload.cwd, .{}),
+        std.json.fmt(payload.diff_ref, .{}),
+    });
 
     for (payload.files, 0..) |file, i| {
         if (i > 0) try writer.writeByte(',');
-        try writer.writeAll("{\"path\":\"");
-        try writeJsonEscaped(writer, file.path);
-        try writer.writeAll("\",\"old_path\":\"");
-        try writeJsonEscaped(writer, file.old_path);
-        try writer.writeAll("\",\"hunk_count\":");
-        try writer.print("{d}", .{file.hunk_count});
-        try writer.writeByte('}');
+        try writer.print("{{\"path\":{f},\"old_path\":{f},\"hunk_count\":{d}}}", .{
+            std.json.fmt(file.path, .{}),
+            std.json.fmt(file.old_path, .{}),
+            file.hunk_count,
+        });
     }
 
     try writer.writeAll("]}\n");
@@ -310,9 +305,7 @@ pub fn encodeWelcome(allocator: Allocator, id: []const u8) ![]u8 {
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"welcome\",\"id\":\"");
-    try writer.writeAll(id);
-    try writer.writeAll("\"}\n");
+    try writer.print("{{\"event\":\"welcome\",\"id\":{f}}}\n", .{std.json.fmt(id, .{})});
     return output.toOwnedSlice(allocator);
 }
 
@@ -322,15 +315,12 @@ pub fn encodeAddComment(allocator: Allocator, payload: AddCommentPayload) ![]u8 
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"add_comment\",\"file\":\"");
-    try writeJsonEscaped(writer, payload.file);
-    try writer.writeAll("\",\"line\":");
-    try writer.print("{d}", .{payload.line});
-    try writer.writeAll(",\"line_type\":\"");
-    try writeJsonEscaped(writer, payload.line_type);
-    try writer.writeAll("\",\"text\":\"");
-    try writeJsonEscaped(writer, payload.text);
-    try writer.writeAll("\"}\n");
+    try writer.print("{{\"event\":\"add_comment\",\"file\":{f},\"line\":{d},\"line_type\":{f},\"text\":{f}}}\n", .{
+        std.json.fmt(payload.file, .{}),
+        payload.line,
+        std.json.fmt(payload.line_type, .{}),
+        std.json.fmt(payload.text, .{}),
+    });
     return output.toOwnedSlice(allocator);
 }
 
@@ -340,18 +330,14 @@ pub fn encodeCommentAdded(allocator: Allocator, success: bool, comment_idx: ?usi
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"comment_added\",\"success\":");
-    try writer.writeAll(if (success) "true" else "false");
+    try writer.print("{{\"event\":\"comment_added\",\"success\":{}", .{success});
 
     if (comment_idx) |idx| {
-        try writer.writeAll(",\"comment_idx\":");
-        try writer.print("{d}", .{idx});
+        try writer.print(",\"comment_idx\":{d}", .{idx});
     }
 
     if (err_msg) |msg| {
-        try writer.writeAll(",\"error\":\"");
-        try writeJsonEscaped(writer, msg);
-        try writer.writeByte('"');
+        try writer.print(",\"error\":{f}", .{std.json.fmt(msg, .{})});
     }
 
     try writer.writeAll("}\n");
@@ -377,19 +363,14 @@ pub fn encodeComments(allocator: Allocator, comments: []const CommentInfo) ![]u8
 
     for (comments, 0..) |comment, i| {
         if (i > 0) try writer.writeByte(',');
-        try writer.writeAll("{\"idx\":");
-        try writer.print("{d}", .{comment.idx});
-        try writer.writeAll(",\"file_path\":\"");
-        try writeJsonEscaped(writer, comment.file_path);
-        try writer.writeAll("\",\"line\":");
-        try writer.print("{d}", .{comment.line});
-        try writer.writeAll(",\"text\":\"");
-        try writeJsonEscaped(writer, comment.text);
-        try writer.writeAll("\",\"line_type\":\"");
-        try writer.writeAll(comment.line_type);
-        try writer.writeAll("\",\"line_type_flag\":\"");
-        try writeJsonEscaped(writer, comment.line_type_flag);
-        try writer.writeAll("\"}");
+        try writer.print("{{\"idx\":{d},\"file_path\":{f},\"line\":{d},\"text\":{f},\"line_type\":{f},\"line_type_flag\":{f}}}", .{
+            comment.idx,
+            std.json.fmt(comment.file_path, .{}),
+            comment.line,
+            std.json.fmt(comment.text, .{}),
+            std.json.fmt(comment.line_type, .{}),
+            std.json.fmt(comment.line_type_flag, .{}),
+        });
     }
 
     try writer.writeAll("]}\n");
@@ -402,11 +383,10 @@ pub fn encodeError(allocator: Allocator, code: []const u8, message: []const u8) 
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"error\",\"code\":\"");
-    try writer.writeAll(code);
-    try writer.writeAll("\",\"message\":\"");
-    try writeJsonEscaped(writer, message);
-    try writer.writeAll("\"}\n");
+    try writer.print("{{\"event\":\"error\",\"code\":{f},\"message\":{f}}}\n", .{
+        std.json.fmt(code, .{}),
+        std.json.fmt(message, .{}),
+    });
     return output.toOwnedSlice(allocator);
 }
 
@@ -440,9 +420,7 @@ pub fn encodeGetFileDiff(allocator: Allocator, file: []const u8) ![]u8 {
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"get_file_diff\",\"file\":\"");
-    try writeJsonEscaped(writer, file);
-    try writer.writeAll("\"}\n");
+    try writer.print("{{\"event\":\"get_file_diff\",\"file\":{f}}}\n", .{std.json.fmt(file, .{})});
     return output.toOwnedSlice(allocator);
 }
 
@@ -452,27 +430,21 @@ pub fn encodeDiffContext(allocator: Allocator, payload: DiffContextPayload) ![]u
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"diff_context\",\"diff_ref\":\"");
-    try writeJsonEscaped(writer, payload.diff_ref);
-    try writer.writeAll("\",\"cwd\":\"");
-    try writeJsonEscaped(writer, payload.cwd);
-    try writer.writeAll("\",\"diff_files\":[");
+    try writer.print("{{\"event\":\"diff_context\",\"diff_ref\":{f},\"cwd\":{f},\"diff_files\":[", .{
+        std.json.fmt(payload.diff_ref, .{}),
+        std.json.fmt(payload.cwd, .{}),
+    });
 
     for (payload.files, 0..) |file, file_idx| {
         if (file_idx > 0) try writer.writeByte(',');
-        try writer.writeAll("{\"path\":\"");
-        try writeJsonEscaped(writer, file.path);
-        try writer.writeAll("\",\"old_path\":\"");
-        try writeJsonEscaped(writer, file.old_path);
-        try writer.writeAll("\",\"status\":\"");
-        try writer.writeAll(file.status);
-        try writer.writeAll("\",\"additions\":");
-        try writer.print("{d}", .{file.additions});
-        try writer.writeAll(",\"deletions\":");
-        try writer.print("{d}", .{file.deletions});
-        try writer.writeAll(",\"hunk_count\":");
-        try writer.print("{d}", .{file.hunk_count});
-        try writer.writeByte('}');
+        try writer.print("{{\"path\":{f},\"old_path\":{f},\"status\":{f},\"additions\":{d},\"deletions\":{d},\"hunk_count\":{d}}}", .{
+            std.json.fmt(file.path, .{}),
+            std.json.fmt(file.old_path, .{}),
+            std.json.fmt(file.status, .{}),
+            file.additions,
+            file.deletions,
+            file.hunk_count,
+        });
     }
 
     try writer.writeAll("]}\n");
@@ -485,50 +457,39 @@ pub fn encodeFileDiff(allocator: Allocator, payload: FileDiffPayload) ![]u8 {
     errdefer output.deinit(allocator);
 
     const writer = output.writer(allocator);
-    try writer.writeAll("{\"event\":\"file_diff\",\"file\":\"");
-    try writeJsonEscaped(writer, payload.file);
-    try writer.writeAll("\",\"old_file\":\"");
-    try writeJsonEscaped(writer, payload.old_file);
-    try writer.writeAll("\",\"status\":\"");
-    try writer.writeAll(payload.status);
-    try writer.writeAll("\",\"hunks\":[");
+    try writer.print("{{\"event\":\"file_diff\",\"file\":{f},\"old_file\":{f},\"status\":{f},\"hunks\":[", .{
+        std.json.fmt(payload.file, .{}),
+        std.json.fmt(payload.old_file, .{}),
+        std.json.fmt(payload.status, .{}),
+    });
 
     for (payload.hunks, 0..) |hunk, hunk_idx| {
         if (hunk_idx > 0) try writer.writeByte(',');
-        try writer.writeAll("{\"header\":\"");
-        try writeJsonEscaped(writer, hunk.header);
-        try writer.writeAll("\",\"old_start\":");
-        try writer.print("{d}", .{hunk.old_start});
-        try writer.writeAll(",\"old_count\":");
-        try writer.print("{d}", .{hunk.old_count});
-        try writer.writeAll(",\"new_start\":");
-        try writer.print("{d}", .{hunk.new_start});
-        try writer.writeAll(",\"new_count\":");
-        try writer.print("{d}", .{hunk.new_count});
-        try writer.writeAll(",\"lines\":[");
+        try writer.print("{{\"header\":{f},\"old_start\":{d},\"old_count\":{d},\"new_start\":{d},\"new_count\":{d},\"lines\":[", .{
+            std.json.fmt(hunk.header, .{}),
+            hunk.old_start,
+            hunk.old_count,
+            hunk.new_start,
+            hunk.new_count,
+        });
 
         for (hunk.lines, 0..) |line, line_idx| {
             if (line_idx > 0) try writer.writeByte(',');
-            try writer.writeAll("{\"change_type\":\"");
-            try writer.writeAll(line.change_type);
-            try writer.writeAll("\",\"content\":\"");
-            try writeJsonEscaped(writer, line.content);
-            try writer.writeByte('"');
+            try writer.print("{{\"change_type\":{f},\"content\":{f}", .{
+                std.json.fmt(line.change_type, .{}),
+                std.json.fmt(line.content, .{}),
+            });
             if (line.old_lineno) |n| {
-                try writer.writeAll(",\"old_lineno\":");
-                try writer.print("{d}", .{n});
+                try writer.print(",\"old_lineno\":{d}", .{n});
             }
             if (line.new_lineno) |n| {
-                try writer.writeAll(",\"new_lineno\":");
-                try writer.print("{d}", .{n});
+                try writer.print(",\"new_lineno\":{d}", .{n});
             }
             // Pre-computed hints for add_comment
-            try writer.writeAll(",\"comment_line\":");
-            try writer.print("{d}", .{line.comment_line});
-            try writer.writeAll(",\"comment_line_type\":\"");
-            try writer.writeAll(line.comment_line_type);
-            try writer.writeByte('"');
-            try writer.writeByte('}');
+            try writer.print(",\"comment_line\":{d},\"comment_line_type\":{f}}}", .{
+                line.comment_line,
+                std.json.fmt(line.comment_line_type, .{}),
+            });
         }
 
         try writer.writeAll("]}");
@@ -774,30 +735,6 @@ pub fn decode(allocator: Allocator, json_line: []const u8) !ParsedMessage {
     }
 
     return .{ .unknown = try allocator.dupe(u8, event) };
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-/// Write a string with JSON escaping
-fn writeJsonEscaped(writer: anytype, str: []const u8) !void {
-    for (str) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => {
-                if (c < 0x20) {
-                    try writer.print("\\u{x:0>4}", .{c});
-                } else {
-                    try writer.writeByte(c);
-                }
-            },
-        }
-    }
 }
 
 // =============================================================================
