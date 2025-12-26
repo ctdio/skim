@@ -16,6 +16,46 @@ const tools = @import("tools.zig");
 // Daemon Server
 // =============================================================================
 
+// Configuration constants for backpressure
+const MAX_PENDING_REQUESTS_PER_CLIENT: usize = 3;
+const MAX_PENDING_REQUESTS_PER_ADAPTER: usize = 10;
+
+// Secondary index key for O(1) request correlation
+const ClientMethodKey = struct {
+    client_id: registry.SessionId,
+    method_hash: u64, // Hash of method string
+
+    pub fn hash(self: ClientMethodKey, seed: u64) u64 {
+        var hasher = std.hash.Wyhash.init(seed);
+        hasher.update(&self.client_id);
+        hasher.update(std.mem.asBytes(&self.method_hash));
+        return hasher.final();
+    }
+
+    pub fn eql(self: ClientMethodKey, other: ClientMethodKey) bool {
+        return std.mem.eql(u8, &self.client_id, &other.client_id) and
+            self.method_hash == other.method_hash;
+    }
+};
+
+// Helper for streaming response encoding with yield points
+const ResponseBuilder = struct {
+    output: std.ArrayList(u8),
+    bytes_since_yield: usize = 0,
+    max_bytes_before_yield: usize = 4096, // Yield every 4KB
+
+    fn maybeYield(self: *ResponseBuilder) void {
+        if (self.bytes_since_yield >= self.max_bytes_before_yield) {
+            std.Thread.yield() catch {};
+            self.bytes_since_yield = 0;
+        }
+    }
+
+    fn trackWrite(self: *ResponseBuilder, bytes: usize) void {
+        self.bytes_since_yield += bytes;
+    }
+};
+
 /// Central daemon server that manages TUI clients and MCP adapters
 pub const Daemon = struct {
     allocator: Allocator,
@@ -36,6 +76,13 @@ pub const Daemon = struct {
 
     // Request tracking for async response correlation
     pending_requests: std.AutoHashMap([36]u8, PendingRequest),
+
+    // Secondary index for O(1) request correlation by (client_id, method)
+    client_method_index: std.AutoHashMap(ClientMethodKey, [36]u8),
+
+    // Backpressure tracking: count of pending requests per client/adapter
+    client_pending_counts: std.AutoHashMap(registry.SessionId, usize),
+    adapter_pending_counts: std.AutoHashMap(registry.SessionId, usize),
 
     // MCP Framework server
     mcp_server: framework.Server,
@@ -64,6 +111,9 @@ pub const Daemon = struct {
             .pending_tui_connections = .{},
             .pending_adapter_connections = .{},
             .pending_requests = std.AutoHashMap([36]u8, PendingRequest).init(allocator),
+            .client_method_index = std.AutoHashMap(ClientMethodKey, [36]u8).init(allocator),
+            .client_pending_counts = std.AutoHashMap(registry.SessionId, usize).init(allocator),
+            .adapter_pending_counts = std.AutoHashMap(registry.SessionId, usize).init(allocator),
             .mcp_server = try tools.createServer(allocator),
             .last_heartbeat_check = 0,
             .running = false,
@@ -97,6 +147,9 @@ pub const Daemon = struct {
             if (req.params) |p| self.allocator.free(p);
         }
         self.pending_requests.deinit();
+        self.client_method_index.deinit();
+        self.client_pending_counts.deinit();
+        self.adapter_pending_counts.deinit();
 
         self.mcp_server.deinit();
         self.tui_clients.deinit();
@@ -780,6 +833,13 @@ pub const Daemon = struct {
             .created_at = std.time.timestamp(),
         });
 
+        // Add to secondary index for O(1) lookup
+        const method_hash = std.hash.Wyhash.hash(0, "add_comment");
+        try self.client_method_index.put(.{
+            .client_id = client.id,
+            .method_hash = method_hash,
+        }, request_id);
+
         // Send add_comment to TUI
         const msg = try protocol.encodeAddComment(self.allocator, .{
             .file = file.string,
@@ -792,6 +852,10 @@ pub const Daemon = struct {
         client.stream.writeAll(msg) catch |err| {
             std.log.err("Failed to send to TUI: {any}", .{err});
             _ = self.pending_requests.remove(request_id);
+            _ = self.client_method_index.remove(.{
+                .client_id = client.id,
+                .method_hash = method_hash,
+            });
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
             return;
         };
@@ -841,6 +905,13 @@ pub const Daemon = struct {
             .created_at = std.time.timestamp(),
         });
 
+        // Add to secondary index for O(1) lookup
+        const method_hash = std.hash.Wyhash.hash(0, "get_comments");
+        try self.client_method_index.put(.{
+            .client_id = client.id,
+            .method_hash = method_hash,
+        }, request_id);
+
         // Send get_comments to TUI
         const msg = try protocol.encodeGetComments(self.allocator);
         defer self.allocator.free(msg);
@@ -848,6 +919,10 @@ pub const Daemon = struct {
         client.stream.writeAll(msg) catch |err| {
             std.log.err("Failed to send to TUI: {any}", .{err});
             _ = self.pending_requests.remove(request_id);
+            _ = self.client_method_index.remove(.{
+                .client_id = client.id,
+                .method_hash = method_hash,
+            });
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
             return;
         };
@@ -880,6 +955,30 @@ pub const Daemon = struct {
             return;
         };
 
+        // Check client backpressure
+        const client_count = self.client_pending_counts.get(client.id) orelse 0;
+        if (client_count >= MAX_PENDING_REQUESTS_PER_CLIENT) {
+            try self.sendToolError(
+                adapter,
+                req.request_id,
+                req.mcp_id,
+                "Too many pending requests for this client (max 3). Please wait.",
+            );
+            return;
+        }
+
+        // Check adapter backpressure
+        const adapter_count = self.adapter_pending_counts.get(adapter.id) orelse 0;
+        if (adapter_count >= MAX_PENDING_REQUESTS_PER_ADAPTER) {
+            try self.sendToolError(
+                adapter,
+                req.request_id,
+                req.mcp_id,
+                "Too many pending requests (max 10). Please wait.",
+            );
+            return;
+        }
+
         // Store pending request
         var request_id: [36]u8 = undefined;
         @memcpy(&request_id, req.request_id[0..36]);
@@ -897,13 +996,35 @@ pub const Daemon = struct {
             .created_at = std.time.timestamp(),
         });
 
+        // Add to secondary index for O(1) lookup
+        const method_hash = std.hash.Wyhash.hash(0, "get_diff_context");
+        try self.client_method_index.put(.{
+            .client_id = client.id,
+            .method_hash = method_hash,
+        }, request_id);
+
+        // Increment pending request counters
+        try self.client_pending_counts.put(client.id, client_count + 1);
+        try self.adapter_pending_counts.put(adapter.id, adapter_count + 1);
+
         // Send get_diff_context to TUI
         const msg = try protocol.encodeGetDiffContext(self.allocator);
         defer self.allocator.free(msg);
 
         client.stream.writeAll(msg) catch |err| {
             std.log.err("Failed to send to TUI: {any}", .{err});
+            // Clean up on error
             _ = self.pending_requests.remove(request_id);
+            _ = self.client_method_index.remove(.{
+                .client_id = client.id,
+                .method_hash = method_hash,
+            });
+            if (self.client_pending_counts.getPtr(client.id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
+            if (self.adapter_pending_counts.getPtr(adapter.id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
             return;
         };
@@ -941,6 +1062,30 @@ pub const Daemon = struct {
             return;
         };
 
+        // Check client backpressure
+        const client_count = self.client_pending_counts.get(client.id) orelse 0;
+        if (client_count >= MAX_PENDING_REQUESTS_PER_CLIENT) {
+            try self.sendToolError(
+                adapter,
+                req.request_id,
+                req.mcp_id,
+                "Too many pending requests for this client (max 3). Please wait.",
+            );
+            return;
+        }
+
+        // Check adapter backpressure
+        const adapter_count = self.adapter_pending_counts.get(adapter.id) orelse 0;
+        if (adapter_count >= MAX_PENDING_REQUESTS_PER_ADAPTER) {
+            try self.sendToolError(
+                adapter,
+                req.request_id,
+                req.mcp_id,
+                "Too many pending requests (max 10). Please wait.",
+            );
+            return;
+        }
+
         // Store pending request
         var request_id: [36]u8 = undefined;
         @memcpy(&request_id, req.request_id[0..36]);
@@ -958,13 +1103,35 @@ pub const Daemon = struct {
             .created_at = std.time.timestamp(),
         });
 
+        // Add to secondary index for O(1) lookup
+        const method_hash = std.hash.Wyhash.hash(0, "get_file_diff");
+        try self.client_method_index.put(.{
+            .client_id = client.id,
+            .method_hash = method_hash,
+        }, request_id);
+
+        // Increment pending request counters
+        try self.client_pending_counts.put(client.id, client_count + 1);
+        try self.adapter_pending_counts.put(adapter.id, adapter_count + 1);
+
         // Send get_file_diff to TUI
         const msg = try protocol.encodeGetFileDiff(self.allocator, file_path.string);
         defer self.allocator.free(msg);
 
         client.stream.writeAll(msg) catch |err| {
             std.log.err("Failed to send to TUI: {any}", .{err});
+            // Clean up on error
             _ = self.pending_requests.remove(request_id);
+            _ = self.client_method_index.remove(.{
+                .client_id = client.id,
+                .method_hash = method_hash,
+            });
+            if (self.client_pending_counts.getPtr(client.id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
+            if (self.adapter_pending_counts.getPtr(adapter.id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Failed to send to client");
             return;
         };
@@ -975,244 +1142,296 @@ pub const Daemon = struct {
     // =========================================================================
 
     fn completePendingRequest(self: *Self, client: *registry.ClientInfo, result: protocol.CommentAddedPayload) !void {
-        // Find pending request for this TUI client
-        var found_key: ?[36]u8 = null;
-        var it = self.pending_requests.iterator();
-        while (it.next()) |entry| {
-            if (std.mem.eql(u8, &entry.value_ptr.tui_client_id, &client.id) and
-                std.mem.eql(u8, entry.value_ptr.method, "add_comment"))
-            {
-                found_key = entry.key_ptr.*;
-                break;
+        // O(1) lookup using secondary index
+        const method_hash = std.hash.Wyhash.hash(0, "add_comment");
+        const key_struct = ClientMethodKey{
+            .client_id = client.id,
+            .method_hash = method_hash,
+        };
+
+        const request_id = self.client_method_index.get(key_struct) orelse {
+            std.log.warn("No pending add_comment request for client {s}", .{&client.id});
+            return;
+        };
+
+        // Remove from both indexes
+        _ = self.client_method_index.remove(key_struct);
+
+        if (self.pending_requests.fetchRemove(request_id)) |entry| {
+            defer {
+                switch (entry.value.mcp_id) {
+                    .string => |s| self.allocator.free(s),
+                    else => {},
+                }
+                self.allocator.free(entry.value.method);
             }
-        }
 
-        if (found_key) |key| {
-            if (self.pending_requests.fetchRemove(key)) |entry| {
-                defer {
-                    switch (entry.value.mcp_id) {
-                        .string => |s| self.allocator.free(s),
-                        else => {},
-                    }
-                    self.allocator.free(entry.value.method);
+            // Decrement pending request counters
+            if (self.client_pending_counts.getPtr(entry.value.tui_client_id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
+            if (self.adapter_pending_counts.getPtr(entry.value.adapter_id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
+
+            // Find adapter and send response
+            if (self.adapters.get(entry.value.adapter_id)) |adapter| {
+                const response_text = if (result.success)
+                    "Comment added successfully"
+                else
+                    result.@"error" orelse "Failed to add comment";
+
+                var output: std.ArrayList(u8) = .{};
+                defer output.deinit(self.allocator);
+
+                try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+                try output.appendSlice(self.allocator, response_text);
+                try output.appendSlice(self.allocator, "\"}]");
+                if (!result.success) {
+                    try output.appendSlice(self.allocator, ",\"isError\":true");
                 }
+                try output.appendSlice(self.allocator, "}");
 
-                // Find adapter and send response
-                if (self.adapters.get(entry.value.adapter_id)) |adapter| {
-                    const response_text = if (result.success)
-                        "Comment added successfully"
-                    else
-                        result.@"error" orelse "Failed to add comment";
-
-                    var output: std.ArrayList(u8) = .{};
-                    defer output.deinit(self.allocator);
-
-                    try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
-                    try output.appendSlice(self.allocator, response_text);
-                    try output.appendSlice(self.allocator, "\"}]");
-                    if (!result.success) {
-                        try output.appendSlice(self.allocator, ",\"isError\":true");
-                    }
-                    try output.appendSlice(self.allocator, "}");
-
-                    try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
-                }
+                try self.sendMcpResponse(adapter, &request_id, entry.value.mcp_id, output.items);
             }
         }
     }
 
     fn completePendingCommentsRequest(self: *Self, client: *registry.ClientInfo, result: protocol.CommentsPayload) !void {
-        // Find pending request for this TUI client
-        var found_key: ?[36]u8 = null;
-        var it = self.pending_requests.iterator();
-        while (it.next()) |entry| {
-            if (std.mem.eql(u8, &entry.value_ptr.tui_client_id, &client.id) and
-                std.mem.eql(u8, entry.value_ptr.method, "get_comments"))
-            {
-                found_key = entry.key_ptr.*;
-                break;
+        // O(1) lookup using secondary index
+        const method_hash = std.hash.Wyhash.hash(0, "get_comments");
+        const key_struct = ClientMethodKey{
+            .client_id = client.id,
+            .method_hash = method_hash,
+        };
+
+        const request_id = self.client_method_index.get(key_struct) orelse {
+            std.log.warn("No pending get_comments request for client {s}", .{&client.id});
+            return;
+        };
+
+        // Remove from both indexes
+        _ = self.client_method_index.remove(key_struct);
+
+        if (self.pending_requests.fetchRemove(request_id)) |entry| {
+            defer {
+                switch (entry.value.mcp_id) {
+                    .string => |s| self.allocator.free(s),
+                    else => {},
+                }
+                self.allocator.free(entry.value.method);
             }
-        }
 
-        if (found_key) |key| {
-            if (self.pending_requests.fetchRemove(key)) |entry| {
-                defer {
-                    switch (entry.value.mcp_id) {
-                        .string => |s| self.allocator.free(s),
-                        else => {},
+            // Decrement pending request counters
+            if (self.client_pending_counts.getPtr(entry.value.tui_client_id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
+            if (self.adapter_pending_counts.getPtr(entry.value.adapter_id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
+
+            // Find adapter and send response
+            if (self.adapters.get(entry.value.adapter_id)) |adapter| {
+                var output: std.ArrayList(u8) = .{};
+                defer output.deinit(self.allocator);
+
+                try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+
+                if (result.comments.len == 0) {
+                    try output.appendSlice(self.allocator, "No comments.");
+                } else {
+                    try output.appendSlice(self.allocator, "Comments:\\n");
+                    for (result.comments) |comment| {
+                        try output.appendSlice(self.allocator, "- ");
+                        try writeJsonEscaped(output.writer(self.allocator), comment.file_path);
+                        try output.writer(self.allocator).print(":{d} [{s}]: ", .{
+                            comment.line,
+                            comment.line_type,
+                        });
+                        try writeJsonEscaped(output.writer(self.allocator), comment.text);
+                        try output.appendSlice(self.allocator, "\\n");
                     }
-                    self.allocator.free(entry.value.method);
                 }
 
-                // Find adapter and send response
-                if (self.adapters.get(entry.value.adapter_id)) |adapter| {
-                    var output: std.ArrayList(u8) = .{};
-                    defer output.deinit(self.allocator);
+                try output.appendSlice(self.allocator, "\"}]}");
 
-                    try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
-
-                    if (result.comments.len == 0) {
-                        try output.appendSlice(self.allocator, "No comments.");
-                    } else {
-                        try output.appendSlice(self.allocator, "Comments:\\n");
-                        for (result.comments) |comment| {
-                            try output.appendSlice(self.allocator, "- ");
-                            try writeJsonEscaped(output.writer(self.allocator), comment.file_path);
-                            try output.writer(self.allocator).print(":{d} [{s}]: ", .{
-                                comment.line,
-                                comment.line_type,
-                            });
-                            try writeJsonEscaped(output.writer(self.allocator), comment.text);
-                            try output.appendSlice(self.allocator, "\\n");
-                        }
-                    }
-
-                    try output.appendSlice(self.allocator, "\"}]}");
-
-                    try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
-                }
+                try self.sendMcpResponse(adapter, &request_id, entry.value.mcp_id, output.items);
             }
         }
     }
 
     fn completePendingDiffContextRequest(self: *Self, client: *registry.ClientInfo, result: protocol.DiffContextPayload) !void {
-        // Find pending request for this TUI client
-        var found_key: ?[36]u8 = null;
-        var it = self.pending_requests.iterator();
-        while (it.next()) |entry| {
-            if (std.mem.eql(u8, &entry.value_ptr.tui_client_id, &client.id) and
-                std.mem.eql(u8, entry.value_ptr.method, "get_diff_context"))
-            {
-                found_key = entry.key_ptr.*;
-                break;
+        // O(1) lookup using secondary index
+        const method_hash = std.hash.Wyhash.hash(0, "get_diff_context");
+        const key_struct = ClientMethodKey{
+            .client_id = client.id,
+            .method_hash = method_hash,
+        };
+
+        const request_id = self.client_method_index.get(key_struct) orelse {
+            std.log.warn("No pending diff_context request for client {s}", .{&client.id});
+            return;
+        };
+
+        // Remove from both indexes
+        _ = self.client_method_index.remove(key_struct);
+
+        if (self.pending_requests.fetchRemove(request_id)) |entry| {
+            defer {
+                switch (entry.value.mcp_id) {
+                    .string => |s| self.allocator.free(s),
+                    else => {},
+                }
+                self.allocator.free(entry.value.method);
             }
-        }
 
-        if (found_key) |key| {
-            if (self.pending_requests.fetchRemove(key)) |entry| {
-                defer {
-                    switch (entry.value.mcp_id) {
-                        .string => |s| self.allocator.free(s),
-                        else => {},
-                    }
-                    self.allocator.free(entry.value.method);
-                }
+            // Decrement pending request counters
+            if (self.client_pending_counts.getPtr(entry.value.tui_client_id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
+            if (self.adapter_pending_counts.getPtr(entry.value.adapter_id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
 
-                // Find adapter and send response
-                if (self.adapters.get(entry.value.adapter_id)) |adapter| {
-                    var output: std.ArrayList(u8) = .{};
-                    defer output.deinit(self.allocator);
+            // Find adapter and send response
+            if (self.adapters.get(entry.value.adapter_id)) |adapter| {
+                var output: std.ArrayList(u8) = .{};
+                defer output.deinit(self.allocator);
 
-                    // Build JSON response with diff context metadata
-                    try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+                // Build JSON response with diff context metadata
+                try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
 
-                    // Header with diff mode and project info
-                    try output.appendSlice(self.allocator, "Diff Context:\\n");
-                    try output.appendSlice(self.allocator, "  Mode: ");
-                    try writeJsonEscaped(output.writer(self.allocator), result.diff_ref);
-                    try output.appendSlice(self.allocator, "\\n  Project: ");
-                    try writeJsonEscaped(output.writer(self.allocator), result.cwd);
-                    try output.appendSlice(self.allocator, "\\n\\n");
+                // Header with diff mode and project info
+                try output.appendSlice(self.allocator, "Diff Context:\\n");
+                try output.appendSlice(self.allocator, "  Mode: ");
+                try writeJsonEscaped(output.writer(self.allocator), result.diff_ref);
+                try output.appendSlice(self.allocator, "\\n  Project: ");
+                try writeJsonEscaped(output.writer(self.allocator), result.cwd);
+                try output.appendSlice(self.allocator, "\\n\\n");
 
-                    if (result.files.len == 0) {
-                        try output.appendSlice(self.allocator, "No files in diff.");
-                    } else {
-                        try output.writer(self.allocator).print("Files ({d}):\\n", .{result.files.len});
-                        for (result.files) |file| {
-                            // Format: path [status] (+additions/-deletions, N hunks)
-                            try output.appendSlice(self.allocator, "  ");
-                            try writeJsonEscaped(output.writer(self.allocator), file.path);
-                            if (!std.mem.eql(u8, file.old_path, file.path) and file.old_path.len > 0) {
-                                try output.appendSlice(self.allocator, " (was: ");
-                                try writeJsonEscaped(output.writer(self.allocator), file.old_path);
-                                try output.appendSlice(self.allocator, ")");
-                            }
-                            try output.appendSlice(self.allocator, " [");
-                            try output.appendSlice(self.allocator, file.status);
-                            try output.writer(self.allocator).print("] (+{d}/-{d}, {d} hunks)\\n", .{
-                                file.additions,
-                                file.deletions,
-                                file.hunk_count,
-                            });
+                if (result.files.len == 0) {
+                    try output.appendSlice(self.allocator, "No files in diff.");
+                } else {
+                    try output.writer(self.allocator).print("Files ({d}):\\n", .{result.files.len});
+                    for (result.files) |file| {
+                        // Format: path [status] (+additions/-deletions, N hunks)
+                        try output.appendSlice(self.allocator, "  ");
+                        try writeJsonEscaped(output.writer(self.allocator), file.path);
+                        if (!std.mem.eql(u8, file.old_path, file.path) and file.old_path.len > 0) {
+                            try output.appendSlice(self.allocator, " (was: ");
+                            try writeJsonEscaped(output.writer(self.allocator), file.old_path);
+                            try output.appendSlice(self.allocator, ")");
                         }
+                        try output.appendSlice(self.allocator, " [");
+                        try output.appendSlice(self.allocator, file.status);
+                        try output.writer(self.allocator).print("] (+{d}/-{d}, {d} hunks)\\n", .{
+                            file.additions,
+                            file.deletions,
+                            file.hunk_count,
+                        });
                     }
-
-                    try output.appendSlice(self.allocator, "\"}]}");
-
-                    try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
                 }
+
+                try output.appendSlice(self.allocator, "\"}]}");
+
+                try self.sendMcpResponse(adapter, &request_id, entry.value.mcp_id, output.items);
             }
         }
     }
 
     fn completePendingFileDiffRequest(self: *Self, client: *registry.ClientInfo, result: protocol.FileDiffPayload) !void {
-        // Find pending request for this TUI client
-        var found_key: ?[36]u8 = null;
-        var it = self.pending_requests.iterator();
-        while (it.next()) |entry| {
-            if (std.mem.eql(u8, &entry.value_ptr.tui_client_id, &client.id) and
-                std.mem.eql(u8, entry.value_ptr.method, "get_file_diff"))
-            {
-                found_key = entry.key_ptr.*;
-                break;
+        // O(1) lookup using secondary index
+        const method_hash = std.hash.Wyhash.hash(0, "get_file_diff");
+        const key_struct = ClientMethodKey{
+            .client_id = client.id,
+            .method_hash = method_hash,
+        };
+
+        const request_id = self.client_method_index.get(key_struct) orelse {
+            std.log.warn("No pending file_diff request for client {s}", .{&client.id});
+            return;
+        };
+
+        // Remove from both indexes
+        _ = self.client_method_index.remove(key_struct);
+
+        if (self.pending_requests.fetchRemove(request_id)) |entry| {
+            defer {
+                switch (entry.value.mcp_id) {
+                    .string => |s| self.allocator.free(s),
+                    else => {},
+                }
+                self.allocator.free(entry.value.method);
             }
-        }
 
-        if (found_key) |key| {
-            if (self.pending_requests.fetchRemove(key)) |entry| {
-                defer {
-                    switch (entry.value.mcp_id) {
-                        .string => |s| self.allocator.free(s),
-                        else => {},
-                    }
-                    self.allocator.free(entry.value.method);
+            // Decrement pending request counters
+            if (self.client_pending_counts.getPtr(entry.value.tui_client_id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
+            if (self.adapter_pending_counts.getPtr(entry.value.adapter_id)) |count| {
+                count.* = if (count.* > 0) count.* - 1 else 0;
+            }
+
+            // Find adapter and send response
+            if (self.adapters.get(entry.value.adapter_id)) |adapter| {
+                // Use ResponseBuilder with yield points for streaming
+                var builder: ResponseBuilder = .{
+                    .output = .{},
+                };
+                defer builder.output.deinit(self.allocator);
+
+                const writer = builder.output.writer(self.allocator);
+
+                // Build response with periodic yields
+                try writer.writeAll("{\"content\":[{\"type\":\"text\",\"text\":\"");
+                builder.trackWrite(35);
+
+                // File header
+                try writer.writeAll("File: ");
+                try writeJsonEscaped(writer, result.file);
+                builder.trackWrite(result.file.len + 6);
+                builder.maybeYield();
+
+                if (!std.mem.eql(u8, result.old_file, result.file) and result.old_file.len > 0) {
+                    try writer.writeAll(" (was: ");
+                    try writeJsonEscaped(writer, result.old_file);
+                    try writer.writeAll(")");
+                    builder.trackWrite(result.old_file.len + 8);
+                    builder.maybeYield();
                 }
 
-                // Find adapter and send response
-                if (self.adapters.get(entry.value.adapter_id)) |adapter| {
-                    var output: std.ArrayList(u8) = .{};
-                    defer output.deinit(self.allocator);
+                try writer.writeAll("\\nStatus: ");
+                try writer.writeAll(result.status);
+                try writer.writeAll("\\n\\n");
+                builder.trackWrite(result.status.len + 12);
+                builder.maybeYield();
 
-                    // Build response with file diff content
-                    try output.appendSlice(self.allocator, "{\"content\":[{\"type\":\"text\",\"text\":\"");
+                // Output hunks with yield points
+                for (result.hunks) |hunk| {
+                    try writeJsonEscaped(writer, hunk.header);
+                    try writer.writeAll("\\n");
+                    builder.trackWrite(hunk.header.len + 2);
+                    builder.maybeYield();
 
-                    // File header
-                    try output.appendSlice(self.allocator, "File: ");
-                    try writeJsonEscaped(output.writer(self.allocator), result.file);
-                    if (!std.mem.eql(u8, result.old_file, result.file) and result.old_file.len > 0) {
-                        try output.appendSlice(self.allocator, " (was: ");
-                        try writeJsonEscaped(output.writer(self.allocator), result.old_file);
-                        try output.appendSlice(self.allocator, ")");
-                    }
-                    try output.appendSlice(self.allocator, "\\nStatus: ");
-                    try output.appendSlice(self.allocator, result.status);
-                    try output.appendSlice(self.allocator, "\\n\\n");
-
-                    // Output hunks
-                    for (result.hunks) |hunk| {
-                        // Hunk header
-                        try writeJsonEscaped(output.writer(self.allocator), hunk.header);
-                        try output.appendSlice(self.allocator, "\\n");
-
-                        // Lines
-                        for (hunk.lines) |line| {
-                            // Prefix based on line type
-                            if (std.mem.eql(u8, line.line_type, "add")) {
-                                try output.appendSlice(self.allocator, "+");
-                            } else if (std.mem.eql(u8, line.line_type, "delete")) {
-                                try output.appendSlice(self.allocator, "-");
-                            } else {
-                                try output.appendSlice(self.allocator, " ");
-                            }
-                            try writeJsonEscaped(output.writer(self.allocator), line.content);
-                            try output.appendSlice(self.allocator, "\\n");
+                    for (hunk.lines) |line| {
+                        // Prefix based on line type
+                        if (std.mem.eql(u8, line.line_type, "add")) {
+                            try writer.writeAll("+");
+                        } else if (std.mem.eql(u8, line.line_type, "delete")) {
+                            try writer.writeAll("-");
+                        } else {
+                            try writer.writeAll(" ");
                         }
+                        try writeJsonEscaped(writer, line.content);
+                        try writer.writeAll("\\n");
+                        builder.trackWrite(line.content.len + 3);
+                        builder.maybeYield(); // Yield after each line if needed
                     }
-
-                    try output.appendSlice(self.allocator, "\"}]}");
-
-                    try self.sendMcpResponse(adapter, &key, entry.value.mcp_id, output.items);
                 }
+
+                try writer.writeAll("\"}]}");
+
+                try self.sendMcpResponse(adapter, &request_id, entry.value.mcp_id, builder.output.items);
             }
         }
     }
@@ -1463,7 +1682,7 @@ pub const AdapterInfo = struct {
     stream: net.Stream,
     connected_at: i64,
     last_seen: i64,
-    recv_buffer: [8192]u8,
+    recv_buffer: [65536]u8,  // 64KB for larger requests
     recv_len: usize,
 
     pub fn deinit(self: *AdapterInfo) void {

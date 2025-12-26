@@ -18,7 +18,7 @@ pub const ClientInfo = struct {
     files: []protocol.FileInfo,
     connected_at: i64,
     last_seen: i64,
-    recv_buffer: [8192]u8,
+    recv_buffer: [262144]u8,  // 256KB to handle large file diffs
     recv_len: usize,
 
     pub fn deinit(self: *ClientInfo, allocator: Allocator) void {
