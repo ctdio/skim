@@ -1582,7 +1582,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         }
 
         if (session_mode_text) |sm_text| {
-            const sm_style = vaxis.Style{ .fg = .{ .index = 6 }, .bold = true }; // cyan
+            const sm_style = vaxis.Style{ .fg = .{ .index = 7 } }; // white
             var sm_seg = [_]vaxis.Cell.Segment{
                 .{ .text = sm_text, .style = sm_style },
             };
