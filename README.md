@@ -195,7 +195,7 @@ Create or edit `~/.skim/config.json`:
 
 | Feature | Description |
 |---------|-------------|
-| `mcp_enabled` | MCP daemon, adapter, review commands (`R`, `L` keys), review panel |
+| `mcp_enabled` | MCP daemon and adapter for AI agent integration |
 | `acp_enabled` | Agent panel (`,a` key), ACP protocol integration |
 
 When disabled:
@@ -223,8 +223,7 @@ skim daemon start
 # 3. Open your diff in skim
 skim --staged
 
-# 4. Press 'R' to start an AI review (requires SKIM_REVIEW_COMMAND configured)
-# Or press 'L' to view the review log panel
+# 4. Use MCP tools from your AI agent to interact with skim
 ```
 
 ### Daemon Commands
@@ -287,62 +286,12 @@ The skim MCP server exposes these tools to AI agents:
 | `add_comment` | Add a review comment to a specific line |
 | `get_comments` | Get all comments from a skim instance |
 
-### Configuring the Review Command
-
-> The review command requires `mcp_enabled: true` to be set.
-
-Set the `SKIM_REVIEW_COMMAND` environment variable or create `~/.skim/config.json`:
-
-**Environment variable:**
-```bash
-export SKIM_REVIEW_COMMAND='claude --mcp skim "Review this diff for bugs and style issues"'
-```
-
-**Config file (`~/.skim/config.json`):**
-```json
-{
-  "review_command": "your-review-command --client {client_id} --repo {repo}",
-  "experimental": {
-    "mcp_enabled": true
-  }
-}
-```
-
-### Template Variables
-
-The review command supports these template variables:
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `{client_id}` | The skim session ID | `a1b2c3d4-...` |
-| `{repo}` | Path to the git repository | `/home/user/project` |
-| `{diff_ref}` | The diff reference being reviewed | `staged`, `main..feature` |
-| `{adapter_port}` | The MCP adapter port | `9998` |
-
-**Example command with variables:**
-```bash
-export SKIM_REVIEW_COMMAND='my-review-tool --session {client_id} --cwd {repo} --ref {diff_ref}'
-```
-
-### Review Keybindings
-
-> These keybindings only work when `mcp_enabled` is set to `true`.
-
-| Key | Action |
-|-----|--------|
-| `R` | Start AI review (runs SKIM_REVIEW_COMMAND) |
-| `L` | Toggle review log side panel |
-| `Tab` | Toggle panel style (sidebar/dialog) when panel focused |
-| `Ctrl-w h` | Focus left (diff view) from panel |
-| `Ctrl-w l` | Focus right (panel) from diff |
-
 ### Log Files
 
 Skim writes logs to `~/.skim/`:
 - `tui.log` - TUI client logs
 - `daemon.log` - Daemon process logs
 - `mcp.log` - MCP adapter logs
-- `review.log` - Review command output
 
 ---
 

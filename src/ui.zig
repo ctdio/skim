@@ -4,7 +4,6 @@ const rendering_common = @import("rendering/common.zig");
 const render_utils = @import("rendering/utils.zig");
 const state_helpers = @import("state.zig");
 const git = @import("git/diff.zig");
-const review = @import("review.zig");
 
 const App = @import("app.zig").App;
 const graphite = @import("git/graphite.zig");
@@ -773,7 +772,6 @@ pub const UI = struct {
             .help => "-- HELP --",
             .branch_selection => "-- BRANCH SELECTION --",
             .mcp_status => "-- MCP STATUS --",
-            .review_log => "-- REVIEW LOG --",
             .graphite_stack => "-- GRAPHITE STACK --",
             .model_selection => "-- MODEL SELECTION --",
             .agent_selection => "-- AGENT SELECTION --",
@@ -819,7 +817,6 @@ pub const UI = struct {
             .help => "j/k:Scroll  |  Ctrl-d/u:Page  |  ?/ESC:Close",
             .branch_selection => "j/k:Move  |  Enter:Select  |  ESC:Back",
             .mcp_status => "q/ESC:Close",
-            .review_log => "j/k:Scroll  |  d/u:Page  |  Tab:Style  |  q:Exit  |  L:Close",
             .graphite_stack => "j/k:Move  |  Enter:Select  |  ESC:Back  |  [s/]s:Navigate",
             .model_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .agent_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
@@ -939,22 +936,6 @@ pub const UI = struct {
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
             }
 
-            // Show review status if a review is in progress
-            if (app.review_process) |proc| {
-                const review_status = review.checkStatus(proc);
-                const review_text = switch (review_status) {
-                    .running => "  [Review...]",
-                    .completed => "  [Review done]",
-                    .failed => "  [Review failed]",
-                };
-                const review_style: vaxis.Style = switch (review_status) {
-                    .running => .{ .fg = Color.yellow },
-                    .completed => .{ .fg = Color.green },
-                    .failed => .{ .fg = Color.red },
-                };
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, review_text), .style = review_style });
-            }
-
             // Show temporary status message (if any)
             if (app.state.status_message) |msg| {
                 var msg_buf: [128]u8 = undefined;
@@ -992,118 +973,6 @@ pub const UI = struct {
         _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0 )});
     }
 
-    /// Render the review log popup
-    pub fn renderReviewLogPopup(app: *App, win: vaxis.Window) !void {
-        // Calculate popup dimensions - similar to help popup
-        const popup_width = @min(100, win.width - 4);
-        const popup_height = @min(35, win.height - 4);
-        const x_offset = if (win.width > popup_width) (win.width - popup_width) / 2 else 0;
-        const y_offset = if (win.height > popup_height) (win.height - popup_height) / 2 else 0;
-
-        const popup_win = win.child(.{
-            .x_off = x_offset,
-            .y_off = y_offset,
-            .width = @intCast(popup_width),
-            .height = @intCast(popup_height),
-            .border = .{
-                .where = .all,
-                .style = .{
-                    .fg = .{ .index = 6 }, // cyan
-                },
-            },
-        });
-
-        popup_win.clear();
-
-        // Fill with solid background
-        const bg_cell = vaxis.Cell{
-            .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{
-                .bg = .{ .index = 0 }, // black background
-            },
-        };
-        popup_win.fill(bg_cell);
-
-        // Title
-        const title = "Review Log";
-        var title_seg = [_]vaxis.Cell.Segment{
-            .{ .text = title, .style = .{ .fg = .{ .index = 6 }, .bold = true } },
-        };
-        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0 )});
-
-        // Get log content
-        const content = app.state.review_log_content orelse "No review log yet. Press R to start a review.";
-
-        // Calculate visible range
-        const max_visible_rows = popup_height - 3; // Account for borders and title
-        const wrap_width = if (popup_width > 3) popup_width - 3 else 1; // Account for left margin and right padding
-
-        // Build wrapped lines
-        var wrapped_lines: std.ArrayList([]const u8) = .{};
-        defer wrapped_lines.deinit(app.allocator);
-
-        var source_line_iter = std.mem.splitScalar(u8, content, '\n');
-        while (source_line_iter.next()) |source_line| {
-            if (source_line.len == 0) {
-                // Empty line
-                wrapped_lines.append(app.allocator, "") catch continue;
-            } else {
-                // Wrap long lines
-                var remaining = source_line;
-                while (remaining.len > 0) {
-                    const chunk_len = @min(remaining.len, wrap_width);
-                    wrapped_lines.append(app.allocator, remaining[0..chunk_len]) catch break;
-                    remaining = remaining[chunk_len..];
-                }
-            }
-        }
-
-        // Update line count for scrolling (use wrapped count)
-        app.state.review_log_line_count = wrapped_lines.items.len;
-
-        // Calculate max valid scroll and clamp
-        const max_scroll = if (wrapped_lines.items.len > max_visible_rows)
-            wrapped_lines.items.len - max_visible_rows
-        else
-            0;
-        if (app.state.review_log_scroll > max_scroll) {
-            app.state.review_log_scroll = max_scroll;
-        }
-        const scroll_offset = app.state.review_log_scroll;
-
-        // Render visible wrapped lines
-        var row: usize = 2; // Start after title and blank line
-        const start_line = @min(scroll_offset, wrapped_lines.items.len);
-        const end_line = @min(start_line + max_visible_rows, wrapped_lines.items.len);
-
-        if (start_line >= wrapped_lines.items.len) return;
-        for (wrapped_lines.items[start_line..end_line]) |line| {
-            if (row >= max_visible_rows + 1) break;
-
-            var line_seg = [_]vaxis.Cell.Segment{
-                .{ .text = line, .style = .{ .fg = .{ .index = 7 } } },
-            };
-            _ = popup_win.print(&line_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 )});
-            row += 1;
-        }
-
-        // Show scroll indicators
-        if (scroll_offset > 0) {
-            var up_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "▲ (more above)", .style = .{ .fg = .{ .index = 8 } } },
-            };
-            _ = popup_win.print(&up_seg, .{ .row_offset = @intCast(1 )});
-        }
-
-        const total_lines = wrapped_lines.items.len;
-        if (scroll_offset + max_visible_rows < total_lines) {
-            var down_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "▼ (more below)", .style = .{ .fg = .{ .index = 8 } } },
-            };
-            _ = popup_win.print(&down_seg, .{ .row_offset = @intCast(popup_height - 2 )});
-        }
-    }
-
     /// Render a vertical divider line
     pub fn renderVerticalDivider(win: vaxis.Window) !void {
         const divider_style = vaxis.Style{
@@ -1118,141 +987,4 @@ pub const UI = struct {
         }
     }
 
-    /// Render the review log side panel
-    pub fn renderReviewPanel(app: *App, win: vaxis.Window) !void {
-        if (win.width == 0 or win.height == 0) return;
-
-        win.clear();
-
-        // Title bar - different style when focused (review_log mode)
-        const is_focused = app.mode == .review_log;
-        const title = if (is_focused) " Review Log [focused] " else " Review Log ";
-        const title_style = vaxis.Style{
-            .fg = .{ .index = 0 }, // black
-            .bg = if (is_focused) .{ .index = 3 } else .{ .index = 6 }, // yellow when focused, cyan otherwise
-            .bold = true,
-        };
-
-        // Fill title row with background using frame buffer for proper memory management
-        const fill_text = try RenderUtils.frameTextSlice(app, win.width);
-        @memset(fill_text, ' ');
-        var title_bg_seg = [_]vaxis.Cell.Segment{
-            .{ .text = fill_text, .style = title_style },
-        };
-        _ = win.print(&title_bg_seg, .{ .row_offset = @intCast(0 )});
-
-        // Print title text
-        var title_seg = [_]vaxis.Cell.Segment{
-            .{ .text = title, .style = title_style },
-        };
-        _ = win.print(&title_seg, .{ .row_offset = @intCast(0 )});
-
-        // Show status indicator if review is running
-        if (app.review_process) |proc| {
-            const status_text = switch (proc.status) {
-                .running => " ● Running",
-                .completed => " ✓ Done",
-                .failed => " ✗ Failed",
-            };
-            const status_style = vaxis.Style{
-                .fg = switch (proc.status) {
-                    .running => if (is_focused) .{ .index = 0 } else .{ .index = 3 }, // black on yellow bg, yellow on cyan
-                    .completed => .{ .index = 2 }, // green
-                    .failed => .{ .index = 1 }, // red
-                },
-                .bg = if (is_focused) .{ .index = 3 } else .{ .index = 6 },
-            };
-            // Use display width (codepoints) not byte length for Unicode status text
-            const title_width = std.unicode.utf8CountCodepoints(title) catch title.len;
-            const status_width = std.unicode.utf8CountCodepoints(status_text) catch status_text.len;
-            const status_col = if (win.width > title_width + status_width)
-                win.width - status_width
-            else
-                title_width;
-            var status_seg = [_]vaxis.Cell.Segment{
-                .{ .text = status_text, .style = status_style },
-            };
-            _ = win.print(&status_seg, .{ .row_offset = 0, .col_offset = @intCast(status_col )});
-        }
-
-        // Get log content
-        const content = app.state.review_log_content orelse "No review log yet.\n\nPress R to start a review.";
-
-        // Calculate visible range
-        const max_visible_rows = if (win.height > 2) win.height - 2 else 1; // Account for title and bottom margin
-        const wrap_width = if (win.width > 2) win.width - 2 else 1; // Leave margin on left (for divider overflow) and right
-
-        // Build wrapped lines
-        var wrapped_lines: std.ArrayList([]const u8) = .{};
-        defer wrapped_lines.deinit(app.allocator);
-
-        var source_line_iter = std.mem.splitScalar(u8, content, '\n');
-        while (source_line_iter.next()) |source_line| {
-            if (source_line.len == 0) {
-                wrapped_lines.append(app.allocator, "") catch continue;
-            } else {
-                var remaining = source_line;
-                while (remaining.len > 0) {
-                    const chunk_len = @min(remaining.len, wrap_width);
-                    wrapped_lines.append(app.allocator, remaining[0..chunk_len]) catch break;
-                    remaining = remaining[chunk_len..];
-                }
-            }
-        }
-
-        // Update line count
-        app.state.review_log_line_count = wrapped_lines.items.len;
-
-        // Calculate max valid scroll position
-        const max_scroll = if (wrapped_lines.items.len > max_visible_rows)
-            wrapped_lines.items.len - max_visible_rows
-        else
-            0;
-
-        // Tail-follow: auto-scroll to bottom if enabled and review is running
-        if (app.state.review_log_tail_follow) {
-            if (app.review_process) |proc| {
-                if (proc.status == .running) {
-                    app.state.review_log_scroll = max_scroll;
-                }
-            }
-        }
-
-        // Clamp scroll position to valid range (content may have changed)
-        if (app.state.review_log_scroll > max_scroll) {
-            app.state.review_log_scroll = max_scroll;
-        }
-
-        const scroll_offset = app.state.review_log_scroll;
-
-        // Render visible wrapped lines
-        var row: usize = 1; // Start after title
-        const start_line = @min(scroll_offset, wrapped_lines.items.len);
-        const end_line = @min(start_line + max_visible_rows, wrapped_lines.items.len);
-
-        if (start_line < wrapped_lines.items.len) {
-            for (wrapped_lines.items[start_line..end_line]) |line| {
-                if (row > max_visible_rows) break;
-
-                var line_seg = [_]vaxis.Cell.Segment{
-                    .{ .text = line, .style = .{ .fg = .{ .index = 7 } } },
-                };
-                _ = win.print(&line_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 )});
-                row += 1;
-            }
-        }
-
-        // Show scroll indicator at bottom if there's more content
-        if (scroll_offset > 0 or (scroll_offset + max_visible_rows < wrapped_lines.items.len)) {
-            const indicator = if (scroll_offset + max_visible_rows < wrapped_lines.items.len)
-                "▼ more"
-            else
-                "▲ top";
-            const indicator_col = if (win.width > indicator.len) win.width - indicator.len - 1 else 0;
-            var indicator_seg = [_]vaxis.Cell.Segment{
-                .{ .text = indicator, .style = .{ .fg = .{ .index = 8 } } },
-            };
-            _ = win.print(&indicator_seg, .{ .row_offset = @intCast(win.height - 1), .col_offset = @intCast(indicator_col )});
-        }
-    }
 };

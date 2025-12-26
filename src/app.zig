@@ -34,14 +34,12 @@ const help_mode = @import("modes/help_mode.zig");
 const branch_selection_mode = @import("modes/branch_selection_mode.zig");
 const mcp_status_mode = @import("modes/mcp_status_mode.zig");
 const mcp_status = @import("mcp_status.zig");
-const review_log_mode = @import("modes/review_log_mode.zig");
 const graphite_mode = @import("modes/graphite_mode.zig");
 const model_selection_mode = @import("modes/model_selection_mode.zig");
 const agent_selection_mode = @import("modes/agent_selection_mode.zig");
 const agent_mode = @import("modes/agent_mode.zig");
 const agent = @import("agent/agent.zig");
 const app_config = @import("config.zig");
-const review = @import("review.zig");
 const graphite = @import("git/graphite.zig");
 const acp = @import("acp/acp.zig");
 
@@ -103,7 +101,6 @@ pub const App = struct {
     needs_async_highlight: bool, // Flag to trigger async highlighting for current file
     mcp: ?*mcp_client.McpClient, // MCP client for server connection
     mcp_port: ?u16, // Port to connect to MCP server
-    review_process: ?*review.ReviewProcess, // Background review process
     blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
     acp_manager: ?*acp.AcpManager, // ACP agent session manager
     acp_connect_thread: ?std.Thread, // Background thread for ACP connection
@@ -120,7 +117,6 @@ pub const App = struct {
         help, // Help overlay
         branch_selection, // Branch selection menu (when empty)
         mcp_status, // MCP server connection status
-        review_log, // Review log viewer
         graphite_stack, // Graphite stack picker
         agent, // Agent chat panel
         model_selection, // AI model selection menu
@@ -174,13 +170,6 @@ pub const App = struct {
         help_scroll_offset: usize, // Scroll position in help overlay
         expanded_comments: std.AutoHashMap(usize, void), // Set of expanded comment indices
 
-        // Review log viewer state
-        review_log_scroll: usize, // Scroll position in review log viewer
-        review_log_content: ?[]const u8, // Cached review log content
-        review_log_line_count: usize, // Number of lines in review log (wrapped)
-        review_log_tail_follow: bool, // Auto-scroll to bottom when new content arrives
-        review_panel_open: bool, // Whether the review log side panel is visible
-        review_panel_style: ReviewPanelStyle, // Sidebar or dialog style
         pending_ctrl_w: bool, // Waiting for second key in Ctrl+w chord
         pending_leader: bool, // Waiting for second key after leader (,)
 
@@ -220,11 +209,6 @@ pub const App = struct {
         const ViewMode = enum {
             unified,
             side_by_side,
-        };
-
-        const ReviewPanelStyle = enum {
-            sidebar,
-            dialog,
         };
 
         const HunkViewMode = enum {
@@ -392,12 +376,6 @@ pub const App = struct {
                 .filtered_branches = .{},
                 .help_scroll_offset = 0,
                 .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
-                .review_log_scroll = 0,
-                .review_log_content = null,
-                .review_log_line_count = 0,
-                .review_log_tail_follow = true, // Start with tail-follow enabled
-                .review_panel_open = false,
-                .review_panel_style = .sidebar,
                 .pending_ctrl_w = false,
                 .pending_leader = false,
                 .status_message = null,
@@ -435,7 +413,6 @@ pub const App = struct {
             .needs_async_highlight = true, // Start with highlighting needed for first file
             .mcp = null,
             .mcp_port = if (@hasField(@TypeOf(config), "mcp_port")) config.mcp_port else null,
-            .review_process = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
             .acp_manager = null,
             .acp_connect_thread = null,
@@ -506,10 +483,6 @@ pub const App = struct {
             mcp.deinit();
             self.allocator.destroy(mcp);
         }
-        // Clean up review process
-        if (self.review_process) |proc| {
-            proc.deinit();
-        }
         // Clean up ACP connection thread and context
         if (self.acp_connect_thread) |thread| {
             thread.detach();
@@ -531,10 +504,6 @@ pub const App = struct {
             entry.value_ptr.deinit();
         }
         self.blame_cache.deinit();
-        // Clean up review log content
-        if (self.state.review_log_content) |content| {
-            self.allocator.free(content);
-        }
         self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.writer());
         self.tty.deinit();
@@ -757,14 +726,13 @@ pub const App = struct {
             // AND no ACP connection in progress or active session
             // This allows async operations to trigger immediate renders
             const mcp_active = if (self.mcp) |mcp| mcp.connected or mcp.needsReconnect() else false;
-            const has_active_review = if (self.review_process) |proc| proc.status == .running and self.state.review_panel_open else false;
             const stats_loading = self.state.menu_stats_loading;
             const agent_panel_visible = if (self.state.agent_state) |as| as.visible else false;
             // Consider ACP "active" during connection phases and communication
             // This ensures non-blocking event loop while connecting (for responsive UI)
             // Note: .connected is included because createSession() runs AFTER connect() sets .connected
             const acp_active = if (self.acp_manager) |mgr| mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected or mgr.status == .prompting or (agent_panel_visible and mgr.status == .session_active) else false;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !has_active_review and !stats_loading and !acp_active;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !stats_loading and !acp_active;
             if (should_poll) {
                 loop.pollEvent();
             }
@@ -812,8 +780,7 @@ pub const App = struct {
                 had_events = true;
             }
 
-            // Check review process status and clear expired messages
-            self.checkReviewStatus();
+            // Clear expired messages
             self.clearExpiredStatusMessage();
 
             // Poll ACP agent for updates
@@ -1090,12 +1057,6 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
-                .review_log => {
-                    self.mode = .normal;
-                    self.state.review_log_scroll = 0;
-                    self.needs_render = true;
-                    return;
-                },
                 .graphite_stack => {
                     self.mode = .normal;
                     self.needs_render = true;
@@ -1155,7 +1116,6 @@ pub const App = struct {
             .help => try help_mode.handleKey(self, key),
             .branch_selection => try branch_selection_mode.handleKey(self, key),
             .mcp_status => try mcp_status_mode.handleKey(self, key),
-            .review_log => try review_log_mode.handleKey(self, key),
             .graphite_stack => try graphite_mode.handleKey(self, key),
             .model_selection => try model_selection_mode.handleKey(self, key),
             .agent_selection => try agent_selection_mode.handleKey(self, key),
@@ -2743,37 +2703,6 @@ pub const App = struct {
                     });
                     try agent.renderAgentPanel(self, agent_win);
                 }
-            } else if (self.state.review_panel_open and self.state.review_panel_style == .sidebar) {
-                const panel_width = @min(win.width / 3, 80); // Max 80 chars or 1/3 of screen
-                const divider_width: usize = 1;
-                const diff_width = win.width - panel_width - divider_width;
-
-                // Diff content on left
-                const content_win = win.child(.{
-                    .x_off = 0,
-                    .y_off = Layout.header_height,
-                    .width = @intCast(diff_width),
-                    .height = @intCast(content_height),
-                });
-                try self.renderContent(content_win);
-
-                // Vertical divider
-                const divider_win = win.child(.{
-                    .x_off = @intCast(diff_width),
-                    .y_off = Layout.header_height,
-                    .width = @intCast(divider_width),
-                    .height = @intCast(content_height),
-                });
-                try UI.renderVerticalDivider(divider_win);
-
-                // Review panel on right
-                const panel_win = win.child(.{
-                    .x_off = @intCast(diff_width + divider_width),
-                    .y_off = Layout.header_height,
-                    .width = @intCast(panel_width),
-                    .height = @intCast(content_height),
-                });
-                try UI.renderReviewPanel(self, panel_win);
             } else {
                 // Full width content
                 const content_win = win.child(.{
@@ -2808,11 +2737,6 @@ pub const App = struct {
         // Render MCP status overlay if in mcp_status mode
         if (self.mode == .mcp_status) {
             try mcp_status.renderMcpStatusPopup(self, win);
-        }
-
-        // Render review log dialog if open in dialog mode
-        if (self.state.review_panel_open and self.state.review_panel_style == .dialog) {
-            try UI.renderReviewLogPopup(self, win);
         }
 
         // Render graphite stack dialog if in graphite_stack mode
@@ -3275,54 +3199,6 @@ pub const App = struct {
     // Review Methods
     // =========================================================================
 
-    /// Start an AI review using the configured review command.
-    /// The review runs in the background, outputting to ~/.skim/review.log
-    pub fn startReview(self: *App) !void {
-        // Check if a review is already in progress
-        if (self.review_process) |proc| {
-            const status = review.checkStatus(proc);
-            if (status == .running) {
-                self.showStatusMessage("Review already in progress");
-                return;
-            }
-            // Previous review finished, clean it up
-            proc.deinit();
-            self.review_process = null;
-        }
-
-        // Get the review command from config
-        const review_command = app_config.getReviewCommand(self.allocator) catch |err| {
-            std.log.err("Failed to get review command: {any}", .{err});
-            self.showStatusMessage("Failed to load review config");
-            return;
-        };
-
-        if (review_command == null) {
-            self.showStatusMessage("No review command configured. Set SKIM_REVIEW_COMMAND");
-            return;
-        }
-        defer self.allocator.free(review_command.?);
-
-        // Build the review context
-        const client_id = if (self.mcp) |mcp| mcp.session_id orelse "no-mcp-session" else "no-mcp-client";
-        const ctx = app_config.ReviewContext{
-            .client_id = client_id,
-            .repo = self.state.git_repo_root,
-            .diff_ref = self.getDiffRefString(),
-            .adapter_port = 9998, // Default MCP adapter port
-        };
-
-        // Start the review process
-        self.review_process = review.start(self.allocator, review_command.?, ctx) catch |err| {
-            std.log.err("Failed to start review: {any}", .{err});
-            self.showStatusMessage("Failed to start review");
-            return;
-        };
-
-        self.showStatusMessage("Review started...");
-        self.needs_render = true;
-    }
-
     /// Background thread function for ACP connection
     fn acpConnectThreadFn(ctx: *AcpConnectContext) void {
         std.log.info("ACP: Background connection thread started", .{});
@@ -3734,116 +3610,6 @@ pub const App = struct {
 
         // Clear processed messages
         mgr.clearMessages();
-    }
-
-    /// Toggle the review log side panel
-    pub fn toggleReviewPanel(self: *App) !void {
-        self.state.review_panel_open = !self.state.review_panel_open;
-        if (self.state.review_panel_open) {
-            try self.loadReviewLogContent();
-            // Enable tail-follow and start at bottom
-            self.state.review_log_tail_follow = true;
-            // Automatically focus the panel when opened
-            self.mode = .review_log;
-        } else {
-            // Exit review_log mode when closing panel
-            if (self.mode == .review_log) {
-                self.mode = .normal;
-            }
-        }
-        self.needs_render = true;
-    }
-
-    /// Toggle between sidebar and dialog panel styles
-    pub fn toggleReviewPanelStyle(self: *App) !void {
-        self.state.review_panel_style = switch (self.state.review_panel_style) {
-            .sidebar => .dialog,
-            .dialog => .sidebar,
-        };
-        // Open panel if not already open
-        if (!self.state.review_panel_open) {
-            self.state.review_panel_open = true;
-            try self.loadReviewLogContent();
-            // Enable tail-follow
-            self.state.review_log_tail_follow = true;
-        }
-        self.needs_render = true;
-    }
-
-    /// Scroll review panel down one line
-    pub fn scrollReviewPanelDown(self: *App) void {
-        const max_scroll = if (self.state.review_log_line_count > 20)
-            self.state.review_log_line_count - 20
-        else
-            0;
-        if (self.state.review_log_scroll < max_scroll) {
-            self.state.review_log_scroll += 1;
-            self.needs_render = true;
-        }
-    }
-
-    /// Scroll review panel up one line
-    pub fn scrollReviewPanelUp(self: *App) void {
-        if (self.state.review_log_scroll > 0) {
-            self.state.review_log_scroll -= 1;
-            self.needs_render = true;
-        }
-    }
-
-    /// Scroll review panel to bottom
-    pub fn scrollReviewPanelToBottom(self: *App) void {
-        const max_scroll = if (self.state.review_log_line_count > 20)
-            self.state.review_log_line_count - 20
-        else
-            0;
-        self.state.review_log_scroll = max_scroll;
-        self.needs_render = true;
-    }
-
-    /// Load/reload the review log content from disk
-    pub fn loadReviewLogContent(self: *App) !void {
-        // Free old content if any
-        if (self.state.review_log_content) |old| {
-            self.allocator.free(old);
-        }
-
-        // Read the log file
-        const content = try review.readLogContents(self.allocator);
-        self.state.review_log_content = content;
-
-        // Count lines
-        var line_count: usize = 1;
-        for (content) |c| {
-            if (c == '\n') line_count += 1;
-        }
-        self.state.review_log_line_count = line_count;
-    }
-
-    /// Check and update review process status (called from main loop)
-    pub fn checkReviewStatus(self: *App) void {
-        if (self.review_process) |proc| {
-            const old_status = proc.status;
-            const new_status = review.checkStatus(proc);
-
-            // Auto-reload log if panel is open while review is running
-            if (self.state.review_panel_open and old_status == .running) {
-                self.loadReviewLogContent() catch {};
-                self.needs_render = true;
-            }
-
-            if (old_status == .running and new_status != .running) {
-                // Review just finished - reload log one more time
-                if (self.state.review_panel_open) {
-                    self.loadReviewLogContent() catch {};
-                }
-                if (new_status == .completed) {
-                    self.showStatusMessage("Review complete");
-                } else {
-                    self.showStatusMessage("Review failed");
-                }
-                self.needs_render = true;
-            }
-        }
     }
 
     /// Get the diff reference string for display

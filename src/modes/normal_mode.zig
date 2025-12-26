@@ -147,18 +147,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // Check which panels are visible and their positions
         const agent_panel_visible = if (app.state.agent_state) |as| as.visible else false;
         const agent_on_left = if (app.state.agent_state) |as| as.panel_side == .left else false;
-        const review_panel_visible = app_config.isMcpEnabled(app.allocator) and app.state.review_panel_open;
-        // Review panel is always on the right
 
         switch (effective_key) {
             'l' => {
-                // Focus right - check what's on the right
-                // Agent panel (if on right) takes priority, then review panel
+                // Focus right - check what's on the right (agent panel if on right)
                 if (app_config.isAcpEnabled(app.allocator) and agent_panel_visible and !agent_on_left) {
                     app.mode = .agent;
-                    app.needs_render = true;
-                } else if (review_panel_visible) {
-                    app.mode = .review_log;
                     app.needs_render = true;
                 }
             },
@@ -171,12 +165,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // Otherwise no-op (diff is already focused)
             },
             'w' => {
-                // Cycle focus - prioritize visible panels
+                // Cycle focus - switch to agent panel if visible
                 if (app_config.isAcpEnabled(app.allocator) and agent_panel_visible) {
                     app.mode = .agent;
-                    app.needs_render = true;
-                } else if (review_panel_visible) {
-                    app.mode = .review_log;
                     app.needs_render = true;
                 }
             },
@@ -330,18 +321,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.updateCurrentFileAndTriggerHighlighting();
         },
         '?' => app.mode = .help, // Show help overlay
-        'R' => {
-            // Start AI review (MCP feature)
-            if (app_config.isMcpEnabled(app.allocator)) {
-                try app.startReview();
-            }
-        },
-        'L' => {
-            // Toggle review log side panel (MCP feature)
-            if (app_config.isMcpEnabled(app.allocator)) {
-                try app.toggleReviewPanel();
-            }
-        },
         'a' => try app.stageCurrentFile(), // Stage the current file (git add)
         'A' => try app.stageAllFiles(), // Stage all files (git add -A)
         'o' => app.toggleCommentUnderCursorExpanded(), // Toggle comment expand/collapse
