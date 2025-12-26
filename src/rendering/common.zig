@@ -101,3 +101,88 @@ pub const FrameChars = struct {
 // Buffer size constants
 pub const HEADER_BUFFER_WIDTH = 4096;
 pub const FRAME_TEXT_CAPACITY = 262144; // 256 KiB per frame scratch space
+
+// =============================================================================
+// Scrollbar
+// =============================================================================
+
+pub const ScrollbarInfo = struct {
+    thumb_start: usize,
+    thumb_end: usize,
+    show_top_arrow: bool,
+    show_bottom_arrow: bool,
+};
+
+pub fn calculateScrollbar(
+    viewport_height: usize,
+    total_lines: usize,
+    scroll_offset: usize,
+) ScrollbarInfo {
+    if (total_lines == 0 or viewport_height == 0) {
+        return .{
+            .thumb_start = 0,
+            .thumb_end = 0,
+            .show_top_arrow = false,
+            .show_bottom_arrow = false,
+        };
+    }
+
+    // Thumb size: proportional to viewport vs total
+    const thumb_size = @max(1, (viewport_height * viewport_height) / total_lines);
+
+    // Thumb position: proportional to scroll offset
+    const scrollable_range = if (total_lines > viewport_height)
+        total_lines - viewport_height
+    else
+        0;
+
+    const thumb_pos = if (scrollable_range > 0)
+        (scroll_offset * (viewport_height - thumb_size)) / scrollable_range
+    else
+        0;
+
+    // Clamp thumb position to ensure it stays within viewport
+    const max_thumb_start = if (viewport_height > thumb_size) viewport_height - thumb_size else 0;
+    const clamped_thumb_pos = @min(thumb_pos, max_thumb_start);
+
+    return .{
+        .thumb_start = clamped_thumb_pos,
+        .thumb_end = @min(clamped_thumb_pos + thumb_size, viewport_height),
+        .show_top_arrow = scroll_offset > 0,
+        .show_bottom_arrow = scroll_offset < scrollable_range,
+    };
+}
+
+pub fn renderScrollbar(win: vaxis.Window, info: ScrollbarInfo) void {
+    if (win.width == 0 or win.height == 0) return;
+
+    const col = win.width - 1; // Rightmost column
+    const track_style = vaxis.Style{ .fg = .{ .index = 8 }, .dim = true }; // very dim gray
+    const thumb_style = vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray (no bold)
+    const arrow_style = vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray
+
+    for (0..win.height) |row| {
+        var char: []const u8 = undefined;
+        var style: vaxis.Style = undefined;
+
+        // Inset arrows by 1 row to avoid covering content at edges
+        if (row == 1 and info.show_top_arrow) {
+            char = "▴"; // Smaller, subtler arrow
+            style = arrow_style;
+        } else if (row == win.height - 2 and info.show_bottom_arrow and win.height > 2) {
+            char = "▾"; // Smaller, subtler arrow
+            style = arrow_style;
+        } else if (row >= info.thumb_start and row < info.thumb_end) {
+            char = "│"; // Lighter bar for thumb
+            style = thumb_style;
+        } else {
+            char = "│"; // Light vertical line for track
+            style = track_style;
+        }
+
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = char, .width = 1 },
+            .style = style,
+        });
+    }
+}

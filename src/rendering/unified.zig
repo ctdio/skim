@@ -198,6 +198,13 @@ pub const UnifiedRenderer = struct {
             _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
         }
 
+        // Render scrollbar if content is scrollable
+        const total_lines = app.state.line_map.records.len;
+        if (total_lines > win.height) {
+            const scrollbar_info = rendering_common.calculateScrollbar(win.height, total_lines, app.state.global_scroll_offset);
+            rendering_common.renderScrollbar(win, scrollbar_info);
+        }
+
         // Update current_file_idx based on what's at the top of viewport (for sticky header)
         // Use scroll offset instead of cursor position for more accurate header display
         app.state.current_file_idx = app.state.line_map.getFileIndexForLine(app.state.global_scroll_offset) orelse 0;

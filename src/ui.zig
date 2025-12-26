@@ -836,9 +836,7 @@ pub const UI = struct {
             },
         };
 
-        // Get global position info
-        const total_lines = app.getTotalGlobalLines();
-        const current_line = app.state.global_cursor_line + 1; // Display 1-indexed
+        // Get file position info (line number shown via scrollbar)
         const total_files = app.state.files.len;
         const current_file = app.state.current_file_idx + 1; // Display 1-indexed
 
@@ -927,8 +925,9 @@ pub const UI = struct {
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, count_str), .style = .{} });
             }
 
-            var buf: [128]u8 = undefined;
-            const pos_info = try std.fmt.bufPrint(&buf, "  Line {d}/{d} (File {d}/{d})", .{ current_line, total_lines, current_file, total_files });
+            // Only show file position (line number shown via scrollbar)
+            var buf: [64]u8 = undefined;
+            const pos_info = try std.fmt.bufPrint(&buf, "  File {d}/{d}", .{ current_file, total_files });
             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, pos_info), .style = .{} });
 
             // Show search info if there are active matches in normal mode
