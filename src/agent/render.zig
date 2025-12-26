@@ -431,16 +431,15 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     } else " Not connected";
 
     const title_style = vaxis.Style{
-        .fg = .{ .index = 0 }, // black
-        .bg = if (is_focused) .{ .index = 5 } else .{ .index = 4 }, // magenta when focused, blue otherwise
+        .fg = .{ .index = 7 }, // white
         .bold = true,
     };
 
-    // Fill title row with background
+    // Clear title row (no background)
     for (0..win.width) |col| {
         win.writeCell(@intCast(col), 0, .{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = title_style,
+            .style = .{},
         });
     }
 
@@ -455,13 +454,12 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
         .fg = if (app.acp_manager) |mgr|
             switch (mgr.status) {
                 .session_active => .{ .index = 2 }, // green
-                .discovering, .connecting, .connected, .prompting => .{ .index = 3 }, // yellow (still loading)
+                .discovering, .connecting, .connected, .prompting => .{ .index = 8 }, // dim gray
                 .disconnected => .{ .index = 7 }, // white
                 .failed => .{ .index = 1 }, // red
             }
         else
             .{ .index = 7 },
-        .bg = if (is_focused) .{ .index = 5 } else .{ .index = 4 },
     };
 
     const status_width = std.unicode.utf8CountCodepoints(status_text) catch status_text.len;
@@ -499,7 +497,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 else => "Initializing...",
             } else "Initializing...";
             const loading_style = vaxis.Style{
-                .fg = .{ .index = 3 }, // yellow
+                .fg = .{ .index = 8 }, // dim gray
                 .bold = true,
             };
             var seg = [_]vaxis.Cell.Segment{
