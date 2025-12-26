@@ -10,19 +10,25 @@ const codec = @import("codec.zig");
 // Terminal Registry
 // =============================================================================
 
-/// Terminal entry for tracking agent-spawned terminals
+/// End marker for detecting command completion
+const END_MARKER = "___SKIM_CMD_END_";
+
+/// Terminal entry for tracking agent-spawned terminals.
+/// Uses marker-based completion detection for reliable output capture.
 const TerminalEntry = struct {
     allocator: Allocator,
     child: std.process.Child,
+    marker_id: u64,
     output_buffer: std.ArrayListUnmanaged(u8),
     output_byte_limit: u32,
+    completed: bool, // Marker was detected
     exited: bool,
     exit_code: ?u32,
     signal: ?u32,
 
     fn deinit(self: *TerminalEntry) void {
         self.output_buffer.deinit(self.allocator);
-        // Child process cleanup happens when terminated/killed
+        _ = self.child.kill() catch {};
     }
 };
 
@@ -67,6 +73,7 @@ pub const AcpManager = struct {
     // Terminal registry for managing agent-spawned terminals
     terminals: TerminalRegistry,
     next_terminal_id: u64,
+    next_marker_id: u64,
 
     pub const Status = enum {
         disconnected,
@@ -214,6 +221,7 @@ pub const AcpManager = struct {
             .next_request_id = 1000, // Start high to avoid collision with client IDs
             .terminals = .{},
             .next_terminal_id = 1,
+            .next_marker_id = 1,
         };
     }
 
@@ -651,7 +659,8 @@ pub const AcpManager = struct {
     // Terminal Handlers
     // =========================================================================
 
-    /// Handle terminal/create request
+    /// Handle terminal/create request - spawns shell per command with marker-based completion.
+    /// Uses marker detection to reliably capture all output.
     fn handleTerminalCreate(self: *AcpManager, acp: *client.Client, id: codec.JsonRpcId, params_json: ?[]const u8) !void {
         const pjson = params_json orelse {
             try acp.transport.sendErrorResponse(id, -32600, "Missing params");
@@ -664,27 +673,56 @@ pub const AcpManager = struct {
         };
         defer params.deinit(self.allocator);
 
-        std.log.info("ACP Manager: terminal/create command={s} args={d}", .{ params.command, params.args.len });
+        std.log.info("ACP Manager: terminal/create command={s} args={d} env={d}", .{ params.command, params.args.len, params.env.len });
 
-        // Generate terminal ID
+        // Generate terminal ID and marker ID
         const terminal_id = std.fmt.allocPrint(self.allocator, "term_{d}", .{self.next_terminal_id}) catch {
             try acp.transport.sendErrorResponse(id, -32603, "Out of memory");
             return;
         };
         self.next_terminal_id += 1;
 
-        // Build the full command string for shell execution
-        // We need to run through a shell to handle redirections, pipes, &&, etc.
+        const marker_id = self.next_marker_id;
+        self.next_marker_id += 1;
+
+        // Build the command string
         var cmd_buf: std.ArrayListUnmanaged(u8) = .{};
         defer cmd_buf.deinit(self.allocator);
-        cmd_buf.appendSlice(self.allocator, params.command) catch {
-            self.allocator.free(terminal_id);
-            try acp.transport.sendErrorResponse(id, -32603, "Out of memory");
-            return;
-        };
+
+        // Prepend export statements for env vars passed by agent
+        for (params.env) |ev| {
+            cmd_buf.appendSlice(self.allocator, "export ") catch {};
+            cmd_buf.appendSlice(self.allocator, ev.name) catch {};
+            cmd_buf.appendSlice(self.allocator, "='") catch {};
+            for (ev.value) |c| {
+                if (c == '\'') {
+                    cmd_buf.appendSlice(self.allocator, "'\\''") catch {};
+                } else {
+                    cmd_buf.append(self.allocator, c) catch {};
+                }
+            }
+            cmd_buf.appendSlice(self.allocator, "'; ") catch {};
+        }
+
+        // If cwd is specified, cd to it first
+        if (params.cwd) |cwd| {
+            cmd_buf.appendSlice(self.allocator, "cd '") catch {};
+            for (cwd) |c| {
+                if (c == '\'') {
+                    cmd_buf.appendSlice(self.allocator, "'\\''") catch {};
+                } else {
+                    cmd_buf.append(self.allocator, c) catch {};
+                }
+            }
+            cmd_buf.appendSlice(self.allocator, "' && ") catch {};
+        }
+
+        // Add the command
+        cmd_buf.appendSlice(self.allocator, params.command) catch {};
+
+        // Add arguments (shell-escaped)
         for (params.args) |arg| {
             cmd_buf.append(self.allocator, ' ') catch {};
-            // Simple shell escaping - wrap in single quotes, escape existing single quotes
             cmd_buf.append(self.allocator, '\'') catch {};
             for (arg) |c| {
                 if (c == '\'') {
@@ -696,35 +734,54 @@ pub const AcpManager = struct {
             cmd_buf.append(self.allocator, '\'') catch {};
         }
 
-        // Use /bin/sh -c to run the command with shell interpretation
-        const argv = [_][]const u8{ "/bin/sh", "-c", cmd_buf.items };
+        // Use user's shell
+        const user_shell = std.posix.getenv("SHELL") orelse "/bin/sh";
 
-        // Spawn child process
+        // Spawn shell (will read commands from stdin, sources config files)
+        const argv = [_][]const u8{user_shell};
         var child = std.process.Child.init(&argv, self.allocator);
-        child.cwd = params.cwd;
+        child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
 
         child.spawn() catch |err| {
-            std.log.err("ACP Manager: failed to spawn terminal: {any}", .{err});
+            std.log.err("ACP Manager: failed to spawn shell: {any}", .{err});
             self.allocator.free(terminal_id);
-            try acp.transport.sendErrorResponse(id, -32001, "Failed to spawn process");
+            try acp.transport.sendErrorResponse(id, -32001, "Failed to spawn shell");
             return;
         };
 
+        // Write command with marker to stdin
+        // Format: command; echo "___SKIM_CMD_END_<id>_$?"
+        if (child.stdin) |stdin| {
+            var marker_cmd: [256]u8 = undefined;
+            const marker_str = std.fmt.bufPrint(&marker_cmd, "; echo \"{s}{d}_$?\"\n", .{ END_MARKER, marker_id }) catch {
+                self.allocator.free(terminal_id);
+                try acp.transport.sendErrorResponse(id, -32603, "Buffer overflow");
+                return;
+            };
+
+            std.log.info("ACP Manager: writing command: {s}", .{cmd_buf.items});
+            stdin.writeAll(cmd_buf.items) catch {};
+            stdin.writeAll(marker_str) catch {};
+            stdin.close();
+            child.stdin = null;
+        }
+
         // Store in registry
         const entry = TerminalEntry{
+            .allocator = self.allocator,
             .child = child,
+            .marker_id = marker_id,
             .output_buffer = .{},
-            .output_byte_limit = params.output_byte_limit orelse 1024 * 1024, // 1MB default
+            .output_byte_limit = params.output_byte_limit orelse 1024 * 1024,
+            .completed = false,
             .exited = false,
             .exit_code = null,
             .signal = null,
-            .allocator = self.allocator,
         };
 
         self.terminals.put(self.allocator, terminal_id, entry) catch {
-            _ = child.kill() catch {};
             self.allocator.free(terminal_id);
             try acp.transport.sendErrorResponse(id, -32603, "Out of memory");
             return;
@@ -804,6 +861,7 @@ pub const AcpManager = struct {
     }
 
     /// Handle terminal/wait_for_exit request
+    /// Polls until marker is detected, then returns exit code
     fn handleTerminalWait(self: *AcpManager, acp: *client.Client, id: codec.JsonRpcId, params_json: ?[]const u8) !void {
         const pjson = params_json orelse {
             try acp.transport.sendErrorResponse(id, -32600, "Missing params");
@@ -821,22 +879,31 @@ pub const AcpManager = struct {
             return;
         };
 
-        // Wait for process to exit (blocking)
-        if (!entry.exited) {
-            const term = entry.child.wait() catch {
-                try acp.transport.sendErrorResponse(id, -32001, "Wait failed");
-                return;
-            };
-            entry.exited = true;
-            entry.exit_code = switch (term) {
-                .Exited => |code| code,
-                else => null,
-            };
-            entry.signal = switch (term) {
-                .Signal => |sig| @intCast(sig),
-                else => null,
-            };
+        // Poll until marker is detected
+        const timeout_ms: i64 = 60000; // 60 second timeout
+        const start_time = std.time.milliTimestamp();
+
+        while (!entry.completed) {
+            // Check for timeout
+            if (std.time.milliTimestamp() - start_time > timeout_ms) {
+                std.log.err("ACP Manager: terminal wait timeout", .{});
+                entry.completed = true;
+                entry.exited = true;
+                entry.exit_code = null;
+                break;
+            }
+
+            // Poll for output and check for marker
+            self.pollTerminalOutput(entry);
+
+            // If still not complete, sleep briefly
+            if (!entry.completed) {
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+            }
         }
+
+        // Mark as exited
+        entry.exited = true;
 
         // Build response
         var response: std.ArrayListUnmanaged(u8) = .{};
@@ -875,9 +942,9 @@ pub const AcpManager = struct {
             return;
         };
 
-        if (!entry.exited) {
-            _ = entry.child.kill() catch {};
-        }
+        // Kill the child process
+        _ = entry.child.kill() catch {};
+        entry.exited = true;
 
         try acp.transport.sendResponse(id, "{}");
     }
@@ -895,11 +962,9 @@ pub const AcpManager = struct {
         };
         defer params.deinit(self.allocator);
 
+        // Remove from registry and clean up
         if (self.terminals.fetchRemove(params.terminal_id)) |kv| {
             var entry = kv.value;
-            if (!entry.exited) {
-                _ = entry.child.kill() catch {};
-            }
             entry.deinit();
             self.allocator.free(kv.key);
         }
@@ -907,14 +972,49 @@ pub const AcpManager = struct {
         try acp.transport.sendResponse(id, "{}");
     }
 
-    /// Poll terminal for available output (non-blocking)
-    fn pollTerminalOutput(self: *AcpManager, entry: *TerminalEntry) void {
-        if (entry.exited) return;
+    /// Drain all remaining output from terminal pipes (blocking until EOF)
+    /// Called after process has exited to ensure we capture all output
+    fn drainTerminalOutput(self: *AcpManager, entry: *TerminalEntry) void {
+        var buf: [4096]u8 = undefined;
 
-        // Check if stdout has data available
+        // Read stdout until EOF
         if (entry.child.stdout) |stdout| {
-            var buf: [4096]u8 = undefined;
-            // Non-blocking read using poll
+            while (true) {
+                const n = stdout.read(&buf) catch break;
+                if (n == 0) break; // EOF
+                std.log.debug("ACP Manager: drain stdout {d} bytes", .{n});
+                if (entry.output_buffer.items.len < entry.output_byte_limit) {
+                    const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
+                    const to_add = @min(n, remaining);
+                    entry.output_buffer.appendSlice(self.allocator, buf[0..to_add]) catch {};
+                }
+            }
+        }
+
+        // Read stderr until EOF
+        if (entry.child.stderr) |stderr| {
+            while (true) {
+                const n = stderr.read(&buf) catch break;
+                if (n == 0) break; // EOF
+                std.log.debug("ACP Manager: drain stderr {d} bytes", .{n});
+                if (entry.output_buffer.items.len < entry.output_byte_limit) {
+                    const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
+                    const to_add = @min(n, remaining);
+                    entry.output_buffer.appendSlice(self.allocator, buf[0..to_add]) catch {};
+                }
+            }
+        }
+    }
+
+    /// Poll terminal for available output (non-blocking)
+    /// Reads from child process stdout/stderr and detects completion marker
+    fn pollTerminalOutput(self: *AcpManager, entry: *TerminalEntry) void {
+        if (entry.completed) return;
+
+        var buf: [4096]u8 = undefined;
+
+        // Check stdout for data
+        if (entry.child.stdout) |stdout| {
             var fds = [_]std.posix.pollfd{
                 .{ .fd = stdout.handle, .events = std.posix.POLL.IN, .revents = 0 },
             };
@@ -922,12 +1022,70 @@ pub const AcpManager = struct {
             const poll_result = std.posix.poll(&fds, 0) catch return;
             if (poll_result > 0 and (fds[0].revents & std.posix.POLL.IN) != 0) {
                 const n = stdout.read(&buf) catch return;
-                if (n > 0 and entry.output_buffer.items.len < entry.output_byte_limit) {
-                    const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
-                    const to_add = @min(n, remaining);
-                    entry.output_buffer.appendSlice(self.allocator, buf[0..to_add]) catch {};
+                if (n > 0) {
+                    std.log.debug("ACP Manager: stdout read {d} bytes", .{n});
+
+                    if (entry.output_buffer.items.len < entry.output_byte_limit) {
+                        const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
+                        const to_add = @min(n, remaining);
+                        entry.output_buffer.appendSlice(self.allocator, buf[0..to_add]) catch {};
+                    }
+
+                    // Check for completion marker
+                    self.checkForMarker(entry);
                 }
             }
+        }
+
+        // Also check stderr
+        if (entry.child.stderr) |stderr| {
+            var stderr_fds = [_]std.posix.pollfd{
+                .{ .fd = stderr.handle, .events = std.posix.POLL.IN, .revents = 0 },
+            };
+
+            const stderr_poll = std.posix.poll(&stderr_fds, 0) catch return;
+            if (stderr_poll > 0 and (stderr_fds[0].revents & std.posix.POLL.IN) != 0) {
+                const n = stderr.read(&buf) catch return;
+                if (n > 0) {
+                    std.log.debug("ACP Manager: stderr read {d} bytes", .{n});
+                    if (entry.output_buffer.items.len < entry.output_byte_limit) {
+                        const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
+                        const to_add = @min(n, remaining);
+                        entry.output_buffer.appendSlice(self.allocator, buf[0..to_add]) catch {};
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check output buffer for completion marker and extract exit code
+    fn checkForMarker(self: *AcpManager, entry: *TerminalEntry) void {
+        _ = self;
+
+        // Build marker prefix: ___SKIM_CMD_END_<marker_id>_
+        var marker_buf: [64]u8 = undefined;
+        const marker_prefix = std.fmt.bufPrint(&marker_buf, "{s}{d}_", .{ END_MARKER, entry.marker_id }) catch return;
+
+        // Search for marker in output buffer
+        if (std.mem.indexOf(u8, entry.output_buffer.items, marker_prefix)) |marker_start| {
+            // Found the marker, extract exit code
+            const after_marker = entry.output_buffer.items[marker_start + marker_prefix.len ..];
+            // Exit code ends at newline
+            const exit_code_end = std.mem.indexOfScalar(u8, after_marker, '\n') orelse after_marker.len;
+            const exit_code_str = after_marker[0..exit_code_end];
+
+            entry.exit_code = std.fmt.parseInt(u32, exit_code_str, 10) catch 0;
+            entry.completed = true;
+
+            // Remove marker line from output buffer
+            // Find the start of the marker line (previous newline or start)
+            var line_start = marker_start;
+            while (line_start > 0 and entry.output_buffer.items[line_start - 1] != '\n') {
+                line_start -= 1;
+            }
+            entry.output_buffer.shrinkRetainingCapacity(line_start);
+
+            std.log.info("ACP Manager: command completed, exit_code={?d}, output_len={d}", .{ entry.exit_code, entry.output_buffer.items.len });
         }
     }
 
@@ -1169,6 +1327,14 @@ pub const AcpManager = struct {
         if (self.pending_permission) |*perm| {
             perm.deinit(self.allocator);
         }
+
+        // Clean up terminal entries
+        var term_iter = self.terminals.iterator();
+        while (term_iter.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            kv.value_ptr.deinit();
+        }
+        self.terminals.deinit(self.allocator);
     }
 
     // =========================================================================

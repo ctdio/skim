@@ -92,11 +92,23 @@ pub const ParsedPermissionRequest = struct {
 // Parsed Terminal Types
 // =============================================================================
 
+/// Environment variable key-value pair
+pub const EnvVar = struct {
+    name: []const u8,
+    value: []const u8,
+
+    pub fn deinit(self: *EnvVar, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.value);
+    }
+};
+
 /// Parsed terminal/create params
 pub const ParsedTerminalCreate = struct {
     session_id: []const u8,
     command: []const u8,
     args: [][]const u8,
+    env: []EnvVar,
     cwd: ?[]const u8,
     output_byte_limit: ?u32,
 
@@ -107,6 +119,10 @@ pub const ParsedTerminalCreate = struct {
             allocator.free(arg);
         }
         if (self.args.len > 0) allocator.free(self.args);
+        for (self.env) |*ev| {
+            ev.deinit(allocator);
+        }
+        if (self.env.len > 0) allocator.free(self.env);
         if (self.cwd) |c| allocator.free(c);
     }
 };
@@ -697,10 +713,24 @@ pub const Decoder = struct {
             args = args_alloc;
         }
 
+        // Duplicate env vars array
+        var env: []EnvVar = &.{};
+        if (parsed.value.env) |raw_env| {
+            const env_alloc = try self.allocator.alloc(EnvVar, raw_env.len);
+            for (raw_env, 0..) |ev, i| {
+                env_alloc[i] = .{
+                    .name = try self.allocator.dupe(u8, ev.name),
+                    .value = try self.allocator.dupe(u8, ev.value),
+                };
+            }
+            env = env_alloc;
+        }
+
         return .{
             .session_id = session_id,
             .command = command,
             .args = args,
+            .env = env,
             .cwd = cwd,
             .output_byte_limit = parsed.value.outputByteLimit,
         };

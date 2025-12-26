@@ -508,6 +508,28 @@ pub const Client = struct {
                 // We need to run through a shell to handle redirections, pipes, &&, etc.
                 var cmd_buf: std.ArrayListUnmanaged(u8) = .{};
                 defer cmd_buf.deinit(self.allocator);
+
+                // If env vars are provided, prepend export statements to the command
+                // This way the child inherits the parent environment and we add/override specific vars
+                for (params.env) |ev| {
+                    cmd_buf.appendSlice(self.allocator, "export ") catch {
+                        try self.transport.sendErrorResponse(id, -32603, "Out of memory");
+                        return;
+                    };
+                    // Shell-escape the env var name (usually safe but be careful)
+                    cmd_buf.appendSlice(self.allocator, ev.name) catch {};
+                    cmd_buf.appendSlice(self.allocator, "='") catch {};
+                    // Shell-escape the value
+                    for (ev.value) |c| {
+                        if (c == '\'') {
+                            cmd_buf.appendSlice(self.allocator, "'\\''") catch {};
+                        } else {
+                            cmd_buf.append(self.allocator, c) catch {};
+                        }
+                    }
+                    cmd_buf.appendSlice(self.allocator, "'; ") catch {};
+                }
+
                 cmd_buf.appendSlice(self.allocator, params.command) catch {
                     try self.transport.sendErrorResponse(id, -32001, "Failed to build command");
                     return;
@@ -526,14 +548,17 @@ pub const Client = struct {
                     cmd_buf.append(self.allocator, '\'') catch {};
                 }
 
-                // Use /bin/sh -c to run the command with shell interpretation
-                const argv = [_][]const u8{ "/bin/sh", "-c", cmd_buf.items };
+                // Use user's shell from $SHELL env var, fallback to /bin/sh
+                // Child inherits environment from skim (which inherits from user's terminal)
+                const user_shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+                const argv = [_][]const u8{ user_shell, "-c", cmd_buf.items };
 
                 // Spawn process
                 var child = std.process.Child.init(&argv, self.allocator);
                 child.cwd = params.cwd;
                 child.stdout_behavior = .Pipe;
                 child.stderr_behavior = .Pipe;
+
                 child.spawn() catch |err| {
                     std.log.err("ACP Client: failed to spawn terminal: {any}", .{err});
                     try self.transport.sendErrorResponse(id, -32001, "Failed to spawn process");
