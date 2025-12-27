@@ -109,7 +109,7 @@ pub const ChatLineMap = struct {
 
     /// Initialize an empty chat line map
     pub fn init(allocator: Allocator) ChatLineMap {
-        return .{
+        var self = ChatLineMap{
             .records = .{},
             .strings = .{},
             .allocator = allocator,
@@ -117,6 +117,13 @@ pub const ChatLineMap = struct {
             .message_count = 0,
             .diff_view_mode = .unified,
         };
+
+        // Pre-allocate capacity to avoid cold allocation lag on first message
+        // This warms up the allocator and avoids page faults on first use
+        self.records.ensureTotalCapacity(allocator, 64) catch {};
+        self.strings.ensureTotalCapacity(allocator, 16) catch {};
+
+        return self;
     }
 
     /// Free all resources
@@ -682,7 +689,8 @@ pub const ChatLineMap = struct {
                 var remaining = line;
                 while (remaining.len > 0) {
                     const chunk_len = @min(remaining.len, wrap_width);
-                    // Duplicate content to own it - message content can be freed during streaming
+                    // Must copy content since message content_buffer may reallocate
+                    // during streaming, invalidating any direct slices
                     const content_copy = try self.allocator.dupe(u8, remaining[0..chunk_len]);
                     try self.strings.append(self.allocator, content_copy);
 
@@ -736,14 +744,11 @@ pub const ChatLineMap = struct {
                 .completed => .{ .fg = Color.dim },
             };
 
-            // Copy content for the text (icon is rendered via prefix)
-            const entry_text = try self.allocator.dupe(u8, entry.content);
-            try self.strings.append(self.allocator, entry_text);
-
+            // Reference entry content directly - no copy needed
             try self.records.append(self.allocator, .{
                 .global_line = global_line.*,
                 .line_type = .{ .plan_entry = .{ .msg_idx = msg_idx, .entry_idx = entry_idx } },
-                .text = entry_text,
+                .text = entry.content,
                 .style = content_style,
                 .indent = 1,
                 .prefix = status_icon,

@@ -68,6 +68,7 @@ pub const AgentState = struct {
     diff_view_mode: DiffViewMode, // View mode for inline diffs
     line_map: ChatLineMap, // Pre-computed line map for stable rendering
     line_map_dirty: bool, // True when line_map needs rebuild
+    last_line_map_rebuild: i64, // Timestamp of last rebuild (ms) for throttling
     // Agent plan (todo list)
     plan_entries: std.ArrayList(OwnedPlanEntry),
     plan_visible: bool, // Whether to show the plan above input
@@ -105,7 +106,7 @@ pub const AgentState = struct {
     };
 
     pub fn init(allocator: Allocator, panel_side: PanelSide) AgentState {
-        return .{
+        var self = AgentState{
             .allocator = allocator,
             .messages = .{}, // Zig 0.15: ArrayList is unmanaged
             .input = InputEditor.State.init(),
@@ -119,6 +120,7 @@ pub const AgentState = struct {
             .diff_view_mode = .unified, // Default to unified view
             .line_map = ChatLineMap.init(allocator),
             .line_map_dirty = true,
+            .last_line_map_rebuild = 0,
             .plan_entries = .{},
             .plan_visible = true, // Show plan by default when entries exist
             .plan_expanded = false, // Default to collapsed (Ctrl+T to expand)
@@ -133,6 +135,12 @@ pub const AgentState = struct {
             .staged_prompt = undefined,
             .staged_prompt_len = 0,
         };
+
+        // Pre-allocate capacity to avoid cold allocation lag on first message/tool
+        self.messages.ensureTotalCapacity(allocator, 32) catch {};
+        self.available_commands.ensureTotalCapacity(allocator, 16) catch {};
+
+        return self;
     }
 
     pub fn deinit(self: *AgentState) void {
@@ -226,17 +234,19 @@ pub const AgentState = struct {
             return;
         }
 
-        // Append to existing agent message using ArrayList for efficient growth
-        // This avoids reallocating the entire content on every append
-        var content_list: std.ArrayList(u8) = .{};
-        defer content_list.deinit(self.allocator);
+        // Use content_buffer for O(1) amortized appends during streaming
+        if (last.content_buffer.capacity == 0) {
+            // First append - initialize buffer with existing content
+            try last.content_buffer.appendSlice(self.allocator, last.content);
+            // Free the original content slice since buffer now owns the data
+            self.allocator.free(last.content);
+        }
 
-        try content_list.appendSlice(self.allocator, last.content);
-        try content_list.appendSlice(self.allocator, text);
+        // Append new text to buffer (O(1) amortized)
+        try last.content_buffer.appendSlice(self.allocator, text);
 
-        const new_content = try content_list.toOwnedSlice(self.allocator);
-        self.allocator.free(last.content);
-        last.content = new_content;
+        // Update content to point to buffer's items
+        last.content = last.content_buffer.items;
 
         // Mark line map dirty for streaming update
         self.line_map_dirty = true;
@@ -262,16 +272,19 @@ pub const AgentState = struct {
             return;
         }
 
-        // Append to existing thinking message using ArrayList for efficient growth
-        var content_list: std.ArrayList(u8) = .{};
-        defer content_list.deinit(self.allocator);
+        // Use content_buffer for O(1) amortized appends during streaming
+        if (last.content_buffer.capacity == 0) {
+            // First append - initialize buffer with existing content
+            try last.content_buffer.appendSlice(self.allocator, last.content);
+            // Free the original content slice since buffer now owns the data
+            self.allocator.free(last.content);
+        }
 
-        try content_list.appendSlice(self.allocator, last.content);
-        try content_list.appendSlice(self.allocator, text);
+        // Append new text to buffer (O(1) amortized)
+        try last.content_buffer.appendSlice(self.allocator, text);
 
-        const new_content = try content_list.toOwnedSlice(self.allocator);
-        self.allocator.free(last.content);
-        last.content = new_content;
+        // Update content to point to buffer's items
+        last.content = last.content_buffer.items;
 
         // Mark line map dirty for streaming update
         self.line_map_dirty = true;
@@ -490,10 +503,22 @@ pub const AgentState = struct {
 
     /// Ensure line map is up to date for rendering
     /// Returns the line map for iteration
+    /// Throttles rebuilds to ~30fps to keep UI responsive during streaming
     pub fn ensureLineMap(self: *AgentState, wrap_width: usize) !*const ChatLineMap {
-        if (self.line_map_dirty or self.line_map.needsRebuild(wrap_width, self.diff_view_mode)) {
-            try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode);
-            self.line_map_dirty = false;
+        const needs_rebuild = self.line_map_dirty or self.line_map.needsRebuild(wrap_width, self.diff_view_mode);
+
+        if (needs_rebuild) {
+            const now = std.time.milliTimestamp();
+            const elapsed = now - self.last_line_map_rebuild;
+
+            // Throttle rebuilds to every 32ms (~30fps) during streaming
+            // Always rebuild if it's been long enough or this is the first build
+            if (elapsed >= 32 or self.last_line_map_rebuild == 0) {
+                try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode);
+                self.line_map_dirty = false;
+                self.last_line_map_rebuild = now;
+            }
+            // Otherwise skip rebuild this frame - use stale line map
         }
         return &self.line_map;
     }
@@ -936,8 +961,10 @@ pub const AgentState = struct {
 
 pub const Message = struct {
     role: Role,
-    content: []const u8, // Owned by AgentState
+    content: []const u8, // Owned by AgentState (or points to content_buffer.items if streaming)
     timestamp: i64,
+    // For streaming content - allows O(1) amortized appends instead of O(n) copy each time
+    content_buffer: std.ArrayListUnmanaged(u8) = .{},
     // For diff messages
     diff_path: ?[]const u8 = null,
     diff_old: ?[]const u8 = null,
@@ -981,7 +1008,12 @@ pub const Message = struct {
     };
 
     pub fn deinit(self: *Message, allocator: Allocator) void {
-        allocator.free(self.content);
+        // If content_buffer was used (streaming), free it; otherwise free the content slice
+        if (self.content_buffer.capacity > 0) {
+            self.content_buffer.deinit(allocator);
+        } else {
+            allocator.free(self.content);
+        }
         if (self.diff_path) |p| allocator.free(p);
         if (self.diff_old) |o| allocator.free(o);
         if (self.diff_new) |n| allocator.free(n);

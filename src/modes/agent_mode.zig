@@ -8,14 +8,6 @@ const state = @import("../agent/state.zig");
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
     const agent_state = &(app.state.agent_state orelse return);
 
-    // Debug: log all key presses to help diagnose Shift+Tab issues
-    std.log.debug("Agent key: codepoint=0x{X}, shift={}, ctrl={}, alt={}", .{
-        key.codepoint,
-        key.mods.shift,
-        key.mods.ctrl,
-        key.mods.alt,
-    });
-
     // Check for pending permission prompt
     if (app.acp_manager) |mgr| {
         if (mgr.getPendingPermission()) |perm| {
