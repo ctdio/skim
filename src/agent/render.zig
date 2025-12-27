@@ -21,6 +21,10 @@ const protocol = @import("../acp/protocol.zig");
 const rendering_common = @import("../rendering/common.zig");
 const Color = rendering_common.Color;
 
+// Import utilities for word-aware wrapping
+const rendering_utils = @import("../rendering/utils.zig");
+const RenderUtils = rendering_utils.RenderUtils;
+
 // Gutter width for line numbers in side-by-side diff view
 const GUTTER_WIDTH: usize = 5;
 
@@ -1395,16 +1399,19 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         }
         line_num += 1;
 
-        // Wrap this line by splitting at max_input_width boundaries
-        var line_pos: usize = 0;
-        while (line_pos < text_line.len or (line_pos == 0 and text_line.len == 0)) {
+        // Use word-aware wrapping for this line
+        var wrapped_lines = try RenderUtils.wrapText(app.allocator, text_line, max_input_width);
+        defer wrapped_lines.deinit(app.allocator);
+        
+        // Track offset within the original line for cursor positioning
+        var segment_offset: usize = 0;
+        
+        for (wrapped_lines.items) |wrapped_segment| {
             // Stop if we've filled the visible area
             if (visible_row >= visible_lines) break;
-
-            // Calculate how much of the line to show on this display row
-            const remaining = text_line[line_pos..];
-            const chunk_len = @min(remaining.len, max_input_width);
-            const chunk = remaining[0..chunk_len];
+            
+            const chunk = wrapped_segment;
+            const chunk_len = chunk.len;
 
             // Skip rows that are scrolled out of view
             if (display_row >= scroll_offset) {
@@ -1429,7 +1436,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
             }
 
             // Determine segment start and end positions in the full buffer
-            const segment_start = char_offset;
+            const segment_start = char_offset + segment_offset;
             const segment_end = segment_start + chunk_len;
 
             // Only render if in visible area
@@ -1526,13 +1533,22 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                 visible_row += 1;
             }
 
-            char_offset += chunk_len;
-            line_pos += chunk_len;
+            // Update segment_offset to account for this wrapped segment
+            segment_offset += chunk_len;
+            
+            // Account for spaces that were trimmed during wrapping
+            while (segment_offset < text_line.len and text_line[segment_offset] == ' ') {
+                segment_offset += 1;
+            }
+            
             display_row += 1;
 
             // Break after rendering empty line
             if (text_line.len == 0) break;
         }
+        
+        // Move char_offset to the end of this line
+        char_offset += text_line.len;
     }
 
     // Render scrollbar if input area is scrollable
