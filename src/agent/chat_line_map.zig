@@ -9,6 +9,9 @@ const DiffLine = diff_algo.DiffLine;
 const rendering_common = @import("../rendering/common.zig");
 const Color = rendering_common.Color;
 
+const rendering_utils = @import("../rendering/utils.zig");
+const RenderUtils = rendering_utils.RenderUtils;
+
 const Allocator = std.mem.Allocator;
 
 // =============================================================================
@@ -686,12 +689,14 @@ pub const ChatLineMap = struct {
                 global_line.* += 1;
                 line_idx += 1;
             } else {
-                var remaining = line;
-                while (remaining.len > 0) {
-                    const chunk_len = @min(remaining.len, wrap_width);
+                // Use word-aware wrapping instead of hard wrapping
+                var wrapped_lines = try RenderUtils.wrapText(self.allocator, line, wrap_width);
+                defer wrapped_lines.deinit(self.allocator);
+
+                for (wrapped_lines.items) |wrapped_segment| {
                     // Must copy content since message content_buffer may reallocate
                     // during streaming, invalidating any direct slices
-                    const content_copy = try self.allocator.dupe(u8, remaining[0..chunk_len]);
+                    const content_copy = try self.allocator.dupe(u8, wrapped_segment);
                     try self.strings.append(self.allocator, content_copy);
 
                     try self.records.append(self.allocator, .{
@@ -704,7 +709,6 @@ pub const ChatLineMap = struct {
                     });
                     global_line.* += 1;
                     line_idx += 1;
-                    remaining = remaining[chunk_len..];
                 }
             }
         }

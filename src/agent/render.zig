@@ -357,28 +357,33 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         break :blk 1 + visible_entries;
     } else 0;
 
-    // Calculate staged message height (shown above input when agent is thinking)
+    // Calculate status area height (shown between messages and plan when agent is thinking)
+    // Layout: empty row + "Generating..." + empty row + optional queued message + empty row
     const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
-    const staged_height: usize = if (is_thinking and agent_state.hasStagedPrompt()) blk: {
-        // Count actual lines in staged message (up to 3) + label line + trailing line
-        const staged_text = agent_state.getStagedPrompt();
-        var line_count: usize = 0;
-        var iter = std.mem.splitScalar(u8, staged_text, '\n');
-        while (iter.next()) |_| {
-            line_count += 1;
-            if (line_count >= 3) break;
+    const status_height: usize = if (is_thinking) blk: {
+        var height: usize = 3; // empty + "Generating..." + empty
+        // Add queued message height if present
+        if (agent_state.hasStagedPrompt()) {
+            const staged_text = agent_state.getStagedPrompt();
+            var line_count: usize = 0;
+            var iter = std.mem.splitScalar(u8, staged_text, '\n');
+            while (iter.next()) |_| {
+                line_count += 1;
+                if (line_count >= 3) break;
+            }
+            height += 1 + line_count + 1 + 1; // label + content lines + trailing bar + empty spacing
         }
-        break :blk 1 + line_count + 1; // label + content lines + trailing
+        break :blk height;
     } else 0;
 
     // Calculate input area height (always shows normal input)
     // In sidebar mode, skip the footer (main status bar is visible)
     const footer_height: usize = if (agent_state.full_screen) 1 else 0;
-    const input_height: usize = 1 + visible_lines + footer_height + staged_height; // Separator + visible lines + footer (if full-screen) + staged message
+    const input_height: usize = 1 + visible_lines + footer_height; // Separator + visible lines + footer (if full-screen)
 
-    // Layout: title (1 row) + messages (variable) + plan (conditional) + input area (dynamic)
+    // Layout: title (1 row) + messages (variable) + status (conditional) + plan (conditional) + input area (dynamic)
     const title_height: usize = 1;
-    const fixed_height = title_height + plan_height + input_height;
+    const fixed_height = title_height + status_height + plan_height + input_height;
     const messages_height = if (win.height > fixed_height)
         win.height - fixed_height
     else
@@ -399,11 +404,22 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     });
     try renderMessages(app, messages_win, agent_state);
 
+    // Render status area (if agent is thinking)
+    if (status_height > 0) {
+        const status_win = win.child(.{
+            .x_off = 0,
+            .y_off = @intCast(title_height + messages_height),
+            .width = win.width,
+            .height = @intCast(status_height),
+        });
+        renderStatusArea(status_win, agent_state);
+    }
+
     // Render plan area (if visible and has entries)
     if (plan_height > 0) {
         const plan_win = win.child(.{
             .x_off = 0,
-            .y_off = @intCast(title_height + messages_height),
+            .y_off = @intCast(title_height + messages_height + status_height),
             .width = win.width,
             .height = @intCast(plan_height),
         });
@@ -413,7 +429,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     // Render input area (or permission prompt if pending)
     const input_win = win.child(.{
         .x_off = 0,
-        .y_off = @intCast(title_height + messages_height + plan_height),
+        .y_off = @intCast(title_height + messages_height + status_height + plan_height),
         .width = win.width,
         .height = @intCast(input_height),
     });
@@ -421,7 +437,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 
     // Render slash command menu as overlay (if visible)
     if (agent_state.slash_menu_visible) {
-        try renderSlashMenu(win, agent_state, title_height + messages_height + plan_height);
+        try renderSlashMenu(win, agent_state, title_height + messages_height + status_height + plan_height);
     }
 }
 
@@ -535,10 +551,6 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             const text_len = placeholder.len;
             const col = if (win.width > text_len) (win.width - text_len) / 2 else 0;
             _ = win.print(&seg, .{ .row_offset = @intCast(win.height / 2), .col_offset = @intCast(col) });
-        }
-        // Show thinking indicator at bottom when thinking (even with no messages)
-        if (is_thinking and win.height > 0) {
-            renderThinkingIndicator(win, win.height - 1);
         }
         return;
     }
@@ -784,23 +796,31 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
         const scrollbar_info = calculateScrollbar(win.height, total_lines, scroll);
         renderScrollbar(win, scrollbar_info);
     }
+}
 
-    // Show thinking indicator at the bottom of the message area
-    // Note: Staged message is now rendered in input area (dedicated space)
-    // Clear the indicator row first to prevent lingering text when agent completes
-    if (win.height > 1) {
-        const indicator_row = win.height - 1;
-        // Clear the row where the indicator appears
-        for (0..win.width) |col| {
-            win.writeCell(@intCast(col), @intCast(indicator_row), .{
-                .char = .{ .grapheme = " ", .width = 1 },
-                .style = .{},
-            });
-        }
-        // Render indicator only if thinking
-        if (is_thinking) {
-            renderThinkingIndicator(win, indicator_row);
-        }
+/// Render the status area shown between messages and plan when agent is thinking
+/// Layout: empty row + "Generating..." + empty row + optional queued message
+fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState) void {
+    if (win.height == 0) return;
+
+    var row: usize = 0;
+
+    // Row 0: empty padding
+    row += 1;
+
+    // Row 1: "Generating..." indicator with shimmer
+    if (row < win.height) {
+        renderThinkingIndicator(win, row);
+        row += 1;
+    }
+
+    // Row 2: empty padding
+    row += 1;
+
+    // Rows 3+: Queued message preview (if present)
+    if (agent_state.hasStagedPrompt() and row < win.height) {
+        const staged_text = agent_state.getStagedPrompt();
+        renderStagedMessagePreview(win, staged_text, row);
     }
 }
 
@@ -1332,37 +1352,15 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     // Update stored scroll offset
     agent_state.input_scroll_offset = scroll_offset;
 
-    // Calculate staged message height (if agent is thinking and has staged prompt)
-    const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
-    const staged_height: usize = if (is_thinking and agent_state.hasStagedPrompt()) blk: {
-        // Count actual lines in staged message (up to 3) + label line + trailing line
-        const staged_text = agent_state.getStagedPrompt();
-        var line_count: usize = 0;
-        var iter = std.mem.splitScalar(u8, staged_text, '\n');
-        while (iter.next()) |_| {
-            line_count += 1;
-            if (line_count >= 3) break;
-        }
-        break :blk 1 + line_count + 1; // label + content lines + trailing
-    } else 0;
-
     // Layout:
-    // Rows 0..staged_height-1: Staged message preview (if agent is thinking)
-    // Row staged_height: Separator line
-    // Rows staged_height+1..: Input lines with "> " prompt on first line
+    // Row 0: Separator line
+    // Rows 1..: Input lines with "> " prompt on first line
     // Last row: Footer with mode (left) and keybindings (right)
 
-    // Render staged message preview at the top (if present)
-    if (staged_height > 0) {
-        const staged_text = agent_state.getStagedPrompt();
-        renderStagedMessagePreview(win, staged_text, 0);
-    }
-
-    // Separator line (offset by staged_height)
-    const separator_row = staged_height;
+    // Separator line
     const separator_style = vaxis.Style{ .fg = .{ .index = 8 } };
     for (0..win.width) |col| {
-        win.writeCell(@intCast(col), @intCast(separator_row), .{
+        win.writeCell(@intCast(col), 0, .{
             .char = .{ .grapheme = "─", .width = 1 },
             .style = separator_style,
         });
@@ -1377,8 +1375,8 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     const text_style = vaxis.Style{ .fg = .{ .index = 7 } };
     // Use the same max_input_width as calculated earlier for consistency
     const max_input_width = max_input_width_for_calc;
-    // Content starts after staged message + separator
-    const content_start_row = staged_height + 1;
+    // Content starts after separator
+    const content_start_row: usize = 1;
 
     // Split text by newlines and wrap each line
     var line_iter = std.mem.splitScalar(u8, text, '\n');
