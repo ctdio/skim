@@ -1,6 +1,6 @@
 # Skim
 
-A keyboard-driven TUI for code reviews built in Zig. Fast, minimal, and focused on getting out of your way.
+A keyboard-driven TUI for code reviews built in Zig.
 
 ## Features
 
@@ -9,8 +9,8 @@ A keyboard-driven TUI for code reviews built in Zig. Fast, minimal, and focused 
 - Unified and side-by-side views
 - Tree-sitter syntax highlighting with async processing (JS/TS/Zig full support)
 - Command palette: `Ctrl-p` for files, `:` for commands (vim-style), or type `>` to switch modes
-- Built-in help with `?` - comprehensive keybindings reference
-- Search with `/` - smart case matching across all files
+- Built-in help with `?`
+- Search with `/` across all files
 - Live refresh (press 'r')
 - Full git diff compatibility (working dir, staged, branch comparisons)
 - Comment system with export to clipboard ('y' for current, 'Y' for all)
@@ -49,7 +49,7 @@ zig build
 ./zig-out/bin/skim --staged
 ```
 
-Navigate with `j`/`k` to move the cursor, `h`/`l` to switch files. Press `Enter` to focus on a file for detailed review. Press `s` to toggle between unified and side-by-side views.
+Navigate with `j`/`k`, switch files with `h`/`l`. Press `Enter` to focus a file. Press `s` to toggle unified/side-by-side views.
 
 ## Usage
 
@@ -133,10 +133,10 @@ Search through diff content:
 | `Backspace` | Delete character from query |
 
 **Search behavior:**
-- **Smart case**: Search is case-insensitive unless query contains uppercase letters
-- **Global**: Searches across all files in the diff
-- **Code lines only**: Searches through diff content (add/delete/context lines)
-- Use `n`/`N` in NORMAL mode to navigate between matches
+- Case-insensitive unless query contains uppercase
+- Searches across all files in the diff
+- Searches diff content only (add/delete/context lines)
+- Use `n`/`N` in NORMAL mode to navigate matches
 
 ### COMMAND PALETTE Mode
 
@@ -151,17 +151,12 @@ Quick access to files and commands:
 | `ESC` | Cancel and return to NORMAL mode |
 | `Backspace` | Delete character from filter |
 
-**Two modes in one:**
-- **File Mode** (`Ctrl-p`): Type to filter and jump to files in the diff
-  - Smart path truncation for long paths (e.g., `p/o/s/src/file.zig`)
-  - Substring matching on file paths
-  - Type `>` prefix to switch to command mode
-- **Command Mode** (`:` key): Access built-in commands (vim-style)
-  - **Toggle View Mode**: Switch between unified and side-by-side
-  - **Refresh Diff**: Reload the diff from git
-  - **Show Help**: Display help overlay
-  - **Quit**: Exit Skim
-  - Backspace `>` to switch back to file mode
+**Two modes:**
+- **File Mode** (`Ctrl-p`): Filter and jump to files
+  - Type `>` to switch to command mode
+- **Command Mode** (`:` key): Built-in commands (vim-style)
+  - Toggle View Mode, Refresh Diff, Show Help, Quit
+  - Backspace `>` to switch to file mode
 
 ### COMMENT Mode
 
@@ -176,9 +171,9 @@ Edit comments on specific lines:
 
 ## Experimental Features
 
-Skim includes experimental AI agent integration features that are **disabled by default**. These features are under active development and their interfaces are **not stable** - they may change significantly or be removed entirely in future versions.
+Experimental AI agent integration features are **disabled by default**. Interfaces are **not stable** and may change or be removed.
 
-> **⚠️ Warning:** Do not build workflows or tooling that depend on these experimental interfaces. They are provided for testing and feedback purposes only.
+> **⚠️ Warning:** Do not depend on these experimental interfaces.
 
 ### Enabling Experimental Features
 
@@ -209,7 +204,7 @@ When disabled:
 
 > **Note:** This feature requires `"mcp_enabled": true` in your config. See [Experimental Features](#experimental-features).
 
-Skim includes an MCP (Model Context Protocol) server that allows AI agents like Claude to review your code changes. The agent can read diff context, add comments to specific lines, and the comments appear in real-time in your TUI.
+MCP (Model Context Protocol) server for AI agent code reviews. Agents can read diffs, add comments, and see results in real-time.
 
 ### Quick Start for AI Reviews
 
@@ -299,7 +294,7 @@ Skim writes logs to `~/.skim/`:
 
 > **Note:** This feature requires `"acp_enabled": true` in your config. See [Experimental Features](#experimental-features).
 
-The Agent Panel provides a built-in chat interface for interacting with AI coding agents directly within skim. It uses the ACP (Agent Client Protocol) to communicate with compatible agents like Claude Code.
+Built-in chat interface for AI agents. Uses ACP (Agent Client Protocol) to communicate with agents like Claude Code.
 
 ### Quick Start
 

@@ -56,22 +56,22 @@ zig build test
 For detailed architecture documentation, see [docs/architecture.md](docs/architecture.md).
 
 **Quick Overview:**
-- **CLI Layer** (`main.zig`): Arg parsing, initialization, subcommand routing
+- **CLI Layer** (`main.zig`): Arg parsing, init, subcommand routing
 - **Application Layer** (`app.zig`): Modal state machine, event handling
-- **Line Tracking** (`line_map.zig`): Pre-computed position registry
+- **Line Tracking** (`line_map.zig`): Position registry
 - **Git Integration** (`git/`): Command execution, diff parsing
-- **Rendering** (`rendering/`): Unified and side-by-side views
-- **Syntax Highlighting** (`syntax.zig`): Async tree-sitter integration
-- **MCP System** (`mcp/`): Daemon, adapters, and protocol for AI agent integration
-- **Logging** (`logging.zig`): File-based logging to `~/.skim/*.log`
+- **Rendering** (`rendering/`): Unified/side-by-side views
+- **Syntax Highlighting** (`syntax.zig`): Async tree-sitter
+- **MCP System** (`mcp/`): Daemon, adapters, protocol for AI agents
+- **Logging** (`logging.zig`): File logging to `~/.skim/*.log`
 
 **Key Design Principles:**
 - Modal interface (vim-style)
 - Shell-out to git (respects user config)
-- LineMap system (single source of truth for positioning)
+- LineMap registry for positioning
 - Virtual scrolling (render visible lines only)
 - Minimal dependencies (vaxis + z-tree-sitter)
-- Daemon architecture for AI agent integration
+- Daemon architecture for AI agents
 
 ## Logging System
 
@@ -154,13 +154,13 @@ The MCP (Model Context Protocol) system enables AI agents to interact with skim.
 
 ## Key Implementation Patterns
 
-For detailed implementation guides, see [docs/architecture.md](docs/architecture.md).
+See [docs/architecture.md](docs/architecture.md).
 
 ### LineMap System
-- Pre-computed registry of all renderable lines (file headers, hunk headers, code lines, comments, spacers)
-- Single source of truth for positioning
+- Registry of renderable lines (file headers, hunk headers, code lines, comments, spacers)
+- Source of truth for positioning
 - Global line numbers (0-based, sequential)
-- Rebuilt when: init, refresh, comment add/delete
+- Rebuilt on: init, refresh, comment add/delete
 
 ### Modal State Machine
 - Modes: normal, comment, search, visual, command_palette, help, branch_selection

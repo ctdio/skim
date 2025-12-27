@@ -179,7 +179,11 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "Enter", .desc = "Save comment" },
         .{ .key = "Ctrl+J", .desc = "Insert newline" },
         .{ .key = "ESC", .desc = "Cancel" },
-        .{ .key = "Vim keybindings", .desc = "Full vim editing supported" },
+        .{ .key = "i/a/I/A", .desc = "Insert modes" },
+        .{ .key = "h/j/k/l", .desc = "Move cursor" },
+        .{ .key = "w/b/e", .desc = "Word motions" },
+        .{ .key = "0/$", .desc = "Line start/end" },
+        .{ .key = "x/dd", .desc = "Delete char/line" },
     };
 
     for (comment_bindings) |binding| {

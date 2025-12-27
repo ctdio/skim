@@ -523,7 +523,7 @@ fn printHelp(allocator: std.mem.Allocator) !void {
 
     // Base usage
     try stdout.writeAll(
-        \\skim - Lightning-fast code review TUI
+        \\skim
         \\
         \\USAGE:
         \\    skim [OPTIONS] [<ref> | <ref1> <ref2> | <ref1>..<ref2> | <ref1>...<ref2>]
