@@ -57,8 +57,9 @@ pub const AcpManager = struct {
     on_tool_call: ?*const fn (tool: ToolCallInfo, ctx: ?*anyopaque) void,
     callback_ctx: ?*anyopaque,
 
-    // Pending messages for TUI to consume
+    // Pending messages for TUI to consume (protected by messages_mutex for background thread access)
     pending_messages: std.ArrayListUnmanaged(PendingMessage),
+    messages_mutex: std.Thread.Mutex,
 
     // Async prompting state
     pending_prompt_id: ?i64,
@@ -215,6 +216,7 @@ pub const AcpManager = struct {
             .on_tool_call = null,
             .callback_ctx = null,
             .pending_messages = .{},
+            .messages_mutex = .{},
             .pending_prompt_id = null,
             .queued_prompts = .{},
             .pending_permission = null,
@@ -264,6 +266,9 @@ pub const AcpManager = struct {
         self.acp_client = acp;
         self.status = .connected;
         std.log.info("ACP: Connected successfully", .{});
+
+        // Register callback to process session/update in background thread
+        acp.transport.setMessageCallback(backgroundMessageCallback, self);
 
         // Store agent name if available
         if (acp.getAgentInfo()) |info| {
@@ -420,7 +425,11 @@ pub const AcpManager = struct {
 
     /// Poll for new messages from the agent (non-blocking).
     /// Returns slice of pending messages. Call clearMessages() after processing.
+    /// Note: session/update notifications are processed by background thread callback.
     pub fn poll(self: *AcpManager) Error![]PendingMessage {
+        self.messages_mutex.lock();
+        defer self.messages_mutex.unlock();
+
         const acp = self.acp_client orelse return self.pending_messages.items;
 
         // Check if agent process died unexpectedly
@@ -437,18 +446,15 @@ pub const AcpManager = struct {
             return self.pending_messages.items;
         }
 
-        // Poll the transport for new messages
+        // Poll the transport for new messages (session/update handled by background callback)
         const messages = acp.transport.poll() catch return self.pending_messages.items;
 
-        // Process messages
+        // Process non-session/update messages (responses and requests)
         for (messages) |msg| {
             switch (msg) {
-                .notification => |n| {
-                    if (std.mem.eql(u8, n.method, "session/update")) {
-                        if (n.params_json) |pjson| {
-                            self.processSessionUpdate(pjson) catch {};
-                        }
-                    }
+                .notification => {
+                    // session/update notifications are handled by backgroundMessageCallback
+                    // Other notifications are ignored for now
                 },
                 .response => |r| {
                     // Log all responses to help debug
@@ -1091,6 +1097,9 @@ pub const AcpManager = struct {
 
     /// Clear processed messages
     pub fn clearMessages(self: *AcpManager) void {
+        self.messages_mutex.lock();
+        defer self.messages_mutex.unlock();
+
         for (self.pending_messages.items) |*msg| {
             msg.deinit(self.allocator);
         }
@@ -1341,8 +1350,38 @@ pub const AcpManager = struct {
     // Internal
     // =========================================================================
 
+    /// Background thread callback for processing session/update notifications.
+    /// Called from StdioTransport's reader thread to offload heavy JSON parsing.
+    fn backgroundMessageCallback(message: codec.DecodedMessage, ctx: ?*anyopaque) bool {
+        const self: *AcpManager = @ptrCast(@alignCast(ctx));
+        const acp = self.acp_client orelse return false;
+
+        switch (message) {
+            .notification => |n| {
+                if (std.mem.eql(u8, n.method, "session/update")) {
+                    if (n.params_json) |pjson| {
+                        // Parse the heavy JSON in this background thread
+                        const update = acp.transport.decoder.parseSessionUpdateParams(pjson) catch |err| {
+                            std.log.warn("ACP background: failed to parse session/update: {any}", .{err});
+                            return true; // Still handled, just failed to parse
+                        };
+                        // Process the update (this appends to pending_messages with mutex)
+                        handleSessionUpdate(update, ctx);
+                        return true; // Message was handled
+                    }
+                }
+            },
+            else => {},
+        }
+        return false; // Not handled - let transport queue it normally
+    }
+
     fn handleSessionUpdate(update: protocol.SessionUpdateParams, ctx: ?*anyopaque) void {
         const self: *AcpManager = @ptrCast(@alignCast(ctx));
+
+        // Lock mutex - this function may be called from background thread
+        self.messages_mutex.lock();
+        defer self.messages_mutex.unlock();
 
         // Determine message kind based on update type
         const msg_kind: PendingMessage.Kind = switch (update.update_type) {
@@ -1682,12 +1721,6 @@ pub const AcpManager = struct {
                 self.allocator.free(commands_copy);
             };
         }
-    }
-
-    fn processSessionUpdate(self: *AcpManager, json: []const u8) !void {
-        const acp = self.acp_client orelse return;
-        const update = try acp.transport.decoder.parseSessionUpdateParams(json);
-        handleSessionUpdate(update, self);
     }
 };
 

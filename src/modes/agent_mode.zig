@@ -526,27 +526,18 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
 }
 
 /// Update slash menu visibility based on input content
-fn updateSlashMenuVisibility(app: *App, agent_state: *agent.AgentState) void {
+fn updateSlashMenuVisibility(_: *App, agent_state: *agent.AgentState) void {
     if (agent_state.input.vim.vim_mode != .insert) {
         // Only show menu in insert mode
         agent_state.hideSlashMenu();
         return;
     }
 
-    const text = agent_state.input.getText();
-    const has_slash = text.len > 0 and text[0] == '/';
-    const cmd_count = agent_state.available_commands.items.len;
-    _ = has_slash;
-
     const should_show = agent_state.shouldShowSlashMenu();
 
     if (should_show and !agent_state.slash_menu_visible) {
-        // Before showing menu, poll once for any pending ACP updates
-        // Commands will appear on next render if they arrive after this poll
-        if (cmd_count <= 1) { // Only local commands present
-            app.pollAcpUpdates();
-        }
-
+        // Commands from the agent will appear on the next event loop iteration
+        // (main loop calls pollAcpUpdates regularly - no need to block the key handler)
         agent_state.showSlashMenu();
     } else if (!should_show and agent_state.slash_menu_visible) {
         // Hide menu when "/" is deleted or input changes

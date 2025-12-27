@@ -7,6 +7,12 @@ const codec = @import("codec.zig");
 // Stdio Transport
 // =============================================================================
 
+/// Callback for processing messages in the background reader thread.
+/// This allows heavy parsing (like session/update JSON) to happen off the main thread.
+/// The callback receives the decoded message and should return true if it handled
+/// the message (preventing it from being added to pending_messages).
+pub const MessageCallback = *const fn (message: codec.DecodedMessage, ctx: ?*anyopaque) bool;
+
 /// Manages JSON-RPC communication over stdio with an agent process.
 /// Uses a background thread for non-blocking reads.
 pub const StdioTransport = struct {
@@ -23,6 +29,10 @@ pub const StdioTransport = struct {
     reader_thread: ?std.Thread,
     reader_running: std.atomic.Value(bool),
     message_mutex: std.Thread.Mutex,
+
+    // Optional callback for processing messages in background thread
+    message_callback: ?MessageCallback,
+    message_callback_ctx: ?*anyopaque,
 
     pub const Error = error{
         AgentNotRunning,
@@ -46,12 +56,23 @@ pub const StdioTransport = struct {
             .reader_thread = null,
             .reader_running = std.atomic.Value(bool).init(false),
             .message_mutex = .{},
+            .message_callback = null,
+            .message_callback_ctx = null,
         };
 
         // Start background reader thread
         self.startReaderThread();
 
         return self;
+    }
+
+    /// Set a callback to process messages in the background reader thread.
+    /// The callback is invoked for each decoded message BEFORE it's added to the queue.
+    /// If the callback returns true, the message is considered handled and won't be queued.
+    /// This is useful for offloading heavy parsing (like session/update) from the main thread.
+    pub fn setMessageCallback(self: *StdioTransport, callback: MessageCallback, ctx: ?*anyopaque) void {
+        self.message_callback = callback;
+        self.message_callback_ctx = ctx;
     }
 
     /// Start the background reader thread
@@ -143,16 +164,26 @@ pub const StdioTransport = struct {
                 if (json_start) |start| {
                     const json_line = line[start..];
 
-                    // Decode and add to pending messages (with mutex)
+                    // Decode message
                     const message = self.decoder.decode(json_line) catch |err| {
                         std.log.warn("ACP Transport: decode error: {}", .{err});
                         self.shiftLineBuffer(line_buffer, newline_pos + 1);
                         continue;
                     };
 
-                    self.message_mutex.lock();
-                    self.pending_messages.append(self.allocator, message) catch {};
-                    self.message_mutex.unlock();
+                    // If callback is set, let it process the message first
+                    // This allows heavy parsing to happen in this background thread
+                    var handled = false;
+                    if (self.message_callback) |callback| {
+                        handled = callback(message, self.message_callback_ctx);
+                    }
+
+                    // Only queue the message if callback didn't handle it
+                    if (!handled) {
+                        self.message_mutex.lock();
+                        self.pending_messages.append(self.allocator, message) catch {};
+                        self.message_mutex.unlock();
+                    }
                 }
             }
 
