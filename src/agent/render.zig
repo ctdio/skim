@@ -40,6 +40,68 @@ const MAX_PLAN_ENTRIES: usize = 5;
 const MAX_SLASH_MENU_WIDTH: usize = 120;
 
 // =============================================================================
+// File Reference Detection
+// =============================================================================
+
+/// A range representing an @file reference in the input text
+const FileRefRange = struct {
+    start: usize, // Position of @
+    end: usize, // Position after the file path
+};
+
+/// Find all valid @file references in the input text (files that exist)
+/// Returns a list of ranges. Caller owns the returned slice.
+fn findFileRefRanges(allocator: std.mem.Allocator, text: []const u8) ![]FileRefRange {
+    var ranges: std.ArrayList(FileRefRange) = .{};
+    errdefer ranges.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '@') {
+            // Check word boundary
+            const at_word_boundary = (i == 0 or
+                text[i - 1] == ' ' or
+                text[i - 1] == '\n' or
+                text[i - 1] == '\t');
+
+            if (at_word_boundary) {
+                const path_start = i + 1;
+                var path_end = path_start;
+                while (path_end < text.len and
+                    text[path_end] != ' ' and
+                    text[path_end] != '\n' and
+                    text[path_end] != '\t')
+                {
+                    path_end += 1;
+                }
+
+                const file_path = text[path_start..path_end];
+                if (file_path.len > 0) {
+                    // Check if file exists
+                    const cwd = std.fs.cwd();
+                    if (cwd.access(file_path, .{})) {
+                        try ranges.append(allocator, .{ .start = i, .end = path_end });
+                        i = path_end;
+                        continue;
+                    } else |_| {}
+                }
+            }
+        }
+        i += 1;
+    }
+
+    return ranges.toOwnedSlice(allocator);
+}
+
+/// Check if a position is within any file reference range
+fn isInFileRef(pos: usize, ranges: []const FileRefRange) bool {
+    for (ranges) |r| {
+        if (pos >= r.start and pos < r.end) return true;
+    }
+    return false;
+}
+
+// =============================================================================
 // Scrollbar
 // =============================================================================
 
@@ -438,6 +500,11 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     // Render slash command menu as overlay (if visible)
     if (agent_state.slash_menu_visible) {
         try renderSlashMenu(win, agent_state, title_height + messages_height + status_height + plan_height);
+    }
+
+    // Render file picker menu as overlay (if visible)
+    if (agent_state.file_picker.visible) {
+        try renderFilePicker(win, agent_state, title_height + messages_height + status_height + plan_height);
     }
 }
 
@@ -1120,6 +1187,134 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     }
 }
 
+/// Render file picker menu overlay
+fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usize) !void {
+    const filtered_count = agent_state.file_picker.filtered_indices.items.len;
+
+    if (filtered_count == 0) return;
+
+    // Calculate menu dimensions with scroll support
+    const visible_count = @min(filtered_count, state.MAX_FILE_MENU_VISIBLE);
+    const max_scroll = if (filtered_count > visible_count) filtered_count - visible_count else 0;
+    const scroll_offset = @min(agent_state.file_picker.scroll_offset, max_scroll);
+    const menu_height = visible_count + 2; // +2 for top/bottom border
+    const menu_width = @min(win.width -| 4, 80); // max 80 chars wide
+
+    // Position menu just above the input area
+    const menu_y = if (input_top > menu_height) input_top - menu_height else 0;
+    const menu_x: usize = 2; // Small left margin
+
+    // Create menu window
+    const menu_win = win.child(.{
+        .x_off = @intCast(menu_x),
+        .y_off = @intCast(menu_y),
+        .width = @intCast(menu_width),
+        .height = @intCast(menu_height),
+    });
+
+    // Draw menu background and border (neutral colors)
+    const border_style = vaxis.Style{ .fg = .{ .index = 8 } }; // gray
+    const bg_style = vaxis.Style{ .bg = .{ .index = 0 } }; // black background
+
+    // Fill background
+    for (0..menu_height) |row| {
+        for (0..menu_width) |col| {
+            menu_win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = " ", .width = 1 },
+                .style = bg_style,
+            });
+        }
+    }
+
+    // Top border: ┌─ Files ─────────────────────────────┐
+    const has_more_above = scroll_offset > 0;
+    menu_win.writeCell(0, 0, .{ .char = .{ .grapheme = "┌", .width = 1 }, .style = border_style });
+    menu_win.writeCell(@intCast(menu_width - 1), 0, .{ .char = .{ .grapheme = "┐", .width = 1 }, .style = border_style });
+
+    // Draw header: "─ Files " then fill rest with "─"
+    const header_parts = [_][]const u8{ "─", " ", "F", "i", "l", "e", "s", " " };
+    for (1..menu_width - 1) |col| {
+        const char_idx = col - 1;
+        const char: []const u8 = if (has_more_above and col == menu_width - 4)
+            "▲"
+        else if (char_idx < header_parts.len)
+            header_parts[char_idx]
+        else
+            "─";
+        menu_win.writeCell(@intCast(col), 0, .{
+            .char = .{ .grapheme = char, .width = 1 },
+            .style = border_style,
+        });
+    }
+
+    // Bottom border with scroll indicator
+    const has_more_below = scroll_offset + visible_count < filtered_count;
+    menu_win.writeCell(0, @intCast(menu_height - 1), .{ .char = .{ .grapheme = "└", .width = 1 }, .style = border_style });
+    menu_win.writeCell(@intCast(menu_width - 1), @intCast(menu_height - 1), .{ .char = .{ .grapheme = "┘", .width = 1 }, .style = border_style });
+    for (1..menu_width - 1) |col| {
+        const char: []const u8 = if (has_more_below and col == menu_width - 4) "▼" else "─";
+        menu_win.writeCell(@intCast(col), @intCast(menu_height - 1), .{
+            .char = .{ .grapheme = char, .width = 1 },
+            .style = border_style,
+        });
+    }
+
+    // Side borders
+    for (1..menu_height - 1) |row| {
+        menu_win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
+        menu_win.writeCell(@intCast(menu_width - 1), @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
+    }
+
+    // Clamp selection to valid range
+    const selection = @min(agent_state.file_picker.selection, filtered_count - 1);
+
+    // Render file items (with scroll offset applied)
+    for (0..visible_count) |i| {
+        const item_idx = scroll_offset + i;
+        if (item_idx >= filtered_count) break;
+
+        const file_idx = agent_state.file_picker.filtered_indices.items[item_idx];
+        const file_path = agent_state.file_picker.files.items[file_idx];
+        const is_selected = (item_idx == selection);
+        const row = i + 1; // +1 for top border
+
+        // Style based on selection
+        const path_style: vaxis.Style = if (is_selected)
+            .{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 }, .bold = true } // inverted white
+        else
+            .{ .fg = .{ .index = 7 } }; // white
+
+        // Fill row background if selected
+        if (is_selected) {
+            for (1..menu_width - 1) |col| {
+                menu_win.writeCell(@intCast(col), @intCast(row), .{
+                    .char = .{ .grapheme = " ", .width = 1 },
+                    .style = .{ .bg = .{ .index = 7 } },
+                });
+            }
+        }
+
+        // Print file path with @ prefix
+        var col: usize = 2;
+
+        // Print "@" prefix
+        var at_seg = [_]vaxis.Cell.Segment{
+            .{ .text = "@", .style = path_style },
+        };
+        _ = menu_win.print(&at_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
+        col += 1;
+
+        // Print file path (truncate if needed)
+        const max_path_len = if (menu_width > col + 3) menu_width - col - 3 else 1;
+        const path_len = @min(file_path.len, max_path_len);
+        const path_text = file_path[0..path_len];
+        var path_seg = [_]vaxis.Cell.Segment{
+            .{ .text = path_text, .style = path_style },
+        };
+        _ = menu_win.print(&path_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
+    }
+}
+
 // =============================================================================
 // Plan Area
 // =============================================================================
@@ -1373,6 +1568,12 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     else
         vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray when not ready
     const text_style = vaxis.Style{ .fg = .{ .index = 7 } };
+    const file_ref_style = vaxis.Style{ .fg = .{ .index = 6 }, .bold = true }; // cyan, bold for @file refs
+
+    // Find file reference ranges for highlighting
+    const file_ref_ranges = findFileRefRanges(app.allocator, text) catch &[_]FileRefRange{};
+    defer if (file_ref_ranges.len > 0) app.allocator.free(file_ref_ranges);
+    const has_file_refs = file_ref_ranges.len > 0;
     // Use the same max_input_width as calculated earlier for consistency
     const max_input_width = max_input_width_for_calc;
     // Content starts after separator
@@ -1441,15 +1642,17 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
             if (display_row >= scroll_offset) {
                 const row = visible_row + content_start_row;
 
-                // Check for visual mode selection highlighting
+                // Check for visual mode selection highlighting or file references
                 const vim_mode = agent_state.input.vim.vim_mode;
                 const visual_anchor = agent_state.input.vim.visual_anchor;
+                const in_visual_mode = vim_mode == .visual and visual_anchor != null;
 
-                if (vim_mode == .visual and visual_anchor != null) {
-                    const anchor = visual_anchor.?;
+                if (in_visual_mode or has_file_refs) {
+                    // Character-by-character rendering for visual selection or file refs
+                    const anchor = if (in_visual_mode) visual_anchor.? else 0;
                     const cursor = agent_state.input.vim.cursor_pos;
-                    const sel_start = @min(anchor, cursor);
-                    const sel_end = @max(anchor, cursor);
+                    const sel_start = if (in_visual_mode) @min(anchor, cursor) else 0;
+                    const sel_end = if (in_visual_mode) @max(anchor, cursor) else 0;
 
                     // Visual selection style
                     const visual_style = vaxis.Style{
@@ -1464,8 +1667,14 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                         const col = input_col + char_idx;
                         if (col >= win.width) break;
 
-                        const in_selection = abs_pos >= sel_start and abs_pos <= sel_end;
-                        const style = if (in_selection) visual_style else text_style;
+                        const in_selection = in_visual_mode and abs_pos >= sel_start and abs_pos <= sel_end;
+                        const in_file_ref = isInFileRef(abs_pos, file_ref_ranges);
+                        const style = if (in_selection)
+                            visual_style
+                        else if (in_file_ref)
+                            file_ref_style
+                        else
+                            text_style;
 
                         win.writeCell(@intCast(col), @intCast(row), .{
                             .char = .{ .grapheme = chunk[char_idx .. char_idx + 1], .width = 1 },
@@ -1473,7 +1682,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                         });
                     }
                 } else {
-                    // Normal rendering
+                    // Normal rendering (no visual mode, no file refs)
                     var text_seg = [_]vaxis.Cell.Segment{
                         .{ .text = chunk, .style = text_style },
                     };

@@ -19,6 +19,19 @@ pub const ResourceLinkContent = struct {
     name: ?[]const u8 = null,
 };
 
+/// Embedded resource (inline file content)
+pub const EmbeddedResource = struct {
+    uri: []const u8,
+    mimeType: []const u8,
+    text: []const u8,
+};
+
+/// Embedded resource content block
+pub const EmbeddedResourceContent = struct {
+    type: []const u8 = "resource",
+    resource: EmbeddedResource,
+};
+
 /// Diff content block (from agent tool calls)
 pub const DiffContent = struct {
     path: []const u8,
@@ -26,10 +39,11 @@ pub const DiffContent = struct {
     new_text: []const u8,
 };
 
-/// Content block union - skim supports text, resource_link, and diff
+/// Content block union - skim supports text, resource_link, embedded_resource, and diff
 pub const ContentBlock = union(enum) {
     text: TextContent,
     resource_link: ResourceLinkContent,
+    embedded_resource: EmbeddedResourceContent,
     diff: DiffContent,
 };
 

@@ -3,6 +3,8 @@ const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const agent = @import("../agent/agent.zig");
 const state = @import("../agent/state.zig");
+const protocol = @import("../acp/protocol.zig");
+const AcpManager = @import("../acp/manager.zig").AcpManager;
 
 /// Handle keyboard input when in agent mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -150,13 +152,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                     } else if (mgr.status == .failed) {
                         try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
                     } else {
-                        const prompt_copy = try app.allocator.dupe(u8, text);
-                        defer app.allocator.free(prompt_copy);
-
-                        mgr.sendPrompt(prompt_copy) catch |err| {
-                            std.log.err("Agent: Failed to send prompt: {any}", .{err});
-                            try agent_state.addMessage(.system, "Failed to send prompt to agent");
-                        };
+                        // Parse prompt for @file references and send as content blocks
+                        try sendPromptWithFiles(app, mgr, text);
                     }
                 } else {
                     try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
@@ -185,6 +182,39 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
+    // Handle file picker menu navigation when visible
+    if (agent_state.file_picker.visible and agent_state.input.vim.vim_mode == .insert) {
+        // Ctrl+N - move down in file menu
+        if (key.mods.ctrl and key.codepoint == 'n') {
+            agent_state.file_picker.menuDown();
+            app.needs_render = true;
+            return;
+        }
+
+        // Ctrl+P - move up in file menu
+        if (key.mods.ctrl and key.codepoint == 'p') {
+            agent_state.file_picker.menuUp();
+            app.needs_render = true;
+            return;
+        }
+
+        // Enter or Tab - insert selected file as ACP resource
+        if (key.matches(vaxis.Key.enter, .{}) or key.codepoint == vaxis.Key.tab) {
+            if (agent_state.file_picker.getSelectedFile()) |selected_path| {
+                try insertFileAsResource(app, agent_state, selected_path);
+            }
+            agent_state.file_picker.hide();
+            app.needs_render = true;
+            return;
+        }
+
+        // Escape - hide file menu (but stay in insert mode)
+        if (key.codepoint == 27) {
+            agent_state.file_picker.hide();
+            app.needs_render = true;
+            return;
+        }
+    }
 
     // 'z' in normal vim mode - toggle full screen
     if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'z') {
@@ -424,13 +454,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                             } else if (mgr.status == .failed) {
                                 try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
                             } else {
-                                const prompt_copy = try app.allocator.dupe(u8, staged);
-                                defer app.allocator.free(prompt_copy);
-
-                                mgr.sendPrompt(prompt_copy) catch |err| {
-                                    std.log.err("Agent: Failed to send prompt: {any}", .{err});
-                                    try agent_state.addMessage(.system, "Failed to send prompt to agent");
-                                };
+                                try sendPromptWithFiles(app, mgr, staged);
                             }
                         }
 
@@ -460,15 +484,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                             } else if (mgr.status == .failed) {
                                 try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
                             } else {
-                                // Send prompt - manager will queue if session not ready yet
-                                const prompt_copy = try app.allocator.dupe(u8, text);
-                                defer app.allocator.free(prompt_copy);
-
-                                mgr.sendPrompt(prompt_copy) catch |err| {
-                                    std.log.err("Agent: Failed to send prompt: {any}", .{err});
-                                    try agent_state.addMessage(.system, "Failed to send prompt to agent");
-                                };
-                                // Queued status shown in input area, not as a message
+                                // Parse and send prompt with file references
+                                try sendPromptWithFiles(app, mgr, text);
                             }
                         } else {
                             try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
@@ -502,6 +519,92 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Update slash menu visibility based on current input
     updateSlashMenuVisibility(app, agent_state);
+
+    // Update file picker visibility based on current input
+    updateFilePickerVisibility(app, agent_state);
+}
+
+/// Insert a file reference into the input (displayed as @path/to/file)
+/// The file content is resolved and embedded when the prompt is sent.
+fn insertFileAsResource(_: *App, agent_state: *agent.AgentState, file_path: []const u8) !void {
+    const input_text = agent_state.input.getText();
+    const cursor_pos = agent_state.input.vim.cursor_pos;
+
+    // Find the @ position to replace
+    const active = state.FilePickerState.getActiveAtPosition(input_text, cursor_pos) orelse return;
+
+    // Build new text: before @ + @file_path + space + after query
+    var new_text: std.ArrayList(u8) = .{};
+    defer new_text.deinit(agent_state.allocator);
+
+    try new_text.appendSlice(agent_state.allocator, input_text[0..active.start]);
+    try new_text.append(agent_state.allocator, '@');
+    try new_text.appendSlice(agent_state.allocator, file_path);
+    try new_text.append(agent_state.allocator, ' '); // Add space after file reference
+    if (active.end < input_text.len) {
+        try new_text.appendSlice(agent_state.allocator, input_text[active.end..]);
+    }
+
+    // Update input - cursor positioned after the space
+    agent_state.input.setText(new_text.items);
+    agent_state.input.vim.cursor_pos = active.start + 1 + file_path.len + 1; // @path + space
+}
+
+/// Get MIME type for a file path based on extension
+fn getMimeType(path: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, path, ".zig")) return "text/x-zig";
+    if (std.mem.endsWith(u8, path, ".py")) return "text/x-python";
+    if (std.mem.endsWith(u8, path, ".ts")) return "text/typescript";
+    if (std.mem.endsWith(u8, path, ".tsx")) return "text/typescript";
+    if (std.mem.endsWith(u8, path, ".js")) return "text/javascript";
+    if (std.mem.endsWith(u8, path, ".jsx")) return "text/javascript";
+    if (std.mem.endsWith(u8, path, ".json")) return "application/json";
+    if (std.mem.endsWith(u8, path, ".md")) return "text/markdown";
+    if (std.mem.endsWith(u8, path, ".rs")) return "text/x-rust";
+    if (std.mem.endsWith(u8, path, ".go")) return "text/x-go";
+    if (std.mem.endsWith(u8, path, ".c")) return "text/x-c";
+    if (std.mem.endsWith(u8, path, ".cpp") or std.mem.endsWith(u8, path, ".cc")) return "text/x-c++";
+    if (std.mem.endsWith(u8, path, ".h") or std.mem.endsWith(u8, path, ".hpp")) return "text/x-c";
+    if (std.mem.endsWith(u8, path, ".java")) return "text/x-java";
+    if (std.mem.endsWith(u8, path, ".rb")) return "text/x-ruby";
+    if (std.mem.endsWith(u8, path, ".sh") or std.mem.endsWith(u8, path, ".bash")) return "text/x-shellscript";
+    if (std.mem.endsWith(u8, path, ".yaml") or std.mem.endsWith(u8, path, ".yml")) return "text/yaml";
+    if (std.mem.endsWith(u8, path, ".toml")) return "text/toml";
+    if (std.mem.endsWith(u8, path, ".html")) return "text/html";
+    if (std.mem.endsWith(u8, path, ".css")) return "text/css";
+    if (std.mem.endsWith(u8, path, ".xml")) return "application/xml";
+    if (std.mem.endsWith(u8, path, ".sql")) return "text/x-sql";
+    return "text/plain";
+}
+
+/// Escape a string for JSON embedding
+fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var result: std.ArrayList(u8) = .{};
+    errdefer result.deinit(allocator);
+
+    for (input) |c| {
+        switch (c) {
+            '"' => try result.appendSlice(allocator, "\\\""),
+            '\\' => try result.appendSlice(allocator, "\\\\"),
+            '\n' => try result.appendSlice(allocator, "\\n"),
+            '\r' => try result.appendSlice(allocator, "\\r"),
+            '\t' => try result.appendSlice(allocator, "\\t"),
+            0x08 => try result.appendSlice(allocator, "\\b"), // backspace
+            0x0C => try result.appendSlice(allocator, "\\f"), // form feed
+            else => {
+                if (c < 0x20) {
+                    // Control characters - use unicode escape
+                    var buf: [6]u8 = undefined;
+                    _ = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                    try result.appendSlice(allocator, &buf);
+                } else {
+                    try result.append(allocator, c);
+                }
+            },
+        }
+    }
+
+    return result.toOwnedSlice(allocator);
 }
 
 /// Handle local slash commands (executed by skim, not sent to agent)
@@ -544,4 +647,358 @@ fn updateSlashMenuVisibility(_: *App, agent_state: *agent.AgentState) void {
             agent_state.slash_menu_selection = count - 1;
         }
     }
+}
+
+/// Update file picker visibility based on input content
+fn updateFilePickerVisibility(_: *App, agent_state: *agent.AgentState) void {
+    if (agent_state.input.vim.vim_mode != .insert) {
+        // Only show menu in insert mode
+        agent_state.file_picker.visible = false;
+        return;
+    }
+
+    const input_text = agent_state.input.getText();
+    const cursor_pos = agent_state.input.vim.cursor_pos;
+
+    // Check if there's an active @ trigger at cursor position
+    const active = state.FilePickerState.getActiveAtPosition(input_text, cursor_pos);
+
+    if (active != null and !agent_state.file_picker.visible) {
+        // Load files lazily on first show
+        if (agent_state.file_picker.files.items.len == 0) {
+            agent_state.file_picker.loadFiles() catch |err| {
+                std.log.warn("Failed to load files for picker: {}", .{err});
+            };
+        }
+        agent_state.file_picker.visible = true;
+        agent_state.file_picker.selection = 0;
+        agent_state.file_picker.scroll_offset = 0;
+    } else if (active == null and agent_state.file_picker.visible) {
+        // Hide picker when @ is deleted
+        agent_state.file_picker.visible = false;
+    }
+
+    // Update filter when picker is visible
+    if (agent_state.file_picker.visible) {
+        const filter = state.FilePickerState.getFileFilter(input_text, cursor_pos);
+        agent_state.file_picker.updateFilter(filter) catch {};
+    }
+}
+
+/// Send a prompt, parsing @file references and embedding file content.
+/// Falls back to simple text prompt if parsing fails or no files referenced.
+fn sendPromptWithFiles(app: *App, mgr: *AcpManager, text: []const u8) !void {
+    // Check if there are any @ references that might be files
+    const has_at = std.mem.indexOf(u8, text, "@") != null;
+    std.log.info("sendPromptWithFiles: text_len={d}, has_at={}", .{ text.len, has_at });
+
+    if (has_at) {
+        // Parse and send with content blocks
+        var parsed = parsePromptContent(app.allocator, text) catch |err| {
+            std.log.warn("sendPromptWithFiles: Failed to parse prompt content: {}", .{err});
+            // Fall back to simple text prompt
+            const prompt_copy = try app.allocator.dupe(u8, text);
+            defer app.allocator.free(prompt_copy);
+            return mgr.sendPrompt(prompt_copy);
+        };
+        defer parsed.deinit();
+
+        std.log.info("sendPromptWithFiles: parsed {d} blocks, {d} file resources", .{ parsed.blocks.len, parsed.resources.len });
+
+        // Log resource URIs
+        for (parsed.resources, 0..) |res, i| {
+            std.log.info("sendPromptWithFiles: resource[{d}] uri={s}, mime={s}, text_len={d}", .{ i, res.uri, res.mime_type, res.text.len });
+        }
+
+        if (parsed.resources.len > 0) {
+            // Has file resources - send as content blocks
+            std.log.info("sendPromptWithFiles: sending as content blocks with embedded resources", .{});
+            mgr.sendPromptContent(parsed.blocks) catch |err| {
+                std.log.err("sendPromptWithFiles: Failed to send prompt content: {any}", .{err});
+                const agent_state = &(app.state.agent_state orelse return);
+                try agent_state.addMessage(.system, "Failed to send prompt to agent");
+            };
+        } else {
+            // No file resources found - send as simple text
+            std.log.info("sendPromptWithFiles: no valid file refs found, sending as simple text", .{});
+            const prompt_copy = try app.allocator.dupe(u8, text);
+            defer app.allocator.free(prompt_copy);
+            mgr.sendPrompt(prompt_copy) catch |err| {
+                std.log.err("sendPromptWithFiles: Failed to send prompt: {any}", .{err});
+                const agent_state = &(app.state.agent_state orelse return);
+                try agent_state.addMessage(.system, "Failed to send prompt to agent");
+            };
+        }
+    } else {
+        // No @ at all - send simple text prompt
+        std.log.info("sendPromptWithFiles: no @ found, sending as simple text", .{});
+        const prompt_copy = try app.allocator.dupe(u8, text);
+        defer app.allocator.free(prompt_copy);
+        mgr.sendPrompt(prompt_copy) catch |err| {
+            std.log.err("sendPromptWithFiles: Failed to send prompt: {any}", .{err});
+            const agent_state = &(app.state.agent_state orelse return);
+            try agent_state.addMessage(.system, "Failed to send prompt to agent");
+        };
+    }
+}
+
+/// Parsed content with ownership
+pub const ParsedContent = struct {
+    blocks: []protocol.ContentBlock,
+    resources: []OwnedResource,
+    allocator: std.mem.Allocator,
+
+    pub const OwnedResource = struct {
+        uri: []u8,
+        mime_type: []const u8, // Static string, not owned
+        text: []u8,
+    };
+
+    pub fn deinit(self: *ParsedContent) void {
+        // Free owned strings in resources
+        for (self.resources) |res| {
+            self.allocator.free(res.uri);
+            self.allocator.free(res.text);
+        }
+        self.allocator.free(self.resources);
+        self.allocator.free(self.blocks);
+    }
+};
+
+/// Parse prompt text and extract @file references into content blocks.
+/// Returns text blocks and embedded resource blocks.
+/// Caller owns the returned ParsedContent and must call deinit().
+pub fn parsePromptContent(allocator: std.mem.Allocator, input_text: []const u8) !ParsedContent {
+    var blocks: std.ArrayList(protocol.ContentBlock) = .{};
+    errdefer blocks.deinit(allocator);
+
+    var resources: std.ArrayList(ParsedContent.OwnedResource) = .{};
+    errdefer {
+        for (resources.items) |res| {
+            allocator.free(res.uri);
+            allocator.free(res.text);
+        }
+        resources.deinit(allocator);
+    }
+
+    if (input_text.len == 0) {
+        return .{
+            .blocks = try blocks.toOwnedSlice(allocator),
+            .resources = try resources.toOwnedSlice(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    var i: usize = 0;
+    var text_start: usize = 0;
+
+    while (i < input_text.len) {
+        // Check for @ at word boundary
+        if (input_text[i] == '@') {
+            const at_word_boundary = (i == 0 or
+                input_text[i - 1] == ' ' or
+                input_text[i - 1] == '\n' or
+                input_text[i - 1] == '\t');
+
+            if (at_word_boundary) {
+                // Find end of file path (until whitespace or end)
+                const path_start = i + 1;
+                var path_end = path_start;
+                while (path_end < input_text.len and
+                    input_text[path_end] != ' ' and
+                    input_text[path_end] != '\n' and
+                    input_text[path_end] != '\t')
+                {
+                    path_end += 1;
+                }
+
+                const file_path = input_text[path_start..path_end];
+
+                // Try to read the file
+                if (file_path.len > 0) {
+                    const cwd = std.fs.cwd();
+                    if (cwd.openFile(file_path, .{})) |file| {
+                        defer file.close();
+
+                        // Check file size
+                        const stat = file.stat() catch {
+                            i += 1;
+                            continue;
+                        };
+                        if (stat.size > state.MAX_FILE_SIZE) {
+                            i += 1;
+                            continue;
+                        }
+
+                        // Read file content
+                        const content = file.readToEndAlloc(allocator, state.MAX_FILE_SIZE) catch {
+                            i += 1;
+                            continue;
+                        };
+                        errdefer allocator.free(content);
+
+                        // Add text block for content before this @file
+                        if (i > text_start) {
+                            try blocks.append(allocator, .{
+                                .text = .{ .text = input_text[text_start..i] },
+                            });
+                        }
+
+                        // Build file URI
+                        const abs_path = cwd.realpathAlloc(allocator, file_path) catch {
+                            allocator.free(content);
+                            i += 1;
+                            continue;
+                        };
+                        var uri_buf: std.ArrayList(u8) = .{};
+                        defer uri_buf.deinit(allocator);
+                        try uri_buf.appendSlice(allocator, "file://");
+                        try uri_buf.appendSlice(allocator, abs_path);
+                        allocator.free(abs_path);
+                        const uri = try uri_buf.toOwnedSlice(allocator);
+                        errdefer allocator.free(uri);
+
+                        const mime_type = getMimeType(file_path);
+
+                        // Store resource with ownership
+                        try resources.append(allocator, .{
+                            .uri = uri,
+                            .mime_type = mime_type,
+                            .text = content,
+                        });
+
+                        // Add embedded resource block (pointing to last resource)
+                        const res = &resources.items[resources.items.len - 1];
+                        try blocks.append(allocator, .{
+                            .embedded_resource = .{
+                                .resource = .{
+                                    .uri = res.uri,
+                                    .mimeType = res.mime_type,
+                                    .text = res.text,
+                                },
+                            },
+                        });
+
+                        // Move past the @file reference
+                        i = path_end;
+                        text_start = path_end;
+                        continue;
+                    } else |_| {
+                        // File doesn't exist, treat @ as regular text
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Add remaining text as final block
+    if (text_start < input_text.len) {
+        try blocks.append(allocator, .{
+            .text = .{ .text = input_text[text_start..] },
+        });
+    }
+
+    return .{
+        .blocks = try blocks.toOwnedSlice(allocator),
+        .resources = try resources.toOwnedSlice(allocator),
+        .allocator = allocator,
+    };
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test "parsePromptContent plain text no @ references" {
+    const allocator = std.testing.allocator;
+    const parsed = try parsePromptContent(allocator, "hello world");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.blocks.len);
+    try std.testing.expectEqual(@as(usize, 0), parsed.resources.len);
+    try std.testing.expectEqualStrings("hello world", parsed.blocks[0].text.text);
+}
+
+test "parsePromptContent empty input" {
+    const allocator = std.testing.allocator;
+    const parsed = try parsePromptContent(allocator, "");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), parsed.blocks.len);
+    try std.testing.expectEqual(@as(usize, 0), parsed.resources.len);
+}
+
+test "parsePromptContent @ not at word boundary treated as text" {
+    const allocator = std.testing.allocator;
+    // Email-like pattern - @ not at word boundary
+    const parsed = try parsePromptContent(allocator, "contact me at user@example.com");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.blocks.len);
+    try std.testing.expectEqual(@as(usize, 0), parsed.resources.len);
+    try std.testing.expectEqualStrings("contact me at user@example.com", parsed.blocks[0].text.text);
+}
+
+test "parsePromptContent @nonexistent file treated as text" {
+    const allocator = std.testing.allocator;
+    const parsed = try parsePromptContent(allocator, "look at @nonexistent_file_12345.txt please");
+    defer parsed.deinit();
+
+    // File doesn't exist, so @ is kept as regular text
+    try std.testing.expectEqual(@as(usize, 1), parsed.blocks.len);
+    try std.testing.expectEqual(@as(usize, 0), parsed.resources.len);
+    try std.testing.expectEqualStrings("look at @nonexistent_file_12345.txt please", parsed.blocks[0].text.text);
+}
+
+test "parsePromptContent @README.md creates embedded resource" {
+    const allocator = std.testing.allocator;
+    const parsed = try parsePromptContent(allocator, "explain @README.md please");
+    defer parsed.deinit();
+
+    // Should have: text("explain ") + embedded_resource(README.md) + text(" please")
+    try std.testing.expectEqual(@as(usize, 3), parsed.blocks.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.resources.len);
+
+    // First block: text before @
+    try std.testing.expectEqualStrings("explain ", parsed.blocks[0].text.text);
+
+    // Second block: embedded resource
+    try std.testing.expect(std.mem.endsWith(u8, parsed.blocks[1].embedded_resource.resource.uri, "/README.md"));
+    try std.testing.expectEqualStrings("text/markdown", parsed.blocks[1].embedded_resource.resource.mimeType);
+    try std.testing.expect(parsed.blocks[1].embedded_resource.resource.text.len > 0);
+
+    // Third block: text after @file
+    try std.testing.expectEqualStrings(" please", parsed.blocks[2].text.text);
+}
+
+test "parsePromptContent @build.zig at start of input" {
+    const allocator = std.testing.allocator;
+    const parsed = try parsePromptContent(allocator, "@build.zig explain this");
+    defer parsed.deinit();
+
+    // Should have: embedded_resource(build.zig) + text(" explain this")
+    try std.testing.expectEqual(@as(usize, 2), parsed.blocks.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.resources.len);
+
+    // First block: embedded resource (no leading text)
+    try std.testing.expect(std.mem.endsWith(u8, parsed.blocks[0].embedded_resource.resource.uri, "/build.zig"));
+
+    // Second block: text after
+    try std.testing.expectEqualStrings(" explain this", parsed.blocks[1].text.text);
+}
+
+test "parsePromptContent multiple @file references" {
+    const allocator = std.testing.allocator;
+    const parsed = try parsePromptContent(allocator, "compare @README.md and @build.zig");
+    defer parsed.deinit();
+
+    // Should have: text("compare ") + embedded(README) + text(" and ") + embedded(build.zig)
+    try std.testing.expectEqual(@as(usize, 4), parsed.blocks.len);
+    try std.testing.expectEqual(@as(usize, 2), parsed.resources.len);
+
+    try std.testing.expectEqualStrings("compare ", parsed.blocks[0].text.text);
+    try std.testing.expect(std.mem.endsWith(u8, parsed.blocks[1].embedded_resource.resource.uri, "/README.md"));
+    try std.testing.expectEqualStrings(" and ", parsed.blocks[2].text.text);
+    try std.testing.expect(std.mem.endsWith(u8, parsed.blocks[3].embedded_resource.resource.uri, "/build.zig"));
 }

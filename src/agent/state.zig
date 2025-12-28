@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const InputEditor = @import("input_editor.zig").InputEditor;
 const ChatLineMap = @import("chat_line_map.zig").ChatLineMap;
 const protocol = @import("../acp/protocol.zig");
+const git_files = @import("../git/files.zig");
 
 /// Maximum number of slash commands visible in menu at once
 pub const MAX_SLASH_MENU_VISIBLE: usize = 12;
@@ -48,6 +49,230 @@ pub const OwnedCommand = struct {
 };
 
 // =============================================================================
+// File Picker State
+// =============================================================================
+
+/// Maximum number of file menu items visible at once
+pub const MAX_FILE_MENU_VISIBLE: usize = 10;
+/// Maximum file size for embedding in ACP resource (1MB)
+pub const MAX_FILE_SIZE: usize = 1024 * 1024;
+/// Maximum number of filtered results
+pub const MAX_FILTERED_RESULTS: usize = 1000;
+
+/// State for the @ file picker menu
+pub const FilePickerState = struct {
+    allocator: Allocator,
+    visible: bool,
+    files: std.ArrayList([]const u8), // All files in repo (owned)
+    filtered_indices: std.ArrayList(usize), // Indices into files matching filter
+    selection: usize, // Index into filtered_indices
+    scroll_offset: usize, // Scroll offset for menu pagination
+    last_filter_update: i64, // Timestamp for throttling (ms)
+    last_filter: [256]u8, // Cache last filter to avoid redundant updates
+    last_filter_len: usize,
+
+    pub fn init(allocator: Allocator) FilePickerState {
+        return .{
+            .allocator = allocator,
+            .visible = false,
+            .files = .{},
+            .filtered_indices = .{},
+            .selection = 0,
+            .scroll_offset = 0,
+            .last_filter_update = 0,
+            .last_filter = undefined,
+            .last_filter_len = 0,
+        };
+    }
+
+    pub fn deinit(self: *FilePickerState) void {
+        for (self.files.items) |f| {
+            self.allocator.free(f);
+        }
+        self.files.deinit(self.allocator);
+        self.filtered_indices.deinit(self.allocator);
+    }
+
+    /// Load file list from git repository
+    pub fn loadFiles(self: *FilePickerState) !void {
+        // Clear existing files
+        for (self.files.items) |f| {
+            self.allocator.free(f);
+        }
+        self.files.clearRetainingCapacity();
+        self.filtered_indices.clearRetainingCapacity();
+
+        // Load from git
+        const files = try git_files.getAllFiles(self.allocator);
+        errdefer git_files.freeFileList(self.allocator, files);
+
+        // Transfer ownership
+        for (files) |f| {
+            try self.files.append(self.allocator, f);
+        }
+        // Free just the outer slice (inner strings now owned by self.files)
+        self.allocator.free(files);
+
+        std.log.info("FilePickerState: loaded {d} files from git", .{self.files.items.len});
+    }
+
+    /// Check if there's an active @ trigger at cursor position
+    /// Returns the position info if found, null otherwise
+    pub fn getActiveAtPosition(input_text: []const u8, cursor_pos: usize) ?struct { start: usize, end: usize } {
+        if (input_text.len == 0 or cursor_pos == 0) return null;
+
+        // Search backwards from cursor for @
+        var at_pos: ?usize = null;
+        const search_end = @min(cursor_pos, input_text.len);
+
+        var i: usize = 0;
+        while (i < search_end) : (i += 1) {
+            const c = input_text[i];
+            if (c == '@') {
+                // Check if @ is at word boundary (start of input or after space/newline)
+                if (i == 0 or input_text[i - 1] == ' ' or input_text[i - 1] == '\n' or input_text[i - 1] == '\t') {
+                    at_pos = i;
+                }
+            } else if (c == ' ' or c == '\n' or c == '\t') {
+                // Hit word boundary - if we had an @, check if cursor is still in that word
+                if (at_pos != null) {
+                    if (i <= cursor_pos) {
+                        // Cursor is beyond this @word, reset
+                        at_pos = null;
+                    }
+                }
+            }
+        }
+
+        if (at_pos) |start| {
+            // Find end (space, newline, tab, or end of string up to cursor)
+            var end = start + 1;
+            while (end < input_text.len and end <= cursor_pos) : (end += 1) {
+                const c = input_text[end];
+                if (c == ' ' or c == '\n' or c == '\t') break;
+            }
+            return .{ .start = start, .end = @min(end, cursor_pos) };
+        }
+        return null;
+    }
+
+    /// Get the filter text (everything after @ up to cursor)
+    pub fn getFileFilter(input_text: []const u8, cursor_pos: usize) []const u8 {
+        const active = getActiveAtPosition(input_text, cursor_pos) orelse return "";
+        if (active.end <= active.start + 1) return "";
+        return input_text[active.start + 1 .. active.end];
+    }
+
+    /// Check if file menu should be shown
+    pub fn shouldShow(self: *const FilePickerState, input_text: []const u8, cursor_pos: usize) bool {
+        return getActiveAtPosition(input_text, cursor_pos) != null and self.files.items.len > 0;
+    }
+
+    /// Update filtered indices based on current filter
+    pub fn updateFilter(self: *FilePickerState, filter: []const u8) !void {
+        // Check if filter changed
+        const filter_changed = filter.len != self.last_filter_len or
+            (filter.len > 0 and !std.mem.eql(u8, filter, self.last_filter[0..self.last_filter_len]));
+
+        if (!filter_changed and self.filtered_indices.items.len > 0) {
+            return; // No update needed
+        }
+
+        // Throttle updates (50ms)
+        const now = std.time.milliTimestamp();
+        if (now - self.last_filter_update < 50 and self.last_filter_update != 0 and !filter_changed) {
+            return;
+        }
+        self.last_filter_update = now;
+
+        // Cache the filter
+        const copy_len = @min(filter.len, self.last_filter.len);
+        @memcpy(self.last_filter[0..copy_len], filter[0..copy_len]);
+        self.last_filter_len = copy_len;
+
+        // Clear and rebuild filtered indices
+        self.filtered_indices.clearRetainingCapacity();
+
+        for (self.files.items, 0..) |path, idx| {
+            if (self.filtered_indices.items.len >= MAX_FILTERED_RESULTS) break;
+
+            if (filter.len == 0 or fuzzyMatch(path, filter)) {
+                try self.filtered_indices.append(self.allocator, idx);
+            }
+        }
+
+        // Clamp selection
+        if (self.filtered_indices.items.len == 0) {
+            self.selection = 0;
+        } else if (self.selection >= self.filtered_indices.items.len) {
+            self.selection = self.filtered_indices.items.len - 1;
+        }
+    }
+
+    /// Move selection up
+    pub fn menuUp(self: *FilePickerState) void {
+        if (self.selection > 0) {
+            self.selection -= 1;
+            if (self.selection < self.scroll_offset) {
+                self.scroll_offset = self.selection;
+            }
+        }
+    }
+
+    /// Move selection down
+    pub fn menuDown(self: *FilePickerState) void {
+        if (self.filtered_indices.items.len > 0 and self.selection < self.filtered_indices.items.len - 1) {
+            self.selection += 1;
+            if (self.selection >= self.scroll_offset + MAX_FILE_MENU_VISIBLE) {
+                self.scroll_offset = self.selection - MAX_FILE_MENU_VISIBLE + 1;
+            }
+        }
+    }
+
+    /// Get the currently selected file path
+    pub fn getSelectedFile(self: *const FilePickerState) ?[]const u8 {
+        if (self.filtered_indices.items.len == 0) return null;
+        const clamped_selection = @min(self.selection, self.filtered_indices.items.len - 1);
+        const file_idx = self.filtered_indices.items[clamped_selection];
+        if (file_idx >= self.files.items.len) return null;
+        return self.files.items[file_idx];
+    }
+
+    /// Show the menu and reset selection
+    pub fn show(self: *FilePickerState) void {
+        self.visible = true;
+        self.selection = 0;
+        self.scroll_offset = 0;
+        self.last_filter_len = 0; // Force filter update
+    }
+
+    /// Hide the menu
+    pub fn hide(self: *FilePickerState) void {
+        self.visible = false;
+        self.selection = 0;
+        self.scroll_offset = 0;
+    }
+};
+
+/// Fuzzy match: check if all filter chars appear in order within the target (case-insensitive)
+pub fn fuzzyMatch(target: []const u8, filter: []const u8) bool {
+    if (filter.len == 0) return true;
+    if (filter.len > target.len) return false;
+
+    var filter_idx: usize = 0;
+    for (target) |c| {
+        const target_lower = std.ascii.toLower(c);
+        const filter_lower = std.ascii.toLower(filter[filter_idx]);
+
+        if (target_lower == filter_lower) {
+            filter_idx += 1;
+            if (filter_idx >= filter.len) return true;
+        }
+    }
+    return false;
+}
+
+// =============================================================================
 // Agent State
 // =============================================================================
 
@@ -88,6 +313,8 @@ pub const AgentState = struct {
     // Staged prompt (queued to send after agent completes)
     staged_prompt: [8192]u8,
     staged_prompt_len: usize,
+    // File picker state for @ mentions
+    file_picker: FilePickerState,
 
     pub const PanelSide = enum {
         left,
@@ -134,6 +361,7 @@ pub const AgentState = struct {
             .last_messages_viewport_height = 20, // Reasonable default
             .staged_prompt = undefined,
             .staged_prompt_len = 0,
+            .file_picker = FilePickerState.init(allocator),
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -157,6 +385,7 @@ pub const AgentState = struct {
             cmd.deinit(self.allocator);
         }
         self.available_commands.deinit(self.allocator);
+        self.file_picker.deinit();
     }
 
     /// Add a message to the conversation history
@@ -744,28 +973,6 @@ pub const AgentState = struct {
         return count;
     }
 
-    /// Fuzzy match: check if all filter chars appear in order within the target
-    fn fuzzyMatch(target: []const u8, filter: []const u8) bool {
-        if (filter.len == 0) return true;
-        if (filter.len > target.len) return false;
-
-        var filter_idx: usize = 0;
-        for (target) |c| {
-            // Case-insensitive comparison
-            const target_lower = if (c >= 'A' and c <= 'Z') c + 32 else c;
-            const filter_lower = if (filter[filter_idx] >= 'A' and filter[filter_idx] <= 'Z')
-                filter[filter_idx] + 32
-            else
-                filter[filter_idx];
-
-            if (target_lower == filter_lower) {
-                filter_idx += 1;
-                if (filter_idx >= filter.len) return true;
-            }
-        }
-        return false;
-    }
-
     /// Show slash menu and reset selection
     pub fn showSlashMenu(self: *AgentState) void {
         self.slash_menu_visible = true;
@@ -1091,4 +1298,63 @@ test "PanelSide fromString" {
     try std.testing.expectEqual(AgentState.PanelSide.left, AgentState.PanelSide.fromString("left"));
     try std.testing.expectEqual(AgentState.PanelSide.right, AgentState.PanelSide.fromString("right"));
     try std.testing.expect(AgentState.PanelSide.fromString("invalid") == null);
+}
+
+// =============================================================================
+// File Picker Tests
+// =============================================================================
+
+test "fuzzyMatch basic" {
+    try std.testing.expect(fuzzyMatch("src/main.zig", "main"));
+    try std.testing.expect(fuzzyMatch("src/main.zig", "smz"));
+    try std.testing.expect(fuzzyMatch("src/main.zig", "src"));
+    try std.testing.expect(fuzzyMatch("src/main.zig", ""));
+    try std.testing.expect(!fuzzyMatch("src/main.zig", "xyz"));
+    try std.testing.expect(!fuzzyMatch("short", "longer"));
+}
+
+test "fuzzyMatch case insensitive" {
+    try std.testing.expect(fuzzyMatch("README.md", "readme"));
+    try std.testing.expect(fuzzyMatch("README.md", "README"));
+    try std.testing.expect(fuzzyMatch("CamelCase.ts", "cc"));
+    try std.testing.expect(fuzzyMatch("CamelCase.ts", "CC"));
+}
+
+test "getActiveAtPosition basic" {
+    // @ at start
+    const pos1 = FilePickerState.getActiveAtPosition("@src", 4);
+    try std.testing.expect(pos1 != null);
+    try std.testing.expectEqual(@as(usize, 0), pos1.?.start);
+    try std.testing.expectEqual(@as(usize, 4), pos1.?.end);
+
+    // @ after space
+    const pos2 = FilePickerState.getActiveAtPosition("check @foo", 10);
+    try std.testing.expect(pos2 != null);
+    try std.testing.expectEqual(@as(usize, 6), pos2.?.start);
+    try std.testing.expectEqual(@as(usize, 10), pos2.?.end);
+
+    // No @ - should return null
+    const pos3 = FilePickerState.getActiveAtPosition("no at symbol", 12);
+    try std.testing.expect(pos3 == null);
+}
+
+test "getActiveAtPosition email addresses should not trigger" {
+    // email@domain.com - @ is not at word boundary
+    const pos = FilePickerState.getActiveAtPosition("user@example.com", 16);
+    try std.testing.expect(pos == null);
+}
+
+test "getActiveAtPosition multiple @ uses closest to cursor" {
+    // "check @file1 and @file2" with cursor at position 23
+    const input = "check @file1 and @file2";
+    const pos = FilePickerState.getActiveAtPosition(input, 23);
+    try std.testing.expect(pos != null);
+    try std.testing.expectEqual(@as(usize, 17), pos.?.start); // Second @
+}
+
+test "getFileFilter extracts filter text" {
+    try std.testing.expectEqualStrings("src/m", FilePickerState.getFileFilter("@src/m", 6));
+    try std.testing.expectEqualStrings("foo", FilePickerState.getFileFilter("check @foo", 10));
+    try std.testing.expectEqualStrings("", FilePickerState.getFileFilter("@", 1));
+    try std.testing.expectEqualStrings("", FilePickerState.getFileFilter("no at", 5));
 }

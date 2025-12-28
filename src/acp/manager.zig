@@ -185,6 +185,7 @@ pub const AcpManager = struct {
         AlreadyConnected,
         NotConnected,
         NoSession,
+        AlreadyPrompting,
         SpawnFailed,
         InitializeFailed,
         SessionFailed,
@@ -356,6 +357,26 @@ pub const AcpManager = struct {
         self.pending_prompt_id = request_id;
         self.status = .prompting;
         std.log.info("ACP Manager: sent prompt async, request_id={d}", .{request_id});
+    }
+
+    /// Send a prompt with content blocks to the agent (non-blocking).
+    /// This bypasses queueing - use for structured content blocks with file resources.
+    pub fn sendPromptContent(self: *AcpManager, content: []const protocol.ContentBlock) Error!void {
+        const acp = self.acp_client orelse return error.NotConnected;
+        if (self.status != .session_active and self.status != .prompting) return error.NoSession;
+
+        // If already prompting, return error - caller should wait
+        if (self.pending_prompt_id != null) return error.AlreadyPrompting;
+
+        // Send prompt asynchronously
+        const request_id = acp.sendPromptContentAsync(content) catch |err| {
+            std.log.err("ACP Manager: failed to send prompt content: {any}", .{err});
+            return error.PromptFailed;
+        };
+
+        self.pending_prompt_id = request_id;
+        self.status = .prompting;
+        std.log.info("ACP Manager: sent prompt content async, request_id={d}", .{request_id});
     }
 
     /// Send the next queued prompt if any.
@@ -1402,7 +1423,7 @@ pub const AcpManager = struct {
                             self.allocator.free(text);
                         };
                     },
-                    .diff, .resource_link => {},
+                    .diff, .resource_link, .embedded_resource => {},
                 }
             }
         }

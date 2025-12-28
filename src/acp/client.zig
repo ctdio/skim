@@ -274,6 +274,47 @@ pub const Client = struct {
         return request_id;
     }
 
+    /// Send a prompt with content blocks without blocking.
+    /// Returns the request ID for tracking the response.
+    pub fn sendPromptContentAsync(self: *Client, content: []const protocol.ContentBlock) Error!i64 {
+        if (self.state != .session_active) return error.NoActiveSession;
+        const sid = self.session_id orelse return error.NoActiveSession;
+
+        // Log content block summary
+        var text_count: usize = 0;
+        var resource_count: usize = 0;
+        for (content) |block| {
+            switch (block) {
+                .text => text_count += 1,
+                .embedded_resource => resource_count += 1,
+                else => {},
+            }
+        }
+        std.log.info("ACP Client: sendPromptContentAsync - {d} text blocks, {d} embedded resources", .{ text_count, resource_count });
+
+        const params = protocol.SessionPromptParams{
+            .session_id = sid,
+            .content = content,
+        };
+
+        const params_json = self.transport.encoder.encodeSessionPromptParams(params) catch return error.ProtocolError;
+        defer self.allocator.free(params_json);
+
+        // Log full payload (truncate if too long for readability)
+        const max_log_len: usize = 2000;
+        if (params_json.len <= max_log_len) {
+            std.log.info("ACP Client: session/prompt payload: {s}", .{params_json});
+        } else {
+            std.log.info("ACP Client: session/prompt payload (truncated {d} bytes): {s}...", .{ params_json.len, params_json[0..max_log_len] });
+        }
+
+        const request_id = self.nextRequestId();
+        std.log.info("ACP Client: Sending session/prompt request id={d}", .{request_id});
+        _ = try self.transport.sendRequest(request_id, "session/prompt", params_json);
+
+        return request_id;
+    }
+
     /// Process result for a completed prompt
     pub const PromptResult = struct {
         stop_reason: types.StopReason,

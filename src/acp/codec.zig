@@ -360,6 +360,13 @@ pub const Encoder = struct {
                         try writer.writeByte('}');
                     }
                 },
+                .embedded_resource => |e| {
+                    try writer.print("{{\"type\":\"resource\",\"resource\":{{\"uri\":{f},\"mimeType\":{f},\"text\":{f}}}}}", .{
+                        std.json.fmt(e.resource.uri, .{}),
+                        std.json.fmt(e.resource.mimeType, .{}),
+                        std.json.fmt(e.resource.text, .{}),
+                    });
+                },
                 .diff => {
                     // Diff content is only received from agents, not sent
                     // Skip silently (shouldn't happen in practice)
