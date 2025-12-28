@@ -21,12 +21,20 @@ const TerminalEntry = struct {
     marker_id: u64,
     output_buffer: std.ArrayListUnmanaged(u8),
     output_byte_limit: u32,
-    completed: bool, // Marker was detected
-    exited: bool,
+    completed: std.atomic.Value(bool), // Marker was detected (atomic for thread-safe checks)
+    exited: std.atomic.Value(bool), // Process has exited (atomic for thread-safe checks)
     exit_code: ?u32,
     signal: ?u32,
+    
+    // Thread management (will be added in Phase 2)
+    worker_thread: ?std.Thread = null,
+    output_mutex: std.Thread.Mutex = .{},
 
     fn deinit(self: *TerminalEntry) void {
+        // Join worker thread if still running (will be used in Phase 2)
+        if (self.worker_thread) |thread| {
+            thread.join();
+        }
         self.output_buffer.deinit(self.allocator);
         _ = self.child.kill() catch {};
     }
@@ -75,6 +83,14 @@ pub const AcpManager = struct {
     terminals: TerminalRegistry,
     next_terminal_id: u64,
     next_marker_id: u64,
+
+    // Pending terminal wait requests (deferred responses)
+    pending_terminal_waits: std.ArrayListUnmanaged(PendingTerminalWait),
+
+    const PendingTerminalWait = struct {
+        request_id: codec.JsonRpcId,
+        terminal_id: []const u8, // Owned copy
+    };
 
     pub const Status = enum {
         disconnected,
@@ -225,6 +241,7 @@ pub const AcpManager = struct {
             .terminals = .{},
             .next_terminal_id = 1,
             .next_marker_id = 1,
+            .pending_terminal_waits = .{},
         };
     }
 
@@ -454,7 +471,7 @@ pub const AcpManager = struct {
         // Check if any terminals are still running (not completed)
         var iter = self.terminals.iterator();
         while (iter.next()) |entry| {
-            if (!entry.value_ptr.completed and !entry.value_ptr.exited) {
+            if (!entry.value_ptr.completed.load(.acquire) and !entry.value_ptr.exited.load(.acquire)) {
                 return true;
             }
         }
@@ -544,6 +561,9 @@ pub const AcpManager = struct {
 
         // Free the messages we received from the transport
         acp.transport.freeMessages(messages);
+
+        // Check pending terminal waits and send deferred responses
+        self.processPendingTerminalWaits(acp);
 
         // Always check if we can send queued prompts (safe to call repeatedly)
         self.sendNextQueuedPrompt();
@@ -704,6 +724,53 @@ pub const AcpManager = struct {
     // Terminal Handlers
     // =========================================================================
 
+    /// Process pending terminal wait requests and send deferred responses.
+    /// Called from poll() to check if any background terminal workers have completed.
+    fn processPendingTerminalWaits(self: *AcpManager, acp: *client.Client) void {
+        // Process in reverse order so we can remove items while iterating
+        var i: usize = self.pending_terminal_waits.items.len;
+        while (i > 0) {
+            i -= 1;
+            const pending = self.pending_terminal_waits.items[i];
+
+            // Check if terminal exists and has exited
+            const entry = self.terminals.getPtr(pending.terminal_id) orelse {
+                // Terminal no longer exists - send error response
+                acp.transport.sendErrorResponse(pending.request_id, -32001, "Terminal not found") catch {};
+                self.allocator.free(pending.terminal_id);
+                _ = self.pending_terminal_waits.swapRemove(i);
+                continue;
+            };
+
+            // Check if process has exited (set by background thread)
+            if (!entry.exited.load(.acquire)) {
+                // Not done yet, keep waiting
+                continue;
+            }
+
+            // Process exited - send response with exit status
+            var response: std.ArrayListUnmanaged(u8) = .{};
+            defer response.deinit(self.allocator);
+            const writer = response.writer(self.allocator);
+
+            writer.writeAll("{\"exitStatus\":{") catch continue;
+            if (entry.exit_code) |code| {
+                writer.print("\"exitCode\":{d}", .{code}) catch continue;
+            } else if (entry.signal) |sig| {
+                writer.print("\"signal\":{d}", .{sig}) catch continue;
+            } else {
+                writer.writeAll("\"exitCode\":null") catch continue;
+            }
+            writer.writeAll("}}") catch continue;
+
+            acp.transport.sendResponse(pending.request_id, response.items) catch {};
+
+            // Clean up
+            self.allocator.free(pending.terminal_id);
+            _ = self.pending_terminal_waits.swapRemove(i);
+        }
+    }
+
     /// Handle terminal/create request - spawns shell per command with marker-based completion.
     /// Uses marker detection to reliably capture all output.
     fn handleTerminalCreate(self: *AcpManager, acp: *client.Client, id: codec.JsonRpcId, params_json: ?[]const u8) !void {
@@ -796,32 +863,23 @@ pub const AcpManager = struct {
             return;
         };
 
-        // Write command with marker to stdin
-        // Format: command; echo "___SKIM_CMD_END_<id>_$?"
-        if (child.stdin) |stdin| {
-            var marker_cmd: [256]u8 = undefined;
-            const marker_str = std.fmt.bufPrint(&marker_cmd, "; echo \"{s}{d}_$?\"\n", .{ END_MARKER, marker_id }) catch {
-                self.allocator.free(terminal_id);
-                try acp.transport.sendErrorResponse(id, -32603, "Buffer overflow");
-                return;
-            };
+        // Build marker string
+        var marker_cmd: [256]u8 = undefined;
+        const marker_str = std.fmt.bufPrint(&marker_cmd, "; echo \"{s}{d}_$?\"\n", .{ END_MARKER, marker_id }) catch {
+            self.allocator.free(terminal_id);
+            try acp.transport.sendErrorResponse(id, -32603, "Buffer overflow");
+            return;
+        };
 
-            std.log.info("ACP Manager: writing command: {s}", .{cmd_buf.items});
-            stdin.writeAll(cmd_buf.items) catch {};
-            stdin.writeAll(marker_str) catch {};
-            stdin.close();
-            child.stdin = null;
-        }
-
-        // Store in registry
+        // Store in registry FIRST (before modifying child.stdin)
         const entry = TerminalEntry{
             .allocator = self.allocator,
             .child = child,
             .marker_id = marker_id,
             .output_buffer = .{},
             .output_byte_limit = params.output_byte_limit orelse 1024 * 1024,
-            .completed = false,
-            .exited = false,
+            .completed = std.atomic.Value(bool).init(false),
+            .exited = std.atomic.Value(bool).init(false),
             .exit_code = null,
             .signal = null,
         };
@@ -831,6 +889,28 @@ pub const AcpManager = struct {
             try acp.transport.sendErrorResponse(id, -32603, "Out of memory");
             return;
         };
+
+        // Get pointer to registry entry - all modifications must go through this pointer
+        const entry_ptr = self.terminals.getPtr(terminal_id).?;
+
+        // Write command with marker to stdin (don't close - background thread will close)
+        if (entry_ptr.child.stdin) |stdin| {
+            std.log.info("ACP Manager: writing command: {s}", .{cmd_buf.items});
+            stdin.writeAll(cmd_buf.items) catch {};
+            stdin.writeAll(marker_str) catch {};
+            // NOTE: stdin is closed by background thread, not here
+            // This avoids race conditions with child.wait() cleanup
+        }
+
+        // Spawn background worker thread
+        const thread = std.Thread.spawn(.{}, terminalWorkerThreadWrapper, .{entry_ptr}) catch |err| {
+            std.log.err("ACP Manager: failed to spawn terminal worker thread: {any}", .{err});
+            _ = self.terminals.fetchRemove(terminal_id);
+            self.allocator.free(terminal_id);
+            try acp.transport.sendErrorResponse(id, -32001, "Failed to spawn worker thread");
+            return;
+        };
+        entry_ptr.worker_thread = thread;
 
         // Send response
         var response: std.ArrayListUnmanaged(u8) = .{};
@@ -862,8 +942,9 @@ pub const AcpManager = struct {
             return;
         };
 
-        // Try to read available output (non-blocking)
-        self.pollTerminalOutput(entry);
+        // Lock during read to prevent corruption during background thread drain
+        entry.output_mutex.lock();
+        defer entry.output_mutex.unlock();
 
         // Build response
         var response: std.ArrayListUnmanaged(u8) = .{};
@@ -891,7 +972,7 @@ pub const AcpManager = struct {
         writer.writeAll("\",\"truncated\":") catch return;
         writer.writeAll(if (entry.output_buffer.items.len >= entry.output_byte_limit) "true" else "false") catch return;
 
-        if (entry.exited) {
+        if (entry.exited.load(.acquire)) {
             writer.writeAll(",\"exitStatus\":{") catch return;
             if (entry.exit_code) |code| {
                 writer.print("\"exitCode\":{d}", .{code}) catch return;
@@ -906,7 +987,7 @@ pub const AcpManager = struct {
     }
 
     /// Handle terminal/wait_for_exit request
-    /// Polls until marker is detected, then returns exit code
+    /// Non-blocking: if process done, respond immediately; otherwise defer response
     fn handleTerminalWait(self: *AcpManager, acp: *client.Client, id: codec.JsonRpcId, params_json: ?[]const u8) !void {
         const pjson = params_json orelse {
             try acp.transport.sendErrorResponse(id, -32600, "Missing params");
@@ -917,59 +998,44 @@ pub const AcpManager = struct {
             try acp.transport.sendErrorResponse(id, -32600, "Invalid params");
             return;
         };
-        defer params.deinit(self.allocator);
 
         const entry = self.terminals.getPtr(params.terminal_id) orelse {
             try acp.transport.sendErrorResponse(id, -32001, "Terminal not found");
+            params.deinit(self.allocator);
             return;
         };
 
-        // Poll until marker is detected
-        const timeout_ms: i64 = 60000; // 60 second timeout
-        const start_time = std.time.milliTimestamp();
-
-        while (!entry.completed) {
-            // Check for timeout
-            if (std.time.milliTimestamp() - start_time > timeout_ms) {
-                std.log.err("ACP Manager: terminal wait timeout", .{});
-                entry.completed = true;
-                entry.exited = true;
-                entry.exit_code = null;
-                break;
-            }
-
-            // Poll for output and check for marker
-            self.pollTerminalOutput(entry);
-
-            // If still not complete, yield to allow event loop to continue
-            // The main event loop will re-poll this handler frequently (1ms intervals)
-            // so no sleep is needed - just return control immediately
-            if (!entry.completed) {
-                // Small yield to prevent tight loop - much faster than 10ms sleep
-                std.Thread.yield() catch {};
-            }
-        }
-
-        // Mark as exited
-        entry.exited = true;
-
-        // Build response
-        var response: std.ArrayListUnmanaged(u8) = .{};
-        defer response.deinit(self.allocator);
-        const writer = response.writer(self.allocator);
-
-        writer.writeAll("{") catch return;
-        if (entry.exit_code) |code| {
-            writer.print("\"exitCode\":{d}", .{code}) catch return;
+        // Store as pending - poll() will send response when background thread signals completion
+        if (!entry.exited.load(.acquire)) {
+            // Store pending wait - will respond from poll() when done
+            const terminal_id_copy = self.allocator.dupe(u8, params.terminal_id) catch {
+                params.deinit(self.allocator);
+                return;
+            };
+            self.pending_terminal_waits.append(self.allocator, .{
+                .request_id = id,
+                .terminal_id = terminal_id_copy,
+            }) catch {
+                self.allocator.free(terminal_id_copy);
+                params.deinit(self.allocator);
+                return;
+            };
         } else {
-            writer.writeAll("\"exitCode\":null") catch return;
+            // Already done - store for immediate response in poll()
+            const terminal_id_copy = self.allocator.dupe(u8, params.terminal_id) catch {
+                params.deinit(self.allocator);
+                return;
+            };
+            self.pending_terminal_waits.append(self.allocator, .{
+                .request_id = id,
+                .terminal_id = terminal_id_copy,
+            }) catch {
+                self.allocator.free(terminal_id_copy);
+            };
         }
-        if (entry.signal) |sig| {
-            writer.print(",\"signal\":{d}", .{sig}) catch return;
-        }
-        writer.writeAll("}") catch return;
 
-        try acp.transport.sendResponse(id, response.items);
+        params.deinit(self.allocator);
+        // NOTE: No response sent here - poll() will send it
     }
 
     /// Handle terminal/kill request
@@ -992,7 +1058,14 @@ pub const AcpManager = struct {
 
         // Kill the child process
         _ = entry.child.kill() catch {};
-        entry.exited = true;
+        
+        // Join worker thread (exits quickly after kill)
+        if (entry.worker_thread) |thread| {
+            thread.join();
+            entry.worker_thread = null;
+        }
+        
+        entry.exited.store(true, .release);
 
         try acp.transport.sendResponse(id, "{}");
     }
@@ -1011,105 +1084,110 @@ pub const AcpManager = struct {
         defer params.deinit(self.allocator);
 
         // Remove from registry and clean up
+        // IMPORTANT: Must join thread BEFORE removing from map, because thread has pointer to entry
+        if (self.terminals.getPtr(params.terminal_id)) |entry| {
+            entry.deinit(); // This joins the worker thread
+        }
         if (self.terminals.fetchRemove(params.terminal_id)) |kv| {
-            var entry = kv.value;
-            entry.deinit();
             self.allocator.free(kv.key);
         }
 
         try acp.transport.sendResponse(id, "{}");
     }
 
-    /// Drain all remaining output from terminal pipes (blocking until EOF)
-    /// Called after process has exited to ensure we capture all output
-    fn drainTerminalOutput(self: *AcpManager, entry: *TerminalEntry) void {
+    // =========================================================================
+    // Background Terminal Worker Thread
+    // =========================================================================
+
+    /// Background worker thread that waits for process and drains output.
+    /// Runs in dedicated thread per terminal - blocks on child.wait() for zero CPU usage.
+    fn terminalWorkerThread(entry: *TerminalEntry) void {
+        // 1. Close stdin to signal EOF to shell (use std.c.close to avoid panic on BADF)
+        if (entry.child.stdin) |stdin| {
+            _ = std.c.close(stdin.handle);
+            entry.child.stdin = null;
+        }
+
+        // 2. Drain stdout/stderr BEFORE waiting (prevents deadlock if buffers fill)
+        entry.output_mutex.lock();
         var buf: [4096]u8 = undefined;
+
+        // Track which fds we've closed to avoid double-close
+        var stdout_handle: ?std.posix.fd_t = null;
+        var stderr_handle: ?std.posix.fd_t = null;
 
         // Read stdout until EOF
         if (entry.child.stdout) |stdout| {
+            stdout_handle = stdout.handle;
             while (true) {
                 const n = stdout.read(&buf) catch break;
                 if (n == 0) break; // EOF
-                std.log.debug("ACP Manager: drain stdout {d} bytes", .{n});
                 if (entry.output_buffer.items.len < entry.output_byte_limit) {
                     const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
                     const to_add = @min(n, remaining);
-                    entry.output_buffer.appendSlice(self.allocator, buf[0..to_add]) catch {};
+                    entry.output_buffer.appendSlice(entry.allocator, buf[0..to_add]) catch {};
                 }
             }
+            entry.child.stdout = null;
         }
 
         // Read stderr until EOF
         if (entry.child.stderr) |stderr| {
+            stderr_handle = stderr.handle;
             while (true) {
                 const n = stderr.read(&buf) catch break;
-                if (n == 0) break; // EOF
-                std.log.debug("ACP Manager: drain stderr {d} bytes", .{n});
+                if (n == 0) break;
                 if (entry.output_buffer.items.len < entry.output_byte_limit) {
                     const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
                     const to_add = @min(n, remaining);
-                    entry.output_buffer.appendSlice(self.allocator, buf[0..to_add]) catch {};
+                    entry.output_buffer.appendSlice(entry.allocator, buf[0..to_add]) catch {};
                 }
             }
+            entry.child.stderr = null;
         }
+
+        // Close handles (check for same fd to avoid double-close)
+        if (stdout_handle) |h| {
+            _ = std.c.close(h);
+        }
+        if (stderr_handle) |h| {
+            // Don't double-close if stderr == stdout
+            if (stdout_handle == null or h != stdout_handle.?) {
+                _ = std.c.close(h);
+            }
+        }
+
+        entry.output_mutex.unlock();
+
+        // 3. Now wait for process exit using waitpid directly (child.wait cleanup already done)
+        const wait_result = std.posix.waitpid(entry.child.id, 0);
+        // Parse raw wait status using POSIX macros
+        const raw_status = wait_result.status;
+        if (raw_status & 0x7f == 0) {
+            // Normal exit: WIFEXITED - exit code in high byte
+            entry.exit_code = @truncate((raw_status >> 8) & 0xff);
+        } else if (raw_status & 0x7f != 0x7f) {
+            // Killed by signal: signal number in low 7 bits
+            entry.signal = @truncate(raw_status & 0x7f);
+        }
+
+        // 4. Check for completion marker
+        entry.output_mutex.lock();
+        checkForMarkerStatic(entry);
+        entry.output_mutex.unlock();
+
+        // 5. Signal completion
+        entry.completed.store(true, .release);
+        entry.exited.store(true, .release);
     }
 
-    /// Poll terminal for available output (non-blocking)
-    /// Reads from child process stdout/stderr and detects completion marker
-    fn pollTerminalOutput(self: *AcpManager, entry: *TerminalEntry) void {
-        if (entry.completed) return;
-
-        var buf: [4096]u8 = undefined;
-
-        // Check stdout for data
-        if (entry.child.stdout) |stdout| {
-            var fds = [_]std.posix.pollfd{
-                .{ .fd = stdout.handle, .events = std.posix.POLL.IN, .revents = 0 },
-            };
-
-            const poll_result = std.posix.poll(&fds, 0) catch return;
-            if (poll_result > 0 and (fds[0].revents & std.posix.POLL.IN) != 0) {
-                const n = stdout.read(&buf) catch return;
-                if (n > 0) {
-                    std.log.debug("ACP Manager: stdout read {d} bytes", .{n});
-
-                    if (entry.output_buffer.items.len < entry.output_byte_limit) {
-                        const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
-                        const to_add = @min(n, remaining);
-                        entry.output_buffer.appendSlice(self.allocator, buf[0..to_add]) catch {};
-                    }
-
-                    // Check for completion marker
-                    self.checkForMarker(entry);
-                }
-            }
-        }
-
-        // Also check stderr
-        if (entry.child.stderr) |stderr| {
-            var stderr_fds = [_]std.posix.pollfd{
-                .{ .fd = stderr.handle, .events = std.posix.POLL.IN, .revents = 0 },
-            };
-
-            const stderr_poll = std.posix.poll(&stderr_fds, 0) catch return;
-            if (stderr_poll > 0 and (stderr_fds[0].revents & std.posix.POLL.IN) != 0) {
-                const n = stderr.read(&buf) catch return;
-                if (n > 0) {
-                    std.log.debug("ACP Manager: stderr read {d} bytes", .{n});
-                    if (entry.output_buffer.items.len < entry.output_byte_limit) {
-                        const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
-                        const to_add = @min(n, remaining);
-                        entry.output_buffer.appendSlice(self.allocator, buf[0..to_add]) catch {};
-                    }
-                }
-            }
-        }
+    /// Thread wrapper for spawn (must match std.Thread.SpawnFn signature)
+    fn terminalWorkerThreadWrapper(entry: *TerminalEntry) void {
+        terminalWorkerThread(entry);
     }
 
-    /// Check output buffer for completion marker and extract exit code
-    fn checkForMarker(self: *AcpManager, entry: *TerminalEntry) void {
-        _ = self;
-
+    /// Static version of checkForMarker (no self parameter for thread context)
+    fn checkForMarkerStatic(entry: *TerminalEntry) void {
         // Build marker prefix: ___SKIM_CMD_END_<marker_id>_
         var marker_buf: [64]u8 = undefined;
         const marker_prefix = std.fmt.bufPrint(&marker_buf, "{s}{d}_", .{ END_MARKER, entry.marker_id }) catch return;
@@ -1123,8 +1201,7 @@ pub const AcpManager = struct {
             const exit_code_str = after_marker[0..exit_code_end];
 
             entry.exit_code = std.fmt.parseInt(u32, exit_code_str, 10) catch 0;
-            entry.completed = true;
-
+            
             // Remove marker line from output buffer
             // Find the start of the marker line (previous newline or start)
             var line_start = marker_start;
@@ -1136,6 +1213,9 @@ pub const AcpManager = struct {
             std.log.info("ACP Manager: command completed, exit_code={?d}, output_len={d}", .{ entry.exit_code, entry.output_buffer.items.len });
         }
     }
+
+
+
 
     /// Clear processed messages
     pub fn clearMessages(self: *AcpManager) void {
@@ -1378,6 +1458,12 @@ pub const AcpManager = struct {
         if (self.pending_permission) |*perm| {
             perm.deinit(self.allocator);
         }
+
+        // Clean up pending terminal waits
+        for (self.pending_terminal_waits.items) |pending| {
+            self.allocator.free(pending.terminal_id);
+        }
+        self.pending_terminal_waits.deinit(self.allocator);
 
         // Clean up terminal entries
         var term_iter = self.terminals.iterator();
