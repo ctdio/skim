@@ -850,6 +850,11 @@ pub const Decoder = struct {
 
     /// Parse session/update params from JSON (for notifications)
     pub fn parseSessionUpdateParams(self: *Decoder, json: []const u8) !protocol.SessionUpdateParams {
+        // Log raw JSON for debugging (truncated)
+        const max_log_len = 800;
+        const log_json = if (json.len > max_log_len) json[0..max_log_len] else json;
+        std.log.info("CODEC: parseSessionUpdateParams len={d} JSON: {s}...", .{ json.len, log_json });
+
         const parsed = try std.json.parseFromSlice(RawSessionUpdate, self.allocator, json, .{
             .ignore_unknown_fields = true,
             .allocate = .alloc_always,
@@ -869,6 +874,9 @@ pub const Decoder = struct {
             // Get the update type (agent_message_chunk, agent_thought_chunk, tool_call, etc.)
             if (upd.sessionUpdate) |session_update_type| {
                 update_type = protocol.SessionUpdateType.fromString(session_update_type);
+                std.log.info("CODEC: update_type={s}", .{session_update_type});
+            } else {
+                std.log.info("CODEC: no sessionUpdate field", .{});
             }
 
             // Extract tool name from _meta.claudeCode
@@ -878,20 +886,64 @@ pub const Decoder = struct {
             var tool_response_interrupted: bool = false;
 
             if (upd._meta) |meta| {
+                std.log.info("CODEC: _meta present, claudeCode={}", .{meta.claudeCode != null});
                 if (meta.claudeCode) |cc| {
+                    std.log.info("CODEC: claudeCode.toolName={?s}, toolResponse={}", .{ cc.toolName, cc.toolResponse != null });
                     if (cc.toolName) |tn| {
                         tool_name = self.allocator.dupe(u8, tn) catch null;
                     }
+                    // toolResponse can be either:
+                    // - array of content blocks: [{"type":"text","text":"..."}]
+                    // - object with stdout/stderr (older format)
                     if (cc.toolResponse) |tr| {
-                        if (tr.stdout) |s| {
-                            tool_response_stdout = self.allocator.dupe(u8, s) catch null;
+                        switch (tr) {
+                            .array => |arr| {
+                                std.log.info("CODEC: toolResponse is array with {d} items", .{arr.items.len});
+                                // Extract text from content blocks
+                                for (arr.items) |item| {
+                                    if (item == .object) {
+                                        const obj = item.object;
+                                        if (obj.get("type")) |type_val| {
+                                            if (type_val == .string and std.mem.eql(u8, type_val.string, "text")) {
+                                                if (obj.get("text")) |text_val| {
+                                                    if (text_val == .string) {
+                                                        std.log.info("CODEC: found toolResponse text, len={d}", .{text_val.string.len});
+                                                        tool_response_stdout = self.allocator.dupe(u8, text_val.string) catch null;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            .object => |obj| {
+                                // Older format with stdout/stderr fields
+                                if (obj.get("stdout")) |s| {
+                                    if (s == .string) {
+                                        std.log.info("CODEC: toolResponse.stdout len={d}", .{s.string.len});
+                                        tool_response_stdout = self.allocator.dupe(u8, s.string) catch null;
+                                    }
+                                }
+                                if (obj.get("stderr")) |s| {
+                                    if (s == .string) {
+                                        tool_response_stderr = self.allocator.dupe(u8, s.string) catch null;
+                                    }
+                                }
+                                if (obj.get("interrupted")) |i| {
+                                    if (i == .bool) {
+                                        tool_response_interrupted = i.bool;
+                                    }
+                                }
+                            },
+                            else => {
+                                std.log.info("CODEC: toolResponse is unexpected type: {s}", .{@tagName(tr)});
+                            },
                         }
-                        if (tr.stderr) |s| {
-                            tool_response_stderr = self.allocator.dupe(u8, s) catch null;
-                        }
-                        tool_response_interrupted = tr.interrupted orelse false;
                     }
                 }
+            } else {
+                std.log.info("CODEC: no _meta field", .{});
             }
 
             // Extract command/file_path from rawInput for tool calls
@@ -927,15 +979,73 @@ pub const Decoder = struct {
                 else
                     "";
 
+                std.log.info("CODEC: tool_call_update id={s} has_content={} stdout_len={?d} rawOutput_len={?d}", .{
+                    tool_call_id,
+                    upd.content != null,
+                    if (tool_response_stdout) |s| s.len else null,
+                    if (upd.rawOutput) |s| s.len else null,
+                });
+
+                // Try rawOutput as fallback for stdout
+                if (tool_response_stdout == null and upd.rawOutput != null) {
+                    std.log.info("CODEC: using rawOutput as stdout fallback", .{});
+                    tool_response_stdout = self.allocator.dupe(u8, upd.rawOutput.?) catch null;
+                }
+
                 // Parse content blocks for tool_call_update
                 // Structure: [{"type":"content","content":{"type":"text","text":"..."}}]
+                // Or: [{"type":"text","text":"..."}]
+                // Or: [{"type":"terminal","terminalId":"term_1"}]
                 var update_content: []const protocol.ContentBlock = &.{};
+                var terminal_id_from_content: ?[]const u8 = null;
+
                 if (upd.content) |content_val| {
+                    std.log.info("CODEC: content is {s}", .{@tagName(content_val)});
                     if (content_val == .array) {
+                        std.log.info("CODEC: content array has {d} items", .{content_val.array.items.len});
                         var text_blocks: std.ArrayList(protocol.ContentBlock) = .{};
-                        for (content_val.array.items) |item| {
-                            if (item != .object) continue;
+                        for (content_val.array.items, 0..) |item, idx| {
+                            if (item != .object) {
+                                std.log.info("CODEC: content[{d}] is not object, is {s}", .{ idx, @tagName(item) });
+                                continue;
+                            }
                             const obj = item.object;
+
+                            // Log what type field we have
+                            if (obj.get("type")) |type_val| {
+                                if (type_val == .string) {
+                                    std.log.info("CODEC: content[{d}].type = {s}", .{ idx, type_val.string });
+                                }
+                            }
+
+                            // Check for type:"terminal" with terminalId
+                            if (obj.get("type")) |type_val| {
+                                if (type_val == .string and std.mem.eql(u8, type_val.string, "terminal")) {
+                                    if (obj.get("terminalId")) |tid| {
+                                        if (tid == .string) {
+                                            std.log.info("CODEC: found terminal reference: {s}", .{tid.string});
+                                            terminal_id_from_content = self.allocator.dupe(u8, tid.string) catch null;
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+
+                            // Try to get text directly from {"type":"text","text":"..."}
+                            if (obj.get("type")) |type_val| {
+                                if (type_val == .string and std.mem.eql(u8, type_val.string, "text")) {
+                                    if (obj.get("text")) |text_val| {
+                                        if (text_val == .string) {
+                                            std.log.info("CODEC: found direct text: {s}...", .{text_val.string[0..@min(text_val.string.len, 50)]});
+                                            const text_copy = self.allocator.dupe(u8, text_val.string) catch continue;
+                                            text_blocks.append(self.allocator, .{ .text = .{ .text = text_copy } }) catch {
+                                                self.allocator.free(text_copy);
+                                            };
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
 
                             // Check for type:"content" wrapper
                             if (obj.get("type")) |type_val| {
@@ -947,6 +1057,7 @@ pub const Decoder = struct {
                                                 if (inner_type == .string and std.mem.eql(u8, inner_type.string, "text")) {
                                                     if (inner.object.get("text")) |text_val| {
                                                         if (text_val == .string) {
+                                                            std.log.info("CODEC: found nested content.text: {s}...", .{text_val.string[0..@min(text_val.string.len, 50)]});
                                                             const text_copy = self.allocator.dupe(u8, text_val.string) catch continue;
                                                             text_blocks.append(self.allocator, .{ .text = .{ .text = text_copy } }) catch {
                                                                 self.allocator.free(text_copy);
@@ -960,6 +1071,7 @@ pub const Decoder = struct {
                                 }
                             }
                         }
+                        std.log.info("CODEC: parsed {d} text blocks from content", .{text_blocks.items.len});
                         if (text_blocks.items.len > 0) {
                             update_content = text_blocks.toOwnedSlice(self.allocator) catch &.{};
                         }
@@ -977,6 +1089,7 @@ pub const Decoder = struct {
                     .stderr = tool_response_stderr,
                     .interrupted = tool_response_interrupted,
                     .content = update_content,
+                    .terminal_id = terminal_id_from_content,
                 };
             }
 
@@ -1344,6 +1457,8 @@ const RawSessionUpdate = struct {
         content: ?std.json.Value = null,
         // rawInput contains tool-specific parameters (command for Bash, file_path for Edit, etc.)
         rawInput: ?std.json.Value = null,
+        // rawOutput contains tool output (for completed tool calls)
+        rawOutput: ?[]const u8 = null,
         // entries for plan updates
         entries: ?[]const RawPlanEntry = null,
         // Mode update for current_mode_update notifications (camelCase from agent!)
@@ -1354,12 +1469,10 @@ const RawSessionUpdate = struct {
         _meta: ?struct {
             claudeCode: ?struct {
                 toolName: ?[]const u8 = null,
-                toolResponse: ?struct {
-                    stdout: ?[]const u8 = null,
-                    stderr: ?[]const u8 = null,
-                    interrupted: ?bool = null,
-                    isImage: ?bool = null,
-                } = null,
+                // toolResponse can be either:
+                // - array of content blocks: [{"type":"text","text":"..."}]
+                // - struct with stdout/stderr (older format)
+                toolResponse: ?std.json.Value = null,
             } = null,
         } = null,
     } = null,

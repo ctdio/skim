@@ -850,11 +850,52 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             col_offset += prefix.len;
         }
 
-        // Print text
-        var seg = [_]vaxis.Cell.Segment{
-            .{ .text = record.text, .style = record.style },
-        };
-        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+        // Print text - special handling for tool headers to color just the icon
+        switch (record.line_type) {
+            .tool_header => |th| {
+                // Get icon color from message status
+                const messages = agent_state.messages.items;
+                const icon_color: vaxis.Color = if (th.msg_idx < messages.len) blk: {
+                    const msg = messages[th.msg_idx];
+                    break :blk switch (msg.tool_status) {
+                        .pending => .{ .index = 3 }, // yellow
+                        .running => .{ .index = 6 }, // cyan
+                        .completed => .{ .index = 2 }, // green
+                        .failed => .{ .index = 1 }, // red
+                    };
+                } else .{ .index = 7 }; // default white
+
+                // Find first space to split icon from rest
+                if (std.mem.indexOf(u8, record.text, " ")) |space_idx| {
+                    const icon = record.text[0..space_idx];
+                    const rest = record.text[space_idx..];
+
+                    // Print icon with color
+                    var icon_seg = [_]vaxis.Cell.Segment{
+                        .{ .text = icon, .style = .{ .fg = icon_color } },
+                    };
+                    const icon_result = win.print(&icon_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+
+                    // Print rest with default style
+                    var rest_seg = [_]vaxis.Cell.Segment{
+                        .{ .text = rest, .style = record.style },
+                    };
+                    _ = win.print(&rest_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset + icon_result.col) });
+                } else {
+                    // No space found, print normally
+                    var seg = [_]vaxis.Cell.Segment{
+                        .{ .text = record.text, .style = record.style },
+                    };
+                    _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                }
+            },
+            else => {
+                var seg = [_]vaxis.Cell.Segment{
+                    .{ .text = record.text, .style = record.style },
+                };
+                _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+            },
+        }
         row += 1;
     }
 

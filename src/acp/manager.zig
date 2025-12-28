@@ -84,6 +84,9 @@ pub const AcpManager = struct {
     next_terminal_id: u64,
     next_marker_id: u64,
 
+    // Mapping from tool_call_id to terminal_id for fetching output on completion
+    tool_terminal_map: std.StringHashMapUnmanaged([]const u8),
+
     // Pending terminal wait requests (deferred responses)
     pending_terminal_waits: std.ArrayListUnmanaged(PendingTerminalWait),
 
@@ -241,6 +244,7 @@ pub const AcpManager = struct {
             .terminals = .{},
             .next_terminal_id = 1,
             .next_marker_id = 1,
+            .tool_terminal_map = .{},
             .pending_terminal_waits = .{},
         };
     }
@@ -1472,6 +1476,14 @@ pub const AcpManager = struct {
             kv.value_ptr.deinit();
         }
         self.terminals.deinit(self.allocator);
+
+        // Clean up tool-terminal mapping
+        var map_iter = self.tool_terminal_map.iterator();
+        while (map_iter.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            self.allocator.free(kv.value_ptr.*);
+        }
+        self.tool_terminal_map.deinit(self.allocator);
     }
 
     // =========================================================================
@@ -1646,10 +1658,32 @@ pub const AcpManager = struct {
 
         // Handle tool call updates
         if (update.tool_call_update) |tcu| {
+            std.log.info("ACP: tool_call_update received - id={s} status={?s} content_blocks={d} stdout={?s} terminal_id={?s}", .{
+                tcu.tool_call_id,
+                if (tcu.status) |s| s.toString() else null,
+                tcu.content.len,
+                if (tcu.stdout) |s| s[0..@min(s.len, 50)] else null,
+                tcu.terminal_id,
+            });
+
+            // If this update has a terminal reference, store the mapping for later
+            if (tcu.terminal_id) |tid| {
+                const tool_id_copy = self.allocator.dupe(u8, tcu.tool_call_id) catch null;
+                const terminal_id_copy = self.allocator.dupe(u8, tid) catch null;
+                if (tool_id_copy != null and terminal_id_copy != null) {
+                    std.log.info("ACP: storing tool->terminal mapping: {s} -> {s}", .{ tool_id_copy.?, terminal_id_copy.? });
+                    self.tool_terminal_map.put(self.allocator, tool_id_copy.?, terminal_id_copy.?) catch {
+                        self.allocator.free(tool_id_copy.?);
+                        self.allocator.free(terminal_id_copy.?);
+                    };
+                }
+            }
+
             // Extract content text for stdout (tool output is in content blocks, not toolResponse.stdout)
             var output_text: ?[]const u8 = null;
             for (tcu.content) |block| {
                 if (block == .text) {
+                    std.log.info("ACP: found text content block: {s}...", .{block.text.text[0..@min(block.text.text.len, 50)]});
                     output_text = self.allocator.dupe(u8, block.text.text) catch null;
                     break;
                 }
@@ -1657,7 +1691,30 @@ pub const AcpManager = struct {
 
             // Fallback to toolResponse.stdout if present
             if (output_text == null and tcu.stdout != null) {
+                std.log.info("ACP: using stdout fallback", .{});
                 output_text = self.allocator.dupe(u8, tcu.stdout.?) catch null;
+            }
+
+            // If status is completed and we still don't have output, try to get it from the terminal
+            if (output_text == null and tcu.status != null and tcu.status.? == .completed) {
+                // Look up the terminal_id for this tool
+                if (self.tool_terminal_map.get(tcu.tool_call_id)) |terminal_id| {
+                    std.log.info("ACP: looking up terminal output for {s}", .{terminal_id});
+                    if (self.terminals.getPtr(terminal_id)) |entry| {
+                        entry.output_mutex.lock();
+                        defer entry.output_mutex.unlock();
+                        if (entry.output_buffer.items.len > 0) {
+                            std.log.info("ACP: found terminal output, len={d}", .{entry.output_buffer.items.len});
+                            output_text = self.allocator.dupe(u8, entry.output_buffer.items) catch null;
+                        }
+                    }
+                }
+            }
+
+            if (output_text == null) {
+                std.log.warn("ACP: no output text found for tool_call_update", .{});
+            } else {
+                std.log.info("ACP: output_text len={d}", .{output_text.?.len});
             }
 
             const id_copy = self.allocator.dupe(u8, tcu.tool_call_id) catch return;

@@ -523,6 +523,10 @@ pub const AgentState = struct {
     shell_mode: bool,
     // Queued shell command outputs (sent with next prompt)
     queued_shell_outputs: std.ArrayList(QueuedShellOutput),
+    // Currently running shell command (for streaming output)
+    running_shell_cmd: ?RunningShellCommand,
+    // Counter for generating unique shell command tool IDs
+    shell_cmd_counter: u32,
 
     /// Queued shell command output to be sent with next prompt
     pub const QueuedShellOutput = struct {
@@ -530,6 +534,109 @@ pub const AgentState = struct {
 
         pub fn deinit(self: *QueuedShellOutput, allocator: Allocator) void {
             allocator.free(self.content);
+        }
+    };
+
+    /// Running shell command state for streaming output
+    pub const RunningShellCommand = struct {
+        child: std.process.Child,
+        command: []const u8, // Owned
+        tool_id: []const u8, // Owned
+        stdout_buf: std.ArrayList(u8),
+        stderr_buf: std.ArrayList(u8),
+        allocator: Allocator,
+
+        pub fn init(allocator: Allocator, command: []const u8, tool_id: []const u8) !RunningShellCommand {
+            return .{
+                .child = undefined, // Set by caller after spawn
+                .command = try allocator.dupe(u8, command),
+                .tool_id = try allocator.dupe(u8, tool_id),
+                .stdout_buf = .{},
+                .stderr_buf = .{},
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *RunningShellCommand) void {
+            self.allocator.free(self.command);
+            self.allocator.free(self.tool_id);
+            self.stdout_buf.deinit(self.allocator);
+            self.stderr_buf.deinit(self.allocator);
+            // Kill the process if still running
+            _ = self.child.kill() catch {};
+        }
+
+        /// Get the last N lines of stdout for display, processing carriage returns
+        pub fn getLastLines(self: *RunningShellCommand, max_lines: usize) []const u8 {
+            // Process carriage returns to get the "visual" output
+            self.processCarriageReturns();
+
+            const content = self.stdout_buf.items;
+            if (content.len == 0) return "";
+
+            // Find the start of the last N lines
+            var line_count: usize = 0;
+            var pos: usize = content.len;
+
+            // Skip trailing newline if present
+            if (pos > 0 and content[pos - 1] == '\n') {
+                pos -= 1;
+            }
+
+            while (pos > 0 and line_count < max_lines) {
+                pos -= 1;
+                if (content[pos] == '\n') {
+                    line_count += 1;
+                }
+            }
+
+            // If we found enough newlines, skip past the last one we found
+            if (pos > 0 and content[pos] == '\n') {
+                pos += 1;
+            }
+
+            return content[pos..];
+        }
+
+        /// Process carriage returns in the buffer to simulate terminal behavior
+        /// \r moves cursor to start of line, subsequent chars overwrite
+        fn processCarriageReturns(self: *RunningShellCommand) void {
+            const content = self.stdout_buf.items;
+            if (content.len == 0) return;
+
+            // Check if there are any carriage returns to process
+            if (std.mem.indexOf(u8, content, "\r") == null) return;
+
+            // Process the buffer, handling \r by going back to line start
+            var result = std.ArrayList(u8).initCapacity(self.allocator, content.len) catch return;
+            defer {
+                // Swap the processed result back
+                self.stdout_buf.deinit(self.allocator);
+                self.stdout_buf = result;
+            }
+
+            var line_start: usize = 0;
+            var i: usize = 0;
+            while (i < content.len) : (i += 1) {
+                const c = content[i];
+                if (c == '\r') {
+                    // Carriage return - next chars will overwrite from line_start
+                    // But first, if there's a \n right after, it's just a Windows line ending
+                    if (i + 1 < content.len and content[i + 1] == '\n') {
+                        result.append(self.allocator, '\n') catch return;
+                        i += 1;
+                        line_start = result.items.len;
+                    } else {
+                        // Pure \r - go back to line start, truncate to there
+                        result.shrinkRetainingCapacity(line_start);
+                    }
+                } else if (c == '\n') {
+                    result.append(self.allocator, '\n') catch return;
+                    line_start = result.items.len;
+                } else {
+                    result.append(self.allocator, c) catch return;
+                }
+            }
         }
     };
 
@@ -581,6 +688,8 @@ pub const AgentState = struct {
             .file_picker = FilePickerState.init(allocator),
             .shell_mode = false,
             .queued_shell_outputs = .{},
+            .running_shell_cmd = null,
+            .shell_cmd_counter = 0,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -609,6 +718,9 @@ pub const AgentState = struct {
             output.deinit(self.allocator);
         }
         self.queued_shell_outputs.deinit(self.allocator);
+        if (self.running_shell_cmd) |*cmd| {
+            cmd.deinit();
+        }
     }
 
     /// Add a message to the conversation history
@@ -1359,6 +1471,25 @@ pub const AgentState = struct {
             output.deinit(self.allocator);
         }
         self.queued_shell_outputs.clearRetainingCapacity();
+    }
+
+    /// Check if a shell command is currently running
+    pub fn hasRunningShellCommand(self: *const AgentState) bool {
+        return self.running_shell_cmd != null;
+    }
+
+    /// Get next unique shell command tool ID
+    pub fn nextShellCmdId(self: *AgentState, buf: []u8) []const u8 {
+        self.shell_cmd_counter +%= 1;
+        return std.fmt.bufPrint(buf, "shell_{d}", .{self.shell_cmd_counter}) catch "shell_cmd";
+    }
+
+    /// Get the last N lines of running command output for display
+    pub fn getRunningCommandOutput(self: *const AgentState, max_lines: usize) ?[]const u8 {
+        if (self.running_shell_cmd) |*cmd| {
+            return cmd.getLastLines(max_lines);
+        }
+        return null;
     }
 
     /// Estimate memory usage of the agent state (for monitoring)

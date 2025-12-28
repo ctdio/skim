@@ -729,7 +729,9 @@ pub const App = struct {
             // Only consider ACP "active" when agent has pending output to display
             // This allows blocking pollEvent() when agent is idle/connected but not producing data
             const acp_active = if (self.acp_manager) |mgr| mgr.hasPendingOutput() else false;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !stats_loading and !acp_active;
+            // Check if a shell command is running (needs streaming output)
+            const shell_cmd_running = if (self.state.agent_state) |*as| as.hasRunningShellCommand() else false;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !stats_loading and !acp_active and !shell_cmd_running;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -795,6 +797,11 @@ pub const App = struct {
                         self.needs_render = true;
                     }
                 }
+            }
+
+            // Poll running shell command for streaming output
+            if (agent_mode.pollRunningShellCommand(self)) {
+                self.needs_render = true;
             }
 
             // Render if we had events, need to update, or first render
@@ -3556,6 +3563,11 @@ pub const App = struct {
                 },
                 .tool_update => {
                     // Update existing tool message with status and output
+                    std.log.info("APP: tool_update id={?s} status={s} stdout_len={?d}", .{
+                        msg.tool_call_id,
+                        @tagName(msg.tool_status),
+                        if (msg.tool_stdout) |s| s.len else null,
+                    });
                     if (self.state.agent_state) |*agent_state| {
                         const status: agent.Message.ToolStatus = switch (msg.tool_status) {
                             .pending => .pending,

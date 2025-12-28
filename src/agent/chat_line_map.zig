@@ -525,12 +525,8 @@ pub const ChatLineMap = struct {
             .completed => "⏺",
             .failed => "✗",
         };
-        const status_style: vaxis.Style = switch (msg.tool_status) {
-            .pending => .{ .fg = .{ .index = 3 } }, // yellow
-            .running => .{ .fg = .{ .index = 6 } }, // cyan
-            .completed => .{ .fg = .{ .index = 2 } }, // green
-            .failed => .{ .fg = .{ .index = 1 } }, // red
-        };
+        // Text uses default color (icon is colored by render.zig)
+        const text_style: vaxis.Style = .{};
 
         // Handle tool command with smart wrapping
         if (msg.tool_command) |cmd| {
@@ -586,7 +582,7 @@ pub const ChatLineMap = struct {
                     .global_line = global_line.*,
                     .line_type = .{ .tool_header = .{ .msg_idx = msg_idx } },
                     .text = line_text,
-                    .style = status_style,
+                    .style = text_style,
                     .indent = 1,
                 });
                 global_line.* += 1;
@@ -603,7 +599,7 @@ pub const ChatLineMap = struct {
                 .global_line = global_line.*,
                 .line_type = .{ .tool_header = .{ .msg_idx = msg_idx } },
                 .text = header_text,
-                .style = status_style,
+                .style = text_style,
                 .indent = 1,
             });
             global_line.* += 1;
@@ -611,6 +607,74 @@ pub const ChatLineMap = struct {
     }
 
     fn addToolResult(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message) !void {
+        const max_output_lines = 8;
+        // Slightly brighter than dim (index 8), use a light gray
+        const output_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 140, 140, 140 } } };
+
+        // For running or completed shell commands with output, show actual lines
+        if (msg.tool_stdout) |stdout| {
+            if (stdout.len > 0) {
+                // Count total lines and find where to start (last N lines)
+                var total_lines: usize = 0;
+                var count_iter = std.mem.splitScalar(u8, stdout, '\n');
+                while (count_iter.next()) |line| {
+                    // Don't count empty trailing line
+                    if (line.len == 0 and count_iter.peek() == null) continue;
+                    total_lines += 1;
+                }
+
+                const skip_lines = if (total_lines > max_output_lines) total_lines - max_output_lines else 0;
+
+                // Show truncation indicator if we're skipping lines
+                if (skip_lines > 0) {
+                    const truncate_text = try std.fmt.allocPrint(self.allocator, "⎿ (+{d} lines)", .{skip_lines});
+                    try self.strings.append(self.allocator, truncate_text);
+
+                    try self.records.append(self.allocator, .{
+                        .global_line = global_line.*,
+                        .line_type = .{ .tool_result = .{ .msg_idx = msg_idx } },
+                        .text = truncate_text,
+                        .style = .{ .fg = .{ .index = 8 } }, // dim for the indicator
+                        .indent = 1,
+                    });
+                    global_line.* += 1;
+                }
+
+                // Show each line of output (only last N lines)
+                var iter = std.mem.splitScalar(u8, stdout, '\n');
+                var line_num: usize = 0;
+                var first = skip_lines == 0; // Only use ⎿ prefix if no truncation indicator
+                while (iter.next()) |line| {
+                    // Skip empty trailing line
+                    if (line.len == 0 and iter.peek() == null) continue;
+
+                    // Skip lines before our window
+                    if (line_num < skip_lines) {
+                        line_num += 1;
+                        continue;
+                    }
+                    line_num += 1;
+
+                    const prefix = if (first) "⎿ " else "  ";
+                    first = false;
+
+                    const line_text = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prefix, line });
+                    try self.strings.append(self.allocator, line_text);
+
+                    try self.records.append(self.allocator, .{
+                        .global_line = global_line.*,
+                        .line_type = .{ .tool_result = .{ .msg_idx = msg_idx } },
+                        .text = line_text,
+                        .style = output_style,
+                        .indent = 1,
+                    });
+                    global_line.* += 1;
+                }
+                return;
+            }
+        }
+
+        // Fallback for no output or failed status
         const result_text = if (msg.tool_status == .failed) blk: {
             if (msg.tool_stderr) |stderr| {
                 var stderr_iter = std.mem.splitScalar(u8, stderr, '\n');
@@ -621,22 +685,7 @@ pub const ChatLineMap = struct {
             }
             break :blk try self.allocator.dupe(u8, "⎿ Failed");
         } else blk: {
-            if (msg.tool_stdout) |stdout| {
-                if (stdout.len == 0) {
-                    break :blk try self.allocator.dupe(u8, "⎿ (No content)");
-                }
-                var line_count: usize = 0;
-                var iter = std.mem.splitScalar(u8, stdout, '\n');
-                while (iter.next()) |_| line_count += 1;
-                if (line_count > 1) {
-                    break :blk try std.fmt.allocPrint(self.allocator, "⎿ ({d} lines)", .{line_count});
-                } else {
-                    const max_len = @min(stdout.len, 60);
-                    const truncated = if (stdout.len > 60) "..." else "";
-                    break :blk try std.fmt.allocPrint(self.allocator, "⎿ {s}{s}", .{ stdout[0..max_len], truncated });
-                }
-            }
-            break :blk try self.allocator.dupe(u8, "⎿ Done");
+            break :blk try self.allocator.dupe(u8, "⎿ (No content)");
         };
         try self.strings.append(self.allocator, result_text);
 

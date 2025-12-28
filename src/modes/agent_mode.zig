@@ -638,66 +638,132 @@ fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 /// Handle shell command execution (commands starting with !)
-/// Runs the command directly, displays output, and sends as embedded resource to agent
+/// Spawns the command asynchronously and streams output to the UI.
 fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []const u8) !void {
+    // If a command is already running, reject
+    if (agent_state.running_shell_cmd != null) {
+        try agent_state.addMessage(.system, "A command is already running. Wait for it to complete.");
+        return;
+    }
+
     // Add user message showing the command
     var cmd_msg: [2048]u8 = undefined;
     const cmd_text = std.fmt.bufPrint(&cmd_msg, "$ {s}", .{command}) catch command;
     try agent_state.addMessage(.user, cmd_text);
 
+    // Generate unique tool ID for this command
+    var tool_id_buf: [32]u8 = undefined;
+    const tool_id = agent_state.nextShellCmdId(&tool_id_buf);
+
     // Add a "running" tool message that will be updated with output
-    const tool_id = "shell_cmd";
     try agent_state.addToolMessage(tool_id, "Bash", command, command);
+
+    // Initialize running command state
+    var running_cmd = state.AgentState.RunningShellCommand.init(app.allocator, command, tool_id) catch |err| {
+        std.log.err("Failed to init running command: {any}", .{err});
+        try agent_state.updateToolMessage(tool_id, .failed, null, "Failed to initialize command");
+        return;
+    };
 
     // Spawn the command using sh -c
     const user_shell = std.posix.getenv("SHELL") orelse "/bin/sh";
-    const argv = [_][]const u8{ user_shell, "-c", command };
-    
-    var child = std.process.Child.init(&argv, app.allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-    child.stdin_behavior = .Close;
-    
-    child.spawn() catch |err| {
+    var argv_storage: [3][]const u8 = .{ user_shell, "-c", command };
+    running_cmd.child = std.process.Child.init(&argv_storage, app.allocator);
+    running_cmd.child.stdout_behavior = .Pipe;
+    running_cmd.child.stderr_behavior = .Pipe;
+    running_cmd.child.stdin_behavior = .Close;
+
+    running_cmd.child.spawn() catch |err| {
         std.log.err("Failed to spawn command: {any}", .{err});
+        running_cmd.deinit();
         try agent_state.updateToolMessage(tool_id, .failed, null, "Failed to spawn command");
         return;
     };
 
-    // Read output (blocking for now, we can make this async later)
-    const stdout = child.stdout.?.readToEndAlloc(app.allocator, 10 * 1024 * 1024) catch |err| {
-        std.log.err("Failed to read stdout: {any}", .{err});
-        _ = child.kill() catch {};
-        try agent_state.updateToolMessage(tool_id, .failed, null, "Failed to read output");
-        return;
-    };
-    defer app.allocator.free(stdout);
-    
-    const stderr = child.stderr.?.readToEndAlloc(app.allocator, 10 * 1024 * 1024) catch |err| {
-        std.log.err("Failed to read stderr: {any}", .{err});
-        _ = child.kill() catch {};
-        try agent_state.updateToolMessage(tool_id, .failed, null, "Failed to read error output");
-        return;
-    };
-    defer app.allocator.free(stderr);
-    
-    // Wait for completion
-    const term = child.wait() catch |err| {
-        std.log.err("Failed to wait for command: {any}", .{err});
-        try agent_state.updateToolMessage(tool_id, .failed, stdout, stderr);
-        return;
-    };
+    // Store running command for polling
+    agent_state.running_shell_cmd = running_cmd;
+    agent_state.line_map_dirty = true;
+}
 
-    // Update message with output
-    const status: state.Message.ToolStatus = switch (term) {
-        .Exited => |code| if (code == 0) .completed else .failed,
-        else => .failed,
-    };
-    
-    try agent_state.updateToolMessage(tool_id, status, stdout, stderr);
+/// Poll running shell command for output. Returns true if there was activity.
+/// Called from the main event loop.
+pub fn pollRunningShellCommand(app: *App) bool {
+    const agent_state = &(app.state.agent_state orelse return false);
+    var cmd = &(agent_state.running_shell_cmd orelse return false);
 
-    // Queue the command output to be sent with next prompt (instead of sending immediately)
-    try queueCommandOutput(app, agent_state, command, stdout, stderr, term);
+    var had_activity = false;
+    var read_buf: [4096]u8 = undefined;
+
+    // Try to read from stdout (non-blocking via poll)
+    if (cmd.child.stdout) |stdout| {
+        // Check if data is available
+        var poll_fds = [_]std.posix.pollfd{
+            .{ .fd = stdout.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        const poll_result = std.posix.poll(&poll_fds, 0) catch 0;
+
+        if (poll_result > 0 and (poll_fds[0].revents & std.posix.POLL.IN) != 0) {
+            const bytes_read = stdout.read(&read_buf) catch 0;
+            if (bytes_read > 0) {
+                cmd.stdout_buf.appendSlice(app.allocator, read_buf[0..bytes_read]) catch {};
+                had_activity = true;
+            }
+        }
+    }
+
+    // Try to read from stderr
+    if (cmd.child.stderr) |stderr| {
+        var poll_fds = [_]std.posix.pollfd{
+            .{ .fd = stderr.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        const poll_result = std.posix.poll(&poll_fds, 0) catch 0;
+
+        if (poll_result > 0 and (poll_fds[0].revents & std.posix.POLL.IN) != 0) {
+            const bytes_read = stderr.read(&read_buf) catch 0;
+            if (bytes_read > 0) {
+                cmd.stderr_buf.appendSlice(app.allocator, read_buf[0..bytes_read]) catch {};
+                had_activity = true;
+            }
+        }
+    }
+
+    // Update tool message with last 8 lines if we got new output
+    if (had_activity) {
+        const last_lines = cmd.getLastLines(8);
+        agent_state.updateToolMessage(cmd.tool_id, .running, last_lines, null) catch {};
+        agent_state.line_map_dirty = true;
+        app.needs_render = true;
+    }
+
+    // Check if process has terminated (non-blocking)
+    const wait_result = std.posix.waitpid(cmd.child.id, std.c.W.NOHANG);
+    const exited = wait_result.pid != 0;
+    if (exited) {
+        // Process has completed - finalize
+        // Parse exit status using POSIX macros
+        const exit_success = std.c.W.IFEXITED(wait_result.status) and
+            std.c.W.EXITSTATUS(wait_result.status) == 0;
+        const status: state.Message.ToolStatus = if (exit_success) .completed else .failed;
+
+        // Update with final output
+        const stdout_content = cmd.stdout_buf.items;
+        const stderr_content = if (cmd.stderr_buf.items.len > 0) cmd.stderr_buf.items else null;
+        agent_state.updateToolMessage(cmd.tool_id, status, stdout_content, stderr_content) catch {};
+
+        // Queue output for next prompt
+        queueCommandOutput(app, agent_state, cmd.command, stdout_content, stderr_content orelse "", wait_result.status) catch |err| {
+            std.log.err("Failed to queue command output: {any}", .{err});
+        };
+
+        // Clean up
+        cmd.deinit();
+        agent_state.running_shell_cmd = null;
+        agent_state.line_map_dirty = true;
+        app.needs_render = true;
+        return true;
+    }
+
+    return had_activity;
 }
 
 /// Queue shell command output to be sent with the next prompt
@@ -707,7 +773,7 @@ fn queueCommandOutput(
     command: []const u8,
     stdout: []const u8,
     stderr: []const u8,
-    term: std.process.Child.Term,
+    wait_status: u32,
 ) !void {
     // Build the resource content with command, exit code, and output
     var content_buf: std.ArrayList(u8) = .{};
@@ -735,13 +801,15 @@ fn queueCommandOutput(
         }
     }
 
-    // Write exit code
-    const exit_code: i32 = switch (term) {
-        .Exited => |code| @intCast(code),
-        .Signal => |sig| -@as(i32, @intCast(sig)),
-        .Stopped => |sig| -@as(i32, @intCast(sig)),
-        .Unknown => |val| @intCast(val),
-    };
+    // Parse exit code from wait status
+    const exit_code: i32 = if (std.c.W.IFEXITED(wait_status))
+        @intCast(std.c.W.EXITSTATUS(wait_status))
+    else if (std.c.W.IFSIGNALED(wait_status))
+        -@as(i32, @intCast(std.c.W.TERMSIG(wait_status)))
+    else if (std.c.W.IFSTOPPED(wait_status))
+        -@as(i32, @intCast(std.c.W.STOPSIG(wait_status)))
+    else
+        @intCast(wait_status);
     try writer.print("# exit code: {d}\n", .{exit_code});
 
     // Queue for sending with next prompt

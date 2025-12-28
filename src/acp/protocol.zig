@@ -234,6 +234,7 @@ pub const ToolCallUpdate = struct {
     stdout: ?[]const u8 = null, // For Bash tools: command output
     stderr: ?[]const u8 = null, // For Bash tools: error output
     interrupted: bool = false, // For Bash tools: was the command interrupted
+    terminal_id: ?[]const u8 = null, // For terminal-based tools: reference to terminal output
 };
 
 /// Type of session update notification
