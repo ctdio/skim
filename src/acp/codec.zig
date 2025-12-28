@@ -979,17 +979,37 @@ pub const Decoder = struct {
                 else
                     "";
 
-                std.log.info("CODEC: tool_call_update id={s} has_content={} stdout_len={?d} rawOutput_len={?d}", .{
+                std.log.info("CODEC: tool_call_update id={s} has_content={} stdout_len={?d} rawOutput={}", .{
                     tool_call_id,
                     upd.content != null,
                     if (tool_response_stdout) |s| s.len else null,
-                    if (upd.rawOutput) |s| s.len else null,
+                    upd.rawOutput != null,
                 });
 
                 // Try rawOutput as fallback for stdout
+                // rawOutput can be either:
+                // - string: direct output (some agents)
+                // - object: {"aggregated_output":"..."} (Codex format)
                 if (tool_response_stdout == null and upd.rawOutput != null) {
-                    std.log.info("CODEC: using rawOutput as stdout fallback", .{});
-                    tool_response_stdout = self.allocator.dupe(u8, upd.rawOutput.?) catch null;
+                    const raw_out = upd.rawOutput.?;
+                    switch (raw_out) {
+                        .string => |s| {
+                            std.log.info("CODEC: rawOutput is string, len={d}", .{s.len});
+                            tool_response_stdout = self.allocator.dupe(u8, s) catch null;
+                        },
+                        .object => |obj| {
+                            // Codex format: {"aggregated_output":"..."}
+                            if (obj.get("aggregated_output")) |ao| {
+                                if (ao == .string) {
+                                    std.log.info("CODEC: rawOutput.aggregated_output len={d}", .{ao.string.len});
+                                    tool_response_stdout = self.allocator.dupe(u8, ao.string) catch null;
+                                }
+                            }
+                        },
+                        else => {
+                            std.log.info("CODEC: rawOutput is unexpected type: {s}", .{@tagName(raw_out)});
+                        },
+                    }
                 }
 
                 // Parse content blocks for tool_call_update
@@ -1458,7 +1478,8 @@ const RawSessionUpdate = struct {
         // rawInput contains tool-specific parameters (command for Bash, file_path for Edit, etc.)
         rawInput: ?std.json.Value = null,
         // rawOutput contains tool output (for completed tool calls)
-        rawOutput: ?[]const u8 = null,
+        // Can be either a string (direct output) or object {"aggregated_output":"..."} (Codex)
+        rawOutput: ?std.json.Value = null,
         // entries for plan updates
         entries: ?[]const RawPlanEntry = null,
         // Mode update for current_mode_update notifications (camelCase from agent!)
