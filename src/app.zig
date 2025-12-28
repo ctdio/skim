@@ -735,6 +735,10 @@ pub const App = struct {
             const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !stats_loading and !acp_active;
             if (should_poll) {
                 loop.pollEvent();
+            } else {
+                // Non-blocking mode - add small sleep to prevent busy-wait CPU spinning
+                // This caps the loop at ~30 FPS while maintaining UI responsiveness
+                std.Thread.sleep(33 * std.time.ns_per_ms);
             }
             // When not blocking (acp_active, mcp_active, etc.), events are still
             // captured by the vaxis reader thread and available via tryEvent()
@@ -783,14 +787,16 @@ pub const App = struct {
             // Clear expired messages
             self.clearExpiredStatusMessage();
 
-            // Poll ACP agent for updates
-            self.pollAcpUpdates();
+            // Poll ACP agent for updates (only when there's an active connection or thread)
+            if (self.acp_connect_thread != null or self.acp_manager != null) {
+                self.pollAcpUpdates();
 
-            // Force re-render while agent is discovering/connecting/thinking
-            // This keeps the UI responsive during connection
-            if (self.acp_manager) |mgr| {
-                if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected or mgr.status == .prompting) {
-                    self.needs_render = true;
+                // Force re-render while agent is discovering/connecting/thinking
+                // This keeps the UI responsive during connection
+                if (self.acp_manager) |mgr| {
+                    if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected or mgr.status == .prompting) {
+                        self.needs_render = true;
+                    }
                 }
             }
 
