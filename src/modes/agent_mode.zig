@@ -642,7 +642,7 @@ fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []const u8) !void {
     // Add user message showing the command
     var cmd_msg: [2048]u8 = undefined;
-    const cmd_text = std.fmt.bufPrint(&cmd_msg, "!{s}", .{command}) catch command;
+    const cmd_text = std.fmt.bufPrint(&cmd_msg, "$ {s}", .{command}) catch command;
     try agent_state.addMessage(.user, cmd_text);
 
     // Add a "running" tool message that will be updated with output
