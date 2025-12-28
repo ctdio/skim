@@ -1189,7 +1189,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
 
 /// Render file picker menu overlay
 fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usize) !void {
-    const filtered_count = agent_state.file_picker.filtered_indices.items.len;
+    const filtered_count = agent_state.file_picker.getFilteredCount();
 
     if (filtered_count == 0) return;
 

@@ -15,6 +15,7 @@ A keyboard-driven TUI for code reviews built in Zig.
 - Full git diff compatibility (working dir, staged, branch comparisons)
 - Comment system with export to clipboard ('y' for current, 'Y' for all)
 - Editor integration (Ctrl-g opens file at line in $EDITOR)
+- AI agent panel with `@file` fuzzy search for embedding file contents (experimental)
 
 ## Installation
 
@@ -328,6 +329,24 @@ skim --staged
 | `,d` | Focus diff (close agent panel) |
 | `Ctrl-C` | In insert mode: exit to normal mode. In normal mode: close panel |
 | `Ctrl-C` × 2 | In normal mode (diff view): force quit |
+
+### @file References
+
+Type `@` in the agent prompt to fuzzy-search and embed file contents:
+
+```
+@src/m     → fuzzy matches src/main.zig, src/modes/*, etc.
+@readme    → matches README.md
+```
+
+When you send the prompt, `@file` references are replaced with the file's contents as embedded resources for the AI agent.
+
+| Key | Action |
+|-----|--------|
+| `@` | Open file picker (at word boundary) |
+| `↑`/`↓` or `Ctrl-p`/`Ctrl-n` | Navigate file list |
+| `Enter` or `Tab` | Insert selected file |
+| `ESC` | Close file picker |
 
 ### Configuration
 

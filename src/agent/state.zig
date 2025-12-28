@@ -65,24 +65,44 @@ pub const FilePickerState = struct {
     visible: bool,
     files: std.ArrayList([]const u8), // All files in repo (owned)
     filtered_indices: std.ArrayList(usize), // Indices into files matching filter
+    filtered_paths: std.ArrayList([]const u8), // Paths from fzf (for fzf mode, not owned)
     selection: usize, // Index into filtered_indices
     scroll_offset: usize, // Scroll offset for menu pagination
     last_filter_update: i64, // Timestamp for throttling (ms)
     last_filter: [256]u8, // Cache last filter to avoid redundant updates
     last_filter_len: usize,
+    fzf_available: bool, // Whether fzf binary is available
+    use_fzf: bool, // Whether to use fzf for filtering
 
     pub fn init(allocator: Allocator) FilePickerState {
+        // Use native fzf-like scoring by default (faster, no subprocess)
+        // fzf subprocess can be enabled with use_fzf = true
+        std.log.info("FilePickerState: using native fzf-like scoring", .{});
         return .{
             .allocator = allocator,
             .visible = false,
             .files = .{},
             .filtered_indices = .{},
+            .filtered_paths = .{},
             .selection = 0,
             .scroll_offset = 0,
             .last_filter_update = 0,
             .last_filter = undefined,
             .last_filter_len = 0,
+            .fzf_available = false, // Checked lazily if needed
+            .use_fzf = false, // Native scoring by default (faster)
         };
+    }
+
+    /// Check if fzf binary is available (called lazily)
+    pub fn checkFzfAvailable() bool {
+        var child = std.process.Child.init(&.{ "fzf", "--version" }, std.heap.page_allocator);
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        child.stdin_behavior = .Ignore;
+        _ = child.spawn() catch return false;
+        const term = child.wait() catch return false;
+        return term.Exited == 0;
     }
 
     pub fn deinit(self: *FilePickerState) void {
@@ -91,6 +111,7 @@ pub const FilePickerState = struct {
         }
         self.files.deinit(self.allocator);
         self.filtered_indices.deinit(self.allocator);
+        self.filtered_paths.deinit(self.allocator);
     }
 
     /// Load file list from git repository
@@ -174,7 +195,7 @@ pub const FilePickerState = struct {
         const filter_changed = filter.len != self.last_filter_len or
             (filter.len > 0 and !std.mem.eql(u8, filter, self.last_filter[0..self.last_filter_len]));
 
-        if (!filter_changed and self.filtered_indices.items.len > 0) {
+        if (!filter_changed and (self.filtered_indices.items.len > 0 or self.filtered_paths.items.len > 0)) {
             return; // No update needed
         }
 
@@ -190,22 +211,121 @@ pub const FilePickerState = struct {
         @memcpy(self.last_filter[0..copy_len], filter[0..copy_len]);
         self.last_filter_len = copy_len;
 
-        // Clear and rebuild filtered indices
+        // Clear previous results
         self.filtered_indices.clearRetainingCapacity();
+        self.filtered_paths.clearRetainingCapacity();
 
-        for (self.files.items, 0..) |path, idx| {
-            if (self.filtered_indices.items.len >= MAX_FILTERED_RESULTS) break;
-
-            if (filter.len == 0 or fuzzyMatch(path, filter)) {
-                try self.filtered_indices.append(self.allocator, idx);
-            }
+        // Use fzf if available and filter is non-empty
+        if (self.use_fzf and filter.len > 0) {
+            self.updateFilterWithFzf(filter) catch {
+                // Fallback to simple matching on fzf error
+                self.updateFilterSimple(filter);
+            };
+        } else {
+            self.updateFilterSimple(filter);
         }
 
         // Clamp selection
-        if (self.filtered_indices.items.len == 0) {
+        const result_count = self.getFilteredCount();
+        if (result_count == 0) {
             self.selection = 0;
-        } else if (self.selection >= self.filtered_indices.items.len) {
-            self.selection = self.filtered_indices.items.len - 1;
+        } else if (self.selection >= result_count) {
+            self.selection = result_count - 1;
+        }
+    }
+
+    /// Get the count of filtered results (works for both fzf and simple mode)
+    pub fn getFilteredCount(self: *const FilePickerState) usize {
+        if (self.filtered_paths.items.len > 0) {
+            return self.filtered_paths.items.len;
+        }
+        return self.filtered_indices.items.len;
+    }
+
+    /// Update filter using fzf --filter
+    fn updateFilterWithFzf(self: *FilePickerState, filter: []const u8) !void {
+        if (self.files.items.len == 0) return;
+
+        // Build hashmap for O(1) path->index lookup
+        var path_to_idx = std.StringHashMap(usize).init(self.allocator);
+        defer path_to_idx.deinit();
+        for (self.files.items, 0..) |path, idx| {
+            path_to_idx.put(path, idx) catch break;
+        }
+
+        // Build fzf command
+        var child = std.process.Child.init(&.{ "fzf", "--filter", filter }, self.allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+        child.stdin_behavior = .Pipe;
+
+        try child.spawn();
+
+        // Write file list to stdin
+        if (child.stdin) |stdin| {
+            for (self.files.items) |path| {
+                stdin.writeAll(path) catch break;
+                stdin.writeAll("\n") catch break;
+            }
+            stdin.close();
+            child.stdin = null;
+        }
+
+        // Read sorted results from stdout
+        if (child.stdout) |stdout| {
+            // Read all output at once
+            const max_output = 1024 * 1024; // 1MB max
+            const output = stdout.readToEndAlloc(self.allocator, max_output) catch {
+                _ = child.wait() catch {};
+                return error.ReadFailed;
+            };
+            defer self.allocator.free(output);
+
+            // Parse line by line - O(1) lookup per line
+            var count: usize = 0;
+            var iter = std.mem.splitScalar(u8, output, '\n');
+            while (iter.next()) |path| {
+                if (path.len == 0) continue;
+                if (count >= MAX_FILTERED_RESULTS) break;
+
+                if (path_to_idx.get(path)) |idx| {
+                    try self.filtered_indices.append(self.allocator, idx);
+                    count += 1;
+                }
+            }
+        }
+
+        _ = child.wait() catch {};
+    }
+
+    /// Update filter using fzf-like scoring (native, no subprocess)
+    fn updateFilterSimple(self: *FilePickerState, filter: []const u8) void {
+        if (filter.len == 0) {
+            // No filter - show all files in original order
+            for (self.files.items, 0..) |_, idx| {
+                if (self.filtered_indices.items.len >= MAX_FILTERED_RESULTS) break;
+                self.filtered_indices.append(self.allocator, idx) catch break;
+            }
+            return;
+        }
+
+        // Collect scored matches
+        var scored: std.ArrayList(ScoredMatch) = .{};
+        defer scored.deinit(self.allocator);
+
+        for (self.files.items, 0..) |path, idx| {
+            if (fuzzyScore(path, filter)) |score| {
+                scored.append(self.allocator, .{ .index = idx, .score = score }) catch break;
+            }
+        }
+
+        // Sort by score (highest first)
+        std.mem.sort(ScoredMatch, scored.items, {}, compareScoredMatches);
+
+        // Add to filtered indices (limited)
+        for (scored.items) |match| {
+            if (self.filtered_indices.items.len >= MAX_FILTERED_RESULTS) break;
+            self.filtered_indices.append(self.allocator, match.index) catch break;
         }
     }
 
@@ -221,7 +341,8 @@ pub const FilePickerState = struct {
 
     /// Move selection down
     pub fn menuDown(self: *FilePickerState) void {
-        if (self.filtered_indices.items.len > 0 and self.selection < self.filtered_indices.items.len - 1) {
+        const count = self.getFilteredCount();
+        if (count > 0 and self.selection < count - 1) {
             self.selection += 1;
             if (self.selection >= self.scroll_offset + MAX_FILE_MENU_VISIBLE) {
                 self.scroll_offset = self.selection - MAX_FILE_MENU_VISIBLE + 1;
@@ -231,8 +352,9 @@ pub const FilePickerState = struct {
 
     /// Get the currently selected file path
     pub fn getSelectedFile(self: *const FilePickerState) ?[]const u8 {
-        if (self.filtered_indices.items.len == 0) return null;
-        const clamped_selection = @min(self.selection, self.filtered_indices.items.len - 1);
+        const count = self.getFilteredCount();
+        if (count == 0) return null;
+        const clamped_selection = @min(self.selection, count - 1);
         const file_idx = self.filtered_indices.items[clamped_selection];
         if (file_idx >= self.files.items.len) return null;
         return self.files.items[file_idx];
@@ -270,6 +392,88 @@ pub fn fuzzyMatch(target: []const u8, filter: []const u8) bool {
         }
     }
     return false;
+}
+
+/// fzf-like scoring constants (based on fzf's algo.go)
+const SCORE_MATCH: i32 = 16;
+const SCORE_GAP_START: i32 = -3;
+const SCORE_GAP_EXTENSION: i32 = -1;
+const BONUS_BOUNDARY: i32 = SCORE_MATCH / 2; // 8
+const BONUS_CAMEL: i32 = BONUS_BOUNDARY - 1; // 7
+const BONUS_CONSECUTIVE: i32 = -(SCORE_GAP_START + SCORE_GAP_EXTENSION); // 4
+const BONUS_FIRST_CHAR_MULTIPLIER: i32 = 2;
+
+/// Fuzzy match with fzf-like scoring. Returns score (higher = better match), or null if no match.
+pub fn fuzzyScore(target: []const u8, filter: []const u8) ?i32 {
+    if (filter.len == 0) return 0;
+    if (filter.len > target.len) return null;
+
+    var score: i32 = 0;
+    var filter_idx: usize = 0;
+    var prev_matched: bool = false;
+    var prev_char: u8 = 0;
+
+    for (target, 0..) |c, i| {
+        const target_lower = std.ascii.toLower(c);
+        const filter_lower = std.ascii.toLower(filter[filter_idx]);
+
+        if (target_lower == filter_lower) {
+            // Base match score
+            score += SCORE_MATCH;
+
+            // Bonus for word boundary (start, after /, _, -, ., space)
+            const is_boundary = (i == 0) or
+                prev_char == '/' or prev_char == '_' or
+                prev_char == '-' or prev_char == '.' or
+                prev_char == ' ';
+
+            // Bonus for camelCase (lowercase followed by uppercase)
+            const is_camel = (prev_char >= 'a' and prev_char <= 'z') and
+                (c >= 'A' and c <= 'Z');
+
+            if (is_boundary) {
+                var bonus = BONUS_BOUNDARY;
+                if (filter_idx == 0) bonus *= BONUS_FIRST_CHAR_MULTIPLIER;
+                score += bonus;
+            } else if (is_camel) {
+                score += BONUS_CAMEL;
+            }
+
+            // Bonus for consecutive matches
+            if (prev_matched) {
+                score += BONUS_CONSECUTIVE;
+            }
+
+            prev_matched = true;
+            filter_idx += 1;
+            if (filter_idx >= filter.len) {
+                return score;
+            }
+        } else {
+            // Gap penalty
+            if (prev_matched) {
+                score += SCORE_GAP_START;
+            } else if (filter_idx > 0) {
+                score += SCORE_GAP_EXTENSION;
+            }
+            prev_matched = false;
+        }
+        prev_char = c;
+    }
+
+    // Didn't match all filter characters
+    return null;
+}
+
+/// Scored match result for sorting
+const ScoredMatch = struct {
+    index: usize,
+    score: i32,
+};
+
+/// Compare function for sorting scored matches (higher score first)
+fn compareScoredMatches(_: void, a: ScoredMatch, b: ScoredMatch) bool {
+    return a.score > b.score;
 }
 
 // =============================================================================
@@ -1357,4 +1561,45 @@ test "getFileFilter extracts filter text" {
     try std.testing.expectEqualStrings("foo", FilePickerState.getFileFilter("check @foo", 10));
     try std.testing.expectEqualStrings("", FilePickerState.getFileFilter("@", 1));
     try std.testing.expectEqualStrings("", FilePickerState.getFileFilter("no at", 5));
+}
+
+test "fuzzyScore returns null for non-matches" {
+    try std.testing.expect(fuzzyScore("hello", "xyz") == null);
+    try std.testing.expect(fuzzyScore("abc", "abcd") == null); // filter longer than target
+}
+
+test "fuzzyScore returns score for matches" {
+    // Basic match
+    const score1 = fuzzyScore("hello", "hlo");
+    try std.testing.expect(score1 != null);
+    try std.testing.expect(score1.? > 0);
+
+    // Empty filter always matches with score 0
+    try std.testing.expectEqual(@as(?i32, 0), fuzzyScore("anything", ""));
+}
+
+test "fuzzyScore prefers word boundary matches" {
+    // "src/main.zig" with filter "m" should score higher matching at boundary
+    const score_boundary = fuzzyScore("src/main.zig", "m").?;
+    const score_middle = fuzzyScore("something", "m").?;
+
+    // Boundary match (after /) should score higher
+    try std.testing.expect(score_boundary > score_middle);
+}
+
+test "fuzzyScore prefers consecutive matches" {
+    // Consecutive "mai" in "main" vs scattered "m.a.i"
+    const score_consecutive = fuzzyScore("main.zig", "mai").?;
+    const score_scattered = fuzzyScore("m_a_i.txt", "mai").?;
+
+    // Consecutive should score higher
+    try std.testing.expect(score_consecutive > score_scattered);
+}
+
+test "fuzzyScore case insensitive" {
+    const score1 = fuzzyScore("README.md", "read");
+    const score2 = fuzzyScore("readme.md", "READ");
+
+    try std.testing.expect(score1 != null);
+    try std.testing.expect(score2 != null);
 }
