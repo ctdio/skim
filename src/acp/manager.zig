@@ -444,6 +444,24 @@ pub const AcpManager = struct {
         return self.status == .prompting and self.pending_prompt_id != null;
     }
 
+    /// Check if the agent has pending work that requires responsive polling.
+    /// This includes active terminals or ongoing agent responses.
+    /// Used by the main event loop to decide between blocking pollEvent() vs non-blocking mode.
+    pub fn hasPendingOutput(self: *AcpManager) bool {
+        // Agent is actively generating output
+        if (self.status == .prompting) return true;
+
+        // Check if any terminals are still running (not completed)
+        var iter = self.terminals.iterator();
+        while (iter.next()) |entry| {
+            if (!entry.value_ptr.completed and !entry.value_ptr.exited) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// Poll for new messages from the agent (non-blocking).
     /// Returns slice of pending messages. Call clearMessages() after processing.
     /// Note: session/update notifications are processed by background thread callback.
@@ -923,9 +941,12 @@ pub const AcpManager = struct {
             // Poll for output and check for marker
             self.pollTerminalOutput(entry);
 
-            // If still not complete, sleep briefly
+            // If still not complete, yield to allow event loop to continue
+            // The main event loop will re-poll this handler frequently (1ms intervals)
+            // so no sleep is needed - just return control immediately
             if (!entry.completed) {
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                // Small yield to prevent tight loop - much faster than 10ms sleep
+                std.Thread.yield() catch {};
             }
         }
 

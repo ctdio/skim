@@ -722,23 +722,20 @@ pub const App = struct {
             // Only block on pollEvent if we don't need to render AND no async job is running
             // AND not connected to MCP (reader thread may queue messages anytime)
             // AND not needing MCP reconnection (reconnect logic must run periodically)
-            // AND no active review process streaming to the panel
-            // AND no ACP connection in progress or active session
+            // AND no ACP data pending (agent actively producing output)
             // This allows async operations to trigger immediate renders
             const mcp_active = if (self.mcp) |mcp| mcp.connected or mcp.needsReconnect() else false;
             const stats_loading = self.state.menu_stats_loading;
-            const agent_panel_visible = if (self.state.agent_state) |as| as.visible else false;
-            // Consider ACP "active" during connection phases and communication
-            // This ensures non-blocking event loop while connecting (for responsive UI)
-            // Note: .connected is included because createSession() runs AFTER connect() sets .connected
-            const acp_active = if (self.acp_manager) |mgr| mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected or mgr.status == .prompting or (agent_panel_visible and mgr.status == .session_active) else false;
+            // Only consider ACP "active" when agent has pending output to display
+            // This allows blocking pollEvent() when agent is idle/connected but not producing data
+            const acp_active = if (self.acp_manager) |mgr| mgr.hasPendingOutput() else false;
             const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !stats_loading and !acp_active;
             if (should_poll) {
                 loop.pollEvent();
             } else {
-                // Non-blocking mode - add small sleep to prevent busy-wait CPU spinning
-                // This caps the loop at ~30 FPS while maintaining UI responsiveness
-                std.Thread.sleep(33 * std.time.ns_per_ms);
+                // Non-blocking mode - sleep 10ms to prevent busy-wait while staying responsive
+                // This caps render loop at ~100 FPS for smooth updates during active operations
+                std.Thread.sleep(10 * std.time.ns_per_ms);
             }
             // When not blocking (acp_active, mcp_active, etc.), events are still
             // captured by the vaxis reader thread and available via tryEvent()
