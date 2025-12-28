@@ -1410,7 +1410,6 @@ pub const Message = struct {
             return switch (self) {
                 .thinking => "Thinking",
                 .system => "System",
-                .diff => "Edit",
                 .tool => "Tool",
                 .plan_snapshot => "Todos",
                 else => "",

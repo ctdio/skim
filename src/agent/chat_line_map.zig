@@ -616,27 +616,27 @@ pub const ChatLineMap = struct {
                 var stderr_iter = std.mem.splitScalar(u8, stderr, '\n');
                 if (stderr_iter.next()) |first_line| {
                     const max_len = @min(first_line.len, 80);
-                    break :blk try std.fmt.allocPrint(self.allocator, "⎿  {s}", .{first_line[0..max_len]});
+                    break :blk try std.fmt.allocPrint(self.allocator, "⎿ {s}", .{first_line[0..max_len]});
                 }
             }
-            break :blk try self.allocator.dupe(u8, "⎿  Failed");
+            break :blk try self.allocator.dupe(u8, "⎿ Failed");
         } else blk: {
             if (msg.tool_stdout) |stdout| {
                 if (stdout.len == 0) {
-                    break :blk try self.allocator.dupe(u8, "⎿  (No content)");
+                    break :blk try self.allocator.dupe(u8, "⎿ (No content)");
                 }
                 var line_count: usize = 0;
                 var iter = std.mem.splitScalar(u8, stdout, '\n');
                 while (iter.next()) |_| line_count += 1;
                 if (line_count > 1) {
-                    break :blk try std.fmt.allocPrint(self.allocator, "⎿  ({d} lines)", .{line_count});
+                    break :blk try std.fmt.allocPrint(self.allocator, "⎿ ({d} lines)", .{line_count});
                 } else {
                     const max_len = @min(stdout.len, 60);
                     const truncated = if (stdout.len > 60) "..." else "";
-                    break :blk try std.fmt.allocPrint(self.allocator, "⎿  {s}{s}", .{ stdout[0..max_len], truncated });
+                    break :blk try std.fmt.allocPrint(self.allocator, "⎿ {s}{s}", .{ stdout[0..max_len], truncated });
                 }
             }
-            break :blk try self.allocator.dupe(u8, "⎿  Done");
+            break :blk try self.allocator.dupe(u8, "⎿ Done");
         };
         try self.strings.append(self.allocator, result_text);
 
@@ -882,16 +882,6 @@ pub const ChatLineMap = struct {
             .line_type = .{ .diff_header = .{ .msg_idx = msg_idx } },
             .text = header_text,
             .style = .{ .fg = Color.white, .bold = true },
-            .indent = 0,
-        });
-        global_line.* += 1;
-
-        // Blank line
-        try self.records.append(self.allocator, .{
-            .global_line = global_line.*,
-            .line_type = .spacer,
-            .text = "",
-            .style = .{},
             .indent = 0,
         });
         global_line.* += 1;
