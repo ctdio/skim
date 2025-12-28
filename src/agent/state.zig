@@ -519,6 +519,19 @@ pub const AgentState = struct {
     staged_prompt_len: usize,
     // File picker state for @ mentions
     file_picker: FilePickerState,
+    // Shell command mode (activated by ! key)
+    shell_mode: bool,
+    // Queued shell command outputs (sent with next prompt)
+    queued_shell_outputs: std.ArrayList(QueuedShellOutput),
+
+    /// Queued shell command output to be sent with next prompt
+    pub const QueuedShellOutput = struct {
+        content: []const u8, // Owned
+
+        pub fn deinit(self: *QueuedShellOutput, allocator: Allocator) void {
+            allocator.free(self.content);
+        }
+    };
 
     pub const PanelSide = enum {
         left,
@@ -566,6 +579,8 @@ pub const AgentState = struct {
             .staged_prompt = undefined,
             .staged_prompt_len = 0,
             .file_picker = FilePickerState.init(allocator),
+            .shell_mode = false,
+            .queued_shell_outputs = .{},
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -590,6 +605,10 @@ pub const AgentState = struct {
         }
         self.available_commands.deinit(self.allocator);
         self.file_picker.deinit();
+        for (self.queued_shell_outputs.items) |*output| {
+            output.deinit(self.allocator);
+        }
+        self.queued_shell_outputs.deinit(self.allocator);
     }
 
     /// Add a message to the conversation history
@@ -1292,6 +1311,54 @@ pub const AgentState = struct {
     /// Clear the Ctrl+C timestamp (e.g., when another key is pressed)
     pub fn clearCtrlCTimestamp(self: *AgentState) void {
         self.last_ctrl_c_timestamp = 0;
+    }
+
+    // =========================================================================
+    // Shell Command Mode
+    // =========================================================================
+
+    /// Toggle shell command mode on/off
+    pub fn toggleShellMode(self: *AgentState) void {
+        self.shell_mode = !self.shell_mode;
+    }
+
+    /// Check if in shell command mode
+    pub fn isShellMode(self: *const AgentState) bool {
+        return self.shell_mode;
+    }
+
+    /// Clear shell mode (e.g., after submitting a command)
+    pub fn clearShellMode(self: *AgentState) void {
+        self.shell_mode = false;
+    }
+
+    /// Queue a shell command output to be sent with next prompt
+    pub fn queueShellOutput(self: *AgentState, content: []const u8) !void {
+        const owned_content = try self.allocator.dupe(u8, content);
+        errdefer self.allocator.free(owned_content);
+        try self.queued_shell_outputs.append(self.allocator, .{
+            .content = owned_content,
+        });
+    }
+
+    /// Check if there are queued shell outputs
+    pub fn hasQueuedShellOutputs(self: *const AgentState) bool {
+        return self.queued_shell_outputs.items.len > 0;
+    }
+
+    /// Take all queued shell outputs (caller owns returned slice, must free)
+    /// Returns null on allocation failure or if empty
+    pub fn takeQueuedShellOutputs(self: *AgentState) ?[]QueuedShellOutput {
+        if (self.queued_shell_outputs.items.len == 0) return null;
+        return self.queued_shell_outputs.toOwnedSlice(self.allocator) catch null;
+    }
+
+    /// Clear all queued shell outputs
+    pub fn clearQueuedShellOutputs(self: *AgentState) void {
+        for (self.queued_shell_outputs.items) |*output| {
+            output.deinit(self.allocator);
+        }
+        self.queued_shell_outputs.clearRetainingCapacity();
     }
 
     /// Estimate memory usage of the agent state (for monitoring)

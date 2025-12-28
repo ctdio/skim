@@ -1561,9 +1561,14 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         });
     }
 
+    // Check if we're in shell command mode (using shell_mode flag)
+    const is_shell_mode = agent_state.isShellMode();
+    
     // Dim prompt when session is not ready
     const session_ready = if (app.acp_manager) |mgr| mgr.status == .session_active or mgr.status == .prompting else false;
-    const prompt_style = if (session_ready)
+    const prompt_style = if (is_shell_mode)
+        vaxis.Style{ .fg = .{ .index = 3 }, .bold = true } // yellow for shell mode
+    else if (session_ready)
         vaxis.Style{ .fg = .{ .index = 5 }, .bold = true } // magenta when ready
     else
         vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray when not ready
@@ -1616,10 +1621,11 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
             if (display_row >= scroll_offset) {
                 const row = visible_row + content_start_row;
 
-                // First line gets the prompt "> ", others get "  " for alignment
+                // First line gets the prompt ("> " for normal, "$ " for shell mode), others get "  " for alignment
                 if (is_first_line) {
+                    const prompt_char = if (is_shell_mode) "$ " else "> ";
                     var prompt_seg = [_]vaxis.Cell.Segment{
-                        .{ .text = "> ", .style = prompt_style },
+                        .{ .text = prompt_char, .style = prompt_style },
                     };
                     _ = win.print(&prompt_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
                     is_first_line = false;

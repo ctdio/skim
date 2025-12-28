@@ -415,6 +415,28 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
+    // '!' key in insert mode - toggle shell command mode (don't insert the character)
+    if (agent_state.input.vim.vim_mode == .insert and key.codepoint == '!' and !key.mods.ctrl and !key.mods.alt) {
+        agent_state.toggleShellMode();
+        app.needs_render = true;
+        return;
+    }
+
+    // Backspace on empty input in shell mode - exit shell mode
+    if (agent_state.isShellMode() and agent_state.input.vim.vim_mode == .insert and 
+        key.codepoint == vaxis.Key.backspace and agent_state.input.getText().len == 0) {
+        agent_state.clearShellMode();
+        app.needs_render = true;
+        return;
+    }
+
+    // Escape in shell mode - exit shell mode
+    if (agent_state.isShellMode() and key.codepoint == 27) {
+        agent_state.clearShellMode();
+        app.needs_render = true;
+        // Don't return - let normal ESC handling proceed (switches to normal mode)
+    }
+
     // Delegate to input editor
     const action = try agent.InputEditor.handleKey(&agent_state.input, key, app.allocator);
 
@@ -473,34 +495,42 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                         agent_state.stagePrompt(text);
                         agent_state.input.clear();
                     } else {
-                        // Agent not thinking - send normally
-                        // Add user message to history
-                        try agent_state.addMessage(.user, text);
-
-                        // Send to ACP agent (manager will queue if still connecting)
-                        if (app.acp_manager) |mgr| {
-                            if (mgr.status == .disconnected) {
-                                try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
-                            } else if (mgr.status == .failed) {
-                                try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
-                            } else {
-                                // Parse and send prompt with file references
-                                try sendPromptWithFiles(app, mgr, text);
-                            }
+                        // Check if in shell command mode
+                        if (agent_state.isShellMode()) {
+                            // Execute as shell command
+                            try handleShellCommand(app, agent_state, text);
+                            agent_state.input.clear();
+                            agent_state.clearShellMode();
                         } else {
-                            try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
-                        }
+                            // Agent not thinking - send normally
+                            // Add user message to history
+                            try agent_state.addMessage(.user, text);
 
-                        // Clear input for next prompt
-                        agent_state.input.clear();
+                            // Send to ACP agent (manager will queue if still connecting)
+                            if (app.acp_manager) |mgr| {
+                                if (mgr.status == .disconnected) {
+                                    try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
+                                } else if (mgr.status == .failed) {
+                                    try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
+                                } else {
+                                    // Parse and send prompt with file references
+                                    try sendPromptWithFiles(app, mgr, text);
+                                }
+                            } else {
+                                try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
+                            }
 
-                        // Auto-populate from stash if available
-                        if (agent_state.hasStash()) {
-                            agent_state.unstashPrompt();
-                            agent_state.clearStash();
-                            // Position cursor at end for immediate editing
-                            agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
-                            agent_state.input.vim.vim_mode = .insert;
+                            // Clear input for next prompt
+                            agent_state.input.clear();
+
+                            // Auto-populate from stash if available
+                            if (agent_state.hasStash()) {
+                                agent_state.unstashPrompt();
+                                agent_state.clearStash();
+                                // Position cursor at end for immediate editing
+                                agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
+                                agent_state.input.vim.vim_mode = .insert;
+                            }
                         }
                     }
                 }
@@ -607,6 +637,117 @@ fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return result.toOwnedSlice(allocator);
 }
 
+/// Handle shell command execution (commands starting with !)
+/// Runs the command directly, displays output, and sends as embedded resource to agent
+fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []const u8) !void {
+    // Add user message showing the command
+    var cmd_msg: [2048]u8 = undefined;
+    const cmd_text = std.fmt.bufPrint(&cmd_msg, "!{s}", .{command}) catch command;
+    try agent_state.addMessage(.user, cmd_text);
+
+    // Add a "running" tool message that will be updated with output
+    const tool_id = "shell_cmd";
+    try agent_state.addToolMessage(tool_id, "Bash", command, command);
+
+    // Spawn the command using sh -c
+    const user_shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+    const argv = [_][]const u8{ user_shell, "-c", command };
+    
+    var child = std.process.Child.init(&argv, app.allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    child.stdin_behavior = .Close;
+    
+    child.spawn() catch |err| {
+        std.log.err("Failed to spawn command: {any}", .{err});
+        try agent_state.updateToolMessage(tool_id, .failed, null, "Failed to spawn command");
+        return;
+    };
+
+    // Read output (blocking for now, we can make this async later)
+    const stdout = child.stdout.?.readToEndAlloc(app.allocator, 10 * 1024 * 1024) catch |err| {
+        std.log.err("Failed to read stdout: {any}", .{err});
+        _ = child.kill() catch {};
+        try agent_state.updateToolMessage(tool_id, .failed, null, "Failed to read output");
+        return;
+    };
+    defer app.allocator.free(stdout);
+    
+    const stderr = child.stderr.?.readToEndAlloc(app.allocator, 10 * 1024 * 1024) catch |err| {
+        std.log.err("Failed to read stderr: {any}", .{err});
+        _ = child.kill() catch {};
+        try agent_state.updateToolMessage(tool_id, .failed, null, "Failed to read error output");
+        return;
+    };
+    defer app.allocator.free(stderr);
+    
+    // Wait for completion
+    const term = child.wait() catch |err| {
+        std.log.err("Failed to wait for command: {any}", .{err});
+        try agent_state.updateToolMessage(tool_id, .failed, stdout, stderr);
+        return;
+    };
+
+    // Update message with output
+    const status: state.Message.ToolStatus = switch (term) {
+        .Exited => |code| if (code == 0) .completed else .failed,
+        else => .failed,
+    };
+    
+    try agent_state.updateToolMessage(tool_id, status, stdout, stderr);
+
+    // Queue the command output to be sent with next prompt (instead of sending immediately)
+    try queueCommandOutput(app, agent_state, command, stdout, stderr, term);
+}
+
+/// Queue shell command output to be sent with the next prompt
+fn queueCommandOutput(
+    app: *App,
+    agent_state: *agent.AgentState,
+    command: []const u8,
+    stdout: []const u8,
+    stderr: []const u8,
+    term: std.process.Child.Term,
+) !void {
+    // Build the resource content with command, exit code, and output
+    var content_buf: std.ArrayList(u8) = .{};
+    defer content_buf.deinit(app.allocator);
+
+    const writer = content_buf.writer(app.allocator);
+
+    // Write command header
+    try writer.print("$ {s}\n", .{command});
+
+    // Write stdout if present
+    if (stdout.len > 0) {
+        try writer.writeAll(stdout);
+        if (!std.mem.endsWith(u8, stdout, "\n")) {
+            try writer.writeByte('\n');
+        }
+    }
+
+    // Write stderr if present
+    if (stderr.len > 0) {
+        try writer.writeAll("# stderr:\n");
+        try writer.writeAll(stderr);
+        if (!std.mem.endsWith(u8, stderr, "\n")) {
+            try writer.writeByte('\n');
+        }
+    }
+
+    // Write exit code
+    const exit_code: i32 = switch (term) {
+        .Exited => |code| @intCast(code),
+        .Signal => |sig| -@as(i32, @intCast(sig)),
+        .Stopped => |sig| -@as(i32, @intCast(sig)),
+        .Unknown => |val| @intCast(val),
+    };
+    try writer.print("# exit code: {d}\n", .{exit_code});
+
+    // Queue for sending with next prompt
+    try agent_state.queueShellOutput(content_buf.items);
+}
+
 /// Handle local slash commands (executed by skim, not sent to agent)
 fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: []const u8) !void {
     if (std.mem.eql(u8, command_name, "model")) {
@@ -686,16 +827,39 @@ fn updateFilePickerVisibility(_: *App, agent_state: *agent.AgentState) void {
 }
 
 /// Send a prompt, parsing @file references and embedding file content.
-/// Falls back to simple text prompt if parsing fails or no files referenced.
+/// Also includes any queued shell command outputs as embedded resources.
+/// Falls back to simple text prompt if parsing fails or no files/shell outputs.
 fn sendPromptWithFiles(app: *App, mgr: *AcpManager, text: []const u8) !void {
+    const agent_state = &(app.state.agent_state orelse return);
+
+    // Take any queued shell outputs
+    const queued_outputs_opt = agent_state.takeQueuedShellOutputs();
+    defer {
+        if (queued_outputs_opt) |outputs| {
+            for (outputs) |*output| {
+                var mutable_output = output.*;
+                mutable_output.deinit(app.allocator);
+            }
+            app.allocator.free(outputs);
+        }
+    }
+
     // Check if there are any @ references that might be files
     const has_at = std.mem.indexOf(u8, text, "@") != null;
-    std.log.info("sendPromptWithFiles: text_len={d}, has_at={}", .{ text.len, has_at });
+    const has_shell_outputs = queued_outputs_opt != null and queued_outputs_opt.?.len > 0;
+    const queued_count: usize = if (queued_outputs_opt) |o| o.len else 0;
+    std.log.info("sendPromptWithFiles: text_len={d}, has_at={}, queued_shell_outputs={d}", .{ text.len, has_at, queued_count });
 
-    if (has_at) {
-        // Parse and send with content blocks
+    // If we have shell outputs or @file references, send as content blocks
+    if (has_at or has_shell_outputs) {
+        // Parse @file references
         var parsed = parsePromptContent(app.allocator, text) catch |err| {
             std.log.warn("sendPromptWithFiles: Failed to parse prompt content: {}", .{err});
+            // If we have shell outputs, we still need to send them
+            if (queued_outputs_opt) |queued_outputs| {
+                try sendWithShellOutputsOnly(app, mgr, text, queued_outputs);
+                return;
+            }
             // Fall back to simple text prompt
             const prompt_copy = try app.allocator.dupe(u8, text);
             defer app.allocator.free(prompt_copy);
@@ -710,36 +874,98 @@ fn sendPromptWithFiles(app: *App, mgr: *AcpManager, text: []const u8) !void {
             std.log.info("sendPromptWithFiles: resource[{d}] uri={s}, mime={s}, text_len={d}", .{ i, res.uri, res.mime_type, res.text.len });
         }
 
-        if (parsed.resources.len > 0) {
-            // Has file resources - send as content blocks
-            std.log.info("sendPromptWithFiles: sending as content blocks with embedded resources", .{});
-            mgr.sendPromptContent(parsed.blocks) catch |err| {
+        if (parsed.resources.len > 0 or has_shell_outputs) {
+            // Build combined content blocks: parsed blocks + shell output blocks
+            const total_blocks = parsed.blocks.len + queued_count;
+            var combined_blocks = try app.allocator.alloc(protocol.ContentBlock, total_blocks);
+            defer app.allocator.free(combined_blocks);
+
+            // Copy parsed blocks first
+            @memcpy(combined_blocks[0..parsed.blocks.len], parsed.blocks);
+
+            // Add shell output blocks
+            if (queued_outputs_opt) |queued_outputs| {
+                for (queued_outputs, 0..) |output, i| {
+                    combined_blocks[parsed.blocks.len + i] = .{
+                        .embedded_resource = .{
+                            .resource = .{
+                                .uri = "shell://command",
+                                .mimeType = "text/plain",
+                                .text = output.content,
+                            },
+                        },
+                    };
+                }
+            }
+
+            std.log.info("sendPromptWithFiles: sending {d} content blocks ({d} parsed + {d} shell)", .{
+                total_blocks,
+                parsed.blocks.len,
+                queued_count,
+            });
+
+            mgr.sendPromptContent(combined_blocks) catch |err| {
                 std.log.err("sendPromptWithFiles: Failed to send prompt content: {any}", .{err});
-                const agent_state = &(app.state.agent_state orelse return);
                 try agent_state.addMessage(.system, "Failed to send prompt to agent");
             };
         } else {
-            // No file resources found - send as simple text
-            std.log.info("sendPromptWithFiles: no valid file refs found, sending as simple text", .{});
+            // No file resources or shell outputs - send as simple text
+            std.log.info("sendPromptWithFiles: no valid file refs or shell outputs, sending as simple text", .{});
             const prompt_copy = try app.allocator.dupe(u8, text);
             defer app.allocator.free(prompt_copy);
             mgr.sendPrompt(prompt_copy) catch |err| {
                 std.log.err("sendPromptWithFiles: Failed to send prompt: {any}", .{err});
-                const agent_state = &(app.state.agent_state orelse return);
                 try agent_state.addMessage(.system, "Failed to send prompt to agent");
             };
         }
     } else {
-        // No @ at all - send simple text prompt
-        std.log.info("sendPromptWithFiles: no @ found, sending as simple text", .{});
+        // No @ and no shell outputs - send simple text prompt
+        std.log.info("sendPromptWithFiles: no @ or shell outputs, sending as simple text", .{});
         const prompt_copy = try app.allocator.dupe(u8, text);
         defer app.allocator.free(prompt_copy);
         mgr.sendPrompt(prompt_copy) catch |err| {
             std.log.err("sendPromptWithFiles: Failed to send prompt: {any}", .{err});
-            const agent_state = &(app.state.agent_state orelse return);
             try agent_state.addMessage(.system, "Failed to send prompt to agent");
         };
     }
+}
+
+/// Helper to send prompt with shell outputs when @file parsing failed
+fn sendWithShellOutputsOnly(
+    app: *App,
+    mgr: *AcpManager,
+    text: []const u8,
+    queued_outputs: []const state.AgentState.QueuedShellOutput,
+) !void {
+    const agent_state = &(app.state.agent_state orelse return);
+
+    // Build blocks: text + shell outputs
+    const total_blocks = 1 + queued_outputs.len;
+    var blocks = try app.allocator.alloc(protocol.ContentBlock, total_blocks);
+    defer app.allocator.free(blocks);
+
+    // Text block first
+    blocks[0] = .{ .text = .{ .text = text } };
+
+    // Shell output blocks
+    for (queued_outputs, 0..) |output, i| {
+        blocks[1 + i] = .{
+            .embedded_resource = .{
+                .resource = .{
+                    .uri = "shell://command",
+                    .mimeType = "text/plain",
+                    .text = output.content,
+                },
+            },
+        };
+    }
+
+    std.log.info("sendWithShellOutputsOnly: sending {d} blocks (1 text + {d} shell)", .{ total_blocks, queued_outputs.len });
+
+    mgr.sendPromptContent(blocks) catch |err| {
+        std.log.err("sendWithShellOutputsOnly: Failed to send prompt content: {any}", .{err});
+        try agent_state.addMessage(.system, "Failed to send prompt to agent");
+    };
 }
 
 /// Parsed content with ownership
