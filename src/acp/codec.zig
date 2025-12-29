@@ -403,6 +403,20 @@ pub const Encoder = struct {
         return output.toOwnedSlice(self.allocator);
     }
 
+    /// Encode session/set_model params to JSON
+    pub fn encodeSessionSetModelParams(self: *Encoder, params: protocol.SessionSetModelParams) ![]u8 {
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(self.allocator);
+        const writer = output.writer(self.allocator);
+
+        try writer.print("{{\"sessionId\":{f},\"modelId\":{f}}}", .{
+            std.json.fmt(params.session_id, .{}),
+            std.json.fmt(params.model_id, .{}),
+        });
+
+        return output.toOwnedSlice(self.allocator);
+    }
+
     /// Encode fs/read_text_file result to JSON
     pub fn encodeReadTextFileResult(self: *Encoder, result: protocol.ReadTextFileResult) ![]u8 {
         var output: std.ArrayList(u8) = .{};
@@ -576,9 +590,22 @@ pub const Decoder = struct {
             availableModes: ?[]const RawMode = null,
         };
 
+        const RawModel = struct {
+            modelId: []const u8,
+            name: ?[]const u8 = null,
+            displayName: ?[]const u8 = null, // Claude Code uses displayName
+            description: ?[]const u8 = null,
+        };
+
+        const RawModels = struct {
+            currentModelId: ?[]const u8 = null,
+            availableModels: ?[]const RawModel = null,
+        };
+
         const RawResult = struct {
             sessionId: []const u8,
             modes: ?RawModes = null,
+            models: ?RawModels = null,
         };
 
         const parsed = try std.json.parseFromSlice(RawResult, self.allocator, json, .{
@@ -618,9 +645,41 @@ pub const Decoder = struct {
             };
         }
 
+        // Parse models if present
+        var models: ?protocol.SessionModels = null;
+        if (r.models) |raw_models| {
+            var available_models: std.ArrayListUnmanaged(protocol.ModelInfo) = .{};
+            errdefer {
+                for (available_models.items) |*m| {
+                    self.allocator.free(m.model_id);
+                    if (m.name) |n| self.allocator.free(n);
+                    if (m.description) |d| self.allocator.free(d);
+                }
+                available_models.deinit(self.allocator);
+            }
+
+            if (raw_models.availableModels) |raw_avail| {
+                for (raw_avail) |rm| {
+                    // Prefer displayName (Claude Code) over name (Codex), fall back to null
+                    const model_name = rm.displayName orelse rm.name;
+                    try available_models.append(self.allocator, .{
+                        .model_id = try self.allocator.dupe(u8, rm.modelId),
+                        .name = if (model_name) |n| try self.allocator.dupe(u8, n) else null,
+                        .description = if (rm.description) |d| try self.allocator.dupe(u8, d) else null,
+                    });
+                }
+            }
+
+            models = .{
+                .current_model_id = if (raw_models.currentModelId) |id| try self.allocator.dupe(u8, id) else null,
+                .available_models = try available_models.toOwnedSlice(self.allocator),
+            };
+        }
+
         return .{
             .session_id = try self.allocator.dupe(u8, r.sessionId),
             .modes = modes,
+            .models = models,
         };
     }
 

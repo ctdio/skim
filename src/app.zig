@@ -731,7 +731,9 @@ pub const App = struct {
             const acp_active = if (self.acp_manager) |mgr| mgr.hasPendingOutput() else false;
             // Check if a shell command is running (needs streaming output)
             const shell_cmd_running = if (self.state.agent_state) |*as| as.hasRunningShellCommand() else false;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !stats_loading and !acp_active and !shell_cmd_running;
+            // Check if ACP connection thread is running (need to poll for completion)
+            const acp_connecting = self.acp_connect_thread != null;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !stats_loading and !acp_active and !shell_cmd_running and !acp_connecting;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -3256,9 +3258,10 @@ pub const App = struct {
             };
         }
 
-        // TODO: Apply configured model if set (requires ACP model selection support)
+        // Apply configured model if set and matches an available model
         if (agent_info.model) |model_name| {
-            std.log.info("ACP: Configured model: {s} (model selection not yet implemented)", .{model_name});
+            std.log.info("ACP: Applying configured model: {s}", .{model_name});
+            _ = mgr.applyConfiguredModel(model_name);
         }
     }
 
@@ -3480,13 +3483,22 @@ pub const App = struct {
 
                     // Update UI based on result
                     if (mgr.status == .session_active) {
-                        const msg = std.fmt.allocPrint(self.allocator, "Connected to {s}", .{mgr.getAgentDisplayName()}) catch "Connected";
+                        // Build connected message with model name if available
+                        const agent_name = mgr.getAgentDisplayName();
+                        const model_name = mgr.getCurrentModelName();
+                        const msg = if (model_name.len > 0)
+                            std.fmt.allocPrint(self.allocator, "Connected to {s} · {s}", .{ agent_name, model_name }) catch "Connected"
+                        else
+                            std.fmt.allocPrint(self.allocator, "Connected to {s}", .{agent_name}) catch "Connected";
                         defer if (!std.mem.eql(u8, msg, "Connected")) self.allocator.free(msg);
                         self.showStatusMessage(msg);
 
-                        // Add welcome message to agent chat
+                        // Add welcome message to agent chat with model info
                         if (self.state.agent_state) |*agent_state| {
-                            const welcome_msg = std.fmt.allocPrint(self.allocator, "Connected to {s}. You can start chatting!", .{mgr.getAgentDisplayName()}) catch "Connected! You can start chatting.";
+                            const welcome_msg = if (model_name.len > 0)
+                                std.fmt.allocPrint(self.allocator, "Connected to {s} · {s}. You can start chatting!", .{ agent_name, model_name }) catch "Connected! You can start chatting."
+                            else
+                                std.fmt.allocPrint(self.allocator, "Connected to {s}. You can start chatting!", .{agent_name}) catch "Connected! You can start chatting.";
                             defer if (!std.mem.eql(u8, welcome_msg, "Connected! You can start chatting.")) self.allocator.free(welcome_msg);
                             agent_state.addMessage(.system, welcome_msg) catch {};
                         }

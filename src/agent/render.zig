@@ -1,7 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
-const model_selection = @import("../modes/model_selection_mode.zig");
 const state = @import("state.zig");
 const AgentState = state.AgentState;
 const OwnedPlanEntry = state.OwnedPlanEntry;
@@ -383,9 +382,9 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 
     // Calculate height based on mode or pending permission
     const visible_lines = if (app.mode == .model_selection) blk: {
-        const model_count = model_selection.model_aliases.len;
-        // Separator (1) + title (1) + models (model_count) + footer (1)
-        break :blk 3 + model_count;
+        const model_count = if (app.acp_manager) |mgr| mgr.getAvailableModels().len else 0;
+        // Separator (1) + title (1) + models (2 lines each) + footer (1)
+        break :blk 3 + (model_count * 2);
     } else if (pending_permission) |perm| blk: {
         // Separator (1) + title (1) + description (0 or 1) + options + footer (1)
         const desc_rows: usize = if (perm.description != null) 1 else 0;
@@ -1860,13 +1859,33 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         }
 
         // Stash indicator (after session mode)
+        var next_col: usize = if (session_mode_text) |sm| 13 + sm.len else 13;
+
         if (agent_state.hasStash()) {
-            const stash_col: usize = if (session_mode_text) |sm| 13 + sm.len else 13;
             const stash_style = vaxis.Style{ .fg = .{ .index = 3 }, .bold = true }; // yellow
             var stash_seg = [_]vaxis.Cell.Segment{
                 .{ .text = " [stashed]", .style = stash_style },
             };
-            _ = win.print(&stash_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(stash_col) });
+            _ = win.print(&stash_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(next_col) });
+            next_col += 10; // " [stashed]".len
+        }
+
+        // Current model indicator (after stash)
+        var model_buf: [48]u8 = undefined;
+        if (app.acp_manager) |mgr| {
+            if (mgr.hasModels()) {
+                const model_name = mgr.getCurrentModelName();
+                if (model_name.len > 0) {
+                    const model_text = std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch null;
+                    if (model_text) |mt| {
+                        const model_style = vaxis.Style{ .fg = .{ .index = 6 } }; // cyan
+                        var model_seg = [_]vaxis.Cell.Segment{
+                            .{ .text = mt, .style = model_style },
+                        };
+                        _ = win.print(&model_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(next_col) });
+                    }
+                }
+            }
         }
 
         // Keybindings on the right (include mode hint if modes available)
@@ -1893,32 +1912,138 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 // Inline Model Picker
 // =============================================================================
 
-/// Render inline model picker in place of the input area
+/// Render inline model picker with 2-line layout per model (name + description)
 fn renderInlineModelPicker(app: *App, win: vaxis.Window) !void {
-    const model_count = model_selection.model_aliases.len;
-    const selected = app.state.model_selection;
+    const mgr = app.acp_manager orelse return;
+    const models = mgr.getAvailableModels();
+    const model_count = models.len;
+    if (model_count == 0) return;
 
-    // Build menu items from model aliases
-    var items_buf: [8]MenuItem = undefined;
-    for (0..model_count) |i| {
-        items_buf[i] = MenuItem{
-            .name = model_selection.model_aliases[i].name,
-            .description = model_selection.model_aliases[i].description,
-        };
+    const selected = app.state.model_selection;
+    const current_model_id = mgr.getCurrentModelId();
+
+    // Layout: separator(1) + title(1) + models(2 lines each) + footer(1)
+    // Reserve 3 rows for chrome, rest for models
+    const chrome_rows: usize = 3;
+    const available_for_models = if (win.height > chrome_rows) win.height - chrome_rows else 1;
+    const rows_per_model: usize = 2;
+    const max_visible_models = available_for_models / rows_per_model;
+
+    // Calculate scroll offset to keep selected item visible
+    var scroll_offset: usize = 0;
+    if (max_visible_models > 0 and model_count > max_visible_models) {
+        if (selected >= max_visible_models) {
+            scroll_offset = selected - max_visible_models + 1;
+        }
+        // Clamp to valid range
+        if (scroll_offset + max_visible_models > model_count) {
+            scroll_offset = model_count - max_visible_models;
+        }
     }
 
-    const items = items_buf[0..model_count];
+    var row: usize = 0;
+    const separator_style = vaxis.Style{ .fg = .{ .index = 8 } };
+    const title_style = vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }; // magenta
+    const normal_style = vaxis.Style{ .fg = .{ .index = 7 } };
+    const selected_style = vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 6 }, .bold = true }; // black on cyan
+    const desc_style = vaxis.Style{ .fg = .{ .index = 8 } };
+    const current_style = vaxis.Style{ .fg = .{ .index = 2 } }; // green for current model marker
 
-    // Use unified inline menu renderer
-    _ = renderInlineMenu(
-        win,
-        "Select Model:",
-        items,
-        selected,
-        0, // no scroll offset for model menu
-        model_count,
-        "j/k:navigate  Enter:select  ESC:cancel",
-    );
+    // Row 0: Separator line
+    for (0..win.width) |col| {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = "─", .width = 1 },
+            .style = separator_style,
+        });
+    }
+    row += 1;
+
+    // Row 1: Title with count
+    var title_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "Select Model:", .style = title_style },
+    };
+    _ = win.print(&title_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+    row += 1;
+
+    // Render visible models (2 lines each)
+    const visible_count = @min(model_count - scroll_offset, max_visible_models);
+    for (0..visible_count) |i| {
+        if (row + 1 >= win.height) break; // Need 2 rows per model
+
+        const model_idx = scroll_offset + i;
+        if (model_idx >= model_count) break;
+
+        const model = models[model_idx];
+        const is_selected = model_idx == selected;
+        const is_current = if (current_model_id) |cid| std.mem.eql(u8, model.model_id, cid) else false;
+        const name_style = if (is_selected) selected_style else normal_style;
+
+        // Line 1: Selection indicator + model name + current marker
+        const indicator: []const u8 = if (is_selected) "▸ " else "  ";
+        var ind_seg = [_]vaxis.Cell.Segment{
+            .{ .text = indicator, .style = name_style },
+        };
+        _ = win.print(&ind_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+
+        const model_name = model.name orelse model.model_id;
+        var name_seg = [_]vaxis.Cell.Segment{
+            .{ .text = model_name, .style = name_style },
+        };
+        _ = win.print(&name_seg, .{ .row_offset = @intCast(row), .col_offset = 3 });
+
+        // Show ✓ if this is the current model
+        if (is_current) {
+            const check_col = 3 + model_name.len + 1;
+            if (check_col < win.width) {
+                var check_seg = [_]vaxis.Cell.Segment{
+                    .{ .text = " ✓", .style = current_style },
+                };
+                _ = win.print(&check_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(check_col) });
+            }
+        }
+        row += 1;
+
+        // Line 2: Description (indented, always dim)
+        if (model.description) |desc| {
+            if (desc.len > 0 and row < win.height) {
+                const desc_indent: usize = 5; // Indent description under name
+                const max_desc_len = if (win.width > desc_indent) win.width - desc_indent - 1 else 0;
+                const truncated_desc = if (desc.len > max_desc_len) desc[0..max_desc_len] else desc;
+
+                var desc_seg = [_]vaxis.Cell.Segment{
+                    .{ .text = truncated_desc, .style = desc_style },
+                };
+                _ = win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(desc_indent) });
+            }
+        }
+        row += 1;
+    }
+
+    // Footer row with keybindings (right-aligned)
+    if (row < win.height) {
+        const footer = "j/k:navigate  Enter:select  ESC:cancel";
+        const kb_style = vaxis.Style{ .fg = .{ .index = 8 } };
+        const kb_col = if (win.width > footer.len) win.width - footer.len else 0;
+
+        var kb_seg = [_]vaxis.Cell.Segment{
+            .{ .text = footer, .style = kb_style },
+        };
+        _ = win.print(&kb_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(kb_col) });
+
+        // Show scroll indicators if needed
+        if (scroll_offset > 0) {
+            var up_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "↑", .style = kb_style },
+            };
+            _ = win.print(&up_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+        }
+        if (scroll_offset + visible_count < model_count) {
+            var down_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "↓", .style = kb_style },
+            };
+            _ = win.print(&down_seg, .{ .row_offset = @intCast(row), .col_offset = 3 });
+        }
+    }
 }
 
 // =============================================================================

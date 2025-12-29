@@ -60,6 +60,10 @@ pub const AcpManager = struct {
     available_modes: std.ArrayListUnmanaged(OwnedModeInfo),
     current_mode_id: ?[]const u8,
 
+    // Session models
+    available_models: std.ArrayListUnmanaged(OwnedModelInfo),
+    current_model_id: ?[]const u8,
+
     // Message callbacks
     on_message: ?*const fn (text: []const u8, ctx: ?*anyopaque) void,
     on_tool_call: ?*const fn (tool: ToolCallInfo, ctx: ?*anyopaque) void,
@@ -113,6 +117,19 @@ pub const AcpManager = struct {
 
         pub fn deinit(self: *OwnedModeInfo, allocator: Allocator) void {
             allocator.free(self.id);
+            if (self.name) |n| allocator.free(n);
+            if (self.description) |d| allocator.free(d);
+        }
+    };
+
+    /// Owned model info - strings need to be freed
+    pub const OwnedModelInfo = struct {
+        model_id: []const u8,
+        name: ?[]const u8,
+        description: ?[]const u8,
+
+        pub fn deinit(self: *OwnedModelInfo, allocator: Allocator) void {
+            allocator.free(self.model_id);
             if (self.name) |n| allocator.free(n);
             if (self.description) |d| allocator.free(d);
         }
@@ -232,6 +249,8 @@ pub const AcpManager = struct {
             .session_id = null,
             .available_modes = .{},
             .current_mode_id = null,
+            .available_models = .{},
+            .current_model_id = null,
             .on_message = null,
             .on_tool_call = null,
             .callback_ctx = null,
@@ -341,6 +360,35 @@ pub const AcpManager = struct {
             std.log.info("ACP: Loaded {d} session modes, current={s}", .{
                 self.available_modes.items.len,
                 self.current_mode_id orelse "(none)",
+            });
+        }
+
+        // Copy session models from client
+        if (acp.getSessionModels()) |models| {
+            self.clearModels();
+
+            // Copy current model id
+            if (models.current_model_id) |id| {
+                self.current_model_id = self.allocator.dupe(u8, id) catch null;
+            }
+
+            // Copy available models
+            for (models.available_models) |model| {
+                const owned_model = OwnedModelInfo{
+                    .model_id = self.allocator.dupe(u8, model.model_id) catch continue,
+                    .name = if (model.name) |n| self.allocator.dupe(u8, n) catch null else null,
+                    .description = if (model.description) |d| self.allocator.dupe(u8, d) catch null else null,
+                };
+                self.available_models.append(self.allocator, owned_model) catch {
+                    self.allocator.free(owned_model.model_id);
+                    if (owned_model.name) |n| self.allocator.free(n);
+                    if (owned_model.description) |d| self.allocator.free(d);
+                };
+            }
+
+            std.log.info("ACP: Loaded {d} session models, current={s}", .{
+                self.available_models.items.len,
+                self.current_model_id orelse "(none)",
             });
         }
     }
@@ -1349,6 +1397,105 @@ pub const AcpManager = struct {
         return next_mode.name orelse next_mode.id;
     }
 
+    // =========================================================================
+    // Session Models
+    // =========================================================================
+
+    /// Check if agent supports session models
+    pub fn hasModels(self: *AcpManager) bool {
+        return self.available_models.items.len > 0;
+    }
+
+    /// Get the current model ID
+    pub fn getCurrentModelId(self: *AcpManager) ?[]const u8 {
+        return self.current_model_id;
+    }
+
+    /// Get the current model name for display
+    pub fn getCurrentModelName(self: *AcpManager) []const u8 {
+        const current_id = self.current_model_id orelse return "";
+        for (self.available_models.items) |model| {
+            if (std.mem.eql(u8, model.model_id, current_id)) {
+                return model.name orelse model.model_id;
+            }
+        }
+        return current_id;
+    }
+
+    /// Get available models
+    pub fn getAvailableModels(self: *AcpManager) []const OwnedModelInfo {
+        return self.available_models.items;
+    }
+
+    /// Set the session model
+    pub fn setModel(self: *AcpManager, model_id: []const u8) Error!void {
+        const acp = self.acp_client orelse return error.NotConnected;
+        const sid = self.session_id orelse return error.NoSession;
+
+        std.log.info("ACP Manager: setting model to '{s}'", .{model_id});
+
+        const params = protocol.SessionSetModelParams{
+            .session_id = sid,
+            .model_id = model_id,
+        };
+
+        const params_json = acp.transport.encoder.encodeSessionSetModelParams(params) catch return error.PromptFailed;
+        defer self.allocator.free(params_json);
+
+        // Send as request per ACP spec (session/set_model is a request, not notification)
+        const request_id = self.nextRequestId();
+        _ = acp.transport.sendRequest(request_id, "session/set_model", params_json) catch |err| {
+            std.log.err("ACP Manager: failed to send set_model: {any}", .{err});
+            return error.PromptFailed;
+        };
+
+        // Update local state immediately (agent will confirm via session/update)
+        if (self.current_model_id) |old| {
+            self.allocator.free(old);
+        }
+        self.current_model_id = self.allocator.dupe(u8, model_id) catch null;
+    }
+
+    /// Find a model matching the configured name (exact match only)
+    /// Returns the model_id if found, null otherwise.
+    pub fn findMatchingModel(self: *AcpManager, configured_name: []const u8) ?[]const u8 {
+        const models = self.available_models.items;
+        if (models.len == 0) return null;
+
+        // Try exact match on model_id
+        for (models) |model| {
+            if (std.mem.eql(u8, model.model_id, configured_name)) {
+                return model.model_id;
+            }
+        }
+
+        // Try exact match on name (displayName)
+        for (models) |model| {
+            if (model.name) |name| {
+                if (std.mem.eql(u8, name, configured_name)) {
+                    return model.model_id;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// Apply a configured model if it matches an available model
+    /// Returns true if a model was successfully set, false otherwise.
+    pub fn applyConfiguredModel(self: *AcpManager, configured_name: []const u8) bool {
+        if (self.findMatchingModel(configured_name)) |model_id| {
+            std.log.info("ACP Manager: matched configured model '{s}' to '{s}'", .{ configured_name, model_id });
+            self.setModel(model_id) catch |err| {
+                std.log.warn("ACP Manager: failed to set configured model: {}", .{err});
+                return false;
+            };
+            return true;
+        }
+        std.log.info("ACP Manager: no match found for configured model '{s}'", .{configured_name});
+        return false;
+    }
+
     /// Check if there's a pending permission request
     pub fn hasPendingPermission(self: *AcpManager) bool {
         return self.pending_permission != null;
@@ -1428,6 +1575,7 @@ pub const AcpManager = struct {
         }
 
         self.clearModes();
+        self.clearModels();
         self.clearMessages();
         self.clearQueuedPrompts();
         self.pending_prompt_id = null;
@@ -1446,6 +1594,18 @@ pub const AcpManager = struct {
         }
     }
 
+    /// Clear session models
+    fn clearModels(self: *AcpManager) void {
+        for (self.available_models.items) |*model| {
+            model.deinit(self.allocator);
+        }
+        self.available_models.clearRetainingCapacity();
+        if (self.current_model_id) |id| {
+            self.allocator.free(id);
+            self.current_model_id = null;
+        }
+    }
+
     /// Clear queued prompts
     fn clearQueuedPrompts(self: *AcpManager) void {
         for (self.queued_prompts.items) |prompt_text| {
@@ -1459,6 +1619,7 @@ pub const AcpManager = struct {
         self.pending_messages.deinit(self.allocator);
         self.queued_prompts.deinit(self.allocator);
         self.available_modes.deinit(self.allocator);
+        self.available_models.deinit(self.allocator);
         if (self.pending_permission) |*perm| {
             perm.deinit(self.allocator);
         }

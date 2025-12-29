@@ -487,28 +487,36 @@ pub const UI = struct {
     }
 
     pub fn renderModelSelectionDialog(app: *App, win: vaxis.Window) !void {
-        const model_selection_mode = @import("modes/model_selection_mode.zig");
-        const model_aliases = model_selection_mode.model_aliases;
-        const model_count = model_aliases.len;
+        // Get models from ACP manager
+        const mgr = app.acp_manager orelse return;
+        const models = mgr.getAvailableModels();
+        const model_count = models.len;
+        if (model_count == 0) return;
 
-        // Calculate dialog dimensions
+        const current_model_id = mgr.getCurrentModelId();
+
+        // Calculate dialog dimensions (2 lines per model: name + description)
         const title = " Switch Model ";
         const instructions = "j/k:Navigate  Enter:Select  ESC:Cancel";
 
         // Find max width needed for model entries
-        var max_entry_len: usize = 0;
-        for (model_aliases) |model| {
-            const entry_len = 4 + model.name.len + 3 + model.description.len; // "▶ " + name + " - " + desc
-            if (entry_len > max_entry_len) {
-                max_entry_len = entry_len;
-            }
+        var max_name_len: usize = 0;
+        var max_desc_len: usize = 0;
+        for (models) |model| {
+            const name_len = if (model.name) |n| n.len else model.model_id.len;
+            if (name_len > max_name_len) max_name_len = name_len;
+            const desc_len = if (model.description) |d| d.len else 0;
+            if (desc_len > max_desc_len) max_desc_len = desc_len;
         }
 
-        const dialog_width = @max(@max(max_entry_len + 4, title.len + 4), instructions.len + 4);
-        const dialog_height = model_count + 5; // title + models + instructions + padding
+        const content_width = @max(@max(max_name_len + 8, max_desc_len + 6), instructions.len);
+        const dialog_width = @max(content_width + 4, title.len + 4);
+        // Height: title(1) + empty(1) + models(2 each) + empty(1) + instructions(1) + border(2)
+        const ideal_height = 3 + (model_count * 2) + 2;
+        const max_height = win.height - 4;
 
         const popup_width = @min(dialog_width, win.width - 4);
-        const popup_height = @min(dialog_height, win.height - 4);
+        const popup_height = @min(ideal_height, max_height);
         const x_offset = if (win.width > popup_width) (win.width - popup_width) / 2 else 0;
         const y_offset = if (win.height > popup_height) (win.height - popup_height) / 2 else 0;
 
@@ -540,32 +548,65 @@ pub const UI = struct {
         }};
         _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
 
-        // Render model options
-        for (model_aliases, 0..) |model, idx| {
-            const row = idx + 2;
-            const is_selected = idx == app.state.model_selection;
+        // Calculate scroll offset for many models
+        const rows_for_models = if (popup_height > 5) popup_height - 5 else 2;
+        const max_visible = rows_for_models / 2;
+        var scroll_offset: usize = 0;
+        if (max_visible > 0 and model_count > max_visible) {
+            if (app.state.model_selection >= max_visible) {
+                scroll_offset = app.state.model_selection - max_visible + 1;
+            }
+            if (scroll_offset + max_visible > model_count) {
+                scroll_offset = model_count - max_visible;
+            }
+        }
 
-            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
-            defer segments.deinit(app.allocator);
+        // Render model options (2 lines each: name + description)
+        const visible_count = @min(model_count - scroll_offset, max_visible);
+        var row: usize = 2;
+        for (0..visible_count) |i| {
+            const model_idx = scroll_offset + i;
+            if (model_idx >= model_count) break;
+            if (row + 1 >= popup_height - 1) break;
 
-            // Selection caret
+            const model = models[model_idx];
+            const is_selected = model_idx == app.state.model_selection;
+            const is_current = if (current_model_id) |cid| std.mem.eql(u8, model.model_id, cid) else false;
+
+            // Line 1: Selection caret + model name + current marker
+            var name_segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            defer name_segments.deinit(app.allocator);
+
             const caret = if (is_selected) "▶ " else "  ";
             const caret_copy = try RenderUtils.copyFrameText(app, caret);
-            try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+            try name_segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
 
-            // Model name
-            const name_copy = try RenderUtils.copyFrameText(app, model.name);
-            try segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+            const model_name = model.name orelse model.model_id;
+            const name_copy = try RenderUtils.copyFrameText(app, model_name);
+            try name_segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
 
-            // Separator
-            const sep_copy = try RenderUtils.copyFrameText(app, " - ");
-            try segments.append(app.allocator, .{ .text = sep_copy, .style = .{ .fg = Color.dim } });
+            if (is_current) {
+                const check_copy = try RenderUtils.copyFrameText(app, " ✓");
+                try name_segments.append(app.allocator, .{ .text = check_copy, .style = .{ .fg = Color.green } });
+            }
 
-            // Description
-            const desc_copy = try RenderUtils.copyFrameText(app, model.description);
-            try segments.append(app.allocator, .{ .text = desc_copy, .style = .{ .fg = Color.dim } });
+            _ = popup_win.print(name_segments.items, .{ .row_offset = @intCast(row) });
+            row += 1;
 
-            _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row) });
+            // Line 2: Description (indented)
+            if (model.description) |desc| {
+                if (desc.len > 0 and row < popup_height - 1) {
+                    const max_len = if (popup_width > 6) popup_width - 6 else 1;
+                    const truncated = if (desc.len > max_len) desc[0..max_len] else desc;
+                    const desc_copy = try RenderUtils.copyFrameText(app, truncated);
+                    var desc_seg = [_]vaxis.Cell.Segment{.{
+                        .text = desc_copy,
+                        .style = .{ .fg = Color.dim },
+                    }};
+                    _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
+                }
+            }
+            row += 1;
         }
 
         // Instructions at bottom
@@ -575,6 +616,18 @@ pub const UI = struct {
             .style = .{ .fg = Color.dim },
         }};
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
+
+        // Scroll indicators
+        if (scroll_offset > 0) {
+            const up_copy = try RenderUtils.copyFrameText(app, "↑");
+            var up_seg = [_]vaxis.Cell.Segment{.{ .text = up_copy, .style = .{ .fg = Color.dim } }};
+            _ = popup_win.print(&up_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 4) });
+        }
+        if (scroll_offset + visible_count < model_count) {
+            const down_copy = try RenderUtils.copyFrameText(app, "↓");
+            var down_seg = [_]vaxis.Cell.Segment{.{ .text = down_copy, .style = .{ .fg = Color.dim } }};
+            _ = popup_win.print(&down_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 2) });
+        }
     }
 
     pub fn renderAgentSelectionDialog(app: *App, win: vaxis.Window) !void {

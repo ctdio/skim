@@ -17,7 +17,7 @@ pub const LocalSlashCommand = struct {
 
 /// Local slash commands that skim handles (not sent to agent)
 pub const local_slash_commands = [_]LocalSlashCommand{
-    .{ .name = "model", .description = "Switch AI model (opus/sonnet/haiku)", .is_local = true },
+    .{ .name = "model", .description = "Switch AI model", .is_local = true },
 };
 
 // =============================================================================

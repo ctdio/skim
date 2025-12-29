@@ -50,6 +50,9 @@ pub const Client = struct {
     // Session modes (from session/new response)
     session_modes: ?protocol.SessionModes,
 
+    // Session models (from session/new response)
+    session_models: ?protocol.SessionModels,
+
     // Terminal registry for spawned commands
     terminals: TerminalRegistry,
     next_terminal_id: u64,
@@ -94,6 +97,7 @@ pub const Client = struct {
             .agent_capabilities = null,
             .session_id = null,
             .session_modes = null,
+            .session_models = null,
             .terminals = .{},
             .next_terminal_id = 1,
         };
@@ -218,6 +222,7 @@ pub const Client = struct {
                     // Decoder already duplicates the session_id, so we own this memory
                     self.session_id = result.session_id;
                     self.session_modes = result.modes;
+                    self.session_models = result.models;
                     self.state = .session_active;
                     std.log.info("ACP Client: session created with id: {s}", .{result.session_id});
 
@@ -226,6 +231,14 @@ pub const Client = struct {
                         std.log.info("ACP Client: session has {d} available modes, current={s}", .{
                             modes.available_modes.len,
                             modes.current_mode_id orelse "(none)",
+                        });
+                    }
+
+                    // Log available models
+                    if (result.models) |models| {
+                        std.log.info("ACP Client: session has {d} available models, current={s}", .{
+                            models.available_models.len,
+                            models.current_model_id orelse "(none)",
                         });
                     }
 
@@ -791,6 +804,11 @@ pub const Client = struct {
     /// Get session modes (available after session creation)
     pub fn getSessionModes(self: *Client) ?protocol.SessionModes {
         return self.session_modes;
+    }
+
+    /// Get session models (available after session creation)
+    pub fn getSessionModels(self: *Client) ?protocol.SessionModels {
+        return self.session_models;
     }
 
     fn nextRequestId(self: *Client) i64 {

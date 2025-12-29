@@ -116,10 +116,24 @@ pub const SessionModes = struct {
     available_modes: []const ModeInfo = &.{},
 };
 
+/// Information about an available model
+pub const ModelInfo = struct {
+    model_id: []const u8,
+    name: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+};
+
+/// Session models configuration
+pub const SessionModels = struct {
+    current_model_id: ?[]const u8 = null,
+    available_models: []const ModelInfo = &.{},
+};
+
 /// Result from session/new response
 pub const SessionNewResult = struct {
     session_id: types.SessionId,
     modes: ?SessionModes = null,
+    models: ?SessionModels = null,
 };
 
 // =============================================================================
@@ -146,6 +160,12 @@ pub const SessionCancelParams = struct {
 pub const SessionSetModeParams = struct {
     session_id: types.SessionId,
     mode_id: []const u8,
+};
+
+/// Parameters for session/set_model request
+pub const SessionSetModelParams = struct {
+    session_id: types.SessionId,
+    model_id: []const u8,
 };
 
 // =============================================================================

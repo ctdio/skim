@@ -1,25 +1,23 @@
-const std = @import("std");
 const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 
-/// Model alias information for display
-pub const ModelInfo = struct {
-    alias: []const u8,
-    name: []const u8,
-    description: []const u8,
-};
-
-/// Available model aliases (Claude Code compatible)
-pub const model_aliases = [_]ModelInfo{
-    .{ .alias = "opus", .name = "Opus", .description = "Complex reasoning and analysis" },
-    .{ .alias = "sonnet", .name = "Sonnet", .description = "Daily coding tasks" },
-    .{ .alias = "haiku", .name = "Haiku", .description = "Fast, simple tasks" },
-    .{ .alias = "opusplan", .name = "Opus Plan", .description = "Opus for planning, Sonnet for execution" },
-};
+/// Get the number of available models from the ACP manager
+fn getModelCount(app: *App) usize {
+    if (app.acp_manager) |mgr| {
+        return mgr.getAvailableModels().len;
+    }
+    return 0;
+}
 
 /// Handle keyboard input when in model selection mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
-    const model_count = model_aliases.len;
+    const model_count = getModelCount(app);
+    if (model_count == 0) {
+        // No models available, just exit
+        app.mode = .agent;
+        app.needs_render = true;
+        return;
+    }
 
     // Handle Ctrl+key combinations
     if (key.mods.ctrl) {
@@ -76,18 +74,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.needs_render = true;
         },
         '\r' => { // Enter - select model
-            const selected_alias = model_aliases[app.state.model_selection].alias;
-
-            // Send /model command to agent
             if (app.acp_manager) |mgr| {
-                var buf: [64]u8 = undefined;
-                const raw_prompt = std.fmt.bufPrint(&buf, "/model {s}", .{selected_alias}) catch {
-                    app.mode = .agent;
-                    app.needs_render = true;
-                    return;
-                };
-                const prompt = std.mem.trim(u8, raw_prompt, &std.ascii.whitespace);
-                mgr.sendPrompt(prompt) catch {};
+                const models = mgr.getAvailableModels();
+                if (app.state.model_selection < models.len) {
+                    const selected_model = models[app.state.model_selection];
+                    mgr.setModel(selected_model.model_id) catch {};
+                }
             }
 
             app.mode = .agent;
