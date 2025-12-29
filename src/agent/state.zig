@@ -1280,11 +1280,17 @@ pub const AgentState = struct {
         return text.len > 0 and text[0] == '/' and self.available_commands.items.len > 0;
     }
 
-    /// Get the filter text (everything after the "/")
+    /// Get the filter text (command name only, up to first space after "/")
+    /// For "/status-update since last week", returns "status-update"
     pub fn getSlashFilter(self: *const AgentState) []const u8 {
         const text = self.input.getText();
         if (text.len > 1 and text[0] == '/') {
-            return text[1..];
+            const after_slash = text[1..];
+            // Find first space - only filter on command name, not arguments
+            if (std.mem.indexOfScalar(u8, after_slash, ' ')) |space_idx| {
+                return after_slash[0..space_idx];
+            }
+            return after_slash;
         }
         return "";
     }

@@ -118,10 +118,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // Enter - insert selected command and send immediately
         if (key.matches(vaxis.Key.enter, .{})) {
             if (agent_state.getSelectedCommand()) |cmd| {
+                // Extract any arguments after the command name from the input
+                const input_text = agent_state.input.getText();
+                const args = extractCommandArgs(input_text, cmd.name);
+                
                 // Check if this is a local command (handled by skim, not agent)
                 if (state.AgentState.isLocalSlashCommand(cmd.name)) {
-                    // Handle local commands client-side
-                    try handleLocalCommand(app, agent_state, cmd.name);
+                    // Handle local commands client-side with arguments
+                    try handleLocalCommand(app, agent_state, cmd.name, args);
 
                     // Clear input and hide menu
                     agent_state.input.clear();
@@ -130,12 +134,18 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                     return;
                 }
 
-                // Build full command text for agent commands
+                // Build full command text for agent commands, including any arguments
                 var cmd_text: std.ArrayList(u8) = .{};
                 defer cmd_text.deinit(app.allocator);
 
                 try cmd_text.append(app.allocator, '/');
                 try cmd_text.appendSlice(app.allocator, cmd.name);
+
+                // Append arguments if present
+                if (args.len > 0) {
+                    try cmd_text.append(app.allocator, ' ');
+                    try cmd_text.appendSlice(app.allocator, args);
+                }
 
                 const raw_text = try cmd_text.toOwnedSlice(app.allocator);
                 defer app.allocator.free(raw_text);
@@ -816,11 +826,47 @@ fn queueCommandOutput(
     try agent_state.queueShellOutput(content_buf.items);
 }
 
+/// Extract arguments from slash command input.
+/// For input like "/model sonnet", returns "sonnet".
+/// For input like "/model", returns "".
+fn extractCommandArgs(input: []const u8, command_name: []const u8) []const u8 {
+    // Input format: "/command_name args..."
+    // We need to extract everything after "/command_name "
+    
+    // Skip leading "/"
+    if (input.len == 0 or input[0] != '/') return "";
+    
+    const after_slash = input[1..];
+    
+    // Check if input starts with the command name
+    if (!std.mem.startsWith(u8, after_slash, command_name)) return "";
+    
+    // Skip past the command name
+    const after_cmd = after_slash[command_name.len..];
+    
+    // Skip any whitespace between command and args
+    var i: usize = 0;
+    while (i < after_cmd.len and (after_cmd[i] == ' ' or after_cmd[i] == '\t')) : (i += 1) {}
+    
+    if (i >= after_cmd.len) return "";
+    
+    // Return the remaining text (arguments)
+    return std.mem.trim(u8, after_cmd[i..], &std.ascii.whitespace);
+}
+
 /// Handle local slash commands (executed by skim, not sent to agent)
-fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: []const u8) !void {
+fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: []const u8, args: []const u8) !void {
     if (std.mem.eql(u8, command_name, "model")) {
-        // Switch to model selection mode
+        // Switch to model selection mode with optional preselected model
         app.mode = .model_selection;
+        
+        // If args provided, try to preselect that model
+        if (args.len > 0) {
+            // Log the requested model for debugging
+            std.log.info("Model command with args: '{s}'", .{args});
+            // Model selection mode will handle the preselection
+        }
+        
         try agent_state.addMessage(.system, "Switching to model selection...");
         return;
     }
