@@ -77,7 +77,9 @@ fn loadSelectedSession(app: *App) !void {
     // Get CWD from the session or use current
     const cwd = if (selected.project_path.len > 0) selected.project_path else app.state.git_repo_root;
 
-    // Resume the session via ACP client (uses session/new with resume option)
+    // Note: Codex sessions are filtered out in discovery - codex-acp doesn't support resume
+
+    // Use ACP protocol for session resume
     if (mgr.acp_client) |acp_client| {
         // Check if agent supports sessionCapabilities.resume
         const supports_resume = if (acp_client.agent_capabilities) |caps| caps.session_capabilities.@"resume" else false;
@@ -97,9 +99,15 @@ fn loadSelectedSession(app: *App) !void {
                 return;
             };
 
-            // Session resumed successfully
+            // Session resumed successfully - display conversation history
             if (app.state.agent_state) |*agent_state| {
-                agent_state.addMessage(.system, "Session resumed successfully.") catch {};
+                // Clear existing messages and show history
+                agent_state.clearMessages();
+
+                // Parse and display session history
+                displaySessionHistory(app, selected) catch {
+                    agent_state.addMessage(.system, "Session resumed (couldn't load history display).") catch {};
+                };
             }
         } else {
             // Agent doesn't support resume - try session/load as fallback
@@ -123,11 +131,12 @@ fn loadSelectedSession(app: *App) !void {
                 };
 
                 if (injected) {
+                    // Display the history in the UI (context was already sent to agent)
                     if (app.state.agent_state) |*agent_state| {
-                        agent_state.addMessage(
-                            .system,
-                            "Previous conversation loaded as context. The agent has your conversation history.",
-                        ) catch {};
+                        agent_state.clearMessages();
+                        displaySessionHistoryWithMode(app, selected, true) catch {
+                            agent_state.addMessage(.system, "Session context sent (couldn't display history).") catch {};
+                        };
                     }
                 }
                 freeSessionList(app);
@@ -145,6 +154,52 @@ fn loadSelectedSession(app: *App) !void {
     // Clean up and return to agent mode
     freeSessionList(app);
     app.mode = .agent;
+}
+
+/// Display conversation history from a session in the UI
+fn displaySessionHistory(app: *App, session_info: sessions.SessionInfo) !void {
+    displaySessionHistoryWithMode(app, session_info, false) catch |err| return err;
+}
+
+/// Display conversation history with mode indicator
+/// context_injected: true if history was injected as context (not native resume)
+fn displaySessionHistoryWithMode(app: *App, session_info: sessions.SessionInfo, context_injected: bool) !void {
+    const agent_state = &(app.state.agent_state orelse return error.NoAgentState);
+
+    // Parse session file based on agent type
+    const history = switch (session_info.agent_type) {
+        .claude_code => try sessions.parseClaudeSession(
+            app.allocator,
+            session_info.id,
+            session_info.project_path,
+        ),
+        .codex => try sessions.parseCodexSession(
+            app.allocator,
+            session_info.id,
+        ),
+    };
+    defer sessions.freeMessages(app.allocator, history);
+
+    if (history.len == 0) {
+        const msg = if (context_injected) "Context sent (no history to display)." else "Session resumed (no history to display).";
+        try agent_state.addMessage(.system, msg);
+        return;
+    }
+
+    std.log.info("Session picker: displaying {d} messages from history", .{history.len});
+
+    // Add each message to the UI
+    for (history) |msg| {
+        const role: @import("../agent/state.zig").Message.Role = switch (msg.role) {
+            .user => .user,
+            .assistant => .agent,
+            .system => .system,
+        };
+        try agent_state.addMessage(role, msg.content);
+    }
+
+    const marker = if (context_injected) "--- Context injected (agent has history) ---" else "--- Session resumed ---";
+    try agent_state.addMessage(.system, marker);
 }
 
 /// Free the session list and reset state

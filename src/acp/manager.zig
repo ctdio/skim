@@ -300,7 +300,7 @@ pub const AcpManager = struct {
         acp.initialize() catch |err| {
             std.log.err("ACP: Initialize failed: {any}", .{err});
             self.status = .failed;
-            acp.deinit();
+            // errdefer above will call acp.deinit()
             return error.InitializeFailed;
         };
 
@@ -363,7 +363,7 @@ pub const AcpManager = struct {
         acp.initialize() catch |err| {
             std.log.err("ACP: Initialize failed: {any}", .{err});
             self.status = .failed;
-            acp.deinit();
+            // errdefer above will call acp.deinit()
             return error.InitializeFailed;
         };
 

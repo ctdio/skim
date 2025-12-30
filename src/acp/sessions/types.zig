@@ -41,10 +41,14 @@ pub const SessionInfo = struct {
     /// Session timestamp in Unix milliseconds
     timestamp: i64,
 
+    /// Git branch (optional, mainly for Codex)
+    branch: ?[]const u8 = null,
+
     pub fn deinit(self: *SessionInfo) void {
         self.allocator.free(self.id);
         self.allocator.free(self.project_path);
         self.allocator.free(self.display);
+        if (self.branch) |b| self.allocator.free(b);
     }
 
     /// Format timestamp as relative time (e.g., "2 hours ago", "yesterday")

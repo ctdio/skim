@@ -16,16 +16,18 @@ const SessionDiscoveryError = types.SessionDiscoveryError;
 pub const DEFAULT_LIMIT: usize = 20;
 
 /// Discover sessions from a specific agent type
+/// Note: Codex resume is not supported (codex-acp doesn't expose resume_conversation_from_rollout)
 pub fn listSessions(
     allocator: Allocator,
     agent_type: AgentType,
     cwd: []const u8,
     limit: usize,
 ) SessionDiscoveryError![]SessionInfo {
-    return switch (agent_type) {
-        .claude_code => claude_adapter.listSessions(allocator, cwd, limit),
-        .codex => codex_adapter.listSessions(allocator, cwd, limit),
-    };
+    // Codex ACP doesn't support session resume - only list Claude Code sessions
+    if (agent_type == .codex) {
+        return &[_]SessionInfo{};
+    }
+    return claude_adapter.listSessions(allocator, cwd, limit);
 }
 
 /// Discover sessions from all supported agents
@@ -51,15 +53,7 @@ pub fn listAllSessions(
         // Claude Code not available, continue
     }
 
-    // Collect from Codex
-    if (codex_adapter.listSessions(allocator, cwd, limit)) |sessions| {
-        for (sessions) |session| {
-            all_sessions.append(allocator, session) catch return error.OutOfMemory;
-        }
-        allocator.free(sessions);
-    } else |_| {
-        // Codex not available, continue
-    }
+    // Note: Codex sessions not included - codex-acp doesn't support resume
 
     // Sort combined results by timestamp
     std.mem.sort(SessionInfo, all_sessions.items, {}, struct {

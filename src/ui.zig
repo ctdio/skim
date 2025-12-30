@@ -738,12 +738,17 @@ pub const UI = struct {
 
         // Find max width needed for session entries
         var max_display_len: usize = 0;
+        var max_branch_len: usize = 0;
         for (session_list) |session| {
             if (session.display.len > max_display_len) max_display_len = session.display.len;
+            if (session.branch) |branch| {
+                if (branch.len > max_branch_len) max_branch_len = branch.len;
+            }
         }
 
-        // Width: time (12) + display text + padding
-        const content_width = @max(max_display_len + 16, instructions.len);
+        // Width: time (12) + branch + display text + padding
+        const branch_space = if (max_branch_len > 0) max_branch_len + 2 else 0;
+        const content_width = @max(max_display_len + branch_space + 16, instructions.len);
         const dialog_width = @max(content_width + 4, title.len + 4);
         // Height: title(1) + empty(1) + sessions + empty(1) + instructions(1) + border(2)
         const ideal_height = 3 + session_count + 2;
@@ -825,6 +830,14 @@ pub const UI = struct {
             // Separator
             const sep_copy = try RenderUtils.copyFrameText(app, "  ");
             try segments.append(app.allocator, .{ .text = sep_copy, .style = .{} });
+
+            // Branch (if available)
+            if (session.branch) |branch| {
+                const branch_copy = try RenderUtils.copyFrameText(app, branch);
+                try segments.append(app.allocator, .{ .text = branch_copy, .style = .{ .fg = Color.yellow } });
+                const branch_sep_copy = try RenderUtils.copyFrameText(app, "  ");
+                try segments.append(app.allocator, .{ .text = branch_sep_copy, .style = .{} });
+            }
 
             // Display text (truncated if needed)
             const max_display = if (popup_width > 20) popup_width - 20 else 10;

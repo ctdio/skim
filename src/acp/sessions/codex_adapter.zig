@@ -10,6 +10,7 @@ const SessionDiscoveryError = types.SessionDiscoveryError;
 
 /// Discover sessions from Codex's session storage
 /// Walks ~/.codex/sessions/YYYY/MM/DD/ directories
+/// Filters to sessions matching the current working directory
 pub fn listSessions(
     allocator: Allocator,
     cwd: []const u8,
@@ -67,7 +68,14 @@ pub fn listSessions(
                     if (!std.mem.endsWith(u8, file_entry.name, ".jsonl")) continue;
 
                     // Parse session from rollout file
-                    const info = parseRolloutFile(allocator, day_dir, file_entry.name, cwd) catch continue;
+                    var info = parseRolloutFile(allocator, day_dir, file_entry.name) catch continue;
+
+                    // Filter by cwd - only include sessions from this project
+                    if (!std.mem.eql(u8, info.project_path, cwd)) {
+                        info.deinit();
+                        continue;
+                    }
+
                     sessions.append(allocator, info) catch return error.OutOfMemory;
                 }
             }
@@ -96,21 +104,18 @@ fn parseRolloutFile(
     allocator: Allocator,
     dir: std.fs.Dir,
     filename: []const u8,
-    filter_cwd: []const u8,
 ) !SessionInfo {
-    // Open and read file content (first 64KB is enough for session_meta)
+    // Open and read file content
     const file = dir.openFile(filename, .{}) catch return error.IoError;
     defer file.close();
 
-    // Read enough for the first line (session_meta can be large)
-    const content = file.readToEndAlloc(allocator, 64 * 1024) catch return error.IoError;
+    // Read file content (limit to 256KB - enough to find session_meta and first user message)
+    const content = file.readToEndAlloc(allocator, 256 * 1024) catch return error.IoError;
     defer allocator.free(content);
 
-    // Get first line
-    const first_line = if (std.mem.indexOf(u8, content, "\n")) |nl_pos|
-        content[0..nl_pos]
-    else
-        content;
+    // Get first line (session_meta)
+    const first_nl = std.mem.indexOf(u8, content, "\n") orelse content.len;
+    const first_line = content[0..first_nl];
 
     // Parse session_meta
     const parsed = std.json.parseFromSlice(RolloutEntry, allocator, first_line, .{
@@ -125,27 +130,139 @@ fn parseRolloutFile(
 
     const payload = entry.payload orelse return error.InvalidJsonFormat;
 
-    // Filter by cwd
-    if (!std.mem.eql(u8, payload.cwd, filter_cwd)) {
-        return error.InvalidJsonFormat; // Not a match, skip
-    }
-
     // Parse timestamp from ISO format or filename
     const timestamp = parseTimestamp(entry.timestamp) orelse
         parseFilenameTimestamp(filename) orelse
         std.time.milliTimestamp();
 
-    // Create display text from cwd basename
-    const display = extractBasename(payload.cwd);
+    // Find first user message by scanning for response_item entries
+    // Note: findFirstUserMessage returns a slice into content, so we must dupe it
+    // before content is freed by the defer above
+    // Skip abandoned sessions (no actual user prompt sent)
+    const display_text = findFirstUserMessage(content) orelse
+        return error.InvalidJsonFormat;
+
+    // Dupe display_text BEFORE content is freed
+    const display_owned = allocator.dupe(u8, display_text) catch return error.OutOfMemory;
+    errdefer allocator.free(display_owned);
+
+    // Get branch from git info - also dupe before parsed is freed
+    const branch_owned: ?[]const u8 = if (payload.git) |git|
+        if (git.branch) |b| (allocator.dupe(u8, b) catch null) else null
+    else
+        null;
+    errdefer if (branch_owned) |b| allocator.free(b);
+
+    // Dupe other fields
+    const id_owned = allocator.dupe(u8, payload.id) catch return error.OutOfMemory;
+    errdefer allocator.free(id_owned);
+
+    const project_path_owned = allocator.dupe(u8, payload.cwd) catch return error.OutOfMemory;
 
     return SessionInfo{
         .allocator = allocator,
-        .id = allocator.dupe(u8, payload.id) catch return error.OutOfMemory,
+        .id = id_owned,
         .agent_type = .codex,
-        .project_path = allocator.dupe(u8, payload.cwd) catch return error.OutOfMemory,
-        .display = allocator.dupe(u8, display) catch return error.OutOfMemory,
+        .project_path = project_path_owned,
+        .display = display_owned,
         .timestamp = timestamp,
+        .branch = branch_owned,
     };
+}
+
+/// Find the first user message in the session file
+/// Returns a slice into content (caller must dupe before content is freed)
+fn findFirstUserMessage(content: []const u8) ?[]const u8 {
+    var remaining = content;
+
+    // Look for response_item with role":"user" that contains actual user prompt
+    // Skip system context lines (instructions, environment_context, etc.)
+    while (remaining.len > 0) {
+        // Find end of current line
+        const nl_pos = std.mem.indexOf(u8, remaining, "\n") orelse remaining.len;
+        const line = remaining[0..nl_pos];
+
+        // Check if this is a user message line
+        if (std.mem.indexOf(u8, line, "\"role\":\"user\"") != null) {
+            // Skip system context lines
+            if (std.mem.indexOf(u8, line, "user_instructions") != null or
+                std.mem.indexOf(u8, line, "environment_context") != null or
+                std.mem.indexOf(u8, line, "INSTRUCTIONS") != null or
+                std.mem.indexOf(u8, line, "AGENTS.md") != null)
+            {
+                // Skip this line, it's system context
+            } else {
+                // This is an actual user message - extract the text
+                if (extractTextFromLine(line)) |message| {
+                    return message;
+                }
+            }
+        }
+
+        // Move to next line
+        if (nl_pos >= remaining.len) break;
+        remaining = remaining[nl_pos + 1 ..];
+    }
+
+    return null;
+}
+
+/// Extract the "text" field value from a JSON line (for response_item format)
+/// Format: {"payload":{"content":[{"type":"input_text","text":"actual message"}]}}
+/// Returns a slice into the line
+fn extractTextFromLine(line: []const u8) ?[]const u8 {
+    // Find "text":" pattern (the user message content)
+    const marker = "\"text\":\"";
+    const start_idx = std.mem.indexOf(u8, line, marker) orelse return null;
+    const msg_start = start_idx + marker.len;
+
+    if (msg_start >= line.len) return null;
+
+    // Find the end of the text (closing quote, handling escapes)
+    var i: usize = msg_start;
+    while (i < line.len) {
+        if (line[i] == '\\' and i + 1 < line.len) {
+            // Skip escaped character
+            i += 2;
+            continue;
+        }
+        if (line[i] == '"') {
+            break;
+        }
+        i += 1;
+    }
+
+    if (i <= msg_start) return null;
+
+    const message = line[msg_start..i];
+
+    // Skip context injection messages (from skim's fallback resume)
+    if (std.mem.startsWith(u8, message, "This is a continuation of a previous conversation")) {
+        return null;
+    }
+
+    // Truncate to first 100 chars for display, stop at newline or escaped newline
+    const max_len: usize = @min(message.len, 100);
+    var end: usize = max_len;
+    var j: usize = 0;
+    while (j < max_len) {
+        if (message[j] == '\n') {
+            end = j;
+            break;
+        }
+        // Check for escaped newline \n
+        if (message[j] == '\\' and j + 1 < max_len and message[j + 1] == 'n') {
+            end = j;
+            break;
+        }
+        j += 1;
+    }
+
+    if (end > 0) {
+        return message[0..end];
+    }
+
+    return null;
 }
 
 /// Parse ISO 8601 timestamp to Unix milliseconds
@@ -233,16 +350,24 @@ fn extractBasename(path: []const u8) []const u8 {
 // JSON Types
 // =============================================================================
 
+const GitInfo = struct {
+    branch: ?[]const u8 = null,
+    commit_hash: ?[]const u8 = null,
+    repository_url: ?[]const u8 = null,
+};
+
+const SessionMeta = struct {
+    id: []const u8,
+    cwd: []const u8,
+    git: ?GitInfo = null,
+};
+
 const RolloutEntry = struct {
     type: []const u8,
     timestamp: []const u8,
     payload: ?SessionMeta = null,
 };
 
-const SessionMeta = struct {
-    id: []const u8,
-    cwd: []const u8,
-};
 
 // =============================================================================
 // Tests
