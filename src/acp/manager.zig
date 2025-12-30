@@ -318,6 +318,98 @@ pub const AcpManager = struct {
         }
     }
 
+    /// Spawn and connect to an agent, resuming a previous session
+    /// This passes --resume <session-id> to Claude Code to resume the conversation
+    pub fn connectWithResume(
+        self: *AcpManager,
+        agent_command: []const u8,
+        base_args: []const []const u8,
+        cwd: []const u8,
+        session_id: []const u8,
+    ) Error!void {
+        if (self.acp_client != null) return error.AlreadyConnected;
+
+        self.status = .connecting;
+        std.log.info("ACP: Spawning agent '{s}' with --resume {s}", .{ agent_command, session_id });
+
+        // Build args with --resume flag
+        var args_list: std.ArrayList([]const u8) = .{};
+        defer args_list.deinit(self.allocator);
+
+        // Add base args
+        for (base_args) |arg| {
+            args_list.append(self.allocator, arg) catch return error.OutOfMemory;
+        }
+
+        // Add --resume <session-id>
+        args_list.append(self.allocator, "--resume") catch return error.OutOfMemory;
+        args_list.append(self.allocator, session_id) catch return error.OutOfMemory;
+
+        // Spawn the agent
+        const acp = client.Client.spawn(self.allocator, .{
+            .command = agent_command,
+            .args = args_list.items,
+            .cwd = cwd,
+        }) catch |err| {
+            std.log.err("ACP: Failed to spawn agent: {any}", .{err});
+            self.status = .failed;
+            return error.SpawnFailed;
+        };
+        errdefer acp.deinit();
+
+        std.log.info("ACP: Agent spawned with resume, sending initialize...", .{});
+
+        // Initialize the ACP handshake
+        acp.initialize() catch |err| {
+            std.log.err("ACP: Initialize failed: {any}", .{err});
+            self.status = .failed;
+            acp.deinit();
+            return error.InitializeFailed;
+        };
+
+        self.acp_client = acp;
+        self.status = .connected;
+        std.log.info("ACP: Connected with resume successfully", .{});
+
+        // Register callback to process session/update in background thread
+        acp.transport.setMessageCallback(backgroundMessageCallback, self);
+
+        // Store agent name if available
+        if (acp.getAgentInfo()) |info| {
+            self.agent_name = self.allocator.dupe(u8, info.name) catch null;
+            std.log.info("ACP: Agent name: {s}", .{info.name});
+        }
+    }
+
+    /// Reset the current session state (for /clear command)
+    /// This allows creating a new session without restarting the agent
+    pub fn resetSession(self: *AcpManager) void {
+        std.log.info("ACP: Resetting session state", .{});
+
+        // Clear manager's session id
+        if (self.session_id) |sid| {
+            self.allocator.free(sid);
+            self.session_id = null;
+        }
+
+        // Clear client's session id
+        if (self.acp_client) |acp| {
+            if (acp.session_id) |sid| {
+                self.allocator.free(sid);
+                acp.session_id = null;
+            }
+            // Reset client state to initialized (ready for new session)
+            acp.state = .initialized;
+        }
+
+        // Reset status to connected (not session_active)
+        self.status = .connected;
+
+        // Clear modes and models (will be repopulated on new session)
+        self.clearModes();
+        self.clearModels();
+    }
+
     /// Create a new session in the current working directory
     pub fn createSession(self: *AcpManager, cwd: []const u8) Error!void {
         const acp = self.acp_client orelse return error.NotConnected;

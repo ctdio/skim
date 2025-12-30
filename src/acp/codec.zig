@@ -334,6 +334,39 @@ pub const Encoder = struct {
             }
         }
 
+        try writer.writeByte(']');
+
+        // Add resume field if present (for session resumption)
+        // Claude Code ACP expects: _meta.claudeCode.options.resume
+        if (params.@"resume") |session_id| {
+            try writer.print(",\"_meta\":{{\"claudeCode\":{{\"options\":{{\"resume\":{f}}}}}}}", .{std.json.fmt(session_id, .{})});
+        }
+
+        try writer.writeByte('}');
+        return output.toOwnedSlice(self.allocator);
+    }
+
+    /// Encode session/load params to JSON
+    pub fn encodeSessionLoadParams(self: *Encoder, params: protocol.SessionLoadParams) ![]u8 {
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(self.allocator);
+        const writer = output.writer(self.allocator);
+
+        try writer.print("{{\"sessionId\":{f},\"cwd\":{f},\"mcpServers\":[", .{
+            std.json.fmt(params.session_id, .{}),
+            std.json.fmt(params.cwd, .{}),
+        });
+
+        for (params.mcp_servers, 0..) |server, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writer.print("{{\"name\":{f}", .{std.json.fmt(server.name, .{})});
+            if (server.transport_json) |transport| {
+                try writer.print(",\"transport\":{s}}}", .{transport});
+            } else {
+                try writer.writeByte('}');
+            }
+        }
+
         try writer.writeAll("]}");
         return output.toOwnedSlice(self.allocator);
     }
@@ -559,6 +592,14 @@ pub const Decoder = struct {
         defer parsed.deinit();
 
         const r = parsed.value;
+
+        // Check if agentCapabilities.sessionCapabilities.resume is present (even if empty {})
+        // Claude Code ACP advertises: agentCapabilities: { sessionCapabilities: { resume: {} } }
+        const supports_resume = if (r.agentCapabilities) |ac|
+            if (ac.sessionCapabilities) |sc| sc.@"resume" != null else false
+        else
+            false;
+
         return .{
             .protocol_version = r.protocolVersion,
             .agent_capabilities = .{
@@ -567,6 +608,9 @@ pub const Decoder = struct {
                     .image = if (r.agentCapabilities) |ac| if (ac.prompt) |p| p.image orelse false else false else false,
                     .audio = if (r.agentCapabilities) |ac| if (ac.prompt) |p| p.audio orelse false else false else false,
                     .embedded_context = if (r.agentCapabilities) |ac| if (ac.prompt) |p| p.embeddedContext orelse false else false else false,
+                },
+                .session_capabilities = .{
+                    .@"resume" = supports_resume,
                 },
             },
             .agent_info = .{
@@ -1497,6 +1541,12 @@ const RawInitializeResult = struct {
             image: ?bool = null,
             audio: ?bool = null,
             embeddedContext: ?bool = null,
+        } = null,
+        // Claude Code ACP nests sessionCapabilities inside agentCapabilities
+        sessionCapabilities: ?struct {
+            // If present (even empty {}), agent supports session resume
+            // via session/new with resume option
+            @"resume": ?struct {} = null,
         } = null,
     } = null,
     agentInfo: ?struct {

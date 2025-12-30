@@ -101,6 +101,9 @@ pub const SessionNewParams = struct {
     cwd: []const u8,
     /// Optional MCP servers to connect
     mcp_servers: []const McpServerConfig = &.{},
+    /// Optional session ID to resume (if agent supports sessionCapabilities.resume)
+    /// When set, the agent will load history from the existing session instead of creating new
+    @"resume": ?[]const u8 = null,
 };
 
 /// Information about an available session mode
@@ -131,6 +134,25 @@ pub const SessionModels = struct {
 
 /// Result from session/new response
 pub const SessionNewResult = struct {
+    session_id: types.SessionId,
+    modes: ?SessionModes = null,
+    models: ?SessionModels = null,
+};
+
+/// Parameters for session/load request
+/// Used to resume a previous session
+pub const SessionLoadParams = struct {
+    /// Session ID to resume
+    session_id: types.SessionId,
+    /// Working directory for the session
+    cwd: []const u8,
+    /// Optional MCP servers to connect
+    mcp_servers: []const McpServerConfig = &.{},
+};
+
+/// Result from session/load response
+/// Same as session/new - agent replays history via session/update notifications
+pub const SessionLoadResult = struct {
     session_id: types.SessionId,
     modes: ?SessionModes = null,
     models: ?SessionModels = null,

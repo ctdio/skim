@@ -41,14 +41,22 @@ pub const McpTransportCapabilities = struct {
     sse: bool = false,
 };
 
+/// Session-related capabilities
+pub const SessionCapabilities = struct {
+    /// Agent supports resuming previous sessions via session/new with resume option
+    @"resume": bool = false,
+};
+
 /// Agent capabilities received during initialize
 pub const AgentCapabilities = struct {
-    /// Agent supports session/load for resuming sessions
+    /// Agent supports session/load for resuming sessions (legacy - prefer sessionCapabilities.resume)
     load_session: bool = false,
     /// Content types the agent accepts in prompts
     prompt: PromptCapabilities = .{},
     /// MCP transport support
     mcp: McpTransportCapabilities = .{},
+    /// Session management capabilities
+    session_capabilities: SessionCapabilities = .{},
 };
 
 // =============================================================================

@@ -4,6 +4,7 @@ const App = @import("../app.zig").App;
 const agent = @import("../agent/agent.zig");
 const state = @import("../agent/state.zig");
 const protocol = @import("../acp/protocol.zig");
+const sessions = @import("../acp/sessions.zig");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 
 /// Handle keyboard input when in agent mode
@@ -856,18 +857,89 @@ fn extractCommandArgs(input: []const u8, command_name: []const u8) []const u8 {
 
 /// Handle local slash commands (executed by skim, not sent to agent)
 fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: []const u8, args: []const u8) !void {
+    if (std.mem.eql(u8, command_name, "clear")) {
+        // Clear the current session and start a new one
+        std.log.info("Clear command: resetting session", .{});
+
+        // Clear agent state (messages, plan, etc.)
+        agent_state.clearMessages();
+        agent_state.clearPlan();
+        agent_state.clearStagedPrompt();
+        agent_state.clearQueuedShellOutputs();
+
+        // Reset and create a new ACP session
+        if (app.acp_manager) |mgr| {
+            // First reset the existing session state
+            mgr.resetSession();
+
+            // Then create a new session
+            const cwd = app.state.git_repo_root;
+            mgr.createSession(cwd) catch |err| {
+                std.log.err("Clear: failed to create new session: {any}", .{err});
+                try agent_state.addMessage(.system, "Failed to create new session");
+                return;
+            };
+            try agent_state.addMessage(.system, "Session cleared. Starting fresh.");
+        } else {
+            try agent_state.addMessage(.system, "Chat cleared. (No agent connected)");
+        }
+        return;
+    }
+
     if (std.mem.eql(u8, command_name, "model")) {
         // Switch to model selection mode with optional preselected model
         app.mode = .model_selection;
-        
+
         // If args provided, try to preselect that model
         if (args.len > 0) {
             // Log the requested model for debugging
             std.log.info("Model command with args: '{s}'", .{args});
             // Model selection mode will handle the preselection
         }
-        
+
         try agent_state.addMessage(.system, "Switching to model selection...");
+        return;
+    }
+
+    if (std.mem.eql(u8, command_name, "resume")) {
+        // Discover available sessions for current project
+        const cwd = app.state.git_repo_root;
+
+        // Determine which agent type we're using
+        const agent_type: sessions.AgentType = if (app.acp_manager) |mgr| blk: {
+            if (mgr.agent_name) |name| {
+                // Check agent name to determine type
+                if (std.mem.indexOf(u8, name, "claude") != null or
+                    std.mem.indexOf(u8, name, "Claude") != null)
+                {
+                    break :blk .claude_code;
+                } else if (std.mem.indexOf(u8, name, "codex") != null or
+                    std.mem.indexOf(u8, name, "Codex") != null)
+                {
+                    break :blk .codex;
+                }
+            }
+            break :blk .claude_code; // Default to Claude Code
+        } else .claude_code;
+
+        // Discover sessions
+        const session_list = sessions.listSessions(app.allocator, agent_type, cwd, 20) catch |err| {
+            std.log.err("Failed to discover sessions: {any}", .{err});
+            try agent_state.addMessage(.system, "No sessions found for this project");
+            return;
+        };
+
+        if (session_list.len == 0) {
+            try agent_state.addMessage(.system, "No sessions found for this project");
+            return;
+        }
+
+        // Store sessions and switch to picker mode
+        app.state.session_list = session_list;
+        app.state.session_selection = 0;
+        app.mode = .session_picker;
+
+        std.log.info("Resume: found {d} sessions for {s}", .{ session_list.len, cwd });
         return;
     }
 

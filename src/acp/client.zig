@@ -159,6 +159,7 @@ pub const Client = struct {
                 }
 
                 if (r.result_json) |result_json| {
+                    std.log.debug("ACP Client: initialize result JSON: {s}", .{result_json});
                     const result = self.transport.decoder.parseInitializeResult(result_json) catch {
                         self.state = .failed;
                         return error.ProtocolError;
@@ -166,6 +167,7 @@ pub const Client = struct {
 
                     self.agent_info = result.agent_info;
                     self.agent_capabilities = result.agent_capabilities;
+                    std.log.info("ACP Client: sessionCapabilities.resume = {}", .{result.agent_capabilities.session_capabilities.@"resume"});
                     self.state = .initialized;
                 } else {
                     self.state = .failed;
@@ -248,6 +250,155 @@ pub const Client = struct {
                     // the manager from seeing them.
                     std.log.info("ACP Client: session created, manager will poll for notifications", .{});
 
+                    return result.session_id;
+                } else {
+                    return error.SessionFailed;
+                }
+            },
+            else => return error.ProtocolError,
+        }
+    }
+
+    /// Load (resume) an existing session
+    /// The agent will replay conversation history via session/update notifications
+    pub fn loadSession(self: *Client, session_id: []const u8, cwd: []const u8) Error!types.SessionId {
+        if (self.state != .initialized and self.state != .session_active) return error.NotInitialized;
+
+        // Log capability status but try anyway - session/load is a defined ACP method
+        // and the agent may support it even if not explicitly advertised
+        if (self.agent_capabilities) |caps| {
+            if (!caps.load_session) {
+                std.log.info("ACP Client: agent doesn't advertise loadSession capability, trying anyway", .{});
+            }
+        }
+
+        // If we have an active session, we need to end it first
+        if (self.session_id != null) {
+            std.log.debug("ACP Client: ending existing session before loading", .{});
+            if (self.session_id) |sid| {
+                self.allocator.free(sid);
+            }
+            self.session_id = null;
+        }
+
+        // Give the agent a moment to prepare
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+
+        // Drain any pending notifications
+        const drained = try self.transport.poll();
+        self.transport.freeMessages(drained);
+
+        const params = protocol.SessionLoadParams{
+            .session_id = session_id,
+            .cwd = cwd,
+            .mcp_servers = &.{},
+        };
+
+        const params_json = self.transport.encoder.encodeSessionLoadParams(params) catch return error.ProtocolError;
+        defer self.allocator.free(params_json);
+
+        std.log.debug("ACP Client: session/load params: {s}", .{params_json});
+
+        const request_id = self.nextRequestId();
+        std.log.info("ACP Client: Sending session/load request id={d} for session={s}", .{ request_id, session_id });
+        _ = try self.transport.sendRequest(request_id, "session/load", params_json);
+
+        // Wait for response - session loading may take time as agent replays history
+        const response = try self.transport.waitForResponse(request_id, 60000); // 60s timeout
+        if (response == null) return error.Timeout;
+
+        var resp = response.?;
+        defer resp.deinit(self.allocator);
+
+        switch (resp) {
+            .response => |r| {
+                if (r.error_msg) |err| {
+                    std.log.err("ACP Client: session/load failed: code={d} message={s}", .{ err.code, err.message });
+                    return error.SessionFailed;
+                }
+
+                if (r.result_json) |result_json| {
+                    // Parse result (same structure as session/new)
+                    const result = self.transport.decoder.parseSessionNewResult(result_json) catch return error.ProtocolError;
+                    self.session_id = result.session_id;
+                    self.session_modes = result.modes;
+                    self.session_models = result.models;
+                    self.state = .session_active;
+                    std.log.info("ACP Client: session loaded with id: {s}", .{result.session_id});
+                    return result.session_id;
+                } else {
+                    return error.SessionFailed;
+                }
+            },
+            else => return error.ProtocolError,
+        }
+    }
+
+    /// Resume an existing session using session/new with resume option
+    /// This is the preferred method for agents that advertise sessionCapabilities.resume
+    /// (e.g., Claude Code ACP). The agent will load history from the specified session.
+    pub fn resumeSession(self: *Client, session_id_to_resume: []const u8, cwd: []const u8) Error!types.SessionId {
+        if (self.state != .initialized and self.state != .session_active) return error.NotInitialized;
+
+        // Check if agent supports session resume via sessionCapabilities
+        const supports_resume = if (self.agent_capabilities) |caps| caps.session_capabilities.@"resume" else false;
+        if (!supports_resume) {
+            std.log.warn("ACP Client: agent doesn't advertise sessionCapabilities.resume, trying anyway", .{});
+        }
+
+        // If we have an active session, clear it
+        if (self.session_id != null) {
+            std.log.debug("ACP Client: clearing existing session before resume", .{});
+            if (self.session_id) |sid| {
+                self.allocator.free(sid);
+            }
+            self.session_id = null;
+        }
+
+        // Give the agent a moment to prepare
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+
+        // Drain any pending notifications
+        const drained = try self.transport.poll();
+        self.transport.freeMessages(drained);
+
+        // Use session/new with resume option (Claude Code ACP style)
+        const params = protocol.SessionNewParams{
+            .cwd = cwd,
+            .mcp_servers = &.{},
+            .@"resume" = session_id_to_resume,
+        };
+
+        const params_json = self.transport.encoder.encodeSessionNewParams(params) catch return error.ProtocolError;
+        defer self.allocator.free(params_json);
+
+        std.log.info("ACP Client: session/new (resume) params: {s}", .{params_json});
+
+        const request_id = self.nextRequestId();
+        std.log.info("ACP Client: Sending session/new with resume={s}", .{session_id_to_resume});
+        _ = try self.transport.sendRequest(request_id, "session/new", params_json);
+
+        // Wait for response - session resumption may take time as agent loads history
+        const response = try self.transport.waitForResponse(request_id, 60000); // 60s timeout
+        if (response == null) return error.Timeout;
+
+        var resp = response.?;
+        defer resp.deinit(self.allocator);
+
+        switch (resp) {
+            .response => |r| {
+                if (r.error_msg) |err| {
+                    std.log.err("ACP Client: session resume failed: code={d} message={s}", .{ err.code, err.message });
+                    return error.SessionFailed;
+                }
+
+                if (r.result_json) |result_json| {
+                    const result = self.transport.decoder.parseSessionNewResult(result_json) catch return error.ProtocolError;
+                    self.session_id = result.session_id;
+                    self.session_modes = result.modes;
+                    self.session_models = result.models;
+                    self.state = .session_active;
+                    std.log.info("ACP Client: session resumed with id: {s}", .{result.session_id});
                     return result.session_id;
                 } else {
                     return error.SessionFailed;

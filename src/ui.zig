@@ -4,6 +4,7 @@ const rendering_common = @import("rendering/common.zig");
 const render_utils = @import("rendering/utils.zig");
 const state_helpers = @import("state.zig");
 const git = @import("git/diff.zig");
+const sessions = @import("acp/sessions.zig");
 
 const App = @import("app.zig").App;
 const graphite = @import("git/graphite.zig");
@@ -726,6 +727,144 @@ pub const UI = struct {
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
     }
 
+    pub fn renderSessionPickerDialog(app: *App, win: vaxis.Window) !void {
+        const session_list = app.state.session_list;
+        const session_count = session_list.len;
+        if (session_count == 0) return;
+
+        // Calculate dialog dimensions
+        const title = " Resume Session ";
+        const instructions = "j/k:Navigate  Enter:Load  ESC:Cancel";
+
+        // Find max width needed for session entries
+        var max_display_len: usize = 0;
+        for (session_list) |session| {
+            if (session.display.len > max_display_len) max_display_len = session.display.len;
+        }
+
+        // Width: time (12) + display text + padding
+        const content_width = @max(max_display_len + 16, instructions.len);
+        const dialog_width = @max(content_width + 4, title.len + 4);
+        // Height: title(1) + empty(1) + sessions + empty(1) + instructions(1) + border(2)
+        const ideal_height = 3 + session_count + 2;
+        const max_height = win.height - 4;
+
+        const popup_width = @min(dialog_width, win.width - 4);
+        const popup_height = @min(ideal_height, max_height);
+        const x_offset = if (win.width > popup_width) (win.width - popup_width) / 2 else 0;
+        const y_offset = if (win.height > popup_height) (win.height - popup_height) / 2 else 0;
+
+        const popup_win = win.child(.{
+            .x_off = x_offset,
+            .y_off = y_offset,
+            .width = @intCast(popup_width),
+            .height = @intCast(popup_height),
+            .border = .{
+                .where = .all,
+                .style = .{ .fg = Color.cyan },
+            },
+        });
+
+        popup_win.clear();
+
+        // Fill with solid background
+        const bg_cell = vaxis.Cell{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{ .bg = .{ .index = 0 } },
+        };
+        popup_win.fill(bg_cell);
+
+        // Title
+        const title_copy = try RenderUtils.copyFrameText(app, title);
+        var title_seg = [_]vaxis.Cell.Segment{.{
+            .text = title_copy,
+            .style = .{ .fg = Color.cyan, .bold = true },
+        }};
+        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
+
+        // Calculate scroll offset for many sessions
+        const rows_for_sessions = if (popup_height > 5) popup_height - 5 else 2;
+        const max_visible = rows_for_sessions;
+        var scroll_offset: usize = 0;
+        if (max_visible > 0 and session_count > max_visible) {
+            if (app.state.session_selection >= max_visible) {
+                scroll_offset = app.state.session_selection - max_visible + 1;
+            }
+            if (scroll_offset + max_visible > session_count) {
+                scroll_offset = session_count - max_visible;
+            }
+        }
+
+        // Render session options
+        const visible_count = @min(session_count - scroll_offset, max_visible);
+        var row: usize = 2;
+        for (0..visible_count) |i| {
+            const session_idx = scroll_offset + i;
+            if (session_idx >= session_count) break;
+            if (row >= popup_height - 1) break;
+
+            const session = session_list[session_idx];
+            const is_selected = session_idx == app.state.session_selection;
+
+            // Format relative time
+            var time_buf: [32]u8 = undefined;
+            const time_str = session.formatRelativeTime(&time_buf);
+
+            // Build line: caret + time + display
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            defer segments.deinit(app.allocator);
+
+            const caret = if (is_selected) "▶ " else "  ";
+            const caret_copy = try RenderUtils.copyFrameText(app, caret);
+            try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+
+            // Time in dim color
+            const time_copy = try RenderUtils.copyFrameText(app, time_str);
+            try segments.append(app.allocator, .{ .text = time_copy, .style = .{ .fg = Color.dim } });
+
+            // Separator
+            const sep_copy = try RenderUtils.copyFrameText(app, "  ");
+            try segments.append(app.allocator, .{ .text = sep_copy, .style = .{} });
+
+            // Display text (truncated if needed)
+            const max_display = if (popup_width > 20) popup_width - 20 else 10;
+            const display_text = if (session.display.len > max_display) session.display[0..max_display] else session.display;
+            const display_copy = try RenderUtils.copyFrameText(app, display_text);
+            try segments.append(app.allocator, .{ .text = display_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+
+            // Agent type indicator
+            const agent_str = switch (session.agent_type) {
+                .claude_code => " (claude)",
+                .codex => " (codex)",
+            };
+            const agent_copy = try RenderUtils.copyFrameText(app, agent_str);
+            try segments.append(app.allocator, .{ .text = agent_copy, .style = .{ .fg = Color.dim } });
+
+            _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row) });
+            row += 1;
+        }
+
+        // Instructions at bottom
+        const instr_copy = try RenderUtils.copyFrameText(app, instructions);
+        var instr_seg = [_]vaxis.Cell.Segment{.{
+            .text = instr_copy,
+            .style = .{ .fg = Color.dim },
+        }};
+        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
+
+        // Scroll indicators
+        if (scroll_offset > 0) {
+            const up_copy = try RenderUtils.copyFrameText(app, "↑");
+            var up_seg = [_]vaxis.Cell.Segment{.{ .text = up_copy, .style = .{ .fg = Color.dim } }};
+            _ = popup_win.print(&up_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 4) });
+        }
+        if (scroll_offset + visible_count < session_count) {
+            const down_copy = try RenderUtils.copyFrameText(app, "↓");
+            var down_seg = [_]vaxis.Cell.Segment{.{ .text = down_copy, .style = .{ .fg = Color.dim } }};
+            _ = popup_win.print(&down_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 2) });
+        }
+    }
+
     pub fn renderHeader(app: *App, win: vaxis.Window) !void {
         if (win.height == 0 or win.width == 0) return;
         win.clear();
@@ -828,6 +967,7 @@ pub const UI = struct {
             .graphite_stack => "-- GRAPHITE STACK --",
             .model_selection => "-- MODEL SELECTION --",
             .agent_selection => "-- AGENT SELECTION --",
+            .session_picker => "-- RESUME SESSION --",
             .agent => blk: {
                 // Show vim mode when in agent mode
                 if (app.state.agent_state) |agent_state| {
@@ -873,6 +1013,7 @@ pub const UI = struct {
             .graphite_stack => "j/k:Move  |  Enter:Select  |  ESC:Back  |  [s/]s:Navigate",
             .model_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .agent_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
+            .session_picker => "j/k:Move  |  Enter:Load  |  ESC:Cancel",
             .agent => blk: {
                 if (app.state.agent_state) |agent_state| {
                     break :blk switch (agent_state.input.vim.vim_mode) {

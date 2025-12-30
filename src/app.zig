@@ -37,8 +37,10 @@ const mcp_status = @import("mcp_status.zig");
 const graphite_mode = @import("modes/graphite_mode.zig");
 const model_selection_mode = @import("modes/model_selection_mode.zig");
 const agent_selection_mode = @import("modes/agent_selection_mode.zig");
+const session_picker_mode = @import("modes/session_picker_mode.zig");
 const agent_mode = @import("modes/agent_mode.zig");
 const agent = @import("agent/agent.zig");
+const sessions = @import("acp/sessions.zig");
 const app_config = @import("config.zig");
 const graphite = @import("git/graphite.zig");
 const acp = @import("acp/acp.zig");
@@ -121,6 +123,7 @@ pub const App = struct {
         agent, // Agent chat panel
         model_selection, // AI model selection menu
         agent_selection, // Agent selection menu (before connecting)
+        session_picker, // Session picker for /resume command
     };
 
     // Character find commands for NORMAL mode (f/t/F/T)
@@ -168,6 +171,11 @@ pub const App = struct {
         branch_search_len: usize, // Length of search query
         filtered_branches: std.ArrayList(usize), // Indices of branches matching search query
         help_scroll_offset: usize, // Scroll position in help overlay
+
+        // Session picker state (for /resume command)
+        session_list: []sessions.SessionInfo, // Discovered sessions
+        session_selection: usize, // Selected session index
+
         expanded_comments: std.AutoHashMap(usize, void), // Set of expanded comment indices
 
         pending_ctrl_w: bool, // Waiting for second key in Ctrl+w chord
@@ -375,6 +383,8 @@ pub const App = struct {
                 .branch_search_len = 0,
                 .filtered_branches = .{},
                 .help_scroll_offset = 0,
+                .session_list = &[_]sessions.SessionInfo{},
+                .session_selection = 0,
                 .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
                 .pending_ctrl_w = false,
                 .pending_leader = false,
@@ -1079,6 +1089,15 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
+                .session_picker => {
+                    // Cancel session picker, return to agent mode
+                    sessions.freeSessions(self.allocator, self.state.session_list);
+                    self.state.session_list = &[_]sessions.SessionInfo{};
+                    self.state.session_selection = 0;
+                    self.mode = .agent;
+                    self.needs_render = true;
+                    return;
+                },
                 .agent_selection => {
                     // Cancel agent selection, close panel
                     self.mode = .normal;
@@ -1133,6 +1152,7 @@ pub const App = struct {
             .graphite_stack => try graphite_mode.handleKey(self, key),
             .model_selection => try model_selection_mode.handleKey(self, key),
             .agent_selection => try agent_selection_mode.handleKey(self, key),
+            .session_picker => try session_picker_mode.handleKey(self, key),
             .agent => try agent_mode.handleKey(self, key),
         }
     }
@@ -2768,10 +2788,15 @@ pub const App = struct {
             try UI.renderAgentSelectionDialog(self, win);
         }
 
+        // Render session picker dialog if in session_picker mode
+        if (self.mode == .session_picker) {
+            try UI.renderSessionPickerDialog(self, win);
+        }
+
         // Render agent panel full-screen if in full-screen mode
-        // Don't render during agent selection (dialog is shown instead)
+        // Don't render during agent selection or session picker (dialogs are shown instead)
         if (self.state.agent_state) |as| {
-            if (as.visible and as.full_screen and self.mode != .agent_selection) {
+            if (as.visible and as.full_screen and self.mode != .agent_selection and self.mode != .session_picker) {
                 try agent.renderAgentPanel(self, win);
             }
         }
