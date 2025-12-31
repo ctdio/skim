@@ -8,8 +8,17 @@ const SessionDiscoveryError = types.SessionDiscoveryError;
 // Claude Code Session Discovery
 // =============================================================================
 
+/// Aggregated session data from multiple history entries
+const SessionAggregate = struct {
+    first_display: []const u8, // First message (for display)
+    last_timestamp: i64, // Most recent activity (for sorting)
+    message_count: usize, // Number of messages
+    project_path: []const u8,
+};
+
 /// Discover sessions from Claude Code's history
 /// Reads ~/.claude/history.jsonl and filters by project path
+/// Shows first message as display, sorted by most recent activity
 pub fn listSessions(
     allocator: Allocator,
     cwd: []const u8,
@@ -35,11 +44,16 @@ pub fn listSessions(
     };
     defer allocator.free(content);
 
-    // Parse JSONL and collect matching sessions
-    var sessions: std.ArrayList(SessionInfo) = .{};
-    errdefer {
-        for (sessions.items) |*s| s.deinit();
-        sessions.deinit(allocator);
+    // Group entries by sessionId to get first message, last timestamp, and count
+    var session_map = std.StringHashMap(SessionAggregate).init(allocator);
+    defer {
+        var it = session_map.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.first_display);
+            allocator.free(entry.value_ptr.project_path);
+        }
+        session_map.deinit();
     }
 
     var lines = std.mem.splitScalar(u8, content, '\n');
@@ -60,16 +74,50 @@ pub fn listSessions(
         // Skip entries without sessionId
         const session_id = entry.sessionId orelse continue;
 
-        // Create SessionInfo
+        if (session_map.getPtr(session_id)) |agg| {
+            // Update existing session aggregate
+            agg.message_count += 1;
+            if (entry.timestamp > agg.last_timestamp) {
+                agg.last_timestamp = entry.timestamp;
+            }
+            // Keep first_display as-is (it's from the first entry we saw)
+        } else {
+            // New session - store first entry's display
+            const id_copy = allocator.dupe(u8, session_id) catch return error.OutOfMemory;
+            errdefer allocator.free(id_copy);
+
+            const display_copy = allocator.dupe(u8, entry.display) catch return error.OutOfMemory;
+            errdefer allocator.free(display_copy);
+
+            const project_copy = allocator.dupe(u8, entry.project) catch return error.OutOfMemory;
+
+            session_map.put(id_copy, .{
+                .first_display = display_copy,
+                .last_timestamp = entry.timestamp,
+                .message_count = 1,
+                .project_path = project_copy,
+            }) catch return error.OutOfMemory;
+        }
+    }
+
+    // Convert map to list for sorting
+    var sessions: std.ArrayList(SessionInfo) = .{};
+    errdefer {
+        for (sessions.items) |*s| s.deinit();
+        sessions.deinit(allocator);
+    }
+
+    var it = session_map.iterator();
+    while (it.next()) |entry| {
         const info = SessionInfo{
             .allocator = allocator,
-            .id = allocator.dupe(u8, session_id) catch return error.OutOfMemory,
+            .id = allocator.dupe(u8, entry.key_ptr.*) catch return error.OutOfMemory,
             .agent_type = .claude_code,
-            .project_path = allocator.dupe(u8, entry.project) catch return error.OutOfMemory,
-            .display = allocator.dupe(u8, entry.display) catch return error.OutOfMemory,
-            .timestamp = entry.timestamp,
+            .project_path = allocator.dupe(u8, entry.value_ptr.project_path) catch return error.OutOfMemory,
+            .display = allocator.dupe(u8, entry.value_ptr.first_display) catch return error.OutOfMemory,
+            .timestamp = entry.value_ptr.last_timestamp,
+            .message_count = entry.value_ptr.message_count,
         };
-
         sessions.append(allocator, info) catch return error.OutOfMemory;
     }
 
@@ -80,49 +128,15 @@ pub fn listSessions(
         }
     }.lessThan);
 
-    // Deduplicate by session ID (keep most recent entry per session)
-    var unique: std.ArrayList(SessionInfo) = .{};
-    errdefer {
-        for (unique.items) |*s| s.deinit();
-        unique.deinit(allocator);
-    }
-
-    var seen = std.StringHashMap(void).init(allocator);
-    defer seen.deinit();
-
-    // Track which indices we've added to unique (to avoid double-free)
-    var added_indices: std.ArrayList(usize) = .{};
-    defer added_indices.deinit(allocator);
-
-    for (sessions.items, 0..) |session, idx| {
-        if (seen.contains(session.id)) {
-            // Duplicate, free it immediately
-            var s = session;
+    // Limit results
+    if (sessions.items.len > limit) {
+        for (sessions.items[limit..]) |*s| {
             s.deinit();
-            continue;
         }
-
-        seen.put(session.id, {}) catch return error.OutOfMemory;
-        unique.append(allocator, session) catch return error.OutOfMemory;
-        added_indices.append(allocator, idx) catch return error.OutOfMemory;
-
-        if (unique.items.len >= limit) break;
+        sessions.shrinkRetainingCapacity(limit);
     }
 
-    // Free remaining sessions that weren't added to unique
-    // (items after the limit that aren't duplicates)
-    const processed_count = if (unique.items.len > 0)
-        added_indices.items[added_indices.items.len - 1] + 1
-    else
-        0;
-
-    for (sessions.items[processed_count..]) |*s| {
-        s.deinit();
-    }
-
-    sessions.deinit(allocator);
-
-    return unique.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    return sessions.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
 /// Escape project path for Claude Code's directory naming

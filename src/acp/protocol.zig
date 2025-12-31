@@ -104,6 +104,12 @@ pub const SessionNewParams = struct {
     /// Optional session ID to resume (if agent supports sessionCapabilities.resume)
     /// When set, the agent will load history from the existing session instead of creating new
     @"resume": ?[]const u8 = null,
+    /// Optional mode to set for the session (e.g., "code", "plan", "dangerously-skip-permissions")
+    /// Used to restore mode state when resuming a session
+    mode: ?[]const u8 = null,
+    /// Optional model to set for the session (e.g., "sonnet", "opus")
+    /// Used to restore model state when resuming a session
+    model: ?[]const u8 = null,
 };
 
 /// Information about an available session mode

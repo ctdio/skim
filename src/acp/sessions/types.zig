@@ -38,8 +38,11 @@ pub const SessionInfo = struct {
     /// First prompt or summary text for display
     display: []const u8,
 
-    /// Session timestamp in Unix milliseconds
+    /// Session timestamp in Unix milliseconds (last activity)
     timestamp: i64,
+
+    /// Number of messages in the session
+    message_count: usize = 0,
 
     /// Git branch (optional, mainly for Codex)
     branch: ?[]const u8 = null,

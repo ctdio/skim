@@ -337,7 +337,14 @@ pub const Client = struct {
     /// Resume an existing session using session/new with resume option
     /// This is the preferred method for agents that advertise sessionCapabilities.resume
     /// (e.g., Claude Code ACP). The agent will load history from the specified session.
-    pub fn resumeSession(self: *Client, session_id_to_resume: []const u8, cwd: []const u8) Error!types.SessionId {
+    /// Optionally pass mode/model to restore the previous session's mode/model settings.
+    pub fn resumeSession(
+        self: *Client,
+        session_id_to_resume: []const u8,
+        cwd: []const u8,
+        mode: ?[]const u8,
+        model: ?[]const u8,
+    ) Error!types.SessionId {
         if (self.state != .initialized and self.state != .session_active) return error.NotInitialized;
 
         // Check if agent supports session resume via sessionCapabilities
@@ -363,10 +370,13 @@ pub const Client = struct {
         self.transport.freeMessages(drained);
 
         // Use session/new with resume option (Claude Code ACP style)
+        // Include mode/model to restore previous session settings
         const params = protocol.SessionNewParams{
             .cwd = cwd,
             .mcp_servers = &.{},
             .@"resume" = session_id_to_resume,
+            .mode = mode,
+            .model = model,
         };
 
         const params_json = self.transport.encoder.encodeSessionNewParams(params) catch return error.ProtocolError;

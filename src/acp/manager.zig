@@ -426,7 +426,34 @@ pub const AcpManager = struct {
         self.status = .session_active;
         std.log.info("ACP: Session created: {s}", .{sid});
 
-        // Copy session modes from client
+        // Sync modes and models from client
+        self.syncModesFromClient(acp);
+        self.syncModelsFromClient(acp);
+    }
+
+    /// Sync manager state from client after a session/new or resume operation.
+    /// Call this after acp_client.resumeSession() succeeds to update the manager's
+    /// session_id, status, modes, and models to match the client.
+    pub fn syncSessionFromClient(self: *AcpManager) void {
+        const acp = self.acp_client orelse return;
+
+        // Sync session_id
+        if (acp.session_id) |sid| {
+            if (self.session_id) |old| {
+                self.allocator.free(old);
+            }
+            self.session_id = self.allocator.dupe(u8, sid) catch null;
+            self.status = .session_active;
+            std.log.info("ACP: Synced session from client: {s}", .{sid});
+        }
+
+        // Sync modes and models
+        self.syncModesFromClient(acp);
+        self.syncModelsFromClient(acp);
+    }
+
+    /// Copy session modes from client to manager
+    fn syncModesFromClient(self: *AcpManager, acp: *client.Client) void {
         if (acp.getSessionModes()) |modes| {
             self.clearModes();
 
@@ -454,8 +481,10 @@ pub const AcpManager = struct {
                 self.current_mode_id orelse "(none)",
             });
         }
+    }
 
-        // Copy session models from client
+    /// Copy session models from client to manager
+    fn syncModelsFromClient(self: *AcpManager, acp: *client.Client) void {
         if (acp.getSessionModels()) |models| {
             self.clearModels();
 

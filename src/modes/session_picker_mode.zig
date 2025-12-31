@@ -85,8 +85,14 @@ fn loadSelectedSession(app: *App) !void {
         const supports_resume = if (acp_client.agent_capabilities) |caps| caps.session_capabilities.@"resume" else false;
 
         if (supports_resume) {
+            // Capture current mode/model BEFORE resume (they get cleared during session reset)
+            const current_mode = if (mgr.getCurrentModeId()) |m| mgr.allocator.dupe(u8, m) catch null else null;
+            defer if (current_mode) |m| mgr.allocator.free(m);
+            const current_model = if (mgr.getCurrentModelId()) |m| mgr.allocator.dupe(u8, m) catch null else null;
+            defer if (current_model) |m| mgr.allocator.free(m);
+
             // Use the proper resumeSession method (session/new with resume option)
-            _ = acp_client.resumeSession(session_id, cwd) catch |err| {
+            _ = acp_client.resumeSession(session_id, cwd, current_mode, current_model) catch |err| {
                 std.log.err("Session picker: failed to resume session: {any}", .{err});
                 if (app.state.agent_state) |*agent_state| {
                     agent_state.addMessage(
@@ -98,6 +104,25 @@ fn loadSelectedSession(app: *App) !void {
                 app.mode = .agent;
                 return;
             };
+
+            // Sync manager state from client after resume
+            // This updates session_id, status, modes, and models in the manager
+            mgr.syncSessionFromClient();
+
+            // Restore mode/model via session/set_mode and session/set_model
+            // Claude Code ACP doesn't accept mode in session/new options, so we send separately
+            if (current_mode) |mode| {
+                std.log.info("Session picker: restoring mode '{s}' after resume", .{mode});
+                mgr.setMode(mode) catch |err| {
+                    std.log.warn("Session picker: failed to restore mode: {any}", .{err});
+                };
+            }
+            if (current_model) |model| {
+                std.log.info("Session picker: restoring model '{s}' after resume", .{model});
+                mgr.setModel(model) catch |err| {
+                    std.log.warn("Session picker: failed to restore model: {any}", .{err});
+                };
+            }
 
             // Session resumed successfully - display conversation history
             if (app.state.agent_state) |*agent_state| {

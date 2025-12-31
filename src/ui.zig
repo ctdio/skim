@@ -824,35 +824,32 @@ pub const UI = struct {
             const caret_copy = try RenderUtils.copyFrameText(app, caret);
             try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
 
+            // Display text (truncated if needed) - show first
+            const max_display = if (popup_width > 40) popup_width - 40 else 20;
+            const display_text = if (session.display.len > max_display) session.display[0..max_display] else session.display;
+            const display_copy = try RenderUtils.copyFrameText(app, display_text);
+            try segments.append(app.allocator, .{ .text = display_copy, .style = .{ .fg = Color.white, .bold = is_selected } });
+
             // Time in dim color
             const time_copy = try RenderUtils.copyFrameText(app, time_str);
+            try segments.append(app.allocator, .{ .text = "  ", .style = .{} });
             try segments.append(app.allocator, .{ .text = time_copy, .style = .{ .fg = Color.dim } });
 
-            // Separator
-            const sep_copy = try RenderUtils.copyFrameText(app, "  ");
-            try segments.append(app.allocator, .{ .text = sep_copy, .style = .{} });
+            // Message count
+            if (session.message_count > 0) {
+                var msg_buf: [32]u8 = undefined;
+                const msg_str = std.fmt.bufPrint(&msg_buf, " · {d} messages", .{session.message_count}) catch " · ? messages";
+                const msg_copy = try RenderUtils.copyFrameText(app, msg_str);
+                try segments.append(app.allocator, .{ .text = msg_copy, .style = .{ .fg = Color.dim } });
+            }
 
             // Branch (if available)
             if (session.branch) |branch| {
+                const branch_sep_copy = try RenderUtils.copyFrameText(app, " · ");
+                try segments.append(app.allocator, .{ .text = branch_sep_copy, .style = .{ .fg = Color.dim } });
                 const branch_copy = try RenderUtils.copyFrameText(app, branch);
                 try segments.append(app.allocator, .{ .text = branch_copy, .style = .{ .fg = Color.yellow } });
-                const branch_sep_copy = try RenderUtils.copyFrameText(app, "  ");
-                try segments.append(app.allocator, .{ .text = branch_sep_copy, .style = .{} });
             }
-
-            // Display text (truncated if needed)
-            const max_display = if (popup_width > 20) popup_width - 20 else 10;
-            const display_text = if (session.display.len > max_display) session.display[0..max_display] else session.display;
-            const display_copy = try RenderUtils.copyFrameText(app, display_text);
-            try segments.append(app.allocator, .{ .text = display_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
-
-            // Agent type indicator
-            const agent_str = switch (session.agent_type) {
-                .claude_code => " (claude)",
-                .codex => " (codex)",
-            };
-            const agent_copy = try RenderUtils.copyFrameText(app, agent_str);
-            try segments.append(app.allocator, .{ .text = agent_copy, .style = .{ .fg = Color.dim } });
 
             _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row) });
             row += 1;

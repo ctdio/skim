@@ -336,10 +336,30 @@ pub const Encoder = struct {
 
         try writer.writeByte(']');
 
-        // Add resume field if present (for session resumption)
-        // Claude Code ACP expects: _meta.claudeCode.options.resume
-        if (params.@"resume") |session_id| {
-            try writer.print(",\"_meta\":{{\"claudeCode\":{{\"options\":{{\"resume\":{f}}}}}}}", .{std.json.fmt(session_id, .{})});
+        // Add _meta.claudeCode.options if we have resume, mode, or model
+        // Claude Code ACP expects these options in this nested structure
+        const has_meta = params.@"resume" != null or params.mode != null or params.model != null;
+        if (has_meta) {
+            try writer.writeAll(",\"_meta\":{\"claudeCode\":{\"options\":{");
+            var first_option = true;
+
+            if (params.@"resume") |session_id| {
+                try writer.print("\"resume\":{f}", .{std.json.fmt(session_id, .{})});
+                first_option = false;
+            }
+
+            if (params.mode) |mode| {
+                if (!first_option) try writer.writeByte(',');
+                try writer.print("\"mode\":{f}", .{std.json.fmt(mode, .{})});
+                first_option = false;
+            }
+
+            if (params.model) |model| {
+                if (!first_option) try writer.writeByte(',');
+                try writer.print("\"model\":{f}", .{std.json.fmt(model, .{})});
+            }
+
+            try writer.writeAll("}}}");
         }
 
         try writer.writeByte('}');
