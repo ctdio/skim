@@ -292,6 +292,54 @@ pub fn markUntrackedFiles(files: []FileDiff, untracked_paths: []const []const u8
     }
 }
 
+/// Strip ANSI escape sequences from text (for pager mode where git sends colored output)
+pub fn stripAnsi(allocator: Allocator, input: []const u8) ![]u8 {
+    var result: std.ArrayList(u8) = .{};
+    errdefer result.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < input.len) {
+        // Check for ESC (0x1B) followed by '[' (CSI sequence)
+        if (input[i] == 0x1B and i + 1 < input.len and input[i + 1] == '[') {
+            // Skip the ESC and '['
+            i += 2;
+            // Skip until we find a letter (the terminator)
+            while (i < input.len) {
+                const c = input[i];
+                i += 1;
+                // CSI sequences end with a letter (0x40-0x7E)
+                if (c >= 0x40 and c <= 0x7E) break;
+            }
+        } else {
+            try result.append(allocator, input[i]);
+            i += 1;
+        }
+    }
+
+    return result.toOwnedSlice(allocator);
+}
+
+test "stripAnsi removes color codes" {
+    const allocator = std.testing.allocator;
+
+    // Test with typical git color output
+    const input = "\x1b[32m+added line\x1b[m";
+    const result = try stripAnsi(allocator, input);
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("+added line", result);
+}
+
+test "stripAnsi preserves plain text" {
+    const allocator = std.testing.allocator;
+
+    const input = "plain text without colors";
+    const result = try stripAnsi(allocator, input);
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("plain text without colors", result);
+}
+
 test "parse simple diff" {
     const allocator = std.testing.allocator;
 

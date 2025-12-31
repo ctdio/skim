@@ -298,8 +298,11 @@ pub const App = struct {
         // Load and parse diff - either from stdin or git
         const files = if (is_pager_mode) blk: {
             // Pager mode: parse directly from stdin content
+            // Strip ANSI codes since git sends colored output to pagers
             const stdin_text = config.stdin_content orelse "";
-            break :blk try parser.parse(allocator, stdin_text);
+            const clean_text = try parser.stripAnsi(allocator, stdin_text);
+            defer allocator.free(clean_text);
+            break :blk try parser.parse(allocator, clean_text);
         } else blk: {
             // Normal mode: load git diff (including untracked files for working directory mode)
             const diff_result = try git.getDiffWithUntracked(allocator, config.diff_source);
