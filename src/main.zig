@@ -55,6 +55,9 @@ pub fn main() !void {
 
             std.log.info("TUI starting up (diff subcommand)", .{});
 
+            // Check for piped stdin (pager mode)
+            const stdin_content = try readStdinIfPiped(allocator);
+
             // Create a new args slice without the "diff" subcommand
             var diff_args = try allocator.alloc([]const u8, args.len - 1);
             defer allocator.free(diff_args);
@@ -63,8 +66,15 @@ pub fn main() !void {
                 diff_args[i + 1] = arg;
             }
 
-            const config = try parseArgs(allocator, diff_args);
+            var config = try parseArgs(allocator, diff_args);
             defer config.deinit();
+
+            // If stdin was piped, use it as the diff source
+            if (stdin_content) |content| {
+                config.stdin_content = content;
+                config.diff_source = .stdin;
+                std.log.info("Pager mode: reading diff from stdin ({d} bytes)", .{content.len});
+            }
 
             var app = try App.init(allocator, config);
             defer app.deinit();
@@ -85,6 +95,7 @@ pub fn main() !void {
             const config = Config{
                 .allocator = allocator,
                 .diff_source = .{ .working_dir = .{ .staged = false } },
+                .stdin_content = null,
                 .mcp_port = null,
                 .serve_port = null,
                 .agent_only = true,
@@ -105,8 +116,18 @@ pub fn main() !void {
 
     std.log.info("TUI starting up", .{});
 
-    const config = try parseArgs(allocator, args);
+    // Check for piped stdin (pager mode) BEFORE initializing TUI
+    const stdin_content = try readStdinIfPiped(allocator);
+
+    var config = try parseArgs(allocator, args);
     defer config.deinit();
+
+    // If stdin was piped, use it as the diff source
+    if (stdin_content) |content| {
+        config.stdin_content = content;
+        config.diff_source = .stdin;
+        std.log.info("Pager mode: reading diff from stdin ({d} bytes)", .{content.len});
+    }
 
     // Check if we should run as MCP server (deprecated --serve flag)
     if (config.serve_port) |port| {
@@ -398,13 +419,19 @@ fn printMcpHelp() !void {
 const Config = struct {
     allocator: std.mem.Allocator,
     diff_source: DiffSource,
+    stdin_content: ?[]const u8, // Diff content from stdin (pager mode)
     mcp_port: ?u16, // Port to connect to MCP server
     serve_port: ?u16, // Port to run MCP server on
     agent_only: bool, // Start in agent-only mode (no diff view)
 
     fn deinit(self: *const Config) void {
+        // Free stdin_content if we own it
+        if (self.stdin_content) |content| {
+            self.allocator.free(content);
+        }
+
         switch (self.diff_source) {
-            .working_dir => {},
+            .working_dir, .stdin => {},
             .single_ref => |sr| {
                 self.allocator.free(sr.ref);
             },
@@ -507,10 +534,24 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
     return Config{
         .allocator = allocator,
         .diff_source = diff_source,
+        .stdin_content = null,
         .mcp_port = mcp_port,
         .serve_port = serve_port,
         .agent_only = false,
     };
+}
+
+fn readStdinIfPiped(allocator: std.mem.Allocator) !?[]const u8 {
+    const stdin_file = std.fs.File.stdin();
+    const stdin_is_tty = std.posix.isatty(stdin_file.handle);
+
+    if (stdin_is_tty) {
+        return null;
+    }
+
+    // Read all stdin content (max 50MB for large diffs)
+    const max_size = 50 * 1024 * 1024;
+    return try stdin_file.readToEndAlloc(allocator, max_size);
 }
 
 fn printHelp(allocator: std.mem.Allocator) !void {

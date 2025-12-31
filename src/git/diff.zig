@@ -15,6 +15,7 @@ pub const DiffSource = union(enum) {
         ref2: []const u8,
         use_merge_base: bool,
     },
+    stdin: void, // Diff content comes from stdin (pager mode)
 };
 
 /// Build common git diff arguments for a given source
@@ -58,6 +59,7 @@ fn buildDiffArgs(allocator: Allocator, source: DiffSource, extra_flags: []const 
                 try args.append(allocator, tr.ref2);
             }
         },
+        .stdin => unreachable, // stdin mode is handled separately, never passed to buildDiffArgs
     }
 
     return .{ .args = args, .range_owned = range_owned };
@@ -539,4 +541,21 @@ test "getDiff working directory" {
     defer allocator.free(diff);
 
     // Just verify it doesn't crash - actual output depends on git repo state
+}
+
+test "DiffSource.stdin variant exists" {
+    // Verify the stdin variant can be created and compared
+    const source: DiffSource = .stdin;
+    try std.testing.expect(std.meta.activeTag(source) == .stdin);
+}
+
+test "DiffSource.stdin vs other variants" {
+    const stdin: DiffSource = .stdin;
+    const working: DiffSource = .{ .working_dir = .{ .staged = false } };
+    const staged: DiffSource = .{ .working_dir = .{ .staged = true } };
+
+    try std.testing.expect(std.meta.activeTag(stdin) == .stdin);
+    try std.testing.expect(std.meta.activeTag(working) == .working_dir);
+    try std.testing.expect(std.meta.activeTag(stdin) != .working_dir);
+    try std.testing.expect(std.meta.activeTag(staged) == .working_dir);
 }

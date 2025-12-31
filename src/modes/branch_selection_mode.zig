@@ -90,7 +90,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
             // Free old diff_source if needed
             switch (app.state.diff_source) {
-                .working_dir => {},
+                .working_dir, .stdin => {},
                 .single_ref => |sr| {
                     app.allocator.free(sr.ref);
                 },

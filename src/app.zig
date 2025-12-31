@@ -142,6 +142,7 @@ pub const App = struct {
 
     const State = struct {
         diff_source: DiffSource,
+        pager_mode: bool, // True when reading diff from stdin (disables git-dependent features)
         git_repo_root: []const u8, // Absolute path to git repository root
         files: []parser.FileDiff,
         line_map: line_map.LineMap, // Complete map of all lines
@@ -283,25 +284,37 @@ pub const App = struct {
         });
         errdefer vx.deinit(allocator, tty.writer());
 
+        // Determine if we're in pager mode (reading diff from stdin)
+        const is_pager_mode = config.diff_source == .stdin;
+
         // Get git repository root (for resolving file paths)
-        const git_repo_root = try git.getRepoRoot(allocator);
+        // In pager mode, use current directory as fallback
+        const git_repo_root = if (is_pager_mode)
+            try allocator.dupe(u8, ".")
+        else
+            try git.getRepoRoot(allocator);
         errdefer allocator.free(git_repo_root);
 
-        // Load git diff (including untracked files for working directory mode)
-        const diff_result = try git.getDiffWithUntracked(allocator, config.diff_source);
-        errdefer diff_result.deinit(allocator);
+        // Load and parse diff - either from stdin or git
+        const files = if (is_pager_mode) blk: {
+            // Pager mode: parse directly from stdin content
+            const stdin_text = config.stdin_content orelse "";
+            break :blk try parser.parse(allocator, stdin_text);
+        } else blk: {
+            // Normal mode: load git diff (including untracked files for working directory mode)
+            const diff_result = try git.getDiffWithUntracked(allocator, config.diff_source);
+            defer diff_result.deinit(allocator);
 
-        const files = try parser.parse(allocator, diff_result.diff_text);
+            const parsed_files = try parser.parse(allocator, diff_result.diff_text);
+            parser.markUntrackedFiles(parsed_files, diff_result.untracked_paths);
+            break :blk parsed_files;
+        };
         errdefer {
             for (files) |*file| {
                 file.deinit(allocator);
             }
             allocator.free(files);
         }
-
-        // Mark untracked files
-        parser.markUntrackedFiles(files, diff_result.untracked_paths);
-        diff_result.deinit(allocator);
 
         const header_buffers = std.mem.zeroes([Layout.header_height][HEADER_BUFFER_WIDTH]u8);
 
@@ -337,9 +350,10 @@ pub const App = struct {
                     .use_merge_base = tr.use_merge_base,
                 } };
             },
+            .stdin => .stdin,
         };
         errdefer switch (owned_diff_source) {
-            .working_dir => {},
+            .working_dir, .stdin => {},
             .single_ref => |sr| allocator.free(sr.ref),
             .two_refs => |tr| {
                 allocator.free(tr.ref1);
@@ -354,6 +368,7 @@ pub const App = struct {
             .mode = .normal,
             .state = State{
                 .diff_source = owned_diff_source,
+                .pager_mode = is_pager_mode,
                 .git_repo_root = git_repo_root,
                 .files = files,
                 .line_map = built_line_map,
@@ -452,7 +467,7 @@ pub const App = struct {
 
         // Free diff_source if needed
         switch (self.state.diff_source) {
-            .working_dir => {},
+            .working_dir, .stdin => {},
             .single_ref => |sr| {
                 self.allocator.free(sr.ref);
             },
@@ -520,6 +535,9 @@ pub const App = struct {
     }
 
     pub fn refresh(self: *App) !void {
+        // Disabled in pager mode (stdin content is read once)
+        if (self.state.pager_mode) return;
+
         // Load fresh git diff (including untracked files for working directory mode)
         const diff_result = try git.getDiffWithUntracked(self.allocator, self.state.diff_source);
         defer diff_result.deinit(self.allocator);
@@ -602,6 +620,9 @@ pub const App = struct {
 
     /// Stage the current file (git add) and refresh the view
     pub fn stageCurrentFile(self: *App) !void {
+        // Disabled in pager mode
+        if (self.state.pager_mode) return;
+
         if (self.state.files.len == 0) return;
         if (self.state.current_file_idx >= self.state.files.len) return;
 
@@ -628,6 +649,9 @@ pub const App = struct {
 
     /// Stage all files (git add -A) and switch to staged view
     pub fn stageAllFiles(self: *App) !void {
+        // Disabled in pager mode
+        if (self.state.pager_mode) return;
+
         // Stage all files
         git.stageAllFiles(self.allocator) catch {
             self.state.status_message = "Failed to stage files";
@@ -1196,6 +1220,9 @@ pub const App = struct {
     }
 
     pub fn toggleBlame(self: *App) void {
+        // Disabled in pager mode
+        if (self.state.pager_mode) return;
+
         self.state.show_blame = !self.state.show_blame;
         self.needs_render = true;
 
@@ -2120,6 +2147,9 @@ pub const App = struct {
     }
 
     pub fn startBranchSelection(self: *App) !void {
+        // Disabled in pager mode
+        if (self.state.pager_mode) return;
+
         // Free old branch list
         for (self.state.branch_list) |branch| {
             self.allocator.free(branch);
@@ -2289,6 +2319,9 @@ pub const App = struct {
     }
 
     pub fn startGraphiteStack(self: *App) !void {
+        // Disabled in pager mode
+        if (self.state.pager_mode) return;
+
         self.ensureGraphiteDetected();
 
         if (!self.state.graphite_available) {
@@ -2339,7 +2372,7 @@ pub const App = struct {
 
         // Free old diff_source
         switch (self.state.diff_source) {
-            .working_dir => {},
+            .working_dir, .stdin => {},
             .single_ref => |sr| self.allocator.free(sr.ref),
             .two_refs => |tr| {
                 self.allocator.free(tr.ref1);
@@ -2412,9 +2445,12 @@ pub const App = struct {
     }
 
     pub fn switchDiffMode(self: *App, mode: command_palette.DiffMode) !void {
+        // Disabled in pager mode
+        if (self.state.pager_mode) return;
+
         // Free old diff_source if needed
         switch (self.state.diff_source) {
-            .working_dir => {},
+            .working_dir, .stdin => {},
             .single_ref => |sr| {
                 self.allocator.free(sr.ref);
             },
@@ -3717,6 +3753,7 @@ pub const App = struct {
             .working_dir => |wd| if (wd.staged) "staged" else "working",
             .single_ref => |sr| sr.ref,
             .two_refs => "refs",
+            .stdin => "stdin",
         };
     }
 

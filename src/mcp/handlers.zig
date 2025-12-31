@@ -244,6 +244,7 @@ pub fn handleGetDiffContext(
         .working_dir => |wd| if (wd.staged) "staged" else "working",
         .single_ref => |sr| sr.ref,
         .two_refs => |tr| tr.ref1,
+        .stdin => "stdin",
     };
 
     try mcp.sendDiffContext(.{
@@ -375,6 +376,7 @@ pub fn getDiffRef(diff_source: DiffSource) []const u8 {
         .working_dir => |wd| if (wd.staged) "staged" else "working",
         .single_ref => |sr| sr.ref,
         .two_refs => |tr| tr.ref2,
+        .stdin => "stdin",
     };
 }
 

@@ -41,6 +41,7 @@ fn formatDiffSource(allocator: std.mem.Allocator, diff_source: DiffSource) ![]co
                 break :blk try std.fmt.allocPrint(allocator, "[{s}..{s}]", .{ tr.ref1, tr.ref2 });
             }
         },
+        .stdin => try allocator.dupe(u8, "[Stdin]"),
     };
 }
 
