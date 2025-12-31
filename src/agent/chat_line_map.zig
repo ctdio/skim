@@ -641,6 +641,15 @@ pub const ChatLineMap = struct {
                 }
 
                 // Show each line of output (only last N lines)
+                // Calculate effective width for wrapping (account for indent + prefix)
+                // indent: 1 char, prefix: 3 chars ("⎿ " or "  ")
+                const prefix_len: usize = 3;
+                const indent_chars: usize = 1;
+                const effective_wrap_width = if (self.wrap_width > prefix_len + indent_chars + 10)
+                    self.wrap_width - prefix_len - indent_chars
+                else
+                    40; // Minimum reasonable width
+
                 var iter = std.mem.splitScalar(u8, stdout, '\n');
                 var line_num: usize = 0;
                 var first = skip_lines == 0; // Only use ⎿ prefix if no truncation indicator
@@ -655,20 +664,27 @@ pub const ChatLineMap = struct {
                     }
                     line_num += 1;
 
-                    const prefix = if (first) "⎿ " else "  ";
-                    first = false;
+                    // Wrap the output line if it's too long
+                    var wrapped_lines = try RenderUtils.wrapText(self.allocator, line, effective_wrap_width);
+                    defer wrapped_lines.deinit(self.allocator);
 
-                    const line_text = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prefix, line });
-                    try self.strings.append(self.allocator, line_text);
+                    for (wrapped_lines.items, 0..) |wrapped_segment, wrap_idx| {
+                        // First wrapped segment of first output line gets "⎿ ", others get "  "
+                        const prefix = if (first and wrap_idx == 0) "⎿ " else "  ";
+                        if (wrap_idx == 0) first = false;
 
-                    try self.records.append(self.allocator, .{
-                        .global_line = global_line.*,
-                        .line_type = .{ .tool_result = .{ .msg_idx = msg_idx } },
-                        .text = line_text,
-                        .style = output_style,
-                        .indent = 1,
-                    });
-                    global_line.* += 1;
+                        const line_text = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prefix, wrapped_segment });
+                        try self.strings.append(self.allocator, line_text);
+
+                        try self.records.append(self.allocator, .{
+                            .global_line = global_line.*,
+                            .line_type = .{ .tool_result = .{ .msg_idx = msg_idx } },
+                            .text = line_text,
+                            .style = output_style,
+                            .indent = 1,
+                        });
+                        global_line.* += 1;
+                    }
                 }
                 return;
             }
