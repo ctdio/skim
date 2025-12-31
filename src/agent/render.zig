@@ -1838,7 +1838,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         _ = win.print(&mode_seg, .{ .row_offset = @intCast(footer_row), .col_offset = 0 });
 
         // Session mode display (after vim mode) - only if modes are available
-        var session_mode_buf: [32]u8 = undefined;
+        var session_mode_buf: [64]u8 = undefined;
         var session_mode_text: ?[]const u8 = null;
 
         if (app.acp_manager) |mgr| {
