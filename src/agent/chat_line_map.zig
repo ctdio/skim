@@ -243,14 +243,8 @@ pub const ChatLineMap = struct {
 
         // If message count increased, add new messages
         if (messages.len > self.message_count) {
-            // Remove last spacer if present
-            if (self.records.items.len > 0) {
-                const last = &self.records.items[self.records.items.len - 1];
-                if (last.line_type == .spacer) {
-                    _ = self.records.pop();
-                }
-            }
-
+            // Don't remove the trailing spacer - it provides the visual gap between messages
+            // Just continue from where we left off
             var global_line: usize = if (self.records.items.len > 0)
                 self.records.items[self.records.items.len - 1].global_line + 1
             else

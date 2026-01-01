@@ -1069,22 +1069,41 @@ pub const AgentState = struct {
 
     /// Ensure line map is up to date for rendering
     /// Returns the line map for iteration
-    /// Throttles rebuilds to ~30fps to keep UI responsive during streaming
+    /// Uses incremental updates when possible to avoid O(N) rebuilds
+    /// Throttles updates to ~30fps to keep UI responsive during streaming
     pub fn ensureLineMap(self: *AgentState, wrap_width: usize) !*const ChatLineMap {
-        const needs_rebuild = self.line_map_dirty or self.line_map.needsRebuild(wrap_width, self.diff_view_mode);
+        const width_or_mode_changed = self.line_map.needsRebuild(wrap_width, self.diff_view_mode);
+        const needs_update = self.line_map_dirty or width_or_mode_changed;
 
-        if (needs_rebuild) {
+        if (needs_update) {
             const now = std.time.milliTimestamp();
             const elapsed = now - self.last_line_map_rebuild;
 
-            // Throttle rebuilds to every 32ms (~30fps) during streaming
-            // Always rebuild if it's been long enough or this is the first build
+            // Throttle updates to every 32ms (~30fps) during streaming
+            // Always update if it's been long enough or this is the first build
             if (elapsed >= 32 or self.last_line_map_rebuild == 0) {
-                try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode);
+                const message_count = self.messages.items.len;
+                const prev_message_count = self.line_map.message_count;
+
+                if (width_or_mode_changed or prev_message_count == 0) {
+                    // Width/mode changed or first build - full rebuild required
+                    try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode);
+                } else if (message_count > prev_message_count) {
+                    // New messages added - incremental add
+                    try self.line_map.updateForNewMessage(self.messages.items, wrap_width, self.diff_view_mode);
+                } else if (message_count == prev_message_count and message_count > 0) {
+                    // Same message count but dirty - last message content changed (streaming)
+                    try self.line_map.updateLastMessage(self.messages.items, wrap_width, self.diff_view_mode);
+                }
+                // If message_count < prev_message_count, messages were cleared - rebuild
+                else if (message_count < prev_message_count) {
+                    try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode);
+                }
+
                 self.line_map_dirty = false;
                 self.last_line_map_rebuild = now;
             }
-            // Otherwise skip rebuild this frame - use stale line map
+            // Otherwise skip update this frame - use stale line map
         }
         return &self.line_map;
     }

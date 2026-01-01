@@ -94,6 +94,9 @@ pub const AcpManager = struct {
     // Pending terminal wait requests (deferred responses)
     pending_terminal_waits: std.ArrayListUnmanaged(PendingTerminalWait),
 
+    // HashMap for O(1) tool_call_id lookups (maps tool_call_id -> index in pending_messages)
+    tool_call_id_to_idx: std.StringHashMapUnmanaged(usize),
+
     const PendingTerminalWait = struct {
         request_id: codec.JsonRpcId,
         terminal_id: []const u8, // Owned copy
@@ -265,6 +268,7 @@ pub const AcpManager = struct {
             .next_marker_id = 1,
             .tool_terminal_map = .{},
             .pending_terminal_waits = .{},
+            .tool_call_id_to_idx = .{},
         };
     }
 
@@ -1399,6 +1403,9 @@ pub const AcpManager = struct {
             msg.deinit(self.allocator);
         }
         self.pending_messages.clearRetainingCapacity();
+
+        // Clear the tool_call_id lookup index (keys are owned by pending_messages)
+        self.tool_call_id_to_idx.clearRetainingCapacity();
     }
 
     /// Check if connected and alive
@@ -1766,6 +1773,9 @@ pub const AcpManager = struct {
             self.allocator.free(kv.value_ptr.*);
         }
         self.tool_terminal_map.deinit(self.allocator);
+
+        // Clean up tool_call_id index (keys are owned by pending_messages, already freed above)
+        self.tool_call_id_to_idx.deinit(self.allocator);
     }
 
     // =========================================================================
@@ -1875,22 +1885,11 @@ pub const AcpManager = struct {
 
             // If no diff, create or update a tool_call message with metadata
             if (!has_diff) {
-                // Check if we already have a pending message for this tool_call_id
+                // Use HashMap for O(1) lookup instead of O(N) linear scan
                 // (ACP sends tool_call twice: once without params, once with params)
-                var existing: ?*PendingMessage = null;
-                for (self.pending_messages.items) |*pm| {
-                    if (pm.kind == .tool_call) {
-                        if (pm.tool_call_id) |existing_id| {
-                            if (std.mem.eql(u8, existing_id, tc.tool_call_id)) {
-                                existing = pm;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (existing) |pm| {
+                if (self.tool_call_id_to_idx.get(tc.tool_call_id)) |idx| {
                     // Update existing message with new info
+                    const pm = &self.pending_messages.items[idx];
                     // Update title if we got a more specific one
                     if (!std.mem.eql(u8, title, pm.text)) {
                         const new_text = self.allocator.dupe(u8, title) catch return;
@@ -1921,6 +1920,9 @@ pub const AcpManager = struct {
                     else
                         null;
 
+                    // Record index before appending
+                    const new_idx = self.pending_messages.items.len;
+
                     self.pending_messages.append(self.allocator, .{
                         .kind = .tool_call,
                         .text = text,
@@ -1933,7 +1935,11 @@ pub const AcpManager = struct {
                         self.allocator.free(id_copy);
                         if (name_copy) |n| self.allocator.free(n);
                         if (cmd_copy) |c| self.allocator.free(c);
+                        return;
                     };
+
+                    // Add to HashMap for O(1) future lookups (id_copy is now owned by pending_messages)
+                    self.tool_call_id_to_idx.put(self.allocator, id_copy, new_idx) catch {};
                 }
             }
         }
