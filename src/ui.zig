@@ -751,8 +751,8 @@ pub const UI = struct {
         const branch_space = if (max_branch_len > 0) max_branch_len + 2 else 0;
         const content_width = @max(max_display_len + branch_space + 16, instructions.len);
         const dialog_width = @max(content_width + 4, title.len + 4);
-        // Height: title(1) + empty(1) + sessions + empty(1) + instructions(1) + border(2)
-        const ideal_height = 3 + session_count + 2;
+        // Height: title(1) + empty(1) + sessions (2 rows each for last_message) + empty(1) + instructions(1) + border(2)
+        const ideal_height = 3 + (session_count * 2) + 2;
         const max_height = win.height - 4;
 
         const popup_width = @min(dialog_width, win.width - 4);
@@ -788,9 +788,9 @@ pub const UI = struct {
         }};
         _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
 
-        // Calculate scroll offset for many sessions
-        const rows_for_sessions = if (popup_height > 5) popup_height - 5 else 2;
-        const max_visible = rows_for_sessions;
+        // Calculate scroll offset for many sessions (2 rows per session)
+        const rows_for_sessions = if (popup_height > 5) popup_height - 5 else 4;
+        const max_visible = @max(rows_for_sessions / 2, 1); // Each session takes 2 rows
         var scroll_offset: usize = 0;
         if (max_visible > 0 and session_count > max_visible) {
             if (app.state.session_selection >= max_visible) {
@@ -853,6 +853,31 @@ pub const UI = struct {
 
             _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row) });
             row += 1;
+
+            // Show last message preview on second line
+            if (session.last_message) |last_msg| {
+                if (row < popup_height - 1) {
+                    const preview_max = if (popup_width > 9) popup_width - 9 else 30;
+                    const is_truncated = last_msg.len > preview_max;
+                    const preview_text = if (is_truncated) last_msg[0..preview_max] else last_msg;
+                    const preview_copy = try RenderUtils.copyFrameText(app, preview_text);
+                    if (is_truncated) {
+                        var preview_seg = [_]vaxis.Cell.Segment{
+                            .{ .text = "  ↳ ", .style = .{ .fg = Color.dim } },
+                            .{ .text = preview_copy, .style = .{ .fg = Color.dim } },
+                            .{ .text = "...", .style = .{ .fg = Color.dim } },
+                        };
+                        _ = popup_win.print(&preview_seg, .{ .row_offset = @intCast(row) });
+                    } else {
+                        var preview_seg = [_]vaxis.Cell.Segment{
+                            .{ .text = "  ↳ ", .style = .{ .fg = Color.dim } },
+                            .{ .text = preview_copy, .style = .{ .fg = Color.dim } },
+                        };
+                        _ = popup_win.print(&preview_seg, .{ .row_offset = @intCast(row) });
+                    }
+                    row += 1;
+                }
+            }
         }
 
         // Instructions at bottom

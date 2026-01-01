@@ -47,11 +47,15 @@ pub const SessionInfo = struct {
     /// Git branch (optional, mainly for Codex)
     branch: ?[]const u8 = null,
 
+    /// Most recent message in the session (for display under summary)
+    last_message: ?[]const u8 = null,
+
     pub fn deinit(self: *SessionInfo) void {
         self.allocator.free(self.id);
         self.allocator.free(self.project_path);
         self.allocator.free(self.display);
         if (self.branch) |b| self.allocator.free(b);
+        if (self.last_message) |m| self.allocator.free(m);
     }
 
     /// Format timestamp as relative time (e.g., "2 hours ago", "yesterday")
