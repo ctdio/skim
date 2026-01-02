@@ -145,8 +145,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         };
 
         // Check which panels are visible and their positions
-        const agent_panel_visible = if (app.state.agent_state) |as| as.visible else false;
-        const agent_on_left = if (app.state.agent_state) |as| as.panel_side == .left else false;
+        const agent_panel_visible = app.isAgentPanelVisible();
+        const agent_on_left = app.getAgentPanelSide() == .left;
 
         switch (effective_key) {
             'l' => {

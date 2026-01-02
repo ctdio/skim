@@ -3,7 +3,7 @@ const App = @import("../app.zig").App;
 
 /// Get the number of available models from the ACP manager
 fn getModelCount(app: *App) usize {
-    if (app.acp_manager) |mgr| {
+    if (app.getActiveAcpManager()) |mgr| {
         return mgr.getAvailableModels().len;
     }
     return 0;
@@ -32,7 +32,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             },
             'd' => {
                 // Allow scrolling conversation history during model selection
-                if (app.state.agent_state) |*agent_state| {
+                if (app.getActiveAgentState()) |agent_state| {
                     agent_state.follow_bottom = false;
                     agent_state.scrollDown(10);
                     app.needs_render = true;
@@ -41,7 +41,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             },
             'u' => {
                 // Allow scrolling conversation history during model selection
-                if (app.state.agent_state) |*agent_state| {
+                if (app.getActiveAgentState()) |agent_state| {
                     agent_state.follow_bottom = false;
                     agent_state.scrollUp(10);
                     app.needs_render = true;
@@ -74,7 +74,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.needs_render = true;
         },
         '\r' => { // Enter - select model
-            if (app.acp_manager) |mgr| {
+            if (app.getActiveAcpManager()) |mgr| {
                 const models = mgr.getAvailableModels();
                 if (app.state.model_selection < models.len) {
                     const selected_model = models[app.state.model_selection];

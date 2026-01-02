@@ -4,6 +4,7 @@ const InputEditor = @import("input_editor.zig").InputEditor;
 const ChatLineMap = @import("chat_line_map.zig").ChatLineMap;
 const protocol = @import("../acp/protocol.zig");
 const git_files = @import("../git/files.zig");
+const command_palette = @import("command_palette.zig");
 
 /// Maximum number of slash commands visible in menu at once
 pub const MAX_SLASH_MENU_VISIBLE: usize = 12;
@@ -529,6 +530,8 @@ pub const AgentState = struct {
     running_shell_cmd: ?RunningShellCommand,
     // Counter for generating unique shell command tool IDs
     shell_cmd_counter: u32,
+    // Command palette state (for ':' command menu)
+    cmd_palette: command_palette.AgentCommandPaletteState,
 
     /// Queued shell command output to be sent with next prompt
     pub const QueuedShellOutput = struct {
@@ -692,6 +695,7 @@ pub const AgentState = struct {
             .queued_shell_outputs = .{},
             .running_shell_cmd = null,
             .shell_cmd_counter = 0,
+            .cmd_palette = command_palette.AgentCommandPaletteState.init(allocator),
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -723,6 +727,7 @@ pub const AgentState = struct {
         if (self.running_shell_cmd) |*cmd| {
             cmd.deinit();
         }
+        self.cmd_palette.deinit();
     }
 
     /// Add a message to the conversation history
@@ -1065,6 +1070,14 @@ pub const AgentState = struct {
     /// Get message count
     pub fn messageCount(self: *const AgentState) usize {
         return self.messages.items.len;
+    }
+
+    /// Mark the line map as needing a rebuild
+    /// Call this when switching tabs or when the display context changes
+    pub fn markLineMapDirty(self: *AgentState) void {
+        self.line_map_dirty = true;
+        // Reset the last rebuild timestamp to force an immediate rebuild on next ensureLineMap
+        self.last_line_map_rebuild = 0;
     }
 
     /// Ensure line map is up to date for rendering

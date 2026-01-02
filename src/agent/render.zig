@@ -15,12 +15,13 @@ const ChatLineMap = chat_line_map.ChatLineMap;
 const ChatLineRecord = chat_line_map.ChatLineRecord;
 const SideLineKind = chat_line_map.SideLineKind;
 const protocol = @import("../acp/protocol.zig");
+const command_palette = @import("command_palette.zig");
 
 // Import skim's color palette for consistent styling
 const rendering_common = @import("../rendering/common.zig");
 const Color = rendering_common.Color;
 
-// Import utilities for word-aware wrapping
+// Import utilities for word-aware wrapping and dialog rendering
 const rendering_utils = @import("../rendering/utils.zig");
 const RenderUtils = rendering_utils.RenderUtils;
 
@@ -369,7 +370,7 @@ fn getInputLineInfo(text: []const u8, cursor_pos: usize) InputLineInfo {
 pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     if (win.width == 0 or win.height == 0) return;
 
-    const agent_state = &(app.state.agent_state orelse return);
+    const agent_state = app.getActiveAgentState() orelse return;
     const is_focused = app.mode == .agent;
 
     win.clear();
@@ -378,11 +379,11 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     const text = agent_state.input.getText();
 
     // Check if there's a pending permission
-    const pending_permission = if (app.acp_manager) |mgr| mgr.getPendingPermission() else null;
+    const pending_permission = if (app.getActiveAcpManager()) |mgr| mgr.getPendingPermission() else null;
 
     // Calculate height based on mode or pending permission
     const visible_lines = if (app.mode == .model_selection) blk: {
-        const model_count = if (app.acp_manager) |mgr| mgr.getAvailableModels().len else 0;
+        const model_count = if (app.getActiveAcpManager()) |mgr| mgr.getAvailableModels().len else 0;
         // Separator (1) + title (1) + models (2 lines each) + footer (1)
         break :blk 3 + (model_count * 2);
     } else if (pending_permission) |perm| blk: {
@@ -420,7 +421,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 
     // Calculate status area height (shown between messages and plan when agent is thinking)
     // Layout: empty row + "Generating..." + empty row + optional queued message + empty row
-    const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
+    const is_thinking = if (app.getActiveAcpManager()) |mgr| mgr.status == .prompting else false;
     const status_height: usize = if (is_thinking) blk: {
         var height: usize = 3; // empty + "Generating..." + empty
         // Add queued message height if present
@@ -519,6 +520,11 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     if (agent_state.file_picker.visible) {
         try renderFilePicker(win, agent_state, title_height + tab_bar_height + messages_height + status_height + plan_height);
     }
+
+    // Render agent command palette as centered dialog (if visible)
+    if (agent_state.cmd_palette.visible) {
+        renderAgentCommandPalette(win, &agent_state.cmd_palette);
+    }
 }
 
 fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
@@ -526,7 +532,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
 
     // Status from ACP connection
     var status_buf: [64]u8 = undefined;
-    const status_text = if (app.acp_manager) |mgr| blk: {
+    const status_text = if (app.getActiveAcpManager()) |mgr| blk: {
         const base_status = switch (mgr.status) {
             .disconnected => " Disconnected",
             .discovering => " Discovering...",
@@ -564,7 +570,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
 
     // Print status on the right
     const status_style = vaxis.Style{
-        .fg = if (app.acp_manager) |mgr|
+        .fg = if (app.getActiveAcpManager()) |mgr|
             switch (mgr.status) {
                 .session_active => .{ .index = 2 }, // green
                 .discovering, .connecting, .connected, .prompting => .{ .index = 8 }, // dim gray
@@ -709,15 +715,15 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     win.clear();
 
     // Check agent connection status
-    const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
+    const is_thinking = if (app.getActiveAcpManager()) |mgr| mgr.status == .prompting else false;
     // Note: .connected is included because createSession() still runs after connect() sets .connected
-    const is_loading = if (app.acp_manager) |mgr| mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected else false;
+    const is_loading = if (app.getActiveAcpManager()) |mgr| mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected else false;
 
     // If no messages, show status-aware placeholder
     if (agent_state.messages.items.len == 0) {
         if (is_loading) {
             // Show prominent loading status in center
-            const loading_text = if (app.acp_manager) |mgr| switch (mgr.status) {
+            const loading_text = if (app.getActiveAcpManager()) |mgr| switch (mgr.status) {
                 .discovering => "Discovering agent...",
                 .connecting => "Connecting to agent...",
                 .connected => "Creating session...",
@@ -1221,11 +1227,28 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     const menu_height = visible_count + 2; // +2 for top/bottom border
     const menu_width = @min(win.width -| 4, MAX_SLASH_MENU_WIDTH); // leave some margin
 
+    // Calculate maximum possible menu size (for clearing artifacts)
+    const max_menu_height = MAX_SLASH_MENU_VISIBLE + 2;
+    const max_menu_y = if (input_top > max_menu_height) input_top - max_menu_height else 0;
+
     // Position menu just above the input area
     const menu_y = if (input_top > menu_height) input_top - menu_height else 0;
     const menu_x: usize = 2; // Small left margin
 
-    // Create menu window
+    // Clear the maximum possible menu area first to prevent artifacts when filtering
+    const clear_win = win.child(.{
+        .x_off = @intCast(menu_x),
+        .y_off = @intCast(max_menu_y),
+        .width = @intCast(menu_width),
+        .height = @intCast(max_menu_height),
+    });
+    const bg_cell = vaxis.Cell{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{ .bg = .{ .index = 0 } },
+    };
+    clear_win.fill(bg_cell);
+
+    // Create menu window at actual position
     const menu_win = win.child(.{
         .x_off = @intCast(menu_x),
         .y_off = @intCast(menu_y),
@@ -1368,11 +1391,28 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
     const menu_height = visible_count + 2; // +2 for top/bottom border
     const menu_width = @min(win.width -| 4, 80); // max 80 chars wide
 
+    // Calculate maximum possible menu size (for clearing artifacts)
+    const max_menu_height = state.MAX_FILE_MENU_VISIBLE + 2;
+    const max_menu_y = if (input_top > max_menu_height) input_top - max_menu_height else 0;
+
     // Position menu just above the input area
     const menu_y = if (input_top > menu_height) input_top - menu_height else 0;
     const menu_x: usize = 2; // Small left margin
 
-    // Create menu window
+    // Clear the maximum possible menu area first to prevent artifacts when filtering
+    const clear_win = win.child(.{
+        .x_off = @intCast(menu_x),
+        .y_off = @intCast(max_menu_y),
+        .width = @intCast(menu_width),
+        .height = @intCast(max_menu_height),
+    });
+    const bg_cell = vaxis.Cell{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{ .bg = .{ .index = 0 } },
+    };
+    clear_win.fill(bg_cell);
+
+    // Create menu window at actual position
     const menu_win = win.child(.{
         .x_off = @intCast(menu_x),
         .y_off = @intCast(menu_y),
@@ -1733,7 +1773,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     const is_shell_mode = agent_state.isShellMode();
     
     // Dim prompt when session is not ready
-    const session_ready = if (app.acp_manager) |mgr| mgr.status == .session_active or mgr.status == .prompting else false;
+    const session_ready = if (app.getActiveAcpManager()) |mgr| mgr.status == .session_active or mgr.status == .prompting else false;
     const prompt_style = if (is_shell_mode)
         vaxis.Style{ .fg = .{ .index = 3 }, .bold = true } // yellow for shell mode
     else if (session_ready)
@@ -1969,7 +2009,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         var session_mode_buf: [64]u8 = undefined;
         var session_mode_text: ?[]const u8 = null;
 
-        if (app.acp_manager) |mgr| {
+        if (app.getActiveAcpManager()) |mgr| {
             if (mgr.hasModes()) {
                 const mode_name = mgr.getCurrentModeName();
                 if (mode_name.len > 0) {
@@ -2000,7 +2040,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
         // Current model indicator (after stash)
         var model_buf: [48]u8 = undefined;
-        if (app.acp_manager) |mgr| {
+        if (app.getActiveAcpManager()) |mgr| {
             if (mgr.hasModels()) {
                 const model_name = mgr.getCurrentModelName();
                 if (model_name.len > 0) {
@@ -2018,7 +2058,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
         // Keybindings on the right (include mode hint if modes available)
         // Tab cycles modes only in normal mode
-        const has_modes = if (app.acp_manager) |mgr| mgr.hasModes() else false;
+        const has_modes = if (app.getActiveAcpManager()) |mgr| mgr.hasModes() else false;
         const keybindings = switch (agent_state.input.vim.vim_mode) {
             .insert => "S-Enter:newline  Enter:send  ESC:normal",
             .normal => if (has_modes) "Tab:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",
@@ -2042,7 +2082,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
 /// Render inline model picker with 2-line layout per model (name + description)
 fn renderInlineModelPicker(app: *App, win: vaxis.Window) !void {
-    const mgr = app.acp_manager orelse return;
+    const mgr = app.getActiveAcpManager() orelse return;
     const models = mgr.getAvailableModels();
     const model_count = models.len;
     if (model_count == 0) return;
@@ -2171,6 +2211,124 @@ fn renderInlineModelPicker(app: *App, win: vaxis.Window) !void {
             };
             _ = win.print(&down_seg, .{ .row_offset = @intCast(row), .col_offset = 3 });
         }
+    }
+}
+
+// =============================================================================
+// Agent Command Palette
+// =============================================================================
+
+/// Maximum visible items in command palette
+const MAX_CMD_PALETTE_VISIBLE: usize = 10;
+
+/// Render the agent command palette - same approach as diff view's command_palette.zig
+fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.AgentCommandPaletteState) void {
+    const filtered = cmd_palette.filtered_indices.items;
+    if (filtered.len == 0 and cmd_palette.mode != .rename_input) return;
+
+    // Fixed dimensions - match diff view's command palette (no shrinking)
+    const palette_width: usize = 60;
+    const palette_height = @min(MAX_CMD_PALETTE_VISIBLE + 4, win.height -| 4); // Fixed height
+    const visible_count = @min(filtered.len, MAX_CMD_PALETTE_VISIBLE);
+
+    const x_offset = if (win.width > palette_width) (win.width - palette_width) / 2 else 0;
+    const y_offset = if (win.height > palette_height) (win.height - palette_height) / 2 else 0;
+
+    // Create palette window with border - exactly like diff view
+    const palette_win = win.child(.{
+        .x_off = @intCast(x_offset),
+        .y_off = @intCast(y_offset),
+        .width = @intCast(palette_width),
+        .height = @intCast(palette_height),
+        .border = .{
+            .where = .all,
+            .style = .{ .fg = .{ .index = 6 } }, // cyan border
+        },
+    });
+
+    // Clear and fill - exactly like diff view
+    palette_win.clear();
+    const bg_cell = vaxis.Cell{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{ .bg = .{ .index = 0 } }, // black background
+    };
+    palette_win.fill(bg_cell);
+
+    // Line 0: Title
+    const title: []const u8 = if (cmd_palette.mode == .rename_input) "Rename Tab" else "Commands";
+    const title_style = vaxis.Style{ .fg = .{ .index = 6 }, .bold = true }; // cyan
+    var title_seg = [_]vaxis.Cell.Segment{.{ .text = title, .style = title_style }};
+    _ = palette_win.print(&title_seg, .{});
+
+    // Line 1: Input field
+    const input_prompt: []const u8 = if (cmd_palette.mode == .rename_input) "Name: " else ": ";
+    const input_text = if (cmd_palette.mode == .rename_input)
+        cmd_palette.rename_buffer[0..cmd_palette.rename_len]
+    else
+        cmd_palette.query_buffer[0..cmd_palette.query_len];
+
+    var input_seg = [_]vaxis.Cell.Segment{
+        .{ .text = input_prompt, .style = .{ .fg = .{ .index = 6 } } }, // cyan prompt
+        .{ .text = input_text, .style = .{ .fg = .{ .index = 7 } } }, // white text
+    };
+    _ = palette_win.print(&input_seg, .{ .row_offset = 1 });
+
+    // Show cursor
+    const cursor_x = input_prompt.len + input_text.len;
+    palette_win.showCursor(@intCast(cursor_x), 1);
+
+    // Line 2: Separator
+    if (palette_win.width > 2) {
+        for (0..palette_win.width - 2) |col| {
+            palette_win.writeCell(@intCast(col), 2, .{
+                .char = .{ .grapheme = "-", .width = 1 },
+                .style = .{ .fg = .{ .index = 8 } }, // dim
+            });
+        }
+    }
+
+    // Lines 3+: Items (only in search mode)
+    if (cmd_palette.mode == .search and filtered.len > 0) {
+        const scroll = cmd_palette.scroll_offset;
+
+        for (0..visible_count) |i| {
+            const item_idx = scroll + i;
+            if (item_idx >= filtered.len) break;
+
+            const cmd_idx = filtered[item_idx];
+            const cmd = command_palette.COMMANDS[cmd_idx];
+            const is_selected = item_idx == cmd_palette.selected_idx;
+            const row = 3 + i;
+
+            // Selection indicator
+            const indicator: []const u8 = if (is_selected) "▶ " else "  ";
+            const indicator_style = vaxis.Style{
+                .fg = if (is_selected) .{ .index = 6 } else .{ .index = 8 },
+            };
+
+            // Command name
+            const name_style = vaxis.Style{
+                .fg = .{ .index = 7 },
+                .bold = is_selected,
+            };
+
+            // Alias/description
+            const desc_style = vaxis.Style{ .fg = .{ .index = 8 } };
+
+            var item_seg = [_]vaxis.Cell.Segment{
+                .{ .text = indicator, .style = indicator_style },
+                .{ .text = cmd.name, .style = name_style },
+                .{ .text = "  ", .style = .{} },
+                .{ .text = cmd.aliases[0], .style = desc_style },
+            };
+            _ = palette_win.print(&item_seg, .{ .row_offset = @intCast(row) });
+        }
+    } else if (cmd_palette.mode == .search and filtered.len == 0) {
+        // No matching commands
+        var no_match_seg = [_]vaxis.Cell.Segment{
+            .{ .text = "No matching commands", .style = .{ .fg = .{ .index = 8 } } },
+        };
+        _ = palette_win.print(&no_match_seg, .{ .row_offset = 3 });
     }
 }
 

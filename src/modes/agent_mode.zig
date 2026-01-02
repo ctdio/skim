@@ -6,13 +6,14 @@ const state = @import("../agent/state.zig");
 const protocol = @import("../acp/protocol.zig");
 const sessions = @import("../acp/sessions.zig");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
+const command_palette = @import("../agent/command_palette.zig");
 
 /// Handle keyboard input when in agent mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
-    const agent_state = &(app.state.agent_state orelse return);
+    const agent_state = app.getActiveAgentState() orelse return;
 
     // Check for pending permission prompt
-    if (app.acp_manager) |mgr| {
+    if (app.getActiveAcpManager()) |mgr| {
         if (mgr.getPendingPermission()) |perm| {
             const num_options = perm.options.len;
 
@@ -82,7 +83,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     if (key.codepoint == 27 and agent_state.input.vim.vim_mode == .normal) {
         if (agent_state.recordEscPress()) {
             // Double-ESC detected - try to cancel the prompt
-            if (app.acp_manager) |mgr| {
+            if (app.getActiveAcpManager()) |mgr| {
                 if (mgr.cancelPrompt()) {
                     std.log.info("Agent: Interrupted agent via double-ESC", .{});
                     try agent_state.addMessage(.system, "Interrupted");
@@ -160,7 +161,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.autoNameActiveTab(text);
 
                 // Send to ACP agent
-                if (app.acp_manager) |mgr| {
+                if (app.getActiveAcpManager()) |mgr| {
                     if (mgr.status == .disconnected) {
                         try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
                     } else if (mgr.status == .failed) {
@@ -230,6 +231,111 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
+    // Handle command palette when visible
+    if (agent_state.cmd_palette.visible) {
+        if (agent_state.cmd_palette.mode == .rename_input) {
+            // Rename input mode
+            switch (key.codepoint) {
+                27 => { // ESC - cancel rename
+                    agent_state.cmd_palette.close();
+                    app.needs_render = true;
+                    return;
+                },
+                vaxis.Key.enter => {
+                    // Confirm rename
+                    const new_name = agent_state.cmd_palette.getRenameText();
+                    if (new_name.len > 0) {
+                        if (app.tab_manager) |*tm| {
+                            if (tm.activeTab()) |tab| {
+                                tab.setName(new_name) catch {};
+                                tab.auto_named = false;
+                            }
+                        }
+                    }
+                    agent_state.cmd_palette.close();
+                    app.needs_render = true;
+                    return;
+                },
+                127, 8 => { // Backspace
+                    agent_state.cmd_palette.deleteRenameChar();
+                    app.needs_render = true;
+                    return;
+                },
+                else => {
+                    if (key.codepoint >= 32 and key.codepoint < 127) {
+                        agent_state.cmd_palette.appendRenameChar(@intCast(key.codepoint));
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+            }
+        }
+
+        // Search mode
+        switch (key.codepoint) {
+            27 => { // ESC - close palette
+                agent_state.cmd_palette.close();
+                app.needs_render = true;
+                return;
+            },
+            vaxis.Key.enter => {
+                // Execute selected command
+                if (agent_state.cmd_palette.getSelectedCommand()) |cmd| {
+                    // Close command palette BEFORE executing (in case command switches tabs)
+                    agent_state.cmd_palette.close();
+                    try executeAgentCommand(app, agent_state, cmd.action);
+                } else {
+                    agent_state.cmd_palette.close();
+                }
+                app.needs_render = true;
+                return;
+            },
+            vaxis.Key.up => {
+                agent_state.cmd_palette.moveUp();
+                app.needs_render = true;
+                return;
+            },
+            vaxis.Key.down => {
+                agent_state.cmd_palette.moveDown();
+                app.needs_render = true;
+                return;
+            },
+            127, 8 => { // Backspace
+                agent_state.cmd_palette.deleteQueryChar();
+                app.needs_render = true;
+                return;
+            },
+            else => {
+                // Ctrl+N/P for navigation
+                if (key.mods.ctrl) {
+                    if (key.codepoint == 'n') {
+                        agent_state.cmd_palette.moveDown();
+                        app.needs_render = true;
+                        return;
+                    }
+                    if (key.codepoint == 'p') {
+                        agent_state.cmd_palette.moveUp();
+                        app.needs_render = true;
+                        return;
+                    }
+                }
+                // Regular character input
+                if (key.codepoint >= 32 and key.codepoint < 127) {
+                    agent_state.cmd_palette.appendQueryChar(@intCast(key.codepoint));
+                    app.needs_render = true;
+                }
+                return;
+            },
+        }
+    }
+
+    // ':' in normal vim mode - open command palette
+    if (agent_state.input.vim.vim_mode == .normal and key.codepoint == ':' and !key.mods.ctrl and !key.mods.alt) {
+        agent_state.cmd_palette.open();
+        app.needs_render = true;
+        return;
+    }
+
     // 'z' in normal vim mode - toggle full screen
     if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'z') {
         agent_state.toggleFullScreen();
@@ -265,6 +371,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // gt - next tab
                 if (app.tab_manager) |*tm| {
                     tm.nextTab();
+                    // Mark the new tab's line map as dirty to force rebuild
+                    if (tm.activeTab()) |tab| {
+                        tab.agent_state.markLineMapDirty();
+                    }
                     app.needs_render = true;
                 }
                 return;
@@ -273,6 +383,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // gT - previous tab
                 if (app.tab_manager) |*tm| {
                     tm.prevTab();
+                    // Mark the new tab's line map as dirty to force rebuild
+                    if (tm.activeTab()) |tab| {
+                        tab.agent_state.markLineMapDirty();
+                    }
                     app.needs_render = true;
                 }
                 return;
@@ -349,87 +463,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // Leader key (\) for tab management in normal vim mode
-    if (agent_state.input.vim.vim_mode == .normal and key.codepoint == '\\' and !key.mods.ctrl and !key.mods.alt) {
-        app.state.pending_leader = true;
-        return;
-    }
-
-    // Handle pending leader key sequence
-    if (app.state.pending_leader) {
-        app.state.pending_leader = false;
-        // ESC cancels pending leader
-        if (key.codepoint == 27) {
-            return;
-        }
-
-        switch (key.codepoint) {
-            't' => {
-                // \t - create new tab
-                if (app.tab_manager) |*tm| {
-                    _ = tm.createTab("New Tab") catch |err| {
-                        std.log.err("Failed to create tab: {any}", .{err});
-                        return;
-                    };
-                    app.needs_render = true;
-                }
-                return;
-            },
-            'q' => {
-                // \q - close current tab (unless last)
-                if (app.tab_manager) |*tm| {
-                    if (!tm.closeActiveTab()) {
-                        // Cannot close last tab - show message
-                        if (app.getActiveAgentState()) |as| {
-                            as.addMessage(.system, "Cannot close last tab") catch {};
-                        }
-                    }
-                    app.needs_render = true;
-                }
-                return;
-            },
-            'r' => {
-                // \r - rename tab using current input text
-                if (app.tab_manager) |*tm| {
-                    if (tm.activeTab()) |tab| {
-                        // Use current input as new name
-                        const input_text = agent_state.input.getText();
-                        if (input_text.len > 0) {
-                            const trimmed = std.mem.trim(u8, input_text, &std.ascii.whitespace);
-                            if (trimmed.len > 0) {
-                                tab.setName(trimmed) catch |err| {
-                                    std.log.err("Failed to rename tab: {any}", .{err});
-                                    return;
-                                };
-                                tab.auto_named = false; // Mark as manually named
-                                agent_state.input.clear();
-                                app.needs_render = true;
-                            }
-                        } else {
-                            // No input - show hint
-                            if (app.getActiveAgentState()) |as| {
-                                as.addMessage(.system, "Type a name first, then press \\r to rename") catch {};
-                            }
-                            app.needs_render = true;
-                        }
-                    }
-                }
-                return;
-            },
-            '1', '2', '3', '4', '5', '6', '7', '8', '9' => {
-                // \N - go to tab N (1-indexed)
-                if (app.tab_manager) |*tm| {
-                    const tab_num = key.codepoint - '0';
-                    tm.goToTabNumber(tab_num);
-                    app.needs_render = true;
-                }
-                return;
-            },
-            else => {},
-        }
-        return;
-    }
-
     // Ctrl+E - close agent panel and return to diff (toggle)
     if (key.mods.ctrl and key.codepoint == 'e') {
         agent_state.visible = false;
@@ -478,7 +511,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             (key.codepoint == 'M' and key.mods.alt);
 
         if (is_mode_cycle) {
-            if (app.acp_manager) |mgr| {
+            if (app.getActiveAcpManager()) |mgr| {
                 if (mgr.cycleToNextMode()) |_| {
                     app.needs_render = true;
                 }
@@ -558,10 +591,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             .send => {
                 const raw_text = agent_state.input.getText();
                 const text = std.mem.trim(u8, raw_text, &std.ascii.whitespace);
-                const is_thinking = if (app.acp_manager) |mgr| mgr.status == .prompting else false;
+                const is_thinking = if (app.getActiveAcpManager()) |mgr| mgr.status == .prompting else false;
 
                 // Block prompt submission if session is not ready yet
-                if (app.acp_manager) |mgr| {
+                if (app.getActiveAcpManager()) |mgr| {
                     if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected) {
                         // Session not ready - ignore submission
                         return;
@@ -572,7 +605,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 if (is_thinking and agent_state.hasStagedPrompt()) {
                     if (text.len == 0) {
                         // Empty prompt + staged message = interrupt and send immediately
-                        if (app.acp_manager) |mgr| {
+                        if (app.getActiveAcpManager()) |mgr| {
                             if (mgr.cancelPrompt()) {
                                 std.log.info("Agent: Interrupted via staged message immediate send", .{});
                                 try agent_state.addMessage(.system, "Interrupted");
@@ -586,7 +619,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                         // Auto-name the tab from the first user prompt
                         app.autoNameActiveTab(staged);
 
-                        if (app.acp_manager) |mgr| {
+                        if (app.getActiveAcpManager()) |mgr| {
                             if (mgr.status == .disconnected) {
                                 try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
                             } else if (mgr.status == .failed) {
@@ -626,7 +659,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                             app.autoNameActiveTab(text);
 
                             // Send to ACP agent (manager will queue if still connecting)
-                            if (app.acp_manager) |mgr| {
+                            if (app.getActiveAcpManager()) |mgr| {
                                 if (mgr.status == .disconnected) {
                                     try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
                                 } else if (mgr.status == .failed) {
@@ -807,7 +840,7 @@ fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []cons
 /// Poll running shell command for output. Returns true if there was activity.
 /// Called from the main event loop.
 pub fn pollRunningShellCommand(app: *App) bool {
-    const agent_state = &(app.state.agent_state orelse return false);
+    const agent_state = app.getActiveAgentState() orelse return false;
     var cmd = &(agent_state.running_shell_cmd orelse return false);
 
     var had_activity = false;
@@ -976,7 +1009,7 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
         agent_state.clearQueuedShellOutputs();
 
         // Reset and create a new ACP session
-        if (app.acp_manager) |mgr| {
+        if (app.getActiveAcpManager()) |mgr| {
             // First reset the existing session state
             mgr.resetSession();
 
@@ -1014,7 +1047,7 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
         const cwd = app.state.git_repo_root;
 
         // Determine which agent type we're using
-        const agent_type: sessions.AgentType = if (app.acp_manager) |mgr| blk: {
+        const agent_type: sessions.AgentType = if (app.getActiveAcpManager()) |mgr| blk: {
             if (mgr.agent_name) |name| {
                 // Check agent name to determine type
                 if (std.mem.indexOf(u8, name, "claude") != null or
@@ -1124,7 +1157,7 @@ fn updateFilePickerVisibility(_: *App, agent_state: *agent.AgentState) void {
 /// Also includes any queued shell command outputs as embedded resources.
 /// Falls back to simple text prompt if parsing fails or no files/shell outputs.
 fn sendPromptWithFiles(app: *App, mgr: *AcpManager, text: []const u8) !void {
-    const agent_state = &(app.state.agent_state orelse return);
+    const agent_state = app.getActiveAgentState() orelse return;
 
     // Take any queued shell outputs
     const queued_outputs_opt = agent_state.takeQueuedShellOutputs();
@@ -1231,7 +1264,7 @@ fn sendWithShellOutputsOnly(
     text: []const u8,
     queued_outputs: []const state.AgentState.QueuedShellOutput,
 ) !void {
-    const agent_state = &(app.state.agent_state orelse return);
+    const agent_state = app.getActiveAgentState() orelse return;
 
     // Build blocks: text + shell outputs
     const total_blocks = 1 + queued_outputs.len;
@@ -1521,4 +1554,50 @@ test "parsePromptContent multiple @file references" {
     try std.testing.expect(std.mem.endsWith(u8, parsed.blocks[1].embedded_resource.resource.uri, "/README.md"));
     try std.testing.expectEqualStrings(" and ", parsed.blocks[2].text.text);
     try std.testing.expect(std.mem.endsWith(u8, parsed.blocks[3].embedded_resource.resource.uri, "/build.zig"));
+}
+
+/// Execute an agent command palette action
+fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: command_palette.AgentCommandAction) !void {
+    switch (action) {
+        .new_tab => {
+            const tm = try app.ensureTabManager();
+            const new_tab = try tm.createTab("New Tab");
+
+            // Store tab ID for agent selection to target
+            app.state.pending_tab_for_selection = new_tab.id;
+
+            // Load configured agents if not already loaded
+            if (app.state.configured_agents == null) {
+                app.state.configured_agents = app.loadConfiguredAgents();
+            }
+
+            // Switch to agent selection mode to pick agent for this tab
+            app.mode = .agent_selection;
+        },
+        .close_tab => {
+            const tm = try app.ensureTabManager();
+            if (!tm.closeActiveTab()) {
+                try agent_state.addMessage(.system, "Cannot close last tab");
+            }
+        },
+        .next_tab => {
+            const tm = try app.ensureTabManager();
+            tm.nextTab();
+        },
+        .prev_tab => {
+            const tm = try app.ensureTabManager();
+            tm.prevTab();
+        },
+        .rename_tab => {
+            // Switch to rename input mode
+            agent_state.cmd_palette.startRenameInput();
+        },
+        .goto_tab => |n| {
+            const tm = try app.ensureTabManager();
+            tm.goToTabNumber(n);
+        },
+        .toggle_plan => {
+            agent_state.plan_expanded = !agent_state.plan_expanded;
+        },
+    }
 }

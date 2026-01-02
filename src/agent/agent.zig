@@ -14,6 +14,7 @@ pub const state = @import("state.zig");
 pub const input_editor = @import("input_editor.zig");
 pub const tab_manager = @import("tab_manager.zig");
 pub const render = @import("render.zig");
+pub const command_palette = @import("command_palette.zig");
 
 // Re-export main types for convenience
 pub const AgentState = state.AgentState;
@@ -22,6 +23,7 @@ pub const InputEditor = input_editor.InputEditor;
 pub const TabManager = tab_manager.TabManager;
 pub const AgentTab = tab_manager.AgentTab;
 pub const renderAgentPanel = render.renderAgentPanel;
+pub const AgentCommandPaletteState = command_palette.AgentCommandPaletteState;
 
 test {
     // Run all tests in submodules

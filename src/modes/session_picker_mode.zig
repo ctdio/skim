@@ -65,7 +65,7 @@ fn loadSelectedSession(app: *App) !void {
     const session_id = selected.id;
 
     // Get the ACP manager
-    const mgr = app.acp_manager orelse {
+    const mgr = app.getActiveAcpManager() orelse {
         freeSessionList(app);
         app.mode = .agent;
         return;
@@ -94,7 +94,7 @@ fn loadSelectedSession(app: *App) !void {
             // Use the proper resumeSession method (session/new with resume option)
             _ = acp_client.resumeSession(session_id, cwd, current_mode, current_model) catch |err| {
                 std.log.err("Session picker: failed to resume session: {any}", .{err});
-                if (app.state.agent_state) |*agent_state| {
+                if (app.getActiveAgentState()) |agent_state| {
                     agent_state.addMessage(
                         .system,
                         "Failed to resume session. The agent may not have this session in its history.",
@@ -125,7 +125,7 @@ fn loadSelectedSession(app: *App) !void {
             }
 
             // Session resumed successfully - display conversation history
-            if (app.state.agent_state) |*agent_state| {
+            if (app.getActiveAgentState()) |agent_state| {
                 // Clear existing messages and show history
                 agent_state.clearMessages();
 
@@ -144,7 +144,7 @@ fn loadSelectedSession(app: *App) !void {
                 std.log.info("Session picker: attempting fallback - injecting history as context", .{});
                 const injected = injectHistoryAsContext(app, selected) catch |fallback_err| {
                     std.log.err("Session picker: fallback also failed: {any}", .{fallback_err});
-                    if (app.state.agent_state) |*agent_state| {
+                    if (app.getActiveAgentState()) |agent_state| {
                         agent_state.addMessage(
                             .system,
                             "Could not load session. The agent doesn't support session resume and the session file couldn't be read.",
@@ -157,7 +157,7 @@ fn loadSelectedSession(app: *App) !void {
 
                 if (injected) {
                     // Display the history in the UI (context was already sent to agent)
-                    if (app.state.agent_state) |*agent_state| {
+                    if (app.getActiveAgentState()) |agent_state| {
                         agent_state.clearMessages();
                         displaySessionHistoryWithMode(app, selected, true) catch {
                             agent_state.addMessage(.system, "Session context sent (couldn't display history).") catch {};
@@ -170,7 +170,7 @@ fn loadSelectedSession(app: *App) !void {
             };
 
             // session/load succeeded
-            if (app.state.agent_state) |*agent_state| {
+            if (app.getActiveAgentState()) |agent_state| {
                 agent_state.addMessage(.system, "Session loaded successfully.") catch {};
             }
         }
@@ -189,7 +189,7 @@ fn displaySessionHistory(app: *App, session_info: sessions.SessionInfo) !void {
 /// Display conversation history with mode indicator
 /// context_injected: true if history was injected as context (not native resume)
 fn displaySessionHistoryWithMode(app: *App, session_info: sessions.SessionInfo, context_injected: bool) !void {
-    const agent_state = &(app.state.agent_state orelse return error.NoAgentState);
+    const agent_state = app.getActiveAgentState() orelse return error.NoAgentState;
 
     // Parse session file based on agent type
     const history = switch (session_info.agent_type) {
@@ -237,8 +237,8 @@ fn freeSessionList(app: *App) void {
 /// Fallback: inject conversation history as context to the agent
 /// This sends the previous conversation as a prompt so the agent has context
 fn injectHistoryAsContext(app: *App, session_info: sessions.SessionInfo) !bool {
-    const agent_state = &(app.state.agent_state orelse return error.NoAgentState);
-    const mgr = app.acp_manager orelse return error.NoAgentState;
+    const agent_state = app.getActiveAgentState() orelse return error.NoAgentState;
+    const mgr = app.getActiveAcpManager() orelse return error.NoAgentState;
 
     // Re-create a session since the previous attempt may have cleared it
     const cwd = if (session_info.project_path.len > 0) session_info.project_path else app.state.git_repo_root;

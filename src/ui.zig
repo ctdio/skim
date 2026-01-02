@@ -490,7 +490,7 @@ pub const UI = struct {
 
     pub fn renderModelSelectionDialog(app: *App, win: vaxis.Window) !void {
         // Get models from ACP manager
-        const mgr = app.acp_manager orelse return;
+        const mgr = app.getActiveAcpManager() orelse return;
         const models = mgr.getAvailableModels();
         const model_count = models.len;
         if (model_count == 0) return;
@@ -1006,7 +1006,7 @@ pub const UI = struct {
             .session_picker => "-- RESUME SESSION --",
             .agent => blk: {
                 // Show vim mode when in agent mode
-                if (app.state.agent_state) |agent_state| {
+                if (app.getActiveAgentStateConst()) |agent_state| {
                     break :blk switch (agent_state.input.vim.vim_mode) {
                         .normal => "-- NORMAL (agent) --",
                         .insert => "-- INSERT (agent) --",
@@ -1051,7 +1051,7 @@ pub const UI = struct {
             .agent_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .session_picker => "j/k:Move  |  Enter:Load  |  ESC:Cancel",
             .agent => blk: {
-                if (app.state.agent_state) |agent_state| {
+                if (app.getActiveAgentStateConst()) |agent_state| {
                     break :blk switch (agent_state.input.vim.vim_mode) {
                         .normal => "i:Insert  |  z:Full  |  q:Close  |  ,d:Diff",
                         .insert => "INSERT  |  Enter:Send  |  ESC:Normal",
