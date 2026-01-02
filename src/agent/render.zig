@@ -442,9 +442,12 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     const footer_height: usize = if (agent_state.full_screen) 1 else 0;
     const input_height: usize = 1 + visible_lines + footer_height; // Separator + visible lines + footer (if full-screen)
 
-    // Layout: title (1 row) + messages (variable) + status (conditional) + plan (conditional) + input area (dynamic)
+    // Calculate tab bar height (only shown when multiple tabs exist)
+    const tab_bar_height: usize = if (app.tab_manager) |tm| (if (tm.tabCount() > 1) @as(usize, 1) else 0) else 0;
+
+    // Layout: title (1 row) + tab bar (0 or 1) + messages (variable) + status (conditional) + plan (conditional) + input area (dynamic)
     const title_height: usize = 1;
-    const fixed_height = title_height + status_height + plan_height + input_height;
+    const fixed_height = title_height + tab_bar_height + status_height + plan_height + input_height;
     const messages_height = if (win.height > fixed_height)
         win.height - fixed_height
     else
@@ -456,10 +459,21 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     // Render title bar
     try renderTitleBar(app, win, is_focused);
 
+    // Render tab bar (if multiple tabs)
+    if (tab_bar_height > 0) {
+        const tab_bar_win = win.child(.{
+            .x_off = 0,
+            .y_off = @intCast(title_height),
+            .width = win.width,
+            .height = 1,
+        });
+        _ = renderTabBar(app, tab_bar_win);
+    }
+
     // Render message history
     const messages_win = win.child(.{
         .x_off = 0,
-        .y_off = @intCast(title_height),
+        .y_off = @intCast(title_height + tab_bar_height),
         .width = win.width,
         .height = @intCast(messages_height),
     });
@@ -469,7 +483,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     if (status_height > 0) {
         const status_win = win.child(.{
             .x_off = 0,
-            .y_off = @intCast(title_height + messages_height),
+            .y_off = @intCast(title_height + tab_bar_height + messages_height),
             .width = win.width,
             .height = @intCast(status_height),
         });
@@ -480,7 +494,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     if (plan_height > 0) {
         const plan_win = win.child(.{
             .x_off = 0,
-            .y_off = @intCast(title_height + messages_height + status_height),
+            .y_off = @intCast(title_height + tab_bar_height + messages_height + status_height),
             .width = win.width,
             .height = @intCast(plan_height),
         });
@@ -490,7 +504,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     // Render input area (or permission prompt if pending)
     const input_win = win.child(.{
         .x_off = 0,
-        .y_off = @intCast(title_height + messages_height + status_height + plan_height),
+        .y_off = @intCast(title_height + tab_bar_height + messages_height + status_height + plan_height),
         .width = win.width,
         .height = @intCast(input_height),
     });
@@ -498,12 +512,12 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 
     // Render slash command menu as overlay (if visible)
     if (agent_state.slash_menu_visible) {
-        try renderSlashMenu(win, agent_state, title_height + messages_height + status_height + plan_height);
+        try renderSlashMenu(win, agent_state, title_height + tab_bar_height + messages_height + status_height + plan_height);
     }
 
     // Render file picker menu as overlay (if visible)
     if (agent_state.file_picker.visible) {
-        try renderFilePicker(win, agent_state, title_height + messages_height + status_height + plan_height);
+        try renderFilePicker(win, agent_state, title_height + tab_bar_height + messages_height + status_height + plan_height);
     }
 }
 
@@ -572,6 +586,120 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
         .{ .text = status_text, .style = status_style },
     };
     _ = win.print(&status_seg, .{ .row_offset = 0, .col_offset = @intCast(status_col) });
+}
+
+/// Render the tab bar when multiple tabs exist
+/// Returns true if tab bar was rendered, false if skipped (single tab)
+fn renderTabBar(app: *App, win: vaxis.Window) bool {
+    const tm = app.tab_manager orelse return false;
+
+    // Don't show tab bar for single tab
+    if (tm.tabCount() <= 1) return false;
+
+    // Clear the row
+    for (0..win.width) |col| {
+        win.writeCell(@intCast(col), 0, .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{ .bg = .{ .index = 0 } },
+        });
+    }
+
+    const active_idx = tm.active_idx;
+    var col: usize = 1;
+
+    for (tm.tabs.items, 0..) |*tab, idx| {
+        if (col >= win.width - 2) break;
+
+        const is_active = idx == active_idx;
+
+        // Tab style: active tab is highlighted
+        const tab_style: vaxis.Style = if (is_active) .{
+            .fg = .{ .index = 0 }, // black text
+            .bg = .{ .index = 6 }, // cyan background
+            .bold = true,
+        } else .{
+            .fg = .{ .index = 7 }, // white text
+            .bg = .{ .index = 8 }, // gray background
+        };
+
+        const sep_style = vaxis.Style{ .fg = .{ .index = 8 } };
+
+        // Calculate tab width: " name " (with padding)
+        const name_len = @min(tab.name.len, 15); // Truncate long names
+        const tab_width = name_len + 2; // Space on each side
+
+        // Check if tab has activity (thinking or permission)
+        const has_activity = tab.isThinking();
+        const has_permission = tab.hasPendingPermission();
+
+        // Draw tab content
+        if (col + tab_width < win.width) {
+            // Leading space
+            win.writeCell(@intCast(col), 0, .{
+                .char = .{ .grapheme = " ", .width = 1 },
+                .style = tab_style,
+            });
+            col += 1;
+
+            // Tab name (truncated)
+            for (tab.name[0..name_len]) |c| {
+                if (col >= win.width - 1) break;
+                var char_buf: [1]u8 = .{c};
+                win.writeCell(@intCast(col), 0, .{
+                    .char = .{ .grapheme = &char_buf, .width = 1 },
+                    .style = tab_style,
+                });
+                col += 1;
+            }
+
+            // Activity indicator (if not active tab)
+            if (!is_active and (has_activity or has_permission)) {
+                const indicator: []const u8 = if (has_permission) "!" else "*";
+                const indicator_style: vaxis.Style = if (has_permission)
+                    .{ .fg = .{ .index = 3 }, .bg = tab_style.bg, .bold = true } // yellow
+                else
+                    .{ .fg = .{ .index = 6 }, .bg = tab_style.bg }; // cyan
+                win.writeCell(@intCast(col), 0, .{
+                    .char = .{ .grapheme = indicator, .width = 1 },
+                    .style = indicator_style,
+                });
+            } else {
+                // Trailing space
+                win.writeCell(@intCast(col), 0, .{
+                    .char = .{ .grapheme = " ", .width = 1 },
+                    .style = tab_style,
+                });
+            }
+            col += 1;
+
+            // Separator between tabs
+            if (idx < tm.tabs.items.len - 1 and col < win.width) {
+                win.writeCell(@intCast(col), 0, .{
+                    .char = .{ .grapheme = "│", .width = 1 },
+                    .style = sep_style,
+                });
+                col += 1;
+            }
+        }
+    }
+
+    // Show tab count and keybinding hint on the right
+    var hint_buf: [32]u8 = undefined;
+    const hint = std.fmt.bufPrint(&hint_buf, " {d}/{d} ", .{ active_idx + 1, tm.tabCount() }) catch " ";
+    const hint_len = hint.len;
+    const hint_col = if (win.width > hint_len) win.width - hint_len else 0;
+
+    const hint_style = vaxis.Style{ .fg = .{ .index = 8 } };
+    for (hint, 0..) |c, i| {
+        if (hint_col + i >= win.width) break;
+        var char_buf: [1]u8 = .{c};
+        win.writeCell(@intCast(hint_col + i), 0, .{
+            .char = .{ .grapheme = &char_buf, .width = 1 },
+            .style = hint_style,
+        });
+    }
+
+    return true;
 }
 
 fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void {

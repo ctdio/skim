@@ -156,6 +156,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // Add to message history
                 try agent_state.addMessage(.user, text);
 
+                // Auto-name the tab from the first user prompt
+                app.autoNameActiveTab(text);
+
                 // Send to ACP agent
                 if (app.acp_manager) |mgr| {
                     if (mgr.status == .disconnected) {
@@ -248,7 +251,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Vim navigation in normal mode: 'gg' to scroll to top, 'G' to scroll to bottom
     if (agent_state.input.vim.vim_mode == .normal) {
-        // Handle 'gg' sequence
+        // Handle 'gg' and 'gt'/'gT' sequences
         if (app.state.pending_g) {
             app.state.pending_g = false;
             if (key.codepoint == 'g') {
@@ -258,6 +261,24 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.needs_render = true;
                 return;
             }
+            if (key.codepoint == 't') {
+                // gt - next tab
+                if (app.tab_manager) |*tm| {
+                    tm.nextTab();
+                    app.needs_render = true;
+                }
+                return;
+            }
+            if (key.codepoint == 'T') {
+                // gT - previous tab
+                if (app.tab_manager) |*tm| {
+                    tm.prevTab();
+                    app.needs_render = true;
+                }
+                return;
+            }
+            // Unknown g-sequence, ignore
+            return;
         } else if (key.codepoint == 'g' and !key.mods.ctrl and !key.mods.alt) {
             // First 'g' - wait for second
             app.state.pending_g = true;
@@ -321,6 +342,87 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // Cycle windows: always return to diff
                 app.mode = .normal;
                 app.needs_render = true;
+                return;
+            },
+            else => {},
+        }
+        return;
+    }
+
+    // Leader key (\) for tab management in normal vim mode
+    if (agent_state.input.vim.vim_mode == .normal and key.codepoint == '\\' and !key.mods.ctrl and !key.mods.alt) {
+        app.state.pending_leader = true;
+        return;
+    }
+
+    // Handle pending leader key sequence
+    if (app.state.pending_leader) {
+        app.state.pending_leader = false;
+        // ESC cancels pending leader
+        if (key.codepoint == 27) {
+            return;
+        }
+
+        switch (key.codepoint) {
+            't' => {
+                // \t - create new tab
+                if (app.tab_manager) |*tm| {
+                    _ = tm.createTab("New Tab") catch |err| {
+                        std.log.err("Failed to create tab: {any}", .{err});
+                        return;
+                    };
+                    app.needs_render = true;
+                }
+                return;
+            },
+            'q' => {
+                // \q - close current tab (unless last)
+                if (app.tab_manager) |*tm| {
+                    if (!tm.closeActiveTab()) {
+                        // Cannot close last tab - show message
+                        if (app.getActiveAgentState()) |as| {
+                            as.addMessage(.system, "Cannot close last tab") catch {};
+                        }
+                    }
+                    app.needs_render = true;
+                }
+                return;
+            },
+            'r' => {
+                // \r - rename tab using current input text
+                if (app.tab_manager) |*tm| {
+                    if (tm.activeTab()) |tab| {
+                        // Use current input as new name
+                        const input_text = agent_state.input.getText();
+                        if (input_text.len > 0) {
+                            const trimmed = std.mem.trim(u8, input_text, &std.ascii.whitespace);
+                            if (trimmed.len > 0) {
+                                tab.setName(trimmed) catch |err| {
+                                    std.log.err("Failed to rename tab: {any}", .{err});
+                                    return;
+                                };
+                                tab.auto_named = false; // Mark as manually named
+                                agent_state.input.clear();
+                                app.needs_render = true;
+                            }
+                        } else {
+                            // No input - show hint
+                            if (app.getActiveAgentState()) |as| {
+                                as.addMessage(.system, "Type a name first, then press \\r to rename") catch {};
+                            }
+                            app.needs_render = true;
+                        }
+                    }
+                }
+                return;
+            },
+            '1', '2', '3', '4', '5', '6', '7', '8', '9' => {
+                // \N - go to tab N (1-indexed)
+                if (app.tab_manager) |*tm| {
+                    const tab_num = key.codepoint - '0';
+                    tm.goToTabNumber(tab_num);
+                    app.needs_render = true;
+                }
                 return;
             },
             else => {},
@@ -481,6 +583,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                         const staged = agent_state.getStagedPrompt();
                         try agent_state.addMessage(.user, staged);
 
+                        // Auto-name the tab from the first user prompt
+                        app.autoNameActiveTab(staged);
+
                         if (app.acp_manager) |mgr| {
                             if (mgr.status == .disconnected) {
                                 try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
@@ -516,6 +621,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                             // Agent not thinking - send normally
                             // Add user message to history
                             try agent_state.addMessage(.user, text);
+
+                            // Auto-name the tab from the first user prompt
+                            app.autoNameActiveTab(text);
 
                             // Send to ACP agent (manager will queue if still connecting)
                             if (app.acp_manager) |mgr| {

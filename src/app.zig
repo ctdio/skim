@@ -104,11 +104,12 @@ pub const App = struct {
     mcp: ?*mcp_client.McpClient, // MCP client for server connection
     mcp_port: ?u16, // Port to connect to MCP server
     blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
-    acp_manager: ?*acp.AcpManager, // ACP agent session manager
+    acp_manager: ?*acp.AcpManager, // ACP agent session manager (legacy - use tab_manager for new code)
     acp_connect_thread: ?std.Thread, // Background thread for ACP connection
     acp_connect_ctx: ?*AcpConnectContext, // Context for ACP connection thread (freed after join)
     in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
     agent_only: bool, // Start in agent-only mode (no diff view)
+    tab_manager: ?agent.TabManager, // Multi-tab agent manager
 
     const Mode = enum {
         normal, // Normal navigation and viewing
@@ -447,6 +448,7 @@ pub const App = struct {
             .acp_connect_ctx = null,
             .in_bracketed_paste = false,
             .agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false,
+            .tab_manager = null, // Lazy initialization on first agent panel open
         };
 
         // Graphite detection is lazy - happens on first access to avoid blocking startup
@@ -525,6 +527,10 @@ pub const App = struct {
             mgr.deinit();
             self.allocator.destroy(mgr);
         }
+        // Clean up tab manager
+        if (self.tab_manager) |*tm| {
+            tm.deinit();
+        }
         // Clean up blame cache
         var blame_iter = self.blame_cache.iterator();
         while (blame_iter.next()) |entry| {
@@ -535,6 +541,133 @@ pub const App = struct {
         self.syntax_highlighter.deinit();
         self.vx.deinit(self.allocator, self.tty.writer());
         self.tty.deinit();
+    }
+
+    // =========================================================================
+    // Tab Manager Helpers
+    // =========================================================================
+
+    /// Get the active agent state (from tab_manager if available, else legacy agent_state)
+    pub fn getActiveAgentState(self: *App) ?*agent.AgentState {
+        if (self.tab_manager) |*tm| {
+            if (tm.activeTab()) |tab| {
+                return &tab.agent_state;
+            }
+        }
+        if (self.state.agent_state) |*as| {
+            return as;
+        }
+        return null;
+    }
+
+    /// Get the active agent state (const version)
+    pub fn getActiveAgentStateConst(self: *const App) ?*const agent.AgentState {
+        if (self.tab_manager) |tm| {
+            if (tm.activeTabConst()) |tab| {
+                return &tab.agent_state;
+            }
+        }
+        if (self.state.agent_state) |*as| {
+            return as;
+        }
+        return null;
+    }
+
+    /// Get the active ACP manager (from tab_manager if available, else legacy acp_manager)
+    pub fn getActiveAcpManager(self: *App) ?*acp.AcpManager {
+        if (self.tab_manager) |*tm| {
+            if (tm.activeTab()) |tab| {
+                return tab.acp_manager;
+            }
+        }
+        return self.acp_manager;
+    }
+
+    /// Check if agent panel is visible
+    pub fn isAgentPanelVisible(self: *const App) bool {
+        if (self.tab_manager) |tm| {
+            return tm.panel_visible;
+        }
+        if (self.state.agent_state) |as| {
+            return as.visible;
+        }
+        return false;
+    }
+
+    /// Check if agent panel is in full-screen mode
+    pub fn isAgentFullScreen(self: *const App) bool {
+        if (self.tab_manager) |tm| {
+            return tm.full_screen;
+        }
+        if (self.state.agent_state) |as| {
+            return as.full_screen;
+        }
+        return false;
+    }
+
+    /// Get the agent panel side
+    pub fn getAgentPanelSide(self: *const App) agent.AgentState.PanelSide {
+        if (self.tab_manager) |tm| {
+            return tm.panel_side;
+        }
+        if (self.state.agent_state) |as| {
+            return as.panel_side;
+        }
+        return .right;
+    }
+
+    /// Initialize tab manager if not already initialized
+    pub fn ensureTabManager(self: *App) !*agent.TabManager {
+        if (self.tab_manager == null) {
+            const config = app_config.load(self.allocator) catch app_config.Config{};
+            const panel_side: agent.AgentState.PanelSide = switch (config.agent_panel_side) {
+                .left => .left,
+                .right => .right,
+            };
+            self.tab_manager = agent.TabManager.init(self.allocator, panel_side);
+        }
+        return &(self.tab_manager.?);
+    }
+
+    /// Check if any ACP manager (across all tabs) has pending output
+    pub fn hasAnyAcpActivity(self: *const App) bool {
+        // Check tab managers first
+        if (self.tab_manager) |tm| {
+            for (tm.tabs.items) |*tab| {
+                if (tab.acp_manager) |mgr| {
+                    if (mgr.hasPendingOutput()) return true;
+                }
+            }
+        }
+        // Also check legacy acp_manager
+        if (self.acp_manager) |mgr| {
+            if (mgr.hasPendingOutput()) return true;
+        }
+        return false;
+    }
+
+    /// Check if any tab has a running shell command
+    pub fn hasAnyRunningShellCommand(self: *const App) bool {
+        // Check tab managers first
+        if (self.tab_manager) |tm| {
+            for (tm.tabs.items) |*tab| {
+                if (tab.agent_state.hasRunningShellCommand()) return true;
+            }
+        }
+        // Also check legacy agent_state
+        if (self.state.agent_state) |as| {
+            if (as.hasRunningShellCommand()) return true;
+        }
+        return false;
+    }
+
+    /// Auto-name the active tab from the user's first prompt
+    pub fn autoNameActiveTab(self: *App, prompt: []const u8) void {
+        if (self.tab_manager) |*tm| {
+            if (tm.activeTab()) |tab| {
+                tab.autoNameFromPrompt(prompt) catch {};
+            }
+        }
     }
 
     pub fn refresh(self: *App) !void {
@@ -765,9 +898,10 @@ pub const App = struct {
             const stats_loading = self.state.menu_stats_loading;
             // Only consider ACP "active" when agent has pending output to display
             // This allows blocking pollEvent() when agent is idle/connected but not producing data
-            const acp_active = if (self.acp_manager) |mgr| mgr.hasPendingOutput() else false;
-            // Check if a shell command is running (needs streaming output)
-            const shell_cmd_running = if (self.state.agent_state) |*as| as.hasRunningShellCommand() else false;
+            // Check all tabs for activity (multi-tab support)
+            const acp_active = self.hasAnyAcpActivity();
+            // Check if a shell command is running (needs streaming output) - check all tabs
+            const shell_cmd_running = self.hasAnyRunningShellCommand();
             // Check if ACP connection thread is running (need to poll for completion)
             const acp_connecting = self.acp_connect_thread != null;
             const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !stats_loading and !acp_active and !shell_cmd_running and !acp_connecting;
@@ -826,12 +960,26 @@ pub const App = struct {
             self.clearExpiredStatusMessage();
 
             // Poll ACP agent for updates (only when there's an active connection or thread)
-            if (self.acp_connect_thread != null or self.acp_manager != null) {
+            // Check tabs too for multi-tab support
+            const has_tab_acp = if (self.tab_manager) |tm| blk: {
+                for (tm.tabs.items) |*tab| {
+                    if (tab.acp_manager != null) break :blk true;
+                }
+                break :blk false;
+            } else false;
+
+            if (self.acp_connect_thread != null or self.acp_manager != null or has_tab_acp) {
                 self.pollAcpUpdates();
 
                 // Force re-render while agent is discovering/connecting/thinking
                 // This keeps the UI responsive during connection
                 if (self.acp_manager) |mgr| {
+                    if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected or mgr.status == .prompting) {
+                        self.needs_render = true;
+                    }
+                }
+                // Also check active tab's manager
+                if (self.getActiveAcpManager()) |mgr| {
                     if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected or mgr.status == .prompting) {
                         self.needs_render = true;
                     }
@@ -1243,26 +1391,33 @@ pub const App = struct {
             return;
         }
 
-        // Initialize agent state if first time opening
+        // Initialize tab manager and ensure we have at least one tab
+        const tm = try self.ensureTabManager();
+        const tab = try tm.ensureTab();
+        var agent_state = &tab.agent_state;
+
+        // Also keep legacy agent_state in sync for compatibility during transition
         if (self.state.agent_state == null) {
-            // Load panel side from config
-            const config = app_config.load(self.allocator) catch app_config.Config{};
-            const panel_side: agent.AgentState.PanelSide = switch (config.agent_panel_side) {
-                .left => .left,
-                .right => .right,
-            };
-            self.state.agent_state = agent.AgentState.init(self.allocator, panel_side);
+            self.state.agent_state = agent.AgentState.init(self.allocator, tm.panel_side);
         }
 
-        var agent_state = &(self.state.agent_state.?);
-
-        if (agent_state.visible) {
+        if (tm.panel_visible) {
             // Hide panel, return to normal mode
+            tm.panel_visible = false;
             agent_state.visible = false;
+            // Keep legacy in sync
+            if (self.state.agent_state) |*as| {
+                as.visible = false;
+            }
             self.mode = .normal;
         } else {
             // Show panel, enter agent mode
+            tm.panel_visible = true;
             agent_state.visible = true;
+            // Keep legacy in sync
+            if (self.state.agent_state) |*as| {
+                as.visible = true;
+            }
             self.mode = .agent;
 
             // Re-enable scroll following when reopening panel
@@ -3347,10 +3502,20 @@ pub const App = struct {
             return;
         }
 
-        // Check if already connected
-        if (self.acp_manager) |mgr| {
+        // Check if already connected (check active tab first, then legacy)
+        const active_acp = self.getActiveAcpManager();
+        if (active_acp) |mgr| {
             if (mgr.isConnected()) {
                 std.log.info("ACP: Already connected", .{});
+                self.showStatusMessage("Agent already connected");
+                return;
+            }
+        }
+
+        // Also check legacy acp_manager (used during connection before transfer to tab)
+        if (self.acp_manager) |mgr| {
+            if (mgr.isConnected()) {
+                std.log.info("ACP: Already connected (legacy)", .{});
                 self.showStatusMessage("Agent already connected");
                 return;
             }
@@ -3369,7 +3534,7 @@ pub const App = struct {
         const agents = self.state.configured_agents orelse {
             // No agents configured - show error in agent panel and stay in agent mode
             std.log.warn("ACP: No agents configured in ~/.skim/config.json", .{});
-            if (self.state.agent_state) |*agent_state| {
+            if (self.getActiveAgentState()) |agent_state| {
                 agent_state.addMessage(.system, "No agents configured. Add agents to ~/.skim/config.json") catch {};
             }
             return;
@@ -3378,7 +3543,7 @@ pub const App = struct {
         // Decision logic for agent selection
         if (agents.len == 0) {
             std.log.warn("ACP: Empty agents list in config", .{});
-            if (self.state.agent_state) |*agent_state| {
+            if (self.getActiveAgentState()) |agent_state| {
                 agent_state.addMessage(.system, "No agents configured. Add agents to ~/.skim/config.json") catch {};
             }
             return;
@@ -3558,7 +3723,7 @@ pub const App = struct {
                         self.showStatusMessage(msg);
 
                         // Add welcome message to agent chat with model info
-                        if (self.state.agent_state) |*agent_state| {
+                        if (self.getActiveAgentState()) |agent_state| {
                             const welcome_msg = if (model_name.len > 0)
                                 std.fmt.allocPrint(self.allocator, "Connected to {s} · {s}. You can start chatting!", .{ agent_name, model_name }) catch "Connected! You can start chatting."
                             else
@@ -3567,12 +3732,27 @@ pub const App = struct {
                             agent_state.addMessage(.system, welcome_msg) catch {};
                         }
 
+                        // Transfer manager to active tab (for multi-tab support)
+                        if (self.tab_manager) |*tm| {
+                            if (tm.activeTab()) |tab| {
+                                // Clean up any existing manager on tab
+                                if (tab.acp_manager) |old_mgr| {
+                                    old_mgr.deinit();
+                                    self.allocator.destroy(old_mgr);
+                                }
+                                // Transfer ownership
+                                tab.acp_manager = mgr;
+                                self.acp_manager = null;
+                                std.log.info("ACP: Transferred manager to tab {d}", .{tab.id});
+                            }
+                        }
+
                         // Send any prompts that were queued while connecting
                         mgr.sendNextQueuedPrompt();
                     } else if (mgr.status == .failed) {
                         self.showStatusMessage("Failed to connect to agent");
                         // Add error message to chat history so user can see what happened
-                        if (self.state.agent_state) |*agent_state| {
+                        if (self.getActiveAgentState()) |agent_state| {
                             agent_state.addMessage(.system, "Connection failed. Press 'a' to close this panel and try again.") catch {};
                         }
                         // Clean up failed manager
@@ -3592,8 +3772,24 @@ pub const App = struct {
             return;
         }
 
-        const mgr = self.acp_manager orelse return;
+        // Poll all tabs for ACP updates (multi-tab support)
+        if (self.tab_manager) |*tm| {
+            for (tm.tabs.items, 0..) |*tab, tab_idx| {
+                const tab_mgr = tab.acp_manager orelse continue;
+                self.pollTabAcpManager(tab_mgr, &tab.agent_state, tab_idx == tm.active_idx);
+            }
+        }
 
+        // Also poll legacy acp_manager if still in use (single-tab fallback)
+        if (self.acp_manager) |mgr| {
+            if (self.getActiveAgentState()) |agent_state| {
+                self.pollTabAcpManager(mgr, agent_state, true);
+            }
+        }
+    }
+
+    /// Poll a single ACP manager and route messages to its agent state
+    fn pollTabAcpManager(self: *App, mgr: *acp.AcpManager, agent_state: *agent.AgentState, is_active_tab: bool) void {
         // Track status before polling to detect when agent finishes
         const status_before = mgr.status;
 
@@ -3610,105 +3806,78 @@ pub const App = struct {
         for (messages) |msg| {
             switch (msg.kind) {
                 .agent_text => {
-                    // Forward to agent state message history
-                    if (self.state.agent_state) |*agent_state| {
-                        agent_state.appendToLastAgentMessage(msg.text) catch {};
-                    }
-
+                    agent_state.appendToLastAgentMessage(msg.text) catch {};
                     self.needs_render = true;
                 },
                 .agent_thinking => {
-                    // Forward to agent state as thinking message
-                    if (self.state.agent_state) |*agent_state| {
-                        agent_state.appendToLastThinkingMessage(msg.text) catch {};
-                    }
+                    agent_state.appendToLastThinkingMessage(msg.text) catch {};
                     self.needs_render = true;
                 },
                 .tool_call => {
-                    // Forward to agent state with full tool info
-                    if (self.state.agent_state) |*agent_state| {
-                        agent_state.addToolMessage(
-                            msg.tool_call_id orelse "",
-                            msg.tool_name,
-                            msg.text,
-                            msg.tool_command,
-                        ) catch {};
-                    }
-
+                    agent_state.addToolMessage(
+                        msg.tool_call_id orelse "",
+                        msg.tool_name,
+                        msg.text,
+                        msg.tool_command,
+                    ) catch {};
                     self.needs_render = true;
                 },
                 .tool_update => {
-                    // Update existing tool message with status and output
-                    std.log.info("APP: tool_update id={?s} status={s} stdout_len={?d}", .{
-                        msg.tool_call_id,
-                        @tagName(msg.tool_status),
-                        if (msg.tool_stdout) |s| s.len else null,
-                    });
-                    if (self.state.agent_state) |*agent_state| {
-                        const status: agent.Message.ToolStatus = switch (msg.tool_status) {
-                            .pending => .pending,
-                            .in_progress => .running,
-                            .completed => .completed,
-                            .failed => .failed,
-                        };
-                        agent_state.updateToolMessage(
-                            msg.tool_call_id orelse "",
-                            status,
-                            msg.tool_stdout,
-                            msg.tool_stderr,
-                        ) catch {};
+                    if (is_active_tab) {
+                        std.log.info("APP: tool_update id={?s} status={s} stdout_len={?d}", .{
+                            msg.tool_call_id,
+                            @tagName(msg.tool_status),
+                            if (msg.tool_stdout) |s| s.len else null,
+                        });
                     }
-
+                    const status: agent.Message.ToolStatus = switch (msg.tool_status) {
+                        .pending => .pending,
+                        .in_progress => .running,
+                        .completed => .completed,
+                        .failed => .failed,
+                    };
+                    agent_state.updateToolMessage(
+                        msg.tool_call_id orelse "",
+                        status,
+                        msg.tool_stdout,
+                        msg.tool_stderr,
+                    ) catch {};
                     self.needs_render = true;
                 },
                 .tool_diff => {
-                    // Forward diff to agent state
-                    if (self.state.agent_state) |*agent_state| {
-                        agent_state.addDiffMessage(
-                            msg.text,
-                            msg.diff_path orelse "",
-                            msg.diff_old orelse "",
-                            msg.diff_new orelse "",
-                        ) catch |err| {
-                            std.log.err("Failed to add diff message: {any}", .{err});
-                        };
-                    }
-
+                    agent_state.addDiffMessage(
+                        msg.text,
+                        msg.diff_path orelse "",
+                        msg.diff_old orelse "",
+                        msg.diff_new orelse "",
+                    ) catch |err| {
+                        std.log.err("Failed to add diff message: {any}", .{err});
+                    };
                     self.needs_render = true;
                 },
                 .error_msg => {
-                    // Forward to agent state
-                    if (self.state.agent_state) |*agent_state| {
-                        const err_msg = std.fmt.allocPrint(self.allocator, "[Error: {s}]", .{msg.text}) catch "[Error]";
-                        defer self.allocator.free(err_msg);
-                        agent_state.addMessage(.system, err_msg) catch {};
-                    }
-
+                    const err_msg = std.fmt.allocPrint(self.allocator, "[Error: {s}]", .{msg.text}) catch "[Error]";
+                    defer self.allocator.free(err_msg);
+                    agent_state.addMessage(.system, err_msg) catch {};
                     self.needs_render = true;
                 },
                 .plan_update => {
-                    // Update agent plan
-                    if (self.state.agent_state) |*agent_state| {
-                        if (msg.plan_entries) |entries| {
+                    if (msg.plan_entries) |entries| {
+                        if (is_active_tab) {
                             std.log.debug("plan_update: received {d} entries", .{entries.len});
-                            agent_state.updatePlan(entries) catch |err| {
-                                std.log.err("plan_update: updatePlan failed: {}", .{err});
-                            };
                         }
+                        agent_state.updatePlan(entries) catch |err| {
+                            std.log.err("plan_update: updatePlan failed: {}", .{err});
+                        };
                     }
-
                     self.needs_render = true;
                 },
                 .commands_update => {
-                    // Update available slash commands
-                    if (self.state.agent_state) |*agent_state| {
-                        if (msg.available_commands) |commands| {
-                            agent_state.updateAvailableCommands(commands) catch {};
-                        }
+                    if (msg.available_commands) |commands| {
+                        agent_state.updateAvailableCommands(commands) catch {};
                     }
                     self.needs_render = true;
                 },
-                // Note: If agent doesn't send commands, we add mock ones in startAcpSession
             }
         }
 
@@ -3717,31 +3886,31 @@ pub const App = struct {
 
         // Check if agent just finished responding and there's a staged message to send
         // The condition: agent is idle (session_active) and no pending prompt request
-        const has_staged = if (self.state.agent_state) |as| as.hasStagedPrompt() else false;
+        const has_staged = agent_state.hasStagedPrompt();
         const agent_idle = mgr.status == .session_active and mgr.pending_prompt_id == null;
 
         if (has_staged and agent_idle) {
-            if (self.state.agent_state) |*agent_state| {
-                // Take and send the staged message
-                if (agent_state.takeStagedPrompt()) |staged| {
+            // Take and send the staged message
+            if (agent_state.takeStagedPrompt()) |staged| {
+                if (is_active_tab) {
                     std.log.info("Agent: Auto-sending staged message ({d} bytes)", .{staged.len});
-
-                    // Add to message history
-                    agent_state.addMessage(.user, staged) catch {};
-
-                    // Send to agent
-                    const prompt_copy = self.allocator.dupe(u8, staged) catch return;
-                    defer self.allocator.free(prompt_copy);
-
-                    mgr.sendPrompt(prompt_copy) catch |err| {
-                        std.log.err("Agent: Failed to send staged prompt: {any}", .{err});
-                        agent_state.addMessage(.system, "Failed to send staged message") catch {};
-                    };
-
-                    self.needs_render = true;
                 }
+
+                // Add to message history
+                agent_state.addMessage(.user, staged) catch {};
+
+                // Send to agent
+                const prompt_copy = self.allocator.dupe(u8, staged) catch return;
+                defer self.allocator.free(prompt_copy);
+
+                mgr.sendPrompt(prompt_copy) catch |err| {
+                    std.log.err("Agent: Failed to send staged prompt: {any}", .{err});
+                    agent_state.addMessage(.system, "Failed to send staged message") catch {};
+                };
+
+                self.needs_render = true;
             }
-        } else if (has_staged) {
+        } else if (has_staged and is_active_tab) {
             // Debug: log why we're not sending (agent not idle yet)
             std.log.debug("Agent: Staged message waiting (status={}, pending_id={?})", .{
                 @intFromEnum(mgr.status),
