@@ -602,12 +602,14 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
     // Don't show tab bar for single tab
     if (tm.tabCount() <= 1) return false;
 
-    // Fill background with dim color
-    const bg_cell = vaxis.Cell{
-        .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{ .bg = .{ .index = 8 } }, // gray background like vim tabline
-    };
-    win.fill(bg_cell);
+    // Fill background with dim color - explicitly fill each cell
+    const bg_style = vaxis.Style{ .bg = .{ .index = 8 } }; // gray background like vim tabline
+    for (0..win.width) |x| {
+        win.writeCell(@intCast(x), 0, .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = bg_style,
+        });
+    }
 
     const active_idx = tm.active_idx;
     var col: usize = 0;
