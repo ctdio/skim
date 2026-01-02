@@ -73,8 +73,10 @@ pub const AgentTab = struct {
     /// Auto-name the tab from the first user prompt (if still using default name)
     /// Truncates to MAX_TAB_NAME_LEN and adds "..." if needed
     pub fn autoNameFromPrompt(self: *AgentTab, prompt: []const u8) !void {
-        // Only auto-name if still using default name and not already auto-named
-        if (self.auto_named or !std.mem.eql(u8, self.name, DEFAULT_TAB_NAME)) {
+        // Only auto-name if still using default name ("Session N") and not already auto-named
+        const is_default_name = std.mem.eql(u8, self.name, DEFAULT_TAB_NAME) or
+            std.mem.startsWith(u8, self.name, "Session ");
+        if (self.auto_named or !is_default_name) {
             return;
         }
 
@@ -167,6 +169,7 @@ pub const TabManager = struct {
     }
 
     /// Create a new tab with the given name
+    /// If name is DEFAULT_TAB_NAME, generates "Session N" instead
     pub fn createTab(self: *TabManager, name: []const u8) !*AgentTab {
         if (self.tabs.items.len >= MAX_TABS) {
             return error.TooManyTabs;
@@ -175,7 +178,14 @@ pub const TabManager = struct {
         const id = self.next_id;
         self.next_id += 1;
 
-        const tab = try AgentTab.init(self.allocator, id, name, self.panel_side);
+        // Generate "Session N" for default tabs
+        var name_buf: [32]u8 = undefined;
+        const actual_name = if (std.mem.eql(u8, name, DEFAULT_TAB_NAME))
+            std.fmt.bufPrint(&name_buf, "Session {d}", .{id}) catch name
+        else
+            name;
+
+        const tab = try AgentTab.init(self.allocator, id, actual_name, self.panel_side);
         try self.tabs.append(self.allocator, tab);
 
         // Switch to the new tab
