@@ -603,7 +603,7 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
     if (tm.tabCount() <= 1) return false;
 
     // Fill background with dim color - explicitly fill each cell
-    const bg_style = vaxis.Style{ .bg = .{ .index = 8 } }; // gray background like vim tabline
+    const bg_style = vaxis.Style{ .bg = .{ .index = 240 } }; // medium gray background
     for (0..win.width) |x| {
         win.writeCell(@intCast(x), 0, .{
             .char = .{ .grapheme = " ", .width = 1 },
@@ -619,14 +619,14 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
 
         const is_active = idx == active_idx;
 
-        // Vim-style: active tab has no background (normal), inactive has gray bg
+        // Active tab: darker gray (236) background, inactive: lighter gray (240)
         const tab_style: vaxis.Style = if (is_active) .{
-            .fg = .{ .index = 7 }, // white text
-            .bg = .{ .index = 0 }, // black background (stands out)
+            .fg = .{ .index = 15 }, // bright white text
+            .bg = .{ .index = 236 }, // dark gray (from 256 palette)
             .bold = true,
         } else .{
             .fg = .{ .index = 7 }, // white text
-            .bg = .{ .index = 8 }, // gray background
+            .bg = .{ .index = 240 }, // medium gray (from 256 palette)
         };
 
         // Check if tab has activity (thinking or permission)
@@ -665,7 +665,7 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
         // Separator between tabs (vim-style |)
         if (idx + 1 < tm.tabs.items.len and col < win.width) {
             var sep_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "|", .style = .{ .fg = .{ .index = 8 }, .bg = .{ .index = 8 } } },
+                .{ .text = "|", .style = .{ .fg = .{ .index = 240 }, .bg = .{ .index = 240 } } },
             };
             _ = win.print(&sep_seg, .{ .col_offset = @intCast(col) });
             col += 1;
@@ -678,7 +678,7 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
     const hint_col = if (win.width > hint.len) win.width - hint.len else 0;
 
     var hint_seg = [_]vaxis.Cell.Segment{
-        .{ .text = hint, .style = .{ .fg = .{ .index = 7 }, .bg = .{ .index = 8 } } },
+        .{ .text = hint, .style = .{ .fg = .{ .index = 7 }, .bg = .{ .index = 240 } } },
     };
     _ = win.print(&hint_seg, .{ .col_offset = @intCast(hint_col) });
 
