@@ -594,7 +594,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     _ = win.print(&status_seg, .{ .row_offset = 0, .col_offset = @intCast(status_col) });
 }
 
-/// Render the tab bar when multiple tabs exist
+/// Render the tab bar when multiple tabs exist (vim-style)
 /// Returns true if tab bar was rendered, false if skipped (single tab)
 fn renderTabBar(app: *App, win: vaxis.Window) bool {
     const tm = app.tab_manager orelse return false;
@@ -602,108 +602,83 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
     // Don't show tab bar for single tab
     if (tm.tabCount() <= 1) return false;
 
-    // Clear the row
-    for (0..win.width) |col| {
-        win.writeCell(@intCast(col), 0, .{
-            .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = .{ .index = 0 } },
-        });
-    }
+    // Fill background with dim color
+    const bg_cell = vaxis.Cell{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{ .bg = .{ .index = 8 } }, // gray background like vim tabline
+    };
+    win.fill(bg_cell);
 
     const active_idx = tm.active_idx;
-    var col: usize = 1;
+    var col: usize = 0;
 
     for (tm.tabs.items, 0..) |*tab, idx| {
-        if (col >= win.width - 2) break;
+        if (col >= win.width -| 2) break;
 
         const is_active = idx == active_idx;
 
-        // Tab style: active tab is highlighted
+        // Vim-style: active tab has no background (normal), inactive has gray bg
         const tab_style: vaxis.Style = if (is_active) .{
-            .fg = .{ .index = 0 }, // black text
-            .bg = .{ .index = 6 }, // cyan background
+            .fg = .{ .index = 7 }, // white text
+            .bg = .{ .index = 0 }, // black background (stands out)
             .bold = true,
         } else .{
             .fg = .{ .index = 7 }, // white text
             .bg = .{ .index = 8 }, // gray background
         };
 
-        const sep_style = vaxis.Style{ .fg = .{ .index = 8 } };
-
-        // Calculate tab width: " name " (with padding)
-        const name_len = @min(tab.name.len, 15); // Truncate long names
-        const tab_width = name_len + 2; // Space on each side
-
         // Check if tab has activity (thinking or permission)
         const has_activity = tab.isThinking();
         const has_permission = tab.hasPendingPermission();
 
-        // Draw tab content
-        if (col + tab_width < win.width) {
-            // Leading space
-            win.writeCell(@intCast(col), 0, .{
-                .char = .{ .grapheme = " ", .width = 1 },
-                .style = tab_style,
-            });
+        // Truncate name if needed
+        const max_name_len: usize = 15;
+        const name_len = @min(tab.name.len, max_name_len);
+        const display_name = tab.name[0..name_len];
+
+        // Activity indicator suffix
+        const suffix: []const u8 = if (!is_active and has_permission)
+            "!"
+        else if (!is_active and has_activity)
+            "*"
+        else
+            "";
+
+        const suffix_style: vaxis.Style = if (has_permission)
+            .{ .fg = .{ .index = 3 }, .bg = tab_style.bg, .bold = true } // yellow
+        else
+            .{ .fg = .{ .index = 6 }, .bg = tab_style.bg }; // cyan
+
+        // Print tab: " name " or " name* "
+        var seg = [_]vaxis.Cell.Segment{
+            .{ .text = " ", .style = tab_style },
+            .{ .text = display_name, .style = tab_style },
+            .{ .text = suffix, .style = suffix_style },
+            .{ .text = " ", .style = tab_style },
+        };
+        _ = win.print(&seg, .{ .col_offset = @intCast(col) });
+
+        col += 2 + name_len + suffix.len; // spaces + name + suffix
+
+        // Separator between tabs (vim-style |)
+        if (idx + 1 < tm.tabs.items.len and col < win.width) {
+            var sep_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "|", .style = .{ .fg = .{ .index = 8 }, .bg = .{ .index = 8 } } },
+            };
+            _ = win.print(&sep_seg, .{ .col_offset = @intCast(col) });
             col += 1;
-
-            // Tab name (truncated)
-            for (tab.name[0..name_len]) |c| {
-                if (col >= win.width - 1) break;
-                var char_buf: [1]u8 = .{c};
-                win.writeCell(@intCast(col), 0, .{
-                    .char = .{ .grapheme = &char_buf, .width = 1 },
-                    .style = tab_style,
-                });
-                col += 1;
-            }
-
-            // Activity indicator (if not active tab)
-            if (!is_active and (has_activity or has_permission)) {
-                const indicator: []const u8 = if (has_permission) "!" else "*";
-                const indicator_style: vaxis.Style = if (has_permission)
-                    .{ .fg = .{ .index = 3 }, .bg = tab_style.bg, .bold = true } // yellow
-                else
-                    .{ .fg = .{ .index = 6 }, .bg = tab_style.bg }; // cyan
-                win.writeCell(@intCast(col), 0, .{
-                    .char = .{ .grapheme = indicator, .width = 1 },
-                    .style = indicator_style,
-                });
-            } else {
-                // Trailing space
-                win.writeCell(@intCast(col), 0, .{
-                    .char = .{ .grapheme = " ", .width = 1 },
-                    .style = tab_style,
-                });
-            }
-            col += 1;
-
-            // Separator between tabs
-            if (idx < tm.tabs.items.len - 1 and col < win.width) {
-                win.writeCell(@intCast(col), 0, .{
-                    .char = .{ .grapheme = "│", .width = 1 },
-                    .style = sep_style,
-                });
-                col += 1;
-            }
         }
     }
 
-    // Show tab count and keybinding hint on the right
+    // Show tab count on the right (vim-style)
     var hint_buf: [32]u8 = undefined;
     const hint = std.fmt.bufPrint(&hint_buf, " {d}/{d} ", .{ active_idx + 1, tm.tabCount() }) catch " ";
-    const hint_len = hint.len;
-    const hint_col = if (win.width > hint_len) win.width - hint_len else 0;
+    const hint_col = if (win.width > hint.len) win.width - hint.len else 0;
 
-    const hint_style = vaxis.Style{ .fg = .{ .index = 8 } };
-    for (hint, 0..) |c, i| {
-        if (hint_col + i >= win.width) break;
-        var char_buf: [1]u8 = .{c};
-        win.writeCell(@intCast(hint_col + i), 0, .{
-            .char = .{ .grapheme = &char_buf, .width = 1 },
-            .style = hint_style,
-        });
-    }
+    var hint_seg = [_]vaxis.Cell.Segment{
+        .{ .text = hint, .style = .{ .fg = .{ .index = 7 }, .bg = .{ .index = 8 } } },
+    };
+    _ = win.print(&hint_seg, .{ .col_offset = @intCast(hint_col) });
 
     return true;
 }
