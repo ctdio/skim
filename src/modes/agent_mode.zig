@@ -465,6 +465,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Ctrl+E - close agent panel and return to diff (toggle)
     if (key.mods.ctrl and key.codepoint == 'e') {
+        if (app.tab_manager) |*tm| {
+            tm.panel_visible = false;
+        }
         agent_state.visible = false;
         app.mode = .normal;
         app.needs_render = true;
