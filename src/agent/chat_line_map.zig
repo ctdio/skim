@@ -980,10 +980,31 @@ pub const ChatLineMap = struct {
         });
         global_line.* += 1;
 
-        // Diff lines
+        // Diff lines with truncation for large diffs
+        const max_diff_lines: usize = 25;
+        const total_diff_lines = diff_result.lines.len;
+        const lines_to_show = @min(total_diff_lines, max_diff_lines);
+        const truncated_count = total_diff_lines - lines_to_show;
+        const diff_lines_slice = diff_result.lines[0..lines_to_show];
+
         switch (view_mode) {
-            .unified => try self.addUnifiedDiffLines(global_line, msg_idx, diff_result.lines),
-            .side_by_side => try self.addSideBySideDiffLines(global_line, msg_idx, diff_result.lines, wrap_width),
+            .unified => try self.addUnifiedDiffLines(global_line, msg_idx, diff_lines_slice),
+            .side_by_side => try self.addSideBySideDiffLines(global_line, msg_idx, diff_lines_slice, wrap_width),
+        }
+
+        // Add truncation indicator if lines were hidden
+        if (truncated_count > 0) {
+            const truncate_text = try std.fmt.allocPrint(self.allocator, "⎿ (+{d} lines)", .{truncated_count});
+            try self.strings.append(self.allocator, truncate_text);
+
+            try self.records.append(self.allocator, .{
+                .global_line = global_line.*,
+                .line_type = .{ .diff_line = .{ .msg_idx = msg_idx, .line_idx = lines_to_show } },
+                .text = truncate_text,
+                .style = .{ .fg = .{ .index = 8 } }, // dim for the indicator
+                .indent = 1,
+            });
+            global_line.* += 1;
         }
     }
 
