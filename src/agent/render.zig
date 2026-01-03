@@ -602,6 +602,12 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
     // Don't show tab bar for single tab
     if (tm.tabCount() <= 1) return false;
 
+    // Safety: ensure window has valid dimensions
+    if (win.width == 0 or win.height == 0) return false;
+
+    // Safety: ensure active_idx is valid
+    if (tm.active_idx >= tm.tabs.items.len) return false;
+
     // Fill background with dim color - explicitly fill each cell
     const bg_style = vaxis.Style{ .bg = .{ .index = 240 } }; // medium gray background
     for (0..win.width) |x| {
@@ -660,21 +666,21 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
         };
         _ = win.print(&seg, .{ .col_offset = @intCast(col) });
 
-        col += 2 + name_len + suffix.len; // spaces + name + suffix
+        col +|= 2 + name_len + suffix.len; // spaces + name + suffix
 
         // Separator between tabs (vim-style |)
-        if (idx + 1 < tm.tabs.items.len and col < win.width) {
+        if (idx +| 1 < tm.tabs.items.len and col < win.width) {
             var sep_seg = [_]vaxis.Cell.Segment{
                 .{ .text = "|", .style = .{ .fg = .{ .index = 240 }, .bg = .{ .index = 240 } } },
             };
             _ = win.print(&sep_seg, .{ .col_offset = @intCast(col) });
-            col += 1;
+            col +|= 1;
         }
     }
 
     // Show tab count on the right (vim-style)
     var hint_buf: [32]u8 = undefined;
-    const hint = std.fmt.bufPrint(&hint_buf, " {d}/{d} ", .{ active_idx + 1, tm.tabCount() }) catch " ";
+    const hint = std.fmt.bufPrint(&hint_buf, " {d}/{d} ", .{ active_idx +| 1, tm.tabCount() }) catch " ";
     const hint_col = if (win.width > hint.len) win.width - hint.len else 0;
 
     var hint_seg = [_]vaxis.Cell.Segment{

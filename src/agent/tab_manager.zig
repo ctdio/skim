@@ -176,7 +176,7 @@ pub const TabManager = struct {
         }
 
         const id = self.next_id;
-        self.next_id += 1;
+        self.next_id +|= 1; // Saturating to prevent overflow
 
         // Generate "Session N" for default tabs
         var name_buf: [32]u8 = undefined;
