@@ -564,11 +564,15 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // '!' key in insert mode - toggle shell command mode (don't insert the character)
+    // '!' key in insert mode with empty input - toggle shell command mode
+    // Only triggers when input is empty, so users can type '!' normally in prompts
     if (agent_state.input.vim.vim_mode == .insert and key.codepoint == '!' and !key.mods.ctrl and !key.mods.alt) {
-        agent_state.toggleShellMode();
-        app.needs_render = true;
-        return;
+        if (agent_state.input.getText().len == 0) {
+            agent_state.toggleShellMode();
+            app.needs_render = true;
+            return;
+        }
+        // Otherwise fall through to let '!' be inserted as a character
     }
 
     // Backspace on empty input in shell mode - exit shell mode
