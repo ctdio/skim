@@ -439,9 +439,10 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     } else 0;
 
     // Calculate input area height (always shows normal input)
-    // In sidebar mode, skip the footer (main status bar is visible)
+    // Layout: separator (1) + visible text lines + padding (1) + footer (0 or 1)
+    const padding_height: usize = 1; // Blank line between text and footer/statusline
     const footer_height: usize = if (agent_state.full_screen) 1 else 0;
-    const input_height: usize = 1 + visible_lines + footer_height; // Separator + visible lines + footer (if full-screen)
+    const input_height: usize = 1 + visible_lines + padding_height + footer_height;
 
     // Calculate tab bar height (only shown when multiple tabs exist)
     const tab_bar_height: usize = if (app.tab_manager) |tm| (if (tm.tabCount() > 1) @as(usize, 1) else 0) else 0;
