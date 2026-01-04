@@ -621,7 +621,26 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
     var col: usize = 0;
 
     for (tm.tabs.items, 0..) |*tab, idx| {
-        if (col >= win.width -| 2) break;
+        // Calculate tab width first to check if it fits
+        const max_name_len: usize = 15;
+        const name_len = @min(tab.name.len, max_name_len);
+        
+        // Check if tab has activity (thinking or permission)
+        const has_activity = tab.isThinking();
+        const has_permission = tab.hasPendingPermission();
+        
+        // Activity indicator suffix
+        const suffix_len: usize = if (has_permission or has_activity) 1 else 0;
+        
+        // Calculate total tab width: 2 spaces + name + suffix
+        const tab_width = 2 + name_len + suffix_len;
+        
+        // Check if tab fits (with room for separator if not last tab)
+        const needs_separator = idx + 1 < tm.tabs.items.len;
+        const total_needed = tab_width + (if (needs_separator) @as(usize, 1) else 0);
+        
+        // Break if tab doesn't fit
+        if (col + total_needed > win.width) break;
 
         const is_active = idx == active_idx;
 
@@ -635,13 +654,6 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
             .bg = .{ .index = 240 }, // medium gray (from 256 palette)
         };
 
-        // Check if tab has activity (thinking or permission)
-        const has_activity = tab.isThinking();
-        const has_permission = tab.hasPendingPermission();
-
-        // Truncate name if needed
-        const max_name_len: usize = 15;
-        const name_len = @min(tab.name.len, max_name_len);
         const display_name = tab.name[0..name_len];
 
         // Activity indicator suffix
@@ -666,27 +678,31 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
         };
         _ = win.print(&seg, .{ .col_offset = @intCast(col) });
 
-        col +|= 2 + name_len + suffix.len; // spaces + name + suffix
+        col += tab_width;
 
         // Separator between tabs (vim-style |)
-        if (idx +| 1 < tm.tabs.items.len and col < win.width) {
+        if (needs_separator) {
             var sep_seg = [_]vaxis.Cell.Segment{
                 .{ .text = "|", .style = .{ .fg = .{ .index = 240 }, .bg = .{ .index = 240 } } },
             };
             _ = win.print(&sep_seg, .{ .col_offset = @intCast(col) });
-            col +|= 1;
+            col += 1;
         }
     }
 
     // Show tab count on the right (vim-style)
     var hint_buf: [32]u8 = undefined;
-    const hint = std.fmt.bufPrint(&hint_buf, " {d}/{d} ", .{ active_idx +| 1, tm.tabCount() }) catch " ";
-    const hint_col = if (win.width > hint.len) win.width - hint.len else 0;
-
-    var hint_seg = [_]vaxis.Cell.Segment{
-        .{ .text = hint, .style = .{ .fg = .{ .index = 7 }, .bg = .{ .index = 240 } } },
-    };
-    _ = win.print(&hint_seg, .{ .col_offset = @intCast(hint_col) });
+    const hint = std.fmt.bufPrint(&hint_buf, " {d}/{d} ", .{ active_idx + 1, tm.tabCount() }) catch " ";
+    const hint_len = hint.len;
+    
+    // Only show hint if it fits
+    if (hint_len <= win.width) {
+        const hint_col = win.width - hint_len;
+        var hint_seg = [_]vaxis.Cell.Segment{
+            .{ .text = hint, .style = .{ .fg = .{ .index = 7 }, .bg = .{ .index = 240 } } },
+        };
+        _ = win.print(&hint_seg, .{ .col_offset = @intCast(hint_col) });
+    }
 
     return true;
 }
