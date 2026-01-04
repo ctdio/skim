@@ -3406,8 +3406,18 @@ pub const App = struct {
         // Update status to connecting
         mgr.status = .connecting;
 
+        // Convert AgentInfo.EnvVar to AcpManager.EnvVar for connect call
+        const mgr_env = ctx.app.allocator.alloc(acp.AcpManager.EnvVar, agent_info.env.len) catch {
+            std.log.err("ACP: Failed to allocate env vars", .{});
+            return;
+        };
+        defer ctx.app.allocator.free(mgr_env);
+        for (agent_info.env, 0..) |ev, i| {
+            mgr_env[i] = .{ .name = ev.name, .value = ev.value };
+        }
+
         // Connect to agent (spawn + initialize)
-        mgr.connect(agent_info.command, agent_info.args, ctx.cwd) catch |err| {
+        mgr.connect(agent_info.command, agent_info.args, ctx.cwd, mgr_env) catch |err| {
             std.log.err("ACP: Connect failed: {}", .{err});
             return;
         };
@@ -3599,42 +3609,65 @@ pub const App = struct {
     /// Load configured agents from config file.
     /// Returns null if no agents are configured.
     pub fn loadConfiguredAgents(self: *App) ?[]acp.AgentInfo {
-        // Try to load from config
+        // Try to load from config - now uses standard agent_servers format
         const cfg_agents = app_config.getConfiguredAgents(self.allocator) catch null;
 
         if (cfg_agents) |agents| {
             if (agents.len > 0) {
-                // Convert to ACP ConfigAgent format for loadAgentList
-                const config_slice = self.allocator.alloc(acp.ConfigAgent, agents.len) catch {
-                    app_config.freeAgents(self.allocator, agents);
+                // Convert config.AgentServerConfig to acp.ConfigAgent
+                const acp_agents = self.allocator.alloc(acp.ConfigAgent, agents.len) catch {
+                    app_config.freeAgentServers(self.allocator, agents);
                     return null;
                 };
+                defer self.allocator.free(acp_agents);
 
                 for (agents, 0..) |cfg, i| {
-                    config_slice[i] = .{
+                    // Convert env vars
+                    const env_slice: ?[]const acp.ConfigEnvVar = if (cfg.env) |env| blk: {
+                        const env_copy = self.allocator.alloc(acp.ConfigEnvVar, env.len) catch {
+                            app_config.freeAgentServers(self.allocator, agents);
+                            return null;
+                        };
+                        for (env, 0..) |ev, j| {
+                            env_copy[j] = .{ .name = ev.name, .value = ev.value };
+                        }
+                        break :blk env_copy;
+                    } else null;
+
+                    // Convert skim extensions
+                    const skim_ext: ?acp.SkimAgentExtensions = if (cfg.skim) |s|
+                        .{ .default = s.default, .mode = s.mode, .model = s.model }
+                    else
+                        null;
+
+                    acp_agents[i] = .{
                         .name = cfg.name,
                         .command = cfg.command,
-                        .api_key_env = cfg.api_key_env,
-                        .default = cfg.default,
                         .args = cfg.args,
-                        .model = cfg.model,
-                        .mode = cfg.mode,
+                        .env = env_slice,
+                        .skim = skim_ext,
                     };
                 }
 
-                // loadAgentList will dupe all strings
-                const result = (acp.loadAgentList(self.allocator, config_slice) catch null) orelse {
-                    self.allocator.free(config_slice);
-                    app_config.freeAgents(self.allocator, agents);
+                // loadAgentList will dupe all strings and expand env vars
+                const result = (acp.loadAgentList(self.allocator, acp_agents) catch null) orelse {
+                    // Free converted env slices
+                    for (acp_agents) |a| {
+                        if (a.env) |e| self.allocator.free(e);
+                    }
+                    app_config.freeAgentServers(self.allocator, agents);
                     return null;
                 };
 
-                // Clean up
-                self.allocator.free(config_slice);
-                app_config.freeAgents(self.allocator, agents);
+                // Free converted env slices
+                for (acp_agents) |a| {
+                    if (a.env) |e| self.allocator.free(e);
+                }
+                // Clean up config agents (loadAgentList made copies)
+                app_config.freeAgentServers(self.allocator, agents);
                 return result;
             }
-            app_config.freeAgents(self.allocator, agents);
+            app_config.freeAgentServers(self.allocator, agents);
         }
 
         // No agents configured

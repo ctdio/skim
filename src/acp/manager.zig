@@ -232,11 +232,17 @@ pub const AcpManager = struct {
     } || Allocator.Error;
 
     /// Agent info for connection - from config
+    /// Environment variable for agent process
+    pub const EnvVar = struct {
+        name: []const u8,
+        value: []const u8, // Expanded value (${VAR} already resolved)
+    };
+
     pub const AgentInfo = struct {
         name: []const u8,
         command: []const u8,
         args: []const []const u8,
-        api_key_env: ?[]const u8 = null, // Environment variable containing API key (for status display)
+        env: []const EnvVar = &.{}, // Environment variables (expanded)
         model: ?[]const u8 = null, // AI model to use (e.g., "sonnet", "opus")
         mode: ?[]const u8 = null, // Agent session mode (e.g., "plan", "code")
         from_config: bool = false, // true if loaded from config
@@ -280,17 +286,25 @@ pub const AcpManager = struct {
     }
 
     /// Spawn and connect to an agent
-    pub fn connect(self: *AcpManager, agent_command: []const u8, args: []const []const u8, cwd: []const u8) Error!void {
+    pub fn connect(self: *AcpManager, agent_command: []const u8, args: []const []const u8, cwd: []const u8, env: []const EnvVar) Error!void {
         if (self.acp_client != null) return error.AlreadyConnected;
 
         self.status = .connecting;
         std.log.info("ACP: Spawning agent '{s}'", .{agent_command});
+
+        // Convert EnvVar to process.EnvVar format
+        const process_env = self.allocator.alloc(process.EnvVar, env.len) catch return error.OutOfMemory;
+        defer self.allocator.free(process_env);
+        for (env, 0..) |ev, i| {
+            process_env[i] = .{ .name = ev.name, .value = ev.value };
+        }
 
         // Spawn the agent
         const acp = client.Client.spawn(self.allocator, .{
             .command = agent_command,
             .args = args,
             .cwd = cwd,
+            .extra_env = process_env,
         }) catch |err| {
             std.log.err("ACP: Failed to spawn agent: {any}", .{err});
             self.status = .failed;
@@ -330,6 +344,7 @@ pub const AcpManager = struct {
         base_args: []const []const u8,
         cwd: []const u8,
         session_id: []const u8,
+        env: []const EnvVar,
     ) Error!void {
         if (self.acp_client != null) return error.AlreadyConnected;
 
@@ -349,11 +364,19 @@ pub const AcpManager = struct {
         args_list.append(self.allocator, "--resume") catch return error.OutOfMemory;
         args_list.append(self.allocator, session_id) catch return error.OutOfMemory;
 
+        // Convert EnvVar to process.EnvVar format
+        const process_env = self.allocator.alloc(process.EnvVar, env.len) catch return error.OutOfMemory;
+        defer self.allocator.free(process_env);
+        for (env, 0..) |ev, i| {
+            process_env[i] = .{ .name = ev.name, .value = ev.value };
+        }
+
         // Spawn the agent
         const acp = client.Client.spawn(self.allocator, .{
             .command = agent_command,
             .args = args_list.items,
             .cwd = cwd,
+            .extra_env = process_env,
         }) catch |err| {
             std.log.err("ACP: Failed to spawn agent: {any}", .{err});
             self.status = .failed;
@@ -2201,15 +2224,27 @@ pub const AcpManager = struct {
 // Agent Utilities
 // =============================================================================
 
-/// Config agent struct for loadAgentList parameter (mirrors config.AgentConfig)
+/// Skim-specific extensions for agent config (mirrors config.SkimAgentExtensions)
+pub const SkimAgentExtensions = struct {
+    default: bool = false,
+    mode: ?[]const u8 = null,
+    model: ?[]const u8 = null,
+};
+
+/// Environment variable entry from config (mirrors config.EnvVar)
+pub const ConfigEnvVar = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// Config agent struct for loadAgentList parameter
+/// Standard ACP agent_servers format with skim extensions (mirrors config.AgentServerConfig)
 pub const ConfigAgent = struct {
     name: []const u8,
     command: []const u8,
-    api_key_env: ?[]const u8 = null,
-    default: bool = false,
     args: ?[]const []const u8 = null,
-    model: ?[]const u8 = null,
-    mode: ?[]const u8 = null,
+    env: ?[]const ConfigEnvVar = null,
+    skim: ?SkimAgentExtensions = null,
 };
 
 /// Load agent list from config agents.
@@ -2224,18 +2259,44 @@ pub fn loadAgentList(allocator: Allocator, config_agents: ?[]const ConfigAgent) 
     errdefer allocator.free(result);
 
     for (agents, 0..) |cfg, i| {
+        // Expand env vars from config
+        const cfg_env = cfg.env orelse &.{};
+        const env_copy = try allocator.alloc(AcpManager.EnvVar, cfg_env.len);
+        for (cfg_env, 0..) |ev, j| {
+            env_copy[j] = .{
+                .name = try allocator.dupe(u8, ev.name),
+                .value = try expandEnvValue(allocator, ev.value),
+            };
+        }
+
+        // Extract skim extensions
+        const skim = cfg.skim orelse SkimAgentExtensions{};
+
         result[i] = .{
             .name = try allocator.dupe(u8, cfg.name),
             .command = try allocator.dupe(u8, cfg.command),
             .args = if (cfg.args) |a| try dupeStringSlice(allocator, a) else &.{},
-            .api_key_env = if (cfg.api_key_env) |e| try allocator.dupe(u8, e) else null,
-            .model = if (cfg.model) |m| try allocator.dupe(u8, m) else null,
-            .mode = if (cfg.mode) |m| try allocator.dupe(u8, m) else null,
+            .env = env_copy,
+            .model = if (skim.model) |m| try allocator.dupe(u8, m) else null,
+            .mode = if (skim.mode) |m| try allocator.dupe(u8, m) else null,
             .from_config = true,
-            .is_default = cfg.default,
+            .is_default = skim.default,
         };
     }
     return result;
+}
+
+/// Expand ${VAR} syntax in env values from user's environment
+fn expandEnvValue(allocator: Allocator, value: []const u8) ![]const u8 {
+    if (std.mem.startsWith(u8, value, "${") and std.mem.endsWith(u8, value, "}")) {
+        const var_name = value[2 .. value.len - 1];
+        const expanded = std.process.getEnvVarOwned(allocator, var_name) catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => return try allocator.dupe(u8, ""),
+            else => return err,
+        };
+        return expanded;
+    }
+    return try allocator.dupe(u8, value);
 }
 
 /// Free an agent list returned by loadAgentList
@@ -2247,7 +2308,13 @@ pub fn freeAgentList(allocator: Allocator, agents: []AcpManager.AgentInfo) void 
             for (agent.args) |arg| allocator.free(arg);
             allocator.free(agent.args);
         }
-        if (agent.api_key_env) |e| allocator.free(e);
+        if (agent.env.len > 0) {
+            for (agent.env) |ev| {
+                allocator.free(ev.name);
+                allocator.free(ev.value);
+            }
+            allocator.free(agent.env);
+        }
         if (agent.model) |m| allocator.free(m);
         if (agent.mode) |m| allocator.free(m);
     }

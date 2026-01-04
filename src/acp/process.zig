@@ -49,6 +49,20 @@ pub const AgentProcess = struct {
             self.child.cwd = cwd;
         }
 
+        // Apply extra environment variables if provided
+        if (config.extra_env.len > 0) {
+            // Allocate env_map on heap and inherit from parent environment
+            const env_ptr = try allocator.create(std.process.EnvMap);
+            env_ptr.* = try std.process.getEnvMap(allocator);
+            self.child.env_map = env_ptr;
+
+            // Add extra env vars
+            for (config.extra_env) |ev| {
+                try env_ptr.put(ev.name, ev.value);
+                std.log.debug("ACP: Setting env {s}=<{d} chars>", .{ ev.name, ev.value.len });
+            }
+        }
+
         // Log if the CLAUDE_CODE_OAUTH_TOKEN is available (for debugging)
         if (std.posix.getenv("CLAUDE_CODE_OAUTH_TOKEN")) |_| {
             std.log.info("ACP: CLAUDE_CODE_OAUTH_TOKEN is present in environment", .{});
@@ -223,6 +237,12 @@ pub const AgentProcess = struct {
 // Spawn Configuration
 // =============================================================================
 
+/// Environment variable for agent process
+pub const EnvVar = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
 pub const SpawnConfig = struct {
     /// Command to execute (e.g., "claude", "/usr/bin/gemini")
     command: []const u8,
@@ -230,8 +250,8 @@ pub const SpawnConfig = struct {
     args: []const []const u8 = &.{},
     /// Working directory (null = inherit)
     cwd: ?[]const u8 = null,
-    /// Environment variables (null = inherit)
-    env: ?*const std.process.EnvMap = null,
+    /// Extra environment variables to set (in addition to inherited env)
+    extra_env: []const EnvVar = &.{},
 };
 
 // =============================================================================

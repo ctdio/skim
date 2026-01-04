@@ -5,21 +5,33 @@ const Allocator = std.mem.Allocator;
 // Types
 // =============================================================================
 
-/// Agent configuration from ~/.skim/config.json
-pub const AgentConfig = struct {
-    name: []const u8,
-    command: []const u8,
-    api_key_env: ?[]const u8 = null, // Environment variable containing API key (for status display)
+/// Skim-specific extensions (namespaced to avoid ACP spec conflicts)
+pub const SkimAgentExtensions = struct {
     default: bool = false,
+    mode: ?[]const u8 = null, // e.g., "plan", "code"
+    model: ?[]const u8 = null, // e.g., "opus", "sonnet"
+};
+
+/// Environment variable entry (name -> value)
+pub const EnvVar = struct {
+    name: []const u8,
+    value: []const u8, // May contain ${VAR} for expansion
+};
+
+/// Standard ACP agent server config with skim extensions
+/// Matches the standard agent_servers format used by JetBrains, Zed, etc.
+pub const AgentServerConfig = struct {
+    name: []const u8, // Populated from object key during parsing
+    command: []const u8,
     args: ?[]const []const u8 = null,
-    model: ?[]const u8 = null, // AI model to use (e.g., "sonnet", "opus")
-    mode: ?[]const u8 = null, // Agent session mode (e.g., "plan", "code")
+    env: ?[]const EnvVar = null, // Environment variables
+    skim: ?SkimAgentExtensions = null, // Namespaced skim extensions
 };
 
 pub const Config = struct {
     agent_panel_side: AgentPanelSide = .left,
     experimental: Experimental = .{},
-    agents: ?[]const AgentConfig = null,
+    agent_servers: ?[]const AgentServerConfig = null,
 
     pub const AgentPanelSide = enum {
         left,
@@ -44,55 +56,161 @@ pub fn load(allocator: Allocator) !Config {
     const file = try std.fs.openFileAbsolute(config_path, .{});
     defer file.close();
 
-    var buffer: [8192]u8 = undefined;
+    var buffer: [16384]u8 = undefined;
     const bytes_read = try file.readAll(&buffer);
 
     if (bytes_read == 0) {
         return Config{};
     }
 
-    const parsed = try std.json.parseFromSlice(Config, allocator, buffer[0..bytes_read], .{
-        .ignore_unknown_fields = true,
-    });
+    return parseConfig(allocator, buffer[0..bytes_read]);
+}
+
+/// Parse config from JSON string
+pub fn parseConfig(allocator: Allocator, json_bytes: []const u8) !Config {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
 
-    // Duplicate agents array if present
-    const duped_agents: ?[]const AgentConfig = if (parsed.value.agents) |agents| blk: {
-        const result = try allocator.alloc(AgentConfig, agents.len);
-        for (agents, 0..) |agent, i| {
-            result[i] = try dupeAgentConfig(allocator, agent);
-        }
-        break :blk result;
-    } else null;
-
-    // Return a copy since parsed will be freed
-    return Config{
-        .agent_panel_side = parsed.value.agent_panel_side,
-        .experimental = parsed.value.experimental,
-        .agents = duped_agents,
-    };
-}
-
-/// Duplicate an AgentConfig, copying all strings
-fn dupeAgentConfig(allocator: Allocator, agent: AgentConfig) !AgentConfig {
-    return AgentConfig{
-        .name = try allocator.dupe(u8, agent.name),
-        .command = try allocator.dupe(u8, agent.command),
-        .api_key_env = if (agent.api_key_env) |e| try allocator.dupe(u8, e) else null,
-        .default = agent.default,
-        .args = if (agent.args) |args| try dupeStringSlice(allocator, args) else null,
-        .model = if (agent.model) |m| try allocator.dupe(u8, m) else null,
-        .mode = if (agent.mode) |m| try allocator.dupe(u8, m) else null,
-    };
-}
-
-/// Duplicate a slice of strings
-fn dupeStringSlice(allocator: Allocator, strings: []const []const u8) ![]const []const u8 {
-    const result = try allocator.alloc([]const u8, strings.len);
-    for (strings, 0..) |s, i| {
-        result[i] = try allocator.dupe(u8, s);
+    const root = parsed.value;
+    if (root != .object) {
+        return Config{};
     }
-    return result;
+
+    var config = Config{};
+
+    // Parse agent_panel_side
+    if (root.object.get("agent_panel_side")) |side_val| {
+        if (side_val == .string) {
+            if (std.mem.eql(u8, side_val.string, "right")) {
+                config.agent_panel_side = .right;
+            }
+        }
+    }
+
+    // Parse experimental
+    if (root.object.get("experimental")) |exp_val| {
+        if (exp_val == .object) {
+            if (exp_val.object.get("mcp_enabled")) |v| {
+                if (v == .bool) config.experimental.mcp_enabled = v.bool;
+            }
+            if (exp_val.object.get("acp_enabled")) |v| {
+                if (v == .bool) config.experimental.acp_enabled = v.bool;
+            }
+        }
+    }
+
+    // Parse agent_servers (object format)
+    if (root.object.get("agent_servers")) |servers_val| {
+        if (servers_val == .object) {
+            config.agent_servers = try parseAgentServers(allocator, servers_val.object);
+        }
+    }
+
+    return config;
+}
+
+/// Parse agent_servers object into slice of AgentServerConfig
+fn parseAgentServers(allocator: Allocator, servers: std.json.ObjectMap) ![]const AgentServerConfig {
+    if (servers.count() == 0) return &.{};
+
+    var agents: std.ArrayListUnmanaged(AgentServerConfig) = .{};
+    errdefer {
+        for (agents.items) |*agent| {
+            freeAgentServer(allocator, agent);
+        }
+        agents.deinit(allocator);
+    }
+
+    var iter = servers.iterator();
+    while (iter.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+
+        if (value != .object) continue;
+
+        const agent = try parseAgentServer(allocator, name, value.object);
+        try agents.append(allocator, agent);
+    }
+
+    return try agents.toOwnedSlice(allocator);
+}
+
+/// Parse a single agent server configuration
+fn parseAgentServer(allocator: Allocator, name: []const u8, obj: std.json.ObjectMap) !AgentServerConfig {
+    var agent = AgentServerConfig{
+        .name = try allocator.dupe(u8, name),
+        .command = "",
+    };
+    errdefer allocator.free(agent.name);
+
+    // Parse command (required)
+    if (obj.get("command")) |cmd_val| {
+        if (cmd_val == .string) {
+            agent.command = try allocator.dupe(u8, cmd_val.string);
+        }
+    }
+
+    // Parse args (optional)
+    if (obj.get("args")) |args_val| {
+        if (args_val == .array) {
+            var args: std.ArrayListUnmanaged([]const u8) = .{};
+            errdefer {
+                for (args.items) |arg| allocator.free(arg);
+                args.deinit(allocator);
+            }
+            for (args_val.array.items) |item| {
+                if (item == .string) {
+                    try args.append(allocator, try allocator.dupe(u8, item.string));
+                }
+            }
+            agent.args = try args.toOwnedSlice(allocator);
+        }
+    }
+
+    // Parse env (optional) - object of name -> value
+    if (obj.get("env")) |env_val| {
+        if (env_val == .object) {
+            var env_vars: std.ArrayListUnmanaged(EnvVar) = .{};
+            errdefer {
+                for (env_vars.items) |ev| {
+                    allocator.free(ev.name);
+                    allocator.free(ev.value);
+                }
+                env_vars.deinit(allocator);
+            }
+            var env_iter = env_val.object.iterator();
+            while (env_iter.next()) |env_entry| {
+                if (env_entry.value_ptr.* == .string) {
+                    try env_vars.append(allocator, .{
+                        .name = try allocator.dupe(u8, env_entry.key_ptr.*),
+                        .value = try allocator.dupe(u8, env_entry.value_ptr.string),
+                    });
+                }
+            }
+            agent.env = try env_vars.toOwnedSlice(allocator);
+        }
+    }
+
+    // Parse skim extensions (optional)
+    if (obj.get("skim")) |skim_val| {
+        if (skim_val == .object) {
+            var skim_ext = SkimAgentExtensions{};
+
+            if (skim_val.object.get("default")) |v| {
+                if (v == .bool) skim_ext.default = v.bool;
+            }
+            if (skim_val.object.get("mode")) |v| {
+                if (v == .string) skim_ext.mode = try allocator.dupe(u8, v.string);
+            }
+            if (skim_val.object.get("model")) |v| {
+                if (v == .string) skim_ext.model = try allocator.dupe(u8, v.string);
+            }
+
+            agent.skim = skim_ext;
+        }
+    }
+
+    return agent;
 }
 
 /// Get the path to the config file: ~/.skim/config.json
@@ -112,6 +230,41 @@ pub fn getSkimDir(allocator: Allocator) ![]u8 {
 }
 
 // =============================================================================
+// Environment Variable Expansion
+// =============================================================================
+
+/// Expand ${VAR} syntax in env values from user's environment
+pub fn expandEnvValue(allocator: Allocator, value: []const u8) ![]const u8 {
+    if (std.mem.startsWith(u8, value, "${") and std.mem.endsWith(u8, value, "}")) {
+        const var_name = value[2 .. value.len - 1];
+        const expanded = std.process.getEnvVarOwned(allocator, var_name) catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => return try allocator.dupe(u8, ""),
+            else => return err,
+        };
+        return expanded;
+    }
+    return try allocator.dupe(u8, value);
+}
+
+/// Expand all env vars in an agent config, returning expanded EnvVar slice
+pub fn expandAgentEnv(allocator: Allocator, agent: AgentServerConfig) ![]const EnvVar {
+    const env = agent.env orelse return &.{};
+    if (env.len == 0) return &.{};
+
+    var expanded = try allocator.alloc(EnvVar, env.len);
+    errdefer allocator.free(expanded);
+
+    for (env, 0..) |ev, i| {
+        expanded[i] = .{
+            .name = try allocator.dupe(u8, ev.name),
+            .value = try expandEnvValue(allocator, ev.value),
+        };
+    }
+
+    return expanded;
+}
+
+// =============================================================================
 // Feature Checks
 // =============================================================================
 
@@ -119,6 +272,7 @@ pub fn getSkimDir(allocator: Allocator) ![]u8 {
 /// Returns false if config cannot be loaded.
 pub fn isMcpEnabled(allocator: Allocator) bool {
     const config = load(allocator) catch return false;
+    defer freeConfig(allocator, config);
     return config.experimental.mcp_enabled;
 }
 
@@ -126,6 +280,7 @@ pub fn isMcpEnabled(allocator: Allocator) bool {
 /// Returns false if config cannot be loaded.
 pub fn isAcpEnabled(allocator: Allocator) bool {
     const config = load(allocator) catch return false;
+    defer freeConfig(allocator, config);
     return config.experimental.acp_enabled;
 }
 
@@ -133,38 +288,74 @@ pub fn isAcpEnabled(allocator: Allocator) bool {
 // Agent Configuration Helpers
 // =============================================================================
 
-/// Get configured agents from config file.
+/// Get configured agent servers from config file.
 /// Returns null if config cannot be loaded or no agents are configured.
-/// Caller must free returned agents using freeAgents().
-pub fn getConfiguredAgents(allocator: Allocator) !?[]const AgentConfig {
+/// Caller must free returned agents using freeAgentServers().
+pub fn getConfiguredAgents(allocator: Allocator) !?[]const AgentServerConfig {
     const config = load(allocator) catch return null;
-    return config.agents;
+    // Note: caller takes ownership of agent_servers, we don't free the full config
+    return config.agent_servers;
 }
 
 /// Find the default agent from configured agents.
 /// Returns index of agent marked as default, or null if none marked.
-pub fn findDefaultAgentIndex(agents: []const AgentConfig) ?usize {
+pub fn findDefaultAgentIndex(agents: []const AgentServerConfig) ?usize {
     for (agents, 0..) |agent, i| {
-        if (agent.default) return i;
+        if (agent.skim) |skim| {
+            if (skim.default) return i;
+        }
     }
     return null;
 }
 
-/// Free agents array and all contained strings.
-pub fn freeAgents(allocator: Allocator, agents: []const AgentConfig) void {
-    for (agents) |agent| {
-        allocator.free(agent.name);
-        allocator.free(agent.command);
-        if (agent.api_key_env) |e| allocator.free(e);
-        if (agent.args) |args| {
-            for (args) |arg| allocator.free(arg);
-            allocator.free(args);
+/// Free a single agent server config
+fn freeAgentServer(allocator: Allocator, agent: *const AgentServerConfig) void {
+    allocator.free(agent.name);
+    if (agent.command.len > 0) allocator.free(agent.command);
+    if (agent.args) |args| {
+        for (args) |arg| allocator.free(arg);
+        allocator.free(args);
+    }
+    if (agent.env) |env| {
+        for (env) |ev| {
+            allocator.free(ev.name);
+            allocator.free(ev.value);
         }
-        if (agent.model) |m| allocator.free(m);
-        if (agent.mode) |m| allocator.free(m);
+        allocator.free(env);
+    }
+    if (agent.skim) |skim| {
+        if (skim.mode) |m| allocator.free(m);
+        if (skim.model) |m| allocator.free(m);
+    }
+}
+
+/// Free agent servers array and all contained data.
+pub fn freeAgentServers(allocator: Allocator, agents: []const AgentServerConfig) void {
+    for (agents) |*agent| {
+        freeAgentServer(allocator, agent);
     }
     allocator.free(agents);
 }
+
+/// Free expanded env vars
+pub fn freeExpandedEnv(allocator: Allocator, env: []const EnvVar) void {
+    for (env) |ev| {
+        allocator.free(ev.name);
+        allocator.free(ev.value);
+    }
+    allocator.free(env);
+}
+
+/// Free config and all owned memory
+pub fn freeConfig(allocator: Allocator, config: Config) void {
+    if (config.agent_servers) |agents| {
+        freeAgentServers(allocator, agents);
+    }
+}
+
+// Legacy alias for compatibility during transition
+pub const AgentConfig = AgentServerConfig;
+pub const freeAgents = freeAgentServers;
 
 // =============================================================================
 // Tests
@@ -188,13 +379,11 @@ test "parse experimental config from json" {
         \\}
     ;
 
-    const parsed = try std.json.parseFromSlice(Config, allocator, json, .{
-        .ignore_unknown_fields = true,
-    });
-    defer parsed.deinit();
+    const config = try parseConfig(allocator, json);
+    defer freeConfig(allocator, config);
 
-    try std.testing.expectEqual(true, parsed.value.experimental.mcp_enabled);
-    try std.testing.expectEqual(true, parsed.value.experimental.acp_enabled);
+    try std.testing.expectEqual(true, config.experimental.mcp_enabled);
+    try std.testing.expectEqual(true, config.experimental.acp_enabled);
 }
 
 test "parse config without experimental section uses defaults" {
@@ -206,78 +395,108 @@ test "parse config without experimental section uses defaults" {
         \\}
     ;
 
-    const parsed = try std.json.parseFromSlice(Config, allocator, json, .{
-        .ignore_unknown_fields = true,
-    });
-    defer parsed.deinit();
+    const config = try parseConfig(allocator, json);
+    defer freeConfig(allocator, config);
 
-    try std.testing.expectEqual(false, parsed.value.experimental.mcp_enabled);
-    try std.testing.expectEqual(false, parsed.value.experimental.acp_enabled);
-    try std.testing.expectEqual(Config.AgentPanelSide.left, parsed.value.agent_panel_side);
+    try std.testing.expectEqual(false, config.experimental.mcp_enabled);
+    try std.testing.expectEqual(false, config.experimental.acp_enabled);
+    try std.testing.expectEqual(Config.AgentPanelSide.left, config.agent_panel_side);
 }
 
-test "parse agents config from json" {
+test "parse agent_servers config from json" {
     const allocator = std.testing.allocator;
 
     const json =
         \\{
-        \\  "agents": [
-        \\    {
-        \\      "name": "Claude Code",
-        \\      "command": "claude-code-acp",
-        \\      "api_key_env": "ANTHROPIC_API_KEY",
-        \\      "default": true,
-        \\      "model": "opus",
-        \\      "mode": "plan"
+        \\  "agent_servers": {
+        \\    "Claude Code": {
+        \\      "command": "claude",
+        \\      "args": ["acp"],
+        \\      "env": {
+        \\        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"
+        \\      },
+        \\      "skim": {
+        \\        "default": true,
+        \\        "model": "opus",
+        \\        "mode": "plan"
+        \\      }
         \\    },
-        \\    {
-        \\      "name": "Codex",
-        \\      "command": "codex-acp"
+        \\    "Codex": {
+        \\      "command": "codex"
         \\    }
-        \\  ]
+        \\  }
         \\}
     ;
 
-    const parsed = try std.json.parseFromSlice(Config, allocator, json, .{
-        .ignore_unknown_fields = true,
-    });
-    defer parsed.deinit();
+    const config = try parseConfig(allocator, json);
+    defer freeConfig(allocator, config);
 
-    const agents = parsed.value.agents orelse unreachable;
+    const agents = config.agent_servers orelse unreachable;
     try std.testing.expectEqual(@as(usize, 2), agents.len);
 
-    // First agent
-    try std.testing.expectEqualStrings("Claude Code", agents[0].name);
-    try std.testing.expectEqualStrings("claude-code-acp", agents[0].command);
-    try std.testing.expectEqualStrings("ANTHROPIC_API_KEY", agents[0].api_key_env.?);
-    try std.testing.expectEqual(true, agents[0].default);
-    try std.testing.expectEqualStrings("opus", agents[0].model.?);
-    try std.testing.expectEqualStrings("plan", agents[0].mode.?);
+    // Find Claude Code agent (order not guaranteed in object)
+    var claude_idx: ?usize = null;
+    var codex_idx: ?usize = null;
+    for (agents, 0..) |agent, i| {
+        if (std.mem.eql(u8, agent.name, "Claude Code")) claude_idx = i;
+        if (std.mem.eql(u8, agent.name, "Codex")) codex_idx = i;
+    }
 
-    // Second agent - minimal config
-    try std.testing.expectEqualStrings("Codex", agents[1].name);
-    try std.testing.expectEqualStrings("codex-acp", agents[1].command);
-    try std.testing.expectEqual(@as(?[]const u8, null), agents[1].api_key_env);
-    try std.testing.expectEqual(false, agents[1].default);
+    // Claude Code agent
+    const claude = agents[claude_idx.?];
+    try std.testing.expectEqualStrings("Claude Code", claude.name);
+    try std.testing.expectEqualStrings("claude", claude.command);
+    try std.testing.expectEqual(@as(usize, 1), claude.args.?.len);
+    try std.testing.expectEqualStrings("acp", claude.args.?[0]);
+    try std.testing.expectEqual(@as(usize, 1), claude.env.?.len);
+    try std.testing.expectEqualStrings("ANTHROPIC_API_KEY", claude.env.?[0].name);
+    try std.testing.expectEqualStrings("${ANTHROPIC_API_KEY}", claude.env.?[0].value);
+    try std.testing.expectEqual(true, claude.skim.?.default);
+    try std.testing.expectEqualStrings("opus", claude.skim.?.model.?);
+    try std.testing.expectEqualStrings("plan", claude.skim.?.mode.?);
+
+    // Codex agent - minimal config
+    const codex = agents[codex_idx.?];
+    try std.testing.expectEqualStrings("Codex", codex.name);
+    try std.testing.expectEqualStrings("codex", codex.command);
+    try std.testing.expectEqual(@as(?[]const []const u8, null), codex.args);
+    try std.testing.expectEqual(@as(?SkimAgentExtensions, null), codex.skim);
 }
 
 test "findDefaultAgentIndex returns correct index" {
-    const agents = [_]AgentConfig{
-        .{ .name = "Agent 1", .command = "cmd1", .default = false },
-        .{ .name = "Agent 2", .command = "cmd2", .default = true },
-        .{ .name = "Agent 3", .command = "cmd3", .default = false },
-    };
+    var agents: [3]AgentServerConfig = undefined;
+    agents[0] = .{ .name = "Agent 1", .command = "cmd1", .skim = .{ .default = false } };
+    agents[1] = .{ .name = "Agent 2", .command = "cmd2", .skim = .{ .default = true } };
+    agents[2] = .{ .name = "Agent 3", .command = "cmd3", .skim = .{ .default = false } };
 
     const idx = findDefaultAgentIndex(&agents);
     try std.testing.expectEqual(@as(?usize, 1), idx);
 }
 
 test "findDefaultAgentIndex returns null when no default" {
-    const agents = [_]AgentConfig{
-        .{ .name = "Agent 1", .command = "cmd1", .default = false },
-        .{ .name = "Agent 2", .command = "cmd2", .default = false },
-    };
+    var agents: [2]AgentServerConfig = undefined;
+    agents[0] = .{ .name = "Agent 1", .command = "cmd1", .skim = .{ .default = false } };
+    agents[1] = .{ .name = "Agent 2", .command = "cmd2", .skim = null };
 
     const idx = findDefaultAgentIndex(&agents);
     try std.testing.expectEqual(@as(?usize, null), idx);
+}
+
+test "expandEnvValue expands variable" {
+    const allocator = std.testing.allocator;
+
+    // Test literal value (no expansion)
+    const literal = try expandEnvValue(allocator, "literal_value");
+    defer allocator.free(literal);
+    try std.testing.expectEqualStrings("literal_value", literal);
+
+    // Test expansion syntax with non-existent var (returns empty)
+    const missing = try expandEnvValue(allocator, "${NONEXISTENT_VAR_12345}");
+    defer allocator.free(missing);
+    try std.testing.expectEqualStrings("", missing);
+
+    // Test expansion with existing var (HOME should exist)
+    const home = try expandEnvValue(allocator, "${HOME}");
+    defer allocator.free(home);
+    try std.testing.expect(home.len > 0);
 }
