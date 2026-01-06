@@ -19,15 +19,32 @@ A keyboard-driven TUI for code reviews built in Zig.
 
 ## Installation
 
-### Prerequisites
+### Pre-built Binaries
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/ctdio/skim/releases):
+
+| Platform | Download |
+|----------|----------|
+| macOS (Apple Silicon) | `skim-macos-arm64.tar.gz` |
+| macOS (Intel) | `skim-macos-x86_64.tar.gz` |
+| Linux (x86_64) | `skim-linux-x86_64.tar.gz` |
+| Linux (ARM64) | `skim-linux-arm64.tar.gz` |
+
+```bash
+# Example: macOS Apple Silicon
+curl -L https://github.com/ctdio/skim/releases/latest/download/skim-macos-arm64.tar.gz | tar xz
+sudo mv skim /usr/local/bin/
+```
+
+### Building from Source
+
+#### Prerequisites
 
 - Zig 0.15.1
 - Git
 
-### Building from Source
-
 ```bash
-git clone https://github.com/yourusername/skim.git
+git clone https://github.com/ctdio/skim.git
 cd skim
 
 # Debug build (for development)
@@ -410,6 +427,39 @@ The Agent Client Protocol (ACP) is an experimental protocol for communication be
 
 **Supported agents:**
 - Agents implementing the ACP stdio transport (e.g., `claude-code-acp`, `codex-acp`, `gemini --experimental-acp`)
+
+---
+
+## Releasing
+
+Releases are automated via GitHub Actions. When a version tag is pushed, binaries are built for all platforms and uploaded to GitHub Releases.
+
+### Creating a Release
+
+```bash
+# 1. Update version if needed (e.g., in README or other docs)
+# 2. Commit any final changes
+git add -A && git commit -m "Prepare v0.1.0 release"
+
+# 3. Create and push the tag
+git tag v0.1.0
+git push origin main --tags
+```
+
+The workflow will:
+1. Build optimized binaries for macOS (arm64, x86_64) and Linux (x86_64, arm64)
+2. Create tarballs with the binary, README, and LICENSE
+3. Generate SHA256 checksums
+4. Create a GitHub Release with auto-generated release notes
+
+### Release Artifacts
+
+Each release includes:
+- `skim-macos-arm64.tar.gz` - macOS Apple Silicon
+- `skim-macos-x86_64.tar.gz` - macOS Intel
+- `skim-linux-x86_64.tar.gz` - Linux x86_64
+- `skim-linux-arm64.tar.gz` - Linux ARM64
+- `checksums.txt` - SHA256 checksums for verification
 
 ---
 
