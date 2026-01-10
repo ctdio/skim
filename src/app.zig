@@ -267,6 +267,8 @@ pub const App = struct {
     const CTRL_C_TIMEOUT_NS = 1 * std.time.ns_per_s; // 1 second window
 
     pub fn init(allocator: Allocator, config: anytype) !App {
+        const log = std.log.scoped(.app_init);
+
         // Use static buffer for Tty (must persist for lifetime of Tty)
         var tty = try vaxis.Tty.init(&tty_static_buffer);
         errdefer tty.deinit();
@@ -302,6 +304,23 @@ pub const App = struct {
             // Strip ANSI codes since git sends colored output to pagers
             const stdin_text = config.stdin_content orelse "";
             const clean_text = try parser.stripAnsi(allocator, stdin_text);
+
+            // Check for combined diff format (produced during merge/rebase conflicts)
+            // Combined diff uses "diff --cc" header instead of "diff --git"
+            // We can't parse this format, so fall back to fetching unified diff
+            if (std.mem.startsWith(u8, clean_text, "diff --cc ") or
+                std.mem.indexOf(u8, clean_text, "\ndiff --cc ") != null)
+            {
+                log.info("Detected combined diff format, fetching unified diff instead", .{});
+                allocator.free(clean_text);
+                // Fall back to fetching proper unified diff with HEAD
+                const diff_result = try git.getDiffWithUntracked(allocator, .{ .working_dir = .{ .staged = false } });
+                defer diff_result.deinit(allocator);
+                const parsed_files = try parser.parse(allocator, diff_result.diff_text);
+                parser.markUntrackedFiles(parsed_files, diff_result.untracked_paths);
+                break :blk parsed_files;
+            }
+
             defer allocator.free(clean_text);
             break :blk try parser.parse(allocator, clean_text);
         } else blk: {
