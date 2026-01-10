@@ -321,6 +321,8 @@ pub fn getRepoRoot(allocator: Allocator) ![]u8 {
 /// Check if we're currently in any conflict state (merge, rebase, cherry-pick, revert)
 /// Returns true if we're in an incomplete merge/rebase/cherry-pick/revert with conflicts
 pub fn isInMergeConflict(allocator: Allocator) bool {
+    const log = std.log.scoped(.merge_conflict);
+
     // Get the git directory path
     const args = &[_][]const u8{ "git", "rev-parse", "--git-dir" };
 
@@ -328,17 +330,28 @@ pub fn isInMergeConflict(allocator: Allocator) bool {
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Ignore;
 
-    child.spawn() catch return false;
+    child.spawn() catch |err| {
+        log.debug("spawn failed: {}", .{err});
+        return false;
+    };
 
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024) catch return false;
+    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024) catch |err| {
+        log.debug("read stdout failed: {}", .{err});
+        return false;
+    };
     defer allocator.free(stdout);
 
-    const term = child.wait() catch return false;
+    const term = child.wait() catch |err| {
+        log.debug("wait failed: {}", .{err});
+        return false;
+    };
     if (term != .Exited or term.Exited != 0) {
+        log.debug("git rev-parse failed with exit code: {}", .{term});
         return false;
     }
 
     const git_dir = std.mem.trim(u8, stdout, " \t\r\n");
+    log.debug("git_dir: '{s}' (len={})", .{ git_dir, git_dir.len });
 
     // Check for conflict markers in git directory
     // These files/directories indicate an incomplete merge/rebase/cherry-pick/revert
@@ -354,10 +367,14 @@ pub fn isInMergeConflict(allocator: Allocator) bool {
     for (conflict_markers) |marker| {
         const path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{ git_dir, marker }) catch continue;
         if (std.fs.cwd().access(path, .{})) {
+            log.debug("FOUND conflict marker: '{s}'", .{path});
             return true;
-        } else |_| {}
+        } else |err| {
+            log.debug("not found: '{s}' ({})", .{ path, err });
+        }
     }
 
+    log.debug("no conflict markers found", .{});
     return false;
 }
 
