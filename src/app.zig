@@ -3515,25 +3515,8 @@ pub const App = struct {
             return;
         }
 
-        if (agents.len == 1) {
-            // Single agent: auto-connect
-            std.log.info("ACP: Single agent configured, auto-connecting", .{});
-            try self.connectToAgent(&agents[0]);
-            return;
-        }
-
-        // Multiple agents: check for default
-        if (acp.findDefaultOrFirst(agents)) |default_agent| {
-            if (default_agent.is_default) {
-                // Default is explicitly set
-                std.log.info("ACP: Default agent found, auto-connecting to {s}", .{default_agent.name});
-                try self.connectToAgent(default_agent);
-                return;
-            }
-        }
-
-        // No default set with multiple agents: show selection menu
-        std.log.info("ACP: Multiple agents configured, showing selection menu", .{});
+        // Always show agent selection menu
+        std.log.info("ACP: {d} agent(s) configured, showing selection menu", .{agents.len});
         self.state.agent_selection_idx = 0;
         self.mode = .agent_selection;
         self.needs_render = true;
@@ -3577,6 +3560,11 @@ pub const App = struct {
         const mgr = try self.allocator.create(acp.AcpManager);
         mgr.* = acp.AcpManager.init(self.allocator);
         mgr.status = .discovering;
+
+        // Store server name from config (for display in title bar)
+        if (agent_info) |info| {
+            mgr.server_name = self.allocator.dupe(u8, info.name) catch null;
+        }
 
         // Store directly in target tab
         target_tab.acp_manager = mgr;

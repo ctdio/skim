@@ -529,7 +529,16 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 }
 
 fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
-    const title = if (is_focused) " Agent [focused] " else " Agent ";
+    // Build title with server name when connected
+    const title = if (app.getActiveAcpManager()) |mgr| blk: {
+        if (mgr.server_name) |name| {
+            // Show server name: " Claude Code " or " Claude Code [focused] "
+            break :blk name;
+        }
+        break :blk "Agent";
+    } else "Agent";
+
+    const suffix = if (is_focused) " [focused]" else "";
 
     // Status from ACP connection
     var status_buf: [64]u8 = undefined;
@@ -563,9 +572,12 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
         });
     }
 
-    // Print title
+    // Print title: " {name} [focused] " or " {name} "
     var title_seg = [_]vaxis.Cell.Segment{
+        .{ .text = " ", .style = title_style },
         .{ .text = title, .style = title_style },
+        .{ .text = suffix, .style = title_style },
+        .{ .text = " ", .style = title_style },
     };
     _ = win.print(&title_seg, .{ .row_offset = 0 });
 
@@ -583,7 +595,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     };
 
     const status_width = std.unicode.utf8CountCodepoints(status_text) catch status_text.len;
-    const title_width = std.unicode.utf8CountCodepoints(title) catch title.len;
+    const title_width = 2 + (std.unicode.utf8CountCodepoints(title) catch title.len) + suffix.len; // " {title}{suffix} "
     const status_col = if (win.width > title_width + status_width)
         win.width - status_width
     else

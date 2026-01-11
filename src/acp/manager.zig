@@ -54,6 +54,7 @@ pub const AcpManager = struct {
     acp_client: ?*client.Client,
     status: Status,
     agent_name: ?[]const u8,
+    server_name: ?[]const u8, // Config server name (e.g., "Claude Code")
     session_id: ?[]const u8,
 
     // Session modes
@@ -255,6 +256,7 @@ pub const AcpManager = struct {
             .acp_client = null,
             .status = .disconnected,
             .agent_name = null,
+            .server_name = null,
             .session_id = null,
             .available_modes = .{},
             .current_mode_id = null,
@@ -1718,6 +1720,10 @@ pub const AcpManager = struct {
         if (self.agent_name) |name| {
             self.allocator.free(name);
             self.agent_name = null;
+        }
+        if (self.server_name) |name| {
+            self.allocator.free(name);
+            self.server_name = null;
         }
 
         if (self.session_id) |sid| {
