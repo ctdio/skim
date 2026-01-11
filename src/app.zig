@@ -2266,7 +2266,8 @@ pub const App = struct {
                     }
                 }
                 // Reload agents and show selection
-                _ = self.loadConfiguredAgents();
+                self.state.configured_agents = self.loadConfiguredAgents();
+                self.state.agent_selection_idx = 0;
                 self.mode = .agent_selection;
             },
         }
