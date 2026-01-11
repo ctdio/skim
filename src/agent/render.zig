@@ -1248,7 +1248,7 @@ fn renderThinkingIndicator(win: vaxis.Window, row: usize) void {
     const shimmer_speed: i64 = 80;
     const phase: usize = @intCast(@mod(@divFloor(now, shimmer_speed), 10));
 
-    var col: usize = 2;
+    var col: usize = 1;
     for (text, 0..) |_, idx| {
         if (col >= win.width) break;
 
@@ -1609,25 +1609,23 @@ fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry, expanded: 
         });
     }
 
-    // Draw leading dashes at columns 1-2
-    win.writeCell(1, @intCast(row), .{
-        .char = .{ .grapheme = "─", .width = 1 },
-        .style = header_style,
-    });
-    win.writeCell(2, @intCast(row), .{
-        .char = .{ .grapheme = "─", .width = 1 },
-        .style = header_style,
-    });
+    // Draw leading dashes at columns 0-2 (extend to edge, align with todo content at col 3)
+    for (0..3) |col| {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = "─", .width = 1 },
+            .style = header_style,
+        });
+    }
 
-    // Draw " Todos " text starting at column 3
+    // Draw " Todos " text starting at column 2 (space at col 2, Todos at col 3 aligns with todo content)
     const title_text = " Todos ";
     var title_seg = [_]vaxis.Cell.Segment{
         .{ .text = title_text, .style = header_style },
     };
-    _ = win.print(&title_seg, .{ .row_offset = @intCast(row), .col_offset = 3 });
+    _ = win.print(&title_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
 
     // Add expansion indicator and "+N more" in header for collapsed view
-    const header_end: usize = 10;
+    const header_end: usize = 9; // col 2 + " Todos " (7 chars) = 9
     const indicator_text: []const u8 = if (expanded) "[-]" else "[+]";
     var indicator_seg = [_]vaxis.Cell.Segment{
         .{ .text = indicator_text, .style = header_style },
@@ -1724,10 +1722,10 @@ fn renderPlanEntry(win: vaxis.Window, row: usize, entry: OwnedPlanEntry) void {
     var icon_seg = [_]vaxis.Cell.Segment{
         .{ .text = status_icon, .style = status_style },
     };
-    _ = win.print(&icon_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
+    _ = win.print(&icon_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
 
     // Print content (truncate if needed)
-    const max_content_len = if (win.width > 6) win.width - 6 else 1;
+    const max_content_len = if (win.width > 5) win.width - 5 else 1;
     const content = if (entry.content.len > max_content_len)
         entry.content[0..max_content_len]
     else
@@ -1736,7 +1734,7 @@ fn renderPlanEntry(win: vaxis.Window, row: usize, entry: OwnedPlanEntry) void {
     var content_seg = [_]vaxis.Cell.Segment{
         .{ .text = content, .style = content_style },
     };
-    _ = win.print(&content_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
+    _ = win.print(&content_seg, .{ .row_offset = @intCast(row), .col_offset = 3 });
 }
 
 fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_focused: bool, pending_permission: ?*AcpManager.PendingPermission) !void {
