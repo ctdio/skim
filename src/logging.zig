@@ -11,6 +11,7 @@ pub const Component = enum {
     tui,
     daemon,
     mcp,
+    acp, // ACP protocol debug logging (opt-in)
 };
 
 /// Global state for logging
@@ -106,6 +107,7 @@ pub fn init(component: Component) void {
         .tui => "tui.log",
         .daemon => "daemon.log",
         .mcp => "mcp.log",
+        .acp => "acp.log",
     };
 
     const log_path = std.fmt.allocPrint(std.heap.page_allocator, "{s}/.skim/{s}", .{ home, log_name }) catch return;

@@ -3,6 +3,65 @@ const Allocator = std.mem.Allocator;
 const process = @import("process.zig");
 const codec = @import("codec.zig");
 
+// ACP protocol logging (opt-in via ACP_DEBUG=1 environment variable)
+var acp_log_file: ?std.fs.File = null;
+var acp_log_initialized: bool = false;
+var acp_log_mutex: std.Thread.Mutex = .{};
+
+fn initAcpLog() void {
+    if (acp_log_initialized) return;
+    acp_log_initialized = true;
+
+    // Only enable if ACP_DEBUG environment variable is set
+    const debug_env = std.posix.getenv("ACP_DEBUG") orelse return;
+    if (debug_env.len == 0 or std.mem.eql(u8, debug_env, "0")) return;
+
+    const home = std.posix.getenv("HOME") orelse return;
+
+    // Ensure ~/.skim/ exists
+    var path_buf: [512]u8 = undefined;
+    const skim_dir = std.fmt.bufPrint(&path_buf, "{s}/.skim", .{home}) catch return;
+    std.fs.makeDirAbsolute(skim_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return,
+    };
+
+    const log_path = std.fmt.bufPrint(&path_buf, "{s}/.skim/acp.log", .{home}) catch return;
+    acp_log_file = std.fs.createFileAbsolute(log_path, .{ .truncate = false }) catch return;
+    if (acp_log_file) |f| {
+        f.seekFromEnd(0) catch {};
+    }
+}
+
+fn logAcpMessage(direction: []const u8, message: []const u8) void {
+    acp_log_mutex.lock();
+    defer acp_log_mutex.unlock();
+
+    initAcpLog();
+
+    const file = acp_log_file orelse return;
+
+    // Get timestamp
+    const timestamp = std.time.timestamp();
+    const hours = @mod(@divFloor(timestamp, 3600), 24);
+    const minutes = @mod(@divFloor(timestamp, 60), 60);
+    const seconds = @mod(timestamp, 60);
+
+    // Write log entry: [HH:MM:SS] >>> message (for outgoing)
+    //                  [HH:MM:SS] <<< message (for incoming)
+    var buf: [64]u8 = undefined;
+    const header = std.fmt.bufPrint(&buf, "[{d:0>2}:{d:0>2}:{d:0>2}] {s} ", .{
+        @as(u64, @intCast(hours)),
+        @as(u64, @intCast(minutes)),
+        @as(u64, @intCast(seconds)),
+        direction,
+    }) catch return;
+
+    _ = file.write(header) catch return;
+    _ = file.write(message) catch return;
+    _ = file.write("\n") catch return;
+}
+
 // =============================================================================
 // Stdio Transport
 // =============================================================================
@@ -164,6 +223,9 @@ pub const StdioTransport = struct {
                 if (json_start) |start| {
                     const json_line = line[start..];
 
+                    // Log incoming message (opt-in via ACP_DEBUG=1)
+                    logAcpMessage("<<<", json_line);
+
                     // Decode message
                     const message = self.decoder.decode(json_line) catch |err| {
                         std.log.warn("ACP Transport: decode error: {}", .{err});
@@ -204,6 +266,9 @@ pub const StdioTransport = struct {
     /// Send a JSON-RPC message to the agent
     pub fn send(self: *StdioTransport, message: []const u8) Error!void {
         if (!self.agent.isAlive()) return error.AgentNotRunning;
+
+        // Log outgoing message (opt-in via ACP_DEBUG=1)
+        logAcpMessage(">>>", message);
 
         // Write message followed by newline in a single buffer to avoid fragmentation
         const buf = self.allocator.alloc(u8, message.len + 1) catch return error.WriteError;

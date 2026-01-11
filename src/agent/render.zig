@@ -25,6 +25,72 @@ const Color = rendering_common.Color;
 const rendering_utils = @import("../rendering/utils.zig");
 const RenderUtils = rendering_utils.RenderUtils;
 
+/// Safely print text to window, handling invalid UTF-8 gracefully.
+/// If text contains invalid UTF-8, renders valid portions and replaces invalid bytes with �.
+/// Returns the print result (columns advanced).
+fn safePrint(win: vaxis.Window, text: []const u8, style: vaxis.Style, row: usize, col_offset: usize) vaxis.Window.PrintResult {
+    // Fast path: if valid UTF-8, print directly
+    if (std.unicode.utf8ValidateSlice(text)) {
+        var seg = [_]vaxis.Cell.Segment{
+            .{ .text = text, .style = style },
+        };
+        return win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+    }
+
+    // Slow path: print character by character, replacing invalid sequences
+    var col: usize = col_offset;
+    var i: usize = 0;
+    while (i < text.len) {
+        const byte = text[i];
+        const seq_len = std.unicode.utf8ByteSequenceLength(byte) catch {
+            // Invalid start byte - show replacement character
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = "�", .width = 1 },
+                .style = style,
+            });
+            col += 1;
+            i += 1;
+            continue;
+        };
+
+        // Check if we have enough bytes
+        if (i + seq_len > text.len) {
+            // Truncated sequence - show replacement for remaining bytes
+            while (i < text.len) {
+                win.writeCell(@intCast(col), @intCast(row), .{
+                    .char = .{ .grapheme = "�", .width = 1 },
+                    .style = style,
+                });
+                col += 1;
+                i += 1;
+            }
+            break;
+        }
+
+        // Validate the sequence
+        const seq = text[i .. i + seq_len];
+        if (std.unicode.utf8ValidateSlice(seq)) {
+            // Valid sequence - print it
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = seq, .width = 1 },
+                .style = style,
+            });
+            col += 1;
+            i += seq_len;
+        } else {
+            // Invalid sequence - show replacement character
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = "�", .width = 1 },
+                .style = style,
+            });
+            col += 1;
+            i += 1; // Only skip one byte, try to resync
+        }
+    }
+
+    return .{ .col = @intCast(col - col_offset), .row = 0, .overflow = false };
+}
+
 // Gutter width for line numbers in side-by-side diff view
 const GUTTER_WIDTH: usize = 5;
 
@@ -1015,30 +1081,19 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                     const icon = record.text[0..space_idx];
                     const rest = record.text[space_idx..];
 
-                    // Print icon with color
-                    var icon_seg = [_]vaxis.Cell.Segment{
-                        .{ .text = icon, .style = .{ .fg = icon_color } },
-                    };
-                    const icon_result = win.print(&icon_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                    // Print icon with color (with UTF-8 validation)
+                    const icon_result = safePrint(win, icon, .{ .fg = icon_color }, row, col_offset);
 
-                    // Print rest with default style
-                    var rest_seg = [_]vaxis.Cell.Segment{
-                        .{ .text = rest, .style = record.style },
-                    };
-                    _ = win.print(&rest_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset + icon_result.col) });
+                    // Print rest with default style (with UTF-8 validation)
+                    _ = safePrint(win, rest, record.style, row, col_offset + icon_result.col);
                 } else {
-                    // No space found, print normally
-                    var seg = [_]vaxis.Cell.Segment{
-                        .{ .text = record.text, .style = record.style },
-                    };
-                    _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                    // No space found, print normally (with UTF-8 validation)
+                    _ = safePrint(win, record.text, record.style, row, col_offset);
                 }
             },
             else => {
-                var seg = [_]vaxis.Cell.Segment{
-                    .{ .text = record.text, .style = record.style },
-                };
-                _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                // Print with UTF-8 validation to prevent grapheme iterator crash
+                _ = safePrint(win, record.text, record.style, row, col_offset);
             },
         }
         row += 1;

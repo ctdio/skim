@@ -601,6 +601,16 @@ pub const ChatLineMap = struct {
     }
 
     fn addToolResult(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message) !void {
+        // Skip showing output for MCP file tools - they have custom diff rendering
+        if (msg.tool_name) |name| {
+            if (std.mem.startsWith(u8, name, "mcp__acp__Read") or
+                std.mem.startsWith(u8, name, "mcp__acp__Edit") or
+                std.mem.startsWith(u8, name, "mcp__acp__Write"))
+            {
+                return;
+            }
+        }
+
         const max_output_lines = 8;
         // Slightly brighter than dim (index 8), use a light gray
         const output_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 140, 140, 140 } } };
@@ -980,32 +990,157 @@ pub const ChatLineMap = struct {
         });
         global_line.* += 1;
 
-        // Diff lines with truncation for large diffs
-        const max_diff_lines: usize = 25;
+        // Show all edits with limited context (5 lines) around each change.
+        // Collapse irrelevant context between non-contiguous edits.
+        const context_lines: usize = 5;
         const total_diff_lines = diff_result.lines.len;
-        const lines_to_show = @min(total_diff_lines, max_diff_lines);
-        const truncated_count = total_diff_lines - lines_to_show;
-        const diff_lines_slice = diff_result.lines[0..lines_to_show];
+
+        // Build a mask of which lines to show:
+        // - All change lines (add/delete)
+        // - Up to context_lines before and after each change
+        var show_line = try self.allocator.alloc(bool, total_diff_lines);
+        defer self.allocator.free(show_line);
+        @memset(show_line, false);
+
+        // First pass: mark all change lines and their context
+        for (diff_result.lines, 0..) |line, idx| {
+            if (line.kind != .context) {
+                // Mark this change line
+                show_line[idx] = true;
+                // Mark context before
+                const start = if (idx > context_lines) idx - context_lines else 0;
+                for (start..idx) |i| {
+                    show_line[i] = true;
+                }
+                // Mark context after
+                const end = @min(idx + context_lines + 1, total_diff_lines);
+                for ((idx + 1)..end) |i| {
+                    show_line[i] = true;
+                }
+            }
+        }
+
+        // Second pass: render lines, inserting separators where we skip
+        var line_idx: usize = 0;
+        var prev_shown: ?usize = null;
 
         switch (view_mode) {
-            .unified => try self.addUnifiedDiffLines(global_line, msg_idx, diff_lines_slice),
-            .side_by_side => try self.addSideBySideDiffLines(global_line, msg_idx, diff_lines_slice, wrap_width),
-        }
+            .unified => {
+                while (line_idx < total_diff_lines) {
+                    if (show_line[line_idx]) {
+                        // Check if we need a separator (skipped lines between shown regions)
+                        if (prev_shown) |prev| {
+                            const skipped = line_idx - prev - 1;
+                            if (skipped > 0) {
+                                // Add separator showing how many lines were skipped
+                                const sep_text = try std.fmt.allocPrint(self.allocator, "┃       ⋮ {d} lines", .{skipped});
+                                try self.strings.append(self.allocator, sep_text);
 
-        // Add truncation indicator if lines were hidden
-        if (truncated_count > 0) {
-            const truncate_text = try std.fmt.allocPrint(self.allocator, "⎿ (+{d} lines)", .{truncated_count});
-            try self.strings.append(self.allocator, truncate_text);
+                                try self.records.append(self.allocator, .{
+                                    .global_line = global_line.*,
+                                    .line_type = .{ .diff_line = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
+                                    .text = sep_text,
+                                    .style = .{ .fg = Color.dim },
+                                    .indent = 0,
+                                });
+                                global_line.* += 1;
+                            }
+                        }
 
-            try self.records.append(self.allocator, .{
-                .global_line = global_line.*,
-                .line_type = .{ .diff_line = .{ .msg_idx = msg_idx, .line_idx = lines_to_show } },
-                .text = truncate_text,
-                .style = .{ .fg = .{ .index = 8 } }, // dim for the indicator
-                .indent = 1,
-            });
-            global_line.* += 1;
+                        // Render this line
+                        try self.addUnifiedDiffLine(global_line, msg_idx, line_idx, diff_result.lines[line_idx]);
+                        prev_shown = line_idx;
+                    }
+                    line_idx += 1;
+                }
+            },
+            .side_by_side => {
+                // For side-by-side, collect the lines to show and pass to existing function
+                var lines_to_show: std.ArrayList(DiffLine) = .{};
+                defer lines_to_show.deinit(self.allocator);
+
+                while (line_idx < total_diff_lines) {
+                    if (show_line[line_idx]) {
+                        // Check if we need a separator
+                        if (prev_shown) |prev| {
+                            const skipped = line_idx - prev - 1;
+                            if (skipped > 0) {
+                                // Add separator showing how many lines were skipped
+                                const sep_text = try std.fmt.allocPrint(self.allocator, "┃       ⋮ {d} lines", .{skipped});
+                                try self.strings.append(self.allocator, sep_text);
+
+                                try self.records.append(self.allocator, .{
+                                    .global_line = global_line.*,
+                                    .line_type = .{ .diff_line = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
+                                    .text = sep_text,
+                                    .style = .{ .fg = Color.dim },
+                                    .indent = 0,
+                                });
+                                global_line.* += 1;
+                            }
+                        }
+                        try lines_to_show.append(self.allocator, diff_result.lines[line_idx]);
+                        prev_shown = line_idx;
+                    }
+                    line_idx += 1;
+                }
+
+                if (lines_to_show.items.len > 0) {
+                    try self.addSideBySideDiffLines(global_line, msg_idx, lines_to_show.items, wrap_width);
+                }
+            },
         }
+    }
+
+    /// Add a single unified diff line
+    fn addUnifiedDiffLine(
+        self: *ChatLineMap,
+        global_line: *usize,
+        msg_idx: usize,
+        line_idx: usize,
+        diff_line: DiffLine,
+    ) !void {
+        const line_num: ?usize = switch (diff_line.kind) {
+            .context, .delete => diff_line.old_line_num,
+            .add => diff_line.new_line_num,
+        };
+        const line_style: vaxis.Style = switch (diff_line.kind) {
+            .context => .{ .fg = Color.white },
+            .add => .{ .fg = Color.white, .bg = Color.diff_add_bg },
+            .delete => .{ .fg = Color.white, .bg = Color.diff_delete_bg },
+        };
+        const should_fill = diff_line.kind != .context;
+
+        // Copy content since diff_result will be freed
+        const content_copy = try self.allocator.dupe(u8, diff_line.content);
+        try self.strings.append(self.allocator, content_copy);
+
+        // Pre-format line number string (owned) to avoid buffer reuse issues in render
+        const line_num_str: ?[]const u8 = if (line_num) |n| blk: {
+            const str = try std.fmt.allocPrint(self.allocator, "{d:>3}", .{n});
+            try self.strings.append(self.allocator, str);
+            break :blk str;
+        } else null;
+
+        const sign: u8 = switch (diff_line.kind) {
+            .context => ' ',
+            .add => '+',
+            .delete => '-',
+        };
+
+        try self.records.append(self.allocator, .{
+            .global_line = global_line.*,
+            .line_type = .{ .diff_line = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
+            .text = content_copy,
+            .style = line_style,
+            .indent = 0,
+            .fill_bg = should_fill,
+            .diff_line_num = line_num,
+            .diff_line_num_str = line_num_str,
+            .diff_sign = sign,
+            .diff_kind = diff_line.kind,
+        });
+        global_line.* += 1;
     }
 
     fn addUnifiedDiffLines(
