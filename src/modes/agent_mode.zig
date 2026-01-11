@@ -1139,11 +1139,10 @@ fn updateFilePickerVisibility(_: *App, agent_state: *agent.AgentState) void {
     const active = state.FilePickerState.getActiveAtPosition(input_text, cursor_pos);
 
     if (active != null and !agent_state.file_picker.visible) {
-        // Load files lazily on first show
-        if (agent_state.file_picker.files.items.len == 0) {
-            agent_state.file_picker.loadFiles() catch |err| {
-                std.log.warn("Failed to load files for picker: {}", .{err});
-            };
+        // Start async load if not already loaded/loading
+        // Files should already be preloaded when panel opens, but handle edge case
+        if (!agent_state.file_picker.hasFiles() and !agent_state.file_picker.isLoading()) {
+            agent_state.file_picker.startAsyncLoad();
         }
         agent_state.file_picker.visible = true;
         agent_state.file_picker.selection = 0;

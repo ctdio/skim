@@ -894,9 +894,14 @@ pub const App = struct {
             if (should_poll) {
                 loop.pollEvent();
             } else {
-                // Non-blocking mode - sleep 10ms to prevent busy-wait while staying responsive
-                // This caps render loop at ~100 FPS for smooth updates during active operations
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                // Adaptive sleep based on activity level:
+                // - High activity (prompting): 5ms for smooth streaming (~200 FPS)
+                // - Medium activity (connecting, shell running): 8ms (~125 FPS)
+                // - Low activity (just rendering): 16ms (~60 FPS)
+                const is_high_activity = acp_active or shell_cmd_running;
+                const is_medium_activity = acp_connecting or mcp_active;
+                const sleep_ms: u64 = if (is_high_activity) 5 else if (is_medium_activity) 8 else 16;
+                std.Thread.sleep(sleep_ms * std.time.ns_per_ms);
             }
             // When not blocking (acp_active, mcp_active, etc.), events are still
             // captured by the vaxis reader thread and available via tryEvent()
@@ -968,6 +973,15 @@ pub const App = struct {
             // Poll running shell command for streaming output
             if (agent_mode.pollRunningShellCommand(self)) {
                 self.needs_render = true;
+            }
+
+            // Poll async file loading for file picker (all tabs)
+            if (self.tab_manager) |*tm| {
+                for (tm.tabs.items) |*tab| {
+                    if (tab.agent_state.file_picker.pollAsyncLoad()) {
+                        self.needs_render = true;
+                    }
+                }
             }
 
             // Render if we had events, need to update, or first render
@@ -1389,6 +1403,12 @@ pub const App = struct {
             // Re-enable scroll following when reopening panel
             // (user may have scrolled up before closing, we want to see new messages)
             agent_state.scrollToBottom();
+
+            // Preemptively load file list in background for @ mentions
+            // This ensures files are ready when user types @, avoiding UI freeze
+            if (!agent_state.file_picker.hasFiles() and !agent_state.file_picker.isLoading()) {
+                agent_state.file_picker.startAsyncLoad();
+            }
 
             // Add local slash commands (like /model)
             agent_state.addLocalSlashCommands() catch |err| {
@@ -3828,6 +3848,9 @@ pub const App = struct {
     }
 
     /// Poll a single ACP manager and route messages to its agent state
+    /// Maximum messages to process per frame to prevent UI freezes
+    const MAX_MESSAGES_PER_FRAME: usize = 20;
+
     fn pollTabAcpManager(self: *App, mgr: *acp.AcpManager, agent_state: *agent.AgentState, is_active_tab: bool) void {
         // Track status before polling to detect when agent finishes
         const status_before = mgr.status;
@@ -3841,8 +3864,11 @@ pub const App = struct {
             self.needs_render = true;
         }
 
-        // Process each message (if any)
-        for (messages) |msg| {
+        // Process messages with a limit to prevent UI freezes during high-volume streaming
+        const to_process = @min(messages.len, MAX_MESSAGES_PER_FRAME);
+
+        // Process each message (up to limit)
+        for (messages[0..to_process]) |msg| {
             switch (msg.kind) {
                 .agent_text => {
                     agent_state.appendToLastAgentMessage(msg.text) catch {};
@@ -3920,8 +3946,13 @@ pub const App = struct {
             }
         }
 
-        // Clear processed messages
-        mgr.clearMessages();
+        // Clear only the messages we processed (bounded processing)
+        mgr.clearMessagesN(to_process);
+
+        // If there are more messages, request another render to process them
+        if (messages.len > to_process) {
+            self.needs_render = true;
+        }
 
         // Check if agent just finished responding and there's a staged message to send
         // The condition: agent is idle (session_active) and no pending prompt request

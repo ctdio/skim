@@ -77,10 +77,16 @@ pub const FilePickerState = struct {
     fzf_available: bool, // Whether fzf binary is available
     use_fzf: bool, // Whether to use fzf for filtering
 
+    // Async file loading state
+    loading_thread: ?std.Thread, // Background thread loading files
+    loading_complete: std.atomic.Value(bool), // Signals loading finished
+    pending_files: std.ArrayList([]const u8), // Files loaded by background thread
+    pending_files_mutex: std.Thread.Mutex, // Protects pending_files
+    load_requested: bool, // True if load has been requested (prevents multiple loads)
+
     pub fn init(allocator: Allocator) FilePickerState {
         // Use native fzf-like scoring by default (faster, no subprocess)
         // fzf subprocess can be enabled with use_fzf = true
-        std.log.info("FilePickerState: using native fzf-like scoring", .{});
         return .{
             .allocator = allocator,
             .visible = false,
@@ -94,6 +100,11 @@ pub const FilePickerState = struct {
             .last_filter_len = 0,
             .fzf_available = false, // Checked lazily if needed
             .use_fzf = false, // Native scoring by default (faster)
+            .loading_thread = null,
+            .loading_complete = std.atomic.Value(bool).init(false),
+            .pending_files = .{},
+            .pending_files_mutex = .{},
+            .load_requested = false,
         };
     }
 
@@ -109,6 +120,18 @@ pub const FilePickerState = struct {
     }
 
     pub fn deinit(self: *FilePickerState) void {
+        // Wait for loading thread to finish
+        if (self.loading_thread) |thread| {
+            thread.join();
+        }
+        // Free pending files
+        self.pending_files_mutex.lock();
+        for (self.pending_files.items) |f| {
+            self.allocator.free(f);
+        }
+        self.pending_files.deinit(self.allocator);
+        self.pending_files_mutex.unlock();
+
         for (self.files.items) |f| {
             self.allocator.free(f);
         }
@@ -117,7 +140,7 @@ pub const FilePickerState = struct {
         self.filtered_paths.deinit(self.allocator);
     }
 
-    /// Load file list from git repository
+    /// Load file list from git repository (synchronous - use startAsyncLoad for non-blocking)
     pub fn loadFiles(self: *FilePickerState) !void {
         // Clear existing files
         for (self.files.items) |f| {
@@ -137,7 +160,104 @@ pub const FilePickerState = struct {
         // Free just the outer slice (inner strings now owned by self.files)
         self.allocator.free(files);
 
+        self.load_requested = true;
         std.log.info("FilePickerState: loaded {d} files from git", .{self.files.items.len});
+    }
+
+    /// Start async file loading in background thread.
+    /// Call pollAsyncLoad() periodically to check for completion.
+    /// This is non-blocking and won't freeze the UI.
+    pub fn startAsyncLoad(self: *FilePickerState) void {
+        // Don't start if already loading or already loaded
+        if (self.load_requested) return;
+        if (self.loading_thread != null) return;
+
+        self.load_requested = true;
+        self.loading_complete.store(false, .release);
+
+        // Spawn background thread
+        self.loading_thread = std.Thread.spawn(.{}, fileLoadWorker, .{self}) catch |err| {
+            std.log.err("FilePickerState: failed to spawn loading thread: {}", .{err});
+            self.load_requested = false;
+            return;
+        };
+
+        std.log.info("FilePickerState: started async file loading", .{});
+    }
+
+    /// Background worker thread for async file loading
+    fn fileLoadWorker(self: *FilePickerState) void {
+        // Load files from git
+        const files = git_files.getAllFiles(self.allocator) catch |err| {
+            std.log.err("FilePickerState: async load failed: {}", .{err});
+            self.loading_complete.store(true, .release);
+            return;
+        };
+
+        // Transfer to pending_files under mutex
+        self.pending_files_mutex.lock();
+        defer self.pending_files_mutex.unlock();
+
+        for (files) |f| {
+            self.pending_files.append(self.allocator, f) catch {
+                self.allocator.free(f);
+            };
+        }
+        self.allocator.free(files);
+
+        std.log.info("FilePickerState: async load complete, {d} files", .{self.pending_files.items.len});
+        self.loading_complete.store(true, .release);
+    }
+
+    /// Poll for async load completion. Returns true if files are now available.
+    /// Call this from the main loop to check if background loading finished.
+    pub fn pollAsyncLoad(self: *FilePickerState) bool {
+        // Check if loading thread finished
+        if (!self.loading_complete.load(.acquire)) {
+            return false;
+        }
+
+        // Join thread if still tracked
+        if (self.loading_thread) |thread| {
+            thread.join();
+            self.loading_thread = null;
+        }
+
+        // Transfer pending files to main files list
+        self.pending_files_mutex.lock();
+        defer self.pending_files_mutex.unlock();
+
+        if (self.pending_files.items.len == 0) {
+            return self.files.items.len > 0;
+        }
+
+        // Clear existing files
+        for (self.files.items) |f| {
+            self.allocator.free(f);
+        }
+        self.files.clearRetainingCapacity();
+        self.filtered_indices.clearRetainingCapacity();
+
+        // Move pending files to main list
+        for (self.pending_files.items) |f| {
+            self.files.append(self.allocator, f) catch {
+                self.allocator.free(f);
+            };
+        }
+        self.pending_files.clearRetainingCapacity();
+
+        std.log.info("FilePickerState: transferred {d} files from async load", .{self.files.items.len});
+        return true;
+    }
+
+    /// Check if files are available (either loaded sync or async)
+    pub fn hasFiles(self: *const FilePickerState) bool {
+        return self.files.items.len > 0;
+    }
+
+    /// Check if async load is in progress
+    pub fn isLoading(self: *const FilePickerState) bool {
+        return self.loading_thread != null and !self.loading_complete.load(.acquire);
     }
 
     /// Check if there's an active @ trigger at cursor position

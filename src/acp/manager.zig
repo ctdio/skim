@@ -1433,6 +1433,47 @@ pub const AcpManager = struct {
         self.tool_call_id_to_idx.clearRetainingCapacity();
     }
 
+    /// Clear only the first `count` messages from the pending queue.
+    /// Used for bounded message processing to prevent UI freezes.
+    pub fn clearMessagesN(self: *AcpManager, count: usize) void {
+        self.messages_mutex.lock();
+        defer self.messages_mutex.unlock();
+
+        const to_clear = @min(count, self.pending_messages.items.len);
+        if (to_clear == 0) return;
+
+        // Free the messages we're removing
+        for (self.pending_messages.items[0..to_clear]) |*msg| {
+            msg.deinit(self.allocator);
+        }
+
+        // Shift remaining messages to the front
+        const remaining = self.pending_messages.items.len - to_clear;
+        if (remaining > 0) {
+            std.mem.copyForwards(
+                PendingMessage,
+                self.pending_messages.items[0..remaining],
+                self.pending_messages.items[to_clear..],
+            );
+        }
+        self.pending_messages.items.len = remaining;
+
+        // Rebuild the tool_call_id index since indices changed
+        self.tool_call_id_to_idx.clearRetainingCapacity();
+        for (self.pending_messages.items, 0..) |msg, idx| {
+            if (msg.tool_call_id) |id| {
+                self.tool_call_id_to_idx.put(self.allocator, id, idx) catch {};
+            }
+        }
+    }
+
+    /// Get the count of pending messages without locking (for status checks)
+    pub fn pendingMessageCount(self: *AcpManager) usize {
+        self.messages_mutex.lock();
+        defer self.messages_mutex.unlock();
+        return self.pending_messages.items.len;
+    }
+
     /// Check if connected and alive
     pub fn isConnected(self: *AcpManager) bool {
         if (self.acp_client) |acp| {
