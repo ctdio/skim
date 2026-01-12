@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 
 const App = @import("app.zig").App;
 const mcp_client = @import("mcp/client.zig");
+const Color = @import("rendering/common.zig").Color;
 
 pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     // Calculate popup dimensions - smaller than help since less content
@@ -19,7 +20,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
         .border = .{
             .where = .all,
             .style = .{
-                .fg = .{ .index = 6 }, // cyan
+                .fg = Color.cyan,
             },
         },
     });
@@ -30,16 +31,16 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
         .style = .{
-            .bg = .{ .index = 0 }, // black background
+            .bg = Color.black,
         },
     };
     popup_win.fill(bg_cell);
 
-    const title_style = vaxis.Style{ .fg = .{ .index = 6 }, .bold = true };
-    const label_style = vaxis.Style{ .fg = .{ .index = 3 } }; // yellow
-    const value_style = vaxis.Style{ .fg = .{ .index = 7 } }; // white
-    const connected_style = vaxis.Style{ .fg = .{ .index = 2 } }; // green
-    const disconnected_style = vaxis.Style{ .fg = .{ .index = 1 } }; // red
+    const title_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
+    const label_style = vaxis.Style{ .fg = Color.yellow };
+    const value_style = vaxis.Style{ .fg = Color.white };
+    const connected_style = vaxis.Style{ .fg = Color.green };
+    const disconnected_style = vaxis.Style{ .fg = Color.red };
 
     var row: usize = 0;
 
@@ -58,7 +59,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
         const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
         @memset(sep_text, '-');
         var sep_seg = [_]vaxis.Cell.Segment{
-            .{ .text = sep_text, .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = sep_text, .style = .{ .fg = Color.dim_gray } },
         };
         _ = popup_win.print(&sep_seg, .{ .row_offset = @intCast(row) });
     }
@@ -94,7 +95,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
         } else {
             var session_seg = [_]vaxis.Cell.Segment{
                 .{ .text = "  Session:    ", .style = label_style },
-                .{ .text = "(none)", .style = .{ .fg = .{ .index = 8 } } },
+                .{ .text = "(none)", .style = .{ .fg = Color.dim_gray } },
             };
             _ = popup_win.print(&session_seg, .{ .row_offset = @intCast(row) });
         }
@@ -102,13 +103,13 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
 
         // Description
         var desc_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  The daemon allows AI agents to interact with", .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = "  The daemon allows AI agents to interact with", .style = .{ .fg = Color.dim_gray } },
         };
         _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row) });
         row += 1;
 
         var desc2_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  your code review session via MCP.", .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = "  your code review session via MCP.", .style = .{ .fg = Color.dim_gray } },
         };
         _ = popup_win.print(&desc2_seg, .{ .row_offset = @intCast(row) });
     } else {
@@ -121,19 +122,19 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
         row += 2;
 
         var info_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  Daemon not running or not reachable.", .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = "  Daemon not running or not reachable.", .style = .{ .fg = Color.dim_gray } },
         };
         _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(row) });
         row += 2;
 
         var start_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  To start the daemon:", .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = "  To start the daemon:", .style = .{ .fg = Color.dim_gray } },
         };
         _ = popup_win.print(&start_seg, .{ .row_offset = @intCast(row) });
         row += 1;
 
         var cmd_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "    skim daemon start", .style = .{ .fg = .{ .index = 6 } } },
+            .{ .text = "    skim daemon start", .style = .{ .fg = Color.cyan } },
         };
         _ = popup_win.print(&cmd_seg, .{ .row_offset = @intCast(row) });
     }
@@ -141,7 +142,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     // Footer
     row = popup_height - 3;
     var footer_seg = [_]vaxis.Cell.Segment{
-        .{ .text = "  Press ESC or q to close", .style = .{ .fg = .{ .index = 8 } } },
+        .{ .text = "  Press ESC or q to close", .style = .{ .fg = Color.dim_gray } },
     };
     _ = popup_win.print(&footer_seg, .{ .row_offset = @intCast(row) });
 }

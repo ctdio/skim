@@ -8,6 +8,7 @@ const DiffStats = git.DiffStats;
 const state_helpers = @import("state.zig");
 const render_utils = @import("rendering/utils.zig");
 const app_config = @import("config.zig");
+const Color = @import("rendering/common.zig").Color;
 
 const Allocator = std.mem.Allocator;
 const StateHelpers = state_helpers.StateHelpers;
@@ -441,7 +442,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         .border = .{
             .where = .all,
             .style = .{
-                .fg = .{ .index = 6 }, // cyan
+                .fg = Color.cyan,
             },
         },
     });
@@ -453,7 +454,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
         .style = .{
-            .bg = .{ .index = 0 }, // black background
+            .bg = Color.black,
         },
     };
     palette_win.fill(bg_cell);
@@ -473,7 +474,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         try std.fmt.bufPrint(&title_buf, "Go to File ({d} files, +{d}, -{d})", .{ stats.files, stats.additions, stats.deletions });
 
     const title_style = vaxis.Style{
-        .fg = .{ .index = 6 }, // cyan
+        .fg = Color.cyan,
         .bold = true,
     };
     var title_segments = [_]vaxis.Cell.Segment{
@@ -483,10 +484,10 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
 
     // Line 1: Input field
     const input_style = vaxis.Style{
-        .fg = .{ .index = 7 }, // white
+        .fg = Color.white,
     };
     var input_segments = [_]vaxis.Cell.Segment{
-        .{ .text = "> ", .style = .{ .fg = .{ .index = 6 } } }, // cyan prompt
+        .{ .text = "> ", .style = .{ .fg = Color.cyan } },
         .{ .text = query, .style = input_style },
     };
     _ = palette_win.print(&input_segments, .{ .row_offset = 1  });
@@ -496,7 +497,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
 
     // Line 2: Separator (account for border width like help.zig does)
     const sep_style = vaxis.Style{
-        .fg = .{ .index = 8 }, // dim
+        .fg = Color.dim_gray,
     };
     if (palette_win.width > 2) {
         // Subtract 2 for border padding (1 on each side)
@@ -513,7 +514,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     if (state.filtered_commands.items.len == 0) {
         const no_results = "No matching commands";
         const no_results_style = vaxis.Style{
-            .fg = .{ .index = 8 }, // dim
+            .fg = Color.dim_gray,
         };
         var no_results_segments = [_]vaxis.Cell.Segment{
             .{ .text = no_results, .style = no_results_style },
@@ -532,18 +533,18 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
             // Selection indicator
             const indicator = if (is_selected) "▶ " else "  ";
             const indicator_style = vaxis.Style{
-                .fg = if (is_selected) .{ .index = 6 } else .{ .index = 8 }, // cyan or dim
+                .fg = if (is_selected) Color.cyan else Color.dim_gray,
             };
 
             // Command name
             const name_style = vaxis.Style{
-                .fg = if (is_selected) .{ .index = 7 } else .{ .index = 7 }, // white
+                .fg = if (is_selected) Color.white else Color.white,
                 .bold = is_selected,
             };
 
             // Description
             const desc_style = vaxis.Style{
-                .fg = .{ .index = 8 }, // dim
+                .fg = Color.dim_gray,
             };
 
             // Format: "▶ Name             Description" with stats right-justified
@@ -590,13 +591,13 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
                 // Add colored stats segments
                 const additions_text = try std.fmt.allocPrint(app.allocator, "+{d}", .{cmd.additions});
                 defer app.allocator.free(additions_text);
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, additions_text), .style = .{ .fg = .{ .index = 2 }, .bold = true } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, additions_text), .style = .{ .fg = Color.green, .bold = true } });
 
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ", "), .style = .{} });
 
                 const deletions_text = try std.fmt.allocPrint(app.allocator, "-{d}", .{cmd.deletions});
                 defer app.allocator.free(deletions_text);
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, deletions_text), .style = .{ .fg = .{ .index = 1 }, .bold = true } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, deletions_text), .style = .{ .fg = Color.red, .bold = true } });
             }
 
             _ = palette_win.print(segments.items, .{ .row_offset = @intCast(row ) });
@@ -606,7 +607,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         if (calc_end_idx < state.filtered_commands.items.len) {
             const more_text = "...";
             const more_style = vaxis.Style{
-                .fg = .{ .index = 8 }, // dim
+                .fg = Color.dim_gray,
             };
             var more_segments = [_]vaxis.Cell.Segment{
                 .{ .text = more_text, .style = more_style },

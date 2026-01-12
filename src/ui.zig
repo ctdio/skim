@@ -426,7 +426,7 @@ pub const UI = struct {
         // Fill with solid background
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = .{ .index = 0 } }, // black background
+            .style = .{ .bg = Color.black },
         };
         popup_win.fill(bg_cell);
 
@@ -538,7 +538,7 @@ pub const UI = struct {
         // Fill with solid background
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = .{ .index = 0 } }, // black background
+            .style = .{ .bg = Color.black },
         };
         popup_win.fill(bg_cell);
 
@@ -675,7 +675,7 @@ pub const UI = struct {
         // Fill with solid background
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = .{ .index = 0 } }, // black background
+            .style = .{ .bg = Color.black },
         };
         popup_win.fill(bg_cell);
 
@@ -776,7 +776,7 @@ pub const UI = struct {
         // Fill with solid background
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = .{ .index = 0 } },
+            .style = .{ .bg = Color.black },
         };
         popup_win.fill(bg_cell);
 
@@ -1206,7 +1206,7 @@ pub const UI = struct {
     /// Render a vertical divider line
     pub fn renderVerticalDivider(win: vaxis.Window) !void {
         const divider_style = vaxis.Style{
-            .fg = .{ .index = 8 }, // dark gray
+            .fg = Color.dim_gray,
         };
 
         for (0..win.height) |row| {

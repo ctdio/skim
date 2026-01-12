@@ -1424,7 +1424,7 @@ pub const RenderUtils = struct {
         // Clear with background color (also makes text behind dialog less distracting)
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = .{ .index = 0 } }, // black
+            .style = .{ .bg = Color.black },
         };
         clear_win.fill(bg_cell);
 
@@ -1440,11 +1440,11 @@ pub const RenderUtils = struct {
         });
 
         // Styles
-        const border_style = vaxis.Style{ .fg = .{ .index = 6 } }; // cyan
-        const title_style = vaxis.Style{ .fg = .{ .index = 6 }, .bold = true };
-        const input_style = vaxis.Style{ .fg = .{ .index = 7 } }; // white
-        const prompt_style = vaxis.Style{ .fg = .{ .index = 6 } }; // cyan
-        const sep_style = vaxis.Style{ .fg = .{ .index = 8 } }; // dim
+        const border_style = vaxis.Style{ .fg = Color.cyan };
+        const title_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
+        const input_style = vaxis.Style{ .fg = Color.white };
+        const prompt_style = vaxis.Style{ .fg = Color.cyan };
+        const sep_style = vaxis.Style{ .fg = Color.dim_gray };
 
         // Fill dialog background (in case max clear area is smaller than dialog)
         dialog_win.fill(bg_cell);
@@ -1548,9 +1548,9 @@ pub const RenderUtils = struct {
         description: []const u8,
         max_width: usize,
     ) void {
-        const normal_style = vaxis.Style{ .fg = .{ .index = 7 } };
-        const selected_style = vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 6 }, .bold = true };
-        const desc_style = vaxis.Style{ .fg = .{ .index = 8 } };
+        const normal_style = vaxis.Style{ .fg = Color.white };
+        const selected_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
+        const desc_style = vaxis.Style{ .fg = Color.dim_gray };
 
         const style = if (is_selected) selected_style else normal_style;
 

@@ -207,9 +207,9 @@ fn calculateScrollbar(
 
 fn renderScrollbar(win: vaxis.Window, info: ScrollbarInfo) void {
     const col = win.width - 1; // Rightmost column
-    const track_style = vaxis.Style{ .fg = .{ .index = 8 }, .dim = true }; // very dim gray
-    const thumb_style = vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray (no bold)
-    const arrow_style = vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray
+    const track_style = vaxis.Style{ .fg = Color.dim_gray, .dim = true };
+    const thumb_style = vaxis.Style{ .fg = Color.dim_gray };
+    const arrow_style = vaxis.Style{ .fg = Color.dim_gray };
 
     for (0..win.height) |row| {
         var char: []const u8 = undefined;
@@ -264,7 +264,7 @@ fn renderInlineMenu(
     var row: usize = 0;
 
     // Row 0: Separator line
-    const separator_style = vaxis.Style{ .fg = .{ .index = 8 } };
+    const separator_style = vaxis.Style{ .fg = Color.dim_gray };
     for (0..win.width) |col| {
         win.writeCell(@intCast(col), @intCast(row), .{
             .char = .{ .grapheme = "─", .width = 1 },
@@ -274,7 +274,7 @@ fn renderInlineMenu(
     row += 1;
 
     // Row 1: Title
-    const title_style = vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }; // magenta
+    const title_style = vaxis.Style{ .fg = Color.magenta, .bold = true };
     var title_seg = [_]vaxis.Cell.Segment{
         .{ .text = title, .style = title_style },
     };
@@ -282,14 +282,14 @@ fn renderInlineMenu(
     row += 1;
 
     // Rows 2+: Menu items
-    const normal_style = vaxis.Style{ .fg = .{ .index = 7 } };
-    const selected_style = vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 6 }, .bold = true }; // black on cyan
-    const desc_style = vaxis.Style{ .fg = .{ .index = 8 } };
+    const normal_style = vaxis.Style{ .fg = Color.white };
+    const selected_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
+    const desc_style = vaxis.Style{ .fg = Color.dim_gray };
 
     // Show scroll indicator at top if there are items above
     if (scroll_offset > 0 and row < win.height) {
         const scroll_ind = "  ↑ more";
-        const scroll_style = vaxis.Style{ .fg = .{ .index = 8 } };
+        const scroll_style = vaxis.Style{ .fg = Color.dim_gray };
         var scroll_seg = [_]vaxis.Cell.Segment{
             .{ .text = scroll_ind, .style = scroll_style },
         };
@@ -336,7 +336,7 @@ fn renderInlineMenu(
     const has_more_below = scroll_offset + visible_count < items.len;
     if (has_more_below and row < win.height) {
         const scroll_ind = "  ↓ more";
-        const scroll_style = vaxis.Style{ .fg = .{ .index = 8 } };
+        const scroll_style = vaxis.Style{ .fg = Color.dim_gray };
         var scroll_seg = [_]vaxis.Cell.Segment{
             .{ .text = scroll_ind, .style = scroll_style },
         };
@@ -346,7 +346,7 @@ fn renderInlineMenu(
 
     // Footer row with keybindings
     if (row < win.height and footer.len > 0) {
-        const kb_style = vaxis.Style{ .fg = .{ .index = 8 } };
+        const kb_style = vaxis.Style{ .fg = Color.dim_gray };
         const kb_col = if (win.width > footer.len) win.width - footer.len else 0;
 
         var kb_seg = [_]vaxis.Cell.Segment{
@@ -626,7 +626,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     } else " Not connected";
 
     const title_style = vaxis.Style{
-        .fg = .{ .index = 7 }, // white
+        .fg = Color.white,
         .bold = true,
     };
 
@@ -651,13 +651,13 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     const status_style = vaxis.Style{
         .fg = if (app.getActiveAcpManager()) |mgr|
             switch (mgr.status) {
-                .session_active => .{ .index = 2 }, // green
-                .discovering, .connecting, .connected, .prompting => .{ .index = 8 }, // dim gray
-                .disconnected => .{ .index = 7 }, // white
-                .failed => .{ .index = 1 }, // red
+                .session_active => Color.green,
+                .discovering, .connecting, .connected, .prompting => Color.dim_gray,
+                .disconnected => Color.white,
+                .failed => Color.red,
             }
         else
-            .{ .index = 7 },
+            Color.white,
     };
 
     const status_width = std.unicode.utf8CountCodepoints(status_text) catch status_text.len;
@@ -688,7 +688,7 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
     if (tm.active_idx >= tm.tabs.items.len) return false;
 
     // Fill background with dim color - explicitly fill each cell
-    const bg_style = vaxis.Style{ .bg = .{ .index = 240 } }; // medium gray background
+    const bg_style = vaxis.Style{ .bg = Color.gray_240 };
     for (0..win.width) |x| {
         win.writeCell(@intCast(x), 0, .{
             .char = .{ .grapheme = " ", .width = 1 },
@@ -727,12 +727,12 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
 
         // Active tab: darker gray (236) background, inactive: lighter gray (240)
         const tab_style: vaxis.Style = if (is_active) .{
-            .fg = .{ .index = 15 }, // bright white text
-            .bg = .{ .index = 236 }, // dark gray (from 256 palette)
+            .fg = Color.bright_white,
+            .bg = Color.gray_236,
             .bold = true,
         } else .{
-            .fg = .{ .index = 7 }, // white text
-            .bg = .{ .index = 240 }, // medium gray (from 256 palette)
+            .fg = Color.white,
+            .bg = Color.gray_240,
         };
 
         const display_name = tab.name[0..name_len];
@@ -746,9 +746,9 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
             "";
 
         const suffix_style: vaxis.Style = if (has_permission)
-            .{ .fg = .{ .index = 3 }, .bg = tab_style.bg, .bold = true } // yellow
+            .{ .fg = Color.yellow, .bg = tab_style.bg, .bold = true }
         else
-            .{ .fg = .{ .index = 6 }, .bg = tab_style.bg }; // cyan
+            .{ .fg = Color.cyan, .bg = tab_style.bg };
 
         // Print tab: " name " or " name* "
         var seg = [_]vaxis.Cell.Segment{
@@ -764,7 +764,7 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
         // Separator between tabs (vim-style |)
         if (needs_separator) {
             var sep_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "|", .style = .{ .fg = .{ .index = 240 }, .bg = .{ .index = 240 } } },
+                .{ .text = "|", .style = .{ .fg = Color.gray_240, .bg = Color.gray_240 } },
             };
             _ = win.print(&sep_seg, .{ .col_offset = @intCast(col) });
             col = std.math.add(usize, col, 1) catch break;
@@ -780,7 +780,7 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
     if (hint_len <= win.width) {
         const hint_col = win.width - hint_len;
         var hint_seg = [_]vaxis.Cell.Segment{
-            .{ .text = hint, .style = .{ .fg = .{ .index = 7 }, .bg = .{ .index = 240 } } },
+            .{ .text = hint, .style = .{ .fg = Color.white, .bg = Color.gray_240 } },
         };
         _ = win.print(&hint_seg, .{ .col_offset = @intCast(hint_col) });
     }
@@ -810,7 +810,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 else => "Initializing...",
             } else "Initializing...";
             const loading_style = vaxis.Style{
-                .fg = .{ .index = 8 }, // dim gray
+                .fg = Color.dim_gray,
                 .bold = true,
             };
             var seg = [_]vaxis.Cell.Segment{
@@ -822,7 +822,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
         } else if (!is_thinking) {
             const placeholder = "Type a prompt and press Enter to send.";
             const placeholder_style = vaxis.Style{
-                .fg = .{ .index = 8 }, // dark gray
+                .fg = Color.dim_gray,
                 .italic = true,
             };
             var seg = [_]vaxis.Cell.Segment{
@@ -841,7 +841,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     const line_map = agent_state.ensureLineMap(wrap_width) catch {
         // Fallback: show error message
         var err_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "Error building line map", .style = .{ .fg = .{ .index = 1 } } },
+            .{ .text = "Error building line map", .style = .{ .fg = Color.red } },
         };
         _ = win.print(&err_seg, .{ .row_offset = 0, .col_offset = 1 });
         return;
@@ -1071,12 +1071,12 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 const icon_color: vaxis.Color = if (th.msg_idx < messages.len) blk: {
                     const msg = messages[th.msg_idx];
                     break :blk switch (msg.tool_status) {
-                        .pending => .{ .index = 3 }, // yellow
-                        .running => .{ .index = 6 }, // cyan
-                        .completed => .{ .index = 2 }, // green
-                        .failed => .{ .index = 1 }, // red
+                        .pending => Color.yellow,
+                        .running => Color.cyan,
+                        .completed => Color.green,
+                        .failed => Color.red,
                     };
-                } else .{ .index = 7 }; // default white
+                } else Color.white;
 
                 // Find first space to split icon from rest
                 if (std.mem.indexOf(u8, record.text, " ")) |space_idx| {
@@ -1313,7 +1313,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     });
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{ .bg = .{ .index = 0 } },
+        .style = .{ .bg = Color.black },
     };
     clear_win.fill(bg_cell);
 
@@ -1326,8 +1326,8 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     });
 
     // Draw menu background and border (neutral colors)
-    const border_style = vaxis.Style{ .fg = .{ .index = 8 } }; // gray
-    const bg_style = vaxis.Style{ .bg = .{ .index = 0 } }; // black background
+    const border_style = vaxis.Style{ .fg = Color.dim_gray };
+    const bg_style = vaxis.Style{ .bg = Color.black };
 
     // Fill background
     for (0..menu_height) |row| {
@@ -1396,21 +1396,21 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
 
         // Style based on selection (neutral colors)
         const name_style: vaxis.Style = if (is_selected)
-            .{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 }, .bold = true } // inverted white
+            .{ .fg = Color.black, .bg = Color.white, .bold = true }
         else
-            .{ .fg = .{ .index = 7 }, .bold = true }; // white
+            .{ .fg = Color.white, .bold = true };
 
         const desc_style: vaxis.Style = if (is_selected)
-            .{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 } } // inverted
+            .{ .fg = Color.black, .bg = Color.white }
         else
-            .{ .fg = .{ .index = 8 } }; // dim
+            .{ .fg = Color.dim_gray };
 
         // Fill row background if selected
         if (is_selected) {
             for (1..menu_width - 1) |col| {
                 menu_win.writeCell(@intCast(col), @intCast(row), .{
                     .char = .{ .grapheme = " ", .width = 1 },
-                    .style = .{ .bg = .{ .index = 7 } }, // white background
+                    .style = .{ .bg = Color.white },
                 });
             }
         }
@@ -1477,7 +1477,7 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
     });
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{ .bg = .{ .index = 0 } },
+        .style = .{ .bg = Color.black },
     };
     clear_win.fill(bg_cell);
 
@@ -1490,8 +1490,8 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
     });
 
     // Draw menu background and border (neutral colors)
-    const border_style = vaxis.Style{ .fg = .{ .index = 8 } }; // gray
-    const bg_style = vaxis.Style{ .bg = .{ .index = 0 } }; // black background
+    const border_style = vaxis.Style{ .fg = Color.dim_gray };
+    const bg_style = vaxis.Style{ .bg = Color.black };
 
     // Fill background
     for (0..menu_height) |row| {
@@ -1557,16 +1557,16 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
 
         // Style based on selection
         const path_style: vaxis.Style = if (is_selected)
-            .{ .fg = .{ .index = 0 }, .bg = .{ .index = 7 }, .bold = true } // inverted white
+            .{ .fg = Color.black, .bg = Color.white, .bold = true }
         else
-            .{ .fg = .{ .index = 7 } }; // white
+            .{ .fg = Color.white };
 
         // Fill row background if selected
         if (is_selected) {
             for (1..menu_width - 1) |col| {
                 menu_win.writeCell(@intCast(col), @intCast(row), .{
                     .char = .{ .grapheme = " ", .width = 1 },
-                    .style = .{ .bg = .{ .index = 7 } },
+                    .style = .{ .bg = Color.white },
                 });
             }
         }
@@ -1601,7 +1601,7 @@ fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry, expanded: 
     if (win.height == 0 or entries.len == 0) return;
 
     var row: usize = 0;
-    const header_style = vaxis.Style{ .fg = .{ .index = 8 }, .bold = true };
+    const header_style = vaxis.Style{ .fg = Color.dim_gray, .bold = true };
 
     // Clear entire header row first to avoid artifacts
     for (0..win.width) |col| {
@@ -1709,15 +1709,15 @@ fn renderPlanEntry(win: vaxis.Window, row: usize, entry: OwnedPlanEntry) void {
 
     // Status color
     const status_style: vaxis.Style = switch (entry.status) {
-        .pending => .{ .fg = .{ .index = 8 } }, // dim
-        .in_progress => .{ .fg = .{ .index = 3 }, .bold = true }, // yellow
-        .completed => .{ .fg = .{ .index = 2 } }, // green
+        .pending => .{ .fg = Color.dim_gray },
+        .in_progress => .{ .fg = Color.yellow, .bold = true },
+        .completed => .{ .fg = Color.green },
     };
 
     // Content style (dim for completed)
     const content_style: vaxis.Style = switch (entry.status) {
-        .completed => .{ .fg = .{ .index = 8 } },
-        else => .{ .fg = .{ .index = 7 } },
+        .completed => .{ .fg = Color.dim_gray },
+        else => .{ .fg = Color.white },
     };
 
     // Print status icon
@@ -1828,7 +1828,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     // Last row: Footer with mode (left) and keybindings (right)
 
     // Separator line
-    const separator_style = vaxis.Style{ .fg = .{ .index = 8 } };
+    const separator_style = vaxis.Style{ .fg = Color.dim_gray };
     for (0..win.width) |col| {
         win.writeCell(@intCast(col), 0, .{
             .char = .{ .grapheme = "─", .width = 1 },
@@ -1842,13 +1842,13 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     // Dim prompt when session is not ready
     const session_ready = if (app.getActiveAcpManager()) |mgr| mgr.status == .session_active or mgr.status == .prompting else false;
     const prompt_style = if (is_shell_mode)
-        vaxis.Style{ .fg = .{ .index = 3 }, .bold = true } // yellow for shell mode
+        vaxis.Style{ .fg = Color.yellow, .bold = true }
     else if (session_ready)
-        vaxis.Style{ .fg = .{ .index = 5 }, .bold = true } // magenta when ready
+        vaxis.Style{ .fg = Color.magenta, .bold = true }
     else
-        vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray when not ready
-    const text_style = vaxis.Style{ .fg = .{ .index = 7 } };
-    const file_ref_style = vaxis.Style{ .fg = .{ .index = 6 }, .bold = true }; // cyan, bold for @file refs
+        vaxis.Style{ .fg = Color.dim_gray };
+    const text_style = vaxis.Style{ .fg = Color.white };
+    const file_ref_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
 
     // Find file reference ranges for highlighting
     const file_ref_ranges = findFileRefRanges(app.allocator, text) catch &[_]FileRefRange{};
@@ -1937,8 +1937,8 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
                     // Visual selection style
                     const visual_style = vaxis.Style{
-                        .fg = .{ .index = 0 },
-                        .bg = .{ .index = 6 },
+                        .fg = Color.black,
+                        .bg = Color.cyan,
                         .bold = true,
                     };
 
@@ -2086,7 +2086,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         }
 
         if (session_mode_text) |sm_text| {
-            const sm_style = vaxis.Style{ .fg = .{ .index = 7 } }; // white
+            const sm_style = vaxis.Style{ .fg = Color.white };
             var sm_seg = [_]vaxis.Cell.Segment{
                 .{ .text = sm_text, .style = sm_style },
             };
@@ -2097,7 +2097,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         var next_col: usize = if (session_mode_text) |sm| 13 + sm.len else 13;
 
         if (agent_state.hasStash()) {
-            const stash_style = vaxis.Style{ .fg = .{ .index = 3 }, .bold = true }; // yellow
+            const stash_style = vaxis.Style{ .fg = Color.yellow, .bold = true };
             var stash_seg = [_]vaxis.Cell.Segment{
                 .{ .text = " [stashed]", .style = stash_style },
             };
@@ -2113,7 +2113,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                 if (model_name.len > 0) {
                     const model_text = std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch null;
                     if (model_text) |mt| {
-                        const model_style = vaxis.Style{ .fg = .{ .index = 6 } }; // cyan
+                        const model_style = vaxis.Style{ .fg = Color.cyan };
                         var model_seg = [_]vaxis.Cell.Segment{
                             .{ .text = mt, .style = model_style },
                         };
@@ -2132,7 +2132,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
             .visual => "ESC:exit",
             .command => "Enter:execute  ESC:cancel",
         };
-        const kb_style = vaxis.Style{ .fg = .{ .index = 8 } };
+        const kb_style = vaxis.Style{ .fg = Color.dim_gray };
         const kb_len = keybindings.len;
         const kb_col = if (win.width > kb_len) win.width - kb_len else 0;
 
@@ -2177,12 +2177,12 @@ fn renderInlineModelPicker(app: *App, win: vaxis.Window) !void {
     }
 
     var row: usize = 0;
-    const separator_style = vaxis.Style{ .fg = .{ .index = 8 } };
-    const title_style = vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }; // magenta
-    const normal_style = vaxis.Style{ .fg = .{ .index = 7 } };
-    const selected_style = vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 6 }, .bold = true }; // black on cyan
-    const desc_style = vaxis.Style{ .fg = .{ .index = 8 } };
-    const current_style = vaxis.Style{ .fg = .{ .index = 2 } }; // green for current model marker
+    const separator_style = vaxis.Style{ .fg = Color.dim_gray };
+    const title_style = vaxis.Style{ .fg = Color.magenta, .bold = true };
+    const normal_style = vaxis.Style{ .fg = Color.white };
+    const selected_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
+    const desc_style = vaxis.Style{ .fg = Color.dim_gray };
+    const current_style = vaxis.Style{ .fg = Color.green };
 
     // Row 0: Separator line
     for (0..win.width) |col| {
@@ -2257,7 +2257,7 @@ fn renderInlineModelPicker(app: *App, win: vaxis.Window) !void {
     // Footer row with keybindings (right-aligned)
     if (row < win.height) {
         const footer = "j/k:navigate  Enter:select  ESC:cancel";
-        const kb_style = vaxis.Style{ .fg = .{ .index = 8 } };
+        const kb_style = vaxis.Style{ .fg = Color.dim_gray };
         const kb_col = if (win.width > footer.len) win.width - footer.len else 0;
 
         var kb_seg = [_]vaxis.Cell.Segment{
@@ -2309,7 +2309,7 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
         .height = @intCast(palette_height),
         .border = .{
             .where = .all,
-            .style = .{ .fg = .{ .index = 6 } }, // cyan border
+            .style = .{ .fg = Color.cyan },
         },
     });
 
@@ -2317,13 +2317,13 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
     palette_win.clear();
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{ .bg = .{ .index = 0 } }, // black background
+        .style = .{ .bg = Color.black }, // black background
     };
     palette_win.fill(bg_cell);
 
     // Line 0: Title
     const title: []const u8 = if (cmd_palette.mode == .rename_input) "Rename Tab" else "Commands";
-    const title_style = vaxis.Style{ .fg = .{ .index = 6 }, .bold = true }; // cyan
+    const title_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
     var title_seg = [_]vaxis.Cell.Segment{.{ .text = title, .style = title_style }};
     _ = palette_win.print(&title_seg, .{});
 
@@ -2335,8 +2335,8 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
         cmd_palette.query_buffer[0..cmd_palette.query_len];
 
     var input_seg = [_]vaxis.Cell.Segment{
-        .{ .text = input_prompt, .style = .{ .fg = .{ .index = 6 } } }, // cyan prompt
-        .{ .text = input_text, .style = .{ .fg = .{ .index = 7 } } }, // white text
+        .{ .text = input_prompt, .style = .{ .fg = Color.cyan } },
+        .{ .text = input_text, .style = .{ .fg = Color.white } },
     };
     _ = palette_win.print(&input_seg, .{ .row_offset = 1 });
 
@@ -2349,7 +2349,7 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
         for (0..palette_win.width - 2) |col| {
             palette_win.writeCell(@intCast(col), 2, .{
                 .char = .{ .grapheme = "-", .width = 1 },
-                .style = .{ .fg = .{ .index = 8 } }, // dim
+                .style = .{ .fg = Color.dim_gray },
             });
         }
     }
@@ -2370,17 +2370,17 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
             // Selection indicator
             const indicator: []const u8 = if (is_selected) "▶ " else "  ";
             const indicator_style = vaxis.Style{
-                .fg = if (is_selected) .{ .index = 6 } else .{ .index = 8 },
+                .fg = if (is_selected) Color.cyan else Color.dim_gray,
             };
 
             // Command name
             const name_style = vaxis.Style{
-                .fg = .{ .index = 7 },
+                .fg = Color.white,
                 .bold = is_selected,
             };
 
             // Alias/description
-            const desc_style = vaxis.Style{ .fg = .{ .index = 8 } };
+            const desc_style = vaxis.Style{ .fg = Color.dim_gray };
 
             var item_seg = [_]vaxis.Cell.Segment{
                 .{ .text = indicator, .style = indicator_style },
@@ -2393,7 +2393,7 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
     } else if (cmd_palette.mode == .search and filtered.len == 0) {
         // No matching commands
         var no_match_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "No matching commands", .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = "No matching commands", .style = .{ .fg = Color.dim_gray } },
         };
         _ = palette_win.print(&no_match_seg, .{ .row_offset = 3 });
     }
@@ -2459,7 +2459,7 @@ fn renderInlinePermissionPrompt(win: vaxis.Window, perm: *AcpManager.PendingPerm
     var row: usize = 0;
 
     // Row 0: Separator line
-    const separator_style = vaxis.Style{ .fg = .{ .index = 8 } };
+    const separator_style = vaxis.Style{ .fg = Color.dim_gray };
     for (0..win.width) |col| {
         win.writeCell(@intCast(col), @intCast(row), .{
             .char = .{ .grapheme = "─", .width = 1 },
@@ -2469,21 +2469,21 @@ fn renderInlinePermissionPrompt(win: vaxis.Window, perm: *AcpManager.PendingPerm
     row += 1;
 
     // Row 1+: Title (wrapped if needed)
-    const title_style = vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }; // magenta
+    const title_style = vaxis.Style{ .fg = Color.magenta, .bold = true };
     const max_text_width = if (win.width > 3) win.width - 3 else 1; // Leave margin
     const title_rows = renderWrappedText(win, perm.title, row, 1, max_text_width, title_style);
     row += title_rows;
 
     // Row N+: Description (wrapped if present)
     if (perm.description) |desc| {
-        const desc_style = vaxis.Style{ .fg = .{ .index = 8 }, .italic = true };
+        const desc_style = vaxis.Style{ .fg = Color.dim_gray, .italic = true };
         const desc_rows = renderWrappedText(win, desc, row, 1, max_text_width, desc_style);
         row += desc_rows;
     }
 
     // Rows: Options
-    const normal_style = vaxis.Style{ .fg = .{ .index = 7 } };
-    const selected_style = vaxis.Style{ .fg = .{ .index = 0 }, .bg = .{ .index = 6 }, .bold = true }; // black on cyan
+    const normal_style = vaxis.Style{ .fg = Color.white };
+    const selected_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
 
     for (perm.options, 0..) |opt, i| {
         if (row >= win.height) break;
@@ -2510,7 +2510,7 @@ fn renderInlinePermissionPrompt(win: vaxis.Window, perm: *AcpManager.PendingPerm
     // Footer row with keybindings
     if (row < win.height) {
         const footer = "j/k:navigate  Enter:confirm  ESC:cancel";
-        const kb_style = vaxis.Style{ .fg = .{ .index = 8 } };
+        const kb_style = vaxis.Style{ .fg = Color.dim_gray };
         const kb_col = if (win.width > footer.len) win.width - footer.len else 0;
 
         var kb_seg = [_]vaxis.Cell.Segment{

@@ -11,6 +11,14 @@ pub const Color = struct {
     pub const magenta: vaxis.Cell.Color = .{ .index = 5 };
     pub const cyan: vaxis.Cell.Color = .{ .index = 6 };
     pub const white: vaxis.Cell.Color = .{ .index = 7 };
+    pub const dim_gray: vaxis.Cell.Color = .{ .index = 8 }; // ANSI bright black / dark gray
+    pub const bright_white: vaxis.Cell.Color = .{ .index = 15 }; // ANSI bright white
+
+    // Extended 256-color palette grays
+    pub const gray_236: vaxis.Cell.Color = .{ .index = 236 }; // Dark gray from 256 palette
+    pub const gray_240: vaxis.Cell.Color = .{ .index = 240 }; // Medium gray from 256 palette
+
+    // Legacy alias - prefer dim_gray for new code
     pub const dim: vaxis.Cell.Color = .{ .rgb = [3]u8{ 100, 100, 100 } }; // Medium gray #646464
 
     // Diff background colors - slightly darkened for subtle depth
@@ -157,9 +165,9 @@ pub fn renderScrollbar(win: vaxis.Window, info: ScrollbarInfo) void {
     if (win.width == 0 or win.height == 0) return;
 
     const col = win.width - 1; // Rightmost column
-    const track_style = vaxis.Style{ .fg = .{ .index = 8 }, .dim = true }; // very dim gray
-    const thumb_style = vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray (no bold)
-    const arrow_style = vaxis.Style{ .fg = .{ .index = 8 } }; // dim gray
+    const track_style = vaxis.Style{ .fg = Color.dim_gray, .dim = true }; // very dim gray
+    const thumb_style = vaxis.Style{ .fg = Color.dim_gray }; // dim gray (no bold)
+    const arrow_style = vaxis.Style{ .fg = Color.dim_gray }; // dim gray
 
     for (0..win.height) |row| {
         var char: []const u8 = undefined;

@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 
 const App = @import("app.zig").App;
 const app_config = @import("config.zig");
+const Color = @import("rendering/common.zig").Color;
 
 pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     // Calculate popup dimensions - larger for help content
@@ -19,7 +20,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .border = .{
             .where = .all,
             .style = .{
-                .fg = .{ .index = 6 }, // cyan
+                .fg = Color.cyan,
             },
         },
     });
@@ -30,7 +31,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
         .style = .{
-            .bg = .{ .index = 0 }, // black background
+            .bg = Color.black,
         },
     };
     popup_win.fill(bg_cell);
@@ -40,20 +41,20 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     defer content_lines.deinit(app.allocator);
 
     // Title
-    try content_lines.append(app.allocator, .{ .text = "Skim - Keybindings", .style = .{ .fg = .{ .index = 6 }, .bold = true } });
+    try content_lines.append(app.allocator, .{ .text = "Skim - Keybindings", .style = .{ .fg = Color.cyan, .bold = true } });
 
     // Separator
     try content_lines.append(app.allocator, .{ .text = null, .style = .{}, .is_separator = true });
 
     const section_style = vaxis.Style{
-        .fg = .{ .index = 3 }, // yellow
+        .fg = Color.yellow,
         .bold = true,
     };
     const key_style = vaxis.Style{
-        .fg = .{ .index = 6 }, // cyan
+        .fg = Color.cyan,
     };
     const desc_style = vaxis.Style{
-        .fg = .{ .index = 7 }, // white
+        .fg = Color.white,
     };
 
     // NORMAL MODE section
@@ -213,7 +214,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     }
 
     // Footer
-    try content_lines.append(app.allocator, .{ .text = "j/k or ↑↓: Scroll  |  Ctrl-d/u: Page down/up  |  g/G: Top/Bottom  |  ? or ESC: Close", .style = .{ .fg = .{ .index = 8 } } });
+    try content_lines.append(app.allocator, .{ .text = "j/k or ↑↓: Scroll  |  Ctrl-d/u: Page down/up  |  g/G: Top/Bottom  |  ? or ESC: Close", .style = .{ .fg = Color.dim_gray } });
 
     // Calculate visible range based on scroll offset
     const scroll_offset = app.state.help_scroll_offset;
@@ -227,7 +228,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     if (scroll_offset > 0) {
         const indicator = "▲ (scroll up for more)";
         var indicator_seg = [_]vaxis.Cell.Segment{
-            .{ .text = indicator, .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = indicator, .style = .{ .fg = Color.dim_gray } },
         };
         _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row) });
         current_row += 1;
@@ -249,7 +250,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
                 const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
                 @memset(sep_text, '-');
                 var sep_segments = [_]vaxis.Cell.Segment{
-                    .{ .text = sep_text, .style = .{ .fg = .{ .index = 8 } } },
+                    .{ .text = sep_text, .style = .{ .fg = Color.dim_gray } },
                 };
                 _ = popup_win.print(&sep_segments, .{ .row_offset = @intCast(current_row) });
             }
@@ -277,7 +278,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     if (visible_end < total_content_rows and current_row < max_visible_rows) {
         const indicator = "▼ (scroll down for more)";
         var indicator_seg = [_]vaxis.Cell.Segment{
-            .{ .text = indicator, .style = .{ .fg = .{ .index = 8 } } },
+            .{ .text = indicator, .style = .{ .fg = Color.dim_gray } },
         };
         _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row) });
     }

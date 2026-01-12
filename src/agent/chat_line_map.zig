@@ -638,7 +638,7 @@ pub const ChatLineMap = struct {
                         .global_line = global_line.*,
                         .line_type = .{ .tool_result = .{ .msg_idx = msg_idx } },
                         .text = truncate_text,
-                        .style = .{ .fg = .{ .index = 8 } }, // dim for the indicator
+                        .style = .{ .fg = Color.dim_gray },
                         .indent = 1,
                     });
                     global_line.* += 1;
@@ -713,7 +713,7 @@ pub const ChatLineMap = struct {
             .global_line = global_line.*,
             .line_type = .{ .tool_result = .{ .msg_idx = msg_idx } },
             .text = result_text,
-            .style = .{ .fg = .{ .index = 8 } }, // dim
+            .style = .{ .fg = Color.dim_gray },
             .indent = 1,
         });
         global_line.* += 1;
@@ -806,8 +806,8 @@ pub const ChatLineMap = struct {
             };
             const icon_style: vaxis.Style = switch (entry.status) {
                 .pending => .{ .fg = Color.dim },
-                .in_progress => .{ .fg = .{ .index = 3 }, .bold = true }, // yellow
-                .completed => .{ .fg = .{ .index = 2 } }, // green
+                .in_progress => .{ .fg = Color.yellow, .bold = true },
+                .completed => .{ .fg = Color.green },
             };
 
             // Content style
