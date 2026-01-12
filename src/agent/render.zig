@@ -703,23 +703,25 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
         // Calculate tab width first to check if it fits
         const max_name_len: usize = 15;
         const name_len = @min(tab.name.len, max_name_len);
-        
+
         // Check if tab has activity (thinking or permission)
         const has_activity = tab.isThinking();
         const has_permission = tab.hasPendingPermission();
-        
+
         // Activity indicator suffix
         const suffix_len: usize = if (has_permission or has_activity) 1 else 0;
-        
+
         // Calculate total tab width: 2 spaces + name + suffix
-        const tab_width = 2 + name_len + suffix_len;
-        
+        const name_and_suffix = std.math.add(usize, name_len, suffix_len) catch break;
+        const tab_width = std.math.add(usize, name_and_suffix, 2) catch break;
+
         // Check if tab fits (with room for separator if not last tab)
         const needs_separator = idx + 1 < tm.tabs.items.len;
-        const total_needed = tab_width + (if (needs_separator) @as(usize, 1) else 0);
-        
+        const total_needed = std.math.add(usize, tab_width, if (needs_separator) @as(usize, 1) else 0) catch break;
+
         // Break if tab doesn't fit
-        if (col + total_needed > win.width) break;
+        const next_col = std.math.add(usize, col, total_needed) catch break;
+        if (next_col > win.width) break;
 
         const is_active = idx == active_idx;
 
@@ -757,7 +759,7 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
         };
         _ = win.print(&seg, .{ .col_offset = @intCast(col) });
 
-        col += tab_width;
+        col = std.math.add(usize, col, tab_width) catch break;
 
         // Separator between tabs (vim-style |)
         if (needs_separator) {
@@ -765,7 +767,7 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
                 .{ .text = "|", .style = .{ .fg = .{ .index = 240 }, .bg = .{ .index = 240 } } },
             };
             _ = win.print(&sep_seg, .{ .col_offset = @intCast(col) });
-            col += 1;
+            col = std.math.add(usize, col, 1) catch break;
         }
     }
 
