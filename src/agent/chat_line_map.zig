@@ -36,7 +36,7 @@ pub const ChatLineType = union(enum) {
         msg_idx: usize,
     },
 
-    /// Tool result (e.g., "⎿  (No content)")
+    /// Tool result (e.g., "↳  (No content)")
     tool_result: struct {
         msg_idx: usize,
     },
@@ -626,7 +626,7 @@ pub const ChatLineMap = struct {
 
                 // Show truncation indicator if we're skipping lines
                 if (skip_lines > 0) {
-                    const truncate_text = try std.fmt.allocPrint(self.allocator, "⎿ (+{d} lines)", .{skip_lines});
+                    const truncate_text = try std.fmt.allocPrint(self.allocator, "↳ (+{d} lines)", .{skip_lines});
                     try self.strings.append(self.allocator, truncate_text);
 
                     try self.records.append(self.allocator, .{
@@ -641,7 +641,7 @@ pub const ChatLineMap = struct {
 
                 // Show each line of output (only last N lines)
                 // Calculate effective width for wrapping (account for indent + prefix)
-                // indent: 1 char, prefix: 3 chars ("⎿ " or "  ")
+                // indent: 1 char, prefix: 3 chars ("↳ " or "  ")
                 const prefix_len: usize = 3;
                 const indent_chars: usize = 1;
                 const effective_wrap_width = if (self.wrap_width > prefix_len + indent_chars + 10)
@@ -668,8 +668,8 @@ pub const ChatLineMap = struct {
                     defer wrapped_lines.deinit(self.allocator);
 
                     for (wrapped_lines.items, 0..) |wrapped_segment, wrap_idx| {
-                        // First wrapped segment of first output line gets "⎿ ", others get "  "
-                        const prefix = if (first and wrap_idx == 0) "⎿ " else "  ";
+                        // First wrapped segment of first output line gets "↳ ", others get "  "
+                        const prefix = if (first and wrap_idx == 0) "↳ " else "  ";
                         if (wrap_idx == 0) first = false;
 
                         const line_text = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prefix, wrapped_segment });
@@ -695,12 +695,12 @@ pub const ChatLineMap = struct {
                 var stderr_iter = std.mem.splitScalar(u8, stderr, '\n');
                 if (stderr_iter.next()) |first_line| {
                     const max_len = @min(first_line.len, 80);
-                    break :blk try std.fmt.allocPrint(self.allocator, "⎿ {s}", .{first_line[0..max_len]});
+                    break :blk try std.fmt.allocPrint(self.allocator, "↳ {s}", .{first_line[0..max_len]});
                 }
             }
-            break :blk try self.allocator.dupe(u8, "⎿ Failed");
+            break :blk try self.allocator.dupe(u8, "↳ Failed");
         } else blk: {
-            break :blk try self.allocator.dupe(u8, "⎿ (No content)");
+            break :blk try self.allocator.dupe(u8, "↳ (No content)");
         };
         try self.strings.append(self.allocator, result_text);
 
