@@ -961,10 +961,15 @@ pub const App = struct {
             if (self.acp_connect_thread != null or has_tab_acp) {
                 self.pollAcpUpdates();
 
-                // Force re-render while agent is discovering/connecting/thinking
-                // This keeps the UI responsive during connection
+                // Only force re-render when there's actual pending output or status changes
+                // This prevents CPU-burning render loops when agent is idle but connected
                 if (self.getActiveAcpManager()) |mgr| {
-                    if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected or mgr.status == .prompting) {
+                    // Only render if:
+                    // 1. Agent is actively connecting (status spinner needs updating)
+                    // 2. Agent has pending output to display
+                    const is_connecting = mgr.status == .discovering or mgr.status == .connecting;
+                    const has_pending = mgr.hasPendingOutput();
+                    if (is_connecting or has_pending) {
                         self.needs_render = true;
                     }
                 }

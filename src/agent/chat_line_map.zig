@@ -109,6 +109,8 @@ pub const ChatLineMap = struct {
     wrap_width: usize, // Width used for wrapping (rebuild if changed)
     message_count: usize, // Number of messages processed (for incremental updates)
     diff_view_mode: AgentState.DiffViewMode, // Current view mode
+    last_msg_start_idx: usize, // Cached index where last message starts (for O(1) streaming updates)
+    last_msg_strings_start: usize, // Cached index where last message's strings start (for efficient cleanup)
 
     /// Initialize an empty chat line map
     pub fn init(allocator: Allocator) ChatLineMap {
@@ -119,6 +121,8 @@ pub const ChatLineMap = struct {
             .wrap_width = 0,
             .message_count = 0,
             .diff_view_mode = .unified,
+            .last_msg_start_idx = 0,
+            .last_msg_strings_start = 0,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message
@@ -156,6 +160,8 @@ pub const ChatLineMap = struct {
         self.wrap_width = wrap_width;
         self.message_count = messages.len;
         self.diff_view_mode = diff_view_mode;
+        self.last_msg_start_idx = 0;
+        self.last_msg_strings_start = 0;
 
         // Pre-allocate capacity to reduce reallocations during build
         // Estimate: ~10 lines per message on average (header + content lines + spacing)
@@ -168,6 +174,12 @@ pub const ChatLineMap = struct {
         var global_line: usize = 0;
 
         for (messages, 0..) |msg, msg_idx| {
+            // Track where the last message starts (for O(1) streaming updates)
+            if (msg_idx == messages.len - 1) {
+                self.last_msg_start_idx = self.records.items.len;
+                self.last_msg_strings_start = self.strings.items.len;
+            }
+
             // Handle different message types
             switch (msg.role) {
                 .tool => {
@@ -254,6 +266,10 @@ pub const ChatLineMap = struct {
             for (self.message_count..messages.len) |msg_idx| {
                 const msg = &messages[msg_idx];
 
+                // Track where the last message starts (for O(1) streaming updates)
+                self.last_msg_start_idx = self.records.items.len;
+                self.last_msg_strings_start = self.strings.items.len;
+
                 switch (msg.role) {
                     .tool => {
                         try self.addToolHeader(&global_line, msg_idx, msg.*);
@@ -300,6 +316,7 @@ pub const ChatLineMap = struct {
     }
 
     /// Update when the last message content changes (streaming)
+    /// Uses cached last_msg_start_idx for O(1) lookup instead of O(N) search
     pub fn updateLastMessage(
         self: *ChatLineMap,
         messages: []const Message,
@@ -317,43 +334,21 @@ pub const ChatLineMap = struct {
         const last_msg_idx = messages.len - 1;
         const msg = &messages[last_msg_idx];
 
-        // Find where the last message starts
-        var start_idx: ?usize = null;
-        for (self.records.items, 0..) |record, i| {
-            switch (record.line_type) {
-                .role_header => |rh| if (rh.msg_idx == last_msg_idx) {
-                    start_idx = i;
-                    break;
-                },
-                .tool_header => |th| if (th.msg_idx == last_msg_idx) {
-                    start_idx = i;
-                    break;
-                },
-                .diff_header => |dh| if (dh.msg_idx == last_msg_idx) {
-                    start_idx = i;
-                    break;
-                },
-                else => {},
-            }
-        }
+        // Use cached index for O(1) lookup - validate it's still correct
+        const idx = self.last_msg_start_idx;
 
-        if (start_idx) |idx| {
-            // Remove lines from this message
-            // First, free any owned strings from removed lines
-            var i = idx;
-            while (i < self.records.items.len) {
-                const record = &self.records.items[i];
-                // Check if this string is owned (in our strings list)
-                for (self.strings.items, 0..) |s, si| {
-                    if (std.mem.eql(u8, s, record.text)) {
-                        self.allocator.free(s);
-                        _ = self.strings.orderedRemove(si);
-                        break;
-                    }
+        // Validate the cached index is reasonable
+        if (idx <= self.records.items.len) {
+            // Free strings added by the last message (O(1) using cached index)
+            const strings_start = self.last_msg_strings_start;
+            if (strings_start < self.strings.items.len) {
+                for (self.strings.items[strings_start..]) |s| {
+                    self.allocator.free(s);
                 }
-                i += 1;
+                self.strings.shrinkRetainingCapacity(strings_start);
             }
 
+            // Shrink records to remove last message
             self.records.shrinkRetainingCapacity(idx);
 
             // Re-add the last message
