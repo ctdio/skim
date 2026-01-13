@@ -1081,13 +1081,16 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 // Find first space to split icon from rest
                 if (std.mem.indexOf(u8, record.text, " ")) |space_idx| {
                     const icon = record.text[0..space_idx];
-                    const rest = record.text[space_idx..];
+                    // Skip the space - we'll add it explicitly to avoid width calculation issues
+                    const rest = if (space_idx + 1 < record.text.len) record.text[space_idx + 1 ..] else "";
 
                     // Print icon with color (with UTF-8 validation)
-                    const icon_result = safePrint(win, icon, .{ .fg = icon_color }, row, col_offset);
+                    _ = safePrint(win, icon, .{ .fg = icon_color }, row, col_offset);
 
-                    // Print rest with default style (with UTF-8 validation)
-                    _ = safePrint(win, rest, record.style, row, col_offset + icon_result.col);
+                    // Use fixed width of 1 for the icon (all status icons are single-width)
+                    // Then print space and rest with default style
+                    _ = safePrint(win, " ", record.style, row, col_offset + 1);
+                    _ = safePrint(win, rest, record.style, row, col_offset + 2);
                 } else {
                     // No space found, print normally (with UTF-8 validation)
                     _ = safePrint(win, record.text, record.style, row, col_offset);
