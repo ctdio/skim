@@ -336,12 +336,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // 'z' in normal vim mode - toggle full screen
+    // 'z' in normal vim mode - toggle full screen (sidebar mode)
     if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'z') {
-        agent_state.toggleFullScreen();
-        // When exiting fullscreen, return focus to diff
-        if (!agent_state.full_screen) {
-            app.mode = .normal;
+        if (app.tab_manager) |*tm| {
+            tm.toggleFullScreen();
+            // When exiting fullscreen, return focus to diff
+            if (!tm.full_screen) {
+                app.mode = .normal;
+            }
         }
         app.needs_render = true;
         return;

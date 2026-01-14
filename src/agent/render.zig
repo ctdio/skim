@@ -510,7 +510,9 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     // Calculate input area height (always shows normal input)
     // Layout: separator (1) + visible text lines + padding (1) + footer (0 or 1)
     const padding_height: usize = 1; // Blank line between text and footer/statusline
-    const footer_height: usize = if (agent_state.full_screen) 1 else 0;
+    // Only show footer in full-screen mode (sidebar mode uses main app status bar)
+    const is_full_screen = if (app.tab_manager) |tm| tm.full_screen else true;
+    const footer_height: usize = if (is_full_screen) 1 else 0;
     const input_height: usize = 1 + visible_lines + padding_height + footer_height;
 
     // Calculate tab bar height (only shown when multiple tabs exist)
@@ -2075,7 +2077,8 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
     // Footer row: mode (left), session mode (center), and keybindings (right)
     // Only render footer in full-screen mode (sidebar mode uses the main status bar)
-    if (!agent_state.full_screen) return;
+    const is_full_screen = if (app.tab_manager) |tm| tm.full_screen else true;
+    if (!is_full_screen) return;
 
     const footer_row = win.height - 1;
     if (win.height > 1) {

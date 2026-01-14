@@ -2915,14 +2915,6 @@ pub const App = struct {
             }
         } else {
             // Normal rendering with header, content, and status bar
-            const header_win = win.child(.{
-                .x_off = 0,
-                .y_off = 0,
-                .width = @intCast(win.width),
-                .height = @intCast(Layout.header_height),
-            });
-            try UI.renderHeader(self, header_win);
-
             // Split content area based on panels
             if (show_agent_panel) {
                 const panel_side = self.getAgentPanelSide();
@@ -2931,25 +2923,34 @@ pub const App = struct {
                 const diff_width = win.width - panel_width - divider_width;
 
                 if (panel_side == .left) {
-                    // Agent panel on left
+                    // Agent panel on left (starts at y=0, full height including header area)
                     const agent_win = win.child(.{
                         .x_off = 0,
-                        .y_off = Layout.header_height,
+                        .y_off = 0,
                         .width = @intCast(panel_width),
-                        .height = @intCast(content_height),
+                        .height = @intCast(content_height + Layout.header_height),
                     });
                     try agent.renderAgentPanel(self, agent_win);
 
-                    // Vertical divider
+                    // Vertical divider (full height)
                     const divider_win = win.child(.{
                         .x_off = @intCast(panel_width),
-                        .y_off = Layout.header_height,
+                        .y_off = 0,
                         .width = @intCast(divider_width),
-                        .height = @intCast(content_height),
+                        .height = @intCast(content_height + Layout.header_height),
                     });
                     try UI.renderVerticalDivider(divider_win);
 
-                    // Diff content on right
+                    // Header above diff content (on right side)
+                    const header_win = win.child(.{
+                        .x_off = @intCast(panel_width + divider_width),
+                        .y_off = 0,
+                        .width = @intCast(diff_width),
+                        .height = @intCast(Layout.header_height),
+                    });
+                    try UI.renderHeader(self, header_win);
+
+                    // Diff content on right (below header)
                     const content_win = win.child(.{
                         .x_off = @intCast(panel_width + divider_width),
                         .y_off = Layout.header_height,
@@ -2959,6 +2960,16 @@ pub const App = struct {
                     try self.renderContent(content_win);
                 } else {
                     // Agent panel on right (default)
+                    // Header above diff content (on left side)
+                    const header_win = win.child(.{
+                        .x_off = 0,
+                        .y_off = 0,
+                        .width = @intCast(diff_width),
+                        .height = @intCast(Layout.header_height),
+                    });
+                    try UI.renderHeader(self, header_win);
+
+                    // Diff content on left (below header)
                     const content_win = win.child(.{
                         .x_off = 0,
                         .y_off = Layout.header_height,
@@ -2967,25 +2978,33 @@ pub const App = struct {
                     });
                     try self.renderContent(content_win);
 
-                    // Vertical divider
+                    // Vertical divider (full height)
                     const divider_win = win.child(.{
                         .x_off = @intCast(diff_width),
-                        .y_off = Layout.header_height,
+                        .y_off = 0,
                         .width = @intCast(divider_width),
-                        .height = @intCast(content_height),
+                        .height = @intCast(content_height + Layout.header_height),
                     });
                     try UI.renderVerticalDivider(divider_win);
 
-                    // Agent panel on right
+                    // Agent panel on right (starts at y=0, full height including header area)
                     const agent_win = win.child(.{
                         .x_off = @intCast(diff_width + divider_width),
-                        .y_off = Layout.header_height,
+                        .y_off = 0,
                         .width = @intCast(panel_width),
-                        .height = @intCast(content_height),
+                        .height = @intCast(content_height + Layout.header_height),
                     });
                     try agent.renderAgentPanel(self, agent_win);
                 }
             } else {
+                // Full width - header spans full width
+                const header_win = win.child(.{
+                    .x_off = 0,
+                    .y_off = 0,
+                    .width = @intCast(win.width),
+                    .height = @intCast(Layout.header_height),
+                });
+                try UI.renderHeader(self, header_win);
                 // Full width content
                 const content_win = win.child(.{
                     .x_off = 0,
