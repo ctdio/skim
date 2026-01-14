@@ -1008,11 +1008,11 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             continue; // Skip normal text rendering for sbs lines
         }
 
-        // Render left bar for user messages only (comment-style)
-        // Agent messages, tools, and thinking use no bar for a cleaner, more conversational look
+        // Render left bar for user and thinking messages (comment-style)
+        // Agent messages and tools use no bar for a cleaner, more conversational look
         switch (record.line_type) {
             .message_content => {
-                // Only draw bar for user messages (comment-style)
+                // Draw bar for user and thinking messages
                 const messages = agent_state.messages.items;
                 const msg_idx = record.line_type.message_content.msg_idx;
                 if (msg_idx < messages.len) {
@@ -1024,17 +1024,31 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                             .{ .text = "┃ ", .style = bar_style },
                         };
                         _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
+                    } else if (msg.role == .thinking) {
+                        const bar_style: vaxis.Style = .{ .fg = Color.dim };
+
+                        var bar_seg = [_]vaxis.Cell.Segment{
+                            .{ .text = "┃ ", .style = bar_style },
+                        };
+                        _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
                     }
                 }
             },
             .role_header => {
-                // Only draw bar for user messages (comment-style)
+                // Draw bar for user and thinking messages
                 const messages = agent_state.messages.items;
                 const msg_idx = record.line_type.role_header.msg_idx;
                 if (msg_idx < messages.len) {
                     const msg = messages[msg_idx];
                     if (msg.role == .user) {
                         const bar_style: vaxis.Style = .{ .fg = Color.chat_user, .bg = Color.comment_bg };
+
+                        var bar_seg = [_]vaxis.Cell.Segment{
+                            .{ .text = "┃ ", .style = bar_style },
+                        };
+                        _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
+                    } else if (msg.role == .thinking) {
+                        const bar_style: vaxis.Style = .{ .fg = Color.dim };
 
                         var bar_seg = [_]vaxis.Cell.Segment{
                             .{ .text = "┃ ", .style = bar_style },
