@@ -13,7 +13,6 @@ pub const AgentCommandAction = union(enum) {
     next_tab: void,
     prev_tab: void,
     rename_tab: void,
-    goto_tab: u8,
     toggle_plan: void,
 };
 
@@ -56,60 +55,6 @@ pub const COMMANDS = [_]AgentCommand{
         .aliases = &[_][]const u8{ ":tabr", ":tabrename" },
         .description = "Rename current tab",
         .action = .rename_tab,
-    },
-    .{
-        .name = "Tab 1",
-        .aliases = &[_][]const u8{":tab1"},
-        .description = "Go to tab 1",
-        .action = .{ .goto_tab = 1 },
-    },
-    .{
-        .name = "Tab 2",
-        .aliases = &[_][]const u8{":tab2"},
-        .description = "Go to tab 2",
-        .action = .{ .goto_tab = 2 },
-    },
-    .{
-        .name = "Tab 3",
-        .aliases = &[_][]const u8{":tab3"},
-        .description = "Go to tab 3",
-        .action = .{ .goto_tab = 3 },
-    },
-    .{
-        .name = "Tab 4",
-        .aliases = &[_][]const u8{":tab4"},
-        .description = "Go to tab 4",
-        .action = .{ .goto_tab = 4 },
-    },
-    .{
-        .name = "Tab 5",
-        .aliases = &[_][]const u8{":tab5"},
-        .description = "Go to tab 5",
-        .action = .{ .goto_tab = 5 },
-    },
-    .{
-        .name = "Tab 6",
-        .aliases = &[_][]const u8{":tab6"},
-        .description = "Go to tab 6",
-        .action = .{ .goto_tab = 6 },
-    },
-    .{
-        .name = "Tab 7",
-        .aliases = &[_][]const u8{":tab7"},
-        .description = "Go to tab 7",
-        .action = .{ .goto_tab = 7 },
-    },
-    .{
-        .name = "Tab 8",
-        .aliases = &[_][]const u8{":tab8"},
-        .description = "Go to tab 8",
-        .action = .{ .goto_tab = 8 },
-    },
-    .{
-        .name = "Tab 9",
-        .aliases = &[_][]const u8{":tab9"},
-        .description = "Go to tab 9",
-        .action = .{ .goto_tab = 9 },
     },
     .{
         .name = "Toggle Plan",

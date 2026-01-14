@@ -245,7 +245,7 @@ fn injectHistoryAsContext(app: *App, session_info: sessions.SessionInfo) !bool {
     if (mgr.acp_client) |acp_client| {
         if (acp_client.session_id == null) {
             std.log.info("Session picker: fallback - creating new session for context injection", .{});
-            _ = acp_client.createSession(cwd) catch |err| {
+            _ = acp_client.createSession(cwd, null, null) catch |err| {
                 std.log.err("Session picker: fallback - failed to create session: {any}", .{err});
                 return err;
             };

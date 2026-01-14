@@ -123,7 +123,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // Extract any arguments after the command name from the input
                 const input_text = agent_state.input.getText();
                 const args = extractCommandArgs(input_text, cmd.name);
-                
+
                 // Check if this is a local command (handled by skim, not agent)
                 if (state.AgentState.isLocalSlashCommand(cmd.name)) {
                     // Handle local commands client-side with arguments
@@ -407,7 +407,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
-
     // Ctrl+W chord for window navigation (vim-style)
     if (key.mods.ctrl and key.codepoint == 'w') {
         app.state.pending_ctrl_w = true;
@@ -576,8 +575,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     }
 
     // Backspace on empty input in shell mode - exit shell mode
-    if (agent_state.isShellMode() and agent_state.input.vim.vim_mode == .insert and 
-        key.codepoint == vaxis.Key.backspace and agent_state.input.getText().len == 0) {
+    if (agent_state.isShellMode() and agent_state.input.vim.vim_mode == .insert and
+        key.codepoint == vaxis.Key.backspace and agent_state.input.getText().len == 0)
+    {
         agent_state.clearShellMode();
         app.needs_render = true;
         return;
@@ -981,24 +981,24 @@ fn queueCommandOutput(
 fn extractCommandArgs(input: []const u8, command_name: []const u8) []const u8 {
     // Input format: "/command_name args..."
     // We need to extract everything after "/command_name "
-    
+
     // Skip leading "/"
     if (input.len == 0 or input[0] != '/') return "";
-    
+
     const after_slash = input[1..];
-    
+
     // Check if input starts with the command name
     if (!std.mem.startsWith(u8, after_slash, command_name)) return "";
-    
+
     // Skip past the command name
     const after_cmd = after_slash[command_name.len..];
-    
+
     // Skip any whitespace between command and args
     var i: usize = 0;
     while (i < after_cmd.len and (after_cmd[i] == ' ' or after_cmd[i] == '\t')) : (i += 1) {}
-    
+
     if (i >= after_cmd.len) return "";
-    
+
     // Return the remaining text (arguments)
     return std.mem.trim(u8, after_cmd[i..], &std.ascii.whitespace);
 }
@@ -1017,12 +1017,30 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
 
         // Reset and create a new ACP session
         if (app.getActiveAcpManager()) |mgr| {
+            // Capture copies of current mode/model before reset (resetSession frees them)
+            const current_mode: ?[]const u8 = if (mgr.current_mode_id) |m|
+                app.allocator.dupe(u8, m) catch null
+            else
+                null;
+            defer if (current_mode) |m| app.allocator.free(m);
+
+            const current_model: ?[]const u8 = if (mgr.current_model_id) |m|
+                app.allocator.dupe(u8, m) catch null
+            else
+                null;
+            defer if (current_model) |m| app.allocator.free(m);
+
+            std.log.info("Clear: preserving mode={s}, model={s}", .{
+                current_mode orelse "(none)",
+                current_model orelse "(none)",
+            });
+
             // First reset the existing session state
             mgr.resetSession();
 
-            // Then create a new session
+            // Then create a new session with the same mode/model settings
             const cwd = app.state.git_repo_root;
-            mgr.createSession(cwd) catch |err| {
+            mgr.createSessionWithSettings(cwd, current_mode, current_model) catch |err| {
                 std.log.err("Clear: failed to create new session: {any}", .{err});
                 try agent_state.addMessage(.system, "Failed to create new session");
                 return;
@@ -1597,10 +1615,6 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
         .rename_tab => {
             // Switch to rename input mode
             agent_state.cmd_palette.startRenameInput();
-        },
-        .goto_tab => |n| {
-            const tm = try app.ensureTabManager();
-            tm.goToTabNumber(n);
         },
         .toggle_plan => {
             agent_state.plan_expanded = !agent_state.plan_expanded;

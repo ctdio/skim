@@ -440,12 +440,28 @@ pub const AcpManager = struct {
     }
 
     /// Create a new session in the current working directory
+    /// Optionally pass mode/model to initialize the session with specific settings
+    /// (e.g., when clearing a session and wanting to preserve the current mode/model)
     pub fn createSession(self: *AcpManager, cwd: []const u8) Error!void {
+        return self.createSessionWithSettings(cwd, null, null);
+    }
+
+    /// Create a new session with specific mode/model settings
+    pub fn createSessionWithSettings(
+        self: *AcpManager,
+        cwd: []const u8,
+        mode: ?[]const u8,
+        model: ?[]const u8,
+    ) Error!void {
         const acp = self.acp_client orelse return error.NotConnected;
 
-        std.log.info("ACP: Creating session in {s}", .{cwd});
+        std.log.info("ACP: Creating session in {s} (mode={s}, model={s})", .{
+            cwd,
+            mode orelse "(default)",
+            model orelse "(default)",
+        });
 
-        const sid = acp.createSession(cwd) catch |err| {
+        const sid = acp.createSession(cwd, mode, model) catch |err| {
             std.log.err("ACP: Session creation failed: {any}", .{err});
             self.status = .failed;
             return error.SessionFailed;

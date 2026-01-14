@@ -182,7 +182,14 @@ pub const Client = struct {
     }
 
     /// Create a new session
-    pub fn createSession(self: *Client, cwd: []const u8) Error!types.SessionId {
+    /// Optionally pass mode/model to initialize the session with specific settings
+    /// (e.g., when clearing a session and wanting to preserve the current mode/model)
+    pub fn createSession(
+        self: *Client,
+        cwd: []const u8,
+        mode: ?[]const u8,
+        model: ?[]const u8,
+    ) Error!types.SessionId {
         if (self.state != .initialized and self.state != .session_active) return error.NotInitialized;
         if (self.session_id != null) return error.SessionAlreadyActive;
 
@@ -197,6 +204,8 @@ pub const Client = struct {
         const params = protocol.SessionNewParams{
             .cwd = cwd,
             .mcp_servers = &.{},
+            .mode = mode,
+            .model = model,
         };
 
         const params_json = self.transport.encoder.encodeSessionNewParams(params) catch return error.ProtocolError;
