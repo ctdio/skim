@@ -83,6 +83,23 @@ pub const AcpConnectContext = struct {
     tab_id: u32, // Target tab ID for the connection
 };
 
+/// Case-insensitive substring search
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+
+    const end = haystack.len - needle.len + 1;
+    outer: for (0..end) |i| {
+        for (0..needle.len) |j| {
+            const h = std.ascii.toLower(haystack[i + j]);
+            const n = std.ascii.toLower(needle[j]);
+            if (h != n) continue :outer;
+        }
+        return true;
+    }
+    return false;
+}
+
 pub const App = struct {
     allocator: Allocator,
     vx: Vaxis,
@@ -207,7 +224,10 @@ pub const App = struct {
         graphite_stack_selection: usize, // Selected index in stack picker
 
         // Model selection state
-        model_selection: usize, // Selected index in model picker
+        model_selection: usize, // Selected index in model picker (within filtered list)
+        model_filter_query: [256]u8, // Search query for filtering models
+        model_filter_len: usize, // Length of search query
+        model_filtered_indices: std.ArrayList(usize), // Indices of models matching filter
 
         // Agent selection state (for choosing which agent to connect to)
         configured_agents: ?[]acp.AgentInfo, // Available agents from config or fallback
@@ -441,6 +461,9 @@ pub const App = struct {
                 .graphite_stack = null,
                 .graphite_stack_selection = 0,
                 .model_selection = 0,
+                .model_filter_query = [_]u8{0} ** 256,
+                .model_filter_len = 0,
+                .model_filtered_indices = .{},
                 .configured_agents = null, // Loaded when agent panel opens
                 .agent_selection_idx = 0,
                 .pending_tab_for_selection = null, // No tab waiting for agent selection
@@ -518,6 +541,7 @@ pub const App = struct {
         self.state.filtered_branches.deinit(self.allocator);
         self.state.expanded_comments.deinit();
         self.state.branch_stats_cache.deinit();
+        self.state.model_filtered_indices.deinit(self.allocator);
         // Clean up cached default branch name
         if (self.state.default_branch_name) |name| {
             self.allocator.free(name);
@@ -594,6 +618,45 @@ pub const App = struct {
     pub fn isAgentPanelVisible(self: *const App) bool {
         const tm = self.tab_manager orelse return false;
         return tm.panel_visible;
+    }
+
+    /// Update the filtered model indices based on the current filter query
+    pub fn updateModelFilter(self: *App) void {
+        const mgr = self.getActiveAcpManager() orelse return;
+        const models = mgr.getAvailableModels();
+
+        // Clear existing filtered indices
+        self.state.model_filtered_indices.clearRetainingCapacity();
+
+        const query = self.state.model_filter_query[0..self.state.model_filter_len];
+
+        // If no query, show all models
+        if (query.len == 0) {
+            for (0..models.len) |i| {
+                self.state.model_filtered_indices.append(self.allocator, i) catch {};
+            }
+        } else {
+            // Filter models by name or id (case-insensitive substring match)
+            for (models, 0..) |model, i| {
+                const name = model.name orelse model.model_id;
+                if (containsIgnoreCase(name, query) or containsIgnoreCase(model.model_id, query)) {
+                    self.state.model_filtered_indices.append(self.allocator, i) catch {};
+                }
+            }
+        }
+
+        // Reset selection to 0 if current selection is out of bounds
+        if (self.state.model_selection >= self.state.model_filtered_indices.items.len) {
+            self.state.model_selection = 0;
+        }
+    }
+
+    /// Reset model filter state (called when entering model selection mode)
+    pub fn resetModelFilter(self: *App) void {
+        self.state.model_filter_query = [_]u8{0} ** 256;
+        self.state.model_filter_len = 0;
+        self.state.model_selection = 0;
+        self.updateModelFilter();
     }
 
     /// Check if agent panel is in full-screen mode

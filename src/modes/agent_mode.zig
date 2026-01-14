@@ -1054,6 +1054,7 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
 
     if (std.mem.eql(u8, command_name, "model")) {
         // Switch to model selection mode with optional preselected model
+        app.resetModelFilter();
         app.mode = .model_selection;
 
         // If args provided, try to preselect that model

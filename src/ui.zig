@@ -492,14 +492,17 @@ pub const UI = struct {
         // Get models from ACP manager
         const mgr = app.getActiveAcpManager() orelse return;
         const models = mgr.getAvailableModels();
-        const model_count = models.len;
-        if (model_count == 0) return;
+        if (models.len == 0) return;
 
         const current_model_id = mgr.getCurrentModelId();
 
-        // Calculate dialog dimensions (2 lines per model: name + description)
+        // Use filtered indices
+        const filtered = app.state.model_filtered_indices.items;
+        const filtered_count = filtered.len;
+
+        // Calculate dialog dimensions
         const title = " Switch Model ";
-        const instructions = "j/k:Navigate  Enter:Select  ESC:Cancel";
+        const instructions = "Type to search  |  ↑↓/Ctrl-n/p:Navigate  |  Enter:Select  |  ESC:Clear/Cancel";
 
         // Find max width needed for model entries
         var max_name_len: usize = 0;
@@ -513,8 +516,9 @@ pub const UI = struct {
 
         const content_width = @max(@max(max_name_len + 8, max_desc_len + 6), instructions.len);
         const dialog_width = @max(content_width + 4, title.len + 4);
-        // Height: title(1) + empty(1) + models(2 each) + empty(1) + instructions(1) + border(2)
-        const ideal_height = 3 + (model_count * 2) + 2;
+        // Height: title(1) + search(1) + empty(1) + models(2 each) + empty(1) + instructions(1) + border(2)
+        const display_count = if (filtered_count > 0) filtered_count else 1; // At least 1 row for "No matches"
+        const ideal_height = 4 + (display_count * 2) + 2;
         const max_height = win.height - 4;
 
         const popup_width = @min(dialog_width, win.width - 4);
@@ -550,65 +554,106 @@ pub const UI = struct {
         }};
         _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
 
-        // Calculate scroll offset for many models
-        const rows_for_models = if (popup_height > 5) popup_height - 5 else 2;
-        const max_visible = rows_for_models / 2;
-        var scroll_offset: usize = 0;
-        if (max_visible > 0 and model_count > max_visible) {
-            if (app.state.model_selection >= max_visible) {
-                scroll_offset = app.state.model_selection - max_visible + 1;
-            }
-            if (scroll_offset + max_visible > model_count) {
-                scroll_offset = model_count - max_visible;
-            }
-        }
+        // Search query line (row 1)
+        const query = app.state.model_filter_query[0..app.state.model_filter_len];
+        var search_buf: [280]u8 = undefined;
+        const search_line = if (query.len > 0)
+            std.fmt.bufPrint(&search_buf, "Search: {s}_", .{query}) catch "Search: ..."
+        else
+            "Type to search...";
 
-        // Render model options (2 lines each: name + description)
-        const visible_count = @min(model_count - scroll_offset, max_visible);
-        var row: usize = 2;
-        for (0..visible_count) |i| {
-            const model_idx = scroll_offset + i;
-            if (model_idx >= model_count) break;
-            if (row + 1 >= popup_height - 1) break;
+        const search_copy = try RenderUtils.copyFrameText(app, search_line);
+        var search_seg = [_]vaxis.Cell.Segment{.{
+            .text = search_copy,
+            .style = .{ .fg = if (query.len > 0) Color.cyan else Color.dim },
+        }};
+        _ = popup_win.print(&search_seg, .{ .row_offset = @intCast(1), .col_offset = 1 });
 
-            const model = models[model_idx];
-            const is_selected = model_idx == app.state.model_selection;
-            const is_current = if (current_model_id) |cid| std.mem.eql(u8, model.model_id, cid) else false;
-
-            // Line 1: Selection caret + model name + current marker
-            var name_segments: std.ArrayList(vaxis.Cell.Segment) = .{};
-            defer name_segments.deinit(app.allocator);
-
-            const caret = if (is_selected) "▶ " else "  ";
-            const caret_copy = try RenderUtils.copyFrameText(app, caret);
-            try name_segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
-
-            const model_name = model.name orelse model.model_id;
-            const name_copy = try RenderUtils.copyFrameText(app, model_name);
-            try name_segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
-
-            if (is_current) {
-                const check_copy = try RenderUtils.copyFrameText(app, " ✓");
-                try name_segments.append(app.allocator, .{ .text = check_copy, .style = .{ .fg = Color.green } });
-            }
-
-            _ = popup_win.print(name_segments.items, .{ .row_offset = @intCast(row) });
-            row += 1;
-
-            // Line 2: Description (indented)
-            if (model.description) |desc| {
-                if (desc.len > 0 and row < popup_height - 1) {
-                    const max_len = if (popup_width > 6) popup_width - 6 else 1;
-                    const truncated = if (desc.len > max_len) desc[0..max_len] else desc;
-                    const desc_copy = try RenderUtils.copyFrameText(app, truncated);
-                    var desc_seg = [_]vaxis.Cell.Segment{.{
-                        .text = desc_copy,
-                        .style = .{ .fg = Color.dim },
-                    }};
-                    _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
+        // Show "No matches" if filtered list is empty
+        if (filtered_count == 0) {
+            const no_matches = "No matching models";
+            const no_matches_copy = try RenderUtils.copyFrameText(app, no_matches);
+            var no_matches_seg = [_]vaxis.Cell.Segment{.{
+                .text = no_matches_copy,
+                .style = .{ .fg = Color.dim },
+            }};
+            _ = popup_win.print(&no_matches_seg, .{ .row_offset = @intCast(3), .col_offset = 1 });
+        } else {
+            // Calculate scroll offset for many models
+            const rows_for_models = if (popup_height > 6) popup_height - 6 else 2;
+            const max_visible = rows_for_models / 2;
+            var scroll_offset: usize = 0;
+            if (max_visible > 0 and filtered_count > max_visible) {
+                if (app.state.model_selection >= max_visible) {
+                    scroll_offset = app.state.model_selection - max_visible + 1;
+                }
+                if (scroll_offset + max_visible > filtered_count) {
+                    scroll_offset = filtered_count - max_visible;
                 }
             }
-            row += 1;
+
+            // Render model options (2 lines each: name + description)
+            const visible_count = @min(filtered_count - scroll_offset, max_visible);
+            var row: usize = 3; // Start after title + search + empty
+            for (0..visible_count) |i| {
+                const selection_idx = scroll_offset + i;
+                if (selection_idx >= filtered_count) break;
+                if (row + 1 >= popup_height - 1) break;
+
+                const actual_model_idx = filtered[selection_idx];
+                if (actual_model_idx >= models.len) continue;
+
+                const model = models[actual_model_idx];
+                const is_selected = selection_idx == app.state.model_selection;
+                const is_current = if (current_model_id) |cid| std.mem.eql(u8, model.model_id, cid) else false;
+
+                // Line 1: Selection caret + model name + current marker
+                var name_segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+                defer name_segments.deinit(app.allocator);
+
+                const caret = if (is_selected) "▶ " else "  ";
+                const caret_copy = try RenderUtils.copyFrameText(app, caret);
+                try name_segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+
+                const model_name = model.name orelse model.model_id;
+                const name_copy = try RenderUtils.copyFrameText(app, model_name);
+                try name_segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+
+                if (is_current) {
+                    const check_copy = try RenderUtils.copyFrameText(app, " ✓");
+                    try name_segments.append(app.allocator, .{ .text = check_copy, .style = .{ .fg = Color.green } });
+                }
+
+                _ = popup_win.print(name_segments.items, .{ .row_offset = @intCast(row) });
+                row += 1;
+
+                // Line 2: Description (indented)
+                if (model.description) |desc| {
+                    if (desc.len > 0 and row < popup_height - 1) {
+                        const max_len = if (popup_width > 6) popup_width - 6 else 1;
+                        const truncated = if (desc.len > max_len) desc[0..max_len] else desc;
+                        const desc_copy = try RenderUtils.copyFrameText(app, truncated);
+                        var desc_seg = [_]vaxis.Cell.Segment{.{
+                            .text = desc_copy,
+                            .style = .{ .fg = Color.dim },
+                        }};
+                        _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
+                    }
+                }
+                row += 1;
+            }
+
+            // Scroll indicators
+            if (scroll_offset > 0) {
+                const up_copy = try RenderUtils.copyFrameText(app, "↑");
+                var up_seg = [_]vaxis.Cell.Segment{.{ .text = up_copy, .style = .{ .fg = Color.dim } }};
+                _ = popup_win.print(&up_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 4) });
+            }
+            if (scroll_offset + visible_count < filtered_count) {
+                const down_copy = try RenderUtils.copyFrameText(app, "↓");
+                var down_seg = [_]vaxis.Cell.Segment{.{ .text = down_copy, .style = .{ .fg = Color.dim } }};
+                _ = popup_win.print(&down_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 2) });
+            }
         }
 
         // Instructions at bottom
@@ -618,18 +663,6 @@ pub const UI = struct {
             .style = .{ .fg = Color.dim },
         }};
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
-
-        // Scroll indicators
-        if (scroll_offset > 0) {
-            const up_copy = try RenderUtils.copyFrameText(app, "↑");
-            var up_seg = [_]vaxis.Cell.Segment{.{ .text = up_copy, .style = .{ .fg = Color.dim } }};
-            _ = popup_win.print(&up_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 4) });
-        }
-        if (scroll_offset + visible_count < model_count) {
-            const down_copy = try RenderUtils.copyFrameText(app, "↓");
-            var down_seg = [_]vaxis.Cell.Segment{.{ .text = down_copy, .style = .{ .fg = Color.dim } }};
-            _ = popup_win.print(&down_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 2) });
-        }
     }
 
     pub fn renderAgentSelectionDialog(app: *App, win: vaxis.Window) !void {
