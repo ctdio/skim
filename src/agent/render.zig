@@ -445,7 +445,13 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     const agent_state = app.getActiveAgentState() orelse return;
     const is_focused = app.mode == .agent;
 
-    win.clear();
+    // Use fill() instead of clear() to ensure all cells are explicitly set to spaces
+    // This prevents artifacts from previous renders (e.g., permission dialogs)
+    const blank = vaxis.Cell{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{},
+    };
+    win.fill(blank);
 
     // Calculate dynamic input height based on content or mode
     const text = agent_state.input.getText();
@@ -508,12 +514,10 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     } else 0;
 
     // Calculate input area height (always shows normal input)
-    // Layout: separator (1) + visible text lines + padding (1) + footer (0 or 1)
+    // Layout: separator (1) + visible text lines + padding (1)
+    // Note: Footer is now rendered by the unified status bar in app.zig, not here
     const padding_height: usize = 1; // Blank line between text and footer/statusline
-    // Only show footer in full-screen mode (sidebar mode uses main app status bar)
-    const is_full_screen = if (app.tab_manager) |tm| tm.full_screen else true;
-    const footer_height: usize = if (is_full_screen) 1 else 0;
-    const input_height: usize = 1 + visible_lines + padding_height + footer_height;
+    const input_height: usize = 1 + visible_lines + padding_height;
 
     // Calculate tab bar height (only shown when multiple tabs exist)
     const tab_bar_height: usize = if (app.tab_manager) |tm| (if (tm.tabCount() > 1) @as(usize, 1) else 0) else 0;
@@ -1139,6 +1143,12 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 /// Layout: empty row + "Generating..." + empty row + optional queued message
 fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState) void {
     if (win.height == 0) return;
+
+    const blank_cell = vaxis.Cell{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{},
+    };
+    win.fill(blank_cell);
 
     var row: usize = 0;
 
@@ -1769,6 +1779,15 @@ fn renderPlanEntry(win: vaxis.Window, row: usize, entry: OwnedPlanEntry) void {
 fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_focused: bool, pending_permission: ?*AcpManager.PendingPermission) !void {
     if (win.height == 0) return;
 
+    // Fill the entire input area with spaces to prevent artifacts from previous renders
+    // (e.g., permission dialogs leaving remnants when dismissed)
+    // Using fill() instead of clear() for more robust clearing
+    const blank_cell = vaxis.Cell{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{},
+    };
+    win.fill(blank_cell);
+
     // Note: model_selection mode is now rendered as a centered dialog overlay in renderAgentPanel
 
     // Check if there's a pending permission - render inline permission prompt instead
@@ -2074,97 +2093,11 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         });
         renderScrollbar(scrollbar_win, scrollbar_info);
     }
+    // Note: Footer is now rendered by the unified status bar in UI.renderStatus
+}
 
-    // Footer row: mode (left), session mode (center), and keybindings (right)
-    // Only render footer in full-screen mode (sidebar mode uses the main status bar)
-    const is_full_screen = if (app.tab_manager) |tm| tm.full_screen else true;
-    if (!is_full_screen) return;
-
-    const footer_row = win.height - 1;
-    if (win.height > 1) {
-        // Mode text like vim: -- INSERT -- or -- NORMAL --
-        const mode_text = switch (agent_state.input.vim.vim_mode) {
-            .normal => "-- NORMAL --",
-            .insert => "-- INSERT --",
-            .visual => "-- VISUAL --",
-            .command => "-- COMMAND --",
-        };
-        const mode_style = vaxis.Style{ .bold = true };
-
-        var mode_seg = [_]vaxis.Cell.Segment{
-            .{ .text = mode_text, .style = mode_style },
-        };
-        _ = win.print(&mode_seg, .{ .row_offset = @intCast(footer_row), .col_offset = 0 });
-
-        // Session mode display (after vim mode) - only if modes are available
-        var session_mode_buf: [64]u8 = undefined;
-        var session_mode_text: ?[]const u8 = null;
-
-        if (app.getActiveAcpManager()) |mgr| {
-            if (mgr.hasModes()) {
-                const mode_name = mgr.getCurrentModeName();
-                if (mode_name.len > 0) {
-                    session_mode_text = std.fmt.bufPrint(&session_mode_buf, " [{s}]", .{mode_name}) catch null;
-                }
-            }
-        }
-
-        if (session_mode_text) |sm_text| {
-            const sm_style = vaxis.Style{ .fg = Color.white };
-            var sm_seg = [_]vaxis.Cell.Segment{
-                .{ .text = sm_text, .style = sm_style },
-            };
-            _ = win.print(&sm_seg, .{ .row_offset = @intCast(footer_row), .col_offset = 13 });
-        }
-
-        // Stash indicator (after session mode)
-        var next_col: usize = if (session_mode_text) |sm| 13 + sm.len else 13;
-
-        if (agent_state.hasStash()) {
-            const stash_style = vaxis.Style{ .fg = Color.yellow, .bold = true };
-            var stash_seg = [_]vaxis.Cell.Segment{
-                .{ .text = " [stashed]", .style = stash_style },
-            };
-            _ = win.print(&stash_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(next_col) });
-            next_col += 10; // " [stashed]".len
-        }
-
-        // Current model indicator (after stash)
-        var model_buf: [48]u8 = undefined;
-        if (app.getActiveAcpManager()) |mgr| {
-            if (mgr.hasModels()) {
-                const model_name = mgr.getCurrentModelName();
-                if (model_name.len > 0) {
-                    const model_text = std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch null;
-                    if (model_text) |mt| {
-                        const model_style = vaxis.Style{ .fg = Color.cyan };
-                        var model_seg = [_]vaxis.Cell.Segment{
-                            .{ .text = mt, .style = model_style },
-                        };
-                        _ = win.print(&model_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(next_col) });
-                    }
-                }
-            }
-        }
-
-        // Keybindings on the right (include mode hint if modes available)
-        // Tab cycles modes only in normal mode
-        const has_modes = if (app.getActiveAcpManager()) |mgr| mgr.hasModes() else false;
-        const keybindings = switch (agent_state.input.vim.vim_mode) {
-            .insert => "S-Enter:newline  Enter:send  ESC:normal",
-            .normal => if (has_modes) "Tab:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",
-            .visual => "ESC:exit",
-            .command => "Enter:execute  ESC:cancel",
-        };
-        const kb_style = vaxis.Style{ .fg = Color.dim_gray };
-        const kb_len = keybindings.len;
-        const kb_col = if (win.width > kb_len) win.width - kb_len else 0;
-
-        var kb_seg = [_]vaxis.Cell.Segment{
-            .{ .text = keybindings, .style = kb_style },
-        };
-        _ = win.print(&kb_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(kb_col) });
-    }
+fn clipText(text: []const u8, max_len: usize) []const u8 {
+    return if (text.len > max_len) text[0..max_len] else text;
 }
 
 // =============================================================================

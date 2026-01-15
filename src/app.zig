@@ -3015,7 +3015,7 @@ pub const App = struct {
                 try self.renderContent(content_win);
             }
 
-            // Render status bar
+            // Render unified status bar (handles both diff mode and agent mode content)
             const status_win = win.child(.{
                 .x_off = 0,
                 .y_off = win.height - Layout.status_height,
@@ -3060,10 +3060,17 @@ pub const App = struct {
             try UI.renderSessionPickerDialog(self, win);
         }
 
-        // Render agent panel full-screen if in full-screen mode
-        // Don't render during agent selection or session picker (dialogs are shown instead)
-        if (self.isAgentPanelVisible() and self.isAgentFullScreen() and self.mode != .agent_selection and self.mode != .session_picker) {
-            try agent.renderAgentPanel(self, win);
+        // Render agent panel full-screen if in full-screen mode AND in agent mode
+        // Only render when actually focused on the agent panel (mode == .agent)
+        // Use a child window that excludes the status bar row (status bar is unified)
+        if (self.isAgentPanelVisible() and self.isAgentFullScreen() and self.mode == .agent) {
+            const agent_win = win.child(.{
+                .x_off = 0,
+                .y_off = 0,
+                .width = win.width,
+                .height = if (win.height > Layout.status_height) win.height - Layout.status_height else win.height,
+            });
+            try agent.renderAgentPanel(self, agent_win);
         }
     }
 

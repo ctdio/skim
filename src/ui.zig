@@ -1137,6 +1137,65 @@ pub const UI = struct {
             }
 
             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+        } else if (app.mode == .agent) {
+            // Agent mode - show vim mode, model name, session mode, stash indicator
+            if (app.getActiveAgentStateConst()) |agent_state| {
+                // Vim mode on the left
+                const vim_mode_str = switch (agent_state.input.vim.vim_mode) {
+                    .normal => "-- NORMAL --",
+                    .insert => "-- INSERT --",
+                    .visual => "-- VISUAL --",
+                    .command => "-- COMMAND --",
+                };
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, vim_mode_str), .style = .{ .bold = true } });
+
+                // Session mode (if available)
+                if (app.getActiveAcpManager()) |mgr| {
+                    if (mgr.hasModes()) {
+                        const session_mode_name = mgr.getCurrentModeName();
+                        if (session_mode_name.len > 0) {
+                            var session_buf: [64]u8 = undefined;
+                            const session_str = std.fmt.bufPrint(&session_buf, " [{s}]", .{session_mode_name}) catch "";
+                            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, session_str), .style = .{ .fg = Color.white } });
+                        }
+                    }
+                }
+
+                // Stash indicator
+                if (agent_state.hasStash()) {
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " [stashed]"), .style = .{ .fg = Color.yellow, .bold = true } });
+                }
+
+                // Model name
+                if (app.getActiveAcpManager()) |mgr| {
+                    if (mgr.hasModels()) {
+                        const model_name = mgr.getCurrentModelName();
+                        if (model_name.len > 0) {
+                            var model_buf: [64]u8 = undefined;
+                            const model_str = std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch "";
+                            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
+                        }
+                    }
+                }
+
+                // Keybindings on the right
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+
+                // Agent-specific keybindings based on vim mode
+                const has_modes = if (app.getActiveAcpManager()) |mgr| mgr.hasModes() else false;
+                const agent_keybindings = switch (agent_state.input.vim.vim_mode) {
+                    .insert => "S-Enter:newline  Enter:send  ESC:normal",
+                    .normal => if (has_modes) "Tab:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",
+                    .visual => "ESC:exit",
+                    .command => "Enter:execute  ESC:cancel",
+                };
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, agent_keybindings), .style = .{ .fg = Color.dim_gray } });
+            } else {
+                // Fallback if no agent state
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+            }
         } else {
             // Normal mode status bar with colored hunk view mode
             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
