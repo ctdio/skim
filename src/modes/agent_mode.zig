@@ -1603,8 +1603,13 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
         },
         .close_tab => {
             const tm = try app.ensureTabManager();
-            if (!tm.closeActiveTab()) {
-                try agent_state.addMessage(.system, "Cannot close last tab");
+            if (tm.tabCount() <= 1) {
+                // Last tab - hide panel and return to diff view
+                tm.panel_visible = false;
+                agent_state.visible = false;
+                app.mode = .normal;
+            } else {
+                _ = tm.closeActiveTab();
             }
         },
         .next_tab => {
