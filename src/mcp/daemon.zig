@@ -1056,6 +1056,19 @@ pub const Daemon = struct {
             return;
         }
 
+        // Get view_mode (default to "unified")
+        const view_mode_val = args.object.get("view_mode");
+        const view_mode = if (view_mode_val) |vm|
+            if (vm == .string) vm.string else "unified"
+        else
+            "unified";
+
+        // Validate view_mode
+        if (!std.mem.eql(u8, view_mode, "unified") and !std.mem.eql(u8, view_mode, "side_by_side")) {
+            try self.sendToolError(adapter, req.request_id, req.mcp_id, "Invalid view_mode: must be 'unified' or 'side_by_side'");
+            return;
+        }
+
         // Find TUI client
         const client = self.tui_clients.getByIdString(client_id.string) orelse {
             try self.sendToolError(adapter, req.request_id, req.mcp_id, "Client not found");
@@ -1098,7 +1111,7 @@ pub const Daemon = struct {
                 .null_value => .{ .null_value = {} },
             },
             .method = try self.allocator.dupe(u8, "get_file_diff"),
-            .params = null,
+            .params = try self.allocator.dupe(u8, view_mode),
             .tui_client_id = client.id,
             .created_at = std.time.timestamp(),
         });
@@ -1362,6 +1375,7 @@ pub const Daemon = struct {
                     else => {},
                 }
                 self.allocator.free(entry.value.method);
+                if (entry.value.params) |p| self.allocator.free(p);
             }
 
             // Decrement pending request counters
@@ -1371,6 +1385,10 @@ pub const Daemon = struct {
             if (self.adapter_pending_counts.getPtr(entry.value.adapter_id)) |count| {
                 count.* = if (count.* > 0) count.* - 1 else 0;
             }
+
+            // Get view_mode from params (default to unified)
+            const view_mode = entry.value.params orelse "unified";
+            const use_side_by_side = std.mem.eql(u8, view_mode, "side_by_side");
 
             // Find adapter and send response
             if (self.adapters.get(entry.value.adapter_id)) |adapter| {
@@ -1406,32 +1424,94 @@ pub const Daemon = struct {
                 builder.trackWrite(result.status.len + 12);
                 builder.maybeYield();
 
-                // Output hunks with yield points
-                for (result.hunks) |hunk| {
-                    try writeJsonEscaped(writer, hunk.header);
-                    try writer.writeAll("\\n");
-                    builder.trackWrite(hunk.header.len + 2);
-                    builder.maybeYield();
-
-                    for (hunk.lines) |line| {
-                        // Prefix based on change type
-                        if (std.mem.eql(u8, line.change_type, "add")) {
-                            try writer.writeAll("+");
-                        } else if (std.mem.eql(u8, line.change_type, "delete")) {
-                            try writer.writeAll("-");
-                        } else {
-                            try writer.writeAll(" ");
-                        }
-                        try writeJsonEscaped(writer, line.content);
-                        try writer.writeAll("\\n");
-                        builder.trackWrite(line.content.len + 3);
-                        builder.maybeYield(); // Yield after each line if needed
-                    }
+                // Output hunks based on view mode
+                if (use_side_by_side) {
+                    try self.formatSideBySideDiff(writer, &builder, result);
+                } else {
+                    try self.formatUnifiedDiff(writer, &builder, result);
                 }
 
                 try writer.writeAll("\"}]}");
 
                 try self.sendMcpResponse(adapter, &request_id, entry.value.mcp_id, builder.output.items);
+            }
+        }
+    }
+
+    fn formatUnifiedDiff(self: *Self, writer: anytype, builder: *ResponseBuilder, result: protocol.FileDiffPayload) !void {
+        _ = self;
+        for (result.hunks) |hunk| {
+            try writeJsonEscaped(writer, hunk.header);
+            try writer.writeAll("\\n");
+            builder.trackWrite(hunk.header.len + 2);
+            builder.maybeYield();
+
+            for (hunk.lines) |line| {
+                // Prefix based on change type
+                if (std.mem.eql(u8, line.change_type, "add")) {
+                    try writer.writeAll("+");
+                } else if (std.mem.eql(u8, line.change_type, "delete")) {
+                    try writer.writeAll("-");
+                } else {
+                    try writer.writeAll(" ");
+                }
+                try writeJsonEscaped(writer, line.content);
+                try writer.writeAll("\\n");
+                builder.trackWrite(line.content.len + 3);
+                builder.maybeYield();
+            }
+        }
+    }
+
+    fn formatSideBySideDiff(self: *Self, writer: anytype, builder: *ResponseBuilder, result: protocol.FileDiffPayload) !void {
+        // Side-by-side format: show old lines on left, new lines on right
+        // Format: "OLD_LINE_NUM | OLD_CONTENT     | NEW_LINE_NUM | NEW_CONTENT"
+        const col_width: usize = 40;
+
+        for (result.hunks) |hunk| {
+            try writeJsonEscaped(writer, hunk.header);
+            try writer.writeAll("\\n");
+            builder.trackWrite(hunk.header.len + 2);
+            builder.maybeYield();
+
+            // Separator line
+            try writer.writeAll("----------------------------------------|----------------------------------------\\n");
+            builder.trackWrite(82);
+            builder.maybeYield();
+
+            // Collect lines into old/new pairs for side-by-side display
+            var old_lines: std.ArrayList(SideBySideLineInfo) = .{};
+            var new_lines: std.ArrayList(SideBySideLineInfo) = .{};
+            defer old_lines.deinit(self.allocator);
+            defer new_lines.deinit(self.allocator);
+
+            for (hunk.lines) |line| {
+                if (std.mem.eql(u8, line.change_type, "delete")) {
+                    try old_lines.append(self.allocator, .{ .num = line.old_lineno, .content = line.content });
+                } else if (std.mem.eql(u8, line.change_type, "add")) {
+                    try new_lines.append(self.allocator, .{ .num = line.new_lineno, .content = line.content });
+                } else {
+                    // Context line - flush any pending changes first, then show on both sides
+                    const max_len = @max(old_lines.items.len, new_lines.items.len);
+                    for (0..max_len) |i| {
+                        const old_line: ?SideBySideLineInfo = if (i < old_lines.items.len) old_lines.items[i] else null;
+                        const new_line: ?SideBySideLineInfo = if (i < new_lines.items.len) new_lines.items[i] else null;
+                        try writeSideBySideLine(writer, builder, old_line, new_line, col_width);
+                    }
+                    old_lines.clearRetainingCapacity();
+                    new_lines.clearRetainingCapacity();
+
+                    // Write context line on both sides
+                    try writeSideBySideLine(writer, builder, SideBySideLineInfo{ .num = line.old_lineno, .content = line.content }, SideBySideLineInfo{ .num = line.new_lineno, .content = line.content }, col_width);
+                }
+            }
+
+            // Flush remaining changes at end of hunk
+            const max_len = @max(old_lines.items.len, new_lines.items.len);
+            for (0..max_len) |i| {
+                const old_line: ?SideBySideLineInfo = if (i < old_lines.items.len) old_lines.items[i] else null;
+                const new_line: ?SideBySideLineInfo = if (i < new_lines.items.len) new_lines.items[i] else null;
+                try writeSideBySideLine(writer, builder, old_line, new_line, col_width);
             }
         }
     }
@@ -1834,6 +1914,51 @@ fn getCurrentPid() i32 {
 }
 
 /// Write a string with JSON escaping (for embedding in JSON strings)
+const SideBySideLineInfo = struct { num: ?u32, content: []const u8 };
+
+fn writeSideBySideLine(writer: anytype, builder: *ResponseBuilder, old: ?SideBySideLineInfo, new: ?SideBySideLineInfo, col_width: usize) !void {
+    // Format: "LINE | CONTENT                        | LINE | CONTENT"
+    // Write old side
+    if (old) |o| {
+        if (o.num) |num| {
+            try writer.print("{d:>4} | ", .{num});
+        } else {
+            try writer.writeAll("     | ");
+        }
+        // Truncate content if too long
+        const content_len = @min(o.content.len, col_width - 7);
+        try writeJsonEscaped(writer, o.content[0..content_len]);
+        // Pad to column width
+        const padding = col_width - 7 - content_len;
+        for (0..padding) |_| {
+            try writer.writeByte(' ');
+        }
+    } else {
+        // Empty old side
+        for (0..col_width) |_| {
+            try writer.writeByte(' ');
+        }
+    }
+
+    try writer.writeAll("|");
+
+    // Write new side
+    if (new) |n| {
+        if (n.num) |num| {
+            try writer.print(" {d:>4} | ", .{num});
+        } else {
+            try writer.writeAll("      | ");
+        }
+        // Truncate content if too long
+        const content_len = @min(n.content.len, col_width - 8);
+        try writeJsonEscaped(writer, n.content[0..content_len]);
+    }
+
+    try writer.writeAll("\\n");
+    builder.trackWrite(col_width * 2 + 3);
+    builder.maybeYield();
+}
+
 fn writeJsonEscaped(writer: anytype, str: []const u8) !void {
     for (str) |c| {
         switch (c) {

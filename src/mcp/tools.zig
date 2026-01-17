@@ -32,6 +32,7 @@ pub const GetDiffContextParams = struct {
 pub const GetFileDiffParams = struct {
     client_id: []const u8,
     file: []const u8,
+    view_mode: []const u8 = "unified", // "unified" or "side_by_side"
 };
 
 // =============================================================================
@@ -345,7 +346,9 @@ pub fn createServer(allocator: Allocator) !Server {
 
     try server.tool(
         "get_file_diff",
-        "Get the full diff content for a specific file (hunks and lines)",
+        "Get the full diff content for a specific file (hunks and lines). " ++
+            "Use view_mode='unified' (default) for traditional +/- format, " ++
+            "or view_mode='side_by_side' for a two-column layout showing old and new content.",
         GetFileDiffParams,
         getFileDiff,
     );
