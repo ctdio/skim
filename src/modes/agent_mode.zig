@@ -500,6 +500,16 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
+    // Up arrow on empty input - restore staged prompt into input for editing
+    if (key.codepoint == vaxis.Key.up and agent_state.input.isEmpty() and agent_state.hasStagedPrompt()) {
+        const staged = agent_state.takeStagedPrompt() orelse return;
+        agent_state.input.setText(staged);
+        agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
+        agent_state.input.vim.vim_mode = .insert;
+        app.needs_render = true;
+        return;
+    }
+
     // Cycle through session modes (only in normal vim mode):
     // - Tab (plain tab key in normal mode)
     // - Shift+Tab (requires kitty keyboard protocol - many terminals don't support this)
