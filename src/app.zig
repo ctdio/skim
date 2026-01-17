@@ -67,9 +67,14 @@ const FrameChars = rendering_common.FrameChars;
 const HEADER_BUFFER_WIDTH = 4096;
 const FRAME_TEXT_CAPACITY = 262144; // 256 KiB per frame scratch space
 
+const HunkKey = struct {
+    file_idx: usize,
+    hunk_idx: usize,
+};
+
 const PendingJob = struct {
-    content: []const u8, // Owned NEW file content
-    old_content: []const u8, // Owned OLD file content
+    content: []const u8, // Owned NEW hunk content
+    old_content: []const u8, // Owned OLD hunk content
 };
 
 // Static buffer for vaxis Tty writer (must persist for lifetime of Tty)
@@ -116,7 +121,7 @@ pub const App = struct {
     frame_text_used: usize,
     syntax_highlighter: syntax.SyntaxHighlighter,
     highlight_worker: ?*state_helpers.HighlightWorker, // Long-lived worker thread with cached parsers
-    pending_highlight_jobs: std.AutoHashMap(usize, PendingJob), // file_idx -> owned content strings
+    pending_highlight_jobs: std.AutoHashMap(HunkKey, PendingJob), // {file_idx, hunk_idx} -> owned content strings
     needs_render: bool, // Flag to force re-render (e.g., after async highlighting)
     needs_async_highlight: bool, // Flag to trigger async highlighting for current file
     mcp: ?*mcp_client.McpClient, // MCP client for server connection
@@ -478,7 +483,7 @@ pub const App = struct {
             .frame_text_used = 0,
             .syntax_highlighter = syntax_highlighter,
             .highlight_worker = null, // Will be created on first use
-            .pending_highlight_jobs = std.AutoHashMap(usize, PendingJob).init(allocator),
+            .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
             .needs_render = false,
             .needs_async_highlight = true, // Start with highlighting needed for first file
             .mcp = null,
@@ -1077,23 +1082,27 @@ pub const App = struct {
 
                 for (results.items) |result| {
                     const file_idx = result.file_idx;
+                    const hunk_idx = result.hunk_idx;
 
                     // Remove from pending jobs and free content
-                    if (self.pending_highlight_jobs.fetchRemove(file_idx)) |entry| {
+                    const key = HunkKey{ .file_idx = file_idx, .hunk_idx = hunk_idx };
+                    if (self.pending_highlight_jobs.fetchRemove(key)) |entry| {
                         self.allocator.free(entry.value.content);
                         self.allocator.free(entry.value.old_content);
                     }
 
-                    // Apply highlights to file
-                    if (result.highlights) |highlights| {
-                        if (file_idx < self.state.files.len) {
-                            const file = &self.state.files[file_idx];
-                            const mutable_file = @constCast(file);
-                            mutable_file.highlights = highlights;
+                    // Apply highlights to hunk
+                    if (file_idx < self.state.files.len) {
+                        const file = &self.state.files[file_idx];
+                        if (hunk_idx < file.hunks.len) {
+                            const hunk = &file.hunks[hunk_idx];
+                            const mutable_hunk = @constCast(hunk);
 
-                            // Also apply old highlights if available
+                            if (result.highlights) |highlights| {
+                                mutable_hunk.highlights = highlights;
+                            }
                             if (result.old_highlights) |old_highlights| {
-                                mutable_file.old_highlights = old_highlights;
+                                mutable_hunk.old_highlights = old_highlights;
                             }
 
                             // Only trigger re-render if this is the CURRENT file
@@ -1101,12 +1110,24 @@ pub const App = struct {
                                 self.needs_render = true;
                             }
                         } else {
-                            // File no longer exists (refresh happened), free highlights
+                            // Hunk no longer exists, free highlights
                             if (self.highlight_worker) |w| {
-                                w.highlighter.freeHighlights(highlights);
+                                if (result.highlights) |highlights| {
+                                    w.highlighter.freeHighlights(highlights);
+                                }
                                 if (result.old_highlights) |old_highlights| {
                                     w.highlighter.freeHighlights(old_highlights);
                                 }
+                            }
+                        }
+                    } else {
+                        // File no longer exists (refresh happened), free highlights
+                        if (self.highlight_worker) |w| {
+                            if (result.highlights) |highlights| {
+                                w.highlighter.freeHighlights(highlights);
+                            }
+                            if (result.old_highlights) |old_highlights| {
+                                w.highlighter.freeHighlights(old_highlights);
                             }
                         }
                     }
@@ -1133,8 +1154,8 @@ pub const App = struct {
                 }
             }
 
-            // Submit highlighting jobs for visible files
-            // Strategy: Highlight files that are currently visible on screen
+            // Submit highlighting jobs for visible hunks (per-hunk highlighting)
+            // Strategy: Highlight hunks in files that are currently visible on screen
             // This ensures smooth scrolling without waiting for highlights
             if (self.state.files.len > 0) {
                 // Create worker on first use
@@ -1144,7 +1165,6 @@ pub const App = struct {
 
                 if (self.highlight_worker) |worker| {
                     // Determine which files are visible in the viewport
-                    // Strategy: Check files around scroll position (current + next few)
                     const viewport_height = self.state.viewport_height;
                     const scroll_line = self.state.global_scroll_offset;
                     const visible_end = scroll_line + viewport_height;
@@ -1152,60 +1172,69 @@ pub const App = struct {
                     // Start from file at scroll position
                     const start_file_idx = self.state.line_map.getFileIndexForLine(scroll_line) orelse 0;
 
-                    // Submit jobs for visible files (current + up to 3 ahead for smooth scrolling)
-                    var files_submitted: usize = 0;
-                    var check_idx = start_file_idx;
-                    while (check_idx < self.state.files.len and files_submitted < 4) : (check_idx += 1) {
-                        const file = &self.state.files[check_idx];
+                    // Submit jobs for visible hunks (current file + up to 3 files ahead)
+                    var hunks_submitted: usize = 0;
+                    const max_hunks_per_frame: usize = 8; // Limit hunks per frame to prevent overwhelming
 
-                        // Skip if already highlighted or job pending
-                        if (file.highlights != null or self.pending_highlight_jobs.contains(check_idx)) {
-                            continue;
-                        }
+                    var check_idx = start_file_idx;
+                    file_loop: while (check_idx < self.state.files.len) : (check_idx += 1) {
+                        const file = &self.state.files[check_idx];
 
                         // Check if this file is visible or close to visible
                         if (self.state.line_map.getFileHeaderLine(check_idx)) |file_header_line| {
-                            // Only submit if file starts before end of viewport + buffer
                             const buffer_lines = viewport_height; // One screen ahead
                             if (file_header_line > visible_end + buffer_lines) {
                                 break; // File is too far ahead
                             }
                         }
 
-                        // Build NEW file content (add/context lines)
-                        const content = StateHelpers.buildFileContent(self.allocator, file) catch continue;
-                        errdefer self.allocator.free(content);
-
-                        // Build OLD file content (delete/context lines)
-                        const old_content = StateHelpers.buildOldFileContent(self.allocator, file) catch {
-                            self.allocator.free(content);
-                            continue;
-                        };
-                        errdefer self.allocator.free(old_content);
-
-                        // Submit job to worker
                         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-                        worker.submitJob(.{
-                            .file_path = file_path,
-                            .content = content,
-                            .old_content = old_content,
-                            .file_idx = check_idx,
-                        }) catch {
-                            self.allocator.free(content);
-                            self.allocator.free(old_content);
-                            continue;
-                        };
 
-                        // Track pending job (store both content strings)
-                        self.pending_highlight_jobs.put(check_idx, .{
-                            .content = content,
-                            .old_content = old_content,
-                        }) catch {
-                            self.allocator.free(content);
-                            self.allocator.free(old_content);
-                        };
+                        // Iterate through hunks in this file
+                        for (file.hunks, 0..) |*hunk, hunk_idx| {
+                            if (hunks_submitted >= max_hunks_per_frame) break :file_loop;
 
-                        files_submitted += 1;
+                            // Skip if already highlighted or job pending
+                            const key = HunkKey{ .file_idx = check_idx, .hunk_idx = hunk_idx };
+                            if (hunk.highlights != null or self.pending_highlight_jobs.contains(key)) {
+                                continue;
+                            }
+
+                            // Build NEW hunk content (add/context lines)
+                            const content = StateHelpers.buildHunkContent(self.allocator, hunk) catch continue;
+                            errdefer self.allocator.free(content);
+
+                            // Build OLD hunk content (delete/context lines)
+                            const old_content = StateHelpers.buildHunkOldContent(self.allocator, hunk) catch {
+                                self.allocator.free(content);
+                                continue;
+                            };
+                            errdefer self.allocator.free(old_content);
+
+                            // Submit job to worker
+                            worker.submitJob(.{
+                                .file_path = file_path,
+                                .content = content,
+                                .old_content = old_content,
+                                .file_idx = check_idx,
+                                .hunk_idx = hunk_idx,
+                            }) catch {
+                                self.allocator.free(content);
+                                self.allocator.free(old_content);
+                                continue;
+                            };
+
+                            // Track pending job (store both content strings)
+                            self.pending_highlight_jobs.put(key, .{
+                                .content = content,
+                                .old_content = old_content,
+                            }) catch {
+                                self.allocator.free(content);
+                                self.allocator.free(old_content);
+                            };
+
+                            hunks_submitted += 1;
+                        }
                     }
                 }
 

@@ -639,3 +639,32 @@ test "Debug JavaScript highlights" {
     }
     std.debug.print("===================================\n\n", .{});
 }
+
+test "per-hunk highlighting prevents comment bleeding" {
+    const allocator = std.testing.allocator;
+    var highlighter = try SyntaxHighlighter.init(allocator);
+    defer highlighter.deinit();
+
+    // Hunk 1: Opens a block comment (unclosed)
+    const hunk1 = "function foo() {\n  /**\n   * Doc comment\n";
+
+    // Hunk 2: Regular code (should NOT be commented)
+    const hunk2 = "function bar() {\n  return 42;\n}\n";
+
+    const h1 = try highlighter.highlightFile("test.js", hunk1);
+    defer highlighter.freeHighlights(h1);
+
+    const h2 = try highlighter.highlightFile("test.js", hunk2);
+    defer highlighter.freeHighlights(h2);
+
+    // Verify hunk2 has keyword highlights (not all comments)
+    // If comment bleeding occurred, "function" would be inside a comment and not highlighted as keyword
+    var found_keyword = false;
+    for (h2) |h| {
+        if (std.mem.startsWith(u8, h.category, "keyword")) {
+            found_keyword = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_keyword);
+}

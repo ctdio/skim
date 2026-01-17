@@ -7,11 +7,13 @@ pub const HighlightJob = struct {
     content: []const u8, // Borrowed reference (new file content: add/context lines)
     old_content: []const u8, // Borrowed reference (old file content: delete/context lines)
     file_idx: usize,
+    hunk_idx: usize, // Index of the hunk within the file
 };
 
 // Completed highlighting result
 pub const HighlightResult = struct {
     file_idx: usize,
+    hunk_idx: usize, // Index of the hunk within the file
     highlights: ?[]syntax.Highlight, // Highlights for new file (add/context lines)
     old_highlights: ?[]syntax.Highlight, // Highlights for old file (delete/context lines)
     failed: bool,
@@ -120,6 +122,7 @@ pub const HighlightWorker = struct {
                 self.mutex.lock();
                 self.result_queue.append(self.allocator, .{
                     .file_idx = job.file_idx,
+                    .hunk_idx = job.hunk_idx,
                     .highlights = highlights,
                     .old_highlights = old_highlights,
                     .failed = highlights == null and old_highlights == null,

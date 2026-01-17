@@ -7,8 +7,6 @@ pub const FileDiff = struct {
     old_path: []const u8,
     new_path: []const u8,
     hunks: []Hunk,
-    highlights: ?[]syntax.Highlight, // Cached syntax highlights for the new file (add/context lines)
-    old_highlights: ?[]syntax.Highlight, // Cached syntax highlights for the old file (delete/context lines)
     is_untracked: bool, // True if file is untracked (not yet added to git)
 
     pub fn deinit(self: *const FileDiff, allocator: Allocator) void {
@@ -18,26 +16,14 @@ pub const FileDiff = struct {
             hunk.deinit(allocator);
         }
         allocator.free(self.hunks);
-        if (self.highlights) |highlights| {
-            // Free each category string (they were duplicated during parsing)
-            for (highlights) |h| {
-                allocator.free(h.category);
-            }
-            allocator.free(highlights);
-        }
-        if (self.old_highlights) |old_highlights| {
-            // Free each category string (they were duplicated during parsing)
-            for (old_highlights) |h| {
-                allocator.free(h.category);
-            }
-            allocator.free(old_highlights);
-        }
     }
 };
 
 pub const Hunk = struct {
     header: HunkHeader,
     lines: []Line,
+    highlights: ?[]syntax.Highlight, // Cached syntax highlights for new file (add/context lines)
+    old_highlights: ?[]syntax.Highlight, // Cached syntax highlights for old file (delete/context lines)
 
     pub fn deinit(self: *const Hunk, allocator: Allocator) void {
         allocator.free(self.header.context);
@@ -45,6 +31,18 @@ pub const Hunk = struct {
             line.deinit(allocator);
         }
         allocator.free(self.lines);
+        if (self.highlights) |highlights| {
+            for (highlights) |h| {
+                allocator.free(h.category);
+            }
+            allocator.free(highlights);
+        }
+        if (self.old_highlights) |old_highlights| {
+            for (old_highlights) |h| {
+                allocator.free(h.category);
+            }
+            allocator.free(old_highlights);
+        }
     }
 };
 
@@ -190,8 +188,6 @@ const PartialFileDiff = struct {
             .old_path = self.old_path orelse try allocator.dupe(u8, ""),
             .new_path = self.new_path orelse try allocator.dupe(u8, ""),
             .hunks = try self.hunks.toOwnedSlice(allocator),
-            .highlights = null, // Will be populated on first render
-            .old_highlights = null, // Will be populated on first render
             .is_untracked = false, // Will be set to true for untracked files after parsing
         };
     }
@@ -207,6 +203,8 @@ const PartialHunk = struct {
         return Hunk{
             .header = self.header,
             .lines = try self.lines.toOwnedSlice(allocator),
+            .highlights = null, // Will be populated by async highlighting
+            .old_highlights = null, // Will be populated by async highlighting
         };
     }
 };

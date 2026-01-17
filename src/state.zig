@@ -289,6 +289,114 @@ pub const StateHelpers = struct {
         return offset;
     }
 
+    /// Build content for a single hunk (new file: add/context lines)
+    pub fn buildHunkContent(allocator: std.mem.Allocator, hunk: *const parser.Hunk) ![]u8 {
+        // Step 1: Calculate exact size needed
+        var total_size: usize = 0;
+        for (hunk.lines) |line| {
+            switch (line.line_type) {
+                .delete => {},
+                .add, .context => {
+                    total_size += line.content.len + 1; // +1 for newline
+                },
+            }
+        }
+
+        // Step 2: Single allocation with exact size
+        const content = try allocator.alloc(u8, total_size);
+        errdefer allocator.free(content);
+
+        // Step 3: Copy data in single pass
+        var offset: usize = 0;
+        for (hunk.lines) |line| {
+            switch (line.line_type) {
+                .delete => {},
+                .add, .context => {
+                    @memcpy(content[offset .. offset + line.content.len], line.content);
+                    offset += line.content.len;
+                    content[offset] = '\n';
+                    offset += 1;
+                },
+            }
+        }
+
+        return content;
+    }
+
+    /// Build content for a single hunk (old file: delete/context lines)
+    pub fn buildHunkOldContent(allocator: std.mem.Allocator, hunk: *const parser.Hunk) ![]u8 {
+        // Step 1: Calculate exact size needed
+        var total_size: usize = 0;
+        for (hunk.lines) |line| {
+            switch (line.line_type) {
+                .add => {}, // Skip additions - not in old file
+                .delete, .context => {
+                    total_size += line.content.len + 1; // +1 for newline
+                },
+            }
+        }
+
+        // Step 2: Single allocation with exact size
+        const content = try allocator.alloc(u8, total_size);
+        errdefer allocator.free(content);
+
+        // Step 3: Copy data in single pass
+        var offset: usize = 0;
+        for (hunk.lines) |line| {
+            switch (line.line_type) {
+                .add => {}, // Skip additions
+                .delete, .context => {
+                    @memcpy(content[offset .. offset + line.content.len], line.content);
+                    offset += line.content.len;
+                    content[offset] = '\n';
+                    offset += 1;
+                },
+            }
+        }
+
+        return content;
+    }
+
+    /// Byte offset within a single hunk (new file: add/context lines)
+    pub fn getLineByteOffsetInHunk(hunk: *const parser.Hunk, target_line_idx: usize) usize {
+        var offset: usize = 0;
+
+        for (hunk.lines, 0..) |line, line_idx| {
+            if (line_idx == target_line_idx) {
+                return offset;
+            }
+            // Only count additions and context (deletions are not in new file)
+            switch (line.line_type) {
+                .delete => {}, // Skip - not in reconstructed content
+                .add, .context => {
+                    offset += line.content.len + 1; // +1 for newline
+                },
+            }
+        }
+
+        return offset;
+    }
+
+    /// Byte offset within a single hunk (old file: delete/context lines)
+    pub fn getOldLineByteOffsetInHunk(hunk: *const parser.Hunk, target_line_idx: usize) usize {
+        var offset: usize = 0;
+
+        for (hunk.lines, 0..) |line, line_idx| {
+            if (line_idx == target_line_idx) {
+                return offset;
+            }
+            // Only count deletions and context (additions are not in old file)
+            switch (line.line_type) {
+                .add => {}, // Skip - not in old file
+                .delete, .context => {
+                    offset += line.content.len + 1; // +1 for newline
+                },
+            }
+        }
+
+        return offset;
+    }
+
     // Spawn a background thread to highlight a file (truly async)
     // Optimized: Build content on main thread with single allocation (fast)
     // Only parser loading/highlighting happens in background (slow part)
