@@ -335,9 +335,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
 /// Handle keyboard input when in empty menu (no files loaded)
 fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
-    // Fixed menu: working, staged, main, branch, graphite stack, refresh, quit
+    // Fixed menu: working, staged, main, branch, commit, graphite stack, refresh, quit
     // Graphite detection happens lazily when user selects it
-    const menu_items_count: usize = 7;
+    const menu_items_count: usize = 8;
 
     // Handle Ctrl+key combinations
     if (key.mods.ctrl) {
@@ -380,15 +380,16 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
             app.state.empty_menu_selection = if (app.state.empty_menu_selection == 0) menu_items_count - 1 else app.state.empty_menu_selection - 1;
         },
         '\r' => { // Enter key
-            // Menu order: working(0), staged(1), main(2), branch(3), stack(4), refresh(5), quit(6)
+            // Menu order: working(0), staged(1), main(2), branch(3), commit(4), stack(5), refresh(6), quit(7)
             switch (app.state.empty_menu_selection) {
                 0 => try app.switchDiffMode(.working),
                 1 => try app.switchDiffMode(.staged),
                 2 => try app.switchDiffMode(.main),
                 3 => try app.startBranchSelection(),
-                4 => try app.startGraphiteStack(), // Lazy detection happens here
-                5 => try app.refresh(),
-                6 => app.should_quit = true,
+                4 => try app.startCommitSelection(),
+                5 => try app.startGraphiteStack(), // Lazy detection happens here
+                6 => try app.refresh(),
+                7 => app.should_quit = true,
                 else => {},
             }
         },

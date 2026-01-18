@@ -40,6 +40,7 @@ pub const CommandAction = union(enum) {
     switch_diff_mode: DiffMode,
     show_mcp_status: void,
     switch_agent: void,
+    select_commit: void,
 };
 
 pub const Command = struct {
@@ -242,6 +243,17 @@ pub const CommandPaletteState = struct {
             .owns_display_name = false,
             .additions = main_stats.additions,
             .deletions = main_stats.deletions,
+        });
+
+        try self.commands.append(self.allocator, .{
+            .name = "Select Commit...",
+            .display_name = "Select Commit...",
+            .description = "Diff against a specific commit",
+            .action = .select_commit,
+            .category = .diff,
+            .owns_display_name = false,
+            .additions = 0,
+            .deletions = 0,
         });
 
         // Initialize with files by default (no '>' prefix)

@@ -133,6 +133,7 @@ pub const UI = struct {
             .{ .label = "Staged changes", .description = "Changes ready to commit", .stats = staged_stats },
             .{ .label = "Main branch", .description = default_branch, .stats = main_stats },
             .{ .label = "Select branch...", .description = "Choose a specific branch", .stats = null },
+            .{ .label = "Select commit...", .description = "Diff against a specific commit", .stats = null },
             .{ .label = "Graphite stack", .description = "Review branches in current stack", .stats = null },
             .{ .label = "Refresh", .description = "Reload current diff source", .stats = null },
             .{ .label = "Quit", .description = "Exit Skim", .stats = null },
@@ -382,6 +383,254 @@ pub const UI = struct {
             .style = .{ .fg = Color.dim },
         }};
         _ = win.print(&instr_seg, .{ .row_offset = @intCast(instr_row), .col_offset = @intCast(instr_col )});
+    }
+
+    pub fn renderCommitSelectionMenu(app: *App, win: vaxis.Window) !void {
+        const title = " Select a commit ";
+        const instructions = "Type to search  |  ↑↓/j/k: Navigate  |  Enter: Select  |  ESC: Back";
+
+        // Calculate popup dimensions
+        const max_visible: usize = 10;
+        const popup_width: usize = @min(90, win.width -| 4);
+        const popup_height: usize = @min(max_visible + 6, win.height -| 4); // title + search + separator + items + instructions
+        const x_offset = if (win.width > popup_width) (win.width - popup_width) / 2 else 0;
+        const y_offset = if (win.height > popup_height) (win.height - popup_height) / 2 else 0;
+
+        const popup_win = win.child(.{
+            .x_off = @intCast(x_offset),
+            .y_off = @intCast(y_offset),
+            .width = @intCast(popup_width),
+            .height = @intCast(popup_height),
+            .border = .{
+                .where = .all,
+                .style = .{ .fg = Color.cyan },
+            },
+        });
+
+        popup_win.clear();
+
+        // Fill with solid background
+        const bg_cell = vaxis.Cell{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{ .bg = Color.black },
+        };
+        popup_win.fill(bg_cell);
+
+        // Row 0: Title
+        const title_copy = try RenderUtils.copyFrameText(app, title);
+        var title_seg = [_]vaxis.Cell.Segment{.{
+            .text = title_copy,
+            .style = .{ .fg = Color.cyan, .bold = true },
+        }};
+        _ = popup_win.print(&title_seg, .{ .row_offset = 0 });
+
+        // Row 1: Search query line
+        const query = app.state.commit_search_query[0..app.state.commit_search_len];
+        var search_buf: [512]u8 = undefined;
+        const search_line = if (query.len > 0)
+            try std.fmt.bufPrint(&search_buf, "> {s}_", .{query})
+        else
+            "> Type to search...";
+
+        const search_copy = try RenderUtils.copyFrameText(app, search_line);
+        var search_seg = [_]vaxis.Cell.Segment{.{
+            .text = search_copy,
+            .style = .{ .fg = if (query.len > 0) Color.white else Color.dim },
+        }};
+        _ = popup_win.print(&search_seg, .{ .row_offset = 1, .col_offset = 1 });
+
+        // Row 2: Separator
+        if (popup_win.width > 2) {
+            const sep_width = popup_win.width - 2;
+            const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
+            @memset(sep_text, '-');
+            var sep_seg = [_]vaxis.Cell.Segment{.{
+                .text = sep_text,
+                .style = .{ .fg = Color.dim },
+            }};
+            _ = popup_win.print(&sep_seg, .{ .row_offset = 2 });
+        }
+
+        // Rows 3+: Commit list
+        if (app.state.commit_list.items.len == 0) {
+            const no_commits = "Loading commits...";
+            const no_commits_copy = try RenderUtils.copyFrameText(app, no_commits);
+            var no_commits_seg = [_]vaxis.Cell.Segment{.{
+                .text = no_commits_copy,
+                .style = .{ .fg = Color.dim },
+            }};
+            _ = popup_win.print(&no_commits_seg, .{ .row_offset = 3, .col_offset = 1 });
+        } else {
+            const filtered = app.state.filtered_commits.items;
+
+            if (filtered.len == 0) {
+                const no_matches = "No matching commits";
+                const no_matches_copy = try RenderUtils.copyFrameText(app, no_matches);
+                var no_matches_seg = [_]vaxis.Cell.Segment{.{
+                    .text = no_matches_copy,
+                    .style = .{ .fg = Color.dim },
+                }};
+                _ = popup_win.print(&no_matches_seg, .{ .row_offset = 3, .col_offset = 1 });
+            } else {
+                const start_idx = if (app.state.commit_selection >= max_visible)
+                    app.state.commit_selection - max_visible + 1
+                else
+                    0;
+                const end_idx = @min(start_idx + max_visible, filtered.len);
+
+                for (start_idx..end_idx) |idx| {
+                    const row: usize = 3 + (idx - start_idx);
+                    const commit_idx = filtered[idx];
+                    const commit = app.state.commit_list.items[commit_idx];
+                    const is_selected = idx == app.state.commit_selection;
+
+                    // Build segments for commit display
+                    var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+                    defer segments.deinit(app.allocator);
+
+                    // Caret
+                    const caret = if (is_selected) "▶ " else "  ";
+                    const caret_copy = try RenderUtils.copyFrameText(app, caret);
+                    try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+
+                    // Short hash (yellow)
+                    const hash_copy = try RenderUtils.copyFrameText(app, commit.short_hash);
+                    try segments.append(app.allocator, .{ .text = hash_copy, .style = .{ .fg = Color.yellow, .bold = is_selected } });
+
+                    // Separator
+                    const sep1 = try RenderUtils.copyFrameText(app, "  ");
+                    try segments.append(app.allocator, .{ .text = sep1, .style = .{} });
+
+                    // Subject (truncate if too long)
+                    const available_width = popup_width -| 25; // account for hash, author, date, padding
+                    const max_subject_len = @min(available_width, 45);
+                    const subject_display = if (commit.subject.len > max_subject_len) commit.subject[0..max_subject_len] else commit.subject;
+                    const subject_copy = try RenderUtils.copyFrameText(app, subject_display);
+                    try segments.append(app.allocator, .{ .text = subject_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+
+                    if (commit.subject.len > max_subject_len) {
+                        const ellipsis = try RenderUtils.copyFrameText(app, "...");
+                        try segments.append(app.allocator, .{ .text = ellipsis, .style = .{ .fg = Color.dim } });
+                    }
+
+                    // Author and date in parentheses
+                    var author_buf: [64]u8 = undefined;
+                    const author_text = try std.fmt.bufPrint(&author_buf, "  ({s}, {s})", .{ commit.author, commit.date });
+                    const author_copy = try RenderUtils.copyFrameText(app, author_text);
+                    try segments.append(app.allocator, .{ .text = author_copy, .style = .{ .fg = Color.dim } });
+
+                    // Render the commit line
+                    _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = 1 });
+                }
+
+                // Show scroll indicator if there are more items
+                if (end_idx < filtered.len) {
+                    var more_buf: [32]u8 = undefined;
+                    const more_text = try std.fmt.bufPrint(&more_buf, "... {d} more commits", .{filtered.len - end_idx});
+                    const more_copy = try RenderUtils.copyFrameText(app, more_text);
+                    var more_seg = [_]vaxis.Cell.Segment{.{
+                        .text = more_copy,
+                        .style = .{ .fg = Color.dim },
+                    }};
+                    _ = popup_win.print(&more_seg, .{ .row_offset = @intCast(3 + max_visible), .col_offset = 1 });
+                }
+            }
+        }
+
+        // Instructions at bottom
+        const instr_copy = try RenderUtils.copyFrameText(app, instructions);
+        var instr_seg = [_]vaxis.Cell.Segment{.{
+            .text = instr_copy,
+            .style = .{ .fg = Color.dim },
+        }};
+        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = 1 });
+    }
+
+    pub fn renderCommitDiffModeMenu(app: *App, win: vaxis.Window) !void {
+        const commit = app.state.selected_commit_for_diff orelse return;
+
+        // Small centered popup
+        const title = " Select Diff Mode ";
+        const option1 = "View changes from HEAD";
+        const option2 = "View commit's changes";
+        const instructions = "↑↓/j/k/1/2: Select  |  Enter: Confirm  |  ESC: Back";
+
+        const dialog_width = @max(@max(option1.len + 8, option2.len + 8), instructions.len + 4);
+        const dialog_height: usize = 8; // title + commit info + 2 options + instructions + padding
+
+        const popup_width = @min(dialog_width, win.width - 4);
+        const popup_height = @min(dialog_height, win.height - 4);
+        const x_offset = if (win.width > popup_width) (win.width - popup_width) / 2 else 0;
+        const y_offset = if (win.height > popup_height) (win.height - popup_height) / 2 else 0;
+
+        const popup_win = win.child(.{
+            .x_off = x_offset,
+            .y_off = y_offset,
+            .width = @intCast(popup_width),
+            .height = @intCast(popup_height),
+            .border = .{
+                .where = .all,
+                .style = .{ .fg = Color.cyan },
+            },
+        });
+
+        popup_win.clear();
+
+        // Fill with solid background
+        const bg_cell = vaxis.Cell{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{ .bg = Color.black },
+        };
+        popup_win.fill(bg_cell);
+
+        // Title
+        const title_copy = try RenderUtils.copyFrameText(app, title);
+        var title_seg = [_]vaxis.Cell.Segment{.{
+            .text = title_copy,
+            .style = .{ .fg = Color.cyan, .bold = true },
+        }};
+        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0 )});
+
+        // Commit info
+        var info_buf: [128]u8 = undefined;
+        const max_subject = @min(commit.subject.len, 40);
+        const info_text = try std.fmt.bufPrint(&info_buf, "{s}: {s}...", .{ commit.short_hash, commit.subject[0..max_subject] });
+        const info_copy = try RenderUtils.copyFrameText(app, info_text);
+        var info_seg = [_]vaxis.Cell.Segment{.{
+            .text = info_copy,
+            .style = .{ .fg = Color.dim },
+        }};
+        _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(1), .col_offset = 1 });
+
+        // Option 1
+        const is_opt1_selected = app.state.commit_diff_mode_selection == 0;
+        const caret1 = if (is_opt1_selected) "▶ " else "  ";
+        const caret1_copy = try RenderUtils.copyFrameText(app, caret1);
+        const opt1_copy = try RenderUtils.copyFrameText(app, option1);
+        var opt1_seg = [_]vaxis.Cell.Segment{
+            .{ .text = caret1_copy, .style = .{ .fg = Color.cyan } },
+            .{ .text = opt1_copy, .style = .{ .fg = if (is_opt1_selected) Color.white else Color.dim, .bold = is_opt1_selected } },
+        };
+        _ = popup_win.print(&opt1_seg, .{ .row_offset = @intCast(3), .col_offset = 1 });
+
+        // Option 2
+        const is_opt2_selected = app.state.commit_diff_mode_selection == 1;
+        const caret2 = if (is_opt2_selected) "▶ " else "  ";
+        const caret2_copy = try RenderUtils.copyFrameText(app, caret2);
+        const opt2_copy = try RenderUtils.copyFrameText(app, option2);
+        var opt2_seg = [_]vaxis.Cell.Segment{
+            .{ .text = caret2_copy, .style = .{ .fg = Color.cyan } },
+            .{ .text = opt2_copy, .style = .{ .fg = if (is_opt2_selected) Color.white else Color.dim, .bold = is_opt2_selected } },
+        };
+        _ = popup_win.print(&opt2_seg, .{ .row_offset = @intCast(4), .col_offset = 1 });
+
+        // Instructions
+        const instr_copy = try RenderUtils.copyFrameText(app, instructions);
+        var instr_seg = [_]vaxis.Cell.Segment{.{
+            .text = instr_copy,
+            .style = .{ .fg = Color.dim },
+        }};
+        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = 1 });
     }
 
     pub fn renderGraphiteStackDialog(app: *App, win: vaxis.Window) !void {
@@ -1032,6 +1281,8 @@ pub const UI = struct {
             .command_palette => "-- COMMAND PALETTE --",
             .help => "-- HELP --",
             .branch_selection => "-- BRANCH SELECTION --",
+            .commit_selection => "-- COMMIT SELECTION --",
+            .commit_diff_mode => "-- COMMIT DIFF MODE --",
             .mcp_status => "-- MCP STATUS --",
             .graphite_stack => "-- GRAPHITE STACK --",
             .model_selection => "-- MODEL SELECTION --",
@@ -1078,6 +1329,8 @@ pub const UI = struct {
             .command_palette => "Type to filter  |  '>':Commands  |  ↑↓:Select  |  ESC:Cancel",
             .help => "j/k:Scroll  |  Ctrl-d/u:Page  |  ?/ESC:Close",
             .branch_selection => "j/k:Move  |  Enter:Select  |  ESC:Back",
+            .commit_selection => "j/k:Move  |  Enter:Select  |  ESC:Back",
+            .commit_diff_mode => "j/k/1/2:Select  |  Enter:Confirm  |  ESC:Back",
             .mcp_status => "q/ESC:Close",
             .graphite_stack => "j/k:Move  |  Enter:Select  |  ESC:Back  |  [s/]s:Navigate",
             .model_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",

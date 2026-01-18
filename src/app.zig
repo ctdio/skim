@@ -32,6 +32,7 @@ const visual_mode = @import("modes/visual_mode.zig");
 const command_palette_mode = @import("modes/command_palette_mode.zig");
 const help_mode = @import("modes/help_mode.zig");
 const branch_selection_mode = @import("modes/branch_selection_mode.zig");
+const commit_selection_mode = @import("modes/commit_selection_mode.zig");
 const mcp_status_mode = @import("modes/mcp_status_mode.zig");
 const mcp_status = @import("mcp_status.zig");
 const graphite_mode = @import("modes/graphite_mode.zig");
@@ -142,6 +143,8 @@ pub const App = struct {
         command_palette, // Command palette
         help, // Help overlay
         branch_selection, // Branch selection menu (when empty)
+        commit_selection, // Commit selection menu
+        commit_diff_mode, // Submenu to select diff mode after commit selection
         mcp_status, // MCP server connection status
         graphite_stack, // Graphite stack picker
         agent, // Agent chat panel
@@ -196,6 +199,17 @@ pub const App = struct {
         branch_search_len: usize, // Length of search query
         filtered_branches: std.ArrayList(usize), // Indices of branches matching search query
         help_scroll_offset: usize, // Scroll position in help overlay
+
+        // Commit selection state
+        commit_list: std.ArrayList(git.CommitInfo), // Loaded commits
+        commit_selection: usize, // Selected index in commit selection menu
+        commit_search_query: [256]u8, // Search query buffer for filtering commits
+        commit_search_len: usize, // Length of search query
+        filtered_commits: std.ArrayList(usize), // Indices of commits matching search query
+        commits_loaded_count: usize, // Total commits loaded (for lazy loading)
+        commits_loading: bool, // Whether commits are being loaded
+        selected_commit_for_diff: ?git.CommitInfo, // Commit selected for diff mode submenu (owned copy)
+        commit_diff_mode_selection: usize, // 0 = HEAD vs commit, 1 = commit vs parent
 
         // Session picker state (for /resume command)
         session_list: []sessions.SessionInfo, // Discovered sessions
@@ -446,6 +460,15 @@ pub const App = struct {
                 .branch_search_len = 0,
                 .filtered_branches = .{},
                 .help_scroll_offset = 0,
+                .commit_list = .{},
+                .commit_selection = 0,
+                .commit_search_query = undefined,
+                .commit_search_len = 0,
+                .filtered_commits = .{},
+                .commits_loaded_count = 0,
+                .commits_loading = false,
+                .selected_commit_for_diff = null,
+                .commit_diff_mode_selection = 0,
                 .session_list = &[_]sessions.SessionInfo{},
                 .session_selection = 0,
                 .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
@@ -544,6 +567,16 @@ pub const App = struct {
         }
         self.allocator.free(self.state.branch_list);
         self.state.filtered_branches.deinit(self.allocator);
+        // Free commit list
+        for (self.state.commit_list.items) |*commit| {
+            commit.deinit(self.allocator);
+        }
+        self.state.commit_list.deinit(self.allocator);
+        self.state.filtered_commits.deinit(self.allocator);
+        // Free selected commit for diff mode
+        if (self.state.selected_commit_for_diff) |*commit| {
+            commit.deinit(self.allocator);
+        }
         self.state.expanded_comments.deinit();
         self.state.branch_stats_cache.deinit();
         self.state.model_filtered_indices.deinit(self.allocator);
@@ -1334,6 +1367,24 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
+                .commit_selection => {
+                    self.mode = .normal;
+                    self.state.commit_search_len = 0;
+                    self.state.filtered_commits.clearRetainingCapacity();
+                    self.needs_render = true;
+                    return;
+                },
+                .commit_diff_mode => {
+                    // Go back to commit selection
+                    self.mode = .commit_selection;
+                    // Free the selected commit
+                    if (self.state.selected_commit_for_diff) |*commit| {
+                        commit.deinit(self.allocator);
+                        self.state.selected_commit_for_diff = null;
+                    }
+                    self.needs_render = true;
+                    return;
+                },
                 .visual => {
                     self.mode = .normal;
                     self.state.visual_anchor = null;
@@ -1413,6 +1464,8 @@ pub const App = struct {
             .command_palette => try command_palette_mode.handleKey(self, key),
             .help => try help_mode.handleKey(self, key),
             .branch_selection => try branch_selection_mode.handleKey(self, key),
+            .commit_selection => try commit_selection_mode.handleKey(self, key),
+            .commit_diff_mode => try commit_selection_mode.handleDiffModeKey(self, key),
             .mcp_status => try mcp_status_mode.handleKey(self, key),
             .graphite_stack => try graphite_mode.handleKey(self, key),
             .model_selection => try model_selection_mode.handleKey(self, key),
@@ -2387,6 +2440,9 @@ pub const App = struct {
                 self.state.agent_selection_idx = 0;
                 self.mode = .agent_selection;
             },
+            .select_commit => {
+                try self.startCommitSelection();
+            },
         }
     }
 
@@ -2457,6 +2513,180 @@ pub const App = struct {
             if (matches) return true;
         }
         return false;
+    }
+
+    // =========================================================================
+    // Commit Selection
+    // =========================================================================
+
+    const COMMIT_BATCH_SIZE: usize = 50;
+
+    pub fn startCommitSelection(self: *App) !void {
+        // Disabled in pager mode
+        if (self.state.pager_mode) return;
+
+        // Free old commit list
+        for (self.state.commit_list.items) |*commit| {
+            commit.deinit(self.allocator);
+        }
+        self.state.commit_list.clearRetainingCapacity();
+
+        // Reset state
+        self.state.commit_selection = 0;
+        self.state.commit_search_len = 0;
+        self.state.commits_loaded_count = 0;
+        self.state.commits_loading = false;
+
+        // Load first batch of commits
+        try self.loadMoreCommits();
+
+        // Initialize filtered list
+        try self.filterCommits();
+
+        self.mode = .commit_selection;
+    }
+
+    pub fn loadMoreCommits(self: *App) !void {
+        if (self.state.commits_loading) return;
+
+        self.state.commits_loading = true;
+        defer self.state.commits_loading = false;
+
+        const new_commits = git.getCommits(self.allocator, self.state.commits_loaded_count, COMMIT_BATCH_SIZE) catch |err| {
+            std.log.err("Failed to load commits: {}", .{err});
+            return;
+        };
+        errdefer {
+            for (new_commits) |*c| c.deinit(self.allocator);
+            self.allocator.free(new_commits);
+        }
+
+        // Append to commit list
+        for (new_commits) |commit| {
+            try self.state.commit_list.append(self.allocator, commit);
+        }
+        self.allocator.free(new_commits);
+
+        self.state.commits_loaded_count += COMMIT_BATCH_SIZE;
+
+        // Update filtered list
+        try self.filterCommits();
+    }
+
+    pub fn filterCommits(self: *App) !void {
+        self.state.filtered_commits.clearRetainingCapacity();
+
+        const query = self.state.commit_search_query[0..self.state.commit_search_len];
+
+        // If no query, show all commits
+        if (query.len == 0) {
+            for (self.state.commit_list.items, 0..) |_, idx| {
+                try self.state.filtered_commits.append(self.allocator, idx);
+            }
+        } else {
+            // Filter by hash, subject, author (case-insensitive)
+            for (self.state.commit_list.items, 0..) |commit, idx| {
+                if (self.matchesCommitQuery(commit, query)) {
+                    try self.state.filtered_commits.append(self.allocator, idx);
+                }
+            }
+        }
+
+        // Clamp selection to filtered list
+        if (self.state.filtered_commits.items.len > 0 and self.state.commit_selection >= self.state.filtered_commits.items.len) {
+            self.state.commit_selection = self.state.filtered_commits.items.len - 1;
+        }
+    }
+
+    fn matchesCommitQuery(self: *App, commit: git.CommitInfo, query: []const u8) bool {
+        _ = self;
+        // Case-insensitive substring match on hash, subject, author
+        return containsIgnoreCase(commit.hash, query) or
+            containsIgnoreCase(commit.short_hash, query) or
+            containsIgnoreCase(commit.subject, query) or
+            containsIgnoreCase(commit.author, query);
+    }
+
+    /// Select a commit and show diff mode submenu
+    pub fn selectCommitForDiff(self: *App) !void {
+        const filtered_count = self.state.filtered_commits.items.len;
+        if (filtered_count == 0) return;
+
+        const filtered_idx = self.state.filtered_commits.items[self.state.commit_selection];
+        const commit = self.state.commit_list.items[filtered_idx];
+
+        // Free any existing selected commit
+        if (self.state.selected_commit_for_diff) |*old_commit| {
+            old_commit.deinit(self.allocator);
+        }
+
+        // Make a copy of the selected commit
+        self.state.selected_commit_for_diff = .{
+            .hash = try self.allocator.dupe(u8, commit.hash),
+            .short_hash = try self.allocator.dupe(u8, commit.short_hash),
+            .subject = try self.allocator.dupe(u8, commit.subject),
+            .author = try self.allocator.dupe(u8, commit.author),
+            .date = try self.allocator.dupe(u8, commit.date),
+        };
+
+        self.state.commit_diff_mode_selection = 0;
+        self.mode = .commit_diff_mode;
+    }
+
+    /// Apply the selected diff mode with the chosen commit
+    pub fn applyCommitDiff(self: *App) !void {
+        const commit = self.state.selected_commit_for_diff orelse return;
+
+        // Free old diff_source if needed
+        switch (self.state.diff_source) {
+            .working_dir, .stdin => {},
+            .single_ref => |sr| {
+                self.allocator.free(sr.ref);
+            },
+            .two_refs => |tr| {
+                self.allocator.free(tr.ref1);
+                self.allocator.free(tr.ref2);
+            },
+        }
+
+        if (self.state.commit_diff_mode_selection == 0) {
+            // Option 0: HEAD vs selected commit (changes from commit to HEAD)
+            const commit_ref = try self.allocator.dupe(u8, commit.hash);
+            errdefer self.allocator.free(commit_ref);
+
+            const head_ref = try self.allocator.dupe(u8, "HEAD");
+
+            self.state.diff_source = .{ .two_refs = .{
+                .ref1 = commit_ref,
+                .ref2 = head_ref,
+                .use_merge_base = false,
+            } };
+        } else {
+            // Option 1: commit vs its parent (commit's own changes)
+            var parent_buf: [64]u8 = undefined;
+            const parent_ref = try std.fmt.bufPrint(&parent_buf, "{s}^", .{commit.hash});
+
+            const commit_ref = try self.allocator.dupe(u8, commit.hash);
+            errdefer self.allocator.free(commit_ref);
+
+            const parent_copy = try self.allocator.dupe(u8, parent_ref);
+
+            self.state.diff_source = .{ .two_refs = .{
+                .ref1 = parent_copy,
+                .ref2 = commit_ref,
+                .use_merge_base = false,
+            } };
+        }
+
+        // Free the selected commit
+        if (self.state.selected_commit_for_diff) |*c| {
+            c.deinit(self.allocator);
+            self.state.selected_commit_for_diff = null;
+        }
+
+        // Go back to normal mode and refresh
+        self.mode = .normal;
+        try self.refresh();
     }
 
     // Menu stats async fetching
@@ -2899,6 +3129,11 @@ pub const App = struct {
                     });
                     if (self.mode == .branch_selection) {
                         try UI.renderBranchSelectionMenu(self, content_win);
+                    } else if (self.mode == .commit_selection) {
+                        try UI.renderCommitSelectionMenu(self, content_win);
+                    } else if (self.mode == .commit_diff_mode) {
+                        try UI.renderCommitSelectionMenu(self, content_win);
+                        try UI.renderCommitDiffModeMenu(self, content_win);
                     } else {
                         try UI.renderEmptyMenu(self, content_win);
                     }
@@ -2912,6 +3147,11 @@ pub const App = struct {
                     });
                     if (self.mode == .branch_selection) {
                         try UI.renderBranchSelectionMenu(self, content_win);
+                    } else if (self.mode == .commit_selection) {
+                        try UI.renderCommitSelectionMenu(self, content_win);
+                    } else if (self.mode == .commit_diff_mode) {
+                        try UI.renderCommitSelectionMenu(self, content_win);
+                        try UI.renderCommitDiffModeMenu(self, content_win);
                     } else {
                         try UI.renderEmptyMenu(self, content_win);
                     }
@@ -2938,6 +3178,11 @@ pub const App = struct {
                 // No agent panel - full screen empty menu
                 if (self.mode == .branch_selection) {
                     try UI.renderBranchSelectionMenu(self, win);
+                } else if (self.mode == .commit_selection) {
+                    try UI.renderCommitSelectionMenu(self, win);
+                } else if (self.mode == .commit_diff_mode) {
+                    try UI.renderCommitSelectionMenu(self, win);
+                    try UI.renderCommitDiffModeMenu(self, win);
                 } else {
                     try UI.renderEmptyMenu(self, win);
                 }
@@ -3087,6 +3332,15 @@ pub const App = struct {
         // Render session picker dialog if in session_picker mode
         if (self.mode == .session_picker) {
             try UI.renderSessionPickerDialog(self, win);
+        }
+
+        // Render commit selection overlay if in commit_selection or commit_diff_mode
+        if (self.mode == .commit_selection) {
+            try UI.renderCommitSelectionMenu(self, win);
+        }
+        if (self.mode == .commit_diff_mode) {
+            try UI.renderCommitSelectionMenu(self, win);
+            try UI.renderCommitDiffModeMenu(self, win);
         }
 
         // Render agent panel full-screen if in full-screen mode AND in agent mode

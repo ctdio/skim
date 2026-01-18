@@ -576,3 +576,111 @@ test "DiffSource.stdin vs other variants" {
     try std.testing.expect(std.meta.activeTag(stdin) != .working_dir);
     try std.testing.expect(std.meta.activeTag(staged) == .working_dir);
 }
+
+// =========================================================================
+// Commit Selection Support
+// =========================================================================
+
+pub const CommitInfo = struct {
+    hash: []const u8, // Full hash (for diff source)
+    short_hash: []const u8, // 7-char abbreviated
+    subject: []const u8, // First line of commit message
+    author: []const u8, // Author name
+    date: []const u8, // Relative date string
+
+    pub fn deinit(self: *const CommitInfo, allocator: Allocator) void {
+        allocator.free(self.hash);
+        allocator.free(self.short_hash);
+        allocator.free(self.subject);
+        allocator.free(self.author);
+        allocator.free(self.date);
+    }
+};
+
+/// Get list of commits with pagination support
+/// Returns commits starting from `skip`, up to `count` commits
+/// Git command: git log --format=%H%x00%h%x00%s%x00%an%x00%ar --skip={skip} -n{count}
+pub fn getCommits(allocator: Allocator, skip: usize, count: usize) ![]CommitInfo {
+    // Build the git command
+    var skip_buf: [32]u8 = undefined;
+    const skip_str = try std.fmt.bufPrint(&skip_buf, "--skip={d}", .{skip});
+
+    var count_buf: [32]u8 = undefined;
+    const count_str = try std.fmt.bufPrint(&count_buf, "-n{d}", .{count});
+
+    const args = &[_][]const u8{
+        "git",
+        "log",
+        "--format=%H%x00%h%x00%s%x00%an%x00%ar",
+        skip_str,
+        count_str,
+    };
+
+    var child = std.process.Child.init(args, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+
+    try child.spawn();
+
+    const stdout = try child.stdout.?.readToEndAlloc(allocator, 50 * 1024 * 1024); // 50MB limit
+    defer allocator.free(stdout);
+
+    const term = try child.wait();
+    if (term != .Exited or term.Exited != 0) {
+        return error.GitCommandFailed;
+    }
+
+    // Parse output: each line is hash\0short\0subject\0author\0date
+    var commits: std.ArrayList(CommitInfo) = .{};
+    errdefer {
+        for (commits.items) |*commit| {
+            commit.deinit(allocator);
+        }
+        commits.deinit(allocator);
+    }
+
+    var lines = std.mem.tokenizeScalar(u8, stdout, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+
+        // Split by null byte
+        var parts = std.mem.splitScalar(u8, line, 0);
+        const hash = parts.next() orelse continue;
+        const short_hash = parts.next() orelse continue;
+        const subject = parts.next() orelse continue;
+        const author = parts.next() orelse continue;
+        const date = parts.next() orelse continue;
+
+        try commits.append(allocator, .{
+            .hash = try allocator.dupe(u8, hash),
+            .short_hash = try allocator.dupe(u8, short_hash),
+            .subject = try allocator.dupe(u8, subject),
+            .author = try allocator.dupe(u8, author),
+            .date = try allocator.dupe(u8, date),
+        });
+    }
+
+    return commits.toOwnedSlice(allocator);
+}
+
+/// Get total commit count in the repository (for progress indication)
+pub fn getCommitCount(allocator: Allocator) !usize {
+    const args = &[_][]const u8{ "git", "rev-list", "--count", "HEAD" };
+
+    var child = std.process.Child.init(args, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+
+    try child.spawn();
+
+    const stdout = try child.stdout.?.readToEndAlloc(allocator, 1024);
+    defer allocator.free(stdout);
+
+    const term = try child.wait();
+    if (term != .Exited or term.Exited != 0) {
+        return error.GitCommandFailed;
+    }
+
+    const trimmed = std.mem.trim(u8, stdout, " \t\r\n");
+    return std.fmt.parseInt(usize, trimmed, 10) catch 0;
+}
