@@ -222,6 +222,18 @@ pub const TabManager = struct {
         return self.closeTab(self.active_idx);
     }
 
+    /// Close and wipe all tabs completely.
+    /// Used when closing the last tab - fully resets the tab manager state.
+    /// Next ensureTab() will create a fresh tab and trigger agent selection.
+    pub fn closeAndWipeAll(self: *TabManager) void {
+        for (self.tabs.items) |*tab| {
+            tab.deinit();
+        }
+        self.tabs.clearRetainingCapacity();
+        self.active_idx = 0;
+        // Note: don't reset next_id to avoid potential ID reuse confusion
+    }
+
     /// Get the currently active tab
     pub fn activeTab(self: *TabManager) ?*AgentTab {
         if (self.tabs.items.len == 0) {

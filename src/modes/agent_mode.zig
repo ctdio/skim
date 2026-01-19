@@ -1614,9 +1614,10 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
         .close_tab => {
             const tm = try app.ensureTabManager();
             if (tm.tabCount() <= 1) {
-                // Last tab - hide panel and return to diff view
+                // Last tab - wipe completely and return to diff view
+                // Next Ctrl+E will prompt for agent selection
+                tm.closeAndWipeAll();
                 tm.panel_visible = false;
-                agent_state.visible = false;
                 app.mode = .normal;
             } else {
                 _ = tm.closeActiveTab();
