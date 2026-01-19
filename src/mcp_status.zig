@@ -2,7 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 
 const App = @import("app.zig").App;
-const mcp_client = @import("mcp/client.zig");
+const session_mgr = @import("mcp/session.zig");
 const Color = @import("rendering/common.zig").Color;
 
 pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
@@ -44,9 +44,9 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
 
     var row: usize = 0;
 
-    // Title
+    // Title - changed from "Daemon Connection" to "Session Server"
     var title_seg = [_]vaxis.Cell.Segment{
-        .{ .text = "Daemon Connection", .style = title_style },
+        .{ .text = "Session Server", .style = title_style },
     };
     _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(row) });
     row += 1;
@@ -65,78 +65,87 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     }
     row += 2;
 
-    // Connection status
-    if (app.mcp) |mcp| {
-        // Status line
-        var status_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  Status:     ", .style = label_style },
-            .{ .text = if (mcp.connected) "Connected" else "Disconnected", .style = if (mcp.connected) connected_style else disconnected_style },
-        };
-        _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row) });
-        row += 1;
-
-        // Port
-        var port_buf: [32]u8 = undefined;
-        const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{app.mcp_port orelse 9999}) catch "9999";
-        var port_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  Port:       ", .style = label_style },
-            .{ .text = port_str, .style = value_style },
-        };
-        _ = popup_win.print(&port_seg, .{ .row_offset = @intCast(row) });
-        row += 1;
-
-        // Session ID
-        if (mcp.session_id) |session_id| {
-            var session_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "  Session:    ", .style = label_style },
-                .{ .text = session_id, .style = value_style },
+    // Server status - check if TUI server is running
+    if (app.tui_server) |*server| {
+        if (server.running) {
+            // Status line
+            var status_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "  Status:     ", .style = label_style },
+                .{ .text = "Running", .style = connected_style },
             };
-            _ = popup_win.print(&session_seg, .{ .row_offset = @intCast(row) });
+            _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row) });
+            row += 1;
+
+            // Port
+            var port_buf: [32]u8 = undefined;
+            const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{server.port}) catch "?";
+            var port_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "  Port:       ", .style = label_style },
+                .{ .text = port_str, .style = value_style },
+            };
+            _ = popup_win.print(&port_seg, .{ .row_offset = @intCast(row) });
+            row += 1;
+
+            // PID
+            if (app.session_manager) |*mgr| {
+                var pid_buf: [32]u8 = undefined;
+                const pid_str = std.fmt.bufPrint(&pid_buf, "{d}", .{mgr.current_pid}) catch "?";
+                var pid_seg = [_]vaxis.Cell.Segment{
+                    .{ .text = "  PID:        ", .style = label_style },
+                    .{ .text = pid_str, .style = value_style },
+                };
+                _ = popup_win.print(&pid_seg, .{ .row_offset = @intCast(row) });
+                row += 1;
+            }
+
+            // Client count
+            var clients_buf: [32]u8 = undefined;
+            const clients_str = std.fmt.bufPrint(&clients_buf, "{d}", .{server.clients.items.len}) catch "0";
+            var clients_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "  Clients:    ", .style = label_style },
+                .{ .text = clients_str, .style = value_style },
+            };
+            _ = popup_win.print(&clients_seg, .{ .row_offset = @intCast(row) });
+            row += 2;
+
+            // Description
+            var desc_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "  CLI commands and AI agents can connect", .style = .{ .fg = Color.dim_gray } },
+            };
+            _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row) });
+            row += 1;
+
+            var desc2_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "  to this session via TCP.", .style = .{ .fg = Color.dim_gray } },
+            };
+            _ = popup_win.print(&desc2_seg, .{ .row_offset = @intCast(row) });
         } else {
-            var session_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "  Session:    ", .style = label_style },
-                .{ .text = "(none)", .style = .{ .fg = Color.dim_gray } },
+            // Server not running
+            var status_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "  Status:     ", .style = label_style },
+                .{ .text = "Not Running", .style = disconnected_style },
             };
-            _ = popup_win.print(&session_seg, .{ .row_offset = @intCast(row) });
+            _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row) });
+            row += 2;
+
+            var info_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "  Server failed to start.", .style = .{ .fg = Color.dim_gray } },
+            };
+            _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(row) });
         }
-        row += 2;
-
-        // Description
-        var desc_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  The daemon allows AI agents to interact with", .style = .{ .fg = Color.dim_gray } },
-        };
-        _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row) });
-        row += 1;
-
-        var desc2_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  your code review session via MCP.", .style = .{ .fg = Color.dim_gray } },
-        };
-        _ = popup_win.print(&desc2_seg, .{ .row_offset = @intCast(row) });
     } else {
-        // No MCP client
+        // No TUI server
         var status_seg = [_]vaxis.Cell.Segment{
             .{ .text = "  Status:     ", .style = label_style },
-            .{ .text = "Not Connected", .style = disconnected_style },
+            .{ .text = "Not Initialized", .style = disconnected_style },
         };
         _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row) });
         row += 2;
 
         var info_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  Daemon not running or not reachable.", .style = .{ .fg = Color.dim_gray } },
+            .{ .text = "  Session server not available.", .style = .{ .fg = Color.dim_gray } },
         };
         _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(row) });
-        row += 2;
-
-        var start_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  To start the daemon:", .style = .{ .fg = Color.dim_gray } },
-        };
-        _ = popup_win.print(&start_seg, .{ .row_offset = @intCast(row) });
-        row += 1;
-
-        var cmd_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "    skim daemon start", .style = .{ .fg = Color.cyan } },
-        };
-        _ = popup_win.print(&cmd_seg, .{ .row_offset = @intCast(row) });
     }
 
     // Footer

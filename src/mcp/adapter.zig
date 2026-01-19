@@ -1,90 +1,75 @@
-const std = @import("std");
-const net = std.net;
-const posix = std.posix;
+//! MCP Adapter - Bridge between AI agents (JSON-RPC over stdio) and TUI sessions.
+//!
+//! The adapter speaks MCP JSON-RPC over stdin/stdout with AI agents (Claude, etc.)
+//! and connects directly to TUI sessions via TCP for tool execution.
+//!
+//! Architecture:
+//! ```
+//! AI Agent (Claude Desktop, etc.)
+//!     │
+//!     │ JSON-RPC over stdio
+//!     ▼
+//! MCP Adapter (skim mcp --stdio)
+//!     │
+//!     │ Discovers sessions via ~/.skim/sessions/
+//!     │ Connects to TUI socket on-demand
+//!     ▼
+//! TUI Server (TCP)
+//! ```
 
+const std = @import("std");
+const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
-const internal_protocol = @import("internal_protocol.zig");
-const discovery = @import("discovery.zig");
-const registry = @import("registry.zig");
+const framework = @import("framework.zig");
+const session_mgr = @import("session.zig");
+const cli_client = @import("../cli/client.zig");
 
-/// Write buffer for stdout (Zig 0.15 requires buffer for file.writer())
+// =============================================================================
+// Write Buffers (Zig 0.15 requires buffers for file.writer())
+// =============================================================================
+
 var stdout_buffer: [4096]u8 = undefined;
+var stdin_buffer: [65536]u8 = undefined;
 
 // =============================================================================
 // MCP Adapter
 // =============================================================================
 
-/// Thin MCP adapter that bridges stdio (JSON-RPC from agent) to daemon (TCP)
+/// MCP adapter that bridges stdio (JSON-RPC from agent) to TUI sessions (TCP)
 pub const McpAdapter = struct {
     allocator: Allocator,
-
-    // Connection to daemon
-    daemon_stream: ?net.Stream,
-    daemon_recv_buffer: [65536]u8,
-    daemon_recv_len: usize,
-
-    // Stdin buffer for MCP protocol
-    stdin_buffer: [65536]u8,
+    server: framework.Server,
+    running: bool,
     stdin_len: usize,
 
-    // State
-    adapter_id: registry.SessionId,
-    running: bool,
-    mcp_initialized: bool,
+    pub fn init(allocator: Allocator) McpAdapter {
+        var server = framework.Server.init(allocator, .{
+            .name = "skim",
+            .version = "1.0.0",
+        });
 
-    const Self = @This();
+        // Register tools
+        server.tool("list_sessions", "List all running skim TUI sessions", null, handleListSessions) catch {};
+        server.tool("get_context", "Get diff context and comments from a skim session", GetContextParams, handleGetContext) catch {};
+        server.tool("add_comment", "Add a comment to a line in the diff", AddCommentParams, handleAddComment) catch {};
+        server.tool("list_comments", "List all comments in a skim session", ListCommentsParams, handleListComments) catch {};
+        server.tool("delete_comment", "Delete a comment by index", DeleteCommentParams, handleDeleteComment) catch {};
 
-    pub fn init(allocator: Allocator) Self {
         return .{
             .allocator = allocator,
-            .daemon_stream = null,
-            .daemon_recv_buffer = undefined,
-            .daemon_recv_len = 0,
-            .stdin_buffer = undefined,
-            .stdin_len = 0,
-            .adapter_id = registry.generateSessionId(),
+            .server = server,
             .running = false,
-            .mcp_initialized = false,
+            .stdin_len = 0,
         };
     }
 
-    pub fn deinit(self: *Self) void {
-        if (self.daemon_stream) |stream| {
-            // Send goodbye
-            const goodbye = internal_protocol.encodeAdapterGoodbye(self.allocator) catch null;
-            if (goodbye) |msg| {
-                stream.writeAll(msg) catch {};
-                self.allocator.free(msg);
-            }
-            stream.close();
-        }
-        self.daemon_stream = null;
+    pub fn deinit(self: *McpAdapter) void {
+        self.server.deinit();
     }
 
-    /// Connect to the daemon
-    pub fn connectToDaemon(self: *Self, port: u16) !void {
-        const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-        self.daemon_stream = try net.tcpConnectToAddress(address);
-
-        // Set non-blocking and enable keepalive
-        try setNonBlocking(self.daemon_stream.?.handle);
-        setKeepalive(self.daemon_stream.?.handle);
-
-        // Send hello
-        const hello = try internal_protocol.encodeAdapterHello(self.allocator, &self.adapter_id);
-        defer self.allocator.free(hello);
-
-        // Temporarily set blocking for hello
-        try setBlocking(self.daemon_stream.?.handle);
-        try self.daemon_stream.?.writeAll(hello);
-        try setNonBlocking(self.daemon_stream.?.handle);
-
-        std.log.debug("Adapter connected to daemon on port {d}", .{port});
-    }
-
-    /// Main adapter loop
-    pub fn run(self: *Self) !void {
+    /// Main adapter loop - read from stdin, process MCP requests, write to stdout
+    pub fn run(self: *McpAdapter) !void {
         // Set stdin to non-blocking
         try setNonBlocking(std.fs.File.stdin().handle);
         defer setBlocking(std.fs.File.stdin().handle) catch {};
@@ -92,25 +77,15 @@ pub const McpAdapter = struct {
         self.running = true;
 
         while (self.running) {
-            // Poll stdin for MCP requests from agent
             try self.pollStdin();
-
-            // Poll daemon for responses
-            try self.pollDaemon();
-
-            // Small sleep to avoid busy-waiting
             std.Thread.sleep(1 * std.time.ns_per_ms);
         }
     }
 
-    // =========================================================================
-    // Stdin Handling (MCP JSON-RPC from agent)
-    // =========================================================================
-
-    fn pollStdin(self: *Self) !void {
+    fn pollStdin(self: *McpAdapter) !void {
         const stdin = std.fs.File.stdin();
 
-        const bytes_read = stdin.read(self.stdin_buffer[self.stdin_len..]) catch |err| switch (err) {
+        const bytes_read = stdin.read(stdin_buffer[self.stdin_len..]) catch |err| switch (err) {
             error.WouldBlock => return,
             else => return err,
         };
@@ -127,13 +102,13 @@ pub const McpAdapter = struct {
         // Parse complete lines (newline-delimited JSON-RPC)
         var parse_start: usize = 0;
         while (parse_start < self.stdin_len) {
-            const newline_pos = std.mem.indexOfScalar(u8, self.stdin_buffer[parse_start..self.stdin_len], '\n');
+            const newline_pos = std.mem.indexOfScalar(u8, stdin_buffer[parse_start..self.stdin_len], '\n');
             if (newline_pos) |pos| {
                 const end = parse_start + pos;
-                const line = self.stdin_buffer[parse_start..end];
+                const line = stdin_buffer[parse_start..end];
 
                 if (line.len > 0) {
-                    try self.handleMcpRequest(line);
+                    self.handleMcpRequest(line);
                 }
 
                 parse_start = end + 1;
@@ -142,304 +117,423 @@ pub const McpAdapter = struct {
             }
         }
 
-        // Move remaining data
+        // Move remaining data to start of buffer
         if (parse_start > 0 and parse_start < self.stdin_len) {
             const remaining = self.stdin_len - parse_start;
-            std.mem.copyForwards(u8, self.stdin_buffer[0..remaining], self.stdin_buffer[parse_start..self.stdin_len]);
+            std.mem.copyForwards(u8, stdin_buffer[0..remaining], stdin_buffer[parse_start..self.stdin_len]);
             self.stdin_len = remaining;
         } else if (parse_start >= self.stdin_len) {
             self.stdin_len = 0;
         }
     }
 
-    fn handleMcpRequest(self: *Self, line: []const u8) !void {
-        // Log incoming MCP request
+    fn handleMcpRequest(self: *McpAdapter, line: []const u8) void {
         std.log.debug("MCP request from agent: {s}", .{line});
 
-        // Zig 0.15: need mutable writer for writeAll methods
         var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        defer file_writer.interface.flush() catch {};
         const stdout = &file_writer.interface;
 
         // Parse JSON-RPC request
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch {
-            try self.sendMcpError(stdout, null, -32700, "Parse error");
+            self.sendMcpError(stdout, null, framework.ErrorCode.parse_error, "Parse error");
             return;
         };
         defer parsed.deinit();
 
         const root = parsed.value;
         if (root != .object) {
-            try self.sendMcpError(stdout, null, -32600, "Invalid Request");
+            self.sendMcpError(stdout, null, framework.ErrorCode.invalid_request, "Invalid Request");
             return;
         }
 
         const obj = root.object;
         const method = obj.get("method") orelse {
-            try self.sendMcpError(stdout, null, -32600, "Missing method");
+            self.sendMcpError(stdout, null, framework.ErrorCode.invalid_request, "Missing method");
             return;
         };
 
         if (method != .string) {
-            try self.sendMcpError(stdout, null, -32600, "Invalid method");
+            self.sendMcpError(stdout, null, framework.ErrorCode.invalid_request, "Invalid method");
             return;
         }
 
         const id = obj.get("id");
         const params = obj.get("params");
 
-        // Handle notifications locally (no daemon round-trip needed)
+        // Handle notification (no response needed)
         if (std.mem.eql(u8, method.string, "notifications/initialized")) {
-            self.mcp_initialized = true;
-            return; // No response for notifications
+            return;
         }
 
-        // Forward to daemon
-        try self.forwardToDaemon(method.string, id, params);
+        // Handle request
+        const result = self.server.handleRequest(method.string, params, null);
+
+        // Encode and send response
+        self.sendMcpResponse(stdout, id, method.string, result);
     }
 
-    fn forwardToDaemon(self: *Self, method: []const u8, id: ?std.json.Value, params: ?std.json.Value) !void {
-        std.log.debug("Forwarding to daemon - method: {s}", .{method});
+    fn sendMcpResponse(self: *McpAdapter, writer: anytype, id: ?std.json.Value, method: []const u8, result: framework.Result) void {
+        writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":") catch return;
 
-        const stream = self.daemon_stream orelse {
-            var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
-            try self.sendMcpError(&file_writer.interface, id, -32001, "Not connected to daemon");
-            return;
-        };
-
-        // Generate request ID
-        const request_id = registry.generateSessionId();
-
-        // Parse MCP ID
-        const mcp_id: internal_protocol.McpId = if (id) |id_val| blk: {
-            break :blk switch (id_val) {
-                .string => |s| .{ .string = try self.allocator.dupe(u8, s) },
-                .integer => |n| .{ .number = n },
-                .null => .{ .null_value = {} },
-                else => .{ .null_value = {} },
-            };
-        } else .{ .null_value = {} };
-        defer {
-            switch (mcp_id) {
-                .string => |s| self.allocator.free(s),
-                else => {},
+        // Write ID
+        if (id) |id_val| {
+            switch (id_val) {
+                .integer => |n| writer.print("{d}", .{n}) catch return,
+                .string => |s| {
+                    writer.writeByte('"') catch return;
+                    writer.writeAll(s) catch return;
+                    writer.writeByte('"') catch return;
+                },
+                else => writer.writeAll("null") catch return,
             }
+        } else {
+            writer.writeAll("null") catch return;
         }
 
-        // Stringify params
-        var params_str: ?[]u8 = null;
-        defer if (params_str) |p| self.allocator.free(p);
-
-        if (params) |p| {
-            // Zig 0.15: use Writer.Allocating for Stringify
-            var alloc_writer: std.io.Writer.Allocating = .init(self.allocator);
-            errdefer alloc_writer.deinit();
-            var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
-            stringify.write(p) catch return;
-            params_str = self.allocator.dupe(u8, alloc_writer.written()) catch return;
-        }
-
-        // Encode and send
-        const msg = try internal_protocol.encodeMcpRequest(self.allocator, .{
-            .request_id = &request_id,
-            .mcp_id = mcp_id,
-            .method = method,
-            .params = params_str,
-        });
-        defer self.allocator.free(msg);
-
-        // Temporarily set blocking for send
-        try setBlocking(stream.handle);
-        defer setNonBlocking(stream.handle) catch {};
-
-        stream.writeAll(msg) catch |err| {
-            std.log.err("Failed to send to daemon: {any}", .{err});
-            var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
-            try self.sendMcpError(&file_writer.interface, id, -32000, "Failed to communicate with daemon");
-        };
-    }
-
-    // =========================================================================
-    // Daemon Handling
-    // =========================================================================
-
-    fn pollDaemon(self: *Self) !void {
-        const stream = self.daemon_stream orelse return;
-
-        const bytes_read = stream.read(self.daemon_recv_buffer[self.daemon_recv_len..]) catch |err| switch (err) {
-            error.WouldBlock => return,
-            error.ConnectionResetByPeer, error.BrokenPipe => {
-                std.log.err("Lost connection to daemon", .{});
-                self.daemon_stream = null;
-                self.running = false;
-                return;
-            },
-            else => return err,
-        };
-
-        if (bytes_read == 0) {
-            std.log.err("Daemon closed connection", .{});
-            self.daemon_stream = null;
-            self.running = false;
-            return;
-        }
-
-        self.daemon_recv_len += bytes_read;
-
-        // Parse complete lines
-        var parse_start: usize = 0;
-        while (parse_start < self.daemon_recv_len) {
-            const newline_pos = std.mem.indexOfScalar(u8, self.daemon_recv_buffer[parse_start..self.daemon_recv_len], '\n');
-            if (newline_pos) |pos| {
-                const end = parse_start + pos;
-                const line = self.daemon_recv_buffer[parse_start..end];
-
-                if (line.len > 0) {
-                    try self.handleDaemonMessage(line);
+        switch (result) {
+            .success => |s| {
+                // Special handling for initialize
+                if (std.mem.eql(u8, method, "initialize")) {
+                    const init_response = self.server.encodeInitializeResponse(self.allocator) catch {
+                        writer.writeAll(",\"error\":{\"code\":-32603,\"message\":\"Failed to encode response\"}}\n") catch return;
+                        return;
+                    };
+                    defer self.allocator.free(init_response);
+                    writer.writeAll(",\"result\":") catch return;
+                    writer.writeAll(init_response) catch return;
+                } else if (std.mem.eql(u8, method, "tools/list")) {
+                    const tools_response = self.server.encodeToolsListResponse(self.allocator) catch {
+                        writer.writeAll(",\"error\":{\"code\":-32603,\"message\":\"Failed to encode response\"}}\n") catch return;
+                        return;
+                    };
+                    defer self.allocator.free(tools_response);
+                    writer.writeAll(",\"result\":") catch return;
+                    writer.writeAll(tools_response) catch return;
+                } else {
+                    // Tool call result
+                    var res = result;
+                    defer res.deinit(self.allocator);
+                    const tool_result = self.server.encodeToolResult(self.allocator, result) catch {
+                        writer.writeAll(",\"error\":{\"code\":-32603,\"message\":\"Failed to encode response\"}}\n") catch return;
+                        return;
+                    };
+                    defer self.allocator.free(tool_result);
+                    writer.writeAll(",\"result\":") catch return;
+                    writer.writeAll(tool_result) catch return;
                 }
-
-                parse_start = end + 1;
-            } else {
-                break;
-            }
+                _ = s;
+            },
+            .failure => |f| {
+                writer.writeAll(",\"error\":{\"code\":") catch return;
+                writer.print("{d}", .{f.code}) catch return;
+                writer.writeAll(",\"message\":\"") catch return;
+                writer.writeAll(f.message) catch return;
+                writer.writeAll("\"}") catch return;
+            },
         }
 
-        // Move remaining data
-        if (parse_start > 0 and parse_start < self.daemon_recv_len) {
-            const remaining = self.daemon_recv_len - parse_start;
-            std.mem.copyForwards(u8, self.daemon_recv_buffer[0..remaining], self.daemon_recv_buffer[parse_start..self.daemon_recv_len]);
-            self.daemon_recv_len = remaining;
-        } else if (parse_start >= self.daemon_recv_len) {
-            self.daemon_recv_len = 0;
-        }
+        writer.writeAll("}\n") catch return;
     }
 
-    fn handleDaemonMessage(self: *Self, line: []const u8) !void {
-        var msg = internal_protocol.decodeDaemonMessage(self.allocator, line) catch |err| {
-            std.log.warn("Failed to parse daemon message: {any}", .{err});
-            return;
-        };
-        defer internal_protocol.freeDaemonMessage(self.allocator, &msg);
-
-        // Zig 0.15: std.fs.File.stdout() and buffered writer (uses global stdout_buffer)
-        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
-        const stdout = &file_writer.interface;
-
-        switch (msg) {
-            .adapter_welcome => |welcome| {
-                std.log.debug("Received welcome from daemon, {d} clients connected", .{welcome.clients.len});
-            },
-            .mcp_response => |response| {
-                // Forward response to agent
-                try self.writeMcpResponse(stdout, response);
-                // CRITICAL: Flush buffered output so Claude Code receives the response
-                file_writer.interface.flush() catch {};
-            },
-            .client_update => |update| {
-                std.log.debug("Client {s}: {s}", .{
-                    update.client.id,
-                    if (update.action == .connected) "connected" else "disconnected",
-                });
-            },
-            .status_response => {
-                // Status responses are not expected by the adapter
-                std.log.debug("Unexpected status_response received by adapter", .{});
-            },
-            .unknown => {},
-        }
-    }
-
-    fn writeMcpResponse(self: *Self, writer: anytype, response: internal_protocol.McpResponsePayload) !void {
-        // Log MCP response details
-        if (response.result) |result| {
-            std.log.debug("MCP response - result: {s}", .{result});
-        }
-        if (response.@"error") |err| {
-            std.log.debug("MCP response - error: code={d}, message={s}", .{err.code, err.message});
-        }
-
-        _ = self;
-
-        try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
-
-        // Write the MCP ID from the response
-        switch (response.mcp_id) {
-            .number => |n| try writer.print("{d}", .{n}),
-            .string => |s| {
-                try writer.writeByte('"');
-                try writer.writeAll(s);
-                try writer.writeByte('"');
-            },
-            .null_value => try writer.writeAll("null"),
-        }
-
-        if (response.result) |result| {
-            try writer.writeAll(",\"result\":");
-            try writer.writeAll(result);
-        }
-
-        if (response.@"error") |err| {
-            try writer.writeAll(",\"error\":{\"code\":");
-            try writer.print("{d}", .{err.code});
-            try writer.writeAll(",\"message\":\"");
-            try writer.writeAll(err.message);
-            try writer.writeAll("\"}");
-        }
-
-        try writer.writeAll("}\n");
-    }
-
-    // =========================================================================
-    // Helper Functions
-    // =========================================================================
-
-    fn sendMcpError(self: *Self, writer: anytype, id: ?std.json.Value, code: i32, message: []const u8) !void {
+    fn sendMcpError(self: *McpAdapter, writer: anytype, id: ?std.json.Value, code: i32, message: []const u8) void {
         _ = self;
         _ = id;
 
-        try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":");
-        try writer.print("{d}", .{code});
-        try writer.writeAll(",\"message\":\"");
-        try writer.writeAll(message);
-        try writer.writeAll("\"}}\n");
+        writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":") catch return;
+        writer.print("{d}", .{code}) catch return;
+        writer.writeAll(",\"message\":\"") catch return;
+        writer.writeAll(message) catch return;
+        writer.writeAll("\"}}\n") catch return;
     }
 };
 
 // =============================================================================
-// Public Entry Point
+// Tool Parameter Types
 // =============================================================================
 
-/// Run the MCP adapter, connecting to daemon on the specified port
-pub fn runAdapter(allocator: Allocator, port: u16) !void {
-    var adapter = McpAdapter.init(allocator);
-    defer adapter.deinit();
+const GetContextParams = struct {
+    session_id: []const u8 = "",
+};
 
-    adapter.connectToDaemon(port) catch |err| {
-        // Daemon not running - check if auto-start is enabled
-        if (discovery.isAutoStartEnabled()) {
-            std.log.info("Auto-starting daemon...", .{});
-            // TODO: Implement auto-start logic
-            // For now, fall through to error
+const AddCommentParams = struct {
+    session_id: []const u8 = "",
+    file: []const u8,
+    line: u32,
+    line_type: []const u8 = "new",
+    text: []const u8,
+};
+
+const ListCommentsParams = struct {
+    session_id: []const u8 = "",
+};
+
+const DeleteCommentParams = struct {
+    session_id: []const u8 = "",
+    index: u32,
+};
+
+// =============================================================================
+// Tool Handlers
+// =============================================================================
+
+fn handleListSessions(ctx: *framework.Context, args: ?std.json.Value) framework.Result {
+    _ = args;
+
+    var sm = session_mgr.SessionManager.init(ctx.allocator) catch {
+        return framework.Result.mcpError(framework.ErrorCode.internal_error, "Failed to init session manager");
+    };
+    defer sm.deinit();
+
+    const sessions = sm.listSessions() catch {
+        return framework.Result.mcpError(framework.ErrorCode.internal_error, "Failed to list sessions");
+    };
+    defer {
+        for (sessions) |*s| {
+            var sess = s.*;
+            sess.deinit(ctx.allocator);
         }
+        ctx.allocator.free(sessions);
+    }
 
-        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
-        defer file_writer.interface.flush() catch {};
-        const stdout = &file_writer.interface;
-        try stdout.writeAll("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32001,\"message\":\"skim daemon not running. Start with: skim daemon start\"}}\n");
-        std.log.err("Failed to connect to daemon: {any}", .{err});
-        return;
+    // Build text output
+    var output: std.ArrayList(u8) = .{};
+    const writer = output.writer(ctx.allocator);
+
+    if (sessions.len == 0) {
+        writer.writeAll("No skim sessions running.\n") catch {};
+    } else {
+        writer.print("Running skim sessions ({d}):\n\n", .{sessions.len}) catch {};
+        for (sessions) |s| {
+            writer.print("  PID: {d}\n", .{s.pid}) catch {};
+            writer.print("  CWD: {s}\n", .{s.cwd}) catch {};
+            writer.print("  Diff: {s}\n", .{s.diff_ref}) catch {};
+            writer.print("  Files: {d}\n\n", .{s.files.len}) catch {};
+        }
+    }
+
+    const text = output.toOwnedSlice(ctx.allocator) catch {
+        return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
     };
 
-    try adapter.run();
+    return framework.Result.text(ctx.allocator, text) catch {
+        ctx.allocator.free(text);
+        return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+    };
 }
 
-/// Check if daemon is running and return status for MCP initialization
-pub fn checkDaemonStatus(allocator: Allocator) discovery.DaemonStatus {
-    return discovery.discoverDaemon(allocator);
+fn handleGetContext(ctx: *framework.Context, args: ?std.json.Value) framework.Result {
+    const session_pid = parseSessionId(args);
+
+    var client = cli_client.autoConnect(ctx.allocator, session_pid) catch |err| {
+        return switch (err) {
+            error.NoSessionsRunning => framework.Result.textError(ctx.allocator, "No skim sessions running") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "No sessions"),
+            error.AmbiguousSessions => framework.Result.textError(ctx.allocator, "Multiple sessions found, specify session_id") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Ambiguous"),
+            error.SessionNotFound => framework.Result.textError(ctx.allocator, "Session not found") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Not found"),
+            else => framework.Result.mcpError(framework.ErrorCode.internal_error, "Connection failed"),
+        };
+    };
+    defer client.deinit();
+
+    var response = client.request("get_context", "mcp-ctx", null) catch {
+        return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
+    };
+    defer response.deinit(ctx.allocator);
+
+    switch (response) {
+        .result => |result| {
+            // Serialize result to JSON text
+            var alloc_writer: std.io.Writer.Allocating = .init(ctx.allocator);
+            var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
+            stringify.write(result) catch {
+                alloc_writer.deinit();
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Serialization failed");
+            };
+            const text = ctx.allocator.dupe(u8, alloc_writer.written()) catch {
+                alloc_writer.deinit();
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+            };
+            alloc_writer.deinit();
+
+            return framework.Result.text(ctx.allocator, text) catch {
+                ctx.allocator.free(text);
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+            };
+        },
+        .err => |e| {
+            return framework.Result.textError(ctx.allocator, e.message) catch framework.Result.mcpError(e.code, e.message);
+        },
+    }
+}
+
+fn handleAddComment(ctx: *framework.Context, args: ?std.json.Value) framework.Result {
+    const params = args orelse {
+        return framework.Result.mcpError(framework.ErrorCode.invalid_params, "Missing parameters");
+    };
+
+    if (params != .object) {
+        return framework.Result.mcpError(framework.ErrorCode.invalid_params, "Invalid parameters");
+    }
+
+    const obj = params.object;
+
+    // Get required parameters
+    const file = if (obj.get("file")) |f| if (f == .string) f.string else null else null;
+    const line = if (obj.get("line")) |l| if (l == .integer) @as(u32, @intCast(l.integer)) else null else null;
+    const text = if (obj.get("text")) |t| if (t == .string) t.string else null else null;
+
+    if (file == null or line == null or text == null) {
+        return framework.Result.mcpError(framework.ErrorCode.invalid_params, "Missing required parameters: file, line, text");
+    }
+
+    const line_type = if (obj.get("line_type")) |lt| if (lt == .string) lt.string else "new" else "new";
+    const session_pid = parseSessionId(args);
+
+    var client = cli_client.autoConnect(ctx.allocator, session_pid) catch |err| {
+        return switch (err) {
+            error.NoSessionsRunning => framework.Result.textError(ctx.allocator, "No skim sessions running") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "No sessions"),
+            error.AmbiguousSessions => framework.Result.textError(ctx.allocator, "Multiple sessions found, specify session_id") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Ambiguous"),
+            error.SessionNotFound => framework.Result.textError(ctx.allocator, "Session not found") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Not found"),
+            else => framework.Result.mcpError(framework.ErrorCode.internal_error, "Connection failed"),
+        };
+    };
+    defer client.deinit();
+
+    // Build params for TUI request
+    var req_params = std.json.ObjectMap.init(ctx.allocator);
+    defer req_params.deinit();
+
+    req_params.put(ctx.allocator.dupe(u8, "file") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, file.?) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
+    req_params.put(ctx.allocator.dupe(u8, "line") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .integer = @as(i64, @intCast(line.?)) }) catch {};
+    req_params.put(ctx.allocator.dupe(u8, "line_type") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, line_type) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
+    req_params.put(ctx.allocator.dupe(u8, "text") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, text.?) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
+
+    var response = client.request("add_comment", "mcp-add", .{ .object = req_params }) catch {
+        return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
+    };
+    defer response.deinit(ctx.allocator);
+
+    switch (response) {
+        .result => {
+            return framework.Result.text(ctx.allocator, "Comment added successfully.") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed");
+        },
+        .err => |e| {
+            return framework.Result.textError(ctx.allocator, e.message) catch framework.Result.mcpError(e.code, e.message);
+        },
+    }
+}
+
+fn handleListComments(ctx: *framework.Context, args: ?std.json.Value) framework.Result {
+    const session_pid = parseSessionId(args);
+
+    var client = cli_client.autoConnect(ctx.allocator, session_pid) catch |err| {
+        return switch (err) {
+            error.NoSessionsRunning => framework.Result.textError(ctx.allocator, "No skim sessions running") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "No sessions"),
+            error.AmbiguousSessions => framework.Result.textError(ctx.allocator, "Multiple sessions found, specify session_id") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Ambiguous"),
+            error.SessionNotFound => framework.Result.textError(ctx.allocator, "Session not found") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Not found"),
+            else => framework.Result.mcpError(framework.ErrorCode.internal_error, "Connection failed"),
+        };
+    };
+    defer client.deinit();
+
+    var response = client.request("list_comments", "mcp-list", null) catch {
+        return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
+    };
+    defer response.deinit(ctx.allocator);
+
+    switch (response) {
+        .result => |result| {
+            // Serialize result to JSON text
+            var alloc_writer: std.io.Writer.Allocating = .init(ctx.allocator);
+            var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
+            stringify.write(result) catch {
+                alloc_writer.deinit();
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Serialization failed");
+            };
+            const json_text = ctx.allocator.dupe(u8, alloc_writer.written()) catch {
+                alloc_writer.deinit();
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+            };
+            alloc_writer.deinit();
+
+            return framework.Result.text(ctx.allocator, json_text) catch {
+                ctx.allocator.free(json_text);
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+            };
+        },
+        .err => |e| {
+            return framework.Result.textError(ctx.allocator, e.message) catch framework.Result.mcpError(e.code, e.message);
+        },
+    }
+}
+
+fn handleDeleteComment(ctx: *framework.Context, args: ?std.json.Value) framework.Result {
+    const params = args orelse {
+        return framework.Result.mcpError(framework.ErrorCode.invalid_params, "Missing parameters");
+    };
+
+    if (params != .object) {
+        return framework.Result.mcpError(framework.ErrorCode.invalid_params, "Invalid parameters");
+    }
+
+    const obj = params.object;
+
+    // Get required index parameter
+    const index = if (obj.get("index")) |i| if (i == .integer) @as(u32, @intCast(i.integer)) else null else null;
+
+    if (index == null) {
+        return framework.Result.mcpError(framework.ErrorCode.invalid_params, "Missing required parameter: index");
+    }
+
+    const session_pid = parseSessionId(args);
+
+    var client = cli_client.autoConnect(ctx.allocator, session_pid) catch |err| {
+        return switch (err) {
+            error.NoSessionsRunning => framework.Result.textError(ctx.allocator, "No skim sessions running") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "No sessions"),
+            error.AmbiguousSessions => framework.Result.textError(ctx.allocator, "Multiple sessions found, specify session_id") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Ambiguous"),
+            error.SessionNotFound => framework.Result.textError(ctx.allocator, "Session not found") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Not found"),
+            else => framework.Result.mcpError(framework.ErrorCode.internal_error, "Connection failed"),
+        };
+    };
+    defer client.deinit();
+
+    // Build params for TUI request
+    var req_params = std.json.ObjectMap.init(ctx.allocator);
+    defer req_params.deinit();
+
+    req_params.put(ctx.allocator.dupe(u8, "index") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .integer = @as(i64, @intCast(index.?)) }) catch {};
+
+    var response = client.request("delete_comment", "mcp-del", .{ .object = req_params }) catch {
+        return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
+    };
+    defer response.deinit(ctx.allocator);
+
+    switch (response) {
+        .result => {
+            return framework.Result.text(ctx.allocator, "Comment deleted successfully.") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed");
+        },
+        .err => |e| {
+            return framework.Result.textError(ctx.allocator, e.message) catch framework.Result.mcpError(e.code, e.message);
+        },
+    }
 }
 
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+fn parseSessionId(args: ?std.json.Value) ?posix.pid_t {
+    const params = args orelse return null;
+    if (params != .object) return null;
+
+    const session_id = params.object.get("session_id") orelse return null;
+
+    return switch (session_id) {
+        .string => |s| if (s.len > 0) std.fmt.parseInt(posix.pid_t, s, 10) catch null else null,
+        .integer => |i| @intCast(i),
+        else => null,
+    };
+}
 
 fn setNonBlocking(handle: posix.fd_t) !void {
     const flags = try posix.fcntl(handle, posix.F.GETFL, @as(usize, 0));
@@ -453,31 +547,16 @@ fn setBlocking(handle: posix.fd_t) !void {
     _ = try posix.fcntl(handle, posix.F.SETFL, flags & ~O_NONBLOCK);
 }
 
-fn setKeepalive(handle: posix.socket_t) void {
-    const enable: c_int = 1;
-    posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&enable)) catch |err| {
-        std.log.warn("Failed to set SO_KEEPALIVE: {any}", .{err});
-    };
+// =============================================================================
+// Public Entry Point
+// =============================================================================
 
-    // Set aggressive keepalive parameters to detect dead connections faster
-    const keepalive_time: c_int = 30; // 30 seconds
-    const IPPROTO_TCP: u32 = 6;
+/// Run the MCP adapter
+pub fn runAdapter(allocator: Allocator) !void {
+    var adapter = McpAdapter.init(allocator);
+    defer adapter.deinit();
 
-    const builtin = @import("builtin");
-    if (builtin.os.tag == .macos) {
-        const TCP_KEEPALIVE: u32 = 0x10; // macOS specific
-        posix.setsockopt(handle, IPPROTO_TCP, TCP_KEEPALIVE, std.mem.asBytes(&keepalive_time)) catch {};
-    } else if (builtin.os.tag == .linux) {
-        const TCP_KEEPIDLE: u32 = 4;
-        const TCP_KEEPINTVL: u32 = 5;
-        const TCP_KEEPCNT: u32 = 6;
-        const keepalive_interval: c_int = 10; // 10 seconds between probes
-        const keepalive_count: c_int = 3; // 3 probes before giving up
-
-        posix.setsockopt(handle, IPPROTO_TCP, TCP_KEEPIDLE, std.mem.asBytes(&keepalive_time)) catch {};
-        posix.setsockopt(handle, IPPROTO_TCP, TCP_KEEPINTVL, std.mem.asBytes(&keepalive_interval)) catch {};
-        posix.setsockopt(handle, IPPROTO_TCP, TCP_KEEPCNT, std.mem.asBytes(&keepalive_count)) catch {};
-    }
+    try adapter.run();
 }
 
 // =============================================================================
@@ -491,5 +570,36 @@ test "adapter init and deinit" {
     defer adapter.deinit();
 
     try std.testing.expect(!adapter.running);
-    try std.testing.expect(adapter.daemon_stream == null);
+}
+
+test "parseSessionId with string" {
+    var obj = std.json.ObjectMap.init(std.testing.allocator);
+    defer obj.deinit();
+    try obj.put("session_id", .{ .string = "12345" });
+
+    const pid = parseSessionId(.{ .object = obj });
+    try std.testing.expectEqual(@as(?posix.pid_t, 12345), pid);
+}
+
+test "parseSessionId with integer" {
+    var obj = std.json.ObjectMap.init(std.testing.allocator);
+    defer obj.deinit();
+    try obj.put("session_id", .{ .integer = 54321 });
+
+    const pid = parseSessionId(.{ .object = obj });
+    try std.testing.expectEqual(@as(?posix.pid_t, 54321), pid);
+}
+
+test "parseSessionId with empty string" {
+    var obj = std.json.ObjectMap.init(std.testing.allocator);
+    defer obj.deinit();
+    try obj.put("session_id", .{ .string = "" });
+
+    const pid = parseSessionId(.{ .object = obj });
+    try std.testing.expectEqual(@as(?posix.pid_t, null), pid);
+}
+
+test "parseSessionId with null args" {
+    const pid = parseSessionId(null);
+    try std.testing.expectEqual(@as(?posix.pid_t, null), pid);
 }

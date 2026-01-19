@@ -6,9 +6,8 @@ const parser = @import("git/parser.zig");
 const syntax = @import("highlighting/core.zig");
 const comments = @import("comments/store.zig");
 const line_map = @import("line_map.zig");
-const mcp_client = @import("mcp/client.zig");
-const mcp_protocol = @import("mcp/protocol.zig");
-const mcp_registry = @import("mcp/registry.zig");
+const tui_server = @import("mcp/tui_server.zig");
+const session_mgr = @import("mcp/session.zig");
 const mcp_handlers = @import("mcp/handlers.zig");
 const navigation = @import("navigation.zig");
 const search = @import("search.zig");
@@ -125,8 +124,8 @@ pub const App = struct {
     pending_highlight_jobs: std.AutoHashMap(HunkKey, PendingJob), // {file_idx, hunk_idx} -> owned content strings
     needs_render: bool, // Flag to force re-render (e.g., after async highlighting)
     needs_async_highlight: bool, // Flag to trigger async highlighting for current file
-    mcp: ?*mcp_client.McpClient, // MCP client for server connection
-    mcp_port: ?u16, // Port to connect to MCP server
+    tui_server: ?tui_server.TuiServer, // TCP server for CLI/MCP connections
+    session_manager: ?session_mgr.SessionManager, // Session file management
     blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
     acp_connect_thread: ?std.Thread, // Background thread for ACP connection
     acp_connect_ctx: ?*AcpConnectContext, // Context for ACP connection thread (freed after join)
@@ -509,8 +508,8 @@ pub const App = struct {
             .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
             .needs_render = false,
             .needs_async_highlight = true, // Start with highlighting needed for first file
-            .mcp = null,
-            .mcp_port = if (@hasField(@TypeOf(config), "mcp_port")) config.mcp_port else null,
+            .tui_server = null,
+            .session_manager = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
             .acp_connect_thread = null,
             .acp_connect_ctx = null,
@@ -588,10 +587,13 @@ pub const App = struct {
         if (self.state.graphite_stack) |*stack| {
             stack.deinit(self.allocator);
         }
-        // Clean up MCP client
-        if (self.mcp) |mcp| {
-            mcp.deinit();
-            self.allocator.destroy(mcp);
+        // Clean up TUI server and session
+        if (self.session_manager) |*sm| {
+            sm.removeSession();
+            sm.deinit();
+        }
+        if (self.tui_server) |*server| {
+            server.deinit();
         }
         // Clean up ACP connection thread and context
         if (self.acp_connect_thread) |thread| {
@@ -915,32 +917,11 @@ pub const App = struct {
         try loop.start();
         defer loop.stop();
 
-        // Auto-connect to MCP server (only if MCP is enabled)
+        // Start TUI server for CLI/MCP connections
         if (app_config.isMcpEnabled(self.allocator)) {
-            const mcp_port = self.mcp_port orelse 9999;
-            std.log.debug("MCP: Attempting to connect to port {d}", .{mcp_port});
-            if (self.allocator.create(mcp_client.McpClient)) |m| {
-                m.* = mcp_client.McpClient.init(self.allocator);
-
-                // Try connecting with retries (3 attempts with backoff)
-                if (m.connectWithRetry(mcp_port, 3)) {
-                    std.log.debug("MCP: Connection successful, connected={}", .{m.connected});
-                    self.mcp = m;
-                    // Small delay to ensure daemon has finished accepting
-                    std.Thread.sleep(10 * std.time.ns_per_ms);
-                    // Send hello message to register with server
-                    self.sendMcpHello() catch |err| {
-                        std.log.debug("MCP: Failed to send hello: {any}", .{err});
-                    };
-                    std.log.debug("MCP: Hello sent, connected={}", .{m.connected});
-                } else |err| {
-                    std.log.debug("MCP: Connection failed after retries: {any}", .{err});
-                    // Server not available - keep client for potential reconnection
-                    self.mcp = m;
-                }
-            } else |_| {
-                // Allocation failed - continue without MCP
-            }
+            self.startTuiServer() catch |err| {
+                std.log.warn("Failed to start TUI server: {any}", .{err});
+            };
         }
 
         // If agent-only mode, start with agent panel open and in full-screen mode
@@ -977,11 +958,10 @@ pub const App = struct {
         // Main event loop
         while (!self.should_quit) {
             // Only block on pollEvent if we don't need to render AND no async job is running
-            // AND not connected to MCP (reader thread may queue messages anytime)
-            // AND not needing MCP reconnection (reconnect logic must run periodically)
+            // AND no TUI server active (need to poll for incoming connections)
             // AND no ACP data pending (agent actively producing output)
             // This allows async operations to trigger immediate renders
-            const mcp_active = if (self.mcp) |mcp| mcp.connected or mcp.needsReconnect() else false;
+            const server_active = self.tui_server != null;
             const stats_loading = self.state.menu_stats_loading;
             // Only consider ACP "active" when agent has pending output to display
             // This allows blocking pollEvent() when agent is idle/connected but not producing data
@@ -991,7 +971,7 @@ pub const App = struct {
             const shell_cmd_running = self.hasAnyRunningShellCommand();
             // Check if ACP connection thread is running (need to poll for completion)
             const acp_connecting = self.acp_connect_thread != null;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !mcp_active and !stats_loading and !acp_active and !shell_cmd_running and !acp_connecting;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !acp_active and !shell_cmd_running and !acp_connecting;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -1000,7 +980,7 @@ pub const App = struct {
                 // - Medium activity (connecting, shell running): 8ms (~125 FPS)
                 // - Low activity (just rendering): 16ms (~60 FPS)
                 const is_high_activity = acp_active or shell_cmd_running;
-                const is_medium_activity = acp_connecting or mcp_active;
+                const is_medium_activity = acp_connecting or server_active;
                 const sleep_ms: u64 = if (is_high_activity) 5 else if (is_medium_activity) 8 else 16;
                 std.Thread.sleep(sleep_ms * std.time.ns_per_ms);
             }
@@ -1167,24 +1147,11 @@ pub const App = struct {
                 }
             }
 
-            // Process MCP messages (reader thread handles receiving)
-            if (self.mcp) |mcp| {
-                // Check if reconnection is needed (reader thread sets flag on disconnect)
-                if (mcp.needsReconnect()) {
-                    if (mcp.tryReconnect()) {
-                        // Small delay to ensure daemon has finished accepting
-                        std.Thread.sleep(10 * std.time.ns_per_ms);
-                        // Reconnected - send hello again to re-register
-                        self.sendMcpHello() catch {};
-                    }
-                }
-
-                const messages = mcp.consumeMessages();
-                defer mcp.freeMessages(messages);
-
-                for (messages) |*msg| {
-                    try self.handleMcpMessage(msg);
-                }
+            // Poll TUI server for incoming connections and requests
+            if (self.tui_server) |*server| {
+                server.poll() catch |err| {
+                    std.log.warn("TUI server poll error: {any}", .{err});
+                };
             }
 
             // Submit highlighting jobs for visible hunks (per-hunk highlighting)
@@ -3717,76 +3684,170 @@ pub const App = struct {
         return result;
     }
 
-    // ===== MCP Integration =====
+    // ===== TUI Server Integration =====
 
-    /// Send hello message to MCP server to register this client
-    fn sendMcpHello(self: *App) !void {
-        const mcp = self.mcp orelse return;
-        try mcp_handlers.sendHello(self.allocator, mcp, self.state.files, self.state.diff_source);
+    /// Start TUI server and write session file
+    fn startTuiServer(self: *App) !void {
+        // Initialize session manager
+        var sm = try session_mgr.SessionManager.init(self.allocator);
+        errdefer sm.deinit();
+
+        // Create and start TUI server
+        var server = tui_server.TuiServer.init(self.allocator, handleTuiServerRequest, self);
+        try server.start();
+
+        const port = server.getPort();
+        std.log.info("TUI server started on port {d}", .{port});
+
+        // Build file list
+        var file_list: std.ArrayList([]const u8) = .{};
+        defer file_list.deinit(self.allocator);
+        for (self.state.files) |file| {
+            const path = if (file.new_path.len > 0) file.new_path else file.old_path;
+            try file_list.append(self.allocator, path);
+        }
+
+        // Write session file
+        try sm.writeSession(.{
+            .pid = session_mgr.getCurrentPid(),
+            .port = port,
+            .cwd = self.state.git_repo_root,
+            .diff_ref = self.getDiffRefString(),
+            .files = file_list.items,
+            .started_at = std.time.timestamp(),
+        });
+
+        self.tui_server = server;
+        self.session_manager = sm;
     }
 
-    /// Handle incoming MCP message
-    fn handleMcpMessage(self: *App, msg: *mcp_protocol.ParsedMessage) !void {
-        const mcp = self.mcp orelse return;
+    /// Handle incoming request from CLI/MCP
+    fn handleTuiServerRequest(request: tui_server.Request, user_data: ?*anyopaque) tui_server.Response {
+        const self: *App = @ptrCast(@alignCast(user_data.?));
 
-        switch (msg.*) {
-            .add_comment => |ac| {
-                // Delegate to handler - returns comment_idx if successful
-                const result = mcp_handlers.handleAddComment(self.allocator, mcp, ac, self.state.files, &self.state.comment_store) catch |err| {
-                    std.log.warn("MCP add_comment failed: {any}", .{err});
-                    return;
-                };
-                if (result) |_| {
-                    // Rebuild LineMap since comment count changed
-                    self.state.line_map.deinit();
-                    self.state.line_map = line_map.LineMap.build(
-                        self.allocator,
-                        self.state.files,
-                        &self.state.comment_store,
-                        self.convertHunkViewMode(),
-                        self.shouldApplyHunkFiltering(),
-                    ) catch |err| {
-                        std.log.err("Failed to rebuild LineMap: {any}", .{err});
-                        return;
-                    };
-                    self.needs_render = true;
-                }
-            },
-            .get_comments => {
-                mcp_handlers.handleGetComments(self.allocator, mcp, &self.state.comment_store) catch |err| {
-                    std.log.warn("MCP get_comments failed: {any}", .{err});
-                };
-            },
-            .get_diff_context => {
-                mcp_handlers.handleGetDiffContext(self.allocator, mcp, self.state.files, self.state.diff_source, self.state.git_repo_root) catch |err| {
-                    std.log.warn("MCP get_diff_context failed: {any}", .{err});
-                };
-            },
-            .get_file_diff => |gfd| {
-                mcp_handlers.handleGetFileDiff(self.allocator, mcp, self.state.files, gfd.file) catch |err| {
-                    std.log.warn("MCP get_file_diff failed: {any}", .{err});
-                };
-            },
-            .welcome => |w| {
-                // Store session ID for status display
-                if (mcp.session_id) |old_id| {
-                    self.allocator.free(old_id);
-                }
-                mcp.session_id = self.allocator.dupe(u8, w.id) catch null;
-            },
-            .ping => {
-                // Respond with pong
-                const pong = mcp_protocol.encodePong(self.allocator) catch {
-                    return;
-                };
-                defer self.allocator.free(pong);
-                mcp.send(pong) catch {};
-            },
-            .@"error" => {
-                // Silently ignore errors - can check status via command palette
-            },
-            else => {},
+        if (std.mem.eql(u8, request.method, "get_context")) {
+            return self.handleGetContext();
+        } else if (std.mem.eql(u8, request.method, "add_comment")) {
+            return self.handleAddComment(request.params);
+        } else if (std.mem.eql(u8, request.method, "list_comments")) {
+            return self.handleListComments();
+        } else if (std.mem.eql(u8, request.method, "delete_comment")) {
+            return self.handleDeleteComment(request.params);
         }
+
+        return tui_server.errorResponse(tui_server.ErrorCode.METHOD_NOT_FOUND, "Unknown method");
+    }
+
+    /// Handle get_context request - returns session state
+    fn handleGetContext(self: *App) tui_server.Response {
+        var result = std.json.ObjectMap.init(self.allocator);
+
+        // Add diff_ref
+        const diff_ref = self.getDiffRefString();
+        result.put("diff_ref", .{ .string = self.allocator.dupe(u8, diff_ref) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
+            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
+        };
+
+        // Add cwd
+        result.put("cwd", .{ .string = self.allocator.dupe(u8, self.state.git_repo_root) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
+            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
+        };
+
+        // Add view_mode
+        const view_mode_str = switch (self.state.view_mode) {
+            .unified => "unified",
+            .side_by_side => "side_by_side",
+        };
+        result.put("view_mode", .{ .string = self.allocator.dupe(u8, view_mode_str) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
+            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
+        };
+
+        // Add files array
+        var files_arr = std.json.Array.init(self.allocator);
+        for (self.state.files) |file| {
+            const path = if (file.new_path.len > 0) file.new_path else file.old_path;
+            files_arr.append(.{ .string = self.allocator.dupe(u8, path) catch continue }) catch {};
+        }
+        result.put("files", .{ .array = files_arr }) catch {};
+
+        // Add comment count
+        result.put("comment_count", .{ .integer = @intCast(self.state.comment_store.comments.items.len) }) catch {};
+
+        return .{ .result = .{ .object = result } };
+    }
+
+    /// Handle add_comment request
+    /// Note: This is a simplified interface - full comment addition requires hunk/line context
+    fn handleAddComment(self: *App, params: ?std.json.Value) tui_server.Response {
+        _ = self;
+        _ = params;
+        // TODO: Implement proper comment addition with hunk/line resolution
+        // The CommentStore requires hunk_idx, line_idx, and line context
+        // For now, return not implemented
+        return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "add_comment not yet implemented via CLI");
+    }
+
+    /// Handle list_comments request
+    fn handleListComments(self: *App) tui_server.Response {
+        var result = std.json.ObjectMap.init(self.allocator);
+
+        var comments_arr = std.json.Array.init(self.allocator);
+        for (self.state.comment_store.comments.items, 0..) |comment, idx| {
+            var comment_obj = std.json.ObjectMap.init(self.allocator);
+            comment_obj.put("index", .{ .integer = @intCast(idx) }) catch continue;
+            comment_obj.put("file_path", .{ .string = self.allocator.dupe(u8, comment.file_path) catch continue }) catch continue;
+            comment_obj.put("hunk_idx", .{ .integer = @intCast(comment.hunk_idx) }) catch continue;
+            comment_obj.put("line_idx", .{ .integer = @intCast(comment.line_idx) }) catch continue;
+            comment_obj.put("text", .{ .string = self.allocator.dupe(u8, comment.text) catch continue }) catch continue;
+            comments_arr.append(.{ .object = comment_obj }) catch {};
+        }
+
+        result.put("comments", .{ .array = comments_arr }) catch {};
+        return .{ .result = .{ .object = result } };
+    }
+
+    /// Handle delete_comment request
+    fn handleDeleteComment(self: *App, params: ?std.json.Value) tui_server.Response {
+        const p = params orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing params");
+        if (p != .object) return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "params must be object");
+
+        const obj = p.object;
+
+        const index_val = obj.get("index") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'index'");
+        const index: usize = switch (index_val) {
+            .integer => |i| if (i >= 0) @intCast(i) else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'index' must be non-negative"),
+            else => return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'index' must be integer"),
+        };
+
+        // Delete comment
+        self.state.comment_store.deleteComment(index) catch {
+            return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Invalid comment index");
+        };
+
+        // Rebuild LineMap
+        self.state.line_map.deinit();
+        self.state.line_map = line_map.LineMap.build(
+            self.allocator,
+            self.state.files,
+            &self.state.comment_store,
+            self.convertHunkViewMode(),
+            self.shouldApplyHunkFiltering(),
+        ) catch {
+            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
+        };
+        self.needs_render = true;
+
+        var result = std.json.ObjectMap.init(self.allocator);
+        result.put("success", .{ .bool = true }) catch {};
+        return .{ .result = .{ .object = result } };
+    }
+
+    /// Get session port (for status display)
+    pub fn getSessionPort(self: *const App) ?u16 {
+        if (self.tui_server) |server| {
+            return server.port;
+        }
+        return null;
     }
 
     // =========================================================================

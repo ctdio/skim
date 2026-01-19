@@ -3,11 +3,10 @@ const vaxis = @import("vaxis");
 const App = @import("app.zig").App;
 const DiffSource = @import("git/diff.zig").DiffSource;
 const McpServer = @import("mcp/server.zig").McpServer;
-const Daemon = @import("mcp/daemon.zig").Daemon;
 const adapter = @import("mcp/adapter.zig");
-const discovery = @import("mcp/discovery.zig");
 const logging = @import("logging.zig");
 const app_config = @import("config.zig");
+const cli = @import("cli/mod.zig");
 
 /// Override std.log to use file-based logging
 pub const std_options = std.Options{
@@ -31,14 +30,12 @@ pub fn main() !void {
 
     // Check for subcommands first
     if (args.len >= 2) {
-        if (std.mem.eql(u8, args[1], "daemon")) {
-            if (!app_config.isMcpEnabled(allocator)) {
-                printMcpDisabledMessage();
-                std.process.exit(1);
-            }
-            logging.init(.daemon);
-            defer logging.deinit();
-            return runDaemonCommand(allocator, args);
+        if (std.mem.eql(u8, args[1], "sessions")) {
+            return runSessionsCommand(allocator, args);
+        } else if (std.mem.eql(u8, args[1], "context")) {
+            return runContextCommand(allocator, args);
+        } else if (std.mem.eql(u8, args[1], "comment")) {
+            return runCommentCommand(allocator, args);
         } else if (std.mem.eql(u8, args[1], "mcp")) {
             if (!app_config.isMcpEnabled(allocator)) {
                 printMcpDisabledMessage();
@@ -131,7 +128,7 @@ pub fn main() !void {
 
     // Check if we should run as MCP server (deprecated --serve flag)
     if (config.serve_port) |port| {
-        std.debug.print("Warning: --serve is deprecated. Use 'skim daemon start' instead.\n", .{});
+        std.debug.print("Warning: --serve is deprecated.\n", .{});
 
         const server = try McpServer.init(allocator, port);
         defer server.deinit();
@@ -152,135 +149,7 @@ pub fn main() !void {
 // Subcommand Handlers
 // =============================================================================
 
-fn runDaemonCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len < 3) {
-        try printDaemonHelp();
-        std.process.exit(1);
-    }
-
-    const subcommand = args[2];
-
-    if (std.mem.eql(u8, subcommand, "start")) {
-        // Parse optional arguments
-        var tui_port: u16 = discovery.DEFAULT_TUI_PORT;
-        var adapter_port: u16 = discovery.DEFAULT_ADAPTER_PORT;
-        var foreground = false;
-
-        var i: usize = 3;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "--port") or std.mem.eql(u8, args[i], "-p")) {
-                i += 1;
-                if (i >= args.len) {
-                    std.debug.print("--port requires a port number\n", .{});
-                    std.process.exit(1);
-                }
-                tui_port = std.fmt.parseInt(u16, args[i], 10) catch {
-                    std.debug.print("Invalid port number: {s}\n", .{args[i]});
-                    std.process.exit(1);
-                };
-                adapter_port = tui_port - 1; // Adapter port is one below TUI port
-            } else if (std.mem.eql(u8, args[i], "--foreground") or std.mem.eql(u8, args[i], "-f")) {
-                foreground = true;
-            } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
-                try printDaemonHelp();
-                std.process.exit(0);
-            }
-        }
-
-        // Check if daemon is already running
-        const status = discovery.discoverDaemon(allocator);
-        switch (status) {
-            .running => |info| {
-                std.debug.print("Daemon already running (PID {d}) on ports {d}/{d}\n", .{ info.pid, info.tui_port, info.adapter_port });
-                std.process.exit(1);
-            },
-            .stale => {
-                // Clean up stale discovery file
-                discovery.deleteDiscoveryFile(allocator);
-            },
-            else => {},
-        }
-
-        std.debug.print("Starting skim daemon on ports {d} (TUI) and {d} (adapters)...\n", .{ tui_port, adapter_port });
-
-        // Daemonize unless --foreground is specified
-        if (!foreground) {
-            const daemon_pid = try daemonize(allocator, tui_port, adapter_port);
-            std.debug.print("Daemon started (PID {d})\n", .{daemon_pid});
-            return; // Parent exits, daemon runs in background
-        }
-
-        // Foreground mode - run directly
-        const daemon = try Daemon.init(allocator, tui_port, adapter_port);
-        defer daemon.deinit();
-
-        try daemon.start();
-        std.debug.print("Daemon running in foreground (PID {d})\n", .{getCurrentPid()});
-        try daemon.run();
-    } else if (std.mem.eql(u8, subcommand, "stop")) {
-        const status = discovery.discoverDaemon(allocator);
-        switch (status) {
-            .running => |info| {
-                // Send SIGTERM to the daemon
-                std.posix.kill(info.pid, std.posix.SIG.TERM) catch |err| {
-                    if (err == error.NoSuchProcess) {
-                        std.debug.print("Daemon process not found, cleaning up...\n", .{});
-                        discovery.deleteDiscoveryFile(allocator);
-                    }
-                    return;
-                };
-                std.debug.print("Sent stop signal to daemon (PID {d})\n", .{info.pid});
-            },
-            .stale => {
-                std.debug.print("Cleaning up stale daemon state...\n", .{});
-                discovery.deleteDiscoveryFile(allocator);
-            },
-            .not_running => {
-                std.debug.print("Daemon is not running\n", .{});
-            },
-            .unhealthy => {
-                std.debug.print("Daemon appears unhealthy, cleaning up...\n", .{});
-                discovery.deleteDiscoveryFile(allocator);
-            },
-        }
-    } else if (std.mem.eql(u8, subcommand, "status")) {
-        const status = discovery.discoverDaemon(allocator);
-        const formatted = try discovery.formatStatus(allocator, status);
-        defer allocator.free(formatted);
-        std.debug.print("{s}\n", .{formatted});
-    } else if (std.mem.eql(u8, subcommand, "restart")) {
-        // Stop then start
-        const status = discovery.discoverDaemon(allocator);
-        switch (status) {
-            .running => |info| {
-                std.debug.print("Stopping daemon (PID {d})...\n", .{info.pid});
-                std.posix.kill(info.pid, std.posix.SIG.TERM) catch {};
-                // Wait a bit for it to stop
-                std.Thread.sleep(500 * std.time.ns_per_ms);
-            },
-            else => {},
-        }
-        discovery.deleteDiscoveryFile(allocator);
-
-        // Now start (restart always daemonizes)
-        const restart_tui_port = discovery.DEFAULT_TUI_PORT;
-        const restart_adapter_port = discovery.DEFAULT_ADAPTER_PORT;
-
-        std.debug.print("Starting skim daemon on ports {d} (TUI) and {d} (adapters)...\n", .{ restart_tui_port, restart_adapter_port });
-
-        const daemon_pid = try daemonize(allocator, restart_tui_port, restart_adapter_port);
-        std.debug.print("Daemon started (PID {d})\n", .{daemon_pid});
-    } else if (std.mem.eql(u8, subcommand, "--help") or std.mem.eql(u8, subcommand, "-h")) {
-        try printDaemonHelp();
-    } else {
-        std.debug.print("Unknown daemon command: {s}\n", .{subcommand});
-        try printDaemonHelp();
-        std.process.exit(1);
-    }
-}
-
 fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    var port: u16 = discovery.DEFAULT_ADAPTER_PORT;
     var stdio_mode = false;
 
     // Parse arguments
@@ -288,16 +157,6 @@ fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--stdio")) {
             stdio_mode = true;
-        } else if (std.mem.eql(u8, args[i], "--port") or std.mem.eql(u8, args[i], "-p")) {
-            i += 1;
-            if (i >= args.len) {
-                std.debug.print("--port requires a port number\n", .{});
-                std.process.exit(1);
-            }
-            port = std.fmt.parseInt(u16, args[i], 10) catch {
-                std.debug.print("Invalid port number: {s}\n", .{args[i]});
-                std.process.exit(1);
-            };
         } else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             try printMcpHelp();
             std.process.exit(0);
@@ -314,11 +173,78 @@ fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
         std.process.exit(1);
     }
 
-    try adapter.runAdapter(allocator, port);
+    try adapter.runAdapter(allocator);
 }
 
 /// Write buffer for stdout (Zig 0.15 requires buffer for file.writer())
 var stdout_buffer: [4096]u8 = undefined;
+
+fn runSessionsCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    // Handle `skim sessions list` (or just `skim sessions`)
+    if (args.len >= 3 and std.mem.eql(u8, args[2], "list")) {
+        const parsed = cli.sessions.parseArgs(args);
+        try cli.sessions.run(allocator, parsed);
+    } else if (args.len >= 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h"))) {
+        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        defer file_writer.interface.flush() catch {};
+        try cli.sessions.printHelp(&file_writer.interface);
+    } else if (args.len == 2) {
+        // `skim sessions` defaults to list
+        const parsed = cli.sessions.Args{};
+        try cli.sessions.run(allocator, parsed);
+    } else {
+        std.debug.print("Unknown sessions subcommand. Use 'skim sessions list'.\n", .{});
+        std.process.exit(1);
+    }
+}
+
+fn runContextCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    // Check for help
+    var i: usize = 2;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
+            var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+            defer file_writer.interface.flush() catch {};
+            try cli.context.printHelp(&file_writer.interface);
+            return;
+        }
+    }
+
+    const parsed = cli.context.parseArgs(args);
+    try cli.context.run(allocator, parsed);
+}
+
+fn runCommentCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 3) {
+        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        defer file_writer.interface.flush() catch {};
+        try cli.comment.printHelp(&file_writer.interface);
+        std.process.exit(1);
+    }
+
+    // Check for help
+    if (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h")) {
+        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        defer file_writer.interface.flush() catch {};
+        try cli.comment.printHelp(&file_writer.interface);
+        return;
+    }
+
+    if (std.mem.eql(u8, args[2], "add")) {
+        const parsed = cli.comment.parseAddArgs(args);
+        try cli.comment.runAdd(allocator, parsed);
+    } else if (std.mem.eql(u8, args[2], "list")) {
+        const parsed = cli.comment.parseListArgs(args);
+        try cli.comment.runList(allocator, parsed);
+    } else if (std.mem.eql(u8, args[2], "delete")) {
+        const parsed = cli.comment.parseDeleteArgs(args);
+        try cli.comment.runDelete(allocator, parsed);
+    } else {
+        std.debug.print("Unknown comment subcommand: {s}\n", .{args[2]});
+        std.debug.print("Use 'skim comment --help' for usage.\n", .{});
+        std.process.exit(1);
+    }
+}
 
 fn printMcpDisabledMessage() void {
     std.debug.print(
@@ -348,37 +274,6 @@ fn printAcpDisabledMessage() void {
     , .{});
 }
 
-fn printDaemonHelp() !void {
-    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    defer file_writer.interface.flush() catch {};
-    const stdout = &file_writer.interface;
-    try stdout.writeAll(
-        \\skim daemon - Manage the skim MCP daemon
-        \\
-        \\USAGE:
-        \\    skim daemon <command> [OPTIONS]
-        \\
-        \\COMMANDS:
-        \\    start      Start the daemon
-        \\    stop       Stop the daemon
-        \\    status     Show daemon status
-        \\    restart    Restart the daemon
-        \\
-        \\OPTIONS:
-        \\    -p, --port <port>    Set TUI port (default: 9999, adapter port is TUI-1)
-        \\    -f, --foreground     Run in foreground (don't daemonize)
-        \\    -h, --help           Print this help message
-        \\
-        \\EXAMPLES:
-        \\    skim daemon start              # Start daemon in background
-        \\    skim daemon start --foreground # Run in foreground (for debugging)
-        \\    skim daemon start --port 8888  # Start on custom port
-        \\    skim daemon status             # Check if daemon is running
-        \\    skim daemon stop               # Stop the daemon
-        \\
-    );
-}
-
 fn printMcpHelp() !void {
     var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
     defer file_writer.interface.flush() catch {};
@@ -387,17 +282,26 @@ fn printMcpHelp() !void {
         \\skim mcp - Run as MCP adapter (for AI agents)
         \\
         \\USAGE:
-        \\    skim mcp --stdio [OPTIONS]
+        \\    skim mcp --stdio
         \\
-        \\This command runs skim as a thin MCP adapter that connects to the
-        \\skim daemon. It reads MCP JSON-RPC from stdin and writes responses
+        \\This command runs skim as an MCP adapter that connects to running
+        \\skim TUI sessions. It reads MCP JSON-RPC from stdin and writes responses
         \\to stdout, suitable for use as an MCP server in Claude Desktop,
         \\Cursor, or similar AI coding assistants.
         \\
+        \\The adapter automatically discovers running skim sessions via
+        \\~/.skim/sessions/ and connects to them on-demand when tools are called.
+        \\
         \\OPTIONS:
         \\    --stdio              Use stdio transport (required)
-        \\    -p, --port <port>    Daemon adapter port (default: 9998)
         \\    -h, --help           Print this help message
+        \\
+        \\TOOLS:
+        \\    list_sessions        List all running skim TUI sessions
+        \\    get_context          Get diff context and comments from a session
+        \\    add_comment          Add a comment to a line in the diff
+        \\    list_comments        List all comments in a session
+        \\    delete_comment       Delete a comment by index
         \\
         \\CONFIGURATION:
         \\    Add to your MCP configuration (e.g., Claude Desktop):
@@ -409,9 +313,6 @@ fn printMcpHelp() !void {
         \\        }
         \\      }
         \\    }
-        \\
-        \\ENVIRONMENT:
-        \\    SKIM_DAEMON_AUTO_START=1   Auto-start daemon if not running
         \\
     );
 }
@@ -578,7 +479,6 @@ fn printHelp(allocator: std.mem.Allocator) !void {
     }
     if (mcp_enabled) {
         try stdout.writeAll(
-            \\    skim daemon <start|stop|status|restart>
             \\    skim mcp
             \\
         );
@@ -589,6 +489,9 @@ fn printHelp(allocator: std.mem.Allocator) !void {
         \\
         \\SUBCOMMANDS:
         \\    diff               Review diffs (same as running skim directly)
+        \\    sessions           List running skim sessions
+        \\    context            Get diff context from a running session
+        \\    comment            Manage comments in a running session
         \\
     );
     if (acp_enabled) {
@@ -596,7 +499,6 @@ fn printHelp(allocator: std.mem.Allocator) !void {
     }
     if (mcp_enabled) {
         try stdout.writeAll(
-            \\    daemon             Manage the MCP daemon (for AI agent integration)
             \\    mcp                Run as MCP adapter (for Claude Desktop, Cursor, etc.)
             \\
         );
@@ -649,8 +551,6 @@ fn printHelp(allocator: std.mem.Allocator) !void {
         }
         if (mcp_enabled) {
             try stdout.writeAll(
-                \\    skim daemon start         # Start MCP daemon
-                \\    skim daemon status        # Check daemon status
                 \\    skim mcp                  # Run MCP adapter (for agent configs)
                 \\
             );
@@ -688,105 +588,6 @@ fn getCurrentPid() i32 {
         const c_getpid = @extern(*const fn () callconv(.c) c_int, .{ .name = "getpid" });
         return @intCast(c_getpid());
     }
-}
-
-/// Daemonize the process using double-fork pattern.
-/// Returns the daemon's PID to the parent process.
-/// The daemon process does not return - it runs the daemon loop.
-fn daemonize(allocator: std.mem.Allocator, tui_port: u16, adapter_port: u16) !i32 {
-    const posix = std.posix;
-    const c = struct {
-        extern "c" fn setsid() c_int;
-    };
-
-    // Create a pipe to communicate daemon PID back to parent
-    const pipe_fds = try posix.pipe();
-    const pipe_read = pipe_fds[0];
-    const pipe_write = pipe_fds[1];
-
-    // First fork
-    const pid1 = try posix.fork();
-    if (pid1 != 0) {
-        // Parent: close write end, read daemon PID, return
-        posix.close(pipe_write);
-
-        var pid_buf: [16]u8 = undefined;
-        const bytes_read = posix.read(pipe_read, &pid_buf) catch |err| {
-            posix.close(pipe_read);
-            return err;
-        };
-        posix.close(pipe_read);
-
-        if (bytes_read == 0) {
-            return error.DaemonFailed;
-        }
-
-        const daemon_pid = std.fmt.parseInt(i32, pid_buf[0..bytes_read], 10) catch {
-            return error.DaemonFailed;
-        };
-
-        // Wait for first child to exit
-        _ = posix.waitpid(pid1, 0);
-
-        return daemon_pid;
-    }
-
-    // First child: close read end, create new session
-    posix.close(pipe_read);
-
-    // Create new session (detach from controlling terminal)
-    if (c.setsid() == -1) {
-        posix.close(pipe_write);
-        posix.exit(1);
-    }
-
-    // Second fork (prevents reacquiring a controlling terminal)
-    const pid2 = posix.fork() catch {
-        posix.close(pipe_write);
-        posix.exit(1);
-    };
-
-    if (pid2 != 0) {
-        // First child exits, letting grandchild be adopted by init
-        posix.close(pipe_write);
-        posix.exit(0);
-    }
-
-    // Grandchild: this is the daemon process
-
-    // Write our PID to the pipe
-    const daemon_pid = getCurrentPid();
-    var pid_str: [16]u8 = undefined;
-    const pid_slice = std.fmt.bufPrint(&pid_str, "{d}", .{daemon_pid}) catch "";
-    _ = posix.write(pipe_write, pid_slice) catch {};
-    posix.close(pipe_write);
-
-    // Redirect stdin/stdout/stderr to /dev/null
-    const dev_null = posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch {
-        posix.exit(1);
-    };
-    posix.dup2(dev_null, posix.STDIN_FILENO) catch {};
-    posix.dup2(dev_null, posix.STDOUT_FILENO) catch {};
-    posix.dup2(dev_null, posix.STDERR_FILENO) catch {};
-    if (dev_null > 2) {
-        posix.close(dev_null);
-    }
-
-    // Now run the daemon
-    const daemon = Daemon.init(allocator, tui_port, adapter_port) catch {
-        posix.exit(1);
-    };
-    defer daemon.deinit();
-
-    daemon.start() catch {
-        posix.exit(1);
-    };
-
-    daemon.run() catch {
-        posix.exit(1);
-    };
-
-    posix.exit(0);
 }
 
 test "parse args: working directory" {
