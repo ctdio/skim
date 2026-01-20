@@ -3256,15 +3256,17 @@ pub const App = struct {
                 try self.renderContent(content_win);
             }
 
-            // Render unified status bar (handles both diff mode and agent mode content)
-            const status_win = win.child(.{
-                .x_off = 0,
-                .y_off = win.height - Layout.status_height,
-                .width = @intCast(win.width),
-                .height = @intCast(Layout.status_height),
-            });
-            try UI.renderStatus(self, status_win);
         }
+
+        // Render unified status bar (handles both diff mode and agent mode content)
+        // This is outside the files check so it renders even when there are no files
+        const status_win = win.child(.{
+            .x_off = 0,
+            .y_off = win.height - Layout.status_height,
+            .width = @intCast(win.width),
+            .height = @intCast(Layout.status_height),
+        });
+        try UI.renderStatus(self, status_win);
 
         // Render command palette overlay if in command palette mode
         if (self.mode == .command_palette) {
