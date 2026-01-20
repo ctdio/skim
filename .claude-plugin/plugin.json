@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/claude-code/main/plugin-schema.json",
+  "name": "skim",
+  "version": "0.1.0",
+  "description": "Keyboard-driven TUI for code reviews - AI agent integration",
+  "skills": "../skills/"
+}

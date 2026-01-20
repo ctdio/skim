@@ -196,7 +196,11 @@ pub const TuiServer = struct {
             defer self.allocator.free(message);
 
             const response = self.handleMessage(message);
-            defer freeResponse(self.allocator, response);
+            // Note: We don't free the response here because:
+            // 1. Error responses contain string literals (not allocated)
+            // 2. Success responses are managed by the handler (App allocator)
+            // The handler is responsible for its own memory management.
+            // This avoids trying to free string literals which causes segfaults.
 
             // Send response
             const response_json = try serializeResponse(self.allocator, response);
@@ -332,40 +336,6 @@ fn serializeResponse(allocator: Allocator, response: Response) ![]u8 {
     }
 
     return output.toOwnedSlice(allocator);
-}
-
-fn freeResponse(allocator: Allocator, response: Response) void {
-    switch (response) {
-        .result => |result| {
-            freeJsonValue(allocator, result);
-        },
-        .err => {},
-    }
-}
-
-fn freeJsonValue(allocator: Allocator, value: std.json.Value) void {
-    switch (value) {
-        .object => |obj| {
-            var map = obj;
-            var it = map.iterator();
-            while (it.next()) |entry| {
-                allocator.free(entry.key_ptr.*);
-                freeJsonValue(allocator, entry.value_ptr.*);
-            }
-            map.deinit();
-        },
-        .array => |arr| {
-            var list = arr;
-            for (list.items) |item| {
-                freeJsonValue(allocator, item);
-            }
-            list.deinit();
-        },
-        .string => |s| {
-            allocator.free(s);
-        },
-        else => {},
-    }
 }
 
 // =============================================================================

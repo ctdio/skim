@@ -30,11 +30,16 @@ pub fn main() !void {
 
     // Check for subcommands first
     if (args.len >= 2) {
-        if (std.mem.eql(u8, args[1], "sessions")) {
+        if (std.mem.eql(u8, args[1], "session")) {
+            return cli.session.run(allocator, args);
+        } else if (std.mem.eql(u8, args[1], "sessions")) {
+            // Legacy: `skim sessions` -> `skim session list`
             return runSessionsCommand(allocator, args);
         } else if (std.mem.eql(u8, args[1], "context")) {
+            // Legacy: `skim context` -> `skim session context`
             return runContextCommand(allocator, args);
         } else if (std.mem.eql(u8, args[1], "comment")) {
+            // Legacy: `skim comment` -> `skim session comment`
             return runCommentCommand(allocator, args);
         } else if (std.mem.eql(u8, args[1], "mcp")) {
             if (!app_config.isMcpEnabled(allocator)) {

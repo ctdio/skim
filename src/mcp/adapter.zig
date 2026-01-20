@@ -52,6 +52,7 @@ pub const McpAdapter = struct {
         // Register tools
         server.tool("list_sessions", "List all running skim TUI sessions", null, handleListSessions) catch {};
         server.tool("get_context", "Get diff context and comments from a skim session", GetContextParams, handleGetContext) catch {};
+        server.tool("get_diff", "Get the full diff content with line numbers. Use this to see what lines exist before adding comments.", GetDiffParams, handleGetDiff) catch {};
         server.tool("add_comment", "Add a comment to a line in the diff", AddCommentParams, handleAddComment) catch {};
         server.tool("list_comments", "List all comments in a skim session", ListCommentsParams, handleListComments) catch {};
         server.tool("delete_comment", "Delete a comment by index", DeleteCommentParams, handleDeleteComment) catch {};
@@ -256,6 +257,11 @@ const GetContextParams = struct {
     session_id: []const u8 = "",
 };
 
+const GetDiffParams = struct {
+    session_id: []const u8 = "",
+    file: []const u8 = "", // Optional: specific file, or empty for all files
+};
+
 const AddCommentParams = struct {
     session_id: []const u8 = "",
     file: []const u8,
@@ -338,7 +344,6 @@ fn handleGetContext(ctx: *framework.Context, args: ?std.json.Value) framework.Re
     var response = client.request("get_context", "mcp-ctx", null) catch {
         return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
     };
-    defer response.deinit(ctx.allocator);
 
     switch (response) {
         .result => |result| {
@@ -347,13 +352,16 @@ fn handleGetContext(ctx: *framework.Context, args: ?std.json.Value) framework.Re
             var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
             stringify.write(result) catch {
                 alloc_writer.deinit();
+                response.deinit(ctx.allocator);
                 return framework.Result.mcpError(framework.ErrorCode.internal_error, "Serialization failed");
             };
             const text = ctx.allocator.dupe(u8, alloc_writer.written()) catch {
                 alloc_writer.deinit();
+                response.deinit(ctx.allocator);
                 return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
             };
             alloc_writer.deinit();
+            response.deinit(ctx.allocator);
 
             return framework.Result.text(ctx.allocator, text) catch {
                 ctx.allocator.free(text);
@@ -361,7 +369,96 @@ fn handleGetContext(ctx: *framework.Context, args: ?std.json.Value) framework.Re
             };
         },
         .err => |e| {
-            return framework.Result.textError(ctx.allocator, e.message) catch framework.Result.mcpError(e.code, e.message);
+            // Must duplicate message before freeing response, as e.message points into response
+            const message = ctx.allocator.dupe(u8, e.message) catch {
+                response.deinit(ctx.allocator);
+                return framework.Result.mcpError(e.code, e.message);
+            };
+            response.deinit(ctx.allocator);
+            return framework.Result.textError(ctx.allocator, message) catch {
+                ctx.allocator.free(message);
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+            };
+        },
+    }
+}
+
+fn handleGetDiff(ctx: *framework.Context, args: ?std.json.Value) framework.Result {
+    const session_pid = parseSessionId(args);
+
+    // Get optional file filter
+    const file_filter: ?[]const u8 = blk: {
+        const params = args orelse break :blk null;
+        if (params != .object) break :blk null;
+        const file_val = params.object.get("file") orelse break :blk null;
+        if (file_val != .string) break :blk null;
+        if (file_val.string.len == 0) break :blk null;
+        break :blk file_val.string;
+    };
+
+    var client = cli_client.autoConnect(ctx.allocator, session_pid) catch |err| {
+        return switch (err) {
+            error.NoSessionsRunning => framework.Result.textError(ctx.allocator, "No skim sessions running") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "No sessions"),
+            error.AmbiguousSessions => framework.Result.textError(ctx.allocator, "Multiple sessions found, specify session_id") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Ambiguous"),
+            error.SessionNotFound => framework.Result.textError(ctx.allocator, "Session not found") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Not found"),
+            else => framework.Result.mcpError(framework.ErrorCode.internal_error, "Connection failed"),
+        };
+    };
+    defer client.deinit();
+
+    // Build params for TUI request
+    var req_params_obj: ?std.json.Value = null;
+    if (file_filter) |f| {
+        var req_params = std.json.ObjectMap.init(ctx.allocator);
+        req_params.put(ctx.allocator.dupe(u8, "file") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, f) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
+        req_params_obj = .{ .object = req_params };
+    }
+    defer if (req_params_obj) |*p| {
+        if (p.* == .object) {
+            var it = p.object.iterator();
+            while (it.next()) |entry| {
+                ctx.allocator.free(entry.key_ptr.*);
+                if (entry.value_ptr.* == .string) ctx.allocator.free(entry.value_ptr.string);
+            }
+            p.object.deinit();
+        }
+    };
+
+    var response = client.request("get_diff", "mcp-diff", req_params_obj) catch {
+        return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
+    };
+
+    switch (response) {
+        .result => |result| {
+            // The result should contain "diff" field with the formatted diff text
+            if (result == .object) {
+                if (result.object.get("diff")) |diff_val| {
+                    if (diff_val == .string) {
+                        const text = ctx.allocator.dupe(u8, diff_val.string) catch {
+                            response.deinit(ctx.allocator);
+                            return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+                        };
+                        response.deinit(ctx.allocator);
+                        return framework.Result.text(ctx.allocator, text) catch {
+                            ctx.allocator.free(text);
+                            return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+                        };
+                    }
+                }
+            }
+            response.deinit(ctx.allocator);
+            return framework.Result.mcpError(framework.ErrorCode.internal_error, "Invalid response format");
+        },
+        .err => |e| {
+            const message = ctx.allocator.dupe(u8, e.message) catch {
+                response.deinit(ctx.allocator);
+                return framework.Result.mcpError(e.code, e.message);
+            };
+            response.deinit(ctx.allocator);
+            return framework.Result.textError(ctx.allocator, message) catch {
+                ctx.allocator.free(message);
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+            };
         },
     }
 }
@@ -411,14 +508,23 @@ fn handleAddComment(ctx: *framework.Context, args: ?std.json.Value) framework.Re
     var response = client.request("add_comment", "mcp-add", .{ .object = req_params }) catch {
         return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
     };
-    defer response.deinit(ctx.allocator);
 
     switch (response) {
         .result => {
+            response.deinit(ctx.allocator);
             return framework.Result.text(ctx.allocator, "Comment added successfully.") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed");
         },
         .err => |e| {
-            return framework.Result.textError(ctx.allocator, e.message) catch framework.Result.mcpError(e.code, e.message);
+            // Must duplicate message before freeing response, as e.message points into response
+            const message = ctx.allocator.dupe(u8, e.message) catch {
+                response.deinit(ctx.allocator);
+                return framework.Result.mcpError(e.code, e.message);
+            };
+            response.deinit(ctx.allocator);
+            return framework.Result.textError(ctx.allocator, message) catch {
+                ctx.allocator.free(message);
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+            };
         },
     }
 }
@@ -439,7 +545,6 @@ fn handleListComments(ctx: *framework.Context, args: ?std.json.Value) framework.
     var response = client.request("list_comments", "mcp-list", null) catch {
         return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
     };
-    defer response.deinit(ctx.allocator);
 
     switch (response) {
         .result => |result| {
@@ -448,13 +553,16 @@ fn handleListComments(ctx: *framework.Context, args: ?std.json.Value) framework.
             var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
             stringify.write(result) catch {
                 alloc_writer.deinit();
+                response.deinit(ctx.allocator);
                 return framework.Result.mcpError(framework.ErrorCode.internal_error, "Serialization failed");
             };
             const json_text = ctx.allocator.dupe(u8, alloc_writer.written()) catch {
                 alloc_writer.deinit();
+                response.deinit(ctx.allocator);
                 return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
             };
             alloc_writer.deinit();
+            response.deinit(ctx.allocator);
 
             return framework.Result.text(ctx.allocator, json_text) catch {
                 ctx.allocator.free(json_text);
@@ -462,7 +570,16 @@ fn handleListComments(ctx: *framework.Context, args: ?std.json.Value) framework.
             };
         },
         .err => |e| {
-            return framework.Result.textError(ctx.allocator, e.message) catch framework.Result.mcpError(e.code, e.message);
+            // Must duplicate message before freeing response, as e.message points into response
+            const message = ctx.allocator.dupe(u8, e.message) catch {
+                response.deinit(ctx.allocator);
+                return framework.Result.mcpError(e.code, e.message);
+            };
+            response.deinit(ctx.allocator);
+            return framework.Result.textError(ctx.allocator, message) catch {
+                ctx.allocator.free(message);
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+            };
         },
     }
 }
@@ -506,14 +623,23 @@ fn handleDeleteComment(ctx: *framework.Context, args: ?std.json.Value) framework
     var response = client.request("delete_comment", "mcp-del", .{ .object = req_params }) catch {
         return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
     };
-    defer response.deinit(ctx.allocator);
 
     switch (response) {
         .result => {
+            response.deinit(ctx.allocator);
             return framework.Result.text(ctx.allocator, "Comment deleted successfully.") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed");
         },
         .err => |e| {
-            return framework.Result.textError(ctx.allocator, e.message) catch framework.Result.mcpError(e.code, e.message);
+            // Must duplicate message before freeing response, as e.message points into response
+            const message = ctx.allocator.dupe(u8, e.message) catch {
+                response.deinit(ctx.allocator);
+                return framework.Result.mcpError(e.code, e.message);
+            };
+            response.deinit(ctx.allocator);
+            return framework.Result.textError(ctx.allocator, message) catch {
+                ctx.allocator.free(message);
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+            };
         },
     }
 }
