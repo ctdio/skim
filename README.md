@@ -287,6 +287,47 @@ Add skim to your AI assistant's MCP configuration:
 }
 ```
 
+### Claude Code Plugin
+
+This repo includes a Claude Code plugin with a `/skim` skill that teaches Claude Code how to review code with skim.
+
+**Install from GitHub:**
+
+```bash
+# Add the skim marketplace
+/plugin marketplace add ctdio/skim
+
+# Install the plugin
+/plugin install skim@ctdio-skim
+```
+
+**Or install from a local clone:**
+
+```bash
+# Clone the repo
+git clone https://github.com/ctdio/skim.git
+
+# Add as a local marketplace (point to .claude-plugin directory)
+/plugin marketplace add ./skim/.claude-plugin
+
+# Install the plugin
+/plugin install skim@skim
+```
+
+**Usage:**
+
+Once installed, invoke the skill in Claude Code:
+
+```
+/skim                    # Show help and find sessions
+/skim review this code   # Ask Claude to review the diff
+```
+
+The skill provides Claude Code with:
+- Instructions for using skim MCP tools (`mcp__skim__*`)
+- Fallback CLI commands if MCP is unavailable
+- Guidance on line types and comment workflows
+
 ### MCP Tools Available
 
 The skim MCP server exposes these tools to AI agents:

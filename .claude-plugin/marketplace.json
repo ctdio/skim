@@ -1,0 +1,13 @@
+{
+  "name": "skim",
+  "owner": {
+    "name": "ctdio"
+  },
+  "plugins": [
+    {
+      "name": "skim",
+      "source": "./.",
+      "description": "Keyboard-driven TUI for code reviews with AI integration"
+    }
+  ]
+}
