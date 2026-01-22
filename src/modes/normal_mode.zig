@@ -4,7 +4,6 @@ const App = @import("../app.zig").App;
 const FindCommand = @import("../app.zig").App.FindCommand;
 const navigation = @import("../navigation.zig");
 const Navigation = navigation.Navigation;
-const app_config = @import("../config.zig");
 
 /// Handle keyboard input when in normal mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -45,11 +44,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.updateCurrentFileAndTriggerHighlighting();
             return;
         }
-        // gY - yank all comments to agent input (ACP feature)
+        // gY - yank all comments to agent input
         if (key.codepoint == 'Y') {
-            if (app_config.isAcpEnabled(app.allocator)) {
-                try app.yankCommentsToAgent();
-            }
+            try app.yankCommentsToAgent();
             return;
         }
         // Any other key cancels the pending g, but still processes the key below
@@ -151,14 +148,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         switch (effective_key) {
             'l' => {
                 // Focus right - check what's on the right (agent panel if on right)
-                if (app_config.isAcpEnabled(app.allocator) and agent_panel_visible and !agent_on_left) {
+                if (agent_panel_visible and !agent_on_left) {
                     app.mode = .agent;
                     app.needs_render = true;
                 }
             },
             'h' => {
                 // Focus left - check if agent panel is on the left
-                if (app_config.isAcpEnabled(app.allocator) and agent_panel_visible and agent_on_left) {
+                if (agent_panel_visible and agent_on_left) {
                     app.mode = .agent;
                     app.needs_render = true;
                 }
@@ -166,7 +163,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             },
             'w' => {
                 // Cycle focus - switch to agent panel if visible
-                if (app_config.isAcpEnabled(app.allocator) and agent_panel_visible) {
+                if (agent_panel_visible) {
                     app.mode = .agent;
                     app.needs_render = true;
                 }
@@ -204,10 +201,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.updateCurrentFileAndTriggerHighlighting();
             },
             'e' => {
-                // Ctrl+E: Toggle agent panel (ACP feature)
-                if (app_config.isAcpEnabled(app.allocator)) {
-                    try app.toggleAgentPanel();
-                }
+                // Ctrl+E: Toggle agent panel
+                try app.toggleAgentPanel();
             },
             'g' => try app.openInEditor(),
             'w' => {
@@ -351,10 +346,8 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
                 return;
             },
             'e' => {
-                // Ctrl+E: Toggle agent panel (ACP feature)
-                if (app_config.isAcpEnabled(app.allocator)) {
-                    try app.toggleAgentPanel();
-                }
+                // Ctrl+E: Toggle agent panel
+                try app.toggleAgentPanel();
                 return;
             },
             else => {},

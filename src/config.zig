@@ -30,17 +30,11 @@ pub const AgentServerConfig = struct {
 
 pub const Config = struct {
     agent_panel_side: AgentPanelSide = .left,
-    experimental: Experimental = .{},
     agent_servers: ?[]const AgentServerConfig = null,
 
     pub const AgentPanelSide = enum {
         left,
         right,
-    };
-
-    pub const Experimental = struct {
-        mcp_enabled: bool = false,
-        acp_enabled: bool = false,
     };
 };
 
@@ -83,18 +77,6 @@ pub fn parseConfig(allocator: Allocator, json_bytes: []const u8) !Config {
         if (side_val == .string) {
             if (std.mem.eql(u8, side_val.string, "right")) {
                 config.agent_panel_side = .right;
-            }
-        }
-    }
-
-    // Parse experimental
-    if (root.object.get("experimental")) |exp_val| {
-        if (exp_val == .object) {
-            if (exp_val.object.get("mcp_enabled")) |v| {
-                if (v == .bool) config.experimental.mcp_enabled = v.bool;
-            }
-            if (exp_val.object.get("acp_enabled")) |v| {
-                if (v == .bool) config.experimental.acp_enabled = v.bool;
             }
         }
     }
@@ -265,26 +247,6 @@ pub fn expandAgentEnv(allocator: Allocator, agent: AgentServerConfig) ![]const E
 }
 
 // =============================================================================
-// Feature Checks
-// =============================================================================
-
-/// Check if MCP features are enabled in config.
-/// Returns false if config cannot be loaded.
-pub fn isMcpEnabled(allocator: Allocator) bool {
-    const config = load(allocator) catch return false;
-    defer freeConfig(allocator, config);
-    return config.experimental.mcp_enabled;
-}
-
-/// Check if ACP features are enabled in config.
-/// Returns false if config cannot be loaded.
-pub fn isAcpEnabled(allocator: Allocator) bool {
-    const config = load(allocator) catch return false;
-    defer freeConfig(allocator, config);
-    return config.experimental.acp_enabled;
-}
-
-// =============================================================================
 // Agent Configuration Helpers
 // =============================================================================
 
@@ -361,46 +323,19 @@ pub const freeAgents = freeAgentServers;
 // Tests
 // =============================================================================
 
-test "experimental features default to false" {
-    const config = Config{};
-    try std.testing.expectEqual(false, config.experimental.mcp_enabled);
-    try std.testing.expectEqual(false, config.experimental.acp_enabled);
-}
-
-test "parse experimental config from json" {
+test "parse agent_panel_side config from json" {
     const allocator = std.testing.allocator;
 
     const json =
         \\{
-        \\  "experimental": {
-        \\    "mcp_enabled": true,
-        \\    "acp_enabled": true
-        \\  }
+        \\  "agent_panel_side": "right"
         \\}
     ;
 
     const config = try parseConfig(allocator, json);
     defer freeConfig(allocator, config);
 
-    try std.testing.expectEqual(true, config.experimental.mcp_enabled);
-    try std.testing.expectEqual(true, config.experimental.acp_enabled);
-}
-
-test "parse config without experimental section uses defaults" {
-    const allocator = std.testing.allocator;
-
-    const json =
-        \\{
-        \\  "agent_panel_side": "left"
-        \\}
-    ;
-
-    const config = try parseConfig(allocator, json);
-    defer freeConfig(allocator, config);
-
-    try std.testing.expectEqual(false, config.experimental.mcp_enabled);
-    try std.testing.expectEqual(false, config.experimental.acp_enabled);
-    try std.testing.expectEqual(Config.AgentPanelSide.left, config.agent_panel_side);
+    try std.testing.expectEqual(Config.AgentPanelSide.right, config.agent_panel_side);
 }
 
 test "parse agent_servers config from json" {

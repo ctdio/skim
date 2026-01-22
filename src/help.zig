@@ -2,7 +2,6 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 
 const App = @import("app.zig").App;
-const app_config = @import("config.zig");
 const Color = @import("rendering/common.zig").Color;
 
 pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
@@ -90,34 +89,20 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
 
-    // ACP bindings (only if ACP is enabled)
-    if (app_config.isAcpEnabled(app.allocator)) {
-        const acp_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-            .{ .key = "Ctrl-e", .desc = "Toggle agent panel" },
-            .{ .key = "gY", .desc = "Yank comments to agent" },
-            .{ .key = "Ctrl-w l/h", .desc = "Focus agent/diff" },
-        };
-        for (acp_bindings) |binding| {
-            try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
-        }
+    // Agent panel bindings
+    const agent_bindings = [_]struct { key: []const u8, desc: []const u8 }{
+        .{ .key = "Ctrl-e", .desc = "Toggle agent panel" },
+        .{ .key = "gY", .desc = "Yank comments to agent" },
+        .{ .key = "Ctrl-w l/h", .desc = "Focus agent/diff" },
+    };
+    for (agent_bindings) |binding| {
+        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
 
-    // Always show refresh
+    // Refresh binding
     try content_lines.append(app.allocator, .{ .key = "r", .desc = "Refresh diff", .key_style = key_style, .desc_style = desc_style });
 
-    // MCP bindings (only if MCP is enabled)
-    if (app_config.isMcpEnabled(app.allocator)) {
-        const mcp_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-            .{ .key = "R", .desc = "Start AI review" },
-            .{ .key = "L", .desc = "Toggle review panel" },
-            .{ .key = "Ctrl-w l/h", .desc = "Focus panel/diff" },
-        };
-        for (mcp_bindings) |binding| {
-            try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
-        }
-    }
-
-    // Final bindings (always shown)
+    // Final bindings
     const final_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Ctrl-g", .desc = "Open file in $EDITOR" },
         .{ .key = "Ctrl-C x2", .desc = "Force quit" },
@@ -192,26 +177,24 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     }
     try content_lines.append(app.allocator, .{ .text = "", .style = .{} }); // Blank line
 
-    // AGENT MODE section (only if ACP is enabled)
-    if (app_config.isAcpEnabled(app.allocator)) {
-        try content_lines.append(app.allocator, .{ .text = "AGENT MODE", .style = section_style });
+    // AGENT MODE section
+    try content_lines.append(app.allocator, .{ .text = "AGENT MODE", .style = section_style });
 
-        const agent_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-            .{ .key = "Ctrl-C", .desc = "Insert: exit to normal | Normal: close panel" },
-            .{ .key = "Ctrl-e", .desc = "Close panel, return to diff" },
-            .{ .key = "Ctrl-l", .desc = "Clear message history" },
-            .{ .key = "Ctrl-d/u", .desc = "Page down/up" },
-            .{ .key = "Ctrl-t", .desc = "Toggle todo list expansion" },
-            .{ .key = "gg/G", .desc = "Scroll to top/bottom" },
-            .{ .key = "z", .desc = "Toggle full screen (normal mode)" },
-            .{ .key = "V", .desc = "Toggle diff view mode (normal mode)" },
-            .{ .key = "m", .desc = "Cycle session modes (normal mode)" },
-        };
-        for (agent_bindings) |binding| {
-            try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
-        }
-        try content_lines.append(app.allocator, .{ .text = "", .style = .{} }); // Blank line
+    const agent_mode_bindings = [_]struct { key: []const u8, desc: []const u8 }{
+        .{ .key = "Ctrl-C", .desc = "Insert: exit to normal | Normal: close panel" },
+        .{ .key = "Ctrl-e", .desc = "Close panel, return to diff" },
+        .{ .key = "Ctrl-l", .desc = "Clear message history" },
+        .{ .key = "Ctrl-d/u", .desc = "Page down/up" },
+        .{ .key = "Ctrl-t", .desc = "Toggle todo list expansion" },
+        .{ .key = "gg/G", .desc = "Scroll to top/bottom" },
+        .{ .key = "z", .desc = "Toggle full screen (normal mode)" },
+        .{ .key = "V", .desc = "Toggle diff view mode (normal mode)" },
+        .{ .key = "m", .desc = "Cycle session modes (normal mode)" },
+    };
+    for (agent_mode_bindings) |binding| {
+        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{} }); // Blank line
 
     // Footer
     try content_lines.append(app.allocator, .{ .text = "j/k or ↑↓: Scroll  |  Ctrl-d/u: Page down/up  |  g/G: Top/Bottom  |  ? or ESC: Close", .style = .{ .fg = Color.dim_gray } });

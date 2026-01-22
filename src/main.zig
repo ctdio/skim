@@ -5,7 +5,6 @@ const DiffSource = @import("git/diff.zig").DiffSource;
 const McpServer = @import("mcp/server.zig").McpServer;
 const adapter = @import("mcp/adapter.zig");
 const logging = @import("logging.zig");
-const app_config = @import("config.zig");
 const cli = @import("cli/mod.zig");
 
 /// Override std.log to use file-based logging
@@ -42,10 +41,6 @@ pub fn main() !void {
             // Legacy: `skim comment` -> `skim session comment`
             return runCommentCommand(allocator, args);
         } else if (std.mem.eql(u8, args[1], "mcp")) {
-            if (!app_config.isMcpEnabled(allocator)) {
-                printMcpDisabledMessage();
-                std.process.exit(1);
-            }
             logging.init(.mcp);
             defer logging.deinit();
             return runMcpCommand(allocator, args);
@@ -85,10 +80,6 @@ pub fn main() !void {
             return;
         } else if (std.mem.eql(u8, args[1], "agent")) {
             // `skim agent` starts the agent panel directly
-            if (!app_config.isAcpEnabled(allocator)) {
-                printAcpDisabledMessage();
-                std.process.exit(1);
-            }
             logging.init(.tui);
             defer logging.deinit();
 
@@ -249,34 +240,6 @@ fn runCommentCommand(allocator: std.mem.Allocator, args: []const []const u8) !vo
         std.debug.print("Use 'skim comment --help' for usage.\n", .{});
         std.process.exit(1);
     }
-}
-
-fn printMcpDisabledMessage() void {
-    std.debug.print(
-        \\MCP features are experimental and disabled by default.
-        \\
-        \\To enable, add to ~/.skim/config.json:
-        \\  {{
-        \\    "experimental": {{
-        \\      "mcp_enabled": true
-        \\    }}
-        \\  }}
-        \\
-    , .{});
-}
-
-fn printAcpDisabledMessage() void {
-    std.debug.print(
-        \\ACP (Agent Client Protocol) is experimental and disabled by default.
-        \\
-        \\To enable, add to ~/.skim/config.json:
-        \\  {{
-        \\    "experimental": {{
-        \\      "acp_enabled": true
-        \\    }}
-        \\  }}
-        \\
-    , .{});
 }
 
 fn printMcpHelp() !void {
@@ -460,66 +423,31 @@ fn readStdinIfPiped(allocator: std.mem.Allocator) !?[]const u8 {
     return try stdin_file.readToEndAlloc(allocator, max_size);
 }
 
-fn printHelp(allocator: std.mem.Allocator) !void {
+fn printHelp(_: std.mem.Allocator) !void {
     var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
     defer file_writer.interface.flush() catch {};
     const stdout = &file_writer.interface;
 
-    const mcp_enabled = app_config.isMcpEnabled(allocator);
-    const acp_enabled = app_config.isAcpEnabled(allocator);
-
-    // Base usage
     try stdout.writeAll(
         \\skim
         \\
         \\USAGE:
         \\    skim [OPTIONS] [<ref> | <ref1> <ref2> | <ref1>..<ref2> | <ref1>...<ref2>]
         \\    skim diff [OPTIONS] [<refs>]
-        \\
-    );
-
-    // Experimental subcommands in usage
-    if (acp_enabled) {
-        try stdout.writeAll("    skim agent\n");
-    }
-    if (mcp_enabled) {
-        try stdout.writeAll(
-            \\    skim mcp
-            \\
-        );
-    }
-
-    // Subcommands section
-    try stdout.writeAll(
+        \\    skim agent
+        \\    skim mcp
         \\
         \\SUBCOMMANDS:
         \\    diff               Review diffs (same as running skim directly)
         \\    sessions           List running skim sessions
         \\    context            Get diff context from a running session
         \\    comment            Manage comments in a running session
-        \\
-    );
-    if (acp_enabled) {
-        try stdout.writeAll("    agent              Start the AI agent panel directly (ACP mode)\n");
-    }
-    if (mcp_enabled) {
-        try stdout.writeAll(
-            \\    mcp                Run as MCP adapter (for Claude Desktop, Cursor, etc.)
-            \\
-        );
-    }
-
-    // Options
-    try stdout.writeAll(
+        \\    agent              Start the AI agent panel directly (ACP mode)
+        \\    mcp                Run as MCP adapter (for Claude Desktop, Cursor, etc.)
         \\
         \\OPTIONS:
         \\    --staged, --cached    Review staged changes (or staged vs. ref if ref provided)
-        \\
-    );
-    if (mcp_enabled) {
-        try stdout.writeAll("    --connect <port>      Override MCP client port (default: 9999, auto-connects)\n");
-    }
-    try stdout.writeAll(
+        \\    --connect <port>      Override MCP client port (default: 9999, auto-connects)
         \\    -h, --help            Print this help message
         \\    -v, --version         Print version information
         \\
@@ -542,25 +470,13 @@ fn printHelp(allocator: std.mem.Allocator) !void {
         \\    skim main..feature        # Same as above
         \\    skim main...feature       # Changes on feature since diverging from main
         \\    skim HEAD~5               # Working dir vs. 5 commits ago
+        \\    skim agent                # Open AI agent panel (full-screen)
+        \\
+        \\AI INTEGRATION:
+        \\    skim agent                # Open AI agent panel (full-screen)
+        \\    skim mcp                  # Run MCP adapter (for agent configs)
         \\
     );
-    if (acp_enabled) {
-        try stdout.writeAll("    skim agent                # Open AI agent directly\n");
-    }
-
-    // AI integration section (only if any experimental feature is enabled)
-    if (acp_enabled or mcp_enabled) {
-        try stdout.writeAll("\nAI INTEGRATION:\n");
-        if (acp_enabled) {
-            try stdout.writeAll("    skim agent                # Open AI agent panel (full-screen)\n");
-        }
-        if (mcp_enabled) {
-            try stdout.writeAll(
-                \\    skim mcp                  # Run MCP adapter (for agent configs)
-                \\
-            );
-        }
-    }
 
     try stdout.writeAll(
         \\

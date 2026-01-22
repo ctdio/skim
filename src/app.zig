@@ -918,11 +918,9 @@ pub const App = struct {
         defer loop.stop();
 
         // Start TUI server for CLI/MCP connections
-        if (app_config.isMcpEnabled(self.allocator)) {
-            self.startTuiServer() catch |err| {
-                std.log.warn("Failed to start TUI server: {any}", .{err});
-            };
-        }
+        self.startTuiServer() catch |err| {
+            std.log.warn("Failed to start TUI server: {any}", .{err});
+        };
 
         // If agent-only mode, start with agent panel open and in full-screen mode
         if (self.agent_only) {
@@ -1495,12 +1493,6 @@ pub const App = struct {
 
     /// Toggle the agent chat panel visibility and focus
     pub fn toggleAgentPanel(self: *App) !void {
-        // Check if ACP is enabled
-        if (!app_config.isAcpEnabled(self.allocator)) {
-            self.showStatusMessage("ACP is experimental. Enable in ~/.skim/config.json");
-            return;
-        }
-
         // Initialize tab manager and ensure we have at least one tab
         const tm = try self.ensureTabManager();
         const tab = try tm.ensureTab();
@@ -2158,11 +2150,6 @@ pub const App = struct {
 
     /// Yank all comments and send to agent panel input
     pub fn yankCommentsToAgent(self: *App) !void {
-        // Check if ACP is enabled
-        if (!app_config.isAcpEnabled(self.allocator)) {
-            return;
-        }
-
         // Generate export with context (10 lines before, 10 lines after for LLM context)
         const output = try self.state.comment_store.exportWithContext(
             self.allocator,
@@ -4090,12 +4077,6 @@ pub const App = struct {
     /// Start an ACP agent session (non-blocking)
     /// If agents are configured, may show selection menu first.
     pub fn startAcpSession(self: *App) !void {
-        // Check if ACP is enabled
-        if (!app_config.isAcpEnabled(self.allocator)) {
-            self.showStatusMessage("ACP is experimental. Enable in ~/.skim/config.json");
-            return;
-        }
-
         std.log.info("ACP: startAcpSession called", .{});
 
         // Check if connection already in progress

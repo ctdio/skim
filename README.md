@@ -15,7 +15,7 @@ A keyboard-driven TUI for code reviews built in Zig.
 - Full git diff compatibility (working dir, staged, branch comparisons)
 - Comment system with export to clipboard ('y' for current, 'Y' for all)
 - Editor integration (Ctrl-g opens file at line in $EDITOR)
-- AI agent panel with `@file` fuzzy search for embedding file contents (experimental)
+- AI agent panel with `@file` fuzzy search for embedding file contents
 
 ## Installation
 
@@ -187,56 +187,20 @@ Edit comments on specific lines:
 | `ESC` | Cancel and return to NORMAL mode |
 | `Backspace` | Delete character before cursor |
 
-## Experimental Features
-
-Experimental AI agent integration features are **disabled by default**. Interfaces are **not stable** and may change or be removed.
-
-> **⚠️ Warning:** Do not depend on these experimental interfaces.
-
-### Enabling Experimental Features
-
-Create or edit `~/.skim/config.json`:
-
-```json
-{
-  "experimental": {
-    "mcp_enabled": true,
-    "acp_enabled": true
-  }
-}
-```
-
-| Feature | Description |
-|---------|-------------|
-| `mcp_enabled` | MCP daemon and adapter for AI agent integration |
-| `acp_enabled` | Agent panel (`,a` key), ACP protocol integration |
-
-When disabled:
-- Related keybindings are inactive
-- Commands don't appear in the command palette
-- Help screen only shows stable keybindings
-
----
-
-## AI Agent Integration (Experimental)
-
-> **Note:** This feature requires `"mcp_enabled": true` in your config. See [Experimental Features](#experimental-features).
+## AI Agent Integration
 
 MCP (Model Context Protocol) server for AI agent code reviews. Agents can read diffs, add comments, and see results in real-time.
 
 ### Quick Start for AI Reviews
 
 ```bash
-# 1. Enable MCP in config (~/.skim/config.json)
-# { "experimental": { "mcp_enabled": true } }
-
-# 2. Start the skim daemon (runs in background)
+# 1. Start the skim daemon (runs in background)
 skim daemon start
 
-# 3. Open your diff in skim
+# 2. Open your diff in skim
 skim --staged
 
-# 4. Use MCP tools from your AI agent to interact with skim
+# 3. Use MCP tools from your AI agent to interact with skim
 ```
 
 ### Daemon Commands
@@ -349,9 +313,7 @@ Skim writes logs to `~/.skim/`:
 
 ---
 
-## Agent Panel (Experimental)
-
-> **Note:** This feature requires `"acp_enabled": true` in your config. See [Experimental Features](#experimental-features).
+## Agent Panel
 
 Built-in chat interface for AI agents. Uses ACP (Agent Client Protocol) to communicate with agents like Claude Code.
 
@@ -360,31 +322,27 @@ Built-in chat interface for AI agents. Uses ACP (Agent Client Protocol) to commu
 ```bash
 # 1. Configure agents in ~/.skim/config.json:
 # {
-#   "experimental": { "acp_enabled": true },
-#   "agents": [
-#     {
-#       "name": "Claude Code",
-#       "command": "claude-code-acp",
-#       "default": true,
-#       "model": "sonnet"
+#   "agent_servers": {
+#     "Claude Code": {
+#       "command": "claude",
+#       "args": ["acp"],
+#       "skim": { "default": true, "model": "sonnet" }
 #     }
-#   ]
+#   }
 # }
 
 # 2. Open your diff in skim
 skim --staged
 
-# 3. Press ',a' (comma then 'a') to toggle the agent panel
+# 3. Press Ctrl-e to toggle the agent panel
 ```
 
 ### Agent Panel Keybindings
 
-> These keybindings only work when `acp_enabled` is set to `true`.
-
 | Key | Action |
 |-----|--------|
-| `,a` | Toggle agent panel visibility |
-| `,d` | Focus diff (close agent panel) |
+| `Ctrl-e` | Toggle agent panel visibility |
+| `Ctrl-w h/l` | Focus diff/agent panel |
 | `Ctrl-C` | In insert mode: exit to normal mode. In normal mode: close panel |
 | `Ctrl-C` × 2 | In normal mode (diff view): force quit |
 
@@ -412,26 +370,25 @@ Configure agents and panel settings in `~/.skim/config.json`:
 
 ```json
 {
-  "experimental": {
-    "acp_enabled": true
-  },
   "agent_panel_side": "right",
-  "agents": [
-    {
-      "name": "Claude Code",
-      "command": "claude-code-acp",
-      "api_key_env": "ANTHROPIC_API_KEY",
-      "default": true,
-      "args": ["--verbose"],
-      "model": "sonnet",
-      "mode": "plan"
+  "agent_servers": {
+    "Claude Code": {
+      "command": "claude",
+      "args": ["acp"],
+      "env": {
+        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"
+      },
+      "skim": {
+        "default": true,
+        "model": "sonnet",
+        "mode": "plan"
+      }
     },
-    {
-      "name": "Codex",
-      "command": "codex-acp",
-      "api_key_env": "OPENAI_API_KEY"
+    "Codex": {
+      "command": "codex",
+      "args": ["acp"]
     }
-  ]
+  }
 }
 ```
 
@@ -439,13 +396,12 @@ Configure agents and panel settings in `~/.skim/config.json`:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | Yes | Display name shown in selection menu |
 | `command` | string | Yes | CLI command to spawn the agent |
-| `api_key_env` | string | No | Environment variable containing API key (for status display) |
-| `default` | bool | No | Auto-connect to this agent (default: `false`) |
 | `args` | string[] | No | Additional CLI arguments to pass to the agent |
-| `model` | string | No | AI model to use (e.g., `"sonnet"`, `"opus"`) |
-| `mode` | string | No | Agent session mode (e.g., `"plan"`, `"code"`, `"bypassPermissions"`) |
+| `env` | object | No | Environment variables (supports `${VAR}` expansion) |
+| `skim.default` | bool | No | Auto-connect to this agent (default: `false`) |
+| `skim.model` | string | No | AI model to use (e.g., `"sonnet"`, `"opus"`) |
+| `skim.mode` | string | No | Agent session mode (e.g., `"plan"`, `"code"`) |
 
 #### Agent Selection Behavior
 
@@ -464,43 +420,10 @@ You can switch agents anytime via the command palette (`Ctrl-p`, then `>Switch A
 
 ### ACP Protocol
 
-The Agent Client Protocol (ACP) is an experimental protocol for communication between skim and AI coding agents. The protocol and its implementation are subject to change.
+The Agent Client Protocol (ACP) enables communication between skim and AI coding agents via stdio transport.
 
 **Supported agents:**
-- Agents implementing the ACP stdio transport (e.g., `claude-code-acp`, `codex-acp`, `gemini --experimental-acp`)
-
----
-
-## Releasing
-
-Releases are automated via GitHub Actions. When a version tag is pushed, binaries are built for all platforms and uploaded to GitHub Releases.
-
-### Creating a Release
-
-```bash
-# 1. Update version if needed (e.g., in README or other docs)
-# 2. Commit any final changes
-git add -A && git commit -m "Prepare v0.1.0 release"
-
-# 3. Create and push the tag
-git tag v0.1.0
-git push origin main --tags
-```
-
-The workflow will:
-1. Build optimized binaries for macOS (arm64, x86_64) and Linux (x86_64, arm64)
-2. Create tarballs with the binary, README, and LICENSE
-3. Generate SHA256 checksums
-4. Create a GitHub Release with auto-generated release notes
-
-### Release Artifacts
-
-Each release includes:
-- `skim-macos-arm64.tar.gz` - macOS Apple Silicon
-- `skim-macos-x86_64.tar.gz` - macOS Intel
-- `skim-linux-x86_64.tar.gz` - Linux x86_64
-- `skim-linux-arm64.tar.gz` - Linux ARM64
-- `checksums.txt` - SHA256 checksums for verification
+- Agents implementing the ACP stdio transport (e.g., `claude acp`, `codex acp`)
 
 ---
 
