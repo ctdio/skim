@@ -880,6 +880,23 @@ pub const AgentState = struct {
 
     /// Add a diff message (from tool_call with edit content)
     pub fn addDiffMessage(self: *AgentState, title: []const u8, path: []const u8, old_text: []const u8, new_text: []const u8) !void {
+        if (self.messages.items.len > 0) {
+            const last = &self.messages.items[self.messages.items.len - 1];
+            if (last.role == .diff and last.diff_path != null and last.diff_old != null and last.diff_new != null) {
+                if (std.mem.eql(u8, last.diff_path.?, path) and
+                    std.mem.eql(u8, last.diff_old.?, old_text) and
+                    std.mem.eql(u8, last.diff_new.?, new_text))
+                {
+                    if (!std.mem.eql(u8, last.content, title)) {
+                        const title_copy = try self.allocator.dupe(u8, title);
+                        self.allocator.free(last.content);
+                        last.content = title_copy;
+                    }
+                    return;
+                }
+            }
+        }
+
         const owned_title = try self.allocator.dupe(u8, title);
         errdefer self.allocator.free(owned_title);
 
@@ -1866,6 +1883,23 @@ test "AgentState append creates new message if last is user" {
 
     try std.testing.expectEqual(@as(usize, 2), state.messageCount());
     try std.testing.expectEqual(Message.Role.agent, state.messages.items[1].role);
+}
+
+test "AgentState addDiffMessage dedupes consecutive diffs" {
+    const allocator = std.testing.allocator;
+
+    var state = AgentState.init(allocator, .right);
+    defer state.deinit();
+
+    try state.addDiffMessage("Edit", "file.txt", "old", "new");
+    try state.addDiffMessage("Edit file.txt", "file.txt", "old", "new");
+
+    try std.testing.expectEqual(@as(usize, 1), state.messageCount());
+    try std.testing.expectEqual(Message.Role.diff, state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Edit file.txt", state.messages.items[0].content);
+    try std.testing.expectEqualStrings("file.txt", state.messages.items[0].diff_path.?);
+    try std.testing.expectEqualStrings("old", state.messages.items[0].diff_old.?);
+    try std.testing.expectEqualStrings("new", state.messages.items[0].diff_new.?);
 }
 
 test "PanelSide fromString" {
