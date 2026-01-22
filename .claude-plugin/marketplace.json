@@ -6,8 +6,9 @@
   "plugins": [
     {
       "name": "skim",
-      "source": "./.",
-      "description": "Keyboard-driven TUI for code reviews with AI integration"
+      "source": "./",
+      "description": "Keyboard-driven TUI for code reviews with AI integration",
+      "version": "0.1.0"
     }
   ]
 }
