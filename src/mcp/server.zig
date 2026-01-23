@@ -74,7 +74,7 @@ pub const McpServer = struct {
         // Set non-blocking mode for accept
         if (self.tcp_listener) |listener| {
             const flags = try posix.fcntl(listener.stream.handle, posix.F.GETFL, @as(usize, 0));
-            const O_NONBLOCK: usize = 0x0004; // darwin/macOS
+            const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
             const new_flags = flags | O_NONBLOCK;
             _ = try posix.fcntl(listener.stream.handle, posix.F.SETFL, new_flags);
         }
@@ -137,7 +137,7 @@ pub const McpServer = struct {
 
             // Set non-blocking mode on client socket
             const flags = try posix.fcntl(conn.stream.handle, posix.F.GETFL, @as(usize, 0));
-            const O_NONBLOCK: usize = 0x0004;
+            const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
             const new_flags = flags | O_NONBLOCK;
             _ = try posix.fcntl(conn.stream.handle, posix.F.SETFL, new_flags);
 
@@ -363,7 +363,7 @@ pub const McpServer = struct {
         _ = self;
         const stdin_fd = std.fs.File.stdin().handle;
         const flags = try posix.fcntl(stdin_fd, posix.F.GETFL, @as(usize, 0));
-        const O_NONBLOCK: usize = 0x0004; // darwin/macOS
+        const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
         const new_flags: usize = if (non_blocking)
             flags | O_NONBLOCK
         else

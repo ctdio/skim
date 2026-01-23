@@ -663,13 +663,13 @@ fn parseSessionId(args: ?std.json.Value) ?posix.pid_t {
 
 fn setNonBlocking(handle: posix.fd_t) !void {
     const flags = try posix.fcntl(handle, posix.F.GETFL, @as(usize, 0));
-    const O_NONBLOCK: usize = 0x0004; // darwin/macOS
+    const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
     _ = try posix.fcntl(handle, posix.F.SETFL, flags | O_NONBLOCK);
 }
 
 fn setBlocking(handle: posix.fd_t) !void {
     const flags = try posix.fcntl(handle, posix.F.GETFL, @as(usize, 0));
-    const O_NONBLOCK: usize = 0x0004;
+    const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
     _ = try posix.fcntl(handle, posix.F.SETFL, flags & ~O_NONBLOCK);
 }
 

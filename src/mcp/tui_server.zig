@@ -306,7 +306,8 @@ const ClientConnection = struct {
 
 fn setNonBlocking(handle: posix.fd_t) !void {
     const flags = try posix.fcntl(handle, posix.F.GETFL, @as(usize, 0));
-    const O_NONBLOCK: usize = 0x0004; // darwin/macOS
+    // Use the platform-specific O_NONBLOCK from std.posix (bitcast to u32 first, then extend)
+    const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
     _ = try posix.fcntl(handle, posix.F.SETFL, flags | O_NONBLOCK);
 }
 
