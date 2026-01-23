@@ -596,8 +596,10 @@ pub const App = struct {
             server.deinit();
         }
         // Clean up ACP connection thread and context
+        // IMPORTANT: Must join (not detach) to wait for thread to complete
+        // before freeing resources it depends on (manager, transport, etc.)
         if (self.acp_connect_thread) |thread| {
-            thread.detach();
+            thread.join();
             self.acp_connect_thread = null;
         }
         if (self.acp_connect_ctx) |ctx| {
