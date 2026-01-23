@@ -1,12 +1,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const InputEditor = @import("input_editor.zig").InputEditor;
-const ChatLineMap = @import("chat_line_map.zig").ChatLineMap;
+const chat_line_map = @import("chat_line_map.zig");
+const ChatLineMap = chat_line_map.ChatLineMap;
+const SyntaxHighlighter = chat_line_map.SyntaxHighlighter;
 const protocol = @import("../acp/protocol.zig");
 const git_files = @import("../git/files.zig");
 const command_palette = @import("command_palette.zig");
 
 /// Maximum number of slash commands visible in menu at once
+/// (test edit for diff rendering)
 pub const MAX_SLASH_MENU_VISIBLE: usize = 12;
 
 /// Local slash command definition (handled by skim, not sent to agent)
@@ -652,7 +655,7 @@ pub const AgentState = struct {
     shell_cmd_counter: u32,
     // Command palette state (for ':' command menu)
     cmd_palette: command_palette.AgentCommandPaletteState,
-    // Help overlay state
+    // Help overlay state (toggled with '?' key)
     help_visible: bool,
     help_scroll_offset: usize,
 
@@ -1239,7 +1242,8 @@ pub const AgentState = struct {
     /// Returns the line map for iteration
     /// Uses incremental updates when possible to avoid O(N) rebuilds
     /// Throttles updates to ~30fps to keep UI responsive during streaming
-    pub fn ensureLineMap(self: *AgentState, wrap_width: usize) !*const ChatLineMap {
+    /// Accepts optional SyntaxHighlighter for diff syntax highlighting
+    pub fn ensureLineMap(self: *AgentState, wrap_width: usize, highlighter: ?*SyntaxHighlighter) !*const ChatLineMap {
         const width_or_mode_changed = self.line_map.needsRebuild(wrap_width, self.diff_view_mode);
         const needs_update = self.line_map_dirty or width_or_mode_changed;
 
@@ -1255,17 +1259,17 @@ pub const AgentState = struct {
 
                 if (width_or_mode_changed or prev_message_count == 0) {
                     // Width/mode changed or first build - full rebuild required
-                    try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode);
+                    try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode, highlighter);
                 } else if (message_count > prev_message_count) {
                     // New messages added - incremental add
-                    try self.line_map.updateForNewMessage(self.messages.items, wrap_width, self.diff_view_mode);
+                    try self.line_map.updateForNewMessage(self.messages.items, wrap_width, self.diff_view_mode, highlighter);
                 } else if (message_count == prev_message_count and message_count > 0) {
                     // Same message count but dirty - last message content changed (streaming)
-                    try self.line_map.updateLastMessage(self.messages.items, wrap_width, self.diff_view_mode);
+                    try self.line_map.updateLastMessage(self.messages.items, wrap_width, self.diff_view_mode, highlighter);
                 }
                 // If message_count < prev_message_count, messages were cleared - rebuild
                 else if (message_count < prev_message_count) {
-                    try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode);
+                    try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode, highlighter);
                 }
 
                 self.line_map_dirty = false;

@@ -98,6 +98,10 @@ pub const AcpManager = struct {
     // HashMap for O(1) tool_call_id lookups (maps tool_call_id -> index in pending_messages)
     tool_call_id_to_idx: std.StringHashMapUnmanaged(usize),
 
+    // Set of seen diff keys (path + new_text hash) to deduplicate diffs
+    // ACP sends diffs multiple times during tool execution lifecycle
+    seen_diff_keys: std.StringHashMapUnmanaged(void),
+
     const PendingTerminalWait = struct {
         request_id: codec.JsonRpcId,
         terminal_id: []const u8, // Owned copy
@@ -277,6 +281,7 @@ pub const AcpManager = struct {
             .tool_terminal_map = .{},
             .pending_terminal_waits = .{},
             .tool_call_id_to_idx = .{},
+            .seen_diff_keys = .{},
         };
     }
 
@@ -582,6 +587,14 @@ pub const AcpManager = struct {
             std.log.info("ACP Manager: queued prompt (agent busy), queue size: {d}", .{self.queued_prompts.items.len});
             return;
         }
+
+        // Clear seen_diff_keys for new turn - each prompt/response cycle starts fresh
+        // This ensures diffs from previous turns don't block new diffs to same files
+        var diff_key_iter = self.seen_diff_keys.keyIterator();
+        while (diff_key_iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.seen_diff_keys.clearRetainingCapacity();
 
         // Send prompt asynchronously
         const request_id = acp.sendPromptAsync(prompt_text) catch |err| {
@@ -1862,6 +1875,13 @@ pub const AcpManager = struct {
 
         // Clean up tool_call_id index (keys are owned by pending_messages, already freed above)
         self.tool_call_id_to_idx.deinit(self.allocator);
+
+        // Clean up seen_diff_keys (keys are owned by us)
+        var diff_key_iter = self.seen_diff_keys.keyIterator();
+        while (diff_key_iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.seen_diff_keys.deinit(self.allocator);
     }
 
     // =========================================================================
@@ -1935,6 +1955,27 @@ pub const AcpManager = struct {
                 if (block == .diff) {
                     has_diff = true;
                     const diff = block.diff;
+
+                    // Debug: log incoming diffs to understand duplication
+                    std.log.debug("DIFF RECEIVED: path={s} old_len={d} new_len={d}", .{
+                        diff.path,
+                        diff.old_text.len,
+                        diff.new_text.len,
+                    });
+
+                    // Deduplicate by PATH only within a turn
+                    // ACP sends the same edit multiple times with different context windows
+                    // We only want the first one (smallest context, most focused)
+                    if (self.seen_diff_keys.contains(diff.path)) {
+                        std.log.debug("DIFF SKIPPED (duplicate path): path={s}", .{diff.path});
+                        continue;
+                    }
+                    // Store just the path as the key (owned copy) - freed in deinit or on prompt
+                    const key = self.allocator.dupe(u8, diff.path) catch continue;
+                    self.seen_diff_keys.put(self.allocator, key, {}) catch {
+                        self.allocator.free(key);
+                        continue;
+                    };
 
                     // Create diff message
                     const title_copy = self.allocator.dupe(u8, title) catch continue;

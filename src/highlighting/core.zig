@@ -497,6 +497,14 @@ pub const SyntaxHighlighter = struct {
             }
         }
 
+        // Sort highlights by start_byte to ensure they're processed in order
+        // This is critical for correct rendering - unsorted highlights cause garbled output
+        std.mem.sort(Highlight, highlights.items, {}, struct {
+            fn lessThan(_: void, a: Highlight, b: Highlight) bool {
+                return a.start_byte < b.start_byte;
+            }
+        }.lessThan);
+
         return highlights.toOwnedSlice(self.allocator);
     }
 };

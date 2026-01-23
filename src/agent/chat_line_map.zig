@@ -12,7 +12,17 @@ const Color = rendering_common.Color;
 const rendering_utils = @import("../rendering/utils.zig");
 const RenderUtils = rendering_utils.RenderUtils;
 
+const highlighting = @import("../highlighting/core.zig");
+pub const Highlight = highlighting.Highlight;
+pub const SyntaxHighlighter = highlighting.SyntaxHighlighter;
+
 const Allocator = std.mem.Allocator;
+
+// Test constant for treesitter highlighting verification
+const TEST_HIGHLIGHT_VALUE: u32 = 42;
+
+// Maximum number of diff lines to display before collapsing
+const MAX_VISIBLE_DIFF_LINES: usize = 500;
 
 // =============================================================================
 // Chat Line Types
@@ -83,6 +93,8 @@ pub const ChatLineRecord = struct {
     diff_line_num_str: ?[]const u8 = null, // Pre-formatted line number string (owned)
     diff_sign: ?u8 = null,
     diff_kind: ?DiffLine.Kind = null,
+    // Syntax highlighting for unified diff (byte offsets into text)
+    diff_highlights: ?[]const Highlight = null,
     // Side-by-side diff fields
     sbs_left_num: ?usize = null,
     sbs_left_num_str: ?[]const u8 = null, // Pre-formatted (owned)
@@ -93,6 +105,9 @@ pub const ChatLineRecord = struct {
     sbs_right_content: ?[]const u8 = null,
     sbs_right_kind: ?SideLineKind = null,
     sbs_left_width: usize = 0,
+    // Syntax highlighting for side-by-side diff (byte offsets into respective content)
+    sbs_left_highlights: ?[]const Highlight = null,
+    sbs_right_highlights: ?[]const Highlight = null,
 };
 
 pub const SideLineKind = enum { context, add, delete, empty };
@@ -105,24 +120,28 @@ pub const SideLineKind = enum { context, add, delete, empty };
 pub const ChatLineMap = struct {
     records: std.ArrayList(ChatLineRecord),
     strings: std.ArrayList([]const u8), // Owned strings to free on deinit
+    highlights: std.ArrayList([]const Highlight), // Owned highlight arrays to free on deinit
     allocator: Allocator,
     wrap_width: usize, // Width used for wrapping (rebuild if changed)
     message_count: usize, // Number of messages processed (for incremental updates)
     diff_view_mode: AgentState.DiffViewMode, // Current view mode
     last_msg_start_idx: usize, // Cached index where last message starts (for O(1) streaming updates)
     last_msg_strings_start: usize, // Cached index where last message's strings start (for efficient cleanup)
+    last_msg_highlights_start: usize, // Cached index where last message's highlights start
 
     /// Initialize an empty chat line map
     pub fn init(allocator: Allocator) ChatLineMap {
         var self = ChatLineMap{
             .records = .{},
             .strings = .{},
+            .highlights = .{},
             .allocator = allocator,
             .wrap_width = 0,
             .message_count = 0,
             .diff_view_mode = .unified,
             .last_msg_start_idx = 0,
             .last_msg_strings_start = 0,
+            .last_msg_highlights_start = 0,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message
@@ -140,7 +159,21 @@ pub const ChatLineMap = struct {
             self.allocator.free(s);
         }
         self.strings.deinit(self.allocator);
+        // Free owned highlight arrays
+        self.freeHighlights(0);
+        self.highlights.deinit(self.allocator);
         self.records.deinit(self.allocator);
+    }
+
+    /// Free highlight arrays starting from index
+    fn freeHighlights(self: *ChatLineMap, start_idx: usize) void {
+        for (self.highlights.items[start_idx..]) |hl_array| {
+            // Free each category string in the highlight
+            for (hl_array) |h| {
+                self.allocator.free(h.category);
+            }
+            self.allocator.free(hl_array);
+        }
     }
 
     /// Build or rebuild the line map from messages
@@ -149,12 +182,15 @@ pub const ChatLineMap = struct {
         messages: []const Message,
         wrap_width: usize,
         diff_view_mode: AgentState.DiffViewMode,
+        highlighter: ?*SyntaxHighlighter,
     ) !void {
         // Clear existing data
         for (self.strings.items) |s| {
             self.allocator.free(s);
         }
         self.strings.clearRetainingCapacity();
+        self.freeHighlights(0);
+        self.highlights.clearRetainingCapacity();
         self.records.clearRetainingCapacity();
 
         self.wrap_width = wrap_width;
@@ -162,6 +198,7 @@ pub const ChatLineMap = struct {
         self.diff_view_mode = diff_view_mode;
         self.last_msg_start_idx = 0;
         self.last_msg_strings_start = 0;
+        self.last_msg_highlights_start = 0;
 
         // Pre-allocate capacity to reduce reallocations during build
         // Estimate: ~10 lines per message on average (header + content lines + spacing)
@@ -178,6 +215,7 @@ pub const ChatLineMap = struct {
             if (msg_idx == messages.len - 1) {
                 self.last_msg_start_idx = self.records.items.len;
                 self.last_msg_strings_start = self.strings.items.len;
+                self.last_msg_highlights_start = self.highlights.items.len;
             }
 
             // Handle different message types
@@ -197,7 +235,7 @@ pub const ChatLineMap = struct {
 
                     // Diff content
                     if (msg.diff_path != null and msg.diff_old != null and msg.diff_new != null) {
-                        try self.addDiffContent(&global_line, msg_idx, msg, wrap_width, diff_view_mode);
+                        try self.addDiffContent(&global_line, msg_idx, msg, wrap_width, diff_view_mode, highlighter);
                     }
                 },
                 .plan_snapshot => {
@@ -246,10 +284,11 @@ pub const ChatLineMap = struct {
         messages: []const Message,
         wrap_width: usize,
         diff_view_mode: AgentState.DiffViewMode,
+        highlighter: ?*SyntaxHighlighter,
     ) !void {
         // If width changed or view mode changed, full rebuild
         if (self.needsRebuild(wrap_width, diff_view_mode)) {
-            try self.build(messages, wrap_width, diff_view_mode);
+            try self.build(messages, wrap_width, diff_view_mode, highlighter);
             return;
         }
 
@@ -269,6 +308,7 @@ pub const ChatLineMap = struct {
                 // Track where the last message starts (for O(1) streaming updates)
                 self.last_msg_start_idx = self.records.items.len;
                 self.last_msg_strings_start = self.strings.items.len;
+                self.last_msg_highlights_start = self.highlights.items.len;
 
                 switch (msg.role) {
                     .tool => {
@@ -280,7 +320,7 @@ pub const ChatLineMap = struct {
                     .diff => {
                         try self.addRoleHeader(&global_line, msg_idx, msg.role);
                         if (msg.diff_path != null and msg.diff_old != null and msg.diff_new != null) {
-                            try self.addDiffContent(&global_line, msg_idx, msg.*, wrap_width, diff_view_mode);
+                            try self.addDiffContent(&global_line, msg_idx, msg.*, wrap_width, diff_view_mode, highlighter);
                         }
                     },
                     .plan_snapshot => {
@@ -322,12 +362,13 @@ pub const ChatLineMap = struct {
         messages: []const Message,
         wrap_width: usize,
         diff_view_mode: AgentState.DiffViewMode,
+        highlighter: ?*SyntaxHighlighter,
     ) !void {
         if (messages.len == 0) return;
 
         // If width changed, full rebuild
         if (self.needsRebuild(wrap_width, diff_view_mode)) {
-            try self.build(messages, wrap_width, diff_view_mode);
+            try self.build(messages, wrap_width, diff_view_mode, highlighter);
             return;
         }
 
@@ -346,6 +387,13 @@ pub const ChatLineMap = struct {
                     self.allocator.free(s);
                 }
                 self.strings.shrinkRetainingCapacity(strings_start);
+            }
+
+            // Free highlights added by the last message
+            const highlights_start = self.last_msg_highlights_start;
+            if (highlights_start < self.highlights.items.len) {
+                self.freeHighlights(highlights_start);
+                self.highlights.shrinkRetainingCapacity(highlights_start);
             }
 
             // Shrink records to remove last message
@@ -367,7 +415,7 @@ pub const ChatLineMap = struct {
                 .diff => {
                     try self.addRoleHeader(&global_line, last_msg_idx, msg.role);
                     if (msg.diff_path != null and msg.diff_old != null and msg.diff_new != null) {
-                        try self.addDiffContent(&global_line, last_msg_idx, msg.*, wrap_width, diff_view_mode);
+                        try self.addDiffContent(&global_line, last_msg_idx, msg.*, wrap_width, diff_view_mode, highlighter);
                     }
                 },
                 .plan_snapshot => {
@@ -397,7 +445,7 @@ pub const ChatLineMap = struct {
             });
         } else {
             // Message not found, rebuild
-            try self.build(messages, wrap_width, diff_view_mode);
+            try self.build(messages, wrap_width, diff_view_mode, highlighter);
         }
     }
 
@@ -907,10 +955,14 @@ pub const ChatLineMap = struct {
         msg: Message,
         wrap_width: usize,
         view_mode: AgentState.DiffViewMode,
+        highlighter: ?*SyntaxHighlighter,
     ) !void {
         const path = msg.diff_path orelse return;
         const old_text = msg.diff_old orelse return;
         const new_text = msg.diff_new orelse return;
+
+        // Highlighter is stored for use when rendering diff lines
+        const hl = highlighter;
 
         // Try to find starting line number:
         // 1. First try parsing hunk header from message content (e.g., "@@ -150,3 +150,26 @@")
@@ -1051,8 +1103,8 @@ pub const ChatLineMap = struct {
                             }
                         }
 
-                        // Render this line
-                        try self.addUnifiedDiffLine(global_line, msg_idx, line_idx, diff_result.lines[line_idx]);
+                        // Render this line with syntax highlighting
+                        try self.addUnifiedDiffLine(global_line, msg_idx, line_idx, diff_result.lines[line_idx], path, hl);
                         prev_shown = line_idx;
                     }
                     line_idx += 1;
@@ -1090,19 +1142,21 @@ pub const ChatLineMap = struct {
                 }
 
                 if (lines_to_show.items.len > 0) {
-                    try self.addSideBySideDiffLines(global_line, msg_idx, lines_to_show.items, wrap_width);
+                    try self.addSideBySideDiffLines(global_line, msg_idx, lines_to_show.items, wrap_width, path, hl);
                 }
             },
         }
     }
 
-    /// Add a single unified diff line
+    /// Add a single unified diff line with optional syntax highlighting
     fn addUnifiedDiffLine(
         self: *ChatLineMap,
         global_line: *usize,
         msg_idx: usize,
         line_idx: usize,
         diff_line: DiffLine,
+        file_path: []const u8,
+        highlighter: ?*SyntaxHighlighter,
     ) !void {
         const line_num: ?usize = switch (diff_line.kind) {
             .context, .delete => diff_line.old_line_num,
@@ -1118,6 +1172,17 @@ pub const ChatLineMap = struct {
         // Copy content since diff_result will be freed
         const content_copy = try self.allocator.dupe(u8, diff_line.content);
         try self.strings.append(self.allocator, content_copy);
+
+        // Generate per-line syntax highlights if highlighter is available
+        var line_highlights: ?[]const Highlight = null;
+        if (highlighter) |hl| {
+            if (diff_line.content.len > 0) {
+                line_highlights = hl.highlightFile(file_path, diff_line.content) catch null;
+                if (line_highlights) |h| {
+                    try self.highlights.append(self.allocator, h);
+                }
+            }
+        }
 
         // Pre-format line number string (owned) to avoid buffer reuse issues in render
         const line_num_str: ?[]const u8 = if (line_num) |n| blk: {
@@ -1143,6 +1208,7 @@ pub const ChatLineMap = struct {
             .diff_line_num_str = line_num_str,
             .diff_sign = sign,
             .diff_kind = diff_line.kind,
+            .diff_highlights = line_highlights,
         });
         global_line.* += 1;
     }
@@ -1152,6 +1218,8 @@ pub const ChatLineMap = struct {
         global_line: *usize,
         msg_idx: usize,
         diff_lines: []const DiffLine,
+        file_path: []const u8,
+        highlighter: ?*SyntaxHighlighter,
     ) !void {
         for (diff_lines, 0..) |diff_line, line_idx| {
             const line_num: ?usize = switch (diff_line.kind) {
@@ -1174,6 +1242,17 @@ pub const ChatLineMap = struct {
             const content_copy = try self.allocator.dupe(u8, diff_line.content);
             try self.strings.append(self.allocator, content_copy);
 
+            // Generate per-line syntax highlights if highlighter is available
+            var line_highlights: ?[]const Highlight = null;
+            if (highlighter) |hl| {
+                if (diff_line.content.len > 0) {
+                    line_highlights = hl.highlightFile(file_path, diff_line.content) catch null;
+                    if (line_highlights) |h| {
+                        try self.highlights.append(self.allocator, h);
+                    }
+                }
+            }
+
             // Pre-format line number string (owned) to avoid buffer reuse issues in render
             const line_num_str: ?[]const u8 = if (line_num) |n| blk: {
                 const str = try std.fmt.allocPrint(self.allocator, "{d:>3}", .{n});
@@ -1192,6 +1271,7 @@ pub const ChatLineMap = struct {
                 .diff_line_num_str = line_num_str,
                 .diff_sign = sign,
                 .diff_kind = diff_line.kind,
+                .diff_highlights = line_highlights,
             });
             global_line.* += 1;
         }
@@ -1203,6 +1283,8 @@ pub const ChatLineMap = struct {
         msg_idx: usize,
         diff_lines: []const DiffLine,
         wrap_width: usize,
+        file_path: []const u8,
+        highlighter: ?*SyntaxHighlighter,
     ) !void {
         // Layout: "┃ NNN  content│NNN  content"
         // Left gutter: 2 (┃ ) + 3 (num) + 2 (space) = 7
@@ -1215,7 +1297,7 @@ pub const ChatLineMap = struct {
 
         // Fall back to unified view if panel is too narrow for side-by-side
         if (wrap_width < min_sbs_width) {
-            return self.addUnifiedDiffLines(global_line, msg_idx, diff_lines);
+            return self.addUnifiedDiffLines(global_line, msg_idx, diff_lines, file_path, highlighter);
         }
 
         const remaining = wrap_width - total_gutter;
@@ -1302,6 +1384,24 @@ pub const ChatLineMap = struct {
                 null;
             if (right_content) |c| try self.strings.append(self.allocator, c);
 
+            // Generate per-line syntax highlights if highlighter is available
+            var left_highlights: ?[]const Highlight = null;
+            var right_highlights: ?[]const Highlight = null;
+            if (highlighter) |hl| {
+                if (left.content.len > 0) {
+                    left_highlights = hl.highlightFile(file_path, left.content) catch null;
+                    if (left_highlights) |h| {
+                        try self.highlights.append(self.allocator, h);
+                    }
+                }
+                if (right.content.len > 0) {
+                    right_highlights = hl.highlightFile(file_path, right.content) catch null;
+                    if (right_highlights) |h| {
+                        try self.highlights.append(self.allocator, h);
+                    }
+                }
+            }
+
             // Pre-format line number strings (owned) to avoid buffer reuse issues in render
             const left_num_str: ?[]const u8 = if (left.line_num) |n| blk: {
                 const str = try std.fmt.allocPrint(self.allocator, "{d:>3}", .{n});
@@ -1331,6 +1431,8 @@ pub const ChatLineMap = struct {
                 .sbs_right_content = right_content,
                 .sbs_right_kind = right_kind,
                 .sbs_left_width = left_content_width,
+                .sbs_left_highlights = left_highlights,
+                .sbs_right_highlights = right_highlights,
             });
             global_line.* += 1;
         }
@@ -1361,7 +1463,7 @@ test "ChatLineMap build with empty messages" {
     defer line_map.deinit();
 
     const messages: []const Message = &.{};
-    try line_map.build(messages, 80, .unified);
+    try line_map.build(messages, 80, .unified, null);
 
     try std.testing.expectEqual(@as(usize, 0), line_map.getTotalLines());
 }

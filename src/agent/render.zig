@@ -26,6 +26,12 @@ const Color = rendering_common.Color;
 const rendering_utils = @import("../rendering/utils.zig");
 const RenderUtils = rendering_utils.RenderUtils;
 
+// Test constant for syntax highlighting debugging
+const SYNTAX_HIGHLIGHT_TEST_VALUE: u32 = 42;
+
+// Another test constant to verify treesitter diff rendering
+const DIFF_RENDERING_TEST_FLAG: bool = true;
+
 /// Safely print text to window, handling invalid UTF-8 gracefully.
 /// If text contains invalid UTF-8, renders valid portions and replaces invalid bytes with �.
 /// Returns the print result (columns advanced).
@@ -90,6 +96,189 @@ fn safePrint(win: vaxis.Window, text: []const u8, style: vaxis.Style, row: usize
     }
 
     return .{ .col = @intCast(col - col_offset), .row = 0, .overflow = false };
+}
+
+/// Render text with syntax highlighting applied
+/// If highlights is null, falls back to rendering with base_style
+fn printWithHighlights(
+    win: vaxis.Window,
+    text: []const u8,
+    highlights: ?[]const chat_line_map.Highlight,
+    base_style: vaxis.Style,
+    row: usize,
+    col_offset: usize,
+) void {
+    if (text.len == 0) return;
+
+    // If no highlights, use simple print
+    if (highlights == null or highlights.?.len == 0) {
+        _ = safePrint(win, text, base_style, row, col_offset);
+        return;
+    }
+
+    const hl_list = highlights.?;
+
+    // Track current byte position in text and display column
+    var text_pos: usize = 0;
+    var col: usize = col_offset;
+
+    // Process each highlight - print character by character to handle highlighting correctly
+    for (hl_list) |hl| {
+        // Print any text before this highlight with base style
+        while (text_pos < hl.start_byte and text_pos < text.len) {
+            const char_len = std.unicode.utf8ByteSequenceLength(text[text_pos]) catch 1;
+            const end = @min(text_pos + char_len, text.len);
+            const char_slice = text[text_pos..end];
+            
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = char_slice, .width = 1 },
+                .style = base_style,
+            });
+            col += 1;
+            text_pos = end;
+        }
+
+        // Print the highlighted text with syntax color
+        const hl_end = @min(hl.end_byte, text.len);
+        if (text_pos < hl_end) {
+            const fg_color = mapHighlightCategory(hl.category);
+            const hl_style = vaxis.Style{
+                .fg = fg_color,
+                .bg = base_style.bg,
+                .bold = base_style.bold,
+                .italic = base_style.italic,
+            };
+
+            while (text_pos < hl_end) {
+                const char_len = std.unicode.utf8ByteSequenceLength(text[text_pos]) catch 1;
+                const end = @min(text_pos + char_len, text.len);
+                const char_slice = text[text_pos..end];
+                
+                win.writeCell(@intCast(col), @intCast(row), .{
+                    .char = .{ .grapheme = char_slice, .width = 1 },
+                    .style = hl_style,
+                });
+                col += 1;
+                text_pos = end;
+            }
+        }
+    }
+
+    // Print any remaining text after the last highlight
+    while (text_pos < text.len) {
+        const char_len = std.unicode.utf8ByteSequenceLength(text[text_pos]) catch 1;
+        const end = @min(text_pos + char_len, text.len);
+        const char_slice = text[text_pos..end];
+        
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = char_slice, .width = 1 },
+            .style = base_style,
+        });
+        col += 1;
+        text_pos = end;
+    }
+}
+
+/// Map tree-sitter highlight categories to colors (GitHub Dark theme)
+fn mapHighlightCategory(category: []const u8) vaxis.Color {
+    // Keywords
+    if (std.mem.eql(u8, category, "keyword") or
+        std.mem.eql(u8, category, "keyword.return") or
+        std.mem.eql(u8, category, "keyword.function") or
+        std.mem.eql(u8, category, "keyword.operator") or
+        std.mem.eql(u8, category, "keyword.import") or
+        std.mem.eql(u8, category, "keyword.storage") or
+        std.mem.eql(u8, category, "keyword.modifier") or
+        std.mem.eql(u8, category, "keyword.repeat") or
+        std.mem.eql(u8, category, "keyword.conditional") or
+        std.mem.eql(u8, category, "keyword.exception"))
+    {
+        return .{ .rgb = .{ 0xff, 0x7b, 0x72 } }; // Red-ish (keywords)
+    }
+
+    // Types
+    if (std.mem.eql(u8, category, "type") or
+        std.mem.eql(u8, category, "type.builtin") or
+        std.mem.eql(u8, category, "type.qualifier"))
+    {
+        return .{ .rgb = .{ 0x79, 0xc0, 0xff } }; // Blue (types)
+    }
+
+    // Functions
+    if (std.mem.eql(u8, category, "function") or
+        std.mem.eql(u8, category, "function.builtin") or
+        std.mem.eql(u8, category, "function.call") or
+        std.mem.eql(u8, category, "function.method") or
+        std.mem.eql(u8, category, "method"))
+    {
+        return .{ .rgb = .{ 0xd2, 0xa8, 0xff } }; // Purple (functions)
+    }
+
+    // Strings
+    if (std.mem.eql(u8, category, "string") or
+        std.mem.eql(u8, category, "string.special") or
+        std.mem.eql(u8, category, "string.escape") or
+        std.mem.eql(u8, category, "character"))
+    {
+        return .{ .rgb = .{ 0xa5, 0xd6, 0xff } }; // Light blue (strings)
+    }
+
+    // Numbers
+    if (std.mem.eql(u8, category, "number") or
+        std.mem.eql(u8, category, "float"))
+    {
+        return .{ .rgb = .{ 0x79, 0xc0, 0xff } }; // Blue (numbers)
+    }
+
+    // Comments
+    if (std.mem.eql(u8, category, "comment") or
+        std.mem.eql(u8, category, "comment.line") or
+        std.mem.eql(u8, category, "comment.block"))
+    {
+        return .{ .rgb = .{ 0x8b, 0x94, 0x9e } }; // Gray (comments)
+    }
+
+    // Constants
+    if (std.mem.eql(u8, category, "constant") or
+        std.mem.eql(u8, category, "constant.builtin") or
+        std.mem.eql(u8, category, "boolean"))
+    {
+        return .{ .rgb = .{ 0x79, 0xc0, 0xff } }; // Blue (constants)
+    }
+
+    // Variables
+    if (std.mem.eql(u8, category, "variable") or
+        std.mem.eql(u8, category, "variable.builtin") or
+        std.mem.eql(u8, category, "variable.parameter"))
+    {
+        return .{ .rgb = .{ 0xff, 0xd0, 0x7b } }; // Orange (variables)
+    }
+
+    // Operators and punctuation
+    if (std.mem.eql(u8, category, "operator") or
+        std.mem.eql(u8, category, "punctuation") or
+        std.mem.eql(u8, category, "punctuation.bracket") or
+        std.mem.eql(u8, category, "punctuation.delimiter"))
+    {
+        return Color.white;
+    }
+
+    // Property/field
+    if (std.mem.eql(u8, category, "property") or
+        std.mem.eql(u8, category, "field"))
+    {
+        return .{ .rgb = .{ 0x7e, 0xe7, 0x87 } }; // Green (properties)
+    }
+
+    // Attribute
+    if (std.mem.eql(u8, category, "attribute") or
+        std.mem.eql(u8, category, "label"))
+    {
+        return .{ .rgb = .{ 0x7e, 0xe7, 0x87 } }; // Green (attributes)
+    }
+
+    // Default: white
+    return Color.white;
 }
 
 // Gutter width for line numbers in side-by-side diff view
@@ -858,7 +1047,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     // Get the pre-computed line map (builds if dirty)
     // Reserve 4 cols for indent + 1 col for scrollbar
     const wrap_width = if (win.width > 5) win.width - 5 else 1;
-    const line_map = agent_state.ensureLineMap(wrap_width) catch {
+    const line_map = agent_state.ensureLineMap(wrap_width, &app.syntax_highlighter) catch {
         // Fallback: show error message
         var err_seg = [_]vaxis.Cell.Segment{
             .{ .text = "Error building line map", .style = .{ .fg = Color.red } },
@@ -943,6 +1132,12 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
             // Space after sign
             col_offset += 1;
+
+            // Print content with syntax highlighting
+            printWithHighlights(win, record.text, record.diff_highlights, record.style, row, col_offset);
+
+            row += 1;
+            continue; // Skip normal text rendering for unified diff lines
         } else if (record.sbs_left_kind) |left_kind| {
             // Handle side-by-side diff lines
             const right_kind = record.sbs_right_kind orelse .empty;
@@ -980,17 +1175,14 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             // Space after line number
             col_offset += 2;
 
-            // Left content (truncate to width)
+            // Left content with syntax highlighting (truncate to width)
             if (record.sbs_left_content) |content| {
                 const left_content = if (content.len > left_width) content[0..left_width] else content;
                 const left_style: vaxis.Style = if (left_kind == .delete)
                     .{ .fg = Color.white, .bg = Color.diff_delete_bg }
                 else
                     .{ .fg = Color.white };
-                var left_seg = [_]vaxis.Cell.Segment{
-                    .{ .text = left_content, .style = left_style },
-                };
-                _ = win.print(&left_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                printWithHighlights(win, left_content, record.sbs_left_highlights, left_style, row, col_offset);
             }
             col_offset += left_width;
 
@@ -1012,16 +1204,13 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             // Space after line number
             col_offset += 2;
 
-            // Right content
+            // Right content with syntax highlighting
             if (record.sbs_right_content) |content| {
                 const right_style: vaxis.Style = if (right_kind == .add)
                     .{ .fg = Color.white, .bg = Color.diff_add_bg }
                 else
                     .{ .fg = Color.white };
-                var right_seg = [_]vaxis.Cell.Segment{
-                    .{ .text = content, .style = right_style },
-                };
-                _ = win.print(&right_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                printWithHighlights(win, content, record.sbs_right_highlights, right_style, row, col_offset);
             }
 
             row += 1;
