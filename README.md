@@ -7,14 +7,20 @@ A keyboard-driven TUI for code reviews built in Zig.
 - Vim-style modal interface (hjkl, Ctrl-n/p)
 - File-by-file diff navigation
 - Unified and side-by-side views
+- Hunk view modes: show all lines, only additions, or only deletions
 - Tree-sitter syntax highlighting with async processing (JS/TS/Zig full support)
 - Command palette: `Ctrl-p` for files, `:` for commands (vim-style), or type `>` to switch modes
 - Built-in help with `?`
 - Search with `/` across all files
+- Visual selection mode for multi-line operations
+- Character find commands (`f`/`t`/`F`/`T` like vim)
 - Live refresh (press 'r')
 - Full git diff compatibility (working dir, staged, branch comparisons)
 - Comment system with export to clipboard ('y' for current, 'Y' for all)
 - Editor integration (Ctrl-g opens file at line in $EDITOR)
+- Git blame display toggle
+- File staging from within the TUI
+- Graphite stack integration (navigate stacked PRs)
 - AI agent panel with `@file` fuzzy search for embedding file contents
 
 ## Installation
@@ -106,37 +112,89 @@ skim HEAD~5
 
 Navigate files and position cursor with vim-style movements:
 
+#### Navigation
+
 | Key | Action |
 |-----|--------|
-| `h` | Previous file |
-| `l` | Next file |
+| `h` / `l` | Previous / Next file |
+| `j` / `k` | Cursor down / up |
 | `Ctrl-n` | Next file (alternative) |
-| `Ctrl-p` | **Open command palette** |
-| `j` | Cursor down |
-| `k` | Cursor up |
-| `g` | Jump to top of file |
+| `Ctrl-d` / `Ctrl-u` | Page down / up |
+| `gg` | Jump to top of file |
 | `G` | Jump to bottom of file |
-| `[h` | Jump to previous code change block (supports count prefix) |
-| `]h` | Jump to next code change block (supports count prefix) |
-| `{` | Jump to previous empty line (supports count prefix) |
-| `}` | Jump to next empty line (supports count prefix) |
-| `Ctrl-d` | Page down |
-| `Ctrl-u` | Page up |
 | `Shift-M` | Center cursor in viewport |
+| `zz` | Center viewport on cursor |
+| `[h` / `]h` | Previous / Next code change (supports count prefix) |
+| `[c` / `]c` | Previous / Next comment |
+| `{` / `}` | Previous / Next empty line (supports count prefix) |
+
+#### Character Find (like vim)
+
+| Key | Action |
+|-----|--------|
+| `f{char}` | Find character forward (cursor on character) |
+| `F{char}` | Find character backward (cursor on character) |
+| `t{char}` | Find character forward (cursor before character) |
+| `T{char}` | Find character backward (cursor after character) |
+| `;` | Repeat last find in same direction |
+
+#### Search & Command Palette
+
+| Key | Action |
+|-----|--------|
 | `/` | Enter search mode |
+| `n` / `N` | Next / Previous search match |
 | `Ctrl-p` | Open file palette (type `>` to switch to commands) |
 | `:` | Open command palette (vim-style) |
 | `?` | Show keybindings help |
-| `n` | Jump to next search match |
-| `N` | Jump to previous search match |
+
+#### Comments
+
+| Key | Action |
+|-----|--------|
 | `Enter` | Add/edit comment on cursor line |
 | `d` | Delete comment under cursor |
 | `D` | Clear all comments |
-| `Ctrl-g` | Open current file in $EDITOR |
+| `o` | Toggle comment expand/collapse |
 | `y` | Yank (copy) current comment to clipboard |
 | `Y` | Yank (copy) all comments to clipboard |
+| `gY` | Yank all comments to agent input |
+
+#### View Modes
+
+| Key | Action |
+|-----|--------|
 | `s` | Toggle unified/side-by-side view |
+| `Tab` / `Shift-Tab` | Cycle hunk view mode (all / additions only / deletions only) |
+| `B` | Toggle git blame in gutter |
+
+#### Visual Mode
+
+| Key | Action |
+|-----|--------|
+| `v` / `V` | Enter visual selection mode |
+
+#### Git Operations
+
+| Key | Action |
+|-----|--------|
 | `r` | Refresh diff (reload from git) |
+| `a` | Stage current file (`git add`) |
+| `A` | Stage all files (`git add -A`) |
+
+#### Graphite Integration
+
+| Key | Action |
+|-----|--------|
+| `S` | Open Graphite stack picker |
+| `[s` | Navigate to parent branch (toward trunk) |
+| `]s` | Navigate to child branch (toward tip) |
+
+#### Other
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-g` | Open current file in $EDITOR |
 | `Ctrl-C` × 2 | Force exit (double-press within 1 second) |
 
 ### SEARCH Mode
@@ -176,15 +234,35 @@ Quick access to files and commands:
   - Toggle View Mode, Refresh Diff, Show Help, Quit
   - Backspace `>` to switch to file mode
 
+### VISUAL Mode
+
+Select multiple lines for operations:
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Extend selection down / up |
+| `h` / `l` | Previous / Next file |
+| `g` / `G` | Jump to top / bottom |
+| `Ctrl-d` / `Ctrl-u` | Page down / up |
+| `y` | Yank (copy) selection to clipboard |
+| `Enter` | Create comment for visual selection |
+| `v` / `ESC` | Exit visual mode |
+
 ### COMMENT Mode
 
-Edit comments on specific lines:
+Edit comments with vim-style editing:
 
 | Key | Action |
 |-----|--------|
 | `Enter` | Save comment and return to NORMAL mode |
-| `Shift-Enter` | Insert newline in comment |
+| `Ctrl-J` | Insert newline in comment |
 | `ESC` | Cancel and return to NORMAL mode |
+| `i` / `a` / `I` / `A` | Insert modes (before cursor / after cursor / line start / line end) |
+| `h` / `j` / `k` / `l` | Move cursor |
+| `w` / `b` / `e` | Word motions (next word / back word / end of word) |
+| `0` / `$` | Jump to line start / end |
+| `x` | Delete character under cursor |
+| `dd` | Delete entire line |
 | `Backspace` | Delete character before cursor |
 
 ## AI Agent Integration
@@ -339,12 +417,28 @@ skim --staged
 
 ### Agent Panel Keybindings
 
+#### From Diff View (Normal Mode)
+
 | Key | Action |
 |-----|--------|
 | `Ctrl-e` | Toggle agent panel visibility |
-| `Ctrl-w h/l` | Focus diff/agent panel |
-| `Ctrl-C` | In insert mode: exit to normal mode. In normal mode: close panel |
-| `Ctrl-C` × 2 | In normal mode (diff view): force quit |
+| `Ctrl-w h/l` | Focus agent panel (based on panel side) |
+| `Ctrl-w w` | Cycle focus between panels |
+
+#### In Agent Panel
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-e` | Close panel, return to diff |
+| `Ctrl-C` | Insert mode: exit to normal. Normal mode: close panel |
+| `Ctrl-l` | Clear message history |
+| `Ctrl-d` / `Ctrl-u` | Page down / up |
+| `Ctrl-t` | Toggle todo list expansion |
+| `gg` / `G` | Scroll to top / bottom |
+| `z` | Toggle full screen (normal mode) |
+| `V` | Toggle diff view mode (normal mode) |
+| `Tab` | Cycle session modes (normal mode) |
+| `Alt-m` | Cycle session modes (alternative) |
 
 ### @file References
 

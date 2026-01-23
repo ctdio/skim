@@ -189,7 +189,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "gg/G", .desc = "Scroll to top/bottom" },
         .{ .key = "z", .desc = "Toggle full screen (normal mode)" },
         .{ .key = "V", .desc = "Toggle diff view mode (normal mode)" },
-        .{ .key = "m", .desc = "Cycle session modes (normal mode)" },
+        .{ .key = "Tab", .desc = "Cycle session modes (normal mode)" },
     };
     for (agent_mode_bindings) |binding| {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
