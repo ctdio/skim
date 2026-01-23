@@ -95,8 +95,13 @@ fn runGitCommand(allocator: Allocator, args: []const []const u8) ![]u8 {
     switch (term) {
         .Exited => |code| {
             if (code != 0) {
-                std.debug.print("Git command failed with exit code {d}\n", .{code});
-                std.debug.print("stderr: {s}\n", .{stderr});
+                // Print git's error message (git already prefixes with "fatal:")
+                const trimmed = std.mem.trimRight(u8, stderr, &std.ascii.whitespace);
+                if (trimmed.len > 0) {
+                    std.debug.print("{s}\n", .{trimmed});
+                } else {
+                    std.debug.print("error: git command failed (exit code {d})\n", .{code});
+                }
                 allocator.free(stdout);
                 return error.GitCommandFailed;
             }

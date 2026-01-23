@@ -307,24 +307,6 @@ pub const App = struct {
     pub fn init(allocator: Allocator, config: anytype) !App {
         const log = std.log.scoped(.app_init);
 
-        // Use static buffer for Tty (must persist for lifetime of Tty)
-        var tty = try vaxis.Tty.init(&tty_static_buffer);
-        errdefer tty.deinit();
-
-        var vx = try Vaxis.init(allocator, .{
-            // Enable kitty keyboard protocol for proper modifier detection (Shift+Enter, etc.)
-            .kitty_keyboard_flags = .{
-                .disambiguate = true,
-                .report_events = false,
-                .report_alternate_keys = true,
-                .report_all_as_ctl_seqs = true,
-                .report_text = true,
-            },
-            // Enable system clipboard allocator for paste support (OSC 52)
-            .system_clipboard_allocator = allocator,
-        });
-        errdefer vx.deinit(allocator, tty.writer());
-
         // Determine if we're in pager mode (reading diff from stdin)
         const is_pager_mode = config.diff_source == .stdin;
 
@@ -336,7 +318,8 @@ pub const App = struct {
             try git.getRepoRoot(allocator);
         errdefer allocator.free(git_repo_root);
 
-        // Load and parse diff - either from stdin or git
+        // Load and parse diff BEFORE initializing TUI
+        // This ensures git errors print correctly (TUI puts terminal in raw mode)
         const files = if (is_pager_mode) blk: {
             // Pager mode: parse directly from stdin content
             // Strip ANSI codes since git sends colored output to pagers
@@ -376,6 +359,23 @@ pub const App = struct {
             }
             allocator.free(files);
         }
+
+        // Now initialize TUI (after git operations complete successfully)
+        // This ensures git errors print correctly before terminal enters raw mode
+        var tty = try vaxis.Tty.init(&tty_static_buffer);
+        errdefer tty.deinit();
+
+        var vx = try Vaxis.init(allocator, .{
+            .kitty_keyboard_flags = .{
+                .disambiguate = true,
+                .report_events = false,
+                .report_alternate_keys = true,
+                .report_all_as_ctl_seqs = true,
+                .report_text = true,
+            },
+            .system_clipboard_allocator = allocator,
+        });
+        errdefer vx.deinit(allocator, tty.writer());
 
         const header_buffers = std.mem.zeroes([Layout.header_height][HEADER_BUFFER_WIDTH]u8);
 

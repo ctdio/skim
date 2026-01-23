@@ -73,7 +73,12 @@ pub fn main() !void {
                 std.log.info("Pager mode: reading diff from stdin ({d} bytes)", .{content.len});
             }
 
-            var app = try App.init(allocator, config);
+            var app = App.init(allocator, config) catch |err| {
+                switch (err) {
+                    error.GitCommandFailed => std.process.exit(1),
+                    else => return err,
+                }
+            };
             defer app.deinit();
 
             try app.run();
@@ -95,7 +100,12 @@ pub fn main() !void {
             };
             defer config.deinit();
 
-            var app = try App.init(allocator, config);
+            var app = App.init(allocator, config) catch |err| {
+                switch (err) {
+                    error.GitCommandFailed => std.process.exit(1),
+                    else => return err,
+                }
+            };
             defer app.deinit();
 
             try app.run();
@@ -135,7 +145,15 @@ pub fn main() !void {
     }
 
     // Initialize and run the app
-    var app = try App.init(allocator, config);
+    var app = App.init(allocator, config) catch |err| {
+        switch (err) {
+            error.GitCommandFailed => {
+                // Git already printed stderr, just exit cleanly
+                std.process.exit(1);
+            },
+            else => return err,
+        }
+    };
     defer app.deinit();
 
     try app.run();
