@@ -652,6 +652,9 @@ pub const AgentState = struct {
     shell_cmd_counter: u32,
     // Command palette state (for ':' command menu)
     cmd_palette: command_palette.AgentCommandPaletteState,
+    // Help overlay state
+    help_visible: bool,
+    help_scroll_offset: usize,
 
     /// Queued shell command output to be sent with next prompt
     pub const QueuedShellOutput = struct {
@@ -816,6 +819,8 @@ pub const AgentState = struct {
             .running_shell_cmd = null,
             .shell_cmd_counter = 0,
             .cmd_palette = command_palette.AgentCommandPaletteState.init(allocator),
+            .help_visible = false,
+            .help_scroll_offset = 0,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool

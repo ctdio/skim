@@ -12,6 +12,14 @@ const command_palette = @import("../agent/command_palette.zig");
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
     const agent_state = app.getActiveAgentState() orelse return;
 
+    // Handle help overlay when visible
+    if (agent_state.help_visible) {
+        if (agent.agent_help.handleKey(agent_state, key)) {
+            app.needs_render = true;
+            return;
+        }
+    }
+
     // Check for pending permission prompt
     if (app.getActiveAcpManager()) |mgr| {
         if (mgr.getPendingPermission()) |perm| {
@@ -353,6 +361,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     // Note: lowercase 'v' is reserved for vim visual mode
     if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'V') {
         agent_state.toggleDiffViewMode();
+        app.needs_render = true;
+        return;
+    }
+
+    // '?' in normal vim mode - show help overlay
+    if (agent_state.input.vim.vim_mode == .normal and key.codepoint == '?') {
+        agent_state.help_visible = true;
+        agent_state.help_scroll_offset = 0;
         app.needs_render = true;
         return;
     }

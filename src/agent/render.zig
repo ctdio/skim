@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const state = @import("state.zig");
 const AgentState = state.AgentState;
+const agent_help = @import("agent_help.zig");
 const OwnedPlanEntry = state.OwnedPlanEntry;
 const Message = state.Message;
 const MAX_SLASH_MENU_VISIBLE = state.MAX_SLASH_MENU_VISIBLE;
@@ -605,6 +606,11 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     // Render model selection dialog as centered overlay (if in model_selection mode)
     if (app.mode == .model_selection) {
         renderModelSelectionDialog(app, win);
+    }
+
+    // Render help popup as overlay (if visible)
+    if (agent_state.help_visible) {
+        try agent_help.renderHelpPopup(app, win, agent_state);
     }
 }
 
