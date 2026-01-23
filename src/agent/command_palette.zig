@@ -62,6 +62,12 @@ pub const COMMANDS = [_]AgentCommand{
         .description = "Show/hide plan view",
         .action = .toggle_plan,
     },
+    .{
+        .name = "Quit",
+        .aliases = &[_][]const u8{ ":q", ":quit" },
+        .description = "Close current tab",
+        .action = .close_tab,
+    },
 };
 
 /// Mode for the command palette
