@@ -299,13 +299,20 @@ const MAX_PLAN_ENTRIES: usize = 5;
 // Maximum width for slash command menu
 const MAX_SLASH_MENU_WIDTH: usize = 120;
 
-/// Merge a style with cursor background for history mode cursor line highlighting.
+/// Merge a style with highlight background for history mode cursor/visual selection.
+/// Visual selection takes precedence over cursor highlighting.
 /// Preserves the foreground color and other style attributes, only overriding the background.
-fn withCursorBg(style: vaxis.Style, is_cursor_line: bool) vaxis.Style {
-    if (!is_cursor_line) return style;
+fn withHighlightBg(style: vaxis.Style, is_cursor_line: bool, is_in_visual: bool) vaxis.Style {
+    const bg_color = if (is_in_visual)
+        Color.visual_select_bg
+    else if (is_cursor_line)
+        Color.cursor_bg
+    else
+        return style;
+
     return vaxis.Style{
         .fg = style.fg,
-        .bg = Color.cursor_bg,
+        .bg = bg_color,
         .ul = style.ul,
         .ul_style = style.ul_style,
         .bold = style.bold,
@@ -316,6 +323,11 @@ fn withCursorBg(style: vaxis.Style, is_cursor_line: bool) vaxis.Style {
         .invisible = style.invisible,
         .strikethrough = style.strikethrough,
     };
+}
+
+/// Legacy wrapper for cursor-only highlighting (for backwards compatibility).
+fn withCursorBg(style: vaxis.Style, is_cursor_line: bool) vaxis.Style {
+    return withHighlightBg(style, is_cursor_line, false);
 }
 
 // =============================================================================
@@ -1101,6 +1113,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
     // Check if we're in history mode for cursor highlighting
     const in_history_mode = agent_state.isInHistoryMode();
+    const in_visual_mode = agent_state.isInHistoryVisualMode();
     const cursor_line = agent_state.history_cursor_line;
 
     var row: usize = 0;
@@ -1113,6 +1126,8 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
         // Check if this is the cursor line in history mode
         const is_cursor_line = in_history_mode and line_idx == cursor_line;
+        // Check if this line is in visual selection
+        const is_in_visual = agent_state.isLineInVisualSelection(line_idx);
 
         // Fill background for diff lines (entire row) before printing anything
         if (record.fill_bg) {
@@ -1124,8 +1139,18 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             }
         }
 
-        // Cursor line highlighting in history mode - fills entire row with cursor_bg
-        if (is_cursor_line) {
+        // Visual selection highlighting - takes precedence over regular cursor
+        if (is_in_visual) {
+            const visual_style = vaxis.Style{ .bg = Color.visual_select_bg };
+            for (0..win.width) |col| {
+                win.writeCell(@intCast(col), @intCast(row), .{
+                    .char = .{ .grapheme = " ", .width = 1 },
+                    .style = visual_style,
+                });
+            }
+        } else if (is_cursor_line and !in_visual_mode) {
+            // Cursor line highlighting in history mode - only when NOT in visual mode
+            // (in visual mode, the visual selection bg handles the cursor line too)
             const cursor_style = vaxis.Style{ .bg = Color.cursor_bg };
             for (0..win.width) |col| {
                 win.writeCell(@intCast(col), @intCast(row), .{
@@ -1268,14 +1293,14 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 if (msg_idx < messages.len) {
                     const msg = messages[msg_idx];
                     if (msg.role == .user) {
-                        const bar_style = withCursorBg(.{ .fg = Color.chat_user, .bg = Color.comment_bg }, is_cursor_line);
+                        const bar_style = withHighlightBg(.{ .fg = Color.chat_user, .bg = Color.comment_bg }, is_cursor_line, is_in_visual);
 
                         var bar_seg = [_]vaxis.Cell.Segment{
                             .{ .text = "┃ ", .style = bar_style },
                         };
                         _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
                     } else if (msg.role == .thinking) {
-                        const bar_style = withCursorBg(.{ .fg = Color.dim }, is_cursor_line);
+                        const bar_style = withHighlightBg(.{ .fg = Color.dim }, is_cursor_line, is_in_visual);
 
                         var bar_seg = [_]vaxis.Cell.Segment{
                             .{ .text = "┃ ", .style = bar_style },
@@ -1291,14 +1316,14 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 if (msg_idx < messages.len) {
                     const msg = messages[msg_idx];
                     if (msg.role == .user) {
-                        const bar_style = withCursorBg(.{ .fg = Color.chat_user, .bg = Color.comment_bg }, is_cursor_line);
+                        const bar_style = withHighlightBg(.{ .fg = Color.chat_user, .bg = Color.comment_bg }, is_cursor_line, is_in_visual);
 
                         var bar_seg = [_]vaxis.Cell.Segment{
                             .{ .text = "┃ ", .style = bar_style },
                         };
                         _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
                     } else if (msg.role == .thinking) {
-                        const bar_style = withCursorBg(.{ .fg = Color.dim }, is_cursor_line);
+                        const bar_style = withHighlightBg(.{ .fg = Color.dim }, is_cursor_line, is_in_visual);
 
                         var bar_seg = [_]vaxis.Cell.Segment{
                             .{ .text = "┃ ", .style = bar_style },
@@ -1310,7 +1335,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             .diff_header, .diff_hunk_header => {
                 // Draw bar for diff headers
                 var bar_seg = [_]vaxis.Cell.Segment{
-                    .{ .text = "┃ ", .style = withCursorBg(.{ .fg = Color.white }, is_cursor_line) },
+                    .{ .text = "┃ ", .style = withHighlightBg(.{ .fg = Color.white }, is_cursor_line, is_in_visual) },
                 };
                 _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
             },
@@ -1320,7 +1345,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
         // Print regular prefix if present
         if (record.prefix) |prefix| {
-            const prefix_style = withCursorBg(record.prefix_style orelse record.style, is_cursor_line);
+            const prefix_style = withHighlightBg(record.prefix_style orelse record.style, is_cursor_line, is_in_visual);
             var prefix_seg = [_]vaxis.Cell.Segment{
                 .{ .text = prefix, .style = prefix_style },
             };
@@ -1350,20 +1375,20 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                     const rest = if (space_idx + 1 < record.text.len) record.text[space_idx + 1 ..] else "";
 
                     // Print icon with color (with UTF-8 validation)
-                    _ = safePrint(win, icon, withCursorBg(.{ .fg = icon_color }, is_cursor_line), row, col_offset);
+                    _ = safePrint(win, icon, withHighlightBg(.{ .fg = icon_color }, is_cursor_line, is_in_visual), row, col_offset);
 
                     // Use fixed width of 1 for the icon (all status icons are single-width)
                     // Then print space and rest with default style
-                    _ = safePrint(win, " ", withCursorBg(record.style, is_cursor_line), row, col_offset + 1);
-                    _ = safePrint(win, rest, withCursorBg(record.style, is_cursor_line), row, col_offset + 2);
+                    _ = safePrint(win, " ", withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset + 1);
+                    _ = safePrint(win, rest, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset + 2);
                 } else {
                     // No space found, print normally (with UTF-8 validation)
-                    _ = safePrint(win, record.text, withCursorBg(record.style, is_cursor_line), row, col_offset);
+                    _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
                 }
             },
             else => {
                 // Print with UTF-8 validation to prevent grapheme iterator crash
-                _ = safePrint(win, record.text, withCursorBg(record.style, is_cursor_line), row, col_offset);
+                _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
             },
         }
         row += 1;

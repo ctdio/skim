@@ -88,6 +88,42 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Handle history mode key events
     if (agent_state.isInHistoryMode()) {
+        // Check visual mode first (within history mode)
+        if (agent_state.isInHistoryVisualMode()) {
+            // Visual mode keybindings
+            if (key.codepoint == 27 or key.codepoint == 'v') { // ESC or v
+                // Exit visual mode, stay in history mode
+                agent_state.exitHistoryVisualMode();
+                app.needs_render = true;
+                return;
+            }
+            if (key.codepoint == 'j') {
+                // Extend selection down
+                agent_state.historyCursorDown();
+                agent_state.history_pending_g = false;
+                app.needs_render = true;
+                return;
+            }
+            if (key.codepoint == 'k') {
+                // Extend selection up
+                agent_state.historyCursorUp();
+                agent_state.history_pending_g = false;
+                app.needs_render = true;
+                return;
+            }
+            if (key.codepoint == 'y') {
+                // Yank selection to clipboard
+                agent_state.yankVisualSelection(app.allocator) catch |err| {
+                    std.log.err("Failed to yank visual selection: {any}", .{err});
+                };
+                app.needs_render = true;
+                return;
+            }
+            // Consume other keys in visual mode
+            return;
+        }
+
+        // Regular history mode keybindings
         if (key.codepoint == 'i') {
             // 'i' exits history mode and enters insert mode
             agent_state.exitHistoryMode();
@@ -100,6 +136,22 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             agent_state.exitHistoryMode();
             agent_state.input.vim.vim_mode = .normal;
             agent_state.history_pending_g = false;
+            app.needs_render = true;
+            return;
+        }
+
+        // v - enter visual mode
+        if (key.codepoint == 'v') {
+            agent_state.enterHistoryVisualMode();
+            app.needs_render = true;
+            return;
+        }
+
+        // Y - yank entire current message
+        if (key.codepoint == 'Y') {
+            agent_state.yankCurrentMessage(app.allocator) catch |err| {
+                std.log.err("Failed to yank message: {any}", .{err});
+            };
             app.needs_render = true;
             return;
         }

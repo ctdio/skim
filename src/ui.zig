@@ -1394,8 +1394,10 @@ pub const UI = struct {
             // Agent mode - show vim mode, model name, session mode, stash indicator
             if (app.getActiveAgentStateConst()) |agent_state| {
                 // Mode indicator on the left
-                // Check history mode FIRST (takes precedence over vim mode)
-                const agent_mode_str = if (agent_state.isInHistoryMode())
+                // Check history visual mode, then history mode (takes precedence over vim mode)
+                const agent_mode_str = if (agent_state.isInHistoryVisualMode())
+                    "-- VISUAL --"
+                else if (agent_state.isInHistoryMode())
                     "-- HISTORY --"
                 else switch (agent_state.input.vim.vim_mode) {
                     .normal => "-- NORMAL --",

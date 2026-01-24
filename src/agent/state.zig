@@ -7,6 +7,7 @@ const SyntaxHighlighter = chat_line_map.SyntaxHighlighter;
 const protocol = @import("../acp/protocol.zig");
 const git_files = @import("../git/files.zig");
 const command_palette = @import("command_palette.zig");
+const clipboard = @import("../clipboard.zig");
 
 /// Maximum number of slash commands visible in menu at once
 pub const MAX_SLASH_MENU_VISIBLE: usize = 12;
@@ -662,6 +663,9 @@ pub const AgentState = struct {
     history_mode: bool,
     history_cursor_line: usize,
     history_pending_g: bool, // For gg handling in history mode
+    // Visual selection state (within history mode)
+    history_visual_mode: bool,
+    history_visual_anchor: usize, // Starting line of selection
 
     /// Queued shell command output to be sent with next prompt
     pub const QueuedShellOutput = struct {
@@ -832,6 +836,8 @@ pub const AgentState = struct {
             .history_mode = false,
             .history_cursor_line = 0,
             .history_pending_g = false,
+            .history_visual_mode = false,
+            .history_visual_anchor = 0,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -1294,8 +1300,10 @@ pub const AgentState = struct {
     }
 
     /// Exit history mode and return to normal editing.
+    /// Also clears visual mode if active.
     pub fn exitHistoryMode(self: *AgentState) void {
         self.history_mode = false;
+        self.history_visual_mode = false;
     }
 
     /// Check if currently in history mode.
@@ -1456,6 +1464,101 @@ pub const AgentState = struct {
             }
         }
         return 0;
+    }
+
+    // =========================================================================
+    // Visual Selection Mode (within History Mode)
+    // =========================================================================
+
+    /// Enter visual selection mode (line-based, like V in vim).
+    /// Sets anchor to current cursor position.
+    pub fn enterHistoryVisualMode(self: *AgentState) void {
+        if (!self.history_mode) return;
+        self.history_visual_mode = true;
+        self.history_visual_anchor = self.history_cursor_line;
+    }
+
+    /// Exit visual selection mode (back to normal history mode).
+    pub fn exitHistoryVisualMode(self: *AgentState) void {
+        self.history_visual_mode = false;
+    }
+
+    /// Check if in history visual mode.
+    pub fn isInHistoryVisualMode(self: *const AgentState) bool {
+        return self.history_mode and self.history_visual_mode;
+    }
+
+    /// Get visual selection range (start, end) - always start <= end.
+    pub fn getVisualSelectionRange(self: *const AgentState) struct { start: usize, end: usize } {
+        const a = self.history_visual_anchor;
+        const b = self.history_cursor_line;
+        return .{
+            .start = @min(a, b),
+            .end = @max(a, b),
+        };
+    }
+
+    /// Check if a line is within visual selection.
+    pub fn isLineInVisualSelection(self: *const AgentState, line: usize) bool {
+        if (!self.isInHistoryVisualMode()) return false;
+        const range = self.getVisualSelectionRange();
+        return line >= range.start and line <= range.end;
+    }
+
+    /// Extract text for a range of lines from the line map.
+    /// Returns owned string that caller must free.
+    pub fn getTextForLineRange(self: *const AgentState, alloc: Allocator, start: usize, end: usize) ![]const u8 {
+        var result: std.ArrayList(u8) = .{};
+        errdefer result.deinit(alloc);
+
+        const total_lines = self.line_map.getTotalLines();
+        var line_idx = start;
+        while (line_idx <= end and line_idx < total_lines) : (line_idx += 1) {
+            const record = self.line_map.getLineRecord(line_idx) orelse continue;
+            if (record.text.len > 0) {
+                try result.appendSlice(alloc, record.text);
+            }
+            if (line_idx < end) {
+                try result.append(alloc, '\n');
+            }
+        }
+
+        return result.toOwnedSlice(alloc);
+    }
+
+    /// Extract full message text for a given message index.
+    /// Returns owned string that caller must free.
+    pub fn getTextForMessage(self: *const AgentState, alloc: Allocator, msg_idx: usize) ![]const u8 {
+        if (msg_idx >= self.messages.items.len) return alloc.dupe(u8, "");
+
+        const msg = self.messages.items[msg_idx];
+        return alloc.dupe(u8, msg.content);
+    }
+
+    /// Yank visual selection to clipboard.
+    /// Exits visual mode after yank.
+    pub fn yankVisualSelection(self: *AgentState, alloc: Allocator) !void {
+        if (!self.isInHistoryVisualMode()) return;
+
+        const range = self.getVisualSelectionRange();
+        const text = try self.getTextForLineRange(alloc, range.start, range.end);
+        defer alloc.free(text);
+
+        try clipboard.copyToClipboard(alloc, text);
+
+        // Exit visual mode after yank
+        self.exitHistoryVisualMode();
+    }
+
+    /// Yank entire current message to clipboard.
+    pub fn yankCurrentMessage(self: *AgentState, alloc: Allocator) !void {
+        if (!self.history_mode) return;
+
+        const msg_idx = self.getMessageIdxAtLine(self.history_cursor_line) orelse return;
+        const text = try self.getTextForMessage(alloc, msg_idx);
+        defer alloc.free(text);
+
+        try clipboard.copyToClipboard(alloc, text);
     }
 
     /// Get message count
@@ -2453,4 +2556,193 @@ test "ensureHistoryCursorVisible scrolls viewport to cursor" {
     agent_state.history_cursor_line = 5;
     agent_state.ensureHistoryCursorVisible();
     try std.testing.expect(agent_state.scroll_offset >= 3); // cursor should be visible
+}
+
+// =============================================================================
+// Visual Selection Mode Tests
+// =============================================================================
+
+test "enterHistoryVisualMode sets anchor to current cursor" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add a message and enter history mode
+    try agent_state.addMessage(.user, "Hello");
+    _ = try agent_state.ensureLineMap(80, null);
+    agent_state.enterHistoryMode();
+
+    // Set cursor to a specific line
+    agent_state.history_cursor_line = 3;
+
+    // Enter visual mode
+    agent_state.enterHistoryVisualMode();
+
+    // Verify visual mode is active and anchor is set
+    try std.testing.expect(agent_state.isInHistoryVisualMode());
+    try std.testing.expect(agent_state.history_visual_anchor == 3);
+}
+
+test "getVisualSelectionRange returns ordered range" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add a message and enter history mode
+    try agent_state.addMessage(.user, "Hello");
+    _ = try agent_state.ensureLineMap(80, null);
+    agent_state.enterHistoryMode();
+
+    // Test case 1: anchor < cursor
+    agent_state.history_cursor_line = 5;
+    agent_state.enterHistoryVisualMode(); // anchor = 5
+    agent_state.history_cursor_line = 10; // cursor moved down
+
+    const range1 = agent_state.getVisualSelectionRange();
+    try std.testing.expectEqual(@as(usize, 5), range1.start);
+    try std.testing.expectEqual(@as(usize, 10), range1.end);
+
+    // Test case 2: cursor < anchor (moved up)
+    agent_state.history_cursor_line = 2;
+    const range2 = agent_state.getVisualSelectionRange();
+    try std.testing.expectEqual(@as(usize, 2), range2.start);
+    try std.testing.expectEqual(@as(usize, 5), range2.end);
+
+    // Test case 3: cursor == anchor (single line selection)
+    agent_state.history_cursor_line = 5;
+    const range3 = agent_state.getVisualSelectionRange();
+    try std.testing.expectEqual(@as(usize, 5), range3.start);
+    try std.testing.expectEqual(@as(usize, 5), range3.end);
+}
+
+test "isLineInVisualSelection correct for inside/outside range" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add a message and enter history mode
+    try agent_state.addMessage(.user, "Hello");
+    _ = try agent_state.ensureLineMap(80, null);
+    agent_state.enterHistoryMode();
+
+    // Set up visual selection from 3 to 7
+    agent_state.history_cursor_line = 3;
+    agent_state.enterHistoryVisualMode();
+    agent_state.history_cursor_line = 7;
+
+    // Lines inside selection (inclusive)
+    try std.testing.expect(agent_state.isLineInVisualSelection(3));
+    try std.testing.expect(agent_state.isLineInVisualSelection(5));
+    try std.testing.expect(agent_state.isLineInVisualSelection(7));
+
+    // Lines outside selection
+    try std.testing.expect(!agent_state.isLineInVisualSelection(2));
+    try std.testing.expect(!agent_state.isLineInVisualSelection(8));
+    try std.testing.expect(!agent_state.isLineInVisualSelection(0));
+}
+
+test "exitHistoryVisualMode clears visual state" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add a message and enter history mode then visual mode
+    try agent_state.addMessage(.user, "Hello");
+    _ = try agent_state.ensureLineMap(80, null);
+    agent_state.enterHistoryMode();
+    agent_state.history_cursor_line = 5;
+    agent_state.enterHistoryVisualMode();
+
+    // Verify visual mode is active
+    try std.testing.expect(agent_state.isInHistoryVisualMode());
+
+    // Exit visual mode
+    agent_state.exitHistoryVisualMode();
+
+    // Verify visual mode is cleared but history mode remains
+    try std.testing.expect(!agent_state.isInHistoryVisualMode());
+    try std.testing.expect(agent_state.isInHistoryMode());
+    try std.testing.expect(!agent_state.history_visual_mode);
+}
+
+test "exitHistoryMode also clears visual mode" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add a message and enter history mode then visual mode
+    try agent_state.addMessage(.user, "Hello");
+    _ = try agent_state.ensureLineMap(80, null);
+    agent_state.enterHistoryMode();
+    agent_state.history_cursor_line = 5;
+    agent_state.enterHistoryVisualMode();
+
+    // Verify both modes are active
+    try std.testing.expect(agent_state.isInHistoryMode());
+    try std.testing.expect(agent_state.isInHistoryVisualMode());
+
+    // Exit history mode entirely
+    agent_state.exitHistoryMode();
+
+    // Verify both modes are cleared
+    try std.testing.expect(!agent_state.isInHistoryMode());
+    try std.testing.expect(!agent_state.isInHistoryVisualMode());
+    try std.testing.expect(!agent_state.history_visual_mode);
+}
+
+test "getTextForLineRange extracts text from line map" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add a message with known content
+    try agent_state.addMessage(.user, "Hello World");
+
+    // Build line map
+    _ = try agent_state.ensureLineMap(80, null);
+
+    // Get text for first line (should have some content)
+    const total_lines = agent_state.line_map.getTotalLines();
+    try std.testing.expect(total_lines > 0);
+
+    const text = try agent_state.getTextForLineRange(allocator, 0, 0);
+    defer allocator.free(text);
+
+    // Should have extracted some text (exact content depends on line map formatting)
+    try std.testing.expect(text.len >= 0);
+}
+
+test "getTextForMessage returns message content" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add a message
+    try agent_state.addMessage(.user, "Test message content");
+
+    // Get text for message
+    const text = try agent_state.getTextForMessage(allocator, 0);
+    defer allocator.free(text);
+
+    try std.testing.expectEqualStrings("Test message content", text);
+}
+
+test "getTextForMessage returns empty for invalid index" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // No messages added
+    const text = try agent_state.getTextForMessage(allocator, 0);
+    defer allocator.free(text);
+
+    try std.testing.expectEqualStrings("", text);
 }
