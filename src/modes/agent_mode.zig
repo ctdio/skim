@@ -156,16 +156,51 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
 
+        // y - yank user message at cursor (like comment yanking in diff mode)
+        // yy - yank current line
+        if (key.codepoint == 'y') {
+            if (agent_state.history_pending_y) {
+                // Second 'y' - yank current line
+                agent_state.yankCurrentLine(app.allocator) catch |err| {
+                    std.log.err("Failed to yank current line: {any}", .{err});
+                };
+                agent_state.history_pending_y = false;
+                agent_state.history_pending_g = false;
+                app.needs_render = true;
+                return;
+            } else {
+                // First 'y' - try to yank user message at cursor
+                const yanked = agent_state.yankUserMessageAtCursor(app.allocator) catch |err| {
+                    std.log.err("Failed to yank user message: {any}", .{err});
+                    return;
+                };
+                if (yanked) {
+                    // Successfully yanked user message
+                    agent_state.history_pending_y = false;
+                    agent_state.history_pending_g = false;
+                    app.needs_render = true;
+                    return;
+                } else {
+                    // Not on a user message - wait for second 'y' for yy
+                    agent_state.history_pending_y = true;
+                    agent_state.history_pending_g = false;
+                    return;
+                }
+            }
+        }
+
         // Line navigation: j/k move cursor down/up
         if (key.codepoint == 'j') {
             agent_state.historyCursorDown();
             agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
             app.needs_render = true;
             return;
         }
         if (key.codepoint == 'k') {
             agent_state.historyCursorUp();
             agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
             app.needs_render = true;
             return;
         }
@@ -174,12 +209,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         if (key.codepoint == 'h') {
             agent_state.historyJumpToPrevMessage();
             agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
             app.needs_render = true;
             return;
         }
         if (key.codepoint == 'l') {
             agent_state.historyJumpToNextMessage();
             agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
             app.needs_render = true;
             return;
         }
@@ -188,12 +225,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         if (key.mods.ctrl and key.codepoint == 'd') {
             agent_state.historyPageDown();
             agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
             app.needs_render = true;
             return;
         }
         if (key.mods.ctrl and key.codepoint == 'u') {
             agent_state.historyPageUp();
             agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
             app.needs_render = true;
             return;
         }
@@ -204,23 +243,36 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // Second 'g' - jump to top
                 agent_state.historyJumpToTop();
                 agent_state.history_pending_g = false;
+                agent_state.history_pending_y = false;
                 app.needs_render = true;
                 return;
             } else {
                 // First 'g' - set pending
                 agent_state.history_pending_g = true;
+                agent_state.history_pending_y = false;
                 return;
             }
         }
         if (key.codepoint == 'G') {
             agent_state.historyJumpToBottom();
             agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
             app.needs_render = true;
             return;
         }
 
-        // Any other key clears pending_g
+        // M - move cursor to middle of viewport
+        if (key.codepoint == 'M') {
+            agent_state.historyCenterCursor();
+            agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
+            app.needs_render = true;
+            return;
+        }
+
+        // Any other key clears pending states
         agent_state.history_pending_g = false;
+        agent_state.history_pending_y = false;
 
         // Consume other keys in history mode (don't pass to input editor)
         return;
@@ -513,18 +565,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // Vim navigation in normal mode: 'gg' to scroll to top, 'G' to scroll to bottom
+    // Vim g-prefix commands in normal mode (gb, gt, gT)
+    // Note: gg and G are left to the input editor for normal vim behavior
     if (agent_state.input.vim.vim_mode == .normal) {
-        // Handle 'gg' and 'gt'/'gT' sequences
+        // Handle 'gb', 'gt'/'gT' sequences
         if (app.state.pending_g) {
             app.state.pending_g = false;
-            if (key.codepoint == 'g') {
-                // gg - scroll to top, disable follow mode
-                agent_state.follow_bottom = false;
-                agent_state.scroll_offset = 0;
-                app.needs_render = true;
-                return;
-            }
             if (key.codepoint == 'b') {
                 // gb - enter history mode (if messages exist)
                 if (agent_state.messages.items.len > 0) {
@@ -557,18 +603,29 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 }
                 return;
             }
-            // Unknown g-sequence, ignore
-            return;
+            // Unknown g-sequence (including gg) - pass through to input editor
+            // Re-inject the 'g' that was consumed, then let this key through
+            // For simplicity, just don't consume - let input editor handle
         } else if (key.codepoint == 'g' and !key.mods.ctrl and !key.mods.alt) {
             // First 'g' - wait for second
             app.state.pending_g = true;
             return;
         }
 
-        // 'G' - scroll to bottom, enable follow mode
-        if (key.codepoint == 'G') {
-            agent_state.scrollToBottom(); // Sets follow_bottom = true
-            app.needs_render = true;
+        // Space prefix commands (Space+f for follow)
+        if (app.state.pending_space) {
+            app.state.pending_space = false;
+            if (key.codepoint == 'f') {
+                // Space+f - scroll to bottom, enable follow mode
+                agent_state.scrollToBottom();
+                app.needs_render = true;
+                return;
+            }
+            // Unknown space-sequence, ignore
+            return;
+        } else if (key.codepoint == ' ' and !key.mods.ctrl and !key.mods.alt) {
+            // First Space - wait for second key
+            app.state.pending_space = true;
             return;
         }
     }
@@ -639,37 +696,29 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // Ctrl+L - clear message history
-    if (key.mods.ctrl and key.codepoint == 'l') {
-        agent_state.clearMessages();
-        app.needs_render = true;
-        return;
-    }
 
-    // Ctrl+D - page down (in history mode or normal mode, not insert mode)
-    // In insert mode, Ctrl+D falls through to input editor for vim half-page down
+    // Ctrl+D - page down (only in history mode, otherwise pass to input editor)
     if (key.mods.ctrl and key.codepoint == 'd') {
-        if (agent_state.isInHistoryMode() or agent_state.input.vim.vim_mode != .insert) {
+        if (agent_state.isInHistoryMode()) {
             agent_state.follow_bottom = false; // Disable follow mode
             const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
             agent_state.scrollDown(scroll_amount);
             app.needs_render = true;
             return;
         }
-        // In insert mode, fall through to input editor
+        // Normal/insert mode: fall through to input editor for vim half-page down
     }
 
-    // Ctrl+U - page up (in history mode or normal mode, not insert mode)
-    // In insert mode, Ctrl+U falls through to input editor for vim half-page up
+    // Ctrl+U - page up (only in history mode, otherwise pass to input editor)
     if (key.mods.ctrl and key.codepoint == 'u') {
-        if (agent_state.isInHistoryMode() or agent_state.input.vim.vim_mode != .insert) {
+        if (agent_state.isInHistoryMode()) {
             agent_state.follow_bottom = false; // Disable follow mode
             const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
             agent_state.scrollUp(scroll_amount);
             app.needs_render = true;
             return;
         }
-        // In insert mode, fall through to input editor
+        // Normal/insert mode: fall through to input editor for vim half-page up
     }
 
     // Up arrow on empty input - restore staged prompt into input for editing

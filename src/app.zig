@@ -189,6 +189,7 @@ pub const App = struct {
         last_find: ?NormalModeLastFind, // Last f/t/F/T command for ; and , repeat
         pending_z: bool, // Waiting for second z for zz (center cursor)
         pending_g: bool, // Waiting for second g for gg (agent mode: scroll to top)
+        pending_space: bool, // Waiting for second character after Space (agent mode: Space+f for follow)
         pending_bracket: bool, // Waiting for second character after [ (like [h)
         pending_close_bracket: bool, // Waiting for second character after ] (like ]h)
         empty_menu_selection: usize, // Selected index in empty state menu (0 = working, 1 = staged, 2 = main, 3 = branch, 4 = refresh, 5 = quit)
@@ -450,6 +451,7 @@ pub const App = struct {
                 .last_find = null,
                 .pending_z = false,
                 .pending_g = false,
+                .pending_space = false,
                 .pending_bracket = false,
                 .pending_close_bracket = false,
                 .empty_menu_selection = 0,

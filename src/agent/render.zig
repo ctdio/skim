@@ -1125,7 +1125,8 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
         var col_offset: usize = record.indent;
 
         // Check if this is the cursor line in history mode
-        const is_cursor_line = in_history_mode and line_idx == cursor_line;
+        // For user messages, highlight the entire message as a single unit
+        const is_cursor_line = in_history_mode and (line_idx == cursor_line or agent_state.isLineInCursorUserMessage(line_idx));
         // Check if this line is in visual selection
         const is_in_visual = agent_state.isLineInVisualSelection(line_idx);
 
@@ -1200,7 +1201,9 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             col_offset += 1;
 
             // Print content with syntax highlighting
-            printWithHighlights(win, record.text, record.diff_highlights, record.style, row, col_offset);
+            // Apply cursor/visual highlight to the style so text shows the highlight background
+            const content_style = withHighlightBg(record.style, is_cursor_line, is_in_visual);
+            printWithHighlights(win, record.text, record.diff_highlights, content_style, row, col_offset);
 
             row += 1;
             continue; // Skip normal text rendering for unified diff lines
@@ -1244,10 +1247,12 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             // Left content with syntax highlighting (truncate to width)
             if (record.sbs_left_content) |content| {
                 const left_content = if (content.len > left_width) content[0..left_width] else content;
-                const left_style: vaxis.Style = if (left_kind == .delete)
+                const base_left_style: vaxis.Style = if (left_kind == .delete)
                     .{ .fg = Color.white, .bg = Color.diff_delete_bg }
                 else
                     .{ .fg = Color.white };
+                // Apply cursor/visual highlight to the style
+                const left_style = withHighlightBg(base_left_style, is_cursor_line, is_in_visual);
                 printWithHighlights(win, left_content, record.sbs_left_highlights, left_style, row, col_offset);
             }
             col_offset += left_width;
@@ -1272,10 +1277,12 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
             // Right content with syntax highlighting
             if (record.sbs_right_content) |content| {
-                const right_style: vaxis.Style = if (right_kind == .add)
+                const base_right_style: vaxis.Style = if (right_kind == .add)
                     .{ .fg = Color.white, .bg = Color.diff_add_bg }
                 else
                     .{ .fg = Color.white };
+                // Apply cursor/visual highlight to the style
+                const right_style = withHighlightBg(base_right_style, is_cursor_line, is_in_visual);
                 printWithHighlights(win, content, record.sbs_right_highlights, right_style, row, col_offset);
             }
 
@@ -1398,6 +1405,24 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     if (total_lines > win.height) {
         const scrollbar_info = calculateScrollbar(win.height, total_lines, scroll);
         renderScrollbar(win, scrollbar_info);
+    }
+
+    // Render "more below" indicator when not following and there's content below
+    if (!agent_state.follow_bottom and scroll < max_scroll) {
+        const indicator = " ↓ more ";
+        const indicator_style = vaxis.Style{
+            .fg = Color.black,
+            .bg = Color.yellow,
+            .bold = true,
+        };
+        // Position at bottom-right, leaving room for scrollbar
+        const indicator_len = indicator.len;
+        const col = if (win.width > indicator_len + 2) win.width - indicator_len - 2 else 0;
+        const last_row = if (win.height > 0) win.height - 1 else 0;
+        var seg = [_]vaxis.Cell.Segment{
+            .{ .text = indicator, .style = indicator_style },
+        };
+        _ = win.print(&seg, .{ .row_offset = @intCast(last_row), .col_offset = @intCast(col) });
     }
 }
 

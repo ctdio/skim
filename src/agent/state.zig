@@ -663,6 +663,7 @@ pub const AgentState = struct {
     history_mode: bool,
     history_cursor_line: usize,
     history_pending_g: bool, // For gg handling in history mode
+    history_pending_y: bool, // For yy handling in history mode
     // Visual selection state (within history mode)
     history_visual_mode: bool,
     history_visual_anchor: usize, // Starting line of selection
@@ -836,6 +837,7 @@ pub const AgentState = struct {
             .history_mode = false,
             .history_cursor_line = 0,
             .history_pending_g = false,
+            .history_pending_y = false,
             .history_visual_mode = false,
             .history_visual_anchor = 0,
         };
@@ -1419,6 +1421,19 @@ pub const AgentState = struct {
         self.ensureHistoryCursorVisible();
     }
 
+    /// Move cursor to the middle line of the current viewport (like vim's 'M').
+    pub fn historyCenterCursor(self: *AgentState) void {
+        const viewport_height = self.last_messages_viewport_height;
+        if (viewport_height == 0) return;
+
+        const half_viewport = viewport_height / 2;
+        const middle_line = self.scroll_offset + half_viewport;
+
+        const max_line = self.getHistoryMaxLine();
+        self.history_cursor_line = @min(middle_line, max_line);
+        self.follow_bottom = false;
+    }
+
     /// Ensure the cursor is visible within the viewport, scrolling if needed.
     pub fn ensureHistoryCursorVisible(self: *AgentState) void {
         const viewport_height = self.last_messages_viewport_height;
@@ -1505,6 +1520,41 @@ pub const AgentState = struct {
         return line >= range.start and line <= range.end;
     }
 
+    /// Check if a line should be highlighted as part of the same user message unit.
+    /// When the cursor is on any line of a user message, all lines belonging to
+    /// that same message should be highlighted together as a single unit.
+    /// Returns true if `line` belongs to the same user message as the cursor line.
+    pub fn isLineInCursorUserMessage(self: *const AgentState, line: usize) bool {
+        // Only applies when in history mode and not in visual mode
+        if (!self.isInHistoryMode() or self.isInHistoryVisualMode()) return false;
+
+        // Get the cursor line's record
+        const cursor_record = self.line_map.getLineRecord(self.history_cursor_line) orelse return false;
+
+        // Only applies if cursor is on a user message content line
+        const cursor_msg_idx = switch (cursor_record.line_type) {
+            .message_content => |mc| blk: {
+                // Check if this message is a user message
+                if (mc.msg_idx < self.messages.items.len) {
+                    if (self.messages.items[mc.msg_idx].role == .user) {
+                        break :blk mc.msg_idx;
+                    }
+                }
+                return false;
+            },
+            else => return false,
+        };
+
+        // Get the target line's record
+        const target_record = self.line_map.getLineRecord(line) orelse return false;
+
+        // Check if target line belongs to the same user message
+        return switch (target_record.line_type) {
+            .message_content => |mc| mc.msg_idx == cursor_msg_idx,
+            else => false,
+        };
+    }
+
     /// Extract text for a range of lines from the line map.
     /// Returns owned string that caller must free.
     pub fn getTextForLineRange(self: *const AgentState, alloc: Allocator, start: usize, end: usize) ![]const u8 {
@@ -1559,6 +1609,53 @@ pub const AgentState = struct {
         defer alloc.free(text);
 
         try clipboard.copyToClipboard(alloc, text);
+    }
+
+    /// Yank current line to clipboard (yy in vim).
+    pub fn yankCurrentLine(self: *AgentState, alloc: Allocator) !void {
+        if (!self.history_mode) return;
+
+        const text = try self.getTextForLineRange(alloc, self.history_cursor_line, self.history_cursor_line);
+        defer alloc.free(text);
+
+        if (text.len > 0) {
+            try clipboard.copyToClipboard(alloc, text);
+        }
+    }
+
+    /// Get the user message index at the cursor, if cursor is on a user message.
+    /// Returns null if cursor is not on a user message.
+    pub fn getUserMessageIdxAtCursor(self: *const AgentState) ?usize {
+        if (!self.history_mode) return null;
+
+        const record = self.line_map.getLineRecord(self.history_cursor_line) orelse return null;
+
+        return switch (record.line_type) {
+            .message_content => |mc| blk: {
+                if (mc.msg_idx < self.messages.items.len) {
+                    if (self.messages.items[mc.msg_idx].role == .user) {
+                        break :blk mc.msg_idx;
+                    }
+                }
+                break :blk null;
+            },
+            else => null,
+        };
+    }
+
+    /// Yank user message at cursor to clipboard (y when on user message).
+    /// Returns true if a user message was yanked, false otherwise.
+    pub fn yankUserMessageAtCursor(self: *AgentState, alloc: Allocator) !bool {
+        const msg_idx = self.getUserMessageIdxAtCursor() orelse return false;
+
+        const text = try self.getTextForMessage(alloc, msg_idx);
+        defer alloc.free(text);
+
+        if (text.len > 0) {
+            try clipboard.copyToClipboard(alloc, text);
+            return true;
+        }
+        return false;
     }
 
     /// Get message count
