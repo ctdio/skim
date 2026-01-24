@@ -16,28 +16,44 @@ pub const RenderUtils = struct {
     // Unicode display width utilities
 
     /// Calculate the display width of a UTF-8 string in terminal cells.
-    /// This counts codepoints, which works correctly for most characters
-    /// including box-drawing chars, arrows, and symbols.
-    /// Note: Does not handle full-width CJK characters (would need wcwidth tables).
+    /// Uses vaxis gwidth for accurate Unicode width calculation including
+    /// wide characters (emoji, CJK) that take 2 terminal cells.
     pub fn displayWidth(text: []const u8) usize {
-        return std.unicode.utf8CountCodepoints(text) catch text.len;
+        var width: usize = 0;
+        var byte_pos: usize = 0;
+
+        while (byte_pos < text.len) {
+            const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
+            const char_end = @min(byte_pos + char_len, text.len);
+            const grapheme = text[byte_pos..char_end];
+            width += vaxis.gwidth.gwidth(grapheme, .unicode);
+            byte_pos = char_end;
+        }
+
+        return width;
     }
 
-    /// Slice a UTF-8 string by display width (codepoints), not bytes.
-    /// Returns a slice of the input text containing at most `max_width` codepoints.
+    /// Slice a UTF-8 string by display width (terminal cells), not bytes.
+    /// Returns a slice of the input text containing at most `max_width` terminal cells.
     /// The returned slice ends at a valid UTF-8 boundary.
+    /// Uses vaxis gwidth for accurate Unicode width calculation.
     pub fn sliceByDisplayWidth(text: []const u8, max_width: usize) []const u8 {
         if (max_width == 0) return text[0..0];
 
         var width: usize = 0;
         var byte_pos: usize = 0;
 
-        while (byte_pos < text.len and width < max_width) {
-            const byte = text[byte_pos];
-            const char_len = std.unicode.utf8ByteSequenceLength(byte) catch 1;
-            const next_pos = @min(byte_pos + char_len, text.len);
-            byte_pos = next_pos;
-            width += 1;
+        while (byte_pos < text.len) {
+            const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
+            const char_end = @min(byte_pos + char_len, text.len);
+            const grapheme = text[byte_pos..char_end];
+            const char_width = vaxis.gwidth.gwidth(grapheme, .unicode);
+
+            // Check if adding this character would exceed max_width
+            if (width + char_width > max_width) break;
+
+            width += char_width;
+            byte_pos = char_end;
         }
 
         return text[0..byte_pos];

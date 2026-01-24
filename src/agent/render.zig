@@ -77,12 +77,13 @@ fn safePrint(win: vaxis.Window, text: []const u8, style: vaxis.Style, row: usize
         // Validate the sequence
         const seq = text[i .. i + seq_len];
         if (std.unicode.utf8ValidateSlice(seq)) {
-            // Valid sequence - print it
+            // Valid sequence - print it with proper display width
+            const char_width = vaxis.gwidth.gwidth(seq, .unicode);
             win.writeCell(@intCast(col), @intCast(row), .{
-                .char = .{ .grapheme = seq, .width = 1 },
+                .char = .{ .grapheme = seq, .width = @intCast(char_width) },
                 .style = style,
             });
-            col += 1;
+            col += char_width;
             i += seq_len;
         } else {
             // Invalid sequence - show replacement character
@@ -129,12 +130,13 @@ fn printWithHighlights(
             const char_len = std.unicode.utf8ByteSequenceLength(text[text_pos]) catch 1;
             const end = @min(text_pos + char_len, text.len);
             const char_slice = text[text_pos..end];
-            
+            const char_width = vaxis.gwidth.gwidth(char_slice, .unicode);
+
             win.writeCell(@intCast(col), @intCast(row), .{
-                .char = .{ .grapheme = char_slice, .width = 1 },
+                .char = .{ .grapheme = char_slice, .width = @intCast(char_width) },
                 .style = base_style,
             });
-            col += 1;
+            col += char_width;
             text_pos = end;
         }
 
@@ -153,12 +155,13 @@ fn printWithHighlights(
                 const char_len = std.unicode.utf8ByteSequenceLength(text[text_pos]) catch 1;
                 const end = @min(text_pos + char_len, text.len);
                 const char_slice = text[text_pos..end];
-                
+                const char_width = vaxis.gwidth.gwidth(char_slice, .unicode);
+
                 win.writeCell(@intCast(col), @intCast(row), .{
-                    .char = .{ .grapheme = char_slice, .width = 1 },
+                    .char = .{ .grapheme = char_slice, .width = @intCast(char_width) },
                     .style = hl_style,
                 });
-                col += 1;
+                col += char_width;
                 text_pos = end;
             }
         }
@@ -169,12 +172,13 @@ fn printWithHighlights(
         const char_len = std.unicode.utf8ByteSequenceLength(text[text_pos]) catch 1;
         const end = @min(text_pos + char_len, text.len);
         const char_slice = text[text_pos..end];
-        
+        const char_width = vaxis.gwidth.gwidth(char_slice, .unicode);
+
         win.writeCell(@intCast(col), @intCast(row), .{
-            .char = .{ .grapheme = char_slice, .width = 1 },
+            .char = .{ .grapheme = char_slice, .width = @intCast(char_width) },
             .style = base_style,
         });
-        col += 1;
+        col += char_width;
         text_pos = end;
     }
 }
@@ -2179,12 +2183,21 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                         .bold = true,
                     };
 
-                    // Render each character with appropriate style
-                    for (chunk, 0..) |_, char_idx| {
-                        const abs_pos = segment_start + char_idx;
-                        const col = input_col + char_idx;
-                        if (col >= win.width) break;
+                    // Render each character with appropriate style (UTF-8 aware)
+                    var byte_idx: usize = 0;
+                    var display_col: usize = input_col;
+                    while (byte_idx < chunk.len) {
+                        if (display_col >= win.width) break;
 
+                        // Get UTF-8 sequence length for this character
+                        const seq_len = std.unicode.utf8ByteSequenceLength(chunk[byte_idx]) catch 1;
+                        const char_end = @min(byte_idx + seq_len, chunk.len);
+                        const grapheme = chunk[byte_idx..char_end];
+
+                        // Calculate display width for this grapheme
+                        const char_width = vaxis.gwidth.gwidth(grapheme, .unicode);
+
+                        const abs_pos = segment_start + byte_idx;
                         const in_selection = in_visual_mode and abs_pos >= sel_start and abs_pos <= sel_end;
                         const in_file_ref = isInFileRef(abs_pos, file_ref_ranges);
                         const style = if (in_selection)
@@ -2194,10 +2207,13 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                         else
                             text_style;
 
-                        win.writeCell(@intCast(col), @intCast(row), .{
-                            .char = .{ .grapheme = chunk[char_idx .. char_idx + 1], .width = 1 },
+                        win.writeCell(@intCast(display_col), @intCast(row), .{
+                            .char = .{ .grapheme = grapheme, .width = @intCast(char_width) },
                             .style = style,
                         });
+
+                        display_col += char_width;
+                        byte_idx = char_end;
                     }
                 } else {
                     // Normal rendering (no visual mode, no file refs)
@@ -2227,11 +2243,24 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                         vim_cursor_pos >= segment_start and vim_cursor_pos <= segment_end;
 
                     if (cursor_in_segment) {
-                        const cursor_offset_in_segment = if (vim_cursor_pos >= segment_start)
+                        // Calculate cursor byte offset within the segment
+                        const cursor_byte_offset = if (vim_cursor_pos >= segment_start)
                             @min(vim_cursor_pos - segment_start, chunk_len)
                         else
                             0;
-                        const cursor_col = input_col + cursor_offset_in_segment;
+                        
+                        // Convert byte offset to display column by calculating display width
+                        // of characters from segment start to cursor position
+                        var cursor_display_offset: usize = 0;
+                        var byte_pos: usize = 0;
+                        while (byte_pos < cursor_byte_offset and byte_pos < chunk.len) {
+                            const seq_len = std.unicode.utf8ByteSequenceLength(chunk[byte_pos]) catch 1;
+                            const char_end = @min(byte_pos + seq_len, chunk.len);
+                            const grapheme = chunk[byte_pos..char_end];
+                            cursor_display_offset += vaxis.gwidth.gwidth(grapheme, .unicode);
+                            byte_pos = char_end;
+                        }
+                        const cursor_col = input_col + cursor_display_offset;
 
                         if (cursor_col < win.width) {
                             // Set cursor shape based on vim mode

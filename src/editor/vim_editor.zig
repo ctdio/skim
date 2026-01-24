@@ -636,16 +636,28 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                             try deleteChar(state, state.cursor_pos);
                         }
                     } else {
-                        // Regular backspace - delete single char
+                        // Regular backspace - delete single char (UTF-8 aware)
                         if (state.cursor_pos > 0) {
-                            try deleteChar(state, state.cursor_pos - 1);
-                            state.cursor_pos -= 1;
+                            // Find the start of the previous UTF-8 character
+                            var char_start = state.cursor_pos - 1;
+                            // UTF-8 continuation bytes start with 10xxxxxx (0x80-0xBF)
+                            while (char_start > 0 and (state.text_buffer[char_start] & 0xC0) == 0x80) {
+                                char_start -= 1;
+                            }
+                            // Delete all bytes of this character
+                            const char_len = state.cursor_pos - char_start;
+                            var i: usize = 0;
+                            while (i < char_len) : (i += 1) {
+                                try deleteChar(state, char_start);
+                            }
+                            state.cursor_pos = char_start;
                         }
                     }
                 },
                 else => {
-                    if (key.codepoint >= 32 and key.codepoint < 127) {
-                        try insertChar(state, @intCast(key.codepoint));
+                    // Accept any printable Unicode codepoint (>= 32, excluding DEL at 127)
+                    if (key.codepoint >= 32 and key.codepoint != 127) {
+                        try insertCodepoint(state, key.codepoint);
                     }
                 },
             }
@@ -953,6 +965,31 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             state.text_buffer[state.cursor_pos] = char;
             state.text_len += 1;
             state.cursor_pos += 1;
+        }
+
+        /// Insert a Unicode codepoint as UTF-8 encoded bytes
+        fn insertCodepoint(state: *State, codepoint: u21) !void {
+            // Encode the codepoint as UTF-8
+            var utf8_buf: [4]u8 = undefined;
+            const utf8_len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch return;
+            
+            // Check if we have enough space
+            if (state.text_len + utf8_len > state.text_buffer.len) return;
+            
+            // Make room for the new bytes
+            const remaining = state.text_len - state.cursor_pos;
+            if (remaining > 0) {
+                std.mem.copyBackwards(
+                    u8,
+                    state.text_buffer[state.cursor_pos + utf8_len .. state.text_len + utf8_len],
+                    state.text_buffer[state.cursor_pos..state.text_len],
+                );
+            }
+            
+            // Insert the UTF-8 bytes
+            @memcpy(state.text_buffer[state.cursor_pos .. state.cursor_pos + utf8_len], utf8_buf[0..utf8_len]);
+            state.text_len += utf8_len;
+            state.cursor_pos += utf8_len;
         }
 
         pub fn insertCharPublic(state: *State, char: u8) void {
