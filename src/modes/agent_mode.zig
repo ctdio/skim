@@ -99,17 +99,79 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             // ESC/q exits history mode to normal mode
             agent_state.exitHistoryMode();
             agent_state.input.vim.vim_mode = .normal;
+            agent_state.history_pending_g = false;
             app.needs_render = true;
             return;
         }
-        // Consume other keys in history mode (don't pass to input editor)
-        // Note: Ctrl-d/u for scrolling is handled below, not consumed here
-        if (key.mods.ctrl and (key.codepoint == 'd' or key.codepoint == 'u')) {
-            // Let ctrl-d/u fall through for history scrolling
-        } else {
-            // Consume other keys
+
+        // Line navigation: j/k move cursor down/up
+        if (key.codepoint == 'j') {
+            agent_state.historyCursorDown();
+            agent_state.history_pending_g = false;
+            app.needs_render = true;
             return;
         }
+        if (key.codepoint == 'k') {
+            agent_state.historyCursorUp();
+            agent_state.history_pending_g = false;
+            app.needs_render = true;
+            return;
+        }
+
+        // Message navigation: h/l jump between messages
+        if (key.codepoint == 'h') {
+            agent_state.historyJumpToPrevMessage();
+            agent_state.history_pending_g = false;
+            app.needs_render = true;
+            return;
+        }
+        if (key.codepoint == 'l') {
+            agent_state.historyJumpToNextMessage();
+            agent_state.history_pending_g = false;
+            app.needs_render = true;
+            return;
+        }
+
+        // Page navigation: Ctrl-d/u
+        if (key.mods.ctrl and key.codepoint == 'd') {
+            agent_state.historyPageDown();
+            agent_state.history_pending_g = false;
+            app.needs_render = true;
+            return;
+        }
+        if (key.mods.ctrl and key.codepoint == 'u') {
+            agent_state.historyPageUp();
+            agent_state.history_pending_g = false;
+            app.needs_render = true;
+            return;
+        }
+
+        // Jump to top/bottom: gg / G
+        if (key.codepoint == 'g') {
+            if (agent_state.history_pending_g) {
+                // Second 'g' - jump to top
+                agent_state.historyJumpToTop();
+                agent_state.history_pending_g = false;
+                app.needs_render = true;
+                return;
+            } else {
+                // First 'g' - set pending
+                agent_state.history_pending_g = true;
+                return;
+            }
+        }
+        if (key.codepoint == 'G') {
+            agent_state.historyJumpToBottom();
+            agent_state.history_pending_g = false;
+            app.needs_render = true;
+            return;
+        }
+
+        // Any other key clears pending_g
+        agent_state.history_pending_g = false;
+
+        // Consume other keys in history mode (don't pass to input editor)
+        return;
     }
 
     // Double-ESC to interrupt agent (only in normal vim mode)

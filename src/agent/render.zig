@@ -299,6 +299,25 @@ const MAX_PLAN_ENTRIES: usize = 5;
 // Maximum width for slash command menu
 const MAX_SLASH_MENU_WIDTH: usize = 120;
 
+/// Merge a style with cursor background for history mode cursor line highlighting.
+/// Preserves the foreground color and other style attributes, only overriding the background.
+fn withCursorBg(style: vaxis.Style, is_cursor_line: bool) vaxis.Style {
+    if (!is_cursor_line) return style;
+    return vaxis.Style{
+        .fg = style.fg,
+        .bg = Color.cursor_bg,
+        .ul = style.ul,
+        .ul_style = style.ul_style,
+        .bold = style.bold,
+        .dim = style.dim,
+        .italic = style.italic,
+        .blink = style.blink,
+        .reverse = style.reverse,
+        .invisible = style.invisible,
+        .strikethrough = style.strikethrough,
+    };
+}
+
 // =============================================================================
 // File Reference Detection
 // =============================================================================
@@ -988,7 +1007,7 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
     var hint_buf: [32]u8 = undefined;
     const hint = std.fmt.bufPrint(&hint_buf, " {d}/{d} ", .{ active_idx + 1, tm.tabCount() }) catch " ";
     const hint_len = hint.len;
-    
+
     // Only show hint if it fits
     if (hint_len <= win.width) {
         const hint_col = win.width - hint_len;
@@ -1080,6 +1099,10 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     const start = scroll;
     const end = @min(start + win.height, total_lines);
 
+    // Check if we're in history mode for cursor highlighting
+    const in_history_mode = agent_state.isInHistoryMode();
+    const cursor_line = agent_state.history_cursor_line;
+
     var row: usize = 0;
     for (start..end) |line_idx| {
         if (row >= win.height) break;
@@ -1088,12 +1111,26 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
         var col_offset: usize = record.indent;
 
+        // Check if this is the cursor line in history mode
+        const is_cursor_line = in_history_mode and line_idx == cursor_line;
+
         // Fill background for diff lines (entire row) before printing anything
         if (record.fill_bg) {
             for (0..win.width) |col| {
                 win.writeCell(@intCast(col), @intCast(row), .{
                     .char = .{ .grapheme = " ", .width = 1 },
                     .style = record.style,
+                });
+            }
+        }
+
+        // Cursor line highlighting in history mode - fills entire row with cursor_bg
+        if (is_cursor_line) {
+            const cursor_style = vaxis.Style{ .bg = Color.cursor_bg };
+            for (0..win.width) |col| {
+                win.writeCell(@intCast(col), @intCast(row), .{
+                    .char = .{ .grapheme = " ", .width = 1 },
+                    .style = cursor_style,
                 });
             }
         }
@@ -1231,14 +1268,14 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 if (msg_idx < messages.len) {
                     const msg = messages[msg_idx];
                     if (msg.role == .user) {
-                        const bar_style: vaxis.Style = .{ .fg = Color.chat_user, .bg = Color.comment_bg };
+                        const bar_style = withCursorBg(.{ .fg = Color.chat_user, .bg = Color.comment_bg }, is_cursor_line);
 
                         var bar_seg = [_]vaxis.Cell.Segment{
                             .{ .text = "┃ ", .style = bar_style },
                         };
                         _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
                     } else if (msg.role == .thinking) {
-                        const bar_style: vaxis.Style = .{ .fg = Color.dim };
+                        const bar_style = withCursorBg(.{ .fg = Color.dim }, is_cursor_line);
 
                         var bar_seg = [_]vaxis.Cell.Segment{
                             .{ .text = "┃ ", .style = bar_style },
@@ -1254,14 +1291,14 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 if (msg_idx < messages.len) {
                     const msg = messages[msg_idx];
                     if (msg.role == .user) {
-                        const bar_style: vaxis.Style = .{ .fg = Color.chat_user, .bg = Color.comment_bg };
+                        const bar_style = withCursorBg(.{ .fg = Color.chat_user, .bg = Color.comment_bg }, is_cursor_line);
 
                         var bar_seg = [_]vaxis.Cell.Segment{
                             .{ .text = "┃ ", .style = bar_style },
                         };
                         _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
                     } else if (msg.role == .thinking) {
-                        const bar_style: vaxis.Style = .{ .fg = Color.dim };
+                        const bar_style = withCursorBg(.{ .fg = Color.dim }, is_cursor_line);
 
                         var bar_seg = [_]vaxis.Cell.Segment{
                             .{ .text = "┃ ", .style = bar_style },
@@ -1273,7 +1310,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             .diff_header, .diff_hunk_header => {
                 // Draw bar for diff headers
                 var bar_seg = [_]vaxis.Cell.Segment{
-                    .{ .text = "┃ ", .style = .{ .fg = Color.white } },
+                    .{ .text = "┃ ", .style = withCursorBg(.{ .fg = Color.white }, is_cursor_line) },
                 };
                 _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
             },
@@ -1283,8 +1320,9 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
         // Print regular prefix if present
         if (record.prefix) |prefix| {
+            const prefix_style = withCursorBg(record.prefix_style orelse record.style, is_cursor_line);
             var prefix_seg = [_]vaxis.Cell.Segment{
-                .{ .text = prefix, .style = record.prefix_style orelse record.style },
+                .{ .text = prefix, .style = prefix_style },
             };
             _ = win.print(&prefix_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             col_offset += prefix.len;
@@ -1312,20 +1350,20 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                     const rest = if (space_idx + 1 < record.text.len) record.text[space_idx + 1 ..] else "";
 
                     // Print icon with color (with UTF-8 validation)
-                    _ = safePrint(win, icon, .{ .fg = icon_color }, row, col_offset);
+                    _ = safePrint(win, icon, withCursorBg(.{ .fg = icon_color }, is_cursor_line), row, col_offset);
 
                     // Use fixed width of 1 for the icon (all status icons are single-width)
                     // Then print space and rest with default style
-                    _ = safePrint(win, " ", record.style, row, col_offset + 1);
-                    _ = safePrint(win, rest, record.style, row, col_offset + 2);
+                    _ = safePrint(win, " ", withCursorBg(record.style, is_cursor_line), row, col_offset + 1);
+                    _ = safePrint(win, rest, withCursorBg(record.style, is_cursor_line), row, col_offset + 2);
                 } else {
                     // No space found, print normally (with UTF-8 validation)
-                    _ = safePrint(win, record.text, record.style, row, col_offset);
+                    _ = safePrint(win, record.text, withCursorBg(record.style, is_cursor_line), row, col_offset);
                 }
             },
             else => {
                 // Print with UTF-8 validation to prevent grapheme iterator crash
-                _ = safePrint(win, record.text, record.style, row, col_offset);
+                _ = safePrint(win, record.text, withCursorBg(record.style, is_cursor_line), row, col_offset);
             },
         }
         row += 1;
@@ -2079,7 +2117,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
     // Check if we're in shell command mode (using shell_mode flag)
     const is_shell_mode = agent_state.isShellMode();
-    
+
     // Dim prompt when session is not ready
     const session_ready = if (app.getActiveAcpManager()) |mgr| mgr.status == .session_active or mgr.status == .prompting else false;
     const prompt_style = if (is_shell_mode)
@@ -2122,14 +2160,14 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
         // Use word-aware wrapping for this line
         var wrapped_lines = try RenderUtils.wrapText(app.allocator, text_line, max_input_width);
         defer wrapped_lines.deinit(app.allocator);
-        
+
         // Track offset within the original line for cursor positioning
         var segment_offset: usize = 0;
-        
+
         for (wrapped_lines.items) |wrapped_segment| {
             // Stop if we've filled the visible area
             if (visible_row >= visible_lines) break;
-            
+
             const chunk = wrapped_segment;
             const chunk_len = chunk.len;
 
@@ -2248,7 +2286,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
                             @min(vim_cursor_pos - segment_start, chunk_len)
                         else
                             0;
-                        
+
                         // Convert byte offset to display column by calculating display width
                         // of characters from segment start to cursor position
                         var cursor_display_offset: usize = 0;
@@ -2289,18 +2327,18 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
 
             // Update segment_offset to account for this wrapped segment
             segment_offset += chunk_len;
-            
+
             // Account for spaces that were trimmed during wrapping
             while (segment_offset < text_line.len and text_line[segment_offset] == ' ') {
                 segment_offset += 1;
             }
-            
+
             display_row += 1;
 
             // Break after rendering empty line
             if (text_line.len == 0) break;
         }
-        
+
         // Move char_offset to the end of this line
         char_offset += text_line.len;
     }

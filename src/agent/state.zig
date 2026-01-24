@@ -661,6 +661,7 @@ pub const AgentState = struct {
     // History mode state (for browsing message history with vim-like navigation)
     history_mode: bool,
     history_cursor_line: usize,
+    history_pending_g: bool, // For gg handling in history mode
 
     /// Queued shell command output to be sent with next prompt
     pub const QueuedShellOutput = struct {
@@ -830,6 +831,7 @@ pub const AgentState = struct {
             .help_scroll_offset = 0,
             .history_mode = false,
             .history_cursor_line = 0,
+            .history_pending_g = false,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -1299,6 +1301,161 @@ pub const AgentState = struct {
     /// Check if currently in history mode.
     pub fn isInHistoryMode(self: *const AgentState) bool {
         return self.history_mode;
+    }
+
+    /// Get the maximum valid cursor line (last line index).
+    pub fn getHistoryMaxLine(self: *const AgentState) usize {
+        const total = self.line_map.getTotalLines();
+        return if (total > 0) total - 1 else 0;
+    }
+
+    /// Move cursor up one line, clamping at 0.
+    pub fn historyCursorUp(self: *AgentState) void {
+        if (self.history_cursor_line > 0) {
+            self.history_cursor_line -= 1;
+        }
+        self.ensureHistoryCursorVisible();
+    }
+
+    /// Move cursor down one line, clamping at max.
+    pub fn historyCursorDown(self: *AgentState) void {
+        const max_line = self.getHistoryMaxLine();
+        if (self.history_cursor_line < max_line) {
+            self.history_cursor_line += 1;
+        }
+        self.ensureHistoryCursorVisible();
+    }
+
+    /// Jump to previous message boundary.
+    pub fn historyJumpToPrevMessage(self: *AgentState) void {
+        if (self.history_cursor_line == 0) return;
+
+        // Get current message index
+        const current_msg_idx = self.getMessageIdxAtLine(self.history_cursor_line);
+
+        // Search backwards for a different message
+        var line = self.history_cursor_line;
+        while (line > 0) {
+            line -= 1;
+            const msg_idx = self.getMessageIdxAtLine(line);
+            // Skip spacers (null msg_idx) and match different message
+            if (msg_idx != null and msg_idx != current_msg_idx) {
+                // Found a different message, now find its start
+                self.history_cursor_line = self.findMessageStartLine(msg_idx.?);
+                self.ensureHistoryCursorVisible();
+                return;
+            }
+        }
+
+        // No previous message found, go to line 0
+        self.history_cursor_line = 0;
+        self.ensureHistoryCursorVisible();
+    }
+
+    /// Jump to next message boundary.
+    pub fn historyJumpToNextMessage(self: *AgentState) void {
+        const max_line = self.getHistoryMaxLine();
+        if (self.history_cursor_line >= max_line) return;
+
+        // Get current message index
+        const current_msg_idx = self.getMessageIdxAtLine(self.history_cursor_line);
+
+        // Search forwards for a different message
+        var line = self.history_cursor_line + 1;
+        while (line <= max_line) : (line += 1) {
+            const msg_idx = self.getMessageIdxAtLine(line);
+            // Skip spacers (null msg_idx) and match different message
+            if (msg_idx != null and msg_idx != current_msg_idx) {
+                // Found a different message, set cursor to its first line
+                self.history_cursor_line = line;
+                self.ensureHistoryCursorVisible();
+                return;
+            }
+        }
+
+        // No next message found, go to max
+        self.history_cursor_line = max_line;
+        self.ensureHistoryCursorVisible();
+    }
+
+    /// Page up - move cursor up by half viewport height.
+    pub fn historyPageUp(self: *AgentState) void {
+        const half_viewport = self.last_messages_viewport_height / 2;
+        if (half_viewport == 0) return;
+
+        self.history_cursor_line = self.history_cursor_line -| half_viewport;
+        self.ensureHistoryCursorVisible();
+    }
+
+    /// Page down - move cursor down by half viewport height.
+    pub fn historyPageDown(self: *AgentState) void {
+        const half_viewport = self.last_messages_viewport_height / 2;
+        if (half_viewport == 0) return;
+
+        const max_line = self.getHistoryMaxLine();
+        self.history_cursor_line = @min(self.history_cursor_line + half_viewport, max_line);
+        self.ensureHistoryCursorVisible();
+    }
+
+    /// Jump to top of history (line 0).
+    pub fn historyJumpToTop(self: *AgentState) void {
+        self.history_cursor_line = 0;
+        self.scroll_offset = 0;
+        self.follow_bottom = false;
+    }
+
+    /// Jump to bottom of history (last line).
+    pub fn historyJumpToBottom(self: *AgentState) void {
+        self.history_cursor_line = self.getHistoryMaxLine();
+        self.follow_bottom = true;
+        self.ensureHistoryCursorVisible();
+    }
+
+    /// Ensure the cursor is visible within the viewport, scrolling if needed.
+    pub fn ensureHistoryCursorVisible(self: *AgentState) void {
+        const viewport_height = self.last_messages_viewport_height;
+        if (viewport_height == 0) return;
+
+        // Clamp cursor to valid range
+        self.history_cursor_line = @min(self.history_cursor_line, self.getHistoryMaxLine());
+
+        // Scroll to keep cursor visible
+        if (self.history_cursor_line < self.scroll_offset) {
+            self.scroll_offset = self.history_cursor_line;
+        } else if (self.history_cursor_line >= self.scroll_offset + viewport_height) {
+            self.scroll_offset = self.history_cursor_line - viewport_height + 1;
+        }
+
+        self.follow_bottom = false;
+    }
+
+    /// Get the message index for a given line from the line map.
+    fn getMessageIdxAtLine(self: *const AgentState, line: usize) ?usize {
+        const record = self.line_map.getLineRecord(line) orelse return null;
+        return switch (record.line_type) {
+            .role_header => |h| h.msg_idx,
+            .message_content => |c| c.msg_idx,
+            .tool_header => |t| t.msg_idx,
+            .tool_result => |r| r.msg_idx,
+            .diff_header => |d| d.msg_idx,
+            .diff_hunk_header => |h| h.msg_idx,
+            .diff_line => |d| d.msg_idx,
+            .plan_entry => |p| p.msg_idx,
+            .spacer => null,
+        };
+    }
+
+    /// Find the first line of a message given its index.
+    fn findMessageStartLine(self: *const AgentState, target_msg_idx: usize) usize {
+        const total_lines = self.line_map.getTotalLines();
+        for (0..total_lines) |line| {
+            if (self.getMessageIdxAtLine(line)) |msg_idx| {
+                if (msg_idx == target_msg_idx) {
+                    return line;
+                }
+            }
+        }
+        return 0;
     }
 
     /// Get message count
@@ -2143,4 +2300,157 @@ test "exitHistoryMode clears history_mode" {
 
     // Verify history mode is cleared
     try std.testing.expect(!agent_state.isInHistoryMode());
+}
+
+test "historyCursorDown moves cursor and clamps at max" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add messages to create some lines in line_map
+    try agent_state.addMessage(.user, "Hello");
+    try agent_state.addMessage(.agent, "Hi there");
+
+    // Build the line map to get real line count
+    _ = try agent_state.ensureLineMap(80, null);
+
+    // Enter history mode
+    agent_state.enterHistoryMode();
+    const max_line = agent_state.getHistoryMaxLine();
+
+    // Set cursor to 0 and move down
+    agent_state.history_cursor_line = 0;
+    agent_state.historyCursorDown();
+    try std.testing.expect(agent_state.history_cursor_line == 1);
+
+    // Move cursor to max and try to move down (should stay at max)
+    agent_state.history_cursor_line = max_line;
+    agent_state.historyCursorDown();
+    try std.testing.expect(agent_state.history_cursor_line == max_line);
+}
+
+test "historyCursorUp moves cursor and stops at zero" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add a message
+    try agent_state.addMessage(.user, "Hello");
+
+    // Build the line map
+    _ = try agent_state.ensureLineMap(80, null);
+
+    // Enter history mode
+    agent_state.enterHistoryMode();
+
+    // Set cursor to 2 and move up
+    agent_state.history_cursor_line = 2;
+    agent_state.historyCursorUp();
+    try std.testing.expect(agent_state.history_cursor_line == 1);
+
+    // Move to 0 and try to move up (should stay at 0)
+    agent_state.history_cursor_line = 0;
+    agent_state.historyCursorUp();
+    try std.testing.expect(agent_state.history_cursor_line == 0);
+}
+
+test "historyJumpToTop sets cursor to 0 and scroll_offset to 0" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add messages
+    try agent_state.addMessage(.user, "Hello");
+    try agent_state.addMessage(.agent, "World");
+
+    // Build line map
+    _ = try agent_state.ensureLineMap(80, null);
+
+    // Enter history mode and set some scroll/cursor position
+    agent_state.enterHistoryMode();
+    agent_state.history_cursor_line = 5;
+    agent_state.scroll_offset = 3;
+
+    // Jump to top
+    agent_state.historyJumpToTop();
+
+    try std.testing.expect(agent_state.history_cursor_line == 0);
+    try std.testing.expect(agent_state.scroll_offset == 0);
+    try std.testing.expect(!agent_state.follow_bottom);
+}
+
+test "historyJumpToBottom sets cursor to last line" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add messages
+    try agent_state.addMessage(.user, "Hello");
+
+    // Build line map
+    _ = try agent_state.ensureLineMap(80, null);
+
+    // Enter history mode
+    agent_state.enterHistoryMode();
+    agent_state.history_cursor_line = 0;
+
+    // Jump to bottom
+    agent_state.historyJumpToBottom();
+
+    const max_line = agent_state.getHistoryMaxLine();
+    try std.testing.expect(agent_state.history_cursor_line == max_line);
+    try std.testing.expect(agent_state.follow_bottom);
+}
+
+test "getHistoryMaxLine returns correct max" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Empty - max should be 0
+    try std.testing.expect(agent_state.getHistoryMaxLine() == 0);
+
+    // Add message
+    try agent_state.addMessage(.user, "Hello");
+    _ = try agent_state.ensureLineMap(80, null);
+
+    const total = agent_state.line_map.getTotalLines();
+    const max = agent_state.getHistoryMaxLine();
+    try std.testing.expect(max == if (total > 0) total - 1 else 0);
+}
+
+test "ensureHistoryCursorVisible scrolls viewport to cursor" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add several messages to create enough lines
+    try agent_state.addMessage(.user, "Line 1");
+    try agent_state.addMessage(.agent, "Line 2");
+    try agent_state.addMessage(.user, "Line 3");
+    try agent_state.addMessage(.agent, "Line 4");
+
+    // Build line map
+    _ = try agent_state.ensureLineMap(80, null);
+
+    agent_state.enterHistoryMode();
+    agent_state.last_messages_viewport_height = 3; // Small viewport
+
+    // Cursor above scroll_offset - should scroll up
+    agent_state.scroll_offset = 5;
+    agent_state.history_cursor_line = 2;
+    agent_state.ensureHistoryCursorVisible();
+    try std.testing.expect(agent_state.scroll_offset == 2);
+
+    // Cursor below viewport - should scroll down
+    agent_state.scroll_offset = 0;
+    agent_state.history_cursor_line = 5;
+    agent_state.ensureHistoryCursorVisible();
+    try std.testing.expect(agent_state.scroll_offset >= 3); // cursor should be visible
 }
