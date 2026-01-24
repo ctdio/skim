@@ -86,6 +86,32 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
+    // Handle history mode key events
+    if (agent_state.isInHistoryMode()) {
+        if (key.codepoint == 'i') {
+            // 'i' exits history mode and enters insert mode
+            agent_state.exitHistoryMode();
+            agent_state.input.vim.vim_mode = .insert;
+            app.needs_render = true;
+            return;
+        }
+        if (key.codepoint == 27 or key.codepoint == 'q') { // ESC or q
+            // ESC/q exits history mode to normal mode
+            agent_state.exitHistoryMode();
+            agent_state.input.vim.vim_mode = .normal;
+            app.needs_render = true;
+            return;
+        }
+        // Consume other keys in history mode (don't pass to input editor)
+        // Note: Ctrl-d/u for scrolling is handled below, not consumed here
+        if (key.mods.ctrl and (key.codepoint == 'd' or key.codepoint == 'u')) {
+            // Let ctrl-d/u fall through for history scrolling
+        } else {
+            // Consume other keys
+            return;
+        }
+    }
+
     // Double-ESC to interrupt agent (only in normal vim mode)
     // ESC must be pressed twice within 5 seconds to trigger cancellation
     if (key.codepoint == 27 and agent_state.input.vim.vim_mode == .normal) {
@@ -385,6 +411,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.needs_render = true;
                 return;
             }
+            if (key.codepoint == 'b') {
+                // gb - enter history mode (if messages exist)
+                if (agent_state.messages.items.len > 0) {
+                    agent_state.enterHistoryMode();
+                    app.needs_render = true;
+                }
+                return;
+            }
             if (key.codepoint == 't') {
                 // gt - next tab
                 if (app.tab_manager) |*tm| {
@@ -498,22 +532,30 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // Ctrl+D - page down (works in all modes)
+    // Ctrl+D - page down (in history mode or normal mode, not insert mode)
+    // In insert mode, Ctrl+D falls through to input editor for vim half-page down
     if (key.mods.ctrl and key.codepoint == 'd') {
-        agent_state.follow_bottom = false; // Disable follow mode
-        const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
-        agent_state.scrollDown(scroll_amount);
-        app.needs_render = true;
-        return;
+        if (agent_state.isInHistoryMode() or agent_state.input.vim.vim_mode != .insert) {
+            agent_state.follow_bottom = false; // Disable follow mode
+            const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
+            agent_state.scrollDown(scroll_amount);
+            app.needs_render = true;
+            return;
+        }
+        // In insert mode, fall through to input editor
     }
 
-    // Ctrl+U - page up (works in all modes)
+    // Ctrl+U - page up (in history mode or normal mode, not insert mode)
+    // In insert mode, Ctrl+U falls through to input editor for vim half-page up
     if (key.mods.ctrl and key.codepoint == 'u') {
-        agent_state.follow_bottom = false; // Disable follow mode
-        const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
-        agent_state.scrollUp(scroll_amount);
-        app.needs_render = true;
-        return;
+        if (agent_state.isInHistoryMode() or agent_state.input.vim.vim_mode != .insert) {
+            agent_state.follow_bottom = false; // Disable follow mode
+            const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
+            agent_state.scrollUp(scroll_amount);
+            app.needs_render = true;
+            return;
+        }
+        // In insert mode, fall through to input editor
     }
 
     // Up arrow on empty input - restore staged prompt into input for editing

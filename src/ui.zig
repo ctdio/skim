@@ -87,7 +87,7 @@ pub const UI = struct {
             .text = left_corner,
             .style = .{ .fg = Color.dim },
         }};
-        _ = win.print(&left_seg, .{ .row_offset = @intCast(0 )});
+        _ = win.print(&left_seg, .{ .row_offset = @intCast(0) });
 
         // Print horizontal line
         if (h_line.len > 0) {
@@ -95,7 +95,7 @@ pub const UI = struct {
                 .text = h_line,
                 .style = .{ .fg = Color.dim },
             }};
-            _ = win.print(&h_seg, .{ .row_offset = 0, .col_offset = @intCast(1 )});
+            _ = win.print(&h_seg, .{ .row_offset = 0, .col_offset = @intCast(1) });
         }
 
         // Print right corner
@@ -103,7 +103,7 @@ pub const UI = struct {
             .text = right_corner,
             .style = .{ .fg = Color.dim },
         }};
-        _ = win.print(&right_seg, .{ .row_offset = 0, .col_offset = @intCast(win.width -| 1 )});
+        _ = win.print(&right_seg, .{ .row_offset = 0, .col_offset = @intCast(win.width -| 1) });
     }
 
     pub fn renderEmptyMenu(app: *App, win: vaxis.Window) !void {
@@ -158,7 +158,7 @@ pub const UI = struct {
             .text = subtitle_copy,
             .style = .{ .fg = Color.dim },
         }};
-        _ = win.print(&subtitle_seg, .{ .row_offset = @intCast(start_row + 2), .col_offset = @intCast(subtitle_col )});
+        _ = win.print(&subtitle_seg, .{ .row_offset = @intCast(start_row + 2), .col_offset = @intCast(subtitle_col) });
 
         // Menu items - find longest item to center the block
         const separator = " - ";
@@ -221,7 +221,7 @@ pub const UI = struct {
                 try segments.append(app.allocator, .{ .text = stats_close, .style = .{ .fg = Color.dim } });
             }
 
-            _ = win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(item_col )});
+            _ = win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(item_col) });
 
             // Render caret to the left of selected item
             if (is_selected and item_col >= caret_offset) {
@@ -230,7 +230,7 @@ pub const UI = struct {
                     .text = caret_copy,
                     .style = .{ .fg = Color.cyan },
                 }};
-                _ = win.print(&caret_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(item_col - caret_offset )});
+                _ = win.print(&caret_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(item_col - caret_offset) });
             }
         }
 
@@ -243,7 +243,7 @@ pub const UI = struct {
             .text = instr_copy,
             .style = .{ .fg = Color.dim },
         }};
-        _ = win.print(&instr_seg, .{ .row_offset = @intCast(instr_row), .col_offset = @intCast(instr_col )});
+        _ = win.print(&instr_seg, .{ .row_offset = @intCast(instr_row), .col_offset = @intCast(instr_col) });
     }
 
     pub fn renderBranchSelectionMenu(app: *App, win: vaxis.Window) !void {
@@ -275,7 +275,7 @@ pub const UI = struct {
             .text = search_copy,
             .style = .{ .fg = if (query.len > 0) Color.cyan else Color.dim },
         }};
-        _ = win.print(&search_seg, .{ .row_offset = @intCast(start_row + 2), .col_offset = @intCast(search_col )});
+        _ = win.print(&search_seg, .{ .row_offset = @intCast(start_row + 2), .col_offset = @intCast(search_col) });
 
         if (app.state.branch_list.len == 0) return;
 
@@ -291,7 +291,7 @@ pub const UI = struct {
                 .text = no_matches_copy,
                 .style = .{ .fg = Color.dim },
             }};
-            _ = win.print(&no_matches_seg, .{ .row_offset = @intCast(start_row + 4), .col_offset = @intCast(no_matches_col )});
+            _ = win.print(&no_matches_seg, .{ .row_offset = @intCast(start_row + 4), .col_offset = @intCast(no_matches_col) });
         } else {
             // Estimate max length including stats (branch name + stats format ~30 chars)
             var max_len: usize = 0;
@@ -359,7 +359,7 @@ pub const UI = struct {
                 try segments.append(app.allocator, .{ .text = closing_paren, .style = .{ .fg = Color.dim } });
 
                 // Render branch with colored stats
-                _ = win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(menu_start_col )});
+                _ = win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(menu_start_col) });
 
                 // Render caret for selected branch
                 if (is_selected and menu_start_col >= caret_offset) {
@@ -368,7 +368,7 @@ pub const UI = struct {
                         .text = caret_copy,
                         .style = .{ .fg = Color.cyan },
                     }};
-                    _ = win.print(&caret_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(menu_start_col - caret_offset )});
+                    _ = win.print(&caret_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(menu_start_col - caret_offset) });
                 }
             }
         }
@@ -382,7 +382,7 @@ pub const UI = struct {
             .text = instr_copy,
             .style = .{ .fg = Color.dim },
         }};
-        _ = win.print(&instr_seg, .{ .row_offset = @intCast(instr_row), .col_offset = @intCast(instr_col )});
+        _ = win.print(&instr_seg, .{ .row_offset = @intCast(instr_row), .col_offset = @intCast(instr_col) });
     }
 
     pub fn renderCommitSelectionMenu(app: *App, win: vaxis.Window) !void {
@@ -589,7 +589,7 @@ pub const UI = struct {
             .text = title_copy,
             .style = .{ .fg = Color.cyan, .bold = true },
         }};
-        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0 )});
+        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
 
         // Commit info
         var info_buf: [128]u8 = undefined;
@@ -685,7 +685,7 @@ pub const UI = struct {
             .text = title_copy,
             .style = .{ .fg = Color.cyan, .bold = true },
         }};
-        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0 )});
+        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
 
         // Render stack branches (tip at top, trunk at bottom)
         for (0..branch_count) |visual_idx| {
@@ -725,7 +725,7 @@ pub const UI = struct {
                 try segments.append(app.allocator, .{ .text = restack_copy, .style = .{ .fg = Color.yellow, .bold = true } });
             }
 
-            _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 )});
+            _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(1) });
         }
 
         // Instructions at bottom
@@ -734,7 +734,7 @@ pub const UI = struct {
             .text = instr_copy,
             .style = .{ .fg = Color.dim },
         }};
-        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1 )});
+        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
     }
 
     pub fn renderModelSelectionDialog(app: *App, win: vaxis.Window) !void {
@@ -1223,7 +1223,7 @@ pub const UI = struct {
             .{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } },
         };
 
-        _ = win.print(&segments, .{ .row_offset = 0, .col_offset = @intCast(0 )});
+        _ = win.print(&segments, .{ .row_offset = 0, .col_offset = @intCast(0) });
     }
 
     pub fn renderStatus(app: *App, win: vaxis.Window) !void {
@@ -1393,14 +1393,17 @@ pub const UI = struct {
         } else if (app.mode == .agent) {
             // Agent mode - show vim mode, model name, session mode, stash indicator
             if (app.getActiveAgentStateConst()) |agent_state| {
-                // Vim mode on the left
-                const vim_mode_str = switch (agent_state.input.vim.vim_mode) {
+                // Mode indicator on the left
+                // Check history mode FIRST (takes precedence over vim mode)
+                const agent_mode_str = if (agent_state.isInHistoryMode())
+                    "-- HISTORY --"
+                else switch (agent_state.input.vim.vim_mode) {
                     .normal => "-- NORMAL --",
                     .insert => "-- INSERT --",
                     .visual => "-- VISUAL --",
                     .command => "-- COMMAND --",
                 };
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, vim_mode_str), .style = .{ .bold = true } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, agent_mode_str), .style = .{ .bold = true } });
 
                 // Session mode (if available)
                 if (app.getActiveAcpManager()) |mgr| {
@@ -1522,7 +1525,7 @@ pub const UI = struct {
             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
         }
 
-        _ = win.print(segments.items, .{ .row_offset = @intCast(0 )});
+        _ = win.print(segments.items, .{ .row_offset = @intCast(0) });
     }
 
     pub fn printHeaderLine(app: *App, win: vaxis.Window, row: usize, text: []const u8, style: vaxis.Style) !void {
@@ -1545,7 +1548,7 @@ pub const UI = struct {
             .text = buffer[0..width],
             .style = style,
         }};
-        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0 )});
+        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
     }
 
     /// Render a vertical divider line
@@ -1558,8 +1561,7 @@ pub const UI = struct {
             var seg = [_]vaxis.Cell.Segment{
                 .{ .text = "│", .style = divider_style },
             };
-            _ = win.print(&seg, .{ .row_offset = @intCast(row )});
+            _ = win.print(&seg, .{ .row_offset = @intCast(row) });
         }
     }
-
 };

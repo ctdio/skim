@@ -658,6 +658,9 @@ pub const AgentState = struct {
     // Help overlay state (toggled with '?' key)
     help_visible: bool,
     help_scroll_offset: usize,
+    // History mode state (for browsing message history with vim-like navigation)
+    history_mode: bool,
+    history_cursor_line: usize,
 
     /// Queued shell command output to be sent with next prompt
     pub const QueuedShellOutput = struct {
@@ -825,6 +828,8 @@ pub const AgentState = struct {
             .cmd_palette = command_palette.AgentCommandPaletteState.init(allocator),
             .help_visible = false,
             .help_scroll_offset = 0,
+            .history_mode = false,
+            .history_cursor_line = 0,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -1268,6 +1273,32 @@ pub const AgentState = struct {
             .side_by_side => .unified,
         };
         self.line_map_dirty = true;
+    }
+
+    // =========================================================================
+    // History Mode (for browsing message history)
+    // =========================================================================
+
+    /// Enter history mode for browsing message history.
+    /// Only enters if there are messages to browse.
+    /// Initializes cursor to bottom of history.
+    pub fn enterHistoryMode(self: *AgentState) void {
+        // Only enter history mode if there are messages
+        if (self.messages.items.len == 0) return;
+
+        self.history_mode = true;
+        // Initialize cursor at bottom of history
+        self.history_cursor_line = self.line_map.getTotalLines() -| 1;
+    }
+
+    /// Exit history mode and return to normal editing.
+    pub fn exitHistoryMode(self: *AgentState) void {
+        self.history_mode = false;
+    }
+
+    /// Check if currently in history mode.
+    pub fn isInHistoryMode(self: *const AgentState) bool {
+        return self.history_mode;
     }
 
     /// Get message count
@@ -2061,4 +2092,55 @@ test "fuzzyScore case insensitive" {
 
     try std.testing.expect(score1 != null);
     try std.testing.expect(score2 != null);
+}
+
+// =============================================================================
+// History Mode Tests
+// =============================================================================
+
+test "enterHistoryMode with messages sets history_mode true" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add a message so history mode can be entered
+    try agent_state.addMessage(.user, "Hello");
+
+    // Enter history mode
+    agent_state.enterHistoryMode();
+
+    // Verify history mode is active
+    try std.testing.expect(agent_state.isInHistoryMode());
+}
+
+test "enterHistoryMode with no messages is no-op" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Try to enter history mode with no messages
+    agent_state.enterHistoryMode();
+
+    // Verify history mode is NOT active
+    try std.testing.expect(!agent_state.isInHistoryMode());
+}
+
+test "exitHistoryMode clears history_mode" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // Add a message and enter history mode
+    try agent_state.addMessage(.user, "Hello");
+    agent_state.enterHistoryMode();
+    try std.testing.expect(agent_state.isInHistoryMode());
+
+    // Exit history mode
+    agent_state.exitHistoryMode();
+
+    // Verify history mode is cleared
+    try std.testing.expect(!agent_state.isInHistoryMode());
 }
