@@ -696,6 +696,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
+    // Ctrl+G - open current prompt in $EDITOR (works in normal and insert mode)
+    if (key.mods.ctrl and key.codepoint == 'g') {
+        app.editAgentPromptInEditor() catch |err| {
+            std.log.err("Failed to open prompt in editor: {any}", .{err});
+        };
+        return;
+    }
+
 
     // Ctrl+D - page down (only in history mode, otherwise pass to input editor)
     if (key.mods.ctrl and key.codepoint == 'd') {

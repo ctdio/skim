@@ -115,6 +115,7 @@ pub const App = struct {
     should_suspend_for_editor: bool,
     editor_file_path: ?[]const u8,
     editor_line_number: ?usize,
+    editor_is_prompt_edit: bool, // True if editing agent prompt (read content back after)
     last_ctrl_c: i64,
     header_line_buffers: [Layout.header_height][HEADER_BUFFER_WIDTH]u8,
     frame_text_buffer: []u8,
@@ -501,6 +502,7 @@ pub const App = struct {
             .should_suspend_for_editor = false,
             .editor_file_path = null,
             .editor_line_number = null,
+            .editor_is_prompt_edit = false,
             .last_ctrl_c = 0,
             .header_line_buffers = header_buffers,
             .frame_text_buffer = frame_buffer,
@@ -1003,6 +1005,31 @@ pub const App = struct {
                     editor.openInEditor(self.allocator, file_path, self.editor_line_number) catch |err| {
                         std.log.err("Failed to open editor: {any}", .{err});
                     };
+
+                    // If this was a prompt edit, read the content back
+                    if (self.editor_is_prompt_edit) {
+                        // Read the edited content from the temp file
+                        if (std.fs.cwd().readFileAlloc(self.allocator, file_path, 1024 * 1024)) |content| {
+                            defer self.allocator.free(content);
+                            if (self.getActiveAgentState()) |agent_state| {
+                                // Trim trailing newlines (editors often add them)
+                                var trimmed = content;
+                                while (trimmed.len > 0 and trimmed[trimmed.len - 1] == '\n') {
+                                    trimmed = trimmed[0 .. trimmed.len - 1];
+                                }
+                                // Update the input editor with the new content
+                                agent_state.input.setText(trimmed);
+                                // Position cursor at end
+                                agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
+                            }
+                        } else |err| {
+                            std.log.err("Failed to read edited prompt: {any}", .{err});
+                        }
+                        // Delete the temp file
+                        std.fs.cwd().deleteFile(file_path) catch |err| {
+                            std.log.warn("Failed to delete temp file: {any}", .{err});
+                        };
+                    }
                 }
 
                 // Re-enter alt screen
@@ -1011,8 +1038,10 @@ pub const App = struct {
                 // Restart the event loop
                 try loop.start();
 
-                // Refresh diff after returning from editor
-                try self.refresh();
+                // Refresh diff after returning from editor (only for file editing, not prompt editing)
+                if (!self.editor_is_prompt_edit) {
+                    try self.refresh();
+                }
 
                 // Force a full render after re-entering alt screen
                 self.needs_render = true;
@@ -1021,6 +1050,7 @@ pub const App = struct {
                 self.should_suspend_for_editor = false;
                 self.editor_file_path = null;
                 self.editor_line_number = null;
+                self.editor_is_prompt_edit = false;
             }
 
             // Process all pending events
@@ -2305,6 +2335,55 @@ pub const App = struct {
             editor.openInEditor(self.allocator, absolute_path, line_number) catch |err| {
                 std.log.err("Failed to open editor: {any}", .{err});
             };
+        }
+    }
+
+    /// Open the current agent prompt in the user's $EDITOR for editing.
+    /// After the editor closes, the edited content is read back into the input.
+    pub fn editAgentPromptInEditor(self: *App) !void {
+        const agent_state = self.getActiveAgentState() orelse return;
+
+        // Get current input text
+        const input_text = agent_state.input.getText();
+
+        // Generate a unique filename with full path
+        const timestamp = std.time.timestamp();
+        var path_buf: [256]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&path_buf, "/tmp/skim-prompt-{d}.txt", .{timestamp}) catch {
+            std.log.err("Failed to build temp file path", .{});
+            return;
+        };
+
+        // Create and write the temp file
+        const file = std.fs.cwd().createFile(full_path, .{}) catch |err| {
+            std.log.err("Failed to create temp file: {any}", .{err});
+            return;
+        };
+        file.writeAll(input_text) catch |err| {
+            file.close();
+            std.log.err("Failed to write to temp file: {any}", .{err});
+            return;
+        };
+        file.close();
+
+        // Check if editor is terminal-based
+        const is_terminal = try editor.isCurrentEditorTerminal(self.allocator);
+
+        if (is_terminal) {
+            // Terminal editor: suspend TUI and wait for editor to complete
+            const path_copy = try self.allocator.dupe(u8, full_path);
+            self.should_suspend_for_editor = true;
+            self.editor_file_path = path_copy;
+            self.editor_line_number = null;
+            self.editor_is_prompt_edit = true;
+            // Prevent blocking on next pollEvent() so editor opens immediately
+            self.needs_render = true;
+        } else {
+            // GUI editor: not well suited for prompt editing (no way to know when done)
+            // For now, just show a message
+            std.log.warn("GUI editors not supported for prompt editing", .{});
+            // Clean up the temp file
+            std.fs.cwd().deleteFile(full_path) catch {};
         }
     }
 
