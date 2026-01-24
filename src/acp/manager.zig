@@ -1963,15 +1963,20 @@ pub const AcpManager = struct {
                         diff.new_text.len,
                     });
 
-                    // Deduplicate by PATH only within a turn
-                    // ACP sends the same edit multiple times with different context windows
-                    // We only want the first one (smallest context, most focused)
-                    if (self.seen_diff_keys.contains(diff.path)) {
-                        std.log.debug("DIFF SKIPPED (duplicate path): path={s}", .{diff.path});
+                    // Deduplicate by tool_call_id + path within a turn
+                    // ACP sends the same tool_call multiple times with progressively more context
+                    // We want the first (smallest context) diff for each tool_call_id + path combo
+                    // Build key: tool_call_id + ":" + path
+                    var key_buf: [512]u8 = undefined;
+                    const key_len = std.fmt.bufPrint(&key_buf, "{s}:{s}", .{ tc.tool_call_id, diff.path }) catch continue;
+                    const diff_key = key_buf[0..key_len.len];
+
+                    if (self.seen_diff_keys.contains(diff_key)) {
+                        std.log.debug("DIFF SKIPPED (duplicate): path={s}", .{diff.path});
                         continue;
                     }
-                    // Store just the path as the key (owned copy) - freed in deinit or on prompt
-                    const key = self.allocator.dupe(u8, diff.path) catch continue;
+                    // Store the key (owned copy) - freed in deinit or on prompt
+                    const key = self.allocator.dupe(u8, diff_key) catch continue;
                     self.seen_diff_keys.put(self.allocator, key, {}) catch {
                         self.allocator.free(key);
                         continue;

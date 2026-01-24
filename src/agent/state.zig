@@ -9,7 +9,6 @@ const git_files = @import("../git/files.zig");
 const command_palette = @import("command_palette.zig");
 
 /// Maximum number of slash commands visible in menu at once
-/// (test edit for diff rendering)
 pub const MAX_SLASH_MENU_VISIBLE: usize = 12;
 
 /// Local slash command definition (handled by skim, not sent to agent)
@@ -623,6 +622,7 @@ pub const AgentState = struct {
     diff_view_mode: DiffViewMode, // View mode for inline diffs
     line_map: ChatLineMap, // Pre-computed line map for stable rendering
     line_map_dirty: bool, // True when line_map needs rebuild
+    earlier_message_dirty: bool, // True when a non-last message was modified (requires full rebuild)
     last_line_map_rebuild: i64, // Timestamp of last rebuild (ms) for throttling
     // Agent plan (todo list)
     plan_entries: std.ArrayList(OwnedPlanEntry),
@@ -802,6 +802,7 @@ pub const AgentState = struct {
             .diff_view_mode = .unified, // Default to unified view
             .line_map = ChatLineMap.init(allocator),
             .line_map_dirty = true,
+            .earlier_message_dirty = false,
             .last_line_map_rebuild = 0,
             .plan_entries = .{},
             .plan_visible = true, // Show plan by default when entries exist
@@ -1098,7 +1099,8 @@ pub const AgentState = struct {
         }
     }
 
-    /// Update an existing tool message with completion status and output
+    /// Update an existing tool message with completion status and output.
+    /// If no message with the given tool_call_id exists, creates a new one.
     pub fn updateToolMessage(
         self: *AgentState,
         tool_call_id: []const u8,
@@ -1107,7 +1109,7 @@ pub const AgentState = struct {
         stderr: ?[]const u8,
     ) !void {
         // Find the tool message with matching ID
-        for (self.messages.items) |*msg| {
+        for (self.messages.items, 0..) |*msg, idx| {
             if (msg.role == .tool) {
                 if (msg.tool_call_id) |id| {
                     if (std.mem.eql(u8, id, tool_call_id)) {
@@ -1129,6 +1131,12 @@ pub const AgentState = struct {
                         // Mark line map dirty
                         self.line_map_dirty = true;
 
+                        // If this is not the last message, mark that an earlier message changed
+                        // This ensures ensureLineMap does a full rebuild instead of just updating the last message
+                        if (idx < self.messages.items.len - 1) {
+                            self.earlier_message_dirty = true;
+                        }
+
                         // Auto-scroll only if in follow mode
                         if (self.follow_bottom) {
                             self.scrollToBottom();
@@ -1137,6 +1145,43 @@ pub const AgentState = struct {
                     }
                 }
             }
+        }
+
+        // No existing message found - create a new tool message
+        // This handles cases where tool_update arrives before tool_call
+        std.log.debug("updateToolMessage: creating new message for tool_call_id={s}", .{tool_call_id});
+
+        const owned_id = try self.allocator.dupe(u8, tool_call_id);
+        errdefer self.allocator.free(owned_id);
+
+        // Use tool_call_id as a placeholder title (will be updated when tool_call arrives)
+        const owned_title = try self.allocator.dupe(u8, tool_call_id);
+        errdefer self.allocator.free(owned_title);
+
+        const owned_stdout: ?[]const u8 = if (stdout) |s| try self.allocator.dupe(u8, s) else null;
+        errdefer if (owned_stdout) |s| self.allocator.free(s);
+
+        const owned_stderr: ?[]const u8 = if (stderr) |s| try self.allocator.dupe(u8, s) else null;
+        errdefer if (owned_stderr) |s| self.allocator.free(s);
+
+        try self.messages.append(self.allocator, .{
+            .role = .tool,
+            .content = owned_title,
+            .timestamp = std.time.timestamp(),
+            .tool_call_id = owned_id,
+            .tool_name = null,
+            .tool_status = status,
+            .tool_command = null,
+            .tool_stdout = owned_stdout,
+            .tool_stderr = owned_stderr,
+        });
+
+        // Mark line map dirty
+        self.line_map_dirty = true;
+
+        // Auto-scroll only if in follow mode
+        if (self.follow_bottom) {
+            self.scrollToBottom();
         }
     }
 
@@ -1257,8 +1302,8 @@ pub const AgentState = struct {
                 const message_count = self.messages.items.len;
                 const prev_message_count = self.line_map.message_count;
 
-                if (width_or_mode_changed or prev_message_count == 0) {
-                    // Width/mode changed or first build - full rebuild required
+                if (width_or_mode_changed or prev_message_count == 0 or self.earlier_message_dirty) {
+                    // Width/mode changed, first build, or earlier message modified - full rebuild required
                     try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode, highlighter);
                 } else if (message_count > prev_message_count) {
                     // New messages added - incremental add
@@ -1273,6 +1318,7 @@ pub const AgentState = struct {
                 }
 
                 self.line_map_dirty = false;
+                self.earlier_message_dirty = false;
                 self.last_line_map_rebuild = now;
             }
             // Otherwise skip update this frame - use stale line map
