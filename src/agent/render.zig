@@ -26,13 +26,6 @@ const Color = rendering_common.Color;
 const rendering_utils = @import("../rendering/utils.zig");
 const RenderUtils = rendering_utils.RenderUtils;
 
-// Test constant for syntax highlighting debugging
-// TODO: Remove this test constant before release
-const SYNTAX_HIGHLIGHT_TEST_VALUE: u32 = 42;
-
-// Another test constant to verify treesitter diff rendering
-const DIFF_RENDERING_TEST_FLAG: bool = true;
-
 /// Safely print text to window, handling invalid UTF-8 gracefully.
 /// If text contains invalid UTF-8, renders valid portions and replaces invalid bytes with �.
 /// Returns the print result (columns advanced).
