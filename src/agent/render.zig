@@ -726,10 +726,10 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     };
 
     // Calculate plan height (only if visible and has entries)
-    const plan_entry_count = agent_state.plan_entries.items.len;
-    const plan_height: usize = if (agent_state.plan_visible and plan_entry_count > 0) blk: {
+    const plan_entry_count = agent_state.plan.count();
+    const plan_height: usize = if (agent_state.plan.visible and plan_entry_count > 0) blk: {
         // Header (1) + entries (all if expanded, 1 if collapsed)
-        const visible_entries: usize = if (agent_state.plan_expanded) plan_entry_count else 1;
+        const visible_entries: usize = if (agent_state.plan.expanded) plan_entry_count else 1;
         break :blk 1 + visible_entries;
     } else 0;
 
@@ -814,7 +814,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
             .width = win.width,
             .height = @intCast(plan_height),
         });
-        renderPlanArea(plan_win, agent_state.plan_entries.items, agent_state.plan_expanded);
+        renderPlanArea(plan_win, agent_state.plan.entries.items, agent_state.plan.expanded);
     }
 
     // Render input area (or permission prompt if pending)
@@ -827,7 +827,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     try renderInputArea(app, input_win, agent_state, is_focused, pending_permission);
 
     // Render slash command menu as overlay (if visible)
-    if (agent_state.slash_menu_visible) {
+    if (agent_state.slash_menu.visible) {
         try renderSlashMenu(win, agent_state, title_height + tab_bar_height + messages_height + status_height + plan_height);
     }
 
@@ -1128,7 +1128,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     // Check if we're in history mode for cursor highlighting
     const in_history_mode = agent_state.isInHistoryMode();
     const in_visual_mode = agent_state.isInHistoryVisualMode();
-    const cursor_line = agent_state.history_cursor_line;
+    const cursor_line = agent_state.history.cursor_line;
 
     var row: usize = 0;
     for (start..end) |line_idx| {
@@ -1672,7 +1672,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     // Calculate menu dimensions with scroll support
     const visible_count = @min(filtered_count, MAX_SLASH_MENU_VISIBLE);
     const max_scroll = if (filtered_count > visible_count) filtered_count - visible_count else 0;
-    const scroll_offset = @min(agent_state.slash_menu_scroll_offset, max_scroll);
+    const scroll_offset = @min(agent_state.slash_menu.scroll_offset, max_scroll);
     const menu_height = visible_count + 2; // +2 for top/bottom border
     const menu_width = @min(win.width -| 4, MAX_SLASH_MENU_WIDTH); // leave some margin
 
@@ -1762,7 +1762,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     }
 
     // Clamp selection to valid range
-    const selection = @min(agent_state.slash_menu_selection, filtered_count - 1);
+    const selection = @min(agent_state.slash_menu.selection, filtered_count - 1);
 
     // Render command items (with scroll offset applied)
     for (0..visible_count) |i| {

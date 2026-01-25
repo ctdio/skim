@@ -8,38 +8,22 @@ const protocol = @import("../acp/protocol.zig");
 const git_files = @import("../git/files.zig");
 const command_palette = @import("command_palette.zig");
 const clipboard = @import("../clipboard.zig");
+const history = @import("history.zig");
+pub const HistoryState = history.HistoryState;
+const slash_menu = @import("slash_menu.zig");
+pub const SlashMenuState = slash_menu.SlashMenuState;
+pub const local_slash_commands = slash_menu.local_commands;
+pub const LocalSlashCommand = slash_menu.LocalCommand;
+const plan_mod = @import("plan.zig");
+pub const PlanState = plan_mod.PlanState;
+pub const OwnedPlanEntry = plan_mod.OwnedPlanEntry;
+const shell_mod = @import("shell.zig");
+pub const ShellState = shell_mod.ShellState;
+pub const QueuedShellOutput = shell_mod.QueuedShellOutput;
+pub const RunningShellCommand = shell_mod.RunningShellCommand;
 
 /// Maximum number of slash commands visible in menu at once
-pub const MAX_SLASH_MENU_VISIBLE: usize = 12;
-
-/// Local slash command definition (handled by skim, not sent to agent)
-pub const LocalSlashCommand = struct {
-    name: []const u8,
-    description: []const u8,
-    is_local: bool, // True = handled locally, false = sent to agent
-};
-
-/// Local slash commands that skim handles (not sent to agent)
-pub const local_slash_commands = [_]LocalSlashCommand{
-    .{ .name = "clear", .description = "Clear session and start fresh", .is_local = true },
-    .{ .name = "model", .description = "Switch AI model", .is_local = true },
-    .{ .name = "resume", .description = "Resume previous session", .is_local = true },
-};
-
-// =============================================================================
-// Plan Entry (Owned)
-// =============================================================================
-
-/// Owned plan entry - stores content string that needs to be freed
-pub const OwnedPlanEntry = struct {
-    content: []const u8, // Owned
-    priority: protocol.PlanEntryPriority,
-    status: protocol.PlanEntryStatus,
-
-    pub fn deinit(self: *OwnedPlanEntry, allocator: Allocator) void {
-        allocator.free(self.content);
-    }
-};
+pub const MAX_SLASH_MENU_VISIBLE: usize = slash_menu.MAX_VISIBLE;
 
 /// Owned slash command - stores strings that need to be freed
 pub const OwnedCommand = struct {
@@ -626,14 +610,10 @@ pub const AgentState = struct {
     earlier_message_dirty: bool, // True when a non-last message was modified (requires full rebuild)
     last_line_map_rebuild: i64, // Timestamp of last rebuild (ms) for throttling
     // Agent plan (todo list)
-    plan_entries: std.ArrayList(OwnedPlanEntry),
-    plan_visible: bool, // Whether to show the plan above input
-    plan_expanded: bool, // Whether to show all plan entries (true) or limited (false)
+    plan: PlanState,
     // Slash commands
     available_commands: std.ArrayList(OwnedCommand),
-    slash_menu_visible: bool,
-    slash_menu_selection: usize, // Index into filtered commands
-    slash_menu_scroll_offset: usize, // Scroll offset for menu pagination
+    slash_menu: SlashMenuState,
     // Input area scrolling
     input_scroll_offset: usize, // Vertical scroll offset for multi-line input
     // Interrupt tracking (double-ESC to cancel, double Ctrl+C to exit)
@@ -646,139 +626,15 @@ pub const AgentState = struct {
     staged_prompt_len: usize,
     // File picker state for @ mentions
     file_picker: FilePickerState,
-    // Shell command mode (activated by ! key)
-    shell_mode: bool,
-    // Queued shell command outputs (sent with next prompt)
-    queued_shell_outputs: std.ArrayList(QueuedShellOutput),
-    // Currently running shell command (for streaming output)
-    running_shell_cmd: ?RunningShellCommand,
-    // Counter for generating unique shell command tool IDs
-    shell_cmd_counter: u32,
+    // Shell command state (mode, queued outputs, running command)
+    shell: ShellState,
     // Command palette state (for ':' command menu)
     cmd_palette: command_palette.AgentCommandPaletteState,
     // Help overlay state (toggled with '?' key)
     help_visible: bool,
     help_scroll_offset: usize,
     // History mode state (for browsing message history with vim-like navigation)
-    history_mode: bool,
-    history_cursor_line: usize,
-    history_pending_g: bool, // For gg handling in history mode
-    history_pending_y: bool, // For yy handling in history mode
-    // Visual selection state (within history mode)
-    history_visual_mode: bool,
-    history_visual_anchor: usize, // Starting line of selection
-
-    /// Queued shell command output to be sent with next prompt
-    pub const QueuedShellOutput = struct {
-        content: []const u8, // Owned
-
-        pub fn deinit(self: *QueuedShellOutput, allocator: Allocator) void {
-            allocator.free(self.content);
-        }
-    };
-
-    /// Running shell command state for streaming output
-    pub const RunningShellCommand = struct {
-        child: std.process.Child,
-        command: []const u8, // Owned
-        tool_id: []const u8, // Owned
-        stdout_buf: std.ArrayList(u8),
-        stderr_buf: std.ArrayList(u8),
-        allocator: Allocator,
-
-        pub fn init(allocator: Allocator, command: []const u8, tool_id: []const u8) !RunningShellCommand {
-            return .{
-                .child = undefined, // Set by caller after spawn
-                .command = try allocator.dupe(u8, command),
-                .tool_id = try allocator.dupe(u8, tool_id),
-                .stdout_buf = .{},
-                .stderr_buf = .{},
-                .allocator = allocator,
-            };
-        }
-
-        pub fn deinit(self: *RunningShellCommand) void {
-            self.allocator.free(self.command);
-            self.allocator.free(self.tool_id);
-            self.stdout_buf.deinit(self.allocator);
-            self.stderr_buf.deinit(self.allocator);
-            // Kill the process if still running
-            _ = self.child.kill() catch {};
-        }
-
-        /// Get the last N lines of stdout for display, processing carriage returns
-        pub fn getLastLines(self: *RunningShellCommand, max_lines: usize) []const u8 {
-            // Process carriage returns to get the "visual" output
-            self.processCarriageReturns();
-
-            const content = self.stdout_buf.items;
-            if (content.len == 0) return "";
-
-            // Find the start of the last N lines
-            var line_count: usize = 0;
-            var pos: usize = content.len;
-
-            // Skip trailing newline if present
-            if (pos > 0 and content[pos - 1] == '\n') {
-                pos -= 1;
-            }
-
-            while (pos > 0 and line_count < max_lines) {
-                pos -= 1;
-                if (content[pos] == '\n') {
-                    line_count += 1;
-                }
-            }
-
-            // If we found enough newlines, skip past the last one we found
-            if (pos > 0 and content[pos] == '\n') {
-                pos += 1;
-            }
-
-            return content[pos..];
-        }
-
-        /// Process carriage returns in the buffer to simulate terminal behavior
-        /// \r moves cursor to start of line, subsequent chars overwrite
-        fn processCarriageReturns(self: *RunningShellCommand) void {
-            const content = self.stdout_buf.items;
-            if (content.len == 0) return;
-
-            // Check if there are any carriage returns to process
-            if (std.mem.indexOf(u8, content, "\r") == null) return;
-
-            // Process the buffer, handling \r by going back to line start
-            var result = std.ArrayList(u8).initCapacity(self.allocator, content.len) catch return;
-            defer {
-                // Swap the processed result back
-                self.stdout_buf.deinit(self.allocator);
-                self.stdout_buf = result;
-            }
-
-            var line_start: usize = 0;
-            var i: usize = 0;
-            while (i < content.len) : (i += 1) {
-                const c = content[i];
-                if (c == '\r') {
-                    // Carriage return - next chars will overwrite from line_start
-                    // But first, if there's a \n right after, it's just a Windows line ending
-                    if (i + 1 < content.len and content[i + 1] == '\n') {
-                        result.append(self.allocator, '\n') catch return;
-                        i += 1;
-                        line_start = result.items.len;
-                    } else {
-                        // Pure \r - go back to line start, truncate to there
-                        result.shrinkRetainingCapacity(line_start);
-                    }
-                } else if (c == '\n') {
-                    result.append(self.allocator, '\n') catch return;
-                    line_start = result.items.len;
-                } else {
-                    result.append(self.allocator, c) catch return;
-                }
-            }
-        }
-    };
+    history: HistoryState,
 
     pub const PanelSide = enum {
         left,
@@ -813,13 +669,9 @@ pub const AgentState = struct {
             .line_map_dirty = true,
             .earlier_message_dirty = false,
             .last_line_map_rebuild = 0,
-            .plan_entries = .{},
-            .plan_visible = true, // Show plan by default when entries exist
-            .plan_expanded = false, // Default to collapsed (Ctrl+T to expand)
+            .plan = PlanState.init(allocator),
             .available_commands = .{},
-            .slash_menu_visible = false,
-            .slash_menu_selection = 0,
-            .slash_menu_scroll_offset = 0,
+            .slash_menu = SlashMenuState.init(),
             .input_scroll_offset = 0,
             .last_esc_timestamp = 0,
             .last_ctrl_c_timestamp = 0,
@@ -827,19 +679,11 @@ pub const AgentState = struct {
             .staged_prompt = undefined,
             .staged_prompt_len = 0,
             .file_picker = FilePickerState.init(allocator),
-            .shell_mode = false,
-            .queued_shell_outputs = .{},
-            .running_shell_cmd = null,
-            .shell_cmd_counter = 0,
+            .shell = ShellState.init(allocator),
             .cmd_palette = command_palette.AgentCommandPaletteState.init(allocator),
             .help_visible = false,
             .help_scroll_offset = 0,
-            .history_mode = false,
-            .history_cursor_line = 0,
-            .history_pending_g = false,
-            .history_pending_y = false,
-            .history_visual_mode = false,
-            .history_visual_anchor = 0,
+            .history = HistoryState.init(),
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -855,22 +699,13 @@ pub const AgentState = struct {
         }
         self.messages.deinit(self.allocator);
         self.line_map.deinit();
-        for (self.plan_entries.items) |*entry| {
-            entry.deinit(self.allocator);
-        }
-        self.plan_entries.deinit(self.allocator);
+        self.plan.deinit();
         for (self.available_commands.items) |*cmd| {
             cmd.deinit(self.allocator);
         }
         self.available_commands.deinit(self.allocator);
         self.file_picker.deinit();
-        for (self.queued_shell_outputs.items) |*output| {
-            output.deinit(self.allocator);
-        }
-        self.queued_shell_outputs.deinit(self.allocator);
-        if (self.running_shell_cmd) |*cmd| {
-            cmd.deinit();
-        }
+        self.shell.deinit();
         self.cmd_palette.deinit();
     }
 
@@ -1325,21 +1160,19 @@ pub const AgentState = struct {
         // Only enter history mode if there are messages
         if (self.messages.items.len == 0) return;
 
-        self.history_mode = true;
-        // Initialize cursor at bottom of history
-        self.history_cursor_line = self.line_map.getTotalLines() -| 1;
+        const initial_line = self.line_map.getTotalLines() -| 1;
+        self.history.enter(initial_line);
     }
 
     /// Exit history mode and return to normal editing.
     /// Also clears visual mode if active.
     pub fn exitHistoryMode(self: *AgentState) void {
-        self.history_mode = false;
-        self.history_visual_mode = false;
+        self.history.exit();
     }
 
     /// Check if currently in history mode.
     pub fn isInHistoryMode(self: *const AgentState) bool {
-        return self.history_mode;
+        return self.history.active;
     }
 
     /// Get the maximum valid cursor line (last line index).
@@ -1350,134 +1183,108 @@ pub const AgentState = struct {
 
     /// Move cursor up one line, clamping at 0.
     pub fn historyCursorUp(self: *AgentState) void {
-        if (self.history_cursor_line > 0) {
-            self.history_cursor_line -= 1;
-        }
+        self.history.cursorUp();
         self.ensureHistoryCursorVisible();
     }
 
     /// Move cursor down one line, clamping at max.
     pub fn historyCursorDown(self: *AgentState) void {
-        const max_line = self.getHistoryMaxLine();
-        if (self.history_cursor_line < max_line) {
-            self.history_cursor_line += 1;
-        }
+        self.history.cursorDown(self.getHistoryMaxLine());
         self.ensureHistoryCursorVisible();
     }
 
     /// Jump to previous message boundary.
     pub fn historyJumpToPrevMessage(self: *AgentState) void {
-        if (self.history_cursor_line == 0) return;
+        if (self.history.cursor_line == 0) return;
 
         // Get current message index
-        const current_msg_idx = self.getMessageIdxAtLine(self.history_cursor_line);
+        const current_msg_idx = self.getMessageIdxAtLine(self.history.cursor_line);
 
         // Search backwards for a different message
-        var line = self.history_cursor_line;
+        var line = self.history.cursor_line;
         while (line > 0) {
             line -= 1;
             const msg_idx = self.getMessageIdxAtLine(line);
             // Skip spacers (null msg_idx) and match different message
             if (msg_idx != null and msg_idx != current_msg_idx) {
                 // Found a different message, now find its start
-                self.history_cursor_line = self.findMessageStartLine(msg_idx.?);
+                self.history.cursor_line = self.findMessageStartLine(msg_idx.?);
                 self.ensureHistoryCursorVisible();
                 return;
             }
         }
 
         // No previous message found, go to line 0
-        self.history_cursor_line = 0;
+        self.history.cursor_line = 0;
         self.ensureHistoryCursorVisible();
     }
 
     /// Jump to next message boundary.
     pub fn historyJumpToNextMessage(self: *AgentState) void {
         const max_line = self.getHistoryMaxLine();
-        if (self.history_cursor_line >= max_line) return;
+        if (self.history.cursor_line >= max_line) return;
 
         // Get current message index
-        const current_msg_idx = self.getMessageIdxAtLine(self.history_cursor_line);
+        const current_msg_idx = self.getMessageIdxAtLine(self.history.cursor_line);
 
         // Search forwards for a different message
-        var line = self.history_cursor_line + 1;
+        var line = self.history.cursor_line + 1;
         while (line <= max_line) : (line += 1) {
             const msg_idx = self.getMessageIdxAtLine(line);
             // Skip spacers (null msg_idx) and match different message
             if (msg_idx != null and msg_idx != current_msg_idx) {
                 // Found a different message, set cursor to its first line
-                self.history_cursor_line = line;
+                self.history.cursor_line = line;
                 self.ensureHistoryCursorVisible();
                 return;
             }
         }
 
         // No next message found, go to max
-        self.history_cursor_line = max_line;
+        self.history.cursor_line = max_line;
         self.ensureHistoryCursorVisible();
     }
 
     /// Page up - move cursor up by half viewport height.
     pub fn historyPageUp(self: *AgentState) void {
-        const half_viewport = self.last_messages_viewport_height / 2;
-        if (half_viewport == 0) return;
-
-        self.history_cursor_line = self.history_cursor_line -| half_viewport;
+        self.history.pageUp(self.last_messages_viewport_height);
         self.ensureHistoryCursorVisible();
     }
 
     /// Page down - move cursor down by half viewport height.
     pub fn historyPageDown(self: *AgentState) void {
-        const half_viewport = self.last_messages_viewport_height / 2;
-        if (half_viewport == 0) return;
-
-        const max_line = self.getHistoryMaxLine();
-        self.history_cursor_line = @min(self.history_cursor_line + half_viewport, max_line);
+        self.history.pageDown(self.last_messages_viewport_height, self.getHistoryMaxLine());
         self.ensureHistoryCursorVisible();
     }
 
     /// Jump to top of history (line 0).
     pub fn historyJumpToTop(self: *AgentState) void {
-        self.history_cursor_line = 0;
+        self.history.jumpToTop();
         self.scroll_offset = 0;
         self.follow_bottom = false;
     }
 
     /// Jump to bottom of history (last line).
     pub fn historyJumpToBottom(self: *AgentState) void {
-        self.history_cursor_line = self.getHistoryMaxLine();
+        self.history.jumpToBottom(self.getHistoryMaxLine());
         self.follow_bottom = true;
         self.ensureHistoryCursorVisible();
     }
 
     /// Move cursor to the middle line of the current viewport (like vim's 'M').
     pub fn historyCenterCursor(self: *AgentState) void {
-        const viewport_height = self.last_messages_viewport_height;
-        if (viewport_height == 0) return;
-
-        const half_viewport = viewport_height / 2;
-        const middle_line = self.scroll_offset + half_viewport;
-
-        const max_line = self.getHistoryMaxLine();
-        self.history_cursor_line = @min(middle_line, max_line);
+        self.history.centerCursor(self.scroll_offset, self.last_messages_viewport_height, self.getHistoryMaxLine());
         self.follow_bottom = false;
     }
 
     /// Ensure the cursor is visible within the viewport, scrolling if needed.
     pub fn ensureHistoryCursorVisible(self: *AgentState) void {
-        const viewport_height = self.last_messages_viewport_height;
-        if (viewport_height == 0) return;
-
-        // Clamp cursor to valid range
-        self.history_cursor_line = @min(self.history_cursor_line, self.getHistoryMaxLine());
-
-        // Scroll to keep cursor visible
-        if (self.history_cursor_line < self.scroll_offset) {
-            self.scroll_offset = self.history_cursor_line;
-        } else if (self.history_cursor_line >= self.scroll_offset + viewport_height) {
-            self.scroll_offset = self.history_cursor_line - viewport_height + 1;
-        }
-
+        const new_offset = self.history.ensureCursorVisible(
+            self.scroll_offset,
+            self.last_messages_viewport_height,
+            self.getHistoryMaxLine(),
+        );
+        self.scroll_offset = new_offset;
         self.follow_bottom = false;
     }
 
@@ -1517,36 +1324,28 @@ pub const AgentState = struct {
     /// Enter visual selection mode (line-based, like V in vim).
     /// Sets anchor to current cursor position.
     pub fn enterHistoryVisualMode(self: *AgentState) void {
-        if (!self.history_mode) return;
-        self.history_visual_mode = true;
-        self.history_visual_anchor = self.history_cursor_line;
+        self.history.enterVisualMode();
     }
 
     /// Exit visual selection mode (back to normal history mode).
     pub fn exitHistoryVisualMode(self: *AgentState) void {
-        self.history_visual_mode = false;
+        self.history.exitVisualMode();
     }
 
     /// Check if in history visual mode.
     pub fn isInHistoryVisualMode(self: *const AgentState) bool {
-        return self.history_mode and self.history_visual_mode;
+        return self.history.active and self.history.visual_mode;
     }
 
     /// Get visual selection range (start, end) - always start <= end.
     pub fn getVisualSelectionRange(self: *const AgentState) struct { start: usize, end: usize } {
-        const a = self.history_visual_anchor;
-        const b = self.history_cursor_line;
-        return .{
-            .start = @min(a, b),
-            .end = @max(a, b),
-        };
+        const range = self.history.getVisualRange();
+        return .{ .start = range.start, .end = range.end };
     }
 
     /// Check if a line is within visual selection.
     pub fn isLineInVisualSelection(self: *const AgentState, line: usize) bool {
-        if (!self.isInHistoryVisualMode()) return false;
-        const range = self.getVisualSelectionRange();
-        return line >= range.start and line <= range.end;
+        return self.history.isLineInVisualSelection(line);
     }
 
     /// Check if a line should be highlighted as part of the same user message unit.
@@ -1558,7 +1357,7 @@ pub const AgentState = struct {
         if (!self.isInHistoryMode() or self.isInHistoryVisualMode()) return false;
 
         // Get the cursor line's record
-        const cursor_record = self.line_map.getLineRecord(self.history_cursor_line) orelse return false;
+        const cursor_record = self.line_map.getLineRecord(self.history.cursor_line) orelse return false;
 
         // Only applies if cursor is on a user message content line
         const cursor_msg_idx = switch (cursor_record.line_type) {
@@ -1631,9 +1430,9 @@ pub const AgentState = struct {
 
     /// Yank entire current message to clipboard.
     pub fn yankCurrentMessage(self: *AgentState, alloc: Allocator) !void {
-        if (!self.history_mode) return;
+        if (!self.history.active) return;
 
-        const msg_idx = self.getMessageIdxAtLine(self.history_cursor_line) orelse return;
+        const msg_idx = self.getMessageIdxAtLine(self.history.cursor_line) orelse return;
         const text = try self.getTextForMessage(alloc, msg_idx);
         defer alloc.free(text);
 
@@ -1642,9 +1441,9 @@ pub const AgentState = struct {
 
     /// Yank current line to clipboard (yy in vim).
     pub fn yankCurrentLine(self: *AgentState, alloc: Allocator) !void {
-        if (!self.history_mode) return;
+        if (!self.history.active) return;
 
-        const text = try self.getTextForLineRange(alloc, self.history_cursor_line, self.history_cursor_line);
+        const text = try self.getTextForLineRange(alloc, self.history.cursor_line, self.history.cursor_line);
         defer alloc.free(text);
 
         if (text.len > 0) {
@@ -1655,9 +1454,9 @@ pub const AgentState = struct {
     /// Get the user message index at the cursor, if cursor is on a user message.
     /// Returns null if cursor is not on a user message.
     pub fn getUserMessageIdxAtCursor(self: *const AgentState) ?usize {
-        if (!self.history_mode) return null;
+        if (!self.history.active) return null;
 
-        const record = self.line_map.getLineRecord(self.history_cursor_line) orelse return null;
+        const record = self.line_map.getLineRecord(self.history.cursor_line) orelse return null;
 
         return switch (record.line_type) {
             .message_content => |mc| blk: {
@@ -1749,20 +1548,8 @@ pub const AgentState = struct {
 
     /// Update the plan with new entries (replaces all existing entries)
     pub fn updatePlan(self: *AgentState, entries: []const protocol.PlanEntry) !void {
-        // Clear existing entries
-        self.clearPlan();
-
-        // Add new entries
-        for (entries) |entry| {
-            const owned_content = try self.allocator.dupe(u8, entry.content);
-            errdefer self.allocator.free(owned_content);
-
-            try self.plan_entries.append(self.allocator, .{
-                .content = owned_content,
-                .priority = entry.priority,
-                .status = entry.status,
-            });
-        }
+        // Update plan state (handles clearing and adding entries)
+        try self.plan.update(entries);
 
         // Create a snapshot message for the chat
         try self.addPlanSnapshotMessage();
@@ -1771,29 +1558,17 @@ pub const AgentState = struct {
     /// Add a plan snapshot message to the chat history
     fn addPlanSnapshotMessage(self: *AgentState) !void {
         // Skip if no plan entries
-        if (self.plan_entries.items.len == 0) return;
+        if (!self.plan.hasEntries()) return;
 
-        std.log.debug("addPlanSnapshotMessage: creating snapshot with {d} entries", .{self.plan_entries.items.len});
+        std.log.debug("addPlanSnapshotMessage: creating snapshot with {d} entries", .{self.plan.count()});
 
         // Create a copy of all plan entries for the snapshot
-        const snapshot_entries = try self.allocator.alloc(OwnedPlanEntry, self.plan_entries.items.len);
-        errdefer self.allocator.free(snapshot_entries);
-
-        for (self.plan_entries.items, 0..) |entry, i| {
-            const content_copy = try self.allocator.dupe(u8, entry.content);
-            errdefer {
-                // Clean up any entries we've already copied on error
-                for (snapshot_entries[0..i]) |*copied| {
-                    self.allocator.free(copied.content);
-                }
-                self.allocator.free(content_copy);
+        const snapshot_entries = try self.plan.createSnapshot();
+        errdefer {
+            for (snapshot_entries) |*entry| {
+                self.allocator.free(entry.content);
             }
-
-            snapshot_entries[i] = .{
-                .content = content_copy,
-                .priority = entry.priority,
-                .status = entry.status,
-            };
+            self.allocator.free(snapshot_entries);
         }
 
         // Add message with snapshot (content must be heap-allocated for deinit)
@@ -1820,28 +1595,27 @@ pub const AgentState = struct {
 
     /// Clear all plan entries
     pub fn clearPlan(self: *AgentState) void {
-        for (self.plan_entries.items) |*entry| {
-            entry.deinit(self.allocator);
-        }
-        self.plan_entries.clearRetainingCapacity();
+        self.plan.clear();
     }
 
     /// Toggle plan visibility
     pub fn togglePlanVisibility(self: *AgentState) void {
-        self.plan_visible = !self.plan_visible;
+        self.plan.toggleVisibility();
+    }
+
+    /// Toggle plan expanded/collapsed state
+    pub fn togglePlanExpanded(self: *AgentState) void {
+        self.plan.toggleExpanded();
     }
 
     /// Get the number of plan entries
     pub fn planEntryCount(self: *const AgentState) usize {
-        return self.plan_entries.items.len;
+        return self.plan.count();
     }
 
     /// Check if there are any incomplete plan entries
     pub fn hasIncompletePlanEntries(self: *const AgentState) bool {
-        for (self.plan_entries.items) |entry| {
-            if (entry.status != .completed) return true;
-        }
-        return false;
+        return self.plan.hasIncompleteEntries();
     }
 
     // =========================================================================
@@ -1921,12 +1695,7 @@ pub const AgentState = struct {
 
     /// Check if a command is a local command (handled by skim)
     pub fn isLocalSlashCommand(name: []const u8) bool {
-        for (local_slash_commands) |local_cmd| {
-            if (std.mem.eql(u8, local_cmd.name, name)) {
-                return true;
-            }
-        }
-        return false;
+        return slash_menu.isLocalCommand(name);
     }
 
     /// Check if slash command menu should be shown based on input
@@ -1972,39 +1741,23 @@ pub const AgentState = struct {
 
     /// Show slash menu and reset selection
     pub fn showSlashMenu(self: *AgentState) void {
-        self.slash_menu_visible = true;
-        self.slash_menu_selection = 0;
-        self.slash_menu_scroll_offset = 0;
+        self.slash_menu.show();
     }
 
     /// Hide slash menu
     pub fn hideSlashMenu(self: *AgentState) void {
-        self.slash_menu_visible = false;
-        self.slash_menu_selection = 0;
-        self.slash_menu_scroll_offset = 0;
+        self.slash_menu.hide();
     }
 
     /// Move selection up in slash menu
     pub fn slashMenuUp(self: *AgentState, visible_count: usize) void {
-        if (self.slash_menu_selection > 0) {
-            self.slash_menu_selection -= 1;
-            // Scroll up if selection goes above visible area
-            if (self.slash_menu_selection < self.slash_menu_scroll_offset) {
-                self.slash_menu_scroll_offset = self.slash_menu_selection;
-            }
-        }
-        _ = visible_count; // Used by caller for bounds, we just need to follow selection
+        _ = visible_count;
+        self.slash_menu.moveUp();
     }
 
     /// Move selection down in slash menu
     pub fn slashMenuDown(self: *AgentState, max_items: usize, visible_count: usize) void {
-        if (max_items > 0 and self.slash_menu_selection < max_items - 1) {
-            self.slash_menu_selection += 1;
-            // Scroll down if selection goes below visible area
-            if (visible_count > 0 and self.slash_menu_selection >= self.slash_menu_scroll_offset + visible_count) {
-                self.slash_menu_scroll_offset = self.slash_menu_selection - visible_count + 1;
-            }
-        }
+        self.slash_menu.moveDown(max_items, visible_count);
     }
 
     /// Get the selected command (if any) based on current filter
@@ -2014,8 +1767,7 @@ pub const AgentState = struct {
 
         if (count == 0) return null;
 
-        // Clamp selection to valid range
-        const selection = @min(self.slash_menu_selection, count - 1);
+        const selection = self.slash_menu.getClampedSelection(count);
         return &self.available_commands.items[indices[selection]];
     }
 
@@ -2093,65 +1845,53 @@ pub const AgentState = struct {
 
     /// Toggle shell command mode on/off
     pub fn toggleShellMode(self: *AgentState) void {
-        self.shell_mode = !self.shell_mode;
+        self.shell.toggleMode();
     }
 
     /// Check if in shell command mode
     pub fn isShellMode(self: *const AgentState) bool {
-        return self.shell_mode;
+        return self.shell.isActive();
     }
 
     /// Clear shell mode (e.g., after submitting a command)
     pub fn clearShellMode(self: *AgentState) void {
-        self.shell_mode = false;
+        self.shell.clearMode();
     }
 
     /// Queue a shell command output to be sent with next prompt
     pub fn queueShellOutput(self: *AgentState, content: []const u8) !void {
-        const owned_content = try self.allocator.dupe(u8, content);
-        errdefer self.allocator.free(owned_content);
-        try self.queued_shell_outputs.append(self.allocator, .{
-            .content = owned_content,
-        });
+        try self.shell.queueOutput(content);
     }
 
     /// Check if there are queued shell outputs
     pub fn hasQueuedShellOutputs(self: *const AgentState) bool {
-        return self.queued_shell_outputs.items.len > 0;
+        return self.shell.hasQueuedOutputs();
     }
 
     /// Take all queued shell outputs (caller owns returned slice, must free)
     /// Returns null on allocation failure or if empty
     pub fn takeQueuedShellOutputs(self: *AgentState) ?[]QueuedShellOutput {
-        if (self.queued_shell_outputs.items.len == 0) return null;
-        return self.queued_shell_outputs.toOwnedSlice(self.allocator) catch null;
+        return self.shell.takeQueuedOutputs();
     }
 
     /// Clear all queued shell outputs
     pub fn clearQueuedShellOutputs(self: *AgentState) void {
-        for (self.queued_shell_outputs.items) |*output| {
-            output.deinit(self.allocator);
-        }
-        self.queued_shell_outputs.clearRetainingCapacity();
+        self.shell.clearQueuedOutputs();
     }
 
     /// Check if a shell command is currently running
     pub fn hasRunningShellCommand(self: *const AgentState) bool {
-        return self.running_shell_cmd != null;
+        return self.shell.hasRunningCommand();
     }
 
     /// Get next unique shell command tool ID
     pub fn nextShellCmdId(self: *AgentState, buf: []u8) []const u8 {
-        self.shell_cmd_counter +%= 1;
-        return std.fmt.bufPrint(buf, "shell_{d}", .{self.shell_cmd_counter}) catch "shell_cmd";
+        return self.shell.nextCmdId(buf);
     }
 
     /// Get the last N lines of running command output for display
-    pub fn getRunningCommandOutput(self: *const AgentState, max_lines: usize) ?[]const u8 {
-        if (self.running_shell_cmd) |*cmd| {
-            return cmd.getLastLines(max_lines);
-        }
-        return null;
+    pub fn getRunningCommandOutput(self: *AgentState, max_lines: usize) ?[]const u8 {
+        return self.shell.getRunningOutput(max_lines);
     }
 
     /// Estimate memory usage of the agent state (for monitoring)
@@ -2206,9 +1946,7 @@ pub const AgentState = struct {
         }
 
         // Plan entries
-        for (self.plan_entries.items) |entry| {
-            total += entry.content.len;
-        }
+        total += self.plan.estimateMemoryUsage();
 
         // Available commands
         for (self.available_commands.items) |cmd| {
@@ -2219,7 +1957,6 @@ pub const AgentState = struct {
 
         // ArrayList overhead (rough estimate)
         total += self.messages.capacity * @sizeOf(Message);
-        total += self.plan_entries.capacity * @sizeOf(OwnedPlanEntry);
         total += self.available_commands.capacity * @sizeOf(OwnedCommand);
 
         return total;
@@ -2549,14 +2286,14 @@ test "historyCursorDown moves cursor and clamps at max" {
     const max_line = agent_state.getHistoryMaxLine();
 
     // Set cursor to 0 and move down
-    agent_state.history_cursor_line = 0;
+    agent_state.history.cursor_line = 0;
     agent_state.historyCursorDown();
-    try std.testing.expect(agent_state.history_cursor_line == 1);
+    try std.testing.expect(agent_state.history.cursor_line == 1);
 
     // Move cursor to max and try to move down (should stay at max)
-    agent_state.history_cursor_line = max_line;
+    agent_state.history.cursor_line = max_line;
     agent_state.historyCursorDown();
-    try std.testing.expect(agent_state.history_cursor_line == max_line);
+    try std.testing.expect(agent_state.history.cursor_line == max_line);
 }
 
 test "historyCursorUp moves cursor and stops at zero" {
@@ -2575,14 +2312,14 @@ test "historyCursorUp moves cursor and stops at zero" {
     agent_state.enterHistoryMode();
 
     // Set cursor to 2 and move up
-    agent_state.history_cursor_line = 2;
+    agent_state.history.cursor_line = 2;
     agent_state.historyCursorUp();
-    try std.testing.expect(agent_state.history_cursor_line == 1);
+    try std.testing.expect(agent_state.history.cursor_line == 1);
 
     // Move to 0 and try to move up (should stay at 0)
-    agent_state.history_cursor_line = 0;
+    agent_state.history.cursor_line = 0;
     agent_state.historyCursorUp();
-    try std.testing.expect(agent_state.history_cursor_line == 0);
+    try std.testing.expect(agent_state.history.cursor_line == 0);
 }
 
 test "historyJumpToTop sets cursor to 0 and scroll_offset to 0" {
@@ -2600,13 +2337,13 @@ test "historyJumpToTop sets cursor to 0 and scroll_offset to 0" {
 
     // Enter history mode and set some scroll/cursor position
     agent_state.enterHistoryMode();
-    agent_state.history_cursor_line = 5;
+    agent_state.history.cursor_line = 5;
     agent_state.scroll_offset = 3;
 
     // Jump to top
     agent_state.historyJumpToTop();
 
-    try std.testing.expect(agent_state.history_cursor_line == 0);
+    try std.testing.expect(agent_state.history.cursor_line == 0);
     try std.testing.expect(agent_state.scroll_offset == 0);
     try std.testing.expect(!agent_state.follow_bottom);
 }
@@ -2625,13 +2362,13 @@ test "historyJumpToBottom sets cursor to last line" {
 
     // Enter history mode
     agent_state.enterHistoryMode();
-    agent_state.history_cursor_line = 0;
+    agent_state.history.cursor_line = 0;
 
     // Jump to bottom
     agent_state.historyJumpToBottom();
 
     const max_line = agent_state.getHistoryMaxLine();
-    try std.testing.expect(agent_state.history_cursor_line == max_line);
+    try std.testing.expect(agent_state.history.cursor_line == max_line);
     try std.testing.expect(agent_state.follow_bottom);
 }
 
@@ -2673,13 +2410,13 @@ test "ensureHistoryCursorVisible scrolls viewport to cursor" {
 
     // Cursor above scroll_offset - should scroll up
     agent_state.scroll_offset = 5;
-    agent_state.history_cursor_line = 2;
+    agent_state.history.cursor_line = 2;
     agent_state.ensureHistoryCursorVisible();
     try std.testing.expect(agent_state.scroll_offset == 2);
 
     // Cursor below viewport - should scroll down
     agent_state.scroll_offset = 0;
-    agent_state.history_cursor_line = 5;
+    agent_state.history.cursor_line = 5;
     agent_state.ensureHistoryCursorVisible();
     try std.testing.expect(agent_state.scroll_offset >= 3); // cursor should be visible
 }
@@ -2700,14 +2437,14 @@ test "enterHistoryVisualMode sets anchor to current cursor" {
     agent_state.enterHistoryMode();
 
     // Set cursor to a specific line
-    agent_state.history_cursor_line = 3;
+    agent_state.history.cursor_line = 3;
 
     // Enter visual mode
     agent_state.enterHistoryVisualMode();
 
     // Verify visual mode is active and anchor is set
     try std.testing.expect(agent_state.isInHistoryVisualMode());
-    try std.testing.expect(agent_state.history_visual_anchor == 3);
+    try std.testing.expect(agent_state.history.visual_anchor == 3);
 }
 
 test "getVisualSelectionRange returns ordered range" {
@@ -2722,22 +2459,22 @@ test "getVisualSelectionRange returns ordered range" {
     agent_state.enterHistoryMode();
 
     // Test case 1: anchor < cursor
-    agent_state.history_cursor_line = 5;
+    agent_state.history.cursor_line = 5;
     agent_state.enterHistoryVisualMode(); // anchor = 5
-    agent_state.history_cursor_line = 10; // cursor moved down
+    agent_state.history.cursor_line = 10; // cursor moved down
 
     const range1 = agent_state.getVisualSelectionRange();
     try std.testing.expectEqual(@as(usize, 5), range1.start);
     try std.testing.expectEqual(@as(usize, 10), range1.end);
 
     // Test case 2: cursor < anchor (moved up)
-    agent_state.history_cursor_line = 2;
+    agent_state.history.cursor_line = 2;
     const range2 = agent_state.getVisualSelectionRange();
     try std.testing.expectEqual(@as(usize, 2), range2.start);
     try std.testing.expectEqual(@as(usize, 5), range2.end);
 
     // Test case 3: cursor == anchor (single line selection)
-    agent_state.history_cursor_line = 5;
+    agent_state.history.cursor_line = 5;
     const range3 = agent_state.getVisualSelectionRange();
     try std.testing.expectEqual(@as(usize, 5), range3.start);
     try std.testing.expectEqual(@as(usize, 5), range3.end);
@@ -2755,9 +2492,9 @@ test "isLineInVisualSelection correct for inside/outside range" {
     agent_state.enterHistoryMode();
 
     // Set up visual selection from 3 to 7
-    agent_state.history_cursor_line = 3;
+    agent_state.history.cursor_line = 3;
     agent_state.enterHistoryVisualMode();
-    agent_state.history_cursor_line = 7;
+    agent_state.history.cursor_line = 7;
 
     // Lines inside selection (inclusive)
     try std.testing.expect(agent_state.isLineInVisualSelection(3));
@@ -2780,7 +2517,7 @@ test "exitHistoryVisualMode clears visual state" {
     try agent_state.addMessage(.user, "Hello");
     _ = try agent_state.ensureLineMap(80, null);
     agent_state.enterHistoryMode();
-    agent_state.history_cursor_line = 5;
+    agent_state.history.cursor_line = 5;
     agent_state.enterHistoryVisualMode();
 
     // Verify visual mode is active
@@ -2792,7 +2529,7 @@ test "exitHistoryVisualMode clears visual state" {
     // Verify visual mode is cleared but history mode remains
     try std.testing.expect(!agent_state.isInHistoryVisualMode());
     try std.testing.expect(agent_state.isInHistoryMode());
-    try std.testing.expect(!agent_state.history_visual_mode);
+    try std.testing.expect(!agent_state.history.visual_mode);
 }
 
 test "exitHistoryMode also clears visual mode" {
@@ -2805,7 +2542,7 @@ test "exitHistoryMode also clears visual mode" {
     try agent_state.addMessage(.user, "Hello");
     _ = try agent_state.ensureLineMap(80, null);
     agent_state.enterHistoryMode();
-    agent_state.history_cursor_line = 5;
+    agent_state.history.cursor_line = 5;
     agent_state.enterHistoryVisualMode();
 
     // Verify both modes are active
@@ -2818,7 +2555,7 @@ test "exitHistoryMode also clears visual mode" {
     // Verify both modes are cleared
     try std.testing.expect(!agent_state.isInHistoryMode());
     try std.testing.expect(!agent_state.isInHistoryVisualMode());
-    try std.testing.expect(!agent_state.history_visual_mode);
+    try std.testing.expect(!agent_state.history.visual_mode);
 }
 
 test "getTextForLineRange extracts text from line map" {

@@ -100,14 +100,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             if (key.codepoint == 'j') {
                 // Extend selection down
                 agent_state.historyCursorDown();
-                agent_state.history_pending_g = false;
+                agent_state.history.pending_g = false;
                 app.needs_render = true;
                 return;
             }
             if (key.codepoint == 'k') {
                 // Extend selection up
                 agent_state.historyCursorUp();
-                agent_state.history_pending_g = false;
+                agent_state.history.pending_g = false;
                 app.needs_render = true;
                 return;
             }
@@ -135,7 +135,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             // ESC/q exits history mode to normal mode
             agent_state.exitHistoryMode();
             agent_state.input.vim.vim_mode = .normal;
-            agent_state.history_pending_g = false;
+            agent_state.history.pending_g = false;
             app.needs_render = true;
             return;
         }
@@ -159,13 +159,13 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // y - yank user message at cursor (like comment yanking in diff mode)
         // yy - yank current line
         if (key.codepoint == 'y') {
-            if (agent_state.history_pending_y) {
+            if (agent_state.history.pending_y) {
                 // Second 'y' - yank current line
                 agent_state.yankCurrentLine(app.allocator) catch |err| {
                     std.log.err("Failed to yank current line: {any}", .{err});
                 };
-                agent_state.history_pending_y = false;
-                agent_state.history_pending_g = false;
+                agent_state.history.pending_y = false;
+                agent_state.history.pending_g = false;
                 app.needs_render = true;
                 return;
             } else {
@@ -176,14 +176,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 };
                 if (yanked) {
                     // Successfully yanked user message
-                    agent_state.history_pending_y = false;
-                    agent_state.history_pending_g = false;
+                    agent_state.history.pending_y = false;
+                    agent_state.history.pending_g = false;
                     app.needs_render = true;
                     return;
                 } else {
                     // Not on a user message - wait for second 'y' for yy
-                    agent_state.history_pending_y = true;
-                    agent_state.history_pending_g = false;
+                    agent_state.history.pending_y = true;
+                    agent_state.history.pending_g = false;
                     return;
                 }
             }
@@ -192,15 +192,15 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // Line navigation: j/k move cursor down/up
         if (key.codepoint == 'j') {
             agent_state.historyCursorDown();
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             app.needs_render = true;
             return;
         }
         if (key.codepoint == 'k') {
             agent_state.historyCursorUp();
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             app.needs_render = true;
             return;
         }
@@ -208,15 +208,15 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // Message navigation: h/l jump between messages
         if (key.codepoint == 'h') {
             agent_state.historyJumpToPrevMessage();
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             app.needs_render = true;
             return;
         }
         if (key.codepoint == 'l') {
             agent_state.historyJumpToNextMessage();
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             app.needs_render = true;
             return;
         }
@@ -224,39 +224,39 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // Page navigation: Ctrl-d/u
         if (key.mods.ctrl and key.codepoint == 'd') {
             agent_state.historyPageDown();
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             app.needs_render = true;
             return;
         }
         if (key.mods.ctrl and key.codepoint == 'u') {
             agent_state.historyPageUp();
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             app.needs_render = true;
             return;
         }
 
         // Jump to top/bottom: gg / G
         if (key.codepoint == 'g') {
-            if (agent_state.history_pending_g) {
+            if (agent_state.history.pending_g) {
                 // Second 'g' - jump to top
                 agent_state.historyJumpToTop();
-                agent_state.history_pending_g = false;
-                agent_state.history_pending_y = false;
+                agent_state.history.pending_g = false;
+                agent_state.history.pending_y = false;
                 app.needs_render = true;
                 return;
             } else {
                 // First 'g' - set pending
-                agent_state.history_pending_g = true;
-                agent_state.history_pending_y = false;
+                agent_state.history.pending_g = true;
+                agent_state.history.pending_y = false;
                 return;
             }
         }
         if (key.codepoint == 'G') {
             agent_state.historyJumpToBottom();
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             app.needs_render = true;
             return;
         }
@@ -264,8 +264,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // M - move cursor to middle of viewport
         if (key.codepoint == 'M') {
             agent_state.historyCenterCursor();
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             app.needs_render = true;
             return;
         }
@@ -281,30 +281,30 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 return;
             }
             // Unknown space-sequence in history mode, ignore
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             return;
         } else if (key.codepoint == ' ' and !key.mods.ctrl and !key.mods.alt) {
             // First Space - wait for second key
             app.state.pending_space = true;
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             return;
         }
 
         // Ctrl+W chord for window navigation in history mode
         if (key.mods.ctrl and key.codepoint == 'w') {
             app.state.pending_ctrl_w = true;
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             return;
         }
 
         // Handle pending Ctrl+W chord in history mode
         if (app.state.pending_ctrl_w) {
             app.state.pending_ctrl_w = false;
-            agent_state.history_pending_g = false;
-            agent_state.history_pending_y = false;
+            agent_state.history.pending_g = false;
+            agent_state.history.pending_y = false;
             // ESC cancels pending Ctrl+w
             if (key.codepoint == 27) {
                 return;
@@ -329,8 +329,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
 
         // Any other key clears pending states
-        agent_state.history_pending_g = false;
-        agent_state.history_pending_y = false;
+        agent_state.history.pending_g = false;
+        agent_state.history.pending_y = false;
 
         // Consume other keys in history mode (don't pass to input editor)
         return;
@@ -355,7 +355,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     }
 
     // Handle slash command menu navigation when visible
-    if (agent_state.slash_menu_visible and agent_state.input.vim.vim_mode == .insert) {
+    if (agent_state.slash_menu.visible and agent_state.input.vim.vim_mode == .insert) {
         // Get filtered command count for bounds checking
         var indices: [32]usize = undefined;
         const filtered_count = agent_state.getFilteredCommandIndices(&indices);
@@ -866,7 +866,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Ctrl+T: Toggle plan expansion (expand/collapse todo list)
     if (key.mods.ctrl and key.codepoint == 't') {
-        agent_state.plan_expanded = !agent_state.plan_expanded;
+        agent_state.togglePlanExpanded();
         app.needs_render = true;
         return;
     }
@@ -1108,7 +1108,7 @@ fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 /// Spawns the command asynchronously and streams output to the UI.
 fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []const u8) !void {
     // If a command is already running, reject
-    if (agent_state.running_shell_cmd != null) {
+    if (agent_state.shell.running_cmd != null) {
         try agent_state.addMessage(.system, "A command is already running. Wait for it to complete.");
         return;
     }
@@ -1126,7 +1126,7 @@ fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []cons
     try agent_state.addToolMessage(tool_id, "Bash", command, command);
 
     // Initialize running command state
-    var running_cmd = state.AgentState.RunningShellCommand.init(app.allocator, command, tool_id) catch |err| {
+    var running_cmd = state.RunningShellCommand.init(app.allocator, command, tool_id) catch |err| {
         std.log.err("Failed to init running command: {any}", .{err});
         try agent_state.updateToolMessage(tool_id, .failed, null, "Failed to initialize command");
         return;
@@ -1148,7 +1148,7 @@ fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []cons
     };
 
     // Store running command for polling
-    agent_state.running_shell_cmd = running_cmd;
+    agent_state.shell.running_cmd = running_cmd;
     agent_state.line_map_dirty = true;
 }
 
@@ -1156,7 +1156,7 @@ fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []cons
 /// Called from the main event loop.
 pub fn pollRunningShellCommand(app: *App) bool {
     const agent_state = app.getActiveAgentState() orelse return false;
-    var cmd = &(agent_state.running_shell_cmd orelse return false);
+    var cmd = &(agent_state.shell.running_cmd orelse return false);
 
     var had_activity = false;
     var read_buf: [4096]u8 = undefined;
@@ -1224,7 +1224,7 @@ pub fn pollRunningShellCommand(app: *App) bool {
 
         // Clean up
         cmd.deinit();
-        agent_state.running_shell_cmd = null;
+        agent_state.shell.running_cmd = null;
         agent_state.line_map_dirty = true;
         app.needs_render = true;
         return true;
@@ -1432,21 +1432,21 @@ fn updateSlashMenuVisibility(_: *App, agent_state: *agent.AgentState) void {
 
     const should_show = agent_state.shouldShowSlashMenu();
 
-    if (should_show and !agent_state.slash_menu_visible) {
+    if (should_show and !agent_state.slash_menu.visible) {
         // Commands from the agent will appear on the next event loop iteration
         // (main loop calls pollAcpUpdates regularly - no need to block the key handler)
         agent_state.showSlashMenu();
-    } else if (!should_show and agent_state.slash_menu_visible) {
+    } else if (!should_show and agent_state.slash_menu.visible) {
         // Hide menu when "/" is deleted or input changes
         agent_state.hideSlashMenu();
     }
 
     // Keep selection in bounds when filter changes
-    if (agent_state.slash_menu_visible) {
+    if (agent_state.slash_menu.visible) {
         var indices: [32]usize = undefined;
         const count = agent_state.getFilteredCommandIndices(&indices);
-        if (count > 0 and agent_state.slash_menu_selection >= count) {
-            agent_state.slash_menu_selection = count - 1;
+        if (count > 0 and agent_state.slash_menu.selection >= count) {
+            agent_state.slash_menu.selection = count - 1;
         }
     }
 }
@@ -1595,7 +1595,7 @@ fn sendWithShellOutputsOnly(
     app: *App,
     mgr: *AcpManager,
     text: []const u8,
-    queued_outputs: []const state.AgentState.QueuedShellOutput,
+    queued_outputs: []const state.QueuedShellOutput,
 ) !void {
     const agent_state = app.getActiveAgentState() orelse return;
 
@@ -1932,7 +1932,7 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
             agent_state.cmd_palette.startRenameInput();
         },
         .toggle_plan => {
-            agent_state.plan_expanded = !agent_state.plan_expanded;
+            agent_state.togglePlanExpanded();
         },
     }
 }
