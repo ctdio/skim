@@ -27,6 +27,10 @@ const Color = rendering_common.Color;
 const rendering_utils = @import("../rendering/utils.zig");
 const RenderUtils = rendering_utils.RenderUtils;
 
+// Import markdown rendering for agent messages
+const markdown = @import("markdown/markdown.zig");
+const MarkdownColors = markdown.MarkdownColors;
+
 /// Safely print text to window, handling invalid UTF-8 gracefully.
 /// If text contains invalid UTF-8, renders valid portions and replaces invalid bytes with �.
 /// Returns the print result (columns advanced).
@@ -92,6 +96,217 @@ fn safePrint(win: vaxis.Window, text: []const u8, style: vaxis.Style, row: usize
     }
 
     return .{ .col = @intCast(col - col_offset), .row = 0, .overflow = false };
+}
+
+/// Render text with inline markdown styling for agent messages
+/// Uses the message's markdown parser to apply styles to inline elements
+fn renderTextWithMarkdown(
+    win: vaxis.Window,
+    text: []const u8,
+    msg: *Message,
+    base_style: vaxis.Style,
+    is_cursor_line: bool,
+    is_in_visual: bool,
+    row: usize,
+    col_offset: usize,
+) void {
+    if (text.len == 0) return;
+
+    // Try to ensure markdown is parsed for this message
+    if (!msg.ensureMarkdownParsed()) {
+        // Parsing failed, fall back to plain rendering
+        _ = safePrint(win, text, withHighlightBg(base_style, is_cursor_line, is_in_visual), row, col_offset);
+        return;
+    }
+
+    const md_parser = &(msg.md_parser orelse {
+        // No parser available, fall back to plain rendering
+        _ = safePrint(win, text, withHighlightBg(base_style, is_cursor_line, is_in_visual), row, col_offset);
+        return;
+    });
+
+    // Find where this text line starts in the full message content
+    // This is a pointer subtraction to find the byte offset
+    const text_start = getByteOffsetInContent(text, msg.content);
+
+    if (text_start) |start_offset| {
+        const end_offset = start_offset + text.len;
+
+        // Render character by character, checking style at each position
+        var col: usize = col_offset;
+        var i: usize = 0;
+        while (i < text.len) {
+            const char_len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+            const char_end = @min(i + char_len, text.len);
+            const char_slice = text[i..char_end];
+            const char_width = vaxis.gwidth.gwidth(char_slice, .unicode);
+
+            // Get the style for this character position based on markdown AST
+            const md_style = getMarkdownStyleAtPosition(md_parser, start_offset + i);
+            const final_style = if (md_style) |ms|
+                markdown.colors.mergeStyles(withHighlightBg(base_style, is_cursor_line, is_in_visual), ms)
+            else
+                withHighlightBg(base_style, is_cursor_line, is_in_visual);
+
+            win.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = char_slice, .width = @intCast(char_width) },
+                .style = final_style,
+            });
+
+            col += char_width;
+            i = char_end;
+        }
+        _ = end_offset;
+    } else {
+        // Could not find text offset, fall back to plain rendering
+        _ = safePrint(win, text, withHighlightBg(base_style, is_cursor_line, is_in_visual), row, col_offset);
+    }
+}
+
+/// Find the byte offset of a text slice within the full message content
+/// Returns null if the text is not a direct slice of the content
+fn getByteOffsetInContent(text: []const u8, content: []const u8) ?usize {
+    if (text.len == 0) return null;
+    if (content.len == 0) return null;
+
+    // Check if text.ptr is within content's bounds
+    const text_addr = @intFromPtr(text.ptr);
+    const content_start = @intFromPtr(content.ptr);
+    const content_end = content_start + content.len;
+
+    if (text_addr >= content_start and text_addr < content_end) {
+        return text_addr - content_start;
+    }
+
+    // Text is not a direct slice of content (might be a copy)
+    // Fall back to searching for the text in content
+    // Note: This is imprecise if the same text appears multiple times
+    return std.mem.indexOf(u8, content, text);
+}
+
+/// Get the markdown style for a given byte position in the parsed content
+/// Returns null if no special styling applies at this position
+fn getMarkdownStyleAtPosition(md_parser: *const markdown.MarkdownParser, byte_pos: usize) ?vaxis.Style {
+    const root = md_parser.getRoot() orelse return null;
+
+    // Find the deepest node containing this position
+    var best_style: ?vaxis.Style = null;
+    walkForStyleAtPosition(root, byte_pos, md_parser, &best_style);
+
+    return best_style;
+}
+
+/// Recursively walk the AST to find the style for a given position
+fn walkForStyleAtPosition(
+    node: @import("tree-sitter").Node,
+    byte_pos: usize,
+    md_parser: *const markdown.MarkdownParser,
+    best_style: *?vaxis.Style,
+) void {
+    const start = node.startByte();
+    const end = node.endByte();
+
+    // Skip nodes that don't contain this position
+    if (byte_pos < start or byte_pos >= end) return;
+
+    // Check if this node has a special style
+    // Use kind() method from tree-sitter to get node type string
+    const node_type_str = node.kind();
+    const node_type = markdown.NodeType.fromTreeSitter(node_type_str);
+
+    // Get style for this node type
+    const style = getStyleForNodeType(node_type, node, md_parser);
+    if (style) |s| {
+        // Deeper nodes override shallower ones
+        if (best_style.* == null) {
+            best_style.* = s;
+        } else {
+            // Merge styles for nested elements
+            best_style.* = markdown.colors.mergeStyles(best_style.*.?, s);
+        }
+    }
+
+    // Recurse into children
+    const child_count = node.childCount();
+    var i: u32 = 0;
+    while (i < child_count) : (i += 1) {
+        if (node.child(i)) |child| {
+            walkForStyleAtPosition(child, byte_pos, md_parser, best_style);
+        }
+    }
+}
+
+/// Map node type to markdown style
+fn getStyleForNodeType(node_type: markdown.NodeType, node: @import("tree-sitter").Node, md_parser: *const markdown.MarkdownParser) ?vaxis.Style {
+    const md_colors = markdown.colors.default;
+
+    return switch (node_type) {
+        .heading => getHeaderStyleFromNode(node, md_parser, md_colors),
+        .strong_emphasis => md_colors.bold,
+        .emphasis => md_colors.italic,
+        .strikethrough => md_colors.strikethrough,
+        .code_span => .{
+            .fg = md_colors.inline_code.fg,
+            .bg = md_colors.inline_code_bg,
+        },
+        .link => md_colors.link_text,
+        else => null,
+    };
+}
+
+/// Get header style based on header level
+fn getHeaderStyleFromNode(node: @import("tree-sitter").Node, md_parser: *const markdown.MarkdownParser, md_colors: MarkdownColors) vaxis.Style {
+    const node_type_str = node.kind();
+
+    // Check for setext heading (uses === or --- underlines)
+    if (std.mem.eql(u8, node_type_str, "setext_heading")) {
+        const level = getSetextLevelFromNode(node);
+        return getHeaderStyleByLevel(level, md_colors);
+    }
+
+    // ATX heading: count # characters
+    const text = md_parser.getNodeText(node);
+    var level: usize = 0;
+    for (text) |c| {
+        if (c == '#') {
+            level += 1;
+        } else {
+            break;
+        }
+    }
+
+    level = @max(1, @min(6, level));
+    return getHeaderStyleByLevel(level, md_colors);
+}
+
+/// Get header style by level number
+fn getHeaderStyleByLevel(level: usize, md_colors: MarkdownColors) vaxis.Style {
+    return switch (level) {
+        1 => md_colors.h1,
+        2 => md_colors.h2,
+        3 => md_colors.h3,
+        4 => md_colors.h4,
+        5 => md_colors.h5,
+        else => md_colors.h6,
+    };
+}
+
+/// Determine setext header level by looking for underline child nodes
+fn getSetextLevelFromNode(node: @import("tree-sitter").Node) usize {
+    const child_count = node.childCount();
+    var i: u32 = 0;
+    while (i < child_count) : (i += 1) {
+        if (node.child(i)) |child| {
+            const child_type = child.kind();
+            if (std.mem.eql(u8, child_type, "setext_h1_underline")) {
+                return 1;
+            }
+            if (std.mem.eql(u8, child_type, "setext_h2_underline")) {
+                return 2;
+            }
+        }
+    }
+    return 1; // Default to H1 if no underline found
 }
 
 /// Render text with syntax highlighting applied
@@ -1424,8 +1639,24 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             col_offset += prefix.len;
         }
 
-        // Print text - special handling for tool headers to color just the icon
+        // Print text - special handling for tool headers and agent messages
         switch (record.line_type) {
+            .message_content => |mc| {
+                // Check if this is an agent message with markdown
+                const messages = agent_state.messages.items;
+                if (mc.msg_idx < messages.len) {
+                    const msg = &messages[mc.msg_idx];
+                    // For agent messages, try to render with markdown styling
+                    if (msg.role == .agent and record.text.len > 0) {
+                        renderTextWithMarkdown(win, record.text, msg, record.style, is_cursor_line, is_in_visual, row, col_offset);
+                    } else {
+                        // Non-agent messages or empty text - use plain rendering
+                        _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
+                    }
+                } else {
+                    _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
+                }
+            },
             .tool_header => |th| {
                 // Get icon color from message status
                 const messages = agent_state.messages.items;
