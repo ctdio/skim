@@ -230,10 +230,7 @@ pub const ChatLineMap = struct {
                     }
                 },
                 .diff => {
-                    // Diff header
-                    try self.addRoleHeader(&global_line, msg_idx, msg.role);
-
-                    // Diff content
+                    // Diff content (no role header - diff has its own file header)
                     if (msg.diff_path != null and msg.diff_old != null and msg.diff_new != null) {
                         try self.addDiffContent(&global_line, msg_idx, msg, wrap_width, diff_view_mode, highlighter);
                     }
