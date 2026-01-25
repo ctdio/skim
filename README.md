@@ -197,6 +197,7 @@ Navigate files and position cursor with vim-style movements:
 | `Ctrl-e` | Toggle agent panel |
 | `Ctrl-w h/l` | Focus agent panel (based on panel side) |
 | `Ctrl-w w` | Cycle focus between panels |
+| `Ctrl-w o` | Toggle agent panel full screen |
 
 #### Other
 
@@ -435,6 +436,7 @@ The agent panel uses vim-style modal editing. Keybindings are organized by mode.
 | `Ctrl-G` | Edit prompt in $EDITOR |
 | `Ctrl-W h/l` | Focus diff/agent panel |
 | `Ctrl-W w` | Cycle focus between panels |
+| `Ctrl-W o` | Toggle full screen |
 | `Ctrl-S` | Stash/unstash prompt |
 | `Ctrl-T` | Toggle todo list expansion |
 
@@ -467,7 +469,6 @@ The agent panel uses vim-style modal editing. Keybindings are organized by mode.
 | `gt` / `gT` | Next/previous tab |
 | `Space+b` | Enter history mode |
 | `Space+f` | Scroll to bottom, enable follow |
-| `z` | Toggle full screen |
 | `V` | Toggle diff view mode |
 | `Tab` | Cycle session modes |
 | `ESC ESC` | Interrupt agent (double-tap) |

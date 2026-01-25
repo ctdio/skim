@@ -292,6 +292,42 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
 
+        // Ctrl+W chord for window navigation in history mode
+        if (key.mods.ctrl and key.codepoint == 'w') {
+            app.state.pending_ctrl_w = true;
+            agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
+            return;
+        }
+
+        // Handle pending Ctrl+W chord in history mode
+        if (app.state.pending_ctrl_w) {
+            app.state.pending_ctrl_w = false;
+            agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
+            // ESC cancels pending Ctrl+w
+            if (key.codepoint == 27) {
+                return;
+            }
+            if (key.codepoint == 'o') {
+                // Toggle fullscreen
+                if (app.tab_manager) |*tm| {
+                    tm.toggleFullScreen();
+                    app.needs_render = true;
+                }
+                return;
+            }
+            if (key.codepoint == 'h' or key.codepoint == 'l' or key.codepoint == 'w') {
+                // Window navigation - exit history mode and switch to diff
+                agent_state.exitHistoryMode();
+                app.mode = .normal;
+                app.needs_render = true;
+                return;
+            }
+            // Unknown Ctrl+w sequence - ignore
+            return;
+        }
+
         // Any other key clears pending states
         agent_state.history_pending_g = false;
         agent_state.history_pending_y = false;
@@ -558,15 +594,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // 'z' in normal vim mode - toggle full screen (stay in agent mode)
-    if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'z') {
-        if (app.tab_manager) |*tm| {
-            tm.toggleFullScreen();
-        }
-        app.needs_render = true;
-        return;
-    }
-
     // '?' in normal vim mode - show help overlay
     if (agent_state.input.vim.vim_mode == .normal and key.codepoint == '?') {
         agent_state.help_visible = true;
@@ -710,6 +737,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // Cycle windows: always return to diff
                 app.mode = .normal;
                 app.needs_render = true;
+                return;
+            },
+            'o' => {
+                // Toggle fullscreen (vim's "only window" concept)
+                if (app.tab_manager) |*tm| {
+                    tm.toggleFullScreen();
+                    app.needs_render = true;
+                }
                 return;
             },
             else => {},

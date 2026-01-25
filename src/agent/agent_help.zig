@@ -70,6 +70,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "Ctrl+G", .desc = "Edit prompt in $EDITOR" },
         .{ .key = "Ctrl+W h/l", .desc = "Focus diff/agent panel" },
         .{ .key = "Ctrl+W w", .desc = "Cycle focus between panels" },
+        .{ .key = "Ctrl+W o", .desc = "Toggle full screen" },
         .{ .key = "Ctrl+S", .desc = "Stash/unstash prompt" },
         .{ .key = "Ctrl+T", .desc = "Toggle todo list expansion" },
     };
@@ -114,7 +115,6 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "gt/gT", .desc = "Next/previous tab" },
         .{ .key = "Space+b", .desc = "Enter history mode" },
         .{ .key = "Space+f", .desc = "Scroll to bottom, enable follow" },
-        .{ .key = "z", .desc = "Toggle full screen" },
         .{ .key = "V", .desc = "Toggle diff view mode" },
         .{ .key = "Tab", .desc = "Cycle session modes" },
         .{ .key = "ESC ESC", .desc = "Interrupt agent (double-tap)" },

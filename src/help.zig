@@ -186,8 +186,8 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "Ctrl-l", .desc = "Clear message history" },
         .{ .key = "Ctrl-d/u", .desc = "Page down/up" },
         .{ .key = "Ctrl-t", .desc = "Toggle todo list expansion" },
+        .{ .key = "Ctrl-w o", .desc = "Toggle full screen" },
         .{ .key = "gg/G", .desc = "Scroll to top/bottom" },
-        .{ .key = "z", .desc = "Toggle full screen (normal mode)" },
         .{ .key = "V", .desc = "Toggle diff view mode (normal mode)" },
         .{ .key = "Tab", .desc = "Cycle session modes (normal mode)" },
     };

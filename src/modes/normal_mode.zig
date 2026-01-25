@@ -176,6 +176,13 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                     app.needs_render = true;
                 }
             },
+            'o' => {
+                // Toggle fullscreen (vim's "only window" concept)
+                if (app.tab_manager) |*tm| {
+                    tm.toggleFullScreen();
+                    app.needs_render = true;
+                }
+            },
             else => {},
         }
         return;
@@ -311,12 +318,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             }
         },
         'z' => {
-            // If agent panel exists, toggle fullscreen; otherwise wait for zz (center cursor)
-            if (app.tab_manager) |*tm| {
-                tm.toggleFullScreen();
-            } else {
-                app.state.pending_z = true;
-            }
+            // Wait for second z for zz (center cursor)
+            app.state.pending_z = true;
         },
         '[' => app.state.pending_bracket = true, // Wait for second character (like [h)
         ']' => app.state.pending_close_bracket = true, // Wait for second character (like ]h)
