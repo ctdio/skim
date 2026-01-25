@@ -190,6 +190,14 @@ Navigate files and position cursor with vim-style movements:
 | `[s` | Navigate to parent branch (toward trunk) |
 | `]s` | Navigate to child branch (toward tip) |
 
+#### Agent Panel
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-e` | Toggle agent panel |
+| `Ctrl-w h/l` | Focus agent panel (based on panel side) |
+| `Ctrl-w w` | Cycle focus between panels |
+
 #### Other
 
 | Key | Action |
