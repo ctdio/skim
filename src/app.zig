@@ -4037,9 +4037,23 @@ pub const App = struct {
         };
         self.needs_render = true;
 
+        // Auto-scroll to show the new comment (for external callers like CLI/MCP)
+        const comment_idx = self.state.comment_store.comments.items.len - 1;
+        if (self.state.line_map.findLineByCommentIdx(comment_idx)) |comment_line| {
+            // Center the comment in the viewport
+            const half_viewport = self.state.viewport_height / 2;
+            if (comment_line >= half_viewport) {
+                self.state.global_scroll_offset = comment_line - half_viewport;
+            } else {
+                self.state.global_scroll_offset = 0;
+            }
+            // Also move cursor to the comment line
+            self.state.global_cursor_line = comment_line;
+        }
+
         var result = std.json.ObjectMap.init(self.allocator);
         result.put("success", .{ .bool = true }) catch {};
-        result.put("comment_index", .{ .integer = @intCast(self.state.comment_store.comments.items.len - 1) }) catch {};
+        result.put("comment_index", .{ .integer = @intCast(comment_idx) }) catch {};
         return .{ .result = .{ .object = result } };
     }
 
