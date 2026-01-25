@@ -6,9 +6,19 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 
-// Import skim's color palette for consistency
-const rendering_common = @import("../../rendering/common.zig");
-const Color = rendering_common.Color;
+/// Local color definitions for markdown rendering
+/// These match the skim color palette from rendering/common.zig
+const Color = struct {
+    pub const dim: vaxis.Cell.Color = .{ .rgb = [3]u8{ 100, 100, 100 } }; // Medium gray #646464
+    pub const chat_content: vaxis.Cell.Color = .{ .rgb = [3]u8{ 200, 200, 200 } }; // Light gray #C8C8C8
+
+    // Standard colors for tests
+    pub const white: vaxis.Cell.Color = .{ .index = 7 };
+    pub const blue: vaxis.Cell.Color = .{ .index = 4 };
+    pub const cyan: vaxis.Cell.Color = .{ .index = 6 };
+    pub const red: vaxis.Cell.Color = .{ .index = 1 };
+    pub const green: vaxis.Cell.Color = .{ .index = 2 };
+};
 
 /// Style configuration for markdown rendering
 /// Each field corresponds to a markdown element type
@@ -41,6 +51,18 @@ pub const MarkdownColors = struct {
     link_url: vaxis.Style,
     /// Normal text
     text: vaxis.Style,
+    /// List marker style (bullet/number) - dim
+    list_marker: vaxis.Style,
+    /// Blockquote border (vertical bar) - dim
+    blockquote_border: vaxis.Style,
+    /// Blockquote text - slightly dimmed
+    blockquote_text: vaxis.Style,
+    /// Task list checked marker - green checkmark
+    task_checked: vaxis.Style,
+    /// Task list unchecked marker - dim empty box
+    task_unchecked: vaxis.Style,
+    /// Horizontal rule - dim
+    horizontal_rule: vaxis.Style,
 };
 
 /// Default markdown color scheme matching skim's aesthetic
@@ -98,6 +120,26 @@ pub const default: MarkdownColors = .{
     // Normal text
     .text = .{
         .fg = Color.chat_content, // Light gray #C8C8C8
+    },
+
+    // Block element styles
+    .list_marker = .{
+        .fg = .{ .rgb = [3]u8{ 0x6c, 0x70, 0x86 } }, // Dim gray
+    },
+    .blockquote_border = .{
+        .fg = .{ .rgb = [3]u8{ 0x6c, 0x70, 0x86 } }, // Dim gray
+    },
+    .blockquote_text = .{
+        .fg = .{ .rgb = [3]u8{ 0xa9, 0xb1, 0xd6 } }, // Slightly dimmed text
+    },
+    .task_checked = .{
+        .fg = .{ .rgb = [3]u8{ 0x9e, 0xce, 0x6a } }, // Green
+    },
+    .task_unchecked = .{
+        .fg = .{ .rgb = [3]u8{ 0x6c, 0x70, 0x86 } }, // Dim gray
+    },
+    .horizontal_rule = .{
+        .fg = .{ .rgb = [3]u8{ 0x6c, 0x70, 0x86 } }, // Dim gray
     },
 };
 

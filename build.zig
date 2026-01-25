@@ -159,6 +159,23 @@ pub fn build(b: *std.Build) void {
     });
     const run_acp_tests = b.addRunArtifact(acp_tests);
     test_step.dependOn(&run_acp_tests.step);
+
+    // Markdown module tests
+    const markdown_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/agent/markdown/markdown.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    markdown_tests.root_module.addImport("vaxis", vaxis);
+    markdown_tests.root_module.addImport("tree-sitter", tree_sitter);
+    for (grammars) |grammar| {
+        markdown_tests.linkLibrary(grammar);
+    }
+    markdown_tests.linkLibC();
+    const run_markdown_tests = b.addRunArtifact(markdown_tests);
+    test_step.dependOn(&run_markdown_tests.step);
 }
 
 // Grammar metadata for building

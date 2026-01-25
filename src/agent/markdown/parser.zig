@@ -102,7 +102,7 @@ pub const MarkdownParser = struct {
         };
 
         // Apply edit to old tree
-        old_tree.edit(&edit);
+        old_tree.edit(edit);
 
         // Re-parse with old tree for incremental update
         self.tree = self.parser.parseString(new_source, old_tree);
@@ -138,7 +138,7 @@ pub const MarkdownParser = struct {
 
     /// Get the node type enum for a tree-sitter node
     pub fn getNodeType(node: ts.Node) NodeType {
-        const type_str = node.nodeType() orelse return .unknown;
+        const type_str = node.kind();
         return NodeType.fromTreeSitter(type_str);
     }
 
@@ -183,9 +183,8 @@ test "parser init and parse" {
 
     // Root should be document node
     const root_node = root.?;
-    const node_type = root_node.nodeType();
-    try std.testing.expect(node_type != null);
-    try std.testing.expectEqualStrings("document", node_type.?);
+    const node_type = root_node.kind();
+    try std.testing.expectEqualStrings("document", node_type);
 }
 
 test "parse empty string" {
@@ -199,9 +198,8 @@ test "parse empty string" {
 
     // Even empty string should have document root
     const root_node = root.?;
-    const node_type = root_node.nodeType();
-    try std.testing.expect(node_type != null);
-    try std.testing.expectEqualStrings("document", node_type.?);
+    const node_type = root_node.kind();
+    try std.testing.expectEqualStrings("document", node_type);
 }
 
 test "parser incremental update" {
@@ -251,7 +249,7 @@ test "getNodeType" {
     var parser = try MarkdownParser.init();
     defer parser.deinit();
 
-    try parser.parse("# Heading");
+    try parser.parse("# Hello World");
 
     const root = parser.getRoot().?;
     const root_type = MarkdownParser.getNodeType(root);
