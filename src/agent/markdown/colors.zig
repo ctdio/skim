@@ -63,6 +63,12 @@ pub const MarkdownColors = struct {
     task_unchecked: vaxis.Style,
     /// Horizontal rule - dim
     horizontal_rule: vaxis.Style,
+    /// Code block background - dark
+    code_block_bg: vaxis.Color,
+    /// Code block border (``` markers) - dim
+    code_block_border: vaxis.Style,
+    /// Code block language label - accent color
+    code_block_lang: vaxis.Style,
 };
 
 /// Default markdown color scheme matching skim's aesthetic
@@ -140,6 +146,14 @@ pub const default: MarkdownColors = .{
     },
     .horizontal_rule = .{
         .fg = .{ .rgb = [3]u8{ 0x6c, 0x70, 0x86 } }, // Dim gray
+    },
+    // Code block styles
+    .code_block_bg = .{ .rgb = [3]u8{ 0x1a, 0x1b, 0x26 } }, // Dark background
+    .code_block_border = .{
+        .fg = .{ .rgb = [3]u8{ 0x6c, 0x70, 0x86 } }, // Dim gray
+    },
+    .code_block_lang = .{
+        .fg = .{ .rgb = [3]u8{ 0x7a, 0xa2, 0xf7 } }, // Blue accent
     },
 };
 

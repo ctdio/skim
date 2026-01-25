@@ -9,11 +9,13 @@ const ts = @import("tree-sitter");
 const types = @import("types.zig");
 const colors_mod = @import("colors.zig");
 const parser_mod = @import("parser.zig");
+const code_blocks_mod = @import("code_blocks.zig");
 
 const NodeType = types.NodeType;
 const StyledSpan = types.StyledSpan;
 const MarkdownColors = colors_mod.MarkdownColors;
 const MarkdownParser = parser_mod.MarkdownParser;
+const CodeBlockRenderer = code_blocks_mod.CodeBlockRenderer;
 
 /// Context for tracking nested list state
 const ListContext = struct {
@@ -88,6 +90,7 @@ pub const MarkdownRenderer = struct {
             .block_quote => return self.renderBlockquote(node, md_parser, depth),
             .thematic_break => return self.renderHorizontalRule(),
             .task_list_marker => return self.renderTaskListMarker(node, md_parser),
+            .fenced_code_block => return self.renderFencedCodeBlock(node, md_parser),
             else => {},
         }
 
@@ -358,6 +361,52 @@ pub const MarkdownRenderer = struct {
         });
 
         // Add newline after horizontal rule
+        try self.spans.append(self.allocator, .{
+            .text = "\n",
+            .style = self.colors.text,
+            .indent = 0,
+            .node_type = .softbreak,
+        });
+    }
+
+    /// Render fenced code block with borders and optional language label
+    fn renderFencedCodeBlock(self: *MarkdownRenderer, node: ts.Node, md_parser: *const MarkdownParser) std.mem.Allocator.Error!void {
+        // Extract info_string (language) and code content from the node
+        var language: ?[]const u8 = null;
+        var code_content: []const u8 = "";
+
+        const child_count = node.childCount();
+        var i: u32 = 0;
+        while (i < child_count) : (i += 1) {
+            if (node.child(i)) |child| {
+                const child_type = child.kind();
+                if (std.mem.eql(u8, child_type, "info_string")) {
+                    const raw_lang = md_parser.getNodeText(child);
+                    // Trim whitespace from language string
+                    language = std.mem.trim(u8, raw_lang, " \t\n\r");
+                } else if (std.mem.eql(u8, child_type, "code_fence_content")) {
+                    code_content = md_parser.getNodeText(child);
+                }
+            }
+        }
+
+        // Normalize language if we have one
+        const normalized_lang = if (language) |lang|
+            if (lang.len > 0) CodeBlockRenderer.detectLanguage(lang) else null
+        else
+            null;
+
+        // Use CodeBlockRenderer to render the code block
+        var code_renderer = CodeBlockRenderer.init(self.allocator, self.colors);
+        var code_spans = try code_renderer.render(code_content, normalized_lang);
+        defer code_spans.deinit();
+
+        // Append all code block spans to our span list
+        for (code_spans.items) |span| {
+            try self.spans.append(self.allocator, span);
+        }
+
+        // Add newline after code block
         try self.spans.append(self.allocator, .{
             .text = "\n",
             .style = self.colors.text,
@@ -833,6 +882,18 @@ test "block colors defined" {
     try std.testing.expect(colors_mod.default.task_checked.fg != .default);
     try std.testing.expect(colors_mod.default.task_unchecked.fg != .default);
     try std.testing.expect(colors_mod.default.horizontal_rule.fg != .default);
+}
+
+// =============================================================================
+// Code Block Tests - Phase 4
+// Unit tests that verify code block colors are defined and rendering works
+// =============================================================================
+
+test "code block colors defined" {
+    // Verify all code block colors are defined
+    try std.testing.expect(colors_mod.default.code_block_bg != .default);
+    try std.testing.expect(colors_mod.default.code_block_border.fg != .default);
+    try std.testing.expect(colors_mod.default.code_block_lang.fg != .default);
 }
 
 
