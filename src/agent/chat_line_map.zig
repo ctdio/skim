@@ -18,9 +18,6 @@ pub const SyntaxHighlighter = highlighting.SyntaxHighlighter;
 
 const Allocator = std.mem.Allocator;
 
-// Test constant for treesitter highlighting verification
-const TEST_HIGHLIGHT_VALUE: u32 = 42;
-
 // Maximum number of diff lines to display before collapsing
 const MAX_VISIBLE_DIFF_LINES: usize = 500;
 
@@ -221,6 +218,9 @@ pub const ChatLineMap = struct {
             // Handle different message types
             switch (msg.role) {
                 .tool => {
+                    // Skip pending Edit/Write tools if a diff exists for that tool_call_id
+                    if (shouldSkipToolForDiff(msg, messages)) continue;
+
                     // Tool header: ⏺ ToolName(args)
                     try self.addToolHeader(&global_line, msg_idx, msg);
 
@@ -309,6 +309,9 @@ pub const ChatLineMap = struct {
 
                 switch (msg.role) {
                     .tool => {
+                        // Skip pending Edit/Write tools if a diff exists for that tool_call_id
+                        if (shouldSkipToolForDiff(msg.*, messages)) continue;
+
                         try self.addToolHeader(&global_line, msg_idx, msg.*);
                         if (msg.tool_status == .completed or msg.tool_status == .failed) {
                             try self.addToolResult(&global_line, msg_idx, msg.*);
@@ -404,9 +407,12 @@ pub const ChatLineMap = struct {
 
             switch (msg.role) {
                 .tool => {
-                    try self.addToolHeader(&global_line, last_msg_idx, msg.*);
-                    if (msg.tool_status == .completed or msg.tool_status == .failed) {
-                        try self.addToolResult(&global_line, last_msg_idx, msg.*);
+                    // Skip pending Edit/Write tools if a diff exists for that tool_call_id
+                    if (!shouldSkipToolForDiff(msg.*, messages)) {
+                        try self.addToolHeader(&global_line, last_msg_idx, msg.*);
+                        if (msg.tool_status == .completed or msg.tool_status == .failed) {
+                            try self.addToolResult(&global_line, last_msg_idx, msg.*);
+                        }
                     }
                 },
                 .diff => {
@@ -460,6 +466,40 @@ pub const ChatLineMap = struct {
     // =========================================================================
     // Private helpers
     // =========================================================================
+
+    /// Check if a tool message should be skipped because a diff exists for it.
+    /// This handles Edit/Write tools that have matching diffs, OR phantom tool
+    /// messages created when tool_update arrives before tool_call (no tool_name).
+    fn shouldSkipToolForDiff(msg: Message, messages: []const Message) bool {
+        // First check: if we have a tool_call_id, see if any diff matches it
+        // This catches phantom tool messages that have no tool_name
+        if (msg.tool_call_id) |tool_id| {
+            for (messages) |other| {
+                if (other.role == .diff) {
+                    if (other.tool_call_id) |diff_id| {
+                        if (std.mem.eql(u8, diff_id, tool_id)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Second check: for known Edit/Write tools, also skip if completed
+        if (msg.tool_name) |name| {
+            const is_edit = std.mem.startsWith(u8, name, "mcp__acp__Edit") or std.mem.eql(u8, name, "Edit");
+            const is_write = std.mem.startsWith(u8, name, "mcp__acp__Write") or std.mem.eql(u8, name, "Write");
+            if (is_edit or is_write) {
+                // Skip completed Edit/Write tools even without a diff
+                // (the diff might have arrived before the tool_call was added to state)
+                if (msg.tool_status == .completed) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
 
     fn addRoleHeader(self: *ChatLineMap, global_line: *usize, msg_idx: usize, role: Message.Role) !void {
         const style: vaxis.Style = switch (role) {

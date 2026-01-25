@@ -903,7 +903,9 @@ pub const AgentState = struct {
     }
 
     /// Add a diff message (from tool_call with edit content)
-    pub fn addDiffMessage(self: *AgentState, title: []const u8, path: []const u8, old_text: []const u8, new_text: []const u8) !void {
+    /// tool_call_id is used for precise matching with pending Edit/Write tool messages
+    pub fn addDiffMessage(self: *AgentState, tool_call_id: ?[]const u8, title: []const u8, path: []const u8, old_text: []const u8, new_text: []const u8) !void {
+        // Check for duplicate diff (same path and content)
         if (self.messages.items.len > 0) {
             const last = &self.messages.items[self.messages.items.len - 1];
             if (last.role == .diff and last.diff_path != null and last.diff_old != null and last.diff_new != null) {
@@ -921,6 +923,25 @@ pub const AgentState = struct {
             }
         }
 
+        // Remove pending Edit/Write tool message matching this tool_call_id
+        // This ensures instant replacement instead of showing both briefly
+        if (tool_call_id) |id| {
+            for (self.messages.items, 0..) |*msg, i| {
+                if (msg.role == .tool) {
+                    if (msg.tool_call_id) |existing_id| {
+                        if (std.mem.eql(u8, existing_id, id)) {
+                            // Found exact match by tool_call_id - remove it
+                            msg.deinit(self.allocator);
+                            _ = self.messages.orderedRemove(i);
+                            // Force full rebuild since we removed an earlier message
+                            self.earlier_message_dirty = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         const owned_title = try self.allocator.dupe(u8, title);
         errdefer self.allocator.free(owned_title);
 
@@ -933,6 +954,13 @@ pub const AgentState = struct {
         const owned_new = try self.allocator.dupe(u8, new_text);
         errdefer self.allocator.free(owned_new);
 
+        // Store tool_call_id on the diff message for proper tracking
+        const owned_tool_id: ?[]const u8 = if (tool_call_id) |id|
+            try self.allocator.dupe(u8, id)
+        else
+            null;
+        errdefer if (owned_tool_id) |id| self.allocator.free(id);
+
         try self.messages.append(self.allocator, .{
             .role = .diff,
             .content = owned_title,
@@ -940,6 +968,7 @@ pub const AgentState = struct {
             .diff_path = owned_path,
             .diff_old = owned_old,
             .diff_new = owned_new,
+            .tool_call_id = owned_tool_id,
         });
 
         // Mark line map dirty

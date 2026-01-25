@@ -4577,6 +4577,7 @@ pub const App = struct {
                 },
                 .tool_diff => {
                     agent_state.addDiffMessage(
+                        msg.tool_call_id,
                         msg.text,
                         msg.diff_path orelse "",
                         msg.diff_old orelse "",

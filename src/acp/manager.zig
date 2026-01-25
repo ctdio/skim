@@ -10,11 +10,13 @@ const codec = @import("codec.zig");
 // Terminal Registry
 // =============================================================================
 
-/// End marker for detecting command completion
+/// End marker for detecting command completion.
+/// This unique string is echoed after each command to reliably detect when output is complete.
 const END_MARKER = "___SKIM_CMD_END_";
 
 /// Terminal entry for tracking agent-spawned terminals.
 /// Uses marker-based completion detection for reliable output capture.
+/// Each terminal runs in its own background thread for non-blocking I/O.
 const TerminalEntry = struct {
     allocator: Allocator,
     child: std.process.Child,
@@ -1957,7 +1959,8 @@ pub const AcpManager = struct {
                     const diff = block.diff;
 
                     // Debug: log incoming diffs to understand duplication
-                    std.log.debug("DIFF RECEIVED: path={s} old_len={d} new_len={d}", .{
+                    std.log.debug("DIFF RECEIVED: tool_call_id={s} path={s} old_len={d} new_len={d}", .{
+                        tc.tool_call_id,
                         diff.path,
                         diff.old_text.len,
                         diff.new_text.len,
@@ -2000,18 +2003,51 @@ pub const AcpManager = struct {
                         continue;
                     };
 
+                    // Include tool_call_id for precise matching in UI state
+                    const id_copy = self.allocator.dupe(u8, tc.tool_call_id) catch {
+                        self.allocator.free(title_copy);
+                        self.allocator.free(path_copy);
+                        self.allocator.free(old_copy);
+                        self.allocator.free(new_copy);
+                        continue;
+                    };
+
                     self.pending_messages.append(self.allocator, .{
                         .kind = .tool_diff,
                         .text = title_copy,
                         .diff_path = path_copy,
                         .diff_old = old_copy,
                         .diff_new = new_copy,
+                        .tool_call_id = id_copy,
                     }) catch {
                         self.allocator.free(title_copy);
                         self.allocator.free(path_copy);
                         self.allocator.free(old_copy);
                         self.allocator.free(new_copy);
+                        self.allocator.free(id_copy);
                     };
+                }
+            }
+
+            // If we created diff messages, remove any existing pending tool_call message for this tool_call_id
+            // This prevents showing both "○ Edit..." and the completed diff
+            if (has_diff) {
+                if (self.tool_call_id_to_idx.get(tc.tool_call_id)) |idx| {
+                    // Found existing pending message, remove it
+                    if (idx < self.pending_messages.items.len) {
+                        var pm = &self.pending_messages.items[idx];
+                        pm.deinit(self.allocator);
+                        _ = self.pending_messages.orderedRemove(idx);
+                        // HashMap indices are now stale, but we'll clear them on next prompt
+                        _ = self.tool_call_id_to_idx.remove(tc.tool_call_id);
+                        // Adjust indices in HashMap for entries after the removed one
+                        var it = self.tool_call_id_to_idx.iterator();
+                        while (it.next()) |entry| {
+                            if (entry.value_ptr.* > idx) {
+                                entry.value_ptr.* -= 1;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -2038,6 +2074,7 @@ pub const AcpManager = struct {
                     pm.tool_status = tc.status;
                 } else {
                     // Create new pending message
+                    std.log.debug("TOOL_CALL NEW: id={s} title={s} name={?s}", .{ tc.tool_call_id, title, tc.tool_name });
                     const text = self.allocator.dupe(u8, title) catch return;
                     const id_copy = self.allocator.dupe(u8, tc.tool_call_id) catch {
                         self.allocator.free(text);
