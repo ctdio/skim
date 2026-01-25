@@ -133,12 +133,20 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
         // Support both Ctrl+w l and Ctrl+w Ctrl+l (vim-style)
-        // Ctrl+h sends 8 (backspace), Ctrl+l sends 12 (form feed), Ctrl+w sends 23
-        const effective_key: u21 = switch (key.codepoint) {
-            8 => 'h', // Ctrl+h
-            12 => 'l', // Ctrl+l
-            23 => 'w', // Ctrl+w
-            else => key.codepoint,
+        // Handle both control character codepoints AND ctrl+letter combinations
+        const effective_key: u21 = blk: {
+            // First check control character codepoints
+            // Note: Some terminals send 127 (DEL) for Ctrl+H instead of 8 (BS)
+            if (key.codepoint == 8 or key.codepoint == 127) break :blk 'h'; // Ctrl+h / backspace
+            if (key.codepoint == 12) break :blk 'l'; // Ctrl+l as control char
+            if (key.codepoint == 23) break :blk 'w'; // Ctrl+w as control char
+            // Also handle ctrl+letter (some terminals report this way)
+            if (key.mods.ctrl) {
+                if (key.codepoint == 'h') break :blk 'h';
+                if (key.codepoint == 'l') break :blk 'l';
+                if (key.codepoint == 'w') break :blk 'w';
+            }
+            break :blk key.codepoint;
         };
 
         // Check which panels are visible and their positions
@@ -302,7 +310,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.executeFindInLine(last.command, last.char);
             }
         },
-        'z' => app.state.pending_z = true, // Wait for second z for zz (center cursor)
+        'z' => {
+            // If agent panel exists, toggle fullscreen; otherwise wait for zz (center cursor)
+            if (app.tab_manager) |*tm| {
+                tm.toggleFullScreen();
+            } else {
+                app.state.pending_z = true;
+            }
+        },
         '[' => app.state.pending_bracket = true, // Wait for second character (like [h)
         ']' => app.state.pending_close_bracket = true, // Wait for second character (like ]h)
         '{' => {

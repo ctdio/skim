@@ -536,14 +536,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // 'z' in normal vim mode - toggle full screen (sidebar mode)
+    // 'z' in normal vim mode - toggle full screen (stay in agent mode)
     if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'z') {
         if (app.tab_manager) |*tm| {
             tm.toggleFullScreen();
-            // When exiting fullscreen, return focus to diff
-            if (!tm.full_screen) {
-                app.mode = .normal;
-            }
         }
         app.needs_render = true;
         return;
@@ -650,12 +646,20 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
         // Support both Ctrl+w h and Ctrl+w Ctrl+h (vim-style)
-        // Ctrl+h sends 8 (backspace), Ctrl+l sends 12 (form feed), Ctrl+w sends 23
-        const effective_key: u21 = switch (key.codepoint) {
-            8 => 'h', // Ctrl+h
-            12 => 'l', // Ctrl+l
-            23 => 'w', // Ctrl+w
-            else => key.codepoint,
+        // Handle both control character codepoints AND ctrl+letter combinations
+        const effective_key: u21 = blk: {
+            // First check control character codepoints
+            // Note: Some terminals send 127 (DEL) for Ctrl+H instead of 8 (BS)
+            if (key.codepoint == 8 or key.codepoint == 127) break :blk 'h'; // Ctrl+h / backspace
+            if (key.codepoint == 12) break :blk 'l'; // Ctrl+l as control char
+            if (key.codepoint == 23) break :blk 'w'; // Ctrl+w as control char
+            // Also handle ctrl+letter (some terminals report this way)
+            if (key.mods.ctrl) {
+                if (key.codepoint == 'h') break :blk 'h';
+                if (key.codepoint == 'l') break :blk 'l';
+                if (key.codepoint == 'w') break :blk 'w';
+            }
+            break :blk key.codepoint;
         };
 
         // Check agent panel position to determine correct navigation
