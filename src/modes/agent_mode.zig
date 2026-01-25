@@ -549,14 +549,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // 'V' (shift+v) in normal vim mode - toggle diff view mode (unified/side-by-side)
-    // Note: lowercase 'v' is reserved for vim visual mode
-    if (agent_state.input.vim.vim_mode == .normal and key.codepoint == 'V') {
-        agent_state.toggleDiffViewMode();
-        app.needs_render = true;
-        return;
-    }
-
     // '?' in normal vim mode - show help overlay
     if (agent_state.input.vim.vim_mode == .normal and key.codepoint == '?') {
         agent_state.help_visible = true;
@@ -612,7 +604,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
 
-        // Space prefix commands (Space+b for history, Space+f for follow)
+        // Space prefix commands (Space+b for history, Space+f for follow, Space+s for diff style)
         if (app.state.pending_space) {
             app.state.pending_space = false;
             if (key.codepoint == 'b') {
@@ -626,6 +618,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             if (key.codepoint == 'f') {
                 // Space+f - scroll to bottom, enable follow mode
                 agent_state.scrollToBottom();
+                app.needs_render = true;
+                return;
+            }
+            if (key.codepoint == 's') {
+                // Space+s - toggle diff view mode (unified/side-by-side)
+                agent_state.toggleDiffViewMode();
                 app.needs_render = true;
                 return;
             }
