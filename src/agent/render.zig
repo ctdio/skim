@@ -1269,15 +1269,33 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             if (left_kind == .empty) {
                 // Fill with diagonal pattern for empty left side
                 renderDiagonalFill(win, row, col_offset, left_width, is_cursor_line);
-            } else if (record.sbs_left_content) |content| {
-                const left_content = if (content.len > left_width) content[0..left_width] else content;
-                const base_left_style: vaxis.Style = if (left_kind == .delete)
-                    .{ .fg = Color.white, .bg = Color.diff_delete_bg }
-                else
-                    .{ .fg = Color.white };
-                // Apply cursor/visual highlight to the style
-                const left_style = withHighlightBg(base_left_style, is_cursor_line, is_in_visual);
-                printWithHighlights(win, left_content, record.sbs_left_highlights, left_style, row, col_offset);
+            } else {
+                // Fill entire left content area with diff background first
+                if (left_kind == .delete) {
+                    const fill_style: vaxis.Style = if (is_cursor_line)
+                        .{ .bg = Color.cursor_bg }
+                    else if (is_in_visual)
+                        .{ .bg = Color.visual_select_bg }
+                    else
+                        .{ .bg = Color.diff_delete_bg };
+                    for (0..left_width) |i| {
+                        win.writeCell(@intCast(col_offset + i), @intCast(row), .{
+                            .char = .{ .grapheme = " ", .width = 1 },
+                            .style = fill_style,
+                        });
+                    }
+                }
+                // Then render the text content on top
+                if (record.sbs_left_content) |content| {
+                    const left_content = if (content.len > left_width) content[0..left_width] else content;
+                    const base_left_style: vaxis.Style = if (left_kind == .delete)
+                        .{ .fg = Color.white, .bg = Color.diff_delete_bg }
+                    else
+                        .{ .fg = Color.white };
+                    // Apply cursor/visual highlight to the style
+                    const left_style = withHighlightBg(base_left_style, is_cursor_line, is_in_visual);
+                    printWithHighlights(win, left_content, record.sbs_left_highlights, left_style, row, col_offset);
+                }
             }
             col_offset += left_width;
 
@@ -1303,14 +1321,32 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             if (right_kind == .empty) {
                 // Fill with diagonal pattern for empty right side
                 renderDiagonalFill(win, row, col_offset, left_width, is_cursor_line);
-            } else if (record.sbs_right_content) |content| {
-                const base_right_style: vaxis.Style = if (right_kind == .add)
-                    .{ .fg = Color.white, .bg = Color.diff_add_bg }
-                else
-                    .{ .fg = Color.white };
-                // Apply cursor/visual highlight to the style
-                const right_style = withHighlightBg(base_right_style, is_cursor_line, is_in_visual);
-                printWithHighlights(win, content, record.sbs_right_highlights, right_style, row, col_offset);
+            } else {
+                // Fill entire right content area with diff background first
+                if (right_kind == .add) {
+                    const fill_style: vaxis.Style = if (is_cursor_line)
+                        .{ .bg = Color.cursor_bg }
+                    else if (is_in_visual)
+                        .{ .bg = Color.visual_select_bg }
+                    else
+                        .{ .bg = Color.diff_add_bg };
+                    for (0..left_width) |i| {
+                        win.writeCell(@intCast(col_offset + i), @intCast(row), .{
+                            .char = .{ .grapheme = " ", .width = 1 },
+                            .style = fill_style,
+                        });
+                    }
+                }
+                // Then render the text content on top
+                if (record.sbs_right_content) |content| {
+                    const base_right_style: vaxis.Style = if (right_kind == .add)
+                        .{ .fg = Color.white, .bg = Color.diff_add_bg }
+                    else
+                        .{ .fg = Color.white };
+                    // Apply cursor/visual highlight to the style
+                    const right_style = withHighlightBg(base_right_style, is_cursor_line, is_in_visual);
+                    printWithHighlights(win, content, record.sbs_right_highlights, right_style, row, col_offset);
+                }
             }
 
             row += 1;
