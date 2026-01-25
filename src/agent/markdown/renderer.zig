@@ -10,12 +10,14 @@ const types = @import("types.zig");
 const colors_mod = @import("colors.zig");
 const parser_mod = @import("parser.zig");
 const code_blocks_mod = @import("code_blocks.zig");
+const tables_mod = @import("tables.zig");
 
 const NodeType = types.NodeType;
 const StyledSpan = types.StyledSpan;
 const MarkdownColors = colors_mod.MarkdownColors;
 const MarkdownParser = parser_mod.MarkdownParser;
 const CodeBlockRenderer = code_blocks_mod.CodeBlockRenderer;
+const TableRenderer = tables_mod.TableRenderer;
 
 /// Context for tracking nested list state
 const ListContext = struct {
@@ -91,6 +93,7 @@ pub const MarkdownRenderer = struct {
             .thematic_break => return self.renderHorizontalRule(),
             .task_list_marker => return self.renderTaskListMarker(node, md_parser),
             .fenced_code_block => return self.renderFencedCodeBlock(node, md_parser),
+            .table => return self.renderTable(node, md_parser),
             else => {},
         }
 
@@ -407,6 +410,29 @@ pub const MarkdownRenderer = struct {
         }
 
         // Add newline after code block
+        try self.spans.append(self.allocator, .{
+            .text = "\n",
+            .style = self.colors.text,
+            .indent = 0,
+            .node_type = .softbreak,
+        });
+    }
+
+    /// Render GFM table with ASCII borders
+    fn renderTable(self: *MarkdownRenderer, node: ts.Node, md_parser: *const MarkdownParser) std.mem.Allocator.Error!void {
+        // Use TableRenderer to render the table
+        var table_renderer = TableRenderer.init(self.allocator, self.colors);
+        var table_spans = table_renderer.render(node, md_parser, 80) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        defer table_spans.deinit();
+
+        // Append all table spans to our span list
+        for (table_spans.items) |span| {
+            try self.spans.append(self.allocator, span);
+        }
+
+        // Add newline after table
         try self.spans.append(self.allocator, .{
             .text = "\n",
             .style = self.colors.text,
@@ -896,4 +922,14 @@ test "code block colors defined" {
     try std.testing.expect(colors_mod.default.code_block_lang.fg != .default);
 }
 
+// =============================================================================
+// Table Tests - Phase 5
+// Unit tests that verify table colors are defined
+// =============================================================================
 
+test "table colors defined" {
+    // Verify all table colors are defined
+    try std.testing.expect(colors_mod.default.table_header.bold);
+    try std.testing.expect(colors_mod.default.table_border.fg != .default);
+    try std.testing.expect(colors_mod.default.table_cell.fg != .default);
+}

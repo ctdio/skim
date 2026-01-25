@@ -16,6 +16,7 @@ pub const parser = @import("parser.zig");
 pub const colors = @import("colors.zig");
 pub const renderer = @import("renderer.zig");
 pub const code_blocks = @import("code_blocks.zig");
+pub const tables = @import("tables.zig");
 
 // Re-export main types for convenience
 pub const NodeType = types.NodeType;
@@ -25,6 +26,7 @@ pub const ParseError = parser.ParseError;
 pub const MarkdownColors = colors.MarkdownColors;
 pub const MarkdownRenderer = renderer.MarkdownRenderer;
 pub const CodeBlockRenderer = code_blocks.CodeBlockRenderer;
+pub const TableRenderer = tables.TableRenderer;
 
 test {
     // Run all tests in submodules

@@ -69,6 +69,12 @@ pub const MarkdownColors = struct {
     code_block_border: vaxis.Style,
     /// Code block language label - accent color
     code_block_lang: vaxis.Style,
+    /// Table header row - bold for distinction
+    table_header: vaxis.Style,
+    /// Table borders (| and -) - dim
+    table_border: vaxis.Style,
+    /// Table cell content - normal text
+    table_cell: vaxis.Style,
 };
 
 /// Default markdown color scheme matching skim's aesthetic
@@ -154,6 +160,17 @@ pub const default: MarkdownColors = .{
     },
     .code_block_lang = .{
         .fg = .{ .rgb = [3]u8{ 0x7a, 0xa2, 0xf7 } }, // Blue accent
+    },
+    // Table styles
+    .table_header = .{
+        .fg = Color.chat_content,
+        .bold = true,
+    },
+    .table_border = .{
+        .fg = .{ .rgb = [3]u8{ 0x6c, 0x70, 0x86 } }, // Dim gray
+    },
+    .table_cell = .{
+        .fg = Color.chat_content,
     },
 };
 
