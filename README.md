@@ -417,29 +417,32 @@ skim --staged
 
 ### Agent Panel Keybindings
 
-#### From Diff View (Normal Mode)
+The agent panel uses vim-style modal editing. Keybindings are organized by mode.
+
+#### Global (work in any mode)
 
 | Key | Action |
 |-----|--------|
-| `Ctrl-e` | Toggle agent panel visibility |
-| `Ctrl-w h/l` | Focus agent panel (based on panel side) |
-| `Ctrl-w w` | Cycle focus between panels |
+| `Ctrl-E` | Close panel, return to diff |
+| `Ctrl-G` | Edit prompt in $EDITOR |
+| `Ctrl-W h/l` | Focus diff/agent panel |
+| `Ctrl-W w` | Cycle focus between panels |
+| `Ctrl-S` | Stash/unstash prompt |
+| `Ctrl-T` | Toggle todo list expansion |
 
-#### Input (Insert Mode)
+#### Insert Mode (typing in prompt)
 
 | Key | Action |
 |-----|--------|
 | `Enter` | Send prompt to agent |
 | `Ctrl-J` | Insert newline in prompt |
-| `Ctrl-G` | Edit prompt in $EDITOR |
-| `Ctrl-C` / `ESC` | Exit to normal mode |
-| `/` | Show slash command menu (at start of input) |
-| `@` | Show file picker (at start of input) |
+| `ESC` / `Ctrl-C` | Exit to normal mode |
+| `/` | Show slash command menu (at start) |
+| `@` | Show file picker (at start) |
 | `!` | Toggle shell command mode (empty input) |
-| `Tab` | Accept slash command suggestion |
-| `Up` | Restore last staged prompt (empty input) |
+| `Up` | Restore staged prompt (empty input) |
 
-#### Normal Mode (Vim)
+#### Normal Mode (vim on prompt)
 
 | Key | Action |
 |-----|--------|
@@ -450,22 +453,19 @@ skim --staged
 | `gg` / `G` | Jump to top/bottom of input |
 | `Ctrl-D` / `Ctrl-U` | Half-page down/up in input |
 | `x` / `dd` | Delete char/line |
-| `Ctrl-G` | Edit prompt in $EDITOR |
 | `:` | Open command palette |
 | `?` | Show help |
-
-#### Navigation & Panels
-
-| Key | Action |
-|-----|--------|
-| `Space+f` | Scroll to bottom, enable follow mode |
-| `gb` | Enter history mode (browse messages) |
-| `Ctrl-w h/l` | Focus diff/agent panel |
+| `gb` | Enter history mode |
 | `gt` / `gT` | Next/previous tab |
-| `z` | Toggle full screen (normal mode) |
-| `V` | Toggle diff view mode (normal mode) |
+| `Space+f` | Scroll to bottom, enable follow |
+| `z` | Toggle full screen |
+| `V` | Toggle diff view mode |
+| `Tab` | Cycle session modes |
+| `ESC ESC` | Interrupt agent (double-tap) |
 
-#### History Mode (gb to enter)
+#### History Mode (enter with `gb`)
+
+Browse and yank from message history.
 
 | Key | Action |
 |-----|--------|
@@ -481,25 +481,49 @@ skim --staged
 | `i` | Exit to insert mode |
 | `ESC` / `q` | Exit to normal mode |
 
-#### Session
+#### Visual Mode (in history, enter with `v`)
 
 | Key | Action |
 |-----|--------|
-| `Tab` | Cycle session modes (normal mode) |
-| `Ctrl-S` | Stash/unstash prompt |
-| `Ctrl-T` | Toggle todo list expansion |
-| `Ctrl-E` | Close panel, return to diff |
-| `ESC ESC` | Interrupt agent (double-tap) |
+| `j` / `k` | Extend selection down/up |
+| `y` | Yank selection to clipboard |
+| `ESC` / `v` | Exit visual mode |
 
-#### Permission Prompt
+#### Permission Prompt (when agent requests permission)
 
 | Key | Action |
 |-----|--------|
 | `j` / `k` or `Up` / `Down` | Navigate options |
+| `Ctrl-D` / `Ctrl-U` | Scroll message history |
 | `Enter` / `y` | Accept selected option |
 | `ESC` / `n` | Reject/cancel |
 
-#### Slash Commands
+#### Slash Menu (when visible after `/`)
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-N` / `Ctrl-P` | Navigate menu |
+| `Tab` | Insert selected command |
+| `Enter` | Insert and send command |
+| `ESC` | Close menu |
+
+#### File Picker (when visible after `@`)
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-N` / `Ctrl-P` | Navigate files |
+| `Enter` / `Tab` | Insert selected file |
+| `ESC` | Close picker |
+
+#### Command Palette (opened with `:`)
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` or `Ctrl-P` / `Ctrl-N` | Navigate commands |
+| `Enter` | Execute selected command |
+| `ESC` | Close palette |
+
+#### Built-in Slash Commands
 
 | Command | Action |
 |---------|--------|
