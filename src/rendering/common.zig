@@ -15,6 +15,7 @@ pub const Color = struct {
     pub const bright_white: vaxis.Cell.Color = .{ .index = 15 }; // ANSI bright white
 
     // Extended 256-color palette grays
+    pub const gray_234: vaxis.Cell.Color = .{ .index = 234 }; // Very dark gray from 256 palette
     pub const gray_236: vaxis.Cell.Color = .{ .index = 236 }; // Dark gray from 256 palette
     pub const gray_240: vaxis.Cell.Color = .{ .index = 240 }; // Medium gray from 256 palette
 

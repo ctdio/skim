@@ -27,6 +27,7 @@ const rendering_utils = @import("../rendering/utils.zig");
 const RenderUtils = rendering_utils.RenderUtils;
 
 // Test constant for syntax highlighting debugging
+// TODO: Remove this test constant before release
 const SYNTAX_HIGHLIGHT_TEST_VALUE: u32 = 42;
 
 // Another test constant to verify treesitter diff rendering
@@ -328,6 +329,26 @@ fn withHighlightBg(style: vaxis.Style, is_cursor_line: bool, is_in_visual: bool)
 /// Legacy wrapper for cursor-only highlighting (for backwards compatibility).
 fn withCursorBg(style: vaxis.Style, is_cursor_line: bool) vaxis.Style {
     return withHighlightBg(style, is_cursor_line, false);
+}
+
+/// Render diagonal fill pattern using Unicode box drawing diagonal character.
+/// Used for empty panes in side-by-side diff view.
+fn renderDiagonalFill(win: vaxis.Window, row: usize, col: usize, width: usize, is_cursor_line: bool) void {
+    if (width == 0) return;
+
+    const diagonal = "╱"; // U+2571 - 3 bytes in UTF-8
+    const fill_style: vaxis.Style = if (is_cursor_line)
+        .{ .fg = Color.gray_234, .bg = Color.cursor_bg }
+    else
+        .{ .fg = Color.gray_234 };
+
+    var i: usize = 0;
+    while (i < width) : (i += 1) {
+        win.writeCell(@intCast(col + i), @intCast(row), .{
+            .char = .{ .grapheme = diagonal, .width = 1 },
+            .style = fill_style,
+        });
+    }
 }
 
 // =============================================================================
@@ -1244,8 +1265,11 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             // Space after line number
             col_offset += 2;
 
-            // Left content with syntax highlighting (truncate to width)
-            if (record.sbs_left_content) |content| {
+            // Left content with syntax highlighting (truncate to width) or diagonal fill for empty
+            if (left_kind == .empty) {
+                // Fill with diagonal pattern for empty left side
+                renderDiagonalFill(win, row, col_offset, left_width, is_cursor_line);
+            } else if (record.sbs_left_content) |content| {
                 const left_content = if (content.len > left_width) content[0..left_width] else content;
                 const base_left_style: vaxis.Style = if (left_kind == .delete)
                     .{ .fg = Color.white, .bg = Color.diff_delete_bg }
@@ -1275,8 +1299,11 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
             // Space after line number
             col_offset += 2;
 
-            // Right content with syntax highlighting
-            if (record.sbs_right_content) |content| {
+            // Right content with syntax highlighting (or diagonal fill for empty)
+            if (right_kind == .empty) {
+                // Fill with diagonal pattern for empty right side
+                renderDiagonalFill(win, row, col_offset, left_width, is_cursor_line);
+            } else if (record.sbs_right_content) |content| {
                 const base_right_style: vaxis.Style = if (right_kind == .add)
                     .{ .fg = Color.white, .bg = Color.diff_add_bg }
                 else

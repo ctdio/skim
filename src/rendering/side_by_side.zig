@@ -603,17 +603,13 @@ pub const SideBySideRenderer = struct {
                         _ = win.print(segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_start_col )});
                     }
 
-                    // Right side empty with cursor highlight if needed
-                    if (is_cursor) {
-                        try RenderUtils.renderGutterAtColumn(app, win, current_row, right_col, is_cursor, is_in_visual, false, null, null, gutter_width);
-                        const blank = try RenderUtils.frameTextSlice(app, right_width);
-                        @memset(blank, ' ');
-                        var blank_seg = [_]vaxis.Cell.Segment{.{
-                            .text = blank,
-                            .style = .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg },
-                        }};
-                        _ = win.print(&blank_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_col + gutter_width + Layout.gutter_spacing )});
-                    }
+                    // Right side empty - fill with dimmed diagonal pattern
+                    try RenderUtils.renderGutterAtColumn(app, win, current_row, right_col, is_cursor, is_in_visual, false, null, null, gutter_width);
+                    const fill_style: vaxis.Style = if (is_cursor)
+                        .{ .fg = Color.gray_234, .bg = Color.cursor_bg }
+                    else
+                        .{ .fg = Color.gray_234 };
+                    try renderDiagonalFill(app, win, current_row, right_col + gutter_width + Layout.gutter_spacing, right_width, fill_style);
 
                     byte_offset_in_content += chunk.len;
                     current_row += 1;
@@ -639,17 +635,13 @@ pub const SideBySideRenderer = struct {
 
                     const show_lineno = byte_offset_in_content == 0;
 
-                    // Left side empty with cursor highlight if needed
-                    if (is_cursor) {
-                        try RenderUtils.renderGutter(app, win, 0, current_row, is_cursor, false, null, null, gutter_width);
-                        const blank = try RenderUtils.frameTextSlice(app, left_width);
-                        @memset(blank, ' ');
-                        var blank_seg = [_]vaxis.Cell.Segment{.{
-                            .text = blank,
-                            .style = .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg },
-                        }};
-                        _ = win.print(&blank_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(1 + gutter_width + Layout.gutter_spacing )});
-                    }
+                    // Left side empty - fill with dimmed diagonal pattern
+                    try RenderUtils.renderGutter(app, win, 0, current_row, is_cursor, false, null, null, gutter_width);
+                    const left_fill_style: vaxis.Style = if (is_cursor)
+                        .{ .fg = Color.gray_234, .bg = Color.cursor_bg }
+                    else
+                        .{ .fg = Color.gray_234 };
+                    try renderDiagonalFill(app, win, current_row, 1 + gutter_width + Layout.gutter_spacing, left_width, left_fill_style);
 
                     // Render right side
                     try RenderUtils.renderGutterAtColumn(app, win, current_row, right_col, is_cursor, is_in_visual, show_lineno, line.new_lineno, line.line_type, gutter_width);
@@ -1110,5 +1102,27 @@ pub const SideBySideRenderer = struct {
         current_row += 1;
 
         return current_row - row;
+    }
+
+    /// Render diagonal fill pattern using Unicode box drawing diagonal character
+    fn renderDiagonalFill(app: *App, win: vaxis.Window, row: usize, col: usize, width: usize, style: vaxis.Style) !void {
+        if (width == 0) return;
+
+        // Build string of diagonal characters (╱ is 3 bytes in UTF-8)
+        const diagonal = "╱";
+        const diagonal_len = diagonal.len; // 3 bytes
+        const total_bytes = width * diagonal_len;
+
+        const fill_pattern = try RenderUtils.frameTextSlice(app, total_bytes);
+        var i: usize = 0;
+        while (i < width) : (i += 1) {
+            @memcpy(fill_pattern[i * diagonal_len ..][0..diagonal_len], diagonal);
+        }
+
+        var fill_seg = [_]vaxis.Cell.Segment{.{
+            .text = fill_pattern,
+            .style = style,
+        }};
+        _ = win.print(&fill_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
     }
 };
