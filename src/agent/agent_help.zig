@@ -138,6 +138,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "y", .desc = "Yank user message at cursor" },
         .{ .key = "yy", .desc = "Yank current line" },
         .{ .key = "Y", .desc = "Yank entire current message" },
+        .{ .key = "Space+f", .desc = "Resume follow mode, exit history" },
         .{ .key = "i", .desc = "Exit to insert mode" },
         .{ .key = "ESC/q", .desc = "Exit to normal mode" },
     };

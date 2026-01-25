@@ -487,6 +487,7 @@ Browse and yank from message history.
 | `y` | Yank user message at cursor |
 | `yy` | Yank current line |
 | `Y` | Yank entire current message |
+| `Space+f` | Resume follow mode, exit history |
 | `i` | Exit to insert mode |
 | `ESC` / `q` | Exit to normal mode |
 

@@ -270,6 +270,28 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
 
+        // Space prefix commands in history mode (Space+f for follow/resume)
+        if (app.state.pending_space) {
+            app.state.pending_space = false;
+            if (key.codepoint == 'f') {
+                // Space+f - scroll to bottom, enable follow mode, exit history mode
+                agent_state.exitHistoryMode();
+                agent_state.scrollToBottom();
+                app.needs_render = true;
+                return;
+            }
+            // Unknown space-sequence in history mode, ignore
+            agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
+            return;
+        } else if (key.codepoint == ' ' and !key.mods.ctrl and !key.mods.alt) {
+            // First Space - wait for second key
+            app.state.pending_space = true;
+            agent_state.history_pending_g = false;
+            agent_state.history_pending_y = false;
+            return;
+        }
+
         // Any other key clears pending states
         agent_state.history_pending_g = false;
         agent_state.history_pending_y = false;
