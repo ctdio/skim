@@ -1094,6 +1094,13 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
         return;
     }
 
+    // Ensure markdown is parsed for agent messages
+    // This lazy-initializes the parser and parses content on first render
+    // Parsing is skipped for non-agent messages (user, tool, etc.)
+    for (agent_state.messages.items) |*msg| {
+        _ = msg.ensureMarkdownParsed();
+    }
+
     // Get the pre-computed line map (builds if dirty)
     // Reserve 4 cols for indent + 1 col for scrollbar
     const wrap_width = if (win.width > 5) win.width - 5 else 1;

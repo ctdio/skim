@@ -21,6 +21,8 @@ const shell_mod = @import("shell.zig");
 pub const ShellState = shell_mod.ShellState;
 pub const QueuedShellOutput = shell_mod.QueuedShellOutput;
 pub const RunningShellCommand = shell_mod.RunningShellCommand;
+const markdown = @import("markdown/markdown.zig");
+pub const MarkdownParser = markdown.MarkdownParser;
 
 /// Maximum number of slash commands visible in menu at once
 pub const MAX_SLASH_MENU_VISIBLE: usize = slash_menu.MAX_VISIBLE;
@@ -843,6 +845,9 @@ pub const AgentState = struct {
 
         // Update content to point to buffer's items
         last.content = last.content_buffer.items;
+
+        // Invalidate markdown tree since content changed
+        last.invalidateMarkdownTree();
 
         // Mark line map dirty for streaming update
         self.line_map_dirty = true;
@@ -1986,6 +1991,9 @@ pub const Message = struct {
     tool_stderr: ?[]const u8 = null, // For Bash: error output
     // For plan snapshot messages
     plan_snapshot_entries: ?[]const OwnedPlanEntry = null,
+    // For markdown parsing (agent messages only)
+    md_parser: ?MarkdownParser = null,
+    md_tree_valid: bool = false,
 
     pub const ToolStatus = enum {
         pending,
@@ -2036,6 +2044,45 @@ pub const Message = struct {
             }
             allocator.free(entries);
         }
+        // Clean up markdown parser if present
+        if (self.md_parser) |*parser| {
+            parser.deinit();
+        }
+    }
+
+    /// Ensure markdown is parsed for this message
+    /// Only parses agent messages (user messages don't need markdown rendering)
+    /// Returns true if parsing succeeded or was already done
+    pub fn ensureMarkdownParsed(self: *Message) bool {
+        // Only parse agent messages
+        if (self.role != .agent) {
+            return false;
+        }
+
+        // Already valid
+        if (self.md_tree_valid and self.md_parser != null) {
+            return true;
+        }
+
+        // Initialize parser if needed
+        if (self.md_parser == null) {
+            self.md_parser = MarkdownParser.init() catch {
+                return false;
+            };
+        }
+
+        // Parse the content
+        self.md_parser.?.parse(self.content) catch {
+            return false;
+        };
+
+        self.md_tree_valid = true;
+        return true;
+    }
+
+    /// Invalidate the markdown parse tree (call when content changes)
+    pub fn invalidateMarkdownTree(self: *Message) void {
+        self.md_tree_valid = false;
     }
 };
 

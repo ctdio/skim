@@ -16,6 +16,7 @@ pub const tab_manager = @import("tab_manager.zig");
 pub const render = @import("render.zig");
 pub const command_palette = @import("command_palette.zig");
 pub const agent_help = @import("agent_help.zig");
+pub const markdown = @import("markdown/markdown.zig");
 
 // Re-export main types for convenience
 pub const AgentState = state.AgentState;
