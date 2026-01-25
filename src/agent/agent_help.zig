@@ -7,7 +7,7 @@ const RenderUtils = @import("../rendering/utils.zig").RenderUtils;
 const AgentState = @import("state.zig").AgentState;
 
 // Total number of content rows in help popup (approximate)
-const HELP_CONTENT_ROWS = 45;
+const HELP_CONTENT_ROWS = 60;
 
 /// Render the agent help popup overlay
 pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !void {
@@ -68,6 +68,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     const input_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Enter", .desc = "Send prompt to agent" },
         .{ .key = "Ctrl+J", .desc = "Insert newline in prompt" },
+        .{ .key = "Ctrl+G", .desc = "Edit prompt in $EDITOR" },
         .{ .key = "Ctrl+C/ESC", .desc = "Exit to normal mode" },
         .{ .key = "/", .desc = "Show slash command menu (at start)" },
         .{ .key = "@", .desc = "Show file picker (at start)" },
@@ -89,7 +90,10 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "h/l", .desc = "Move cursor left/right" },
         .{ .key = "w/b/e", .desc = "Word motions" },
         .{ .key = "0/$", .desc = "Line start/end" },
+        .{ .key = "gg/G", .desc = "Jump to top/bottom of input" },
+        .{ .key = "Ctrl+D/U", .desc = "Half-page down/up in input" },
         .{ .key = "x/dd", .desc = "Delete char/line" },
+        .{ .key = "Ctrl+G", .desc = "Edit prompt in $EDITOR" },
         .{ .key = ":", .desc = "Open command palette" },
         .{ .key = "?", .desc = "Show this help" },
     };
@@ -100,11 +104,11 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
 
     // NAVIGATION section
-    try content_lines.append(app.allocator, .{ .text = "NAVIGATION", .style = section_style });
+    try content_lines.append(app.allocator, .{ .text = "NAVIGATION & PANELS", .style = section_style });
 
     const nav_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-        .{ .key = "Ctrl+D/U", .desc = "Page down/up (any mode)" },
-        .{ .key = "gg/G", .desc = "Scroll to top/bottom (normal mode)" },
+        .{ .key = "Space+f", .desc = "Scroll to bottom, enable follow mode" },
+        .{ .key = "gb", .desc = "Enter history mode (browse messages)" },
         .{ .key = "Ctrl+W h/l", .desc = "Focus diff/agent panel" },
         .{ .key = "gt/gT", .desc = "Next/previous tab" },
         .{ .key = "z", .desc = "Toggle full screen (normal mode)" },
@@ -116,13 +120,34 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     }
     try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
 
+    // HISTORY MODE section
+    try content_lines.append(app.allocator, .{ .text = "HISTORY MODE (gb to enter)", .style = section_style });
+
+    const history_bindings = [_]struct { key: []const u8, desc: []const u8 }{
+        .{ .key = "j/k", .desc = "Move cursor down/up" },
+        .{ .key = "h/l", .desc = "Jump to prev/next message" },
+        .{ .key = "gg/G", .desc = "Jump to top/bottom" },
+        .{ .key = "Ctrl+D/U", .desc = "Page down/up" },
+        .{ .key = "M", .desc = "Move cursor to middle of viewport" },
+        .{ .key = "v", .desc = "Enter visual selection mode" },
+        .{ .key = "y", .desc = "Yank user message at cursor" },
+        .{ .key = "yy", .desc = "Yank current line" },
+        .{ .key = "Y", .desc = "Yank entire current message" },
+        .{ .key = "i", .desc = "Exit to insert mode" },
+        .{ .key = "ESC/q", .desc = "Exit to normal mode" },
+    };
+
+    for (history_bindings) |binding| {
+        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+    }
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
+
     // SESSION section
     try content_lines.append(app.allocator, .{ .text = "SESSION", .style = section_style });
 
     const session_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "Tab", .desc = "Cycle session modes (normal mode)" },
         .{ .key = "Ctrl+S", .desc = "Stash/unstash prompt" },
-        .{ .key = "Ctrl+L", .desc = "Clear message history" },
         .{ .key = "Ctrl+T", .desc = "Toggle todo list expansion" },
         .{ .key = "Ctrl+E", .desc = "Close panel, return to diff" },
         .{ .key = "ESC ESC", .desc = "Interrupt agent (double-tap)" },

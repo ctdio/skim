@@ -425,20 +425,87 @@ skim --staged
 | `Ctrl-w h/l` | Focus agent panel (based on panel side) |
 | `Ctrl-w w` | Cycle focus between panels |
 
-#### In Agent Panel
+#### Input (Insert Mode)
 
 | Key | Action |
 |-----|--------|
-| `Ctrl-e` | Close panel, return to diff |
-| `Ctrl-C` | Insert mode: exit to normal. Normal mode: close panel |
-| `Ctrl-l` | Clear message history |
-| `Ctrl-d` / `Ctrl-u` | Page down / up |
-| `Ctrl-t` | Toggle todo list expansion |
-| `gg` / `G` | Scroll to top / bottom |
+| `Enter` | Send prompt to agent |
+| `Ctrl-J` | Insert newline in prompt |
+| `Ctrl-G` | Edit prompt in $EDITOR |
+| `Ctrl-C` / `ESC` | Exit to normal mode |
+| `/` | Show slash command menu (at start of input) |
+| `@` | Show file picker (at start of input) |
+| `!` | Toggle shell command mode (empty input) |
+| `Tab` | Accept slash command suggestion |
+| `Up` | Restore last staged prompt (empty input) |
+
+#### Normal Mode (Vim)
+
+| Key | Action |
+|-----|--------|
+| `i` / `a` / `I` / `A` | Enter insert mode |
+| `h` / `l` | Move cursor left/right |
+| `w` / `b` / `e` | Word motions |
+| `0` / `$` | Line start/end |
+| `gg` / `G` | Jump to top/bottom of input |
+| `Ctrl-D` / `Ctrl-U` | Half-page down/up in input |
+| `x` / `dd` | Delete char/line |
+| `Ctrl-G` | Edit prompt in $EDITOR |
+| `:` | Open command palette |
+| `?` | Show help |
+
+#### Navigation & Panels
+
+| Key | Action |
+|-----|--------|
+| `Space+f` | Scroll to bottom, enable follow mode |
+| `gb` | Enter history mode (browse messages) |
+| `Ctrl-w h/l` | Focus diff/agent panel |
+| `gt` / `gT` | Next/previous tab |
 | `z` | Toggle full screen (normal mode) |
 | `V` | Toggle diff view mode (normal mode) |
+
+#### History Mode (gb to enter)
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Move cursor down/up |
+| `h` / `l` | Jump to prev/next message |
+| `gg` / `G` | Jump to top/bottom |
+| `Ctrl-D` / `Ctrl-U` | Page down/up |
+| `M` | Move cursor to middle of viewport |
+| `v` | Enter visual selection mode |
+| `y` | Yank user message at cursor |
+| `yy` | Yank current line |
+| `Y` | Yank entire current message |
+| `i` | Exit to insert mode |
+| `ESC` / `q` | Exit to normal mode |
+
+#### Session
+
+| Key | Action |
+|-----|--------|
 | `Tab` | Cycle session modes (normal mode) |
-| `Alt-m` | Cycle session modes (alternative) |
+| `Ctrl-S` | Stash/unstash prompt |
+| `Ctrl-T` | Toggle todo list expansion |
+| `Ctrl-E` | Close panel, return to diff |
+| `ESC ESC` | Interrupt agent (double-tap) |
+
+#### Permission Prompt
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` or `Up` / `Down` | Navigate options |
+| `Enter` / `y` | Accept selected option |
+| `ESC` / `n` | Reject/cancel |
+
+#### Slash Commands
+
+| Command | Action |
+|---------|--------|
+| `/clear` | Clear session and start fresh |
+| `/model` | Switch AI model |
+| `/resume` | Resume previous session |
 
 ### @file References
 
