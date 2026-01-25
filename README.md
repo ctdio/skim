@@ -465,13 +465,14 @@ The agent panel uses vim-style modal editing. Keybindings are organized by mode.
 | `?` | Show help |
 | `gb` | Enter history mode |
 | `gt` / `gT` | Next/previous tab |
+| `Space+b` | Enter history mode |
 | `Space+f` | Scroll to bottom, enable follow |
 | `z` | Toggle full screen |
 | `V` | Toggle diff view mode |
 | `Tab` | Cycle session modes |
 | `ESC ESC` | Interrupt agent (double-tap) |
 
-#### History Mode (enter with `gb`)
+#### History Mode (enter with `gb` or `Space+b`)
 
 Browse and yank from message history.
 

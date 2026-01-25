@@ -112,6 +112,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "?", .desc = "Show this help" },
         .{ .key = "gb", .desc = "Enter history mode" },
         .{ .key = "gt/gT", .desc = "Next/previous tab" },
+        .{ .key = "Space+b", .desc = "Enter history mode" },
         .{ .key = "Space+f", .desc = "Scroll to bottom, enable follow" },
         .{ .key = "z", .desc = "Toggle full screen" },
         .{ .key = "V", .desc = "Toggle diff view mode" },
@@ -125,7 +126,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
 
     // HISTORY MODE section
-    try content_lines.append(app.allocator, .{ .text = "HISTORY MODE (enter with gb)", .style = section_style });
+    try content_lines.append(app.allocator, .{ .text = "HISTORY MODE (gb or Space+b)", .style = section_style });
 
     const history_bindings = [_]struct { key: []const u8, desc: []const u8 }{
         .{ .key = "j/k", .desc = "Move cursor down/up" },
