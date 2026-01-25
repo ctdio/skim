@@ -1285,6 +1285,20 @@ pub const App = struct {
             .winsize => |ws| try self.vx.resize(self.allocator, self.tty.writer(), ws),
             .paste_start => {
                 self.in_bracketed_paste = true;
+                // Save undo state before bracketed paste begins
+                switch (self.mode) {
+                    .agent => {
+                        if (self.getActiveAgentState()) |agent_state| {
+                            agent.InputEditor.VimEditor.pushUndoPublic(&agent_state.input.vim);
+                        }
+                    },
+                    .comment => {
+                        if (self.state.active_comment_input) |*input| {
+                            comment_editor.CommentEditor.VimEditor.pushUndoPublic(&input.vim);
+                        }
+                    },
+                    else => {},
+                }
             },
             .paste_end => {
                 self.in_bracketed_paste = false;
@@ -1303,6 +1317,10 @@ pub const App = struct {
         switch (self.mode) {
             .agent => {
                 if (self.getActiveAgentState()) |agent_state| {
+                    // Save undo state before paste
+                    if (text.len > 0) {
+                        agent.InputEditor.VimEditor.pushUndoPublic(&agent_state.input.vim);
+                    }
                     // Insert pasted text into input editor
                     for (text) |char| {
                         if (char == '\r') continue; // Skip carriage returns
@@ -1314,6 +1332,10 @@ pub const App = struct {
             .comment => {
                 // Insert into comment editor
                 if (self.state.active_comment_input) |*input| {
+                    // Save undo state before paste
+                    if (text.len > 0) {
+                        comment_editor.CommentEditor.VimEditor.pushUndoPublic(&input.vim);
+                    }
                     for (text) |char| {
                         if (char == '\r') continue;
                         comment_editor.CommentEditor.insertCharPublic(input, char);

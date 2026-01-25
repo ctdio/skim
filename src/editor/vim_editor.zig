@@ -105,6 +105,15 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 state.last_find = null;
                 state.last_change = null;
                 state.command_len = 0;
+
+                // Push initial empty state so first edit can be undone
+                const undo_state = &state.undo_stack[0];
+                @memset(&undo_state.text, 0);
+                undo_state.text_len = 0;
+                undo_state.cursor_pos = 0;
+                state.undo_count = 1;
+                state.undo_index = 1;
+
                 return state;
             }
 
@@ -340,20 +349,24 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                     state.count_prefix = null;
                 },
                 'i' => {
+                    pushUndo(state);
                     state.vim_mode = .insert;
                     state.count_prefix = null;
                 },
                 'a' => {
+                    pushUndo(state);
                     state.cursor_pos = @min(state.cursor_pos + 1, state.text_len);
                     state.vim_mode = .insert;
                     state.count_prefix = null;
                 },
                 'I' => {
+                    pushUndo(state);
                     state.cursor_pos = findLineStart(state.*);
                     state.vim_mode = .insert;
                     state.count_prefix = null;
                 },
                 'A' => {
+                    pushUndo(state);
                     state.cursor_pos = findLineEnd(state.*);
                     state.vim_mode = .insert;
                     state.count_prefix = null;
@@ -996,6 +1009,11 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             insertCharImpl(state, char);
         }
 
+        /// Push current state to undo stack (for external paste handling)
+        pub fn pushUndoPublic(state: *State) void {
+            pushUndo(state);
+        }
+
         fn deleteChar(state: *State, pos: usize) !void {
             if (pos >= state.text_len) return;
 
@@ -1265,6 +1283,13 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             const clipboard_text = readFromSystemClipboard(allocator) catch null;
             defer if (clipboard_text) |text| allocator.free(text);
 
+            // Check if there's content to paste before modifying state
+            const has_clipboard = clipboard_text != null and clipboard_text.?.len > 0;
+            const has_yank = state.yank_len > 0;
+            if (!has_clipboard and !has_yank) return;
+
+            pushUndo(state);
+
             if (state.cursor_pos < state.text_len) {
                 state.cursor_pos += 1;
             }
@@ -1274,16 +1299,12 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                     if (state.text_len >= state.text_buffer.len) break;
                     try insertChar(state, char);
                 }
-            } else if (state.yank_len > 0) {
+            } else {
+                // Must have yank content (checked above)
                 for (0..state.yank_len) |i| {
                     if (state.text_len >= state.text_buffer.len) break;
                     try insertChar(state, state.yank_buffer[i]);
                 }
-            } else {
-                if (state.cursor_pos > 0) {
-                    state.cursor_pos -= 1;
-                }
-                return;
             }
 
             if (state.cursor_pos > 0) {
