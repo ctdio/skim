@@ -31,9 +31,12 @@ pub const MarkdownRenderer = struct {
     allocator: std.mem.Allocator,
     colors: MarkdownColors,
     spans: std.ArrayList(StyledSpan),
+    strings: std.ArrayList([]const u8), // Allocated strings that need to be freed
     style_stack: std.ArrayList(vaxis.Style),
     list_stack: std.ArrayList(ListContext),
     blockquote_depth: usize,
+    /// Track if we just ended a major block (for adding spacing between blocks)
+    ended_major_block: bool,
 
     /// Initialize a new markdown renderer
     pub fn init(allocator: std.mem.Allocator, md_colors: MarkdownColors) MarkdownRenderer {
@@ -41,14 +44,20 @@ pub const MarkdownRenderer = struct {
             .allocator = allocator,
             .colors = md_colors,
             .spans = .{},
+            .strings = .{},
             .style_stack = .{},
             .list_stack = .{},
             .blockquote_depth = 0,
+            .ended_major_block = false,
         };
     }
 
     /// Clean up renderer resources
     pub fn deinit(self: *MarkdownRenderer) void {
+        for (self.strings.items) |s| {
+            self.allocator.free(s);
+        }
+        self.strings.deinit(self.allocator);
         self.spans.deinit(self.allocator);
         self.style_stack.deinit(self.allocator);
         self.list_stack.deinit(self.allocator);
@@ -59,9 +68,15 @@ pub const MarkdownRenderer = struct {
     pub fn render(self: *MarkdownRenderer, md_parser: *const MarkdownParser) ![]StyledSpan {
         // Clear any previous state
         self.spans.clearRetainingCapacity();
+        // Free any previously allocated strings
+        for (self.strings.items) |s| {
+            self.allocator.free(s);
+        }
+        self.strings.clearRetainingCapacity();
         self.style_stack.clearRetainingCapacity();
         self.list_stack.clearRetainingCapacity();
         self.blockquote_depth = 0;
+        self.ended_major_block = false;
 
         // Push base text style
         try self.style_stack.append(self.allocator, self.colors.text);
@@ -75,6 +90,14 @@ pub const MarkdownRenderer = struct {
         return self.spans.items;
     }
 
+    /// Check if a node type is a major block element that needs spacing
+    fn isMajorBlock(node_type: NodeType) bool {
+        return switch (node_type) {
+            .heading, .fenced_code_block, .code_block, .block_quote, .table, .list, .thematic_break => true,
+            else => false,
+        };
+    }
+
     /// Recursively render a node and its children
     fn renderNode(self: *MarkdownRenderer, node: ts.Node, md_parser: *const MarkdownParser, depth: usize) std.mem.Allocator.Error!void {
         const node_type_str = node.kind();
@@ -85,16 +108,56 @@ pub const MarkdownRenderer = struct {
             return; // Skip markers like #, **, `, etc.
         }
 
+        // Add blank line before major blocks (except first element)
+        // Only at top level (inside document/section, not nested in lists/blockquotes)
+        if (isMajorBlock(node_type) and self.ended_major_block and self.list_stack.items.len == 0 and self.blockquote_depth == 0) {
+            try self.spans.append(self.allocator, .{
+                .text = "\n",
+                .style = self.colors.text,
+                .indent = 0,
+                .node_type = .softbreak,
+            });
+        }
+
         // Handle block elements with special rendering
         switch (node_type) {
-            .list => return self.renderList(node, md_parser, depth),
+            .list => {
+                try self.renderList(node, md_parser, depth);
+                if (self.list_stack.items.len == 0) self.ended_major_block = true;
+                return;
+            },
             .list_item => return self.renderListItem(node, md_parser, depth),
-            .block_quote => return self.renderBlockquote(node, md_parser, depth),
-            .thematic_break => return self.renderHorizontalRule(),
+            .block_quote => {
+                try self.renderBlockquote(node, md_parser, depth);
+                if (self.blockquote_depth == 0) self.ended_major_block = true;
+                return;
+            },
+            .thematic_break => {
+                try self.renderHorizontalRule();
+                self.ended_major_block = true;
+                return;
+            },
             .task_list_marker => return self.renderTaskListMarker(node, md_parser),
-            .fenced_code_block => return self.renderFencedCodeBlock(node, md_parser),
-            .table => return self.renderTable(node, md_parser),
+            .fenced_code_block => {
+                try self.renderFencedCodeBlock(node, md_parser);
+                self.ended_major_block = true;
+                return;
+            },
+            .table => {
+                try self.renderTable(node, md_parser);
+                self.ended_major_block = true;
+                return;
+            },
             else => {},
+        }
+
+        // Handle inline nodes - parse with inline grammar for proper styling
+        if (std.mem.eql(u8, node_type_str, "inline")) {
+            const inline_text = md_parser.getNodeText(node);
+            if (inline_text.len > 0) {
+                try self.renderInlineContent(inline_text, md_parser);
+            }
+            return;
         }
 
         // Get style for this node type (if any)
@@ -110,20 +173,6 @@ pub const MarkdownRenderer = struct {
 
         if (child_count == 0) {
             // Leaf node - emit text span
-            const text = md_parser.getNodeText(node);
-            if (text.len > 0) {
-                const current_indent = self.getCurrentIndent();
-                try self.spans.append(self.allocator, .{
-                    .text = text,
-                    .style = self.currentStyle(),
-                    .indent = current_indent,
-                    .node_type = node_type,
-                });
-            }
-        } else if (node_type == .text and !self.hasNamedChildren(node)) {
-            // Inline node with only anonymous children (e.g., raw markers) -
-            // emit text directly since children are just syntax tokens.
-            // This handles the case where inline grammar isn't applied.
             const text = md_parser.getNodeText(node);
             if (text.len > 0) {
                 const current_indent = self.getCurrentIndent();
@@ -157,7 +206,214 @@ pub const MarkdownRenderer = struct {
                 .indent = 0,
                 .node_type = .softbreak,
             });
+
+            // Mark headings as major blocks for spacing
+            if (node_type == .heading) {
+                self.ended_major_block = true;
+            }
         }
+
+        // Paragraphs also end a major block run (reset spacing tracker)
+        if (node_type == .paragraph) {
+            self.ended_major_block = true;
+        }
+    }
+
+    /// Render inline content using the inline grammar parser
+    fn renderInlineContent(self: *MarkdownRenderer, content: []const u8, md_parser: *const MarkdownParser) std.mem.Allocator.Error!void {
+        const inline_tree = md_parser.parseInline(content) orelse {
+            // Fallback: emit raw text if inline parsing fails
+            try self.spans.append(self.allocator, .{
+                .text = content,
+                .style = self.currentStyle(),
+                .indent = self.getCurrentIndent(),
+                .node_type = .text,
+            });
+            return;
+        };
+        defer inline_tree.destroy();
+
+        const root = inline_tree.rootNode();
+        try self.renderInlineNode(root, content, 0);
+    }
+
+    /// Recursively render inline AST nodes
+    fn renderInlineNode(self: *MarkdownRenderer, node: ts.Node, source: []const u8, depth: usize) std.mem.Allocator.Error!void {
+        _ = depth;
+        const node_type_str = node.kind();
+        const node_type = NodeType.fromTreeSitter(node_type_str);
+
+        // Skip marker nodes (delimiters like **, *, `, etc.)
+        if (isMarkerNode(node_type_str)) {
+            return;
+        }
+
+        // Get style for inline node types
+        const node_style = self.getInlineStyle(node_type);
+
+        // Push style if we have one
+        if (node_style) |style| {
+            try self.style_stack.append(self.allocator, colors_mod.mergeStyles(self.currentStyle(), style));
+        }
+
+        const child_count = node.childCount();
+
+        if (child_count == 0) {
+            // Leaf node - emit text
+            const start = node.startByte();
+            const end = node.endByte();
+            if (start < source.len and end <= source.len and start < end) {
+                const text = source[start..end];
+                if (text.len > 0) {
+                    try self.spans.append(self.allocator, .{
+                        .text = text,
+                        .style = self.currentStyle(),
+                        .indent = self.getCurrentIndent(),
+                        .node_type = node_type,
+                    });
+                }
+            }
+        } else if (self.hasOnlyDelimiterChildren(node)) {
+            // Node with only delimiter children (emphasis, strong_emphasis, code_span, etc.)
+            // Extract text content between delimiters
+            const content_range = self.getContentBetweenDelimiters(node, source);
+            if (content_range) |range| {
+                if (range.end > range.start and range.end <= source.len) {
+                    const text = source[range.start..range.end];
+                    if (text.len > 0) {
+                        try self.spans.append(self.allocator, .{
+                            .text = text,
+                            .style = self.currentStyle(),
+                            .indent = self.getCurrentIndent(),
+                            .node_type = node_type,
+                        });
+                    }
+                }
+            }
+        } else {
+            // Visit children, but also emit text between children
+            var last_end: usize = node.startByte();
+            var i: u32 = 0;
+            while (i < child_count) : (i += 1) {
+                if (node.child(i)) |child| {
+                    // Emit any text between the last child and this one
+                    const child_start = child.startByte();
+                    if (child_start > last_end and child_start <= source.len and last_end < source.len) {
+                        const gap_text = source[last_end..child_start];
+                        // Only emit if it's meaningful (not just whitespace between inline elements)
+                        const trimmed = std.mem.trim(u8, gap_text, " \t");
+                        if (trimmed.len > 0 or std.mem.indexOf(u8, gap_text, "\n") == null) {
+                            if (gap_text.len > 0) {
+                                try self.spans.append(self.allocator, .{
+                                    .text = gap_text,
+                                    .style = self.currentStyle(),
+                                    .indent = self.getCurrentIndent(),
+                                    .node_type = node_type,
+                                });
+                            }
+                        }
+                    }
+
+                    try self.renderInlineNode(child, source, 0);
+                    last_end = child.endByte();
+                }
+            }
+
+            // Emit any trailing text after the last child
+            const node_end = node.endByte();
+            if (node_end > last_end and node_end <= source.len) {
+                const trailing_text = source[last_end..node_end];
+                if (trailing_text.len > 0) {
+                    try self.spans.append(self.allocator, .{
+                        .text = trailing_text,
+                        .style = self.currentStyle(),
+                        .indent = self.getCurrentIndent(),
+                        .node_type = node_type,
+                    });
+                }
+            }
+        }
+
+        // Pop style if we pushed one
+        if (node_style != null) {
+            _ = self.style_stack.pop();
+        }
+    }
+
+    /// Check if a node has only delimiter children
+    fn hasOnlyDelimiterChildren(self: *const MarkdownRenderer, node: ts.Node) bool {
+        _ = self;
+        const child_count = node.childCount();
+        if (child_count == 0) return false;
+
+        var i: u32 = 0;
+        while (i < child_count) : (i += 1) {
+            if (node.child(i)) |child| {
+                const child_type = child.kind();
+                // Check if child is a delimiter
+                if (!std.mem.containsAtLeast(u8, child_type, 1, "delimiter") and
+                    !std.mem.eql(u8, child_type, "code_span_delimiter"))
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Get the byte range of content between delimiters
+    fn getContentBetweenDelimiters(self: *const MarkdownRenderer, node: ts.Node, source: []const u8) ?struct { start: usize, end: usize } {
+        _ = self;
+        _ = source;
+
+        const child_count = node.childCount();
+        if (child_count < 2) return null;
+
+        const node_start = node.startByte();
+        const node_end = node.endByte();
+        const node_mid = node_start + (node_end - node_start) / 2;
+
+        // Find opening delimiters (delimiters that start before the midpoint)
+        // Find closing delimiters (delimiters that start at or after the midpoint)
+        var content_start: usize = node_start;
+        var content_end: usize = node_end;
+
+        var i: u32 = 0;
+        while (i < child_count) : (i += 1) {
+            if (node.child(i)) |child| {
+                const child_type = child.kind();
+                if (std.mem.containsAtLeast(u8, child_type, 1, "delimiter")) {
+                    const child_start = child.startByte();
+                    if (child_start < node_mid) {
+                        // Opening delimiter - content starts after it
+                        content_start = @max(content_start, child.endByte());
+                    } else {
+                        // Closing delimiter - content ends before it
+                        content_end = @min(content_end, child_start);
+                    }
+                }
+            }
+        }
+
+        if (content_end > content_start) {
+            return .{ .start = content_start, .end = content_end };
+        }
+        return null;
+    }
+
+    /// Get style for inline node types
+    fn getInlineStyle(self: *const MarkdownRenderer, node_type: NodeType) ?vaxis.Style {
+        return switch (node_type) {
+            .strong_emphasis => self.colors.bold,
+            .emphasis => self.colors.italic,
+            .strikethrough => self.colors.strikethrough,
+            .code_span => .{
+                .fg = self.colors.inline_code.fg,
+                .bg = self.colors.inline_code_bg,
+            },
+            .link => self.colors.link_text,
+            else => null,
+        };
     }
 
     /// Get current indentation level based on list and blockquote depth
@@ -174,9 +430,9 @@ pub const MarkdownRenderer = struct {
         // Determine if ordered by checking child list items
         const ordered = self.isOrderedList(node, md_parser);
 
-        // Calculate indent level based on nesting
+        // Calculate indent level based on nesting (3 spaces per level for better visibility)
         const indent_level: usize = if (self.list_stack.items.len > 0)
-            self.list_stack.items[self.list_stack.items.len - 1].indent_level + 2
+            self.list_stack.items[self.list_stack.items.len - 1].indent_level + 3
         else
             0;
 
@@ -242,9 +498,9 @@ pub const MarkdownRenderer = struct {
         if (!has_task_marker) {
             // Emit list marker
             if (list_ctx.ordered) {
-                // Ordered list: emit number
-                var num_buf: [8]u8 = undefined;
-                const num_str = std.fmt.bufPrint(&num_buf, "{d}. ", .{list_ctx.item_number}) catch "1. ";
+                // Ordered list: emit number - allocate string for proper lifetime
+                const num_str = try std.fmt.allocPrint(self.allocator, "{d}. ", .{list_ctx.item_number});
+                try self.strings.append(self.allocator, num_str);
                 try self.spans.append(self.allocator, .{
                     .text = num_str,
                     .style = self.colors.list_marker,
@@ -254,7 +510,7 @@ pub const MarkdownRenderer = struct {
             } else {
                 // Unordered list: emit bullet
                 try self.spans.append(self.allocator, .{
-                    .text = "\u{2022} ", // bullet character
+                    .text = "• ",
                     .style = self.colors.list_marker,
                     .indent = indent,
                     .node_type = .list_item,
@@ -265,16 +521,8 @@ pub const MarkdownRenderer = struct {
         // Increment item number for next item
         list_ctx.item_number += 1;
 
-        // Render list item content
+        // Render list item content (don't add extra newline - inline content already has one)
         try self.renderChildren(node, md_parser, depth);
-
-        // Add newline after list item
-        try self.spans.append(self.allocator, .{
-            .text = "\n",
-            .style = self.colors.text,
-            .indent = 0,
-            .node_type = .softbreak,
-        });
     }
 
     /// Check if a list item has a task marker
@@ -293,30 +541,65 @@ pub const MarkdownRenderer = struct {
         return false;
     }
 
-    /// Render blockquote with border
+    /// Render blockquote with border on each line
     fn renderBlockquote(self: *MarkdownRenderer, node: ts.Node, md_parser: *const MarkdownParser, depth: usize) std.mem.Allocator.Error!void {
+        _ = depth;
+
         // Increment blockquote depth
         self.blockquote_depth += 1;
         const indent = (self.blockquote_depth - 1) * 2;
 
-        // Emit blockquote border
-        try self.spans.append(self.allocator, .{
-            .text = "\u{2502} ", // vertical bar
-            .style = self.colors.blockquote_border,
-            .indent = indent,
-            .node_type = .block_quote,
-        });
+        // Get full blockquote text and process line by line
+        const raw_text = md_parser.getNodeText(node);
 
-        // Push blockquote text style
-        try self.style_stack.append(self.allocator, colors_mod.mergeStyles(self.currentStyle(), self.colors.blockquote_text));
+        // Split into lines and render each with border
+        var line_iter = std.mem.splitScalar(u8, raw_text, '\n');
+        var first_line = true;
 
-        // Render children
-        try self.renderChildren(node, md_parser, depth);
+        while (line_iter.next()) |line| {
+            // Strip leading '>' and whitespace from each line
+            var content = line;
+            while (content.len > 0 and (content[0] == '>' or content[0] == ' ')) {
+                content = content[1..];
+            }
 
-        // Pop blockquote text style
-        _ = self.style_stack.pop();
+            // Skip empty lines that were just '>'
+            if (content.len == 0 and !first_line) {
+                continue;
+            }
 
-        // Add newline after blockquote
+            // Add newline before non-first lines
+            if (!first_line) {
+                try self.spans.append(self.allocator, .{
+                    .text = "\n",
+                    .style = self.colors.text,
+                    .indent = 0,
+                    .node_type = .softbreak,
+                });
+            }
+
+            // Emit blockquote border
+            try self.spans.append(self.allocator, .{
+                .text = "│ ",
+                .style = self.colors.blockquote_border,
+                .indent = indent,
+                .node_type = .block_quote,
+            });
+
+            // Emit content with blockquote styling
+            if (content.len > 0) {
+                try self.spans.append(self.allocator, .{
+                    .text = content,
+                    .style = self.colors.blockquote_text,
+                    .indent = indent,
+                    .node_type = .block_quote,
+                });
+            }
+
+            first_line = false;
+        }
+
+        // Add final newline
         try self.spans.append(self.allocator, .{
             .text = "\n",
             .style = self.colors.text,
@@ -338,14 +621,14 @@ pub const MarkdownRenderer = struct {
 
         if (is_checked) {
             try self.spans.append(self.allocator, .{
-                .text = "\u{2611} ", // checked box
+                .text = "☑ ",
                 .style = self.colors.task_checked,
                 .indent = indent,
                 .node_type = .task_list_marker,
             });
         } else {
             try self.spans.append(self.allocator, .{
-                .text = "\u{2610} ", // unchecked box
+                .text = "☐ ",
                 .style = self.colors.task_unchecked,
                 .indent = indent,
                 .node_type = .task_list_marker,
@@ -357,7 +640,7 @@ pub const MarkdownRenderer = struct {
     fn renderHorizontalRule(self: *MarkdownRenderer) std.mem.Allocator.Error!void {
         // Emit a line of horizontal rule characters
         try self.spans.append(self.allocator, .{
-            .text = "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", // 16 horizontal line chars
+            .text = "────────────────────────────────",
             .style = self.colors.horizontal_rule,
             .indent = 0,
             .node_type = .thematic_break,
@@ -402,7 +685,7 @@ pub const MarkdownRenderer = struct {
         // Use CodeBlockRenderer to render the code block
         var code_renderer = CodeBlockRenderer.init(self.allocator, self.colors);
         var code_spans = try code_renderer.render(code_content, normalized_lang);
-        defer code_spans.deinit();
+        defer code_spans.deinit(self.allocator);
 
         // Append all code block spans to our span list
         for (code_spans.items) |span| {
@@ -422,15 +705,23 @@ pub const MarkdownRenderer = struct {
     fn renderTable(self: *MarkdownRenderer, node: ts.Node, md_parser: *const MarkdownParser) std.mem.Allocator.Error!void {
         // Use TableRenderer to render the table
         var table_renderer = TableRenderer.init(self.allocator, self.colors);
-        var table_spans = table_renderer.render(node, md_parser, 80) catch |err| switch (err) {
+        var table_result = table_renderer.render(node, md_parser, 80) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
         };
-        defer table_spans.deinit();
 
         // Append all table spans to our span list
-        for (table_spans.items) |span| {
+        for (table_result.spans.items) |span| {
             try self.spans.append(self.allocator, span);
         }
+
+        // Transfer string ownership to the renderer's strings list
+        for (table_result.strings.items) |s| {
+            try self.strings.append(self.allocator, s);
+        }
+
+        // Free just the ArrayList structures, not the strings they contain
+        table_result.spans.deinit(self.allocator);
+        table_result.strings.deinit(self.allocator);
 
         // Add newline after table
         try self.spans.append(self.allocator, .{
@@ -553,19 +844,33 @@ fn getSetextLevel(node: ts.Node) usize {
 fn isMarkerNode(node_type_str: []const u8) bool {
     // List of node types that are syntax markers to be hidden
     const markers = [_][]const u8{
+        // Header markers
         "atx_h1_marker",
         "atx_h2_marker",
         "atx_h3_marker",
         "atx_h4_marker",
         "atx_h5_marker",
         "atx_h6_marker",
+        // Emphasis markers
         "emphasis_delimiter",
         "code_span_delimiter",
+        "code_delimiter", // Alternative name
+        "backtick", // Alternative name
+        // Link markers
         "link_destination",
         "left_bracket",
         "right_bracket",
         "left_paren",
         "right_paren",
+        // List markers (we emit our own bullets/numbers)
+        "list_marker",
+        "list_marker_minus",
+        "list_marker_plus",
+        "list_marker_star",
+        "list_marker_dot",
+        "list_marker_parenthesis",
+        // Blockquote marker
+        "block_quote_marker",
     };
 
     for (markers) |marker| {
@@ -704,8 +1009,7 @@ test "render setext headers" {
 }
 
 test "render bold emphasis" {
-    // Note: Bold styling requires the inline grammar. Without it, we verify
-    // that the text content is extracted (markers may be included in output).
+    // Bold styling using the inline grammar
     var parser = try MarkdownParser.init();
     defer parser.deinit();
 
@@ -716,11 +1020,13 @@ test "render bold emphasis" {
 
     const spans = try renderer.render(&parser);
 
-    // Find text span - content extraction works even without inline grammar
+    // Find text span with bold styling
     var found_text = false;
     for (spans) |span| {
         if (std.mem.indexOf(u8, span.text, "bold") != null) {
             found_text = true;
+            // Verify bold styling is applied
+            try std.testing.expect(span.style.bold);
             break;
         }
     }
@@ -932,4 +1238,39 @@ test "table colors defined" {
     try std.testing.expect(colors_mod.default.table_header.bold);
     try std.testing.expect(colors_mod.default.table_border.fg != .default);
     try std.testing.expect(colors_mod.default.table_cell.fg != .default);
+}
+
+test "render table" {
+    var parser = try MarkdownParser.init();
+    defer parser.deinit();
+
+    const table_md =
+        \\| Header 1 | Header 2 |
+        \\|:---------|:---------|
+        \\| Cell 1   | Cell 2   |
+    ;
+    try parser.parse(table_md);
+
+    var renderer = MarkdownRenderer.init(std.testing.allocator, colors_mod.default);
+    defer renderer.deinit();
+
+    const spans = try renderer.render(&parser);
+
+    // Should find header and cell content
+    var found_header = false;
+    var found_cell = false;
+
+    for (spans) |span| {
+        if (std.mem.indexOf(u8, span.text, "Header 1") != null) {
+            found_header = true;
+            // Header should have bold style
+            try std.testing.expect(span.style.bold);
+        }
+        if (std.mem.indexOf(u8, span.text, "Cell 1") != null) {
+            found_cell = true;
+        }
+    }
+
+    try std.testing.expect(found_header);
+    try std.testing.expect(found_cell);
 }

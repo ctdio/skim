@@ -1,6 +1,7 @@
 //! Incremental Tree-sitter Markdown Parser
 //!
 //! Provides a wrapper around tree-sitter for parsing markdown content.
+//! Uses both block and inline grammars for complete markdown parsing.
 //! Supports incremental parsing for streaming content updates.
 
 const std = @import("std");
@@ -9,9 +10,10 @@ const types = @import("types.zig");
 
 pub const NodeType = types.NodeType;
 
-// Extern declaration for markdown grammar language function
-// Provided by the linked grammar library (tree-sitter-markdown)
+// Extern declarations for markdown grammar language functions
+// Provided by the linked grammar libraries (tree-sitter-markdown)
 extern fn tree_sitter_markdown() callconv(.c) *const ts.Language;
+extern fn tree_sitter_markdown_inline() callconv(.c) *const ts.Language;
 
 /// Error types for markdown parsing
 pub const ParseError = error{
@@ -22,23 +24,34 @@ pub const ParseError = error{
 };
 
 /// Wrapper around tree-sitter parser for markdown content
+/// Uses both block and inline grammars for complete parsing
 pub const MarkdownParser = struct {
     parser: *ts.Parser,
+    inline_parser: *ts.Parser,
     tree: ?*ts.Tree,
     source: []const u8,
 
-    /// Initialize a new markdown parser
+    /// Initialize a new markdown parser with block and inline grammars
     pub fn init() ParseError!MarkdownParser {
         const parser = ts.Parser.create();
 
-        // Set the markdown language
+        // Set the markdown block language
         parser.setLanguage(tree_sitter_markdown()) catch {
+            parser.destroy();
+            return error.LanguageSetFailed;
+        };
+
+        // Create inline parser
+        const inline_parser = ts.Parser.create();
+        inline_parser.setLanguage(tree_sitter_markdown_inline()) catch {
+            inline_parser.destroy();
             parser.destroy();
             return error.LanguageSetFailed;
         };
 
         return .{
             .parser = parser,
+            .inline_parser = inline_parser,
             .tree = null,
             .source = "",
         };
@@ -50,6 +63,7 @@ pub const MarkdownParser = struct {
             tree.destroy();
         }
         self.parser.destroy();
+        self.inline_parser.destroy();
     }
 
     /// Parse markdown source content
@@ -150,6 +164,13 @@ pub const MarkdownParser = struct {
             return "";
         }
         return self.source[start..end];
+    }
+
+    /// Parse inline content using the inline grammar
+    /// Returns the tree for the inline content - caller must destroy it
+    /// Returns null if parsing fails
+    pub fn parseInline(self: *const MarkdownParser, content: []const u8) ?*ts.Tree {
+        return self.inline_parser.parseString(content, null);
     }
 };
 

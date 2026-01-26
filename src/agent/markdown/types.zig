@@ -55,6 +55,8 @@ pub const NodeType = enum {
 
             // Code
             .{ "code_span", .code_span },
+            .{ "code", .code_span }, // Alternative name in some grammars
+            .{ "inline_code", .code_span }, // Alternative name
             .{ "code_block", .code_block },
             .{ "indented_code_block", .code_block },
             .{ "fenced_code_block", .fenced_code_block },

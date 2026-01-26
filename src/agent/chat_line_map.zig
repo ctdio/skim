@@ -16,6 +16,12 @@ const highlighting = @import("../highlighting/core.zig");
 pub const Highlight = highlighting.Highlight;
 pub const SyntaxHighlighter = highlighting.SyntaxHighlighter;
 
+// Markdown rendering for agent messages
+const markdown = @import("markdown/markdown.zig");
+const MarkdownRenderer = markdown.MarkdownRenderer;
+const StyledSpan = markdown.StyledSpan;
+const NodeType = markdown.NodeType;
+
 const Allocator = std.mem.Allocator;
 
 // Maximum number of diff lines to display before collapsing
@@ -803,6 +809,18 @@ pub const ChatLineMap = struct {
     }
 
     fn addMessageContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize) !void {
+        // For agent messages with parsed markdown, use the markdown renderer
+        if (msg.role == .agent and msg.md_parser != null and msg.md_tree_valid) {
+            try self.addMarkdownContent(global_line, msg_idx, msg, wrap_width);
+            return;
+        }
+
+        // Fall back to plain text rendering for non-agent messages or unparsed markdown
+        try self.addPlainTextContent(global_line, msg_idx, msg, wrap_width);
+    }
+
+    /// Add plain text content without markdown rendering (used for user/thinking/system messages)
+    fn addPlainTextContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize) !void {
         const content_style: vaxis.Style = switch (msg.role) {
             .user => .{ .fg = Color.chat_content, .bg = Color.comment_bg },
             .thinking => .{ .fg = Color.dim },
@@ -882,6 +900,125 @@ pub const ChatLineMap = struct {
                 .fill_bg = fill_bg,
             });
             global_line.* += 1;
+        }
+    }
+
+    /// Add markdown-rendered content for agent messages
+    fn addMarkdownContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize) !void {
+        const md_parser = &(msg.md_parser orelse return);
+
+        // Create renderer and render spans
+        var renderer = MarkdownRenderer.init(self.allocator, markdown.colors.default);
+        defer renderer.deinit();
+
+        const spans = renderer.render(md_parser) catch {
+            // Fall back to plain text if rendering fails
+            try self.addPlainTextContent(global_line, msg_idx, msg, wrap_width);
+            return;
+        };
+
+        // Base indent for agent messages
+        const base_indent: usize = 1;
+
+        // Convert spans to line records
+        // Spans contain text with embedded newlines and indent levels
+        var line_idx: usize = 0;
+        var current_line_text: std.ArrayList(u8) = .{};
+        defer current_line_text.deinit(self.allocator);
+        var current_line_style: vaxis.Style = .{ .fg = Color.chat_content };
+        var current_indent: usize = base_indent;
+        var current_node_type: NodeType = .text;
+
+        for (spans) |span| {
+            // Check if this span contains newlines
+            var span_iter = std.mem.splitScalar(u8, span.text, '\n');
+            var first_segment = true;
+
+            while (span_iter.next()) |segment| {
+                if (!first_segment) {
+                    // Flush the current line before starting a new one
+                    if (current_line_text.items.len > 0) {
+                        // Word-wrap the accumulated line
+                        const effective_width = if (wrap_width > current_indent) wrap_width - current_indent else 1;
+                        var wrapped = try RenderUtils.wrapText(self.allocator, current_line_text.items, effective_width);
+                        defer wrapped.deinit(self.allocator);
+
+                        // Check if current line is a code block (fill background)
+                        const is_code_block = current_node_type == .fenced_code_block or current_node_type == .code_block;
+
+                        for (wrapped.items) |wrapped_segment| {
+                            const content_copy = try self.allocator.dupe(u8, wrapped_segment);
+                            try self.strings.append(self.allocator, content_copy);
+
+                            try self.records.append(self.allocator, .{
+                                .global_line = global_line.*,
+                                .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
+                                .text = content_copy,
+                                .style = current_line_style,
+                                .indent = current_indent,
+                                .fill_bg = is_code_block,
+                            });
+                            global_line.* += 1;
+                            line_idx += 1;
+                        }
+                    } else {
+                        // Empty line - preserve code block background if in code block
+                        const is_code_block = current_node_type == .fenced_code_block or current_node_type == .code_block;
+                        try self.records.append(self.allocator, .{
+                            .global_line = global_line.*,
+                            .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
+                            .text = "",
+                            .style = if (is_code_block) current_line_style else .{},
+                            .indent = current_indent,
+                            .fill_bg = is_code_block,
+                        });
+                        global_line.* += 1;
+                        line_idx += 1;
+                    }
+
+                    // Reset for new line
+                    current_line_text.clearRetainingCapacity();
+                    current_indent = base_indent + span.indent;
+                    current_line_style = span.style;
+                    current_node_type = span.node_type;
+                }
+
+                // Append segment to current line
+                if (segment.len > 0) {
+                    try current_line_text.appendSlice(self.allocator, segment);
+                    current_line_style = span.style;
+                    current_indent = base_indent + span.indent;
+                    current_node_type = span.node_type;
+                }
+
+                first_segment = false;
+            }
+        }
+
+        // Flush any remaining content
+        if (current_line_text.items.len > 0) {
+            const effective_width = if (wrap_width > current_indent) wrap_width - current_indent else 1;
+            var wrapped = try RenderUtils.wrapText(self.allocator, current_line_text.items, effective_width);
+            defer wrapped.deinit(self.allocator);
+
+            // Check if remaining content is a code block
+            const is_code_block = current_node_type == .fenced_code_block or current_node_type == .code_block;
+
+            for (wrapped.items) |wrapped_segment| {
+                const content_copy = try self.allocator.dupe(u8, wrapped_segment);
+                try self.strings.append(self.allocator, content_copy);
+
+                try self.records.append(self.allocator, .{
+                    .global_line = global_line.*,
+                    .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
+                    .text = content_copy,
+                    .style = current_line_style,
+                    .indent = current_indent,
+                    .fill_bg = is_code_block,
+                });
+                global_line.* += 1;
+                line_idx += 1;
+            }
         }
     }
 

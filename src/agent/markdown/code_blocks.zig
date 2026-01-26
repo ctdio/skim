@@ -31,8 +31,8 @@ pub const CodeBlockRenderer = struct {
     /// Render a fenced code block into styled spans
     /// Returns owned slice of spans
     pub fn render(self: *CodeBlockRenderer, code: []const u8, language_hint: ?[]const u8) !std.ArrayList(StyledSpan) {
-        var spans = std.ArrayList(StyledSpan).init(self.allocator);
-        errdefer spans.deinit();
+        var spans: std.ArrayList(StyledSpan) = .{};
+        errdefer spans.deinit(self.allocator);
 
         // Render top border with language label
         try self.renderTopBorder(&spans, language_hint);
@@ -192,7 +192,7 @@ test "render plain code block" {
 
     const code = "const x = 1;";
     var spans = try renderer.render(code, null);
-    defer spans.deinit();
+    defer spans.deinit(allocator);
 
     // Should have at least: top border, code content, bottom border
     try std.testing.expect(spans.items.len >= 3);
@@ -223,7 +223,7 @@ test "render code block with language" {
         \\    print(f"Hello, {name}!")
     ;
     var spans = try renderer.render(code, "python");
-    defer spans.deinit();
+    defer spans.deinit(allocator);
 
     // Should have spans
     try std.testing.expect(spans.items.len >= 3);
@@ -247,7 +247,7 @@ test "render unknown language falls back to plain" {
 
     const code = "some code";
     var spans = try renderer.render(code, "unknownlang");
-    defer spans.deinit();
+    defer spans.deinit(allocator);
 
     // Should still render with borders
     try std.testing.expect(spans.items.len >= 3);
@@ -289,7 +289,7 @@ test "empty code block" {
     var renderer = CodeBlockRenderer.init(allocator, colors_mod.default);
 
     var spans = try renderer.render("", null);
-    defer spans.deinit();
+    defer spans.deinit(allocator);
 
     // Should have at least borders
     try std.testing.expect(spans.items.len >= 2);

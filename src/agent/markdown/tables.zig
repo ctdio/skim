@@ -31,6 +31,21 @@ pub const Column = struct {
     width: usize,
 };
 
+/// Result from table rendering - includes spans and allocated strings
+pub const TableRenderResult = struct {
+    spans: std.ArrayList(StyledSpan),
+    strings: std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *TableRenderResult) void {
+        for (self.strings.items) |s| {
+            self.allocator.free(s);
+        }
+        self.strings.deinit(self.allocator);
+        self.spans.deinit(self.allocator);
+    }
+};
+
 /// Renderer for GFM tables
 pub const TableRenderer = struct {
     allocator: std.mem.Allocator,
@@ -45,28 +60,33 @@ pub const TableRenderer = struct {
     }
 
     /// Render a table node into styled spans
+    /// Returns result containing spans and allocated strings - caller must call deinit
     pub fn render(
         self: *TableRenderer,
         node: ts.Node,
         md_parser: *const MarkdownParser,
         max_width: usize,
-    ) !std.ArrayList(StyledSpan) {
-        var spans = std.ArrayList(StyledSpan).init(self.allocator);
-        errdefer spans.deinit();
+    ) !TableRenderResult {
+        var result = TableRenderResult{
+            .spans = .{},
+            .strings = .{},
+            .allocator = self.allocator,
+        };
+        errdefer result.deinit();
 
         // Extract table data
-        var header_cells = std.ArrayList([]const u8).init(self.allocator);
-        defer header_cells.deinit();
+        var header_cells: std.ArrayList([]const u8) = .{};
+        defer header_cells.deinit(self.allocator);
 
-        var alignments = std.ArrayList(Alignment).init(self.allocator);
-        defer alignments.deinit();
+        var alignments: std.ArrayList(Alignment) = .{};
+        defer alignments.deinit(self.allocator);
 
-        var body_rows = std.ArrayList(std.ArrayList([]const u8)).init(self.allocator);
+        var body_rows: std.ArrayList(std.ArrayList([]const u8)) = .{};
         defer {
             for (body_rows.items) |*row| {
-                row.deinit();
+                row.deinit(self.allocator);
             }
-            body_rows.deinit();
+            body_rows.deinit(self.allocator);
         }
 
         // Parse the table structure from tree-sitter nodes
@@ -74,33 +94,33 @@ pub const TableRenderer = struct {
 
         // If no valid table data found, return empty
         if (header_cells.items.len == 0) {
-            return spans;
+            return result;
         }
 
         // Calculate column widths
         const num_cols = header_cells.items.len;
-        var widths = try self.allocator.alloc(usize, num_cols);
+        const widths = try self.allocator.alloc(usize, num_cols);
         defer self.allocator.free(widths);
 
         self.calculateWidths(header_cells.items, body_rows.items, widths, max_width);
 
         // Ensure alignments match column count
         while (alignments.items.len < num_cols) {
-            try alignments.append(.left);
+            try alignments.append(self.allocator, .left);
         }
 
         // Render header row
-        try self.renderRow(&spans, header_cells.items, widths, alignments.items, true);
+        try self.renderRow(&result, header_cells.items, widths, alignments.items, true);
 
         // Render separator
-        try self.renderSeparator(&spans, widths, alignments.items);
+        try self.renderSeparator(&result, widths, alignments.items);
 
         // Render body rows
         for (body_rows.items) |row| {
-            try self.renderRow(&spans, row.items, widths, alignments.items, false);
+            try self.renderRow(&result, row.items, widths, alignments.items, false);
         }
 
-        return spans;
+        return result;
     }
 
     /// Parse table structure from tree-sitter node
@@ -131,9 +151,9 @@ pub const TableRenderer = struct {
                     found_delimiter = true;
                 } else if (std.mem.indexOf(u8, child_type, "row") != null and found_delimiter) {
                     // Parse body row
-                    var row = std.ArrayList([]const u8).init(self.allocator);
+                    var row: std.ArrayList([]const u8) = .{};
                     try self.parseCells(child, md_parser, &row);
-                    try body_rows.append(row);
+                    try body_rows.append(self.allocator, row);
                 }
             }
         }
@@ -146,7 +166,6 @@ pub const TableRenderer = struct {
         md_parser: *const MarkdownParser,
         cells: *std.ArrayList([]const u8),
     ) !void {
-        _ = self;
         const child_count = row_node.childCount();
         var i: u32 = 0;
 
@@ -159,7 +178,7 @@ pub const TableRenderer = struct {
                 {
                     const text = md_parser.getNodeText(child);
                     const trimmed = std.mem.trim(u8, text, " \t");
-                    try cells.append(trimmed);
+                    try cells.append(self.allocator, trimmed);
                 }
             }
         }
@@ -172,7 +191,6 @@ pub const TableRenderer = struct {
         md_parser: *const MarkdownParser,
         alignments: *std.ArrayList(Alignment),
     ) !void {
-        _ = self;
         const child_count = delim_node.childCount();
         var i: u32 = 0;
 
@@ -184,8 +202,8 @@ pub const TableRenderer = struct {
                     std.mem.indexOf(u8, child_type, "delimiter") != null)
                 {
                     const text = md_parser.getNodeText(child);
-                    const alignment = parseAlignment(text);
-                    try alignments.append(alignment);
+                    const col_align = parseAlignment(text);
+                    try alignments.append(self.allocator, col_align);
                 }
             }
         }
@@ -197,7 +215,7 @@ pub const TableRenderer = struct {
             while (iter.next()) |segment| {
                 const trimmed = std.mem.trim(u8, segment, " \t");
                 if (trimmed.len > 0 and std.mem.indexOfScalar(u8, trimmed, '-') != null) {
-                    try alignments.append(parseAlignment(trimmed));
+                    try alignments.append(self.allocator, parseAlignment(trimmed));
                 }
             }
         }
@@ -250,7 +268,7 @@ pub const TableRenderer = struct {
     /// Render a single row (header or body)
     fn renderRow(
         self: *TableRenderer,
-        spans: *std.ArrayList(StyledSpan),
+        result: *TableRenderResult,
         cells: []const []const u8,
         widths: []const usize,
         alignments: []const Alignment,
@@ -259,7 +277,7 @@ pub const TableRenderer = struct {
         const style = if (is_header) self.colors.table_header else self.colors.table_cell;
 
         // Start border
-        try spans.append(.{
+        try result.spans.append(self.allocator, .{
             .text = "| ",
             .style = self.colors.table_border,
             .indent = 0,
@@ -269,20 +287,20 @@ pub const TableRenderer = struct {
         // Render each cell
         for (cells, 0..) |cell, i| {
             const width = if (i < widths.len) widths[i] else 10;
-            const align = if (i < alignments.len) alignments[i] else .left;
+            const col_align = if (i < alignments.len) alignments[i] else .left;
 
-            // Pad and align cell content
-            var buf: [128]u8 = undefined;
-            const padded = padCell(cell, width, align, &buf);
+            // Pad and align cell content - allocate the result
+            const padded = try padCellAlloc(self.allocator, cell, width, col_align);
+            try result.strings.append(self.allocator, padded);
 
-            try spans.append(.{
+            try result.spans.append(self.allocator, .{
                 .text = padded,
                 .style = style,
                 .indent = 0,
                 .node_type = .table,
             });
 
-            try spans.append(.{
+            try result.spans.append(self.allocator, .{
                 .text = " | ",
                 .style = self.colors.table_border,
                 .indent = 0,
@@ -291,7 +309,7 @@ pub const TableRenderer = struct {
         }
 
         // Newline
-        try spans.append(.{
+        try result.spans.append(self.allocator, .{
             .text = "\n",
             .style = self.colors.text,
             .indent = 0,
@@ -302,12 +320,12 @@ pub const TableRenderer = struct {
     /// Render the separator row between header and body
     fn renderSeparator(
         self: *TableRenderer,
-        spans: *std.ArrayList(StyledSpan),
+        result: *TableRenderResult,
         widths: []const usize,
         alignments: []const Alignment,
     ) !void {
         // Start border
-        try spans.append(.{
+        try result.spans.append(self.allocator, .{
             .text = "|",
             .style = self.colors.table_border,
             .indent = 0,
@@ -316,20 +334,20 @@ pub const TableRenderer = struct {
 
         // Render separator for each column
         for (widths, 0..) |w, i| {
-            const align = if (i < alignments.len) alignments[i] else .left;
+            const col_align = if (i < alignments.len) alignments[i] else .left;
 
-            // Build separator string: :---:, :---, ---:, or ---
-            var sep_buf: [64]u8 = undefined;
-            const sep = buildSeparator(w, align, &sep_buf);
+            // Build separator string - allocate the result
+            const sep = try buildSeparatorAlloc(self.allocator, w, col_align);
+            try result.strings.append(self.allocator, sep);
 
-            try spans.append(.{
+            try result.spans.append(self.allocator, .{
                 .text = sep,
                 .style = self.colors.table_border,
                 .indent = 0,
                 .node_type = .table,
             });
 
-            try spans.append(.{
+            try result.spans.append(self.allocator, .{
                 .text = "|",
                 .style = self.colors.table_border,
                 .indent = 0,
@@ -338,7 +356,7 @@ pub const TableRenderer = struct {
         }
 
         // Newline
-        try spans.append(.{
+        try result.spans.append(self.allocator, .{
             .text = "\n",
             .style = self.colors.text,
             .indent = 0,
@@ -360,28 +378,31 @@ fn parseAlignment(text: []const u8) Alignment {
     return .left;
 }
 
-/// Pad cell content to specified width with alignment
-fn padCell(text: []const u8, width: usize, alignment: Alignment, buf: *[128]u8) []const u8 {
+/// Pad cell content to specified width with alignment - allocates result
+fn padCellAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize, col_align: Alignment) ![]const u8 {
     const actual_width = @min(width, 126);
     const text_len = @min(text.len, actual_width);
 
-    @memset(buf[0..actual_width], ' ');
+    const buf = try allocator.alloc(u8, actual_width);
+    @memset(buf, ' ');
 
-    const offset: usize = switch (alignment) {
+    const offset: usize = switch (col_align) {
         .left => 0,
         .right => actual_width -| text_len,
         .center => (actual_width -| text_len) / 2,
     };
 
     @memcpy(buf[offset..][0..text_len], text[0..text_len]);
-    return buf[0..actual_width];
+    return buf;
 }
 
-/// Build separator string for a column
-fn buildSeparator(width: usize, alignment: Alignment, buf: *[64]u8) []const u8 {
+/// Build separator string for a column - allocates result
+fn buildSeparatorAlloc(allocator: std.mem.Allocator, width: usize, col_align: Alignment) ![]const u8 {
     const actual_width = @min(width + 2, 62); // +2 for padding
 
-    switch (alignment) {
+    const buf = try allocator.alloc(u8, actual_width);
+
+    switch (col_align) {
         .left => {
             buf[0] = ':';
             @memset(buf[1..actual_width], '-');
@@ -397,7 +418,7 @@ fn buildSeparator(width: usize, alignment: Alignment, buf: *[64]u8) []const u8 {
         },
     }
 
-    return buf[0..actual_width];
+    return buf;
 }
 
 // =============================================================================
@@ -421,43 +442,49 @@ test "parseAlignment - center" {
     try std.testing.expectEqual(Alignment.center, parseAlignment(":--:"));
 }
 
-test "padCell - left alignment" {
-    var buf: [128]u8 = undefined;
-    const result = padCell("Hi", 6, .left, &buf);
+test "padCellAlloc - left alignment" {
+    const allocator = std.testing.allocator;
+    const result = try padCellAlloc(allocator, "Hi", 6, .left);
+    defer allocator.free(result);
     try std.testing.expectEqualStrings("Hi    ", result);
 }
 
-test "padCell - right alignment" {
-    var buf: [128]u8 = undefined;
-    const result = padCell("Hi", 6, .right, &buf);
+test "padCellAlloc - right alignment" {
+    const allocator = std.testing.allocator;
+    const result = try padCellAlloc(allocator, "Hi", 6, .right);
+    defer allocator.free(result);
     try std.testing.expectEqualStrings("    Hi", result);
 }
 
-test "padCell - center alignment" {
-    var buf: [128]u8 = undefined;
-    const result = padCell("Hi", 6, .center, &buf);
+test "padCellAlloc - center alignment" {
+    const allocator = std.testing.allocator;
+    const result = try padCellAlloc(allocator, "Hi", 6, .center);
+    defer allocator.free(result);
     try std.testing.expectEqualStrings("  Hi  ", result);
 }
 
-test "buildSeparator - left" {
-    var buf: [64]u8 = undefined;
-    const result = buildSeparator(4, .left, &buf);
+test "buildSeparatorAlloc - left" {
+    const allocator = std.testing.allocator;
+    const result = try buildSeparatorAlloc(allocator, 4, .left);
+    defer allocator.free(result);
     try std.testing.expectEqual(@as(usize, 6), result.len);
     try std.testing.expectEqual(@as(u8, ':'), result[0]);
     try std.testing.expectEqual(@as(u8, '-'), result[1]);
 }
 
-test "buildSeparator - right" {
-    var buf: [64]u8 = undefined;
-    const result = buildSeparator(4, .right, &buf);
+test "buildSeparatorAlloc - right" {
+    const allocator = std.testing.allocator;
+    const result = try buildSeparatorAlloc(allocator, 4, .right);
+    defer allocator.free(result);
     try std.testing.expectEqual(@as(usize, 6), result.len);
     try std.testing.expectEqual(@as(u8, '-'), result[0]);
     try std.testing.expectEqual(@as(u8, ':'), result[result.len - 1]);
 }
 
-test "buildSeparator - center" {
-    var buf: [64]u8 = undefined;
-    const result = buildSeparator(4, .center, &buf);
+test "buildSeparatorAlloc - center" {
+    const allocator = std.testing.allocator;
+    const result = try buildSeparatorAlloc(allocator, 4, .center);
+    defer allocator.free(result);
     try std.testing.expectEqual(@as(usize, 6), result.len);
     try std.testing.expectEqual(@as(u8, ':'), result[0]);
     try std.testing.expectEqual(@as(u8, ':'), result[result.len - 1]);
