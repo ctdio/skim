@@ -159,7 +159,8 @@ pub const default: MarkdownColors = .{
         .fg = .{ .rgb = [3]u8{ 0x6c, 0x70, 0x86 } }, // Dim gray
     },
     .code_block_lang = .{
-        .fg = .{ .rgb = [3]u8{ 0x7a, 0xa2, 0xf7 } }, // Blue accent
+        .fg = .{ .rgb = [3]u8{ 0x6c, 0x70, 0x86 } }, // Dim gray for language label
+        .bg = .{ .rgb = [3]u8{ 0x1a, 0x1b, 0x26 } }, // Same as code_block_bg
     },
     // Table styles
     .table_header = .{

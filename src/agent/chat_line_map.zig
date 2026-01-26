@@ -21,6 +21,8 @@ const markdown = @import("markdown/markdown.zig");
 const MarkdownRenderer = markdown.MarkdownRenderer;
 const StyledSpan = markdown.StyledSpan;
 const NodeType = markdown.NodeType;
+const HighlightContext = markdown.code_blocks.HighlightContext;
+const MdHighlight = markdown.code_blocks.Highlight;
 
 const Allocator = std.mem.Allocator;
 
@@ -266,14 +268,14 @@ pub const ChatLineMap = struct {
                 .user, .agent, .thinking => {
                     // No role header for user/agent/thinking - styling makes it obvious
                     // Content lines only
-                    try self.addMessageContent(&global_line, msg_idx, msg, wrap_width);
+                    try self.addMessageContent(&global_line, msg_idx, msg, wrap_width, highlighter);
                 },
                 else => {
                     // Role header for other types (system, etc.)
                     try self.addRoleHeader(&global_line, msg_idx, msg.role);
 
                     // Content lines
-                    try self.addMessageContent(&global_line, msg_idx, msg, wrap_width);
+                    try self.addMessageContent(&global_line, msg_idx, msg, wrap_width, highlighter);
                 },
             }
 
@@ -350,12 +352,12 @@ pub const ChatLineMap = struct {
                     },
                     .user, .agent, .thinking => {
                         // No role header for user/agent/thinking - styling makes it obvious
-                        try self.addMessageContent(&global_line, msg_idx, msg.*, wrap_width);
+                        try self.addMessageContent(&global_line, msg_idx, msg.*, wrap_width, highlighter);
                     },
                     else => {
                         // Role header for other types (system, etc.)
                         try self.addRoleHeader(&global_line, msg_idx, msg.role);
-                        try self.addMessageContent(&global_line, msg_idx, msg.*, wrap_width);
+                        try self.addMessageContent(&global_line, msg_idx, msg.*, wrap_width, highlighter);
                     },
                 }
 
@@ -448,12 +450,12 @@ pub const ChatLineMap = struct {
                 },
                 .user, .agent, .thinking => {
                     // No role header for user/agent/thinking - styling makes it obvious
-                    try self.addMessageContent(&global_line, last_msg_idx, msg.*, wrap_width);
+                    try self.addMessageContent(&global_line, last_msg_idx, msg.*, wrap_width, highlighter);
                 },
                 else => {
                     // Role header for other types (system, etc.)
                     try self.addRoleHeader(&global_line, last_msg_idx, msg.role);
-                    try self.addMessageContent(&global_line, last_msg_idx, msg.*, wrap_width);
+                    try self.addMessageContent(&global_line, last_msg_idx, msg.*, wrap_width, highlighter);
                 },
             }
 
@@ -821,10 +823,10 @@ pub const ChatLineMap = struct {
         global_line.* += 1;
     }
 
-    fn addMessageContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize) !void {
+    fn addMessageContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize, highlighter: ?*SyntaxHighlighter) !void {
         // For agent messages with parsed markdown, use the markdown renderer
         if (msg.role == .agent and msg.md_parser != null and msg.md_tree_valid) {
-            try self.addMarkdownContent(global_line, msg_idx, msg, wrap_width);
+            try self.addMarkdownContent(global_line, msg_idx, msg, wrap_width, highlighter);
             return;
         }
 
@@ -917,11 +919,17 @@ pub const ChatLineMap = struct {
     }
 
     /// Add markdown-rendered content for agent messages
-    fn addMarkdownContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize) !void {
+    fn addMarkdownContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize, highlighter: ?*SyntaxHighlighter) !void {
         const md_parser = &(msg.md_parser orelse return);
 
-        // Create renderer and render spans
-        var renderer = MarkdownRenderer.init(self.allocator, markdown.colors.default);
+        // Create highlight context if we have a highlighter
+        const highlight_ctx = if (highlighter) |hl|
+            HighlightContext{ .ctx = @ptrCast(hl), .func = highlightCallback }
+        else
+            HighlightContext{ .ctx = null, .func = null };
+
+        // Create renderer with highlight context for code blocks
+        var renderer = MarkdownRenderer.initWithHighlighter(self.allocator, markdown.colors.default, highlight_ctx);
         defer renderer.deinit();
 
         const spans = renderer.render(md_parser) catch {
@@ -1013,12 +1021,16 @@ pub const ChatLineMap = struct {
         const is_code_block = node_type == .fenced_code_block or node_type == .code_block;
 
         if (segments.items.len == 0) {
-            // Empty line
+            // Empty line - use code block background if in code block
+            const empty_style: vaxis.Style = if (is_code_block)
+                .{ .bg = markdown.colors.default.code_block_bg }
+            else
+                .{};
             try self.records.append(self.allocator, .{
                 .global_line = global_line.*,
                 .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx.* } },
                 .text = "",
-                .style = .{},
+                .style = empty_style,
                 .indent = indent,
                 .fill_bg = is_code_block,
             });
@@ -1783,6 +1795,15 @@ const SideLine = struct {
     line_num: ?usize,
     kind: enum { context, add, delete, empty },
 };
+
+/// Highlight callback wrapper for the markdown module
+/// Wraps SyntaxHighlighter.highlightFile to be compatible with HighlightContext
+fn highlightCallback(ctx: *anyopaque, path: []const u8, content: []const u8) ?[]const MdHighlight {
+    const hl: *SyntaxHighlighter = @ptrCast(@alignCast(ctx));
+    const highlights = hl.highlightFile(path, content) catch return null;
+    // The Highlight types have identical layout, so we can safely cast
+    return @ptrCast(highlights);
+}
 
 // =============================================================================
 // Tests

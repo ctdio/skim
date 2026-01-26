@@ -18,6 +18,7 @@ const MarkdownColors = colors_mod.MarkdownColors;
 const MarkdownParser = parser_mod.MarkdownParser;
 const CodeBlockRenderer = code_blocks_mod.CodeBlockRenderer;
 const TableRenderer = tables_mod.TableRenderer;
+const HighlightContext = code_blocks_mod.HighlightContext;
 
 /// Context for tracking nested list state
 const ListContext = struct {
@@ -37,9 +38,16 @@ pub const MarkdownRenderer = struct {
     blockquote_depth: usize,
     /// Track if we just ended a major block (for adding spacing between blocks)
     ended_major_block: bool,
+    /// Optional highlight context for code block syntax highlighting
+    highlight_ctx: HighlightContext,
 
     /// Initialize a new markdown renderer
     pub fn init(allocator: std.mem.Allocator, md_colors: MarkdownColors) MarkdownRenderer {
+        return initWithHighlighter(allocator, md_colors, .{ .ctx = null, .func = null });
+    }
+
+    /// Initialize with an optional highlight context for code blocks
+    pub fn initWithHighlighter(allocator: std.mem.Allocator, md_colors: MarkdownColors, highlight_ctx: HighlightContext) MarkdownRenderer {
         return .{
             .allocator = allocator,
             .colors = md_colors,
@@ -49,6 +57,7 @@ pub const MarkdownRenderer = struct {
             .list_stack = .{},
             .blockquote_depth = 0,
             .ended_major_block = false,
+            .highlight_ctx = highlight_ctx,
         };
     }
 
@@ -682,8 +691,10 @@ pub const MarkdownRenderer = struct {
         else
             null;
 
-        // Use CodeBlockRenderer to render the code block
-        var code_renderer = CodeBlockRenderer.init(self.allocator, self.colors);
+        // Use CodeBlockRenderer to render the code block with syntax highlighting
+        var code_renderer = CodeBlockRenderer.init(self.allocator, self.colors, self.highlight_ctx);
+        defer code_renderer.deinit();
+
         var code_spans = try code_renderer.render(code_content, normalized_lang);
         defer code_spans.deinit(self.allocator);
 
