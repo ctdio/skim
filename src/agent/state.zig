@@ -1222,13 +1222,74 @@ pub const AgentState = struct {
 
     /// Move cursor up one line, clamping at 0.
     pub fn historyCursorUp(self: *AgentState) void {
+        if (self.history.cursor_line == 0) return;
+
+        // Check if current line is part of a user message
+        if (self.getMessageIdxAtLine(self.history.cursor_line)) |msg_idx| {
+            if (msg_idx < self.messages.items.len and self.messages.items[msg_idx].role == .user) {
+                // Find the start of this user message
+                const msg_start = self.findMessageStartLine(msg_idx);
+                if (self.history.cursor_line > msg_start) {
+                    // We're inside a user message, jump to its start
+                    self.history.cursor_line = msg_start;
+                    self.ensureHistoryCursorVisible();
+                    return;
+                }
+                // We're at the start, jump to previous message
+                if (msg_start > 0) {
+                    self.history.cursor_line = msg_start - 1;
+                    // If landed on spacer, go up one more
+                    if (self.getMessageIdxAtLine(self.history.cursor_line) == null and self.history.cursor_line > 0) {
+                        self.history.cursor_line -= 1;
+                    }
+                    // If landed inside another user message, jump to its start
+                    if (self.getMessageIdxAtLine(self.history.cursor_line)) |prev_idx| {
+                        if (prev_idx < self.messages.items.len and self.messages.items[prev_idx].role == .user) {
+                            self.history.cursor_line = self.findMessageStartLine(prev_idx);
+                        }
+                    }
+                    self.ensureHistoryCursorVisible();
+                    return;
+                }
+            }
+        }
+        // Default: move up one line
         self.history.cursorUp();
         self.ensureHistoryCursorVisible();
     }
 
     /// Move cursor down one line, clamping at max.
     pub fn historyCursorDown(self: *AgentState) void {
-        self.history.cursorDown(self.getHistoryMaxLine());
+        const max_line = self.getHistoryMaxLine();
+        if (self.history.cursor_line >= max_line) return;
+
+        // Check if current line is part of a user message
+        if (self.getMessageIdxAtLine(self.history.cursor_line)) |msg_idx| {
+            if (msg_idx < self.messages.items.len and self.messages.items[msg_idx].role == .user) {
+                // Find the end of this user message and jump past it
+                var line = self.history.cursor_line;
+                while (line < max_line) {
+                    line += 1;
+                    const next_msg_idx = self.getMessageIdxAtLine(line);
+                    if (next_msg_idx == null or next_msg_idx.? != msg_idx) {
+                        // Found end of user message
+                        self.history.cursor_line = line;
+                        // If landed on spacer, go down one more
+                        if (next_msg_idx == null and line < max_line) {
+                            self.history.cursor_line += 1;
+                        }
+                        self.ensureHistoryCursorVisible();
+                        return;
+                    }
+                }
+                // Reached end of content
+                self.history.cursor_line = max_line;
+                self.ensureHistoryCursorVisible();
+                return;
+            }
+        }
+        // Default: move down one line
+        self.history.cursorDown(max_line);
         self.ensureHistoryCursorVisible();
     }
 
