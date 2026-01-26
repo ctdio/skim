@@ -9,6 +9,12 @@ const Navigation = navigation.Navigation;
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
     const input = &app.state.active_comment_input.?;
 
+    // Ctrl+E - toggle agent panel (handle before vim editor)
+    if (key.mods.ctrl and key.codepoint == 'e') {
+        try app.toggleAgentPanel();
+        return;
+    }
+
     // Delegate to comment editor module
     const action = try comment_editor.CommentEditor.handleKey(input, key, app.allocator);
 
