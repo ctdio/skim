@@ -97,30 +97,44 @@ pub const CodeBlockRenderer = struct {
         const code_indent: usize = 1; // Code content indent
         const label_indent: usize = 1; // Language label - 2 spaces from edge
 
-        // Language label line (if provided)
-        if (language_hint) |lang| {
-            if (lang.len > 0) {
-                try spans.append(self.allocator, .{
-                    .text = lang,
-                    .style = self.colors.code_block_lang,
-                    .indent = label_indent,
-                    .node_type = .fenced_code_block,
-                });
-                try spans.append(self.allocator, .{
-                    .text = "\n",
-                    .style = bg_style,
-                    .indent = code_indent,
-                    .node_type = .fenced_code_block,
-                });
-                // Empty line after language label
-                try spans.append(self.allocator, .{
-                    .text = "\n",
-                    .style = bg_style,
-                    .indent = code_indent,
-                    .node_type = .fenced_code_block,
-                });
-            }
+        // Language label line (if provided) or empty header line for consistent spacing
+        const has_language = if (language_hint) |lang| lang.len > 0 else false;
+        if (has_language) {
+            try spans.append(self.allocator, .{
+                .text = language_hint.?,
+                .style = self.colors.code_block_lang,
+                .indent = label_indent,
+                .node_type = .fenced_code_block,
+            });
+            try spans.append(self.allocator, .{
+                .text = "\n",
+                .style = bg_style,
+                .indent = code_indent,
+                .node_type = .fenced_code_block,
+            });
+        } else {
+            // No language - add two empty lines to match visual spacing of language label + newline
+            try spans.append(self.allocator, .{
+                .text = "\n",
+                .style = bg_style,
+                .indent = code_indent,
+                .node_type = .fenced_code_block,
+            });
+            try spans.append(self.allocator, .{
+                .text = "\n",
+                .style = bg_style,
+                .indent = code_indent,
+                .node_type = .fenced_code_block,
+            });
         }
+
+        // Empty line before code content (consistent header spacing)
+        try spans.append(self.allocator, .{
+            .text = "\n",
+            .style = bg_style,
+            .indent = code_indent,
+            .node_type = .fenced_code_block,
+        });
 
         // Render code content with syntax highlighting
         try self.renderHighlighted(&spans, code, language_hint, code_indent);
