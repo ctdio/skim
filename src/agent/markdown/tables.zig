@@ -582,8 +582,8 @@ fn wrapTextAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize) !
 /// Build a horizontal line of box-drawing characters - allocates result
 /// Uses ─ (U+2500) which is 3 bytes in UTF-8
 fn buildHorizontalLineAlloc(allocator: std.mem.Allocator, char_width: usize) ![]const u8 {
-    // Cap width to prevent overflow (62 * 3 = 186 bytes max)
-    const capped_width: usize = if (char_width > 62) 62 else char_width;
+    // Cap at reasonable max (500 chars = 1500 bytes) to prevent extreme allocations
+    const capped_width: usize = @min(char_width, 500);
     // ─ is 3 bytes in UTF-8 (0xE2 0x94 0x80)
     const buf = try allocator.alloc(u8, capped_width * 3);
 
