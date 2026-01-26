@@ -79,27 +79,27 @@ pub const MarkdownColors = struct {
 
 /// Default markdown color scheme matching skim's aesthetic
 pub const default: MarkdownColors = .{
-    // Headers use a visual hierarchy with decreasing intensity
+    // Headers use a muted neutral grayscale hierarchy
     .h1 = .{
-        .fg = .{ .rgb = [3]u8{ 88, 166, 255 } }, // Bright blue #58A6FF
+        .fg = .{ .rgb = [3]u8{ 232, 232, 232 } }, // Off-white #E8E8E8
         .bold = true,
     },
     .h2 = .{
-        .fg = .{ .rgb = [3]u8{ 121, 192, 255 } }, // Cyan-ish #79C0FF
+        .fg = .{ .rgb = [3]u8{ 216, 216, 216 } }, // Soft gray #D8D8D8
         .bold = true,
     },
     .h3 = .{
-        .fg = .{ .rgb = [3]u8{ 210, 168, 255 } }, // Purple #D2A8FF
+        .fg = .{ .rgb = [3]u8{ 192, 192, 192 } }, // Medium gray #C0C0C0
         .bold = true,
     },
     .h4 = .{
-        .fg = .{ .rgb = [3]u8{ 63, 185, 80 } }, // Green #3FB950
+        .fg = .{ .rgb = [3]u8{ 168, 168, 168 } }, // Slate gray #A8A8A8
     },
     .h5 = .{
-        .fg = .{ .rgb = [3]u8{ 255, 166, 87 } }, // Yellow-orange #FFA657
+        .fg = .{ .rgb = [3]u8{ 152, 152, 152 } }, // Cooler gray #989898
     },
     .h6 = .{
-        .fg = .{ .rgb = [3]u8{ 165, 214, 255 } }, // Light blue #A5D6FF
+        .fg = .{ .rgb = [3]u8{ 136, 136, 136 } }, // Dim gray #888888
     },
 
     // Emphasis styles
