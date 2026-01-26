@@ -999,7 +999,7 @@ pub const ChatLineMap = struct {
         }
     }
 
-    /// Flush accumulated markdown segments as a line record
+    /// Flush accumulated markdown segments as a line record, with word wrapping
     fn flushMarkdownLine(
         self: *ChatLineMap,
         global_line: *usize,
@@ -1010,8 +1010,6 @@ pub const ChatLineMap = struct {
         node_type: NodeType,
         wrap_width: usize,
     ) !void {
-        _ = wrap_width; // TODO: implement word wrapping for segments
-
         const is_code_block = node_type == .fenced_code_block or node_type == .code_block;
 
         if (segments.items.len == 0) {
@@ -1029,13 +1027,129 @@ pub const ChatLineMap = struct {
             return;
         }
 
+        // Calculate total line length
+        var total_len: usize = 0;
+        for (segments.items) |seg| {
+            total_len += seg.text.len;
+        }
+
+        // Calculate available width (accounting for indent)
+        const available_width = if (wrap_width > indent) wrap_width - indent else wrap_width;
+
+        // If fits on one line or is a code block (don't wrap code), output as-is
+        if (total_len <= available_width or is_code_block) {
+            try self.outputSegmentLine(global_line, msg_idx, line_idx, segments.items, indent, is_code_block);
+            return;
+        }
+
+        // Word wrapping needed - split segments across multiple lines
+        var current_line: std.ArrayList(StyledSegment) = .{};
+        defer current_line.deinit(self.allocator);
+        var current_width: usize = 0;
+
+        for (segments.items) |seg| {
+            // Try to fit this segment on the current line
+            if (current_width + seg.text.len <= available_width) {
+                // Fits entirely
+                try current_line.append(self.allocator, seg);
+                current_width += seg.text.len;
+            } else {
+                // Need to split this segment
+                var remaining = seg.text;
+                const remaining_style = seg.style;
+
+                while (remaining.len > 0) {
+                    const space_left = if (available_width > current_width) available_width - current_width else 0;
+
+                    if (remaining.len <= space_left) {
+                        // Rest fits on current line
+                        try current_line.append(self.allocator, .{
+                            .text = remaining,
+                            .style = remaining_style,
+                        });
+                        current_width += remaining.len;
+                        break;
+                    }
+
+                    // Find a good break point (word boundary)
+                    var break_at: usize = space_left;
+
+                    // Look for last space within the available space
+                    if (space_left > 0) {
+                        var last_space: ?usize = null;
+                        for (remaining[0..space_left], 0..) |c, i| {
+                            if (c == ' ') last_space = i;
+                        }
+                        if (last_space) |sp| {
+                            break_at = sp + 1; // Include the space in current line
+                        }
+                    }
+
+                    // If we couldn't find a break point and current line has content, flush it first
+                    if (break_at == 0 and current_line.items.len > 0) {
+                        try self.outputSegmentLine(global_line, msg_idx, line_idx, current_line.items, indent, is_code_block);
+                        current_line.clearRetainingCapacity();
+                        current_width = 0;
+                        continue;
+                    }
+
+                    // If still no break point (very long word at start of line), force break at available width
+                    if (break_at == 0) {
+                        break_at = @min(available_width, remaining.len);
+                        if (break_at == 0) break_at = 1; // At least one character
+                    }
+
+                    // Add portion to current line
+                    if (break_at > 0 and break_at <= remaining.len) {
+                        // Copy the text portion for storage
+                        const text_portion = try self.allocator.dupe(u8, remaining[0..break_at]);
+                        try self.strings.append(self.allocator, text_portion);
+
+                        try current_line.append(self.allocator, .{
+                            .text = text_portion,
+                            .style = remaining_style,
+                        });
+                    }
+
+                    // Flush current line
+                    try self.outputSegmentLine(global_line, msg_idx, line_idx, current_line.items, indent, is_code_block);
+                    current_line.clearRetainingCapacity();
+                    current_width = 0;
+
+                    // Skip leading spaces on new line
+                    remaining = remaining[break_at..];
+                    while (remaining.len > 0 and remaining[0] == ' ') {
+                        remaining = remaining[1..];
+                    }
+                }
+            }
+        }
+
+        // Flush any remaining content
+        if (current_line.items.len > 0) {
+            try self.outputSegmentLine(global_line, msg_idx, line_idx, current_line.items, indent, is_code_block);
+        }
+    }
+
+    /// Output a single line of segments as a record
+    fn outputSegmentLine(
+        self: *ChatLineMap,
+        global_line: *usize,
+        msg_idx: usize,
+        line_idx: *usize,
+        segs: []const StyledSegment,
+        indent: usize,
+        is_code_block: bool,
+    ) !void {
+        if (segs.len == 0) return;
+
         // If only one segment, use simple text/style fields
-        if (segments.items.len == 1) {
+        if (segs.len == 1) {
             try self.records.append(self.allocator, .{
                 .global_line = global_line.*,
                 .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx.* } },
-                .text = segments.items[0].text,
-                .style = segments.items[0].style,
+                .text = segs[0].text,
+                .style = segs[0].style,
                 .indent = indent,
                 .fill_bg = is_code_block,
             });
@@ -1045,17 +1159,16 @@ pub const ChatLineMap = struct {
         }
 
         // Multiple segments - store them for per-segment rendering
-        // Copy segments slice for storage
-        const segments_copy = try self.allocator.dupe(StyledSegment, segments.items);
+        const segments_copy = try self.allocator.dupe(StyledSegment, segs);
 
         // Calculate total text for fallback rendering
         var total_len: usize = 0;
-        for (segments.items) |seg| {
+        for (segs) |seg| {
             total_len += seg.text.len;
         }
-        var combined_text = try self.allocator.alloc(u8, total_len);
+        const combined_text = try self.allocator.alloc(u8, total_len);
         var offset: usize = 0;
-        for (segments.items) |seg| {
+        for (segs) |seg| {
             @memcpy(combined_text[offset..][0..seg.text.len], seg.text);
             offset += seg.text.len;
         }
@@ -1065,7 +1178,7 @@ pub const ChatLineMap = struct {
             .global_line = global_line.*,
             .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx.* } },
             .text = combined_text, // Fallback for non-segment-aware rendering
-            .style = segments.items[0].style, // Default to first segment's style
+            .style = segs[0].style, // Default to first segment's style
             .indent = indent,
             .segments = segments_copy,
             .fill_bg = is_code_block,

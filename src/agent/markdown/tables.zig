@@ -1,9 +1,9 @@
-//! GFM Table Parsing and ASCII Rendering
+//! GFM Table Parsing and Box-Drawing Rendering
 //!
 //! Handles rendering of GFM (GitHub Flavored Markdown) tables with:
 //! - Header row with bold styling
 //! - Column alignment (left, center, right)
-//! - ASCII borders using | and -
+//! - Unicode box-drawing borders (┌─┬─┐ │ ├─┼─┤ └─┴─┘)
 //! - Auto-sizing columns based on content
 
 const std = @import("std");
@@ -109,16 +109,22 @@ pub const TableRenderer = struct {
             try alignments.append(self.allocator, .left);
         }
 
+        // Render top border
+        try self.renderBorder(&result, widths, .top);
+
         // Render header row
         try self.renderRow(&result, header_cells.items, widths, alignments.items, true);
 
-        // Render separator
-        try self.renderSeparator(&result, widths, alignments.items);
+        // Render separator between header and body
+        try self.renderBorder(&result, widths, .middle);
 
         // Render body rows
         for (body_rows.items) |row| {
             try self.renderRow(&result, row.items, widths, alignments.items, false);
         }
+
+        // Render bottom border
+        try self.renderBorder(&result, widths, .bottom);
 
         return result;
     }
@@ -276,9 +282,9 @@ pub const TableRenderer = struct {
     ) !void {
         const style = if (is_header) self.colors.table_header else self.colors.table_cell;
 
-        // Start border
+        // Start border with box-drawing vertical bar
         try result.spans.append(self.allocator, .{
-            .text = "| ",
+            .text = "│ ",
             .style = self.colors.table_border,
             .indent = 0,
             .node_type = .table,
@@ -301,7 +307,7 @@ pub const TableRenderer = struct {
             });
 
             try result.spans.append(self.allocator, .{
-                .text = " | ",
+                .text = " │ ",
                 .style = self.colors.table_border,
                 .indent = 0,
                 .node_type = .table,
@@ -317,38 +323,59 @@ pub const TableRenderer = struct {
         });
     }
 
-    /// Render the separator row between header and body
-    fn renderSeparator(
+    /// Border position for box-drawing
+    const BorderPosition = enum {
+        top, // ┌───┬───┐
+        middle, // ├───┼───┤
+        bottom, // └───┴───┘
+    };
+
+    /// Box-drawing characters for table borders
+    const BorderChars = struct {
+        left: []const u8,
+        mid: []const u8,
+        right: []const u8,
+    };
+
+    /// Render a horizontal border row (top, middle, or bottom)
+    fn renderBorder(
         self: *TableRenderer,
         result: *TableRenderResult,
         widths: []const usize,
-        alignments: []const Alignment,
+        position: BorderPosition,
     ) !void {
-        // Start border
+        // Box-drawing characters for each position
+        const chars: BorderChars = switch (position) {
+            .top => .{ .left = "┌", .mid = "┬", .right = "┐" },
+            .middle => .{ .left = "├", .mid = "┼", .right = "┤" },
+            .bottom => .{ .left = "└", .mid = "┴", .right = "┘" },
+        };
+
+        // Start with left corner/junction
         try result.spans.append(self.allocator, .{
-            .text = "|",
+            .text = chars.left,
             .style = self.colors.table_border,
             .indent = 0,
             .node_type = .table,
         });
 
-        // Render separator for each column
+        // Render horizontal line for each column
         for (widths, 0..) |w, i| {
-            const col_align = if (i < alignments.len) alignments[i] else .left;
-
-            // Build separator string - allocate the result
-            const sep = try buildSeparatorAlloc(self.allocator, w, col_align);
-            try result.strings.append(self.allocator, sep);
+            // Build horizontal line (width + 2 for padding spaces)
+            const line = try buildHorizontalLineAlloc(self.allocator, w + 2);
+            try result.strings.append(self.allocator, line);
 
             try result.spans.append(self.allocator, .{
-                .text = sep,
+                .text = line,
                 .style = self.colors.table_border,
                 .indent = 0,
                 .node_type = .table,
             });
 
+            // Add junction or right corner
+            const junction = if (i == widths.len - 1) chars.right else chars.mid;
             try result.spans.append(self.allocator, .{
-                .text = "|",
+                .text = junction,
                 .style = self.colors.table_border,
                 .indent = 0,
                 .node_type = .table,
@@ -396,26 +423,18 @@ fn padCellAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize, co
     return buf;
 }
 
-/// Build separator string for a column - allocates result
-fn buildSeparatorAlloc(allocator: std.mem.Allocator, width: usize, col_align: Alignment) ![]const u8 {
-    const actual_width = @min(width + 2, 62); // +2 for padding
+/// Build a horizontal line of box-drawing characters - allocates result
+/// Uses ─ (U+2500) which is 3 bytes in UTF-8
+fn buildHorizontalLineAlloc(allocator: std.mem.Allocator, char_width: usize) ![]const u8 {
+    const actual_width = @min(char_width, 62);
+    // ─ is 3 bytes in UTF-8 (0xE2 0x94 0x80)
+    const buf = try allocator.alloc(u8, actual_width * 3);
 
-    const buf = try allocator.alloc(u8, actual_width);
-
-    switch (col_align) {
-        .left => {
-            buf[0] = ':';
-            @memset(buf[1..actual_width], '-');
-        },
-        .right => {
-            @memset(buf[0 .. actual_width - 1], '-');
-            buf[actual_width - 1] = ':';
-        },
-        .center => {
-            buf[0] = ':';
-            @memset(buf[1 .. actual_width - 1], '-');
-            buf[actual_width - 1] = ':';
-        },
+    var i: usize = 0;
+    while (i < actual_width) : (i += 1) {
+        buf[i * 3] = 0xE2;
+        buf[i * 3 + 1] = 0x94;
+        buf[i * 3 + 2] = 0x80;
     }
 
     return buf;
@@ -463,31 +482,16 @@ test "padCellAlloc - center alignment" {
     try std.testing.expectEqualStrings("  Hi  ", result);
 }
 
-test "buildSeparatorAlloc - left" {
+test "buildHorizontalLineAlloc - creates box drawing line" {
     const allocator = std.testing.allocator;
-    const result = try buildSeparatorAlloc(allocator, 4, .left);
+    const result = try buildHorizontalLineAlloc(allocator, 4);
     defer allocator.free(result);
-    try std.testing.expectEqual(@as(usize, 6), result.len);
-    try std.testing.expectEqual(@as(u8, ':'), result[0]);
-    try std.testing.expectEqual(@as(u8, '-'), result[1]);
-}
-
-test "buildSeparatorAlloc - right" {
-    const allocator = std.testing.allocator;
-    const result = try buildSeparatorAlloc(allocator, 4, .right);
-    defer allocator.free(result);
-    try std.testing.expectEqual(@as(usize, 6), result.len);
-    try std.testing.expectEqual(@as(u8, '-'), result[0]);
-    try std.testing.expectEqual(@as(u8, ':'), result[result.len - 1]);
-}
-
-test "buildSeparatorAlloc - center" {
-    const allocator = std.testing.allocator;
-    const result = try buildSeparatorAlloc(allocator, 4, .center);
-    defer allocator.free(result);
-    try std.testing.expectEqual(@as(usize, 6), result.len);
-    try std.testing.expectEqual(@as(u8, ':'), result[0]);
-    try std.testing.expectEqual(@as(u8, ':'), result[result.len - 1]);
+    // 4 characters * 3 bytes per character (─ is U+2500 = E2 94 80)
+    try std.testing.expectEqual(@as(usize, 12), result.len);
+    // Check first character is ─
+    try std.testing.expectEqual(@as(u8, 0xE2), result[0]);
+    try std.testing.expectEqual(@as(u8, 0x94), result[1]);
+    try std.testing.expectEqual(@as(u8, 0x80), result[2]);
 }
 
 test "table renderer init" {
