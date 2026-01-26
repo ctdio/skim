@@ -117,9 +117,10 @@ pub const MarkdownRenderer = struct {
             return; // Skip markers like #, **, `, etc.
         }
 
-        // Add blank line before major blocks (except first element)
+        // Add blank line before major blocks and paragraphs that follow major blocks
         // Only at top level (inside document/section, not nested in lists/blockquotes)
-        if (isMajorBlock(node_type) and self.ended_major_block and self.list_stack.items.len == 0 and self.blockquote_depth == 0) {
+        const needs_spacing = isMajorBlock(node_type) or node_type == .paragraph;
+        if (needs_spacing and self.ended_major_block and self.list_stack.items.len == 0 and self.blockquote_depth == 0) {
             try self.spans.append(self.allocator, .{
                 .text = "\n",
                 .style = self.colors.text,
@@ -463,6 +464,16 @@ pub const MarkdownRenderer = struct {
 
         // Pop list context
         _ = self.list_stack.pop();
+
+        // Add newline after top-level lists
+        if (self.list_stack.items.len == 0) {
+            try self.spans.append(self.allocator, .{
+                .text = "\n",
+                .style = self.colors.text,
+                .indent = 0,
+                .node_type = .softbreak,
+            });
+        }
     }
 
     /// Check if a list is ordered by examining its markers
