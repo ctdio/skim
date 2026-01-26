@@ -140,6 +140,54 @@ The MCP (Model Context Protocol) system enables AI agents to interact with skim.
 - Run: `zig build test`
 - Coverage includes: arg parsing, diff execution, parser, line_map, comments, editor
 
+### Snapshot Testing (IMPORTANT for UI changes)
+
+**When modifying UI rendering, ALWAYS add or update snapshot tests.**
+
+The project uses snapshot testing to verify UI output. Infrastructure is in `src/testing/`:
+- `snapshot.zig`: Core snapshot comparison logic
+- `harness.zig`: Mock screen/window for capturing rendered output
+- `snapshot_scenarios.zig`: Test scenarios organized by domain
+- `snapshots/`: 55+ snapshot files (`.snap` extension)
+
+**Three testing domains:**
+1. **Diff rendering** - File headers, hunk headers, diff lines (`diff_test_helpers.zig`)
+2. **Agent chat UI** - Messages, tool calls, plan entries (`agent_test_helpers.zig`)
+3. **Markdown rendering** - Headers, formatting, code blocks (`markdown_test_helpers.zig`)
+
+**Running snapshot tests:**
+```bash
+# Run tests (compares against existing snapshots)
+zig build test
+
+# Update snapshots after intentional changes
+SKIM_UPDATE_SNAPSHOTS=1 zig build test
+```
+
+**Writing a snapshot test:**
+```zig
+test "snapshot: my_feature" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 24);
+    defer ctx.deinit();
+
+    // Render to test window
+    const win = ctx.window();
+    renderMyFeature(win, params, ctx.frameAllocator());
+
+    // Compare against snapshot
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, "my_feature", text);
+}
+```
+
+**When to add snapshot tests:**
+- Adding new UI components or rendering functions
+- Modifying existing renderers (diff lines, headers, status bar, etc.)
+- Changing text formatting, spacing, or visual structure
+- Adding new line types to LineMap
+
 ### Debugging TUI Apps
 - Stdout/stderr not available (TUI rendering) - logs go to `~/.skim/*.log`
 - Use `std.log.debug/info/warn/err()` - routed to component-specific log files
@@ -170,8 +218,9 @@ See [docs/architecture.md](docs/architecture.md).
 ### Adding Features
 - **New keybinding**: Update mode handler in `src/modes/`, update status bar help, update README
 - **New language**: Add grammar to `build.zig.zon`, update `syntax.zig`, add `.scm` query file
-- **New line type**: Update `LineType` enum, update `LineMap.build()`, update renderers
+- **New line type**: Update `LineType` enum, update `LineMap.build()`, update renderers, **add snapshot tests**
 - **New MCP tool**: Add to `src/mcp/tools.zig`, register in `createServer()`, update tool docs
+- **UI rendering changes**: Update renderers, **add/update snapshot tests in `src/testing/`**
 
 ## Git Integration
 
