@@ -146,6 +146,8 @@ pub const ChatLineMap = struct {
     last_msg_start_idx: usize, // Cached index where last message starts (for O(1) streaming updates)
     last_msg_strings_start: usize, // Cached index where last message's strings start (for efficient cleanup)
     last_msg_highlights_start: usize, // Cached index where last message's highlights start
+    // Reference to expanded user messages set (set during build, used for collapsed/expanded state)
+    expanded_user_messages: ?*const std.AutoHashMap(usize, void),
 
     /// Initialize an empty chat line map
     pub fn init(allocator: Allocator) ChatLineMap {
@@ -160,6 +162,7 @@ pub const ChatLineMap = struct {
             .last_msg_start_idx = 0,
             .last_msg_strings_start = 0,
             .last_msg_highlights_start = 0,
+            .expanded_user_messages = null,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message
@@ -201,6 +204,7 @@ pub const ChatLineMap = struct {
         wrap_width: usize,
         diff_view_mode: AgentState.DiffViewMode,
         highlighter: ?*SyntaxHighlighter,
+        expanded_user_messages: ?*const std.AutoHashMap(usize, void),
     ) !void {
         // Clear existing data
         for (self.strings.items) |s| {
@@ -217,6 +221,7 @@ pub const ChatLineMap = struct {
         self.last_msg_start_idx = 0;
         self.last_msg_strings_start = 0;
         self.last_msg_highlights_start = 0;
+        self.expanded_user_messages = expanded_user_messages;
 
         // Pre-allocate capacity to reduce reallocations during build
         // Estimate: ~10 lines per message on average (header + content lines + spacing)
@@ -303,10 +308,14 @@ pub const ChatLineMap = struct {
         wrap_width: usize,
         diff_view_mode: AgentState.DiffViewMode,
         highlighter: ?*SyntaxHighlighter,
+        expanded_user_messages: ?*const std.AutoHashMap(usize, void),
     ) !void {
+        // Store expanded state reference for this update
+        self.expanded_user_messages = expanded_user_messages;
+
         // If width changed or view mode changed, full rebuild
         if (self.needsRebuild(wrap_width, diff_view_mode)) {
-            try self.build(messages, wrap_width, diff_view_mode, highlighter);
+            try self.build(messages, wrap_width, diff_view_mode, highlighter, expanded_user_messages);
             return;
         }
 
@@ -384,12 +393,16 @@ pub const ChatLineMap = struct {
         wrap_width: usize,
         diff_view_mode: AgentState.DiffViewMode,
         highlighter: ?*SyntaxHighlighter,
+        expanded_user_messages: ?*const std.AutoHashMap(usize, void),
     ) !void {
         if (messages.len == 0) return;
 
+        // Store expanded state reference for this update
+        self.expanded_user_messages = expanded_user_messages;
+
         // If width changed, full rebuild
         if (self.needsRebuild(wrap_width, diff_view_mode)) {
-            try self.build(messages, wrap_width, diff_view_mode, highlighter);
+            try self.build(messages, wrap_width, diff_view_mode, highlighter, expanded_user_messages);
             return;
         }
 
@@ -469,7 +482,7 @@ pub const ChatLineMap = struct {
             });
         } else {
             // Message not found, rebuild
-            try self.build(messages, wrap_width, diff_view_mode, highlighter);
+            try self.build(messages, wrap_width, diff_view_mode, highlighter, self.expanded_user_messages);
         }
     }
 
@@ -846,6 +859,9 @@ pub const ChatLineMap = struct {
         // User and thinking messages indent to make room for bar, others start at column 1 for a small margin
         const indent: usize = if (msg.role == .user or msg.role == .thinking) 2 else 1;
 
+        // Check if user message is collapsed (default) vs expanded
+        const is_user_collapsed = msg.role == .user and !self.isMessageExpanded(msg_idx);
+
         // Add padding at the top for user messages only
         if (msg.role == .user) {
             try self.records.append(self.allocator, .{
@@ -865,7 +881,93 @@ pub const ChatLineMap = struct {
         else
             msg.content;
 
-        var line_idx: usize = 0;
+        // For collapsed user messages, show single truncated line
+        if (is_user_collapsed) {
+            try self.addCollapsedUserContent(global_line, msg_idx, content, content_style, indent, wrap_width);
+        } else {
+            // Expanded or non-user: show full content with wrapping
+            try self.addExpandedContent(global_line, msg_idx, content, content_style, indent, fill_bg, wrap_width);
+        }
+
+        // Add padding at the bottom for user messages only
+        if (msg.role == .user) {
+            // Get current line_idx (approximation based on records added)
+            const line_idx = if (is_user_collapsed) @as(usize, 2) else self.countLinesForMessage(msg_idx);
+            try self.records.append(self.allocator, .{
+                .global_line = global_line.*,
+                .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
+                .text = "",
+                .style = content_style,
+                .indent = indent,
+                .fill_bg = fill_bg,
+            });
+            global_line.* += 1;
+        }
+    }
+
+    /// Check if a message is expanded (user messages are collapsed by default)
+    fn isMessageExpanded(self: *const ChatLineMap, msg_idx: usize) bool {
+        if (self.expanded_user_messages) |expanded| {
+            return expanded.contains(msg_idx);
+        }
+        return false;
+    }
+
+    /// Add collapsed user content (single line, truncated with "…" if needed)
+    fn addCollapsedUserContent(
+        self: *ChatLineMap,
+        global_line: *usize,
+        msg_idx: usize,
+        content: []const u8,
+        style: vaxis.Style,
+        indent: usize,
+        wrap_width: usize,
+    ) !void {
+        // Get first line of content
+        const first_newline = std.mem.indexOfScalar(u8, content, '\n');
+        const first_line = if (first_newline) |idx| content[0..idx] else content;
+        const has_more = first_newline != null or first_line.len > wrap_width;
+
+        // Truncate if too long, leaving room for "…"
+        const max_display_width = if (wrap_width > 3) wrap_width - 3 else wrap_width;
+        const display_text = if (first_line.len > max_display_width)
+            first_line[0..max_display_width]
+        else
+            first_line;
+
+        // Build the display string with truncation indicator
+        var text_buf: [1024]u8 = undefined;
+        const display_with_ellipsis = if (has_more)
+            std.fmt.bufPrint(&text_buf, "{s} …", .{display_text}) catch display_text
+        else
+            display_text;
+
+        const content_copy = try self.allocator.dupe(u8, display_with_ellipsis);
+        try self.strings.append(self.allocator, content_copy);
+
+        try self.records.append(self.allocator, .{
+            .global_line = global_line.*,
+            .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = 1 } },
+            .text = content_copy,
+            .style = style,
+            .indent = indent,
+            .fill_bg = true,
+        });
+        global_line.* += 1;
+    }
+
+    /// Add expanded content with full wrapping (existing behavior)
+    fn addExpandedContent(
+        self: *ChatLineMap,
+        global_line: *usize,
+        msg_idx: usize,
+        content: []const u8,
+        content_style: vaxis.Style,
+        indent: usize,
+        fill_bg: bool,
+        wrap_width: usize,
+    ) !void {
+        var line_idx: usize = 1; // Start at 1 since 0 is the padding line
         var content_iter = std.mem.splitScalar(u8, content, '\n');
         while (content_iter.next()) |line| {
             if (line.len == 0) {
@@ -885,8 +987,6 @@ pub const ChatLineMap = struct {
                 defer wrapped_lines.deinit(self.allocator);
 
                 for (wrapped_lines.items) |wrapped_segment| {
-                    // Must copy content since message content_buffer may reallocate
-                    // during streaming, invalidating any direct slices
                     const content_copy = try self.allocator.dupe(u8, wrapped_segment);
                     try self.strings.append(self.allocator, content_copy);
 
@@ -903,19 +1003,20 @@ pub const ChatLineMap = struct {
                 }
             }
         }
+    }
 
-        // Add padding at the bottom for user messages only
-        if (msg.role == .user) {
-            try self.records.append(self.allocator, .{
-                .global_line = global_line.*,
-                .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
-                .text = "",
-                .style = content_style,
-                .indent = indent,
-                .fill_bg = fill_bg,
-            });
-            global_line.* += 1;
+    /// Count lines added for a message (for line_idx calculation)
+    fn countLinesForMessage(self: *const ChatLineMap, msg_idx: usize) usize {
+        var count: usize = 0;
+        for (self.records.items) |rec| {
+            switch (rec.line_type) {
+                .message_content => |mc| {
+                    if (mc.msg_idx == msg_idx) count = @max(count, mc.line_idx + 1);
+                },
+                else => {},
+            }
         }
+        return count;
     }
 
     /// Add markdown-rendered content for agent messages
@@ -1823,7 +1924,7 @@ test "ChatLineMap build with empty messages" {
     defer line_map.deinit();
 
     const messages: []const Message = &.{};
-    try line_map.build(messages, 80, .unified, null);
+    try line_map.build(messages, 80, .unified, null, null);
 
     try std.testing.expectEqual(@as(usize, 0), line_map.getTotalLines());
 }

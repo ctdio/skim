@@ -637,6 +637,8 @@ pub const AgentState = struct {
     help_scroll_offset: usize,
     // History mode state (for browsing message history with vim-like navigation)
     history: HistoryState,
+    // Expanded user messages (collapsed by default, toggle with 'o' in history mode)
+    expanded_user_messages: std.AutoHashMap(usize, void),
 
     pub const PanelSide = enum {
         left,
@@ -686,6 +688,7 @@ pub const AgentState = struct {
             .help_visible = false,
             .help_scroll_offset = 0,
             .history = HistoryState.init(),
+            .expanded_user_messages = std.AutoHashMap(usize, void).init(allocator),
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -709,6 +712,7 @@ pub const AgentState = struct {
         self.file_picker.deinit();
         self.shell.deinit();
         self.cmd_palette.deinit();
+        self.expanded_user_messages.deinit();
     }
 
     /// Add a message to the conversation history
@@ -1180,6 +1184,36 @@ pub const AgentState = struct {
         return self.history.active;
     }
 
+    /// Check if a user message is expanded (collapsed by default).
+    pub fn isUserMessageExpanded(self: *const AgentState, msg_idx: usize) bool {
+        return self.expanded_user_messages.contains(msg_idx);
+    }
+
+    /// Toggle a user message's expanded/collapsed state.
+    pub fn toggleUserMessageExpanded(self: *AgentState, msg_idx: usize) void {
+        if (self.expanded_user_messages.contains(msg_idx)) {
+            _ = self.expanded_user_messages.remove(msg_idx);
+        } else {
+            self.expanded_user_messages.put(msg_idx, {}) catch {};
+        }
+        self.line_map_dirty = true;
+    }
+
+    /// Toggle expansion of the user message under the cursor in history mode.
+    /// Returns true if a message was toggled.
+    pub fn toggleUserMessageUnderCursor(self: *AgentState) bool {
+        if (!self.history.active) return false;
+
+        const msg_idx = self.getMessageIdxAtLine(self.history.cursor_line) orelse return false;
+        if (msg_idx >= self.messages.items.len) return false;
+
+        const msg = &self.messages.items[msg_idx];
+        if (msg.role != .user) return false;
+
+        self.toggleUserMessageExpanded(msg_idx);
+        return true;
+    }
+
     /// Get the maximum valid cursor line (last line index).
     pub fn getHistoryMaxLine(self: *const AgentState) usize {
         const total = self.line_map.getTotalLines();
@@ -1525,17 +1559,17 @@ pub const AgentState = struct {
 
                 if (width_or_mode_changed or prev_message_count == 0 or self.earlier_message_dirty) {
                     // Width/mode changed, first build, or earlier message modified - full rebuild required
-                    try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode, highlighter);
+                    try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode, highlighter, &self.expanded_user_messages);
                 } else if (message_count > prev_message_count) {
                     // New messages added - incremental add
-                    try self.line_map.updateForNewMessage(self.messages.items, wrap_width, self.diff_view_mode, highlighter);
+                    try self.line_map.updateForNewMessage(self.messages.items, wrap_width, self.diff_view_mode, highlighter, &self.expanded_user_messages);
                 } else if (message_count == prev_message_count and message_count > 0) {
                     // Same message count but dirty - last message content changed (streaming)
-                    try self.line_map.updateLastMessage(self.messages.items, wrap_width, self.diff_view_mode, highlighter);
+                    try self.line_map.updateLastMessage(self.messages.items, wrap_width, self.diff_view_mode, highlighter, &self.expanded_user_messages);
                 }
                 // If message_count < prev_message_count, messages were cleared - rebuild
                 else if (message_count < prev_message_count) {
-                    try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode, highlighter);
+                    try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode, highlighter, &self.expanded_user_messages);
                 }
 
                 self.line_map_dirty = false;

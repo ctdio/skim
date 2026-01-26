@@ -284,6 +284,16 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
 
+        // o - toggle expand/collapse of user message under cursor
+        if (key.codepoint == 'o') {
+            if (agent_state.toggleUserMessageUnderCursor()) {
+                agent_state.history.pending_g = false;
+                agent_state.history.pending_y = false;
+                app.needs_render = true;
+            }
+            return;
+        }
+
         // Space prefix commands in history mode (Space+f for follow/resume)
         if (app.state.pending_space) {
             app.state.pending_space = false;
