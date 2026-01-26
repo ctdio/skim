@@ -2091,6 +2091,7 @@ pub const Message = struct {
     // For markdown parsing (agent messages only)
     md_parser: ?MarkdownParser = null,
     md_tree_valid: bool = false,
+    md_parsed_len: usize = 0, // Length when tree was last parsed (for incremental updates)
 
     pub const ToolStatus = enum {
         pending,
@@ -2149,6 +2150,7 @@ pub const Message = struct {
 
     /// Ensure markdown is parsed for this message
     /// Only parses agent messages (user messages don't need markdown rendering)
+    /// Uses incremental parsing for streaming updates (O(n) instead of O(n²))
     /// Returns true if parsing succeeded or was already done
     pub fn ensureMarkdownParsed(self: *Message) bool {
         // Only parse agent messages
@@ -2156,7 +2158,7 @@ pub const Message = struct {
             return false;
         }
 
-        // Already valid
+        // Already valid and content unchanged
         if (self.md_tree_valid and self.md_parser != null) {
             return true;
         }
@@ -2168,11 +2170,31 @@ pub const Message = struct {
             };
         }
 
-        // Parse the content
-        self.md_parser.?.parse(self.content) catch {
-            return false;
-        };
+        // Use incremental update if: have tree, have previous parse, content only appended
+        const can_incremental = self.md_parser.?.tree != null and
+            self.md_parsed_len > 0 and
+            self.content.len >= self.md_parsed_len;
 
+        if (can_incremental) {
+            self.md_parser.?.update(
+                @intCast(self.md_parsed_len), // start_byte
+                @intCast(self.md_parsed_len), // old_end_byte
+                @intCast(self.content.len), // new_end_byte
+                self.content,
+            ) catch {
+                // Fallback to full parse on error
+                self.md_parser.?.parse(self.content) catch {
+                    return false;
+                };
+            };
+        } else {
+            // Full parse for initial or non-append changes
+            self.md_parser.?.parse(self.content) catch {
+                return false;
+            };
+        }
+
+        self.md_parsed_len = self.content.len;
         self.md_tree_valid = true;
         return true;
     }

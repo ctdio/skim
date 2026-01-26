@@ -1050,6 +1050,34 @@ test "snapshot: md_table_many_columns" {
     try snapshot.expectSnapshot(allocator, "md_table_many_columns", text);
 }
 
+test "snapshot: md_table_with_emoji" {
+    const allocator = std.testing.allocator;
+    // Test that emojis in table cells are properly aligned
+    // Emoji display width (2 cells) differs from byte length (3+ bytes)
+    var ctx = try harness.createTestContext(allocator, 60, 12);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame_alloc = ctx.frameAllocator();
+
+    // Table with emojis - tests that column widths and padding use display width
+    const table_md =
+        \\| Metric        | Target | Status      |
+        \\|:--------------|:-------|:------------|
+        \\| Cold startup  | <10ms  | ✅          |
+        \\| Binary size   | <2MB   | ✅ (209KB)  |
+        \\| Memory usage  | <50MB  | ✅          |
+        \\| Scrolling FPS | 60     | ✅          |
+    ;
+
+    try md_helpers.renderMarkdown(frame_alloc, win, table_md, 60);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "md_table_with_emoji", text);
+}
+
 test "snapshot: md_code_block" {
     const allocator = std.testing.allocator;
     var ctx = try harness.createTestContext(allocator, 50, 6);

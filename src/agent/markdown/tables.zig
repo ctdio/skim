@@ -9,6 +9,7 @@
 const std = @import("std");
 const ts = @import("tree-sitter");
 const vaxis = @import("vaxis");
+const gwidth = vaxis.gwidth;
 const types = @import("types.zig");
 const colors_mod = @import("colors.zig");
 const parser_mod = @import("parser.zig");
@@ -258,10 +259,10 @@ pub const TableRenderer = struct {
         // Calculate available content space
         const available_content = if (max_total > total_overhead) max_total - total_overhead else widths.len * absolute_min_width;
 
-        // Initialize with header content widths
+        // Initialize with header content widths (using display width for multi-byte chars)
         for (header, 0..) |cell, i| {
             if (i < widths.len) {
-                widths[i] = @max(absolute_min_width, cell.len);
+                widths[i] = @max(absolute_min_width, displayWidth(cell));
             }
         }
 
@@ -269,7 +270,7 @@ pub const TableRenderer = struct {
         for (body) |row| {
             for (row.items, 0..) |cell, i| {
                 if (i < widths.len) {
-                    widths[i] = @max(widths[i], cell.len);
+                    widths[i] = @max(widths[i], displayWidth(cell));
                 }
             }
         }
@@ -463,6 +464,23 @@ pub const TableRenderer = struct {
     }
 };
 
+/// Calculate display width of UTF-8 text in terminal cells
+/// Handles multi-byte characters like emojis correctly
+fn displayWidth(text: []const u8) usize {
+    var width: usize = 0;
+    var byte_pos: usize = 0;
+
+    while (byte_pos < text.len) {
+        const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
+        const char_end = @min(byte_pos + char_len, text.len);
+        const grapheme = text[byte_pos..char_end];
+        width += gwidth.gwidth(grapheme, .unicode);
+        byte_pos = char_end;
+    }
+
+    return width;
+}
+
 /// Parse alignment from delimiter cell text
 fn parseAlignment(text: []const u8) Alignment {
     const trimmed = std.mem.trim(u8, text, " \t|");
@@ -476,24 +494,32 @@ fn parseAlignment(text: []const u8) Alignment {
     return .left;
 }
 
-/// Pad a single line of text to specified width with alignment - allocates result
+/// Pad a single line of text to specified width (in display cells) with alignment - allocates result
+/// Handles multi-byte characters like emojis correctly by using display width, not byte length
 fn padLineAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize, col_align: Alignment) ![]const u8 {
     const actual_width = @min(width, 126);
-    const text_len = @min(text.len, actual_width);
-    const padding = actual_width -| text_len;
-    const buf_size = actual_width;
+
+    // Calculate display width (terminal cells), not byte length
+    const text_display_width = displayWidth(text);
+    const padding_cells = actual_width -| text_display_width;
+
+    // Buffer needs: text bytes + padding spaces (1 byte each)
+    const buf_size = text.len + padding_cells;
 
     const buf = try allocator.alloc(u8, buf_size);
-    @memset(buf, ' ');
 
-    const offset: usize = switch (col_align) {
+    // Calculate offset in bytes for alignment
+    const offset_cells: usize = switch (col_align) {
         .left => 0,
-        .right => padding,
-        .center => padding / 2,
+        .right => padding_cells,
+        .center => padding_cells / 2,
     };
 
-    // Copy text
-    @memcpy(buf[offset..][0..text_len], text[0..text_len]);
+    // Fill with spaces first
+    @memset(buf, ' ');
+
+    // Copy text at the calculated offset (offset is in spaces/cells, but text is bytes)
+    @memcpy(buf[offset_cells..][0..text.len], text);
 
     return buf;
 }
@@ -637,6 +663,41 @@ test "padLineAlloc - center alignment" {
     const result = try padLineAlloc(allocator, "Hi", 6, .center);
     defer allocator.free(result);
     try std.testing.expectEqualStrings("  Hi  ", result);
+}
+
+test "padLineAlloc - emoji uses display width not byte length" {
+    const allocator = std.testing.allocator;
+    // ✅ is U+2705, takes 3 bytes in UTF-8 but displays as 2 terminal cells
+    // With width=6, emoji (2 cells) + 4 spaces should give us total of 6 display cells
+    const result = try padLineAlloc(allocator, "✅", 6, .left);
+    defer allocator.free(result);
+    // Result should be: emoji (3 bytes) + 4 spaces = 7 bytes
+    // Display width: 2 (emoji) + 4 (spaces) = 6 cells
+    try std.testing.expectEqual(@as(usize, 7), result.len); // 3 bytes for ✅ + 4 spaces
+    try std.testing.expectEqualStrings("✅    ", result);
+}
+
+test "padLineAlloc - emoji right alignment" {
+    const allocator = std.testing.allocator;
+    // ✅ is 2 display cells, so with width=6 we need 4 spaces before it
+    const result = try padLineAlloc(allocator, "✅", 6, .right);
+    defer allocator.free(result);
+    try std.testing.expectEqual(@as(usize, 7), result.len); // 4 spaces + 3 bytes for ✅
+    try std.testing.expectEqualStrings("    ✅", result);
+}
+
+test "displayWidth - ascii text" {
+    try std.testing.expectEqual(@as(usize, 5), displayWidth("Hello"));
+}
+
+test "displayWidth - emoji" {
+    // ✅ (U+2705) displays as 2 terminal cells
+    try std.testing.expectEqual(@as(usize, 2), displayWidth("✅"));
+}
+
+test "displayWidth - mixed ascii and emoji" {
+    // "A✅B" = 1 + 2 + 1 = 4 display cells
+    try std.testing.expectEqual(@as(usize, 4), displayWidth("A✅B"));
 }
 
 test "wrapTextAlloc - text fits in width" {
