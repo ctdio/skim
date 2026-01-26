@@ -1152,6 +1152,9 @@ pub const ChatLineMap = struct {
         wrap_width: usize,
     ) !void {
         const is_code_block = node_type == .fenced_code_block or node_type == .code_block;
+        // Tables have pre-calculated widths and use multi-byte UTF-8 box-drawing chars
+        // Don't try to wrap them - byte length != display width for UTF-8
+        const is_table = node_type == .table;
 
         if (segments.items.len == 0) {
             // Empty line - use code block background if in code block
@@ -1172,7 +1175,7 @@ pub const ChatLineMap = struct {
             return;
         }
 
-        // Calculate total line length
+        // Calculate total line length (note: this is byte length, not display width)
         var total_len: usize = 0;
         for (segments.items) |seg| {
             total_len += seg.text.len;
@@ -1181,8 +1184,9 @@ pub const ChatLineMap = struct {
         // Calculate available width (accounting for indent)
         const available_width = if (wrap_width > indent) wrap_width - indent else wrap_width;
 
-        // If fits on one line or is a code block (don't wrap code), output as-is
-        if (total_len <= available_width or is_code_block) {
+        // If fits on one line, is a code block, or is a table (don't wrap these), output as-is
+        // Tables use UTF-8 box-drawing chars where byte length != display width
+        if (total_len <= available_width or is_code_block or is_table) {
             try self.outputSegmentLine(global_line, msg_idx, line_idx, segments.items, indent, is_code_block);
             return;
         }
