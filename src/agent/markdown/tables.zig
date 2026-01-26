@@ -481,6 +481,31 @@ fn displayWidth(text: []const u8) usize {
     return width;
 }
 
+/// Slice a UTF-8 string by display width (terminal cells), not bytes.
+/// Returns a slice of the input text containing at most `max_width` terminal cells.
+/// The returned slice ends at a valid UTF-8 boundary.
+fn sliceByDisplayWidth(text: []const u8, max_width: usize) []const u8 {
+    if (max_width == 0) return text[0..0];
+
+    var width: usize = 0;
+    var byte_pos: usize = 0;
+
+    while (byte_pos < text.len) {
+        const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
+        const char_end = @min(byte_pos + char_len, text.len);
+        const grapheme = text[byte_pos..char_end];
+        const char_width = gwidth.gwidth(grapheme, .unicode);
+
+        // Check if adding this character would exceed max_width
+        if (width + char_width > max_width) break;
+
+        width += char_width;
+        byte_pos = char_end;
+    }
+
+    return text[0..byte_pos];
+}
+
 /// Parse alignment from delimiter cell text
 fn parseAlignment(text: []const u8) Alignment {
     const trimmed = std.mem.trim(u8, text, " \t|");
@@ -524,8 +549,9 @@ fn padLineAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize, co
     return buf;
 }
 
-/// Wrap text to fit within a column width
+/// Wrap text to fit within a column width (in display cells)
 /// Uses word-break where possible, character-break as fallback
+/// Handles multi-byte characters like emojis correctly
 /// Returns array of lines (caller owns all memory)
 fn wrapTextAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize) ![]const []const u8 {
     if (width == 0) {
@@ -534,8 +560,8 @@ fn wrapTextAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize) !
         return lines;
     }
 
-    // If text fits, return single line
-    if (text.len <= width) {
+    // If text fits (by display width), return single line
+    if (displayWidth(text) <= width) {
         const lines = try allocator.alloc([]const u8, 1);
         const line_copy = try allocator.alloc(u8, text.len);
         @memcpy(line_copy, text);
@@ -554,7 +580,8 @@ fn wrapTextAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize) !
     var remaining = text;
 
     while (remaining.len > 0) {
-        if (remaining.len <= width) {
+        const remaining_width = displayWidth(remaining);
+        if (remaining_width <= width) {
             // Last chunk fits
             const line_copy = try allocator.alloc(u8, remaining.len);
             @memcpy(line_copy, remaining);
@@ -562,26 +589,31 @@ fn wrapTextAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize) !
             break;
         }
 
-        // Find break point - prefer word boundary
-        var break_pos = width;
+        // Get max_width display cells worth of text (byte slice)
+        const max_chunk = sliceByDisplayWidth(remaining, width);
 
-        // Look backwards for a space (word boundary)
-        var i = width;
+        // Find break point - look backwards for a space (word boundary)
+        var break_pos = max_chunk.len;
+        var found_space = false;
+
+        // Look backwards through the bytes to find a space
+        var i = max_chunk.len;
         while (i > 0) : (i -= 1) {
-            if (remaining[i - 1] == ' ') {
+            if (max_chunk[i - 1] == ' ') {
                 break_pos = i - 1; // Break before the space
+                found_space = true;
                 break;
             }
         }
 
-        // If no space found, use character break at width
-        if (i == 0) {
-            break_pos = width;
+        // If no space found, hard break at max display width
+        if (!found_space) {
+            break_pos = max_chunk.len;
         }
 
         // Don't create empty lines
         if (break_pos == 0) {
-            break_pos = width;
+            break_pos = max_chunk.len;
         }
 
         // Copy this line
@@ -749,6 +781,44 @@ test "wrapTextAlloc - mixed word and char wrap" {
     try std.testing.expectEqualStrings("superlon", lines[1]);
     try std.testing.expectEqualStrings("gword", lines[2]);
     try std.testing.expectEqualStrings("bye", lines[3]);
+}
+
+test "wrapTextAlloc - emoji uses display width not byte length" {
+    const allocator = std.testing.allocator;
+    // "✅ (209KB)" is 10 display cells: ✅=2, space=1, (209KB)=7
+    // With width=12, it should fit on one line (not wrap due to byte length)
+    const lines = try wrapTextAlloc(allocator, "✅ (209KB)", 12);
+    defer {
+        for (lines) |line| allocator.free(line);
+        allocator.free(lines);
+    }
+    try std.testing.expectEqual(@as(usize, 1), lines.len);
+    try std.testing.expectEqualStrings("✅ (209KB)", lines[0]);
+}
+
+test "wrapTextAlloc - emoji word wrap" {
+    const allocator = std.testing.allocator;
+    // "🐕 Dog woof" is 10 display cells: 🐕=2, space=1, Dog=3, space=1, woof=4
+    // With width=8, should wrap to "🐕 Dog" (6 cells) and "woof" (4 cells)
+    const lines = try wrapTextAlloc(allocator, "🐕 Dog woof", 8);
+    defer {
+        for (lines) |line| allocator.free(line);
+        allocator.free(lines);
+    }
+    try std.testing.expectEqual(@as(usize, 2), lines.len);
+    try std.testing.expectEqualStrings("🐕 Dog", lines[0]);
+    try std.testing.expectEqualStrings("woof", lines[1]);
+}
+
+test "sliceByDisplayWidth - ascii" {
+    const result = sliceByDisplayWidth("Hello World", 5);
+    try std.testing.expectEqualStrings("Hello", result);
+}
+
+test "sliceByDisplayWidth - emoji" {
+    // ✅ is 2 display cells, so with max_width=3 we get ✅ (2 cells)
+    const result = sliceByDisplayWidth("✅AB", 3);
+    try std.testing.expectEqualStrings("✅A", result);
 }
 
 test "buildHorizontalLineAlloc - creates box drawing line" {
