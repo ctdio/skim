@@ -97,14 +97,6 @@ pub const CodeBlockRenderer = struct {
         const code_indent: usize = 1; // Code content indent
         const label_indent: usize = 1; // Language label - 2 spaces from edge
 
-        // Top padding line (blank line with background)
-        try spans.append(self.allocator, .{
-            .text = "\n",
-            .style = bg_style,
-            .indent = code_indent,
-            .node_type = .fenced_code_block,
-        });
-
         // Language label line (if provided)
         if (language_hint) |lang| {
             if (lang.len > 0) {
@@ -132,6 +124,14 @@ pub const CodeBlockRenderer = struct {
 
         // Render code content with syntax highlighting
         try self.renderHighlighted(&spans, code, language_hint, code_indent);
+
+        // Bottom padding - empty line after code block
+        try spans.append(self.allocator, .{
+            .text = "\n",
+            .style = bg_style,
+            .indent = code_indent,
+            .node_type = .fenced_code_block,
+        });
 
         return spans;
     }
