@@ -1749,7 +1749,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 }
 
 /// Render the status area shown between messages and plan when agent is thinking or waiting
-/// Layout: empty row + "Generating..."/"Waiting..." + empty row + optional queued message
+/// Layout: empty row + status message + empty row + optional queued message
 fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bool) void {
     if (win.height == 0) return;
 
@@ -1764,14 +1764,14 @@ fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bo
     // Row 0: empty padding
     row += 1;
 
-    // Row 1: Status indicator with shimmer
+    // Row 1: Status indicator with shimmer (message selected per turn based on user message count)
     if (row < win.height) {
-        if (is_thinking) {
-            renderThinkingIndicator(win, row, "Generating...");
-        } else {
-            // Session initializing with queued message
-            renderThinkingIndicator(win, row, "Waiting...");
+        // Count only user messages for stable turn seed (agent messages change during streaming)
+        var user_msg_count: usize = 0;
+        for (agent_state.messages.items) |msg| {
+            if (msg.role == .user) user_msg_count += 1;
         }
+        renderThinkingIndicator(win, row, is_thinking, user_msg_count);
         row += 1;
     }
 
@@ -1892,11 +1892,47 @@ fn renderStagedMessagePreview(win: vaxis.Window, text: []const u8, start_row: us
     }
 }
 
-/// Render a shimmering status indicator (e.g., "Generating...", "Waiting...")
-fn renderThinkingIndicator(win: vaxis.Window, row: usize, text: []const u8) void {
+/// Messages to show while agent is thinking (one per turn)
+const thinking_messages = [_][]const u8{
+    "Thinking...",
+    "Generating...",
+    "Working...",
+    "Processing...",
+    "Grinding...",
+    "Cranking...",
+    "Crunching...",
+    "Computing...",
+    "Pondering...",
+    "Brewing...",
+    "Cooking...",
+    "Churning...",
+};
+
+/// Messages to show while waiting for session (one per attempt)
+const waiting_messages = [_][]const u8{
+    "Connecting...",
+    "Starting...",
+    "Warming up...",
+    "Booting...",
+};
+
+/// Render a shimmering status indicator (message selected per turn for thinking, time-based for waiting)
+fn renderThinkingIndicator(win: vaxis.Window, row: usize, is_thinking: bool, turn_seed: usize) void {
     if (win.width < 20 or row >= win.height) return;
 
     const now = std.time.milliTimestamp();
+
+    // Select message: per-turn for thinking, time-based cycling for waiting
+    const text = if (is_thinking) blk: {
+        const idx = turn_seed % thinking_messages.len;
+        break :blk thinking_messages[idx];
+    } else blk: {
+        // Cycle waiting messages every 1.5 seconds to show activity
+        const idx: usize = @intCast(@mod(@divFloor(now, 1500), waiting_messages.len));
+        break :blk waiting_messages[idx];
+    };
+
+    // Shimmer effect (time-based animation)
     const shimmer_speed: i64 = 80;
     const phase: usize = @intCast(@mod(@divFloor(now, shimmer_speed), 10));
 
