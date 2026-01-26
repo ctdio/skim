@@ -1,0 +1,7 @@
+┃@@ -15,4 +15,6 @@ pub fn calculate()
+┃  15       var total: i32 = 0;
+┃  16-      total += item.value;
+┃  16+      total += item.value * multiplier;
+┃  17+      if (total > MAX) total = MAX;
+┃  18       return total;
+┃  19   }

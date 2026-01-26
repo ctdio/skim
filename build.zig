@@ -235,6 +235,18 @@ pub fn build(b: *std.Build) void {
     acp_replay_tests.root_module.addImport("vaxis", vaxis);
     const run_acp_replay_tests = b.addRunArtifact(acp_replay_tests);
     test_step.dependOn(&run_acp_replay_tests.step);
+
+    // Snapshot scenario tests
+    const snapshot_scenarios_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/snapshot_scenarios.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    snapshot_scenarios_tests.root_module.addImport("vaxis", vaxis);
+    const run_snapshot_scenarios_tests = b.addRunArtifact(snapshot_scenarios_tests);
+    test_step.dependOn(&run_snapshot_scenarios_tests.step);
 }
 
 // Grammar metadata for building

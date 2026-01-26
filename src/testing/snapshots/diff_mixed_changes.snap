@@ -1,0 +1,7 @@
+┃  10   fn process(data: []const u8) void {
+┃  11-      const result = old_function(data);
+┃  12-      log.debug("old");
+┃  11+      const result = new_function(data);
+┃  12+      log.info("new");
+┃  13+      metrics.increment();
+┃  14       return result;

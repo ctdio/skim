@@ -283,6 +283,7 @@ pub fn calculateDiffStats(file: *const FileDiff) DiffStats {
 
 /// Render a file header to a window
 /// Format: "path/to/file.ext  +N -M"
+/// If frame_alloc is provided, uses it for formatted strings (for snapshot testing).
 pub fn renderFileHeader(
     win: vaxis.Window,
     path: []const u8,
@@ -291,19 +292,41 @@ pub fn renderFileHeader(
     row: usize,
     is_cursor: bool,
 ) void {
+    renderFileHeaderAlloc(win, path, additions, deletions, row, is_cursor, null);
+}
+
+/// Render a file header with allocator for persistent strings (for snapshot testing)
+pub fn renderFileHeaderAlloc(
+    win: vaxis.Window,
+    path: []const u8,
+    additions: usize,
+    deletions: usize,
+    row: usize,
+    is_cursor: bool,
+    frame_alloc: ?Allocator,
+) void {
     if (row >= win.height) return;
 
     // Build path text with trailing spaces
     var path_buf: [1024]u8 = undefined;
-    const path_text = std.fmt.bufPrint(&path_buf, "{s}  ", .{path}) catch path;
+    const path_text = if (frame_alloc) |alloc|
+        std.fmt.allocPrint(alloc, "{s}  ", .{path}) catch path
+    else
+        std.fmt.bufPrint(&path_buf, "{s}  ", .{path}) catch path;
 
     // Build additions text
     var add_buf: [64]u8 = undefined;
-    const add_text = std.fmt.bufPrint(&add_buf, "+{d} ", .{additions}) catch "+0 ";
+    const add_text = if (frame_alloc) |alloc|
+        std.fmt.allocPrint(alloc, "+{d} ", .{additions}) catch "+0 "
+    else
+        std.fmt.bufPrint(&add_buf, "+{d} ", .{additions}) catch "+0 ";
 
     // Build deletions text
     var del_buf: [64]u8 = undefined;
-    const del_text = std.fmt.bufPrint(&del_buf, "-{d}", .{deletions}) catch "-0";
+    const del_text = if (frame_alloc) |alloc|
+        std.fmt.allocPrint(alloc, "-{d}", .{deletions}) catch "-0"
+    else
+        std.fmt.bufPrint(&del_buf, "-{d}", .{deletions}) catch "-0";
 
     // Styles
     const path_style: vaxis.Style = if (is_cursor)
@@ -458,6 +481,144 @@ pub fn renderDiffLine(
         .style = sign_style,
     }};
     _ = win.print(&gutter_seg, .{ .row_offset = @intCast(row), .col_offset = 1 }); // After sidebar
+
+    // Render content after gutter + spacing
+    const content_col = 1 + gutter_width + Layout.gutter_spacing;
+    var content_seg = [_]vaxis.Cell.Segment{.{
+        .text = line.content,
+        .style = style,
+    }};
+    _ = win.print(&content_seg, .{
+        .row_offset = @intCast(row),
+        .col_offset = @intCast(content_col),
+    });
+}
+
+// =============================================================================
+// Snapshot-friendly render functions (with allocator for persistent strings)
+// =============================================================================
+
+/// Render a hunk header with allocator for persistent strings (for snapshot testing)
+pub fn renderHunkHeaderAlloc(
+    win: vaxis.Window,
+    hunk: Hunk,
+    row: usize,
+    is_cursor: bool,
+    alloc: Allocator,
+) void {
+    if (row >= win.height) return;
+
+    // Build hunk header text with allocator
+    const header_text = std.fmt.allocPrint(
+        alloc,
+        "@@ -{d},{d} +{d},{d} @@ {s}",
+        .{
+            hunk.header.old_start,
+            hunk.header.old_count,
+            hunk.header.new_start,
+            hunk.header.new_count,
+            hunk.header.context,
+        },
+    ) catch "@@ ... @@";
+
+    // Style
+    const style: vaxis.Style = if (is_cursor)
+        .{ .fg = Color.white, .bg = Color.cursor_bg }
+    else
+        .{ .fg = Color.dim };
+
+    // Render sidebar
+    const sidebar_style: vaxis.Style = .{ .fg = Color.dim };
+    var sidebar_seg = [_]vaxis.Cell.Segment{.{
+        .text = "┃",
+        .style = sidebar_style,
+    }};
+    _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
+
+    // Render header text after sidebar
+    var header_seg = [_]vaxis.Cell.Segment{.{
+        .text = header_text,
+        .style = style,
+    }};
+    _ = win.print(&header_seg, .{
+        .row_offset = @intCast(row),
+        .col_offset = 1,
+    });
+}
+
+/// Render a diff line with allocator for persistent strings (for snapshot testing)
+pub fn renderDiffLineAlloc(
+    win: vaxis.Window,
+    line: Line,
+    row: usize,
+    gutter_width: usize,
+    is_cursor: bool,
+    alloc: Allocator,
+) void {
+    if (row >= win.height) return;
+
+    // Get line style based on type
+    const base_style: vaxis.Style = switch (line.line_type) {
+        .add => .{ .bg = Color.diff_add_bg },
+        .delete => .{ .bg = Color.diff_delete_bg },
+        .context => .{},
+    };
+
+    const style: vaxis.Style = if (is_cursor)
+        .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
+    else
+        base_style;
+
+    // Render sidebar
+    const sidebar_style: vaxis.Style = .{ .fg = Color.dim };
+    var sidebar_seg = [_]vaxis.Cell.Segment{.{
+        .text = "┃",
+        .style = sidebar_style,
+    }};
+    _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
+
+    // Format line number with allocator
+    const lineno = switch (line.line_type) {
+        .delete => line.old_lineno,
+        .add, .context => line.new_lineno,
+    };
+
+    const num_str = if (lineno) |n|
+        std.fmt.allocPrint(alloc, "{d}", .{n}) catch ""
+    else
+        "";
+
+    // Build gutter text with allocator
+    const padding_needed = gutter_width -| num_str.len -| 1;
+    const sign: u8 = switch (line.line_type) {
+        .add => '+',
+        .delete => '-',
+        .context => ' ',
+    };
+
+    const gutter_text = blk: {
+        var list: std.ArrayList(u8) = .{};
+        list.appendNTimes(alloc, ' ', padding_needed) catch {};
+        list.appendSlice(alloc, num_str) catch {};
+        list.append(alloc, sign) catch {};
+        break :blk list.toOwnedSlice(alloc) catch "";
+    };
+
+    // Get sign style
+    const sign_style: vaxis.Style = if (is_cursor)
+        .{ .fg = Color.cursor_fg, .bg = Color.cursor_bg, .bold = true }
+    else switch (line.line_type) {
+        .add => .{ .fg = Color.diff_sign_add, .bg = Color.diff_add_bg, .bold = true },
+        .delete => .{ .fg = Color.diff_sign_delete, .bg = Color.diff_delete_bg, .bold = true },
+        .context => .{ .fg = Color.dim },
+    };
+
+    // Render gutter
+    var gutter_seg = [_]vaxis.Cell.Segment{.{
+        .text = gutter_text,
+        .style = sign_style,
+    }};
+    _ = win.print(&gutter_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
 
     // Render content after gutter + spacing
     const content_col = 1 + gutter_width + Layout.gutter_spacing;

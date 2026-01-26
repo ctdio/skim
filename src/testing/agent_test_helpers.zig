@@ -414,6 +414,74 @@ pub fn renderPlanEntry(
 }
 
 // =============================================================================
+// Snapshot-friendly render functions (with allocator for persistent strings)
+// =============================================================================
+
+/// Render a tool call with allocator for persistent strings (for snapshot testing)
+pub fn renderToolCallAlloc(
+    win: vaxis.Window,
+    name: []const u8,
+    command: ?[]const u8,
+    status: ToolStatus,
+    stdout: ?[]const u8,
+    row: usize,
+    alloc: std.mem.Allocator,
+) usize {
+    if (row >= win.height) return row;
+
+    var current_row = row;
+
+    // Build status indicator with allocator
+    const status_text = std.fmt.allocPrint(alloc, "[{s}] ", .{status.label()}) catch "[?] ";
+
+    const status_style: vaxis.Style = .{ .fg = status.color(), .bold = true };
+    const name_style: vaxis.Style = .{ .fg = Color.white, .bold = true };
+    const cmd_style: vaxis.Style = .{ .fg = Color.dim };
+
+    // First line: [status] name: command
+    if (command) |cmd| {
+        var segments = [_]vaxis.Cell.Segment{
+            .{ .text = status_text, .style = status_style },
+            .{ .text = name, .style = name_style },
+            .{ .text = ": ", .style = name_style },
+            .{ .text = cmd, .style = cmd_style },
+        };
+        _ = win.print(&segments, .{
+            .row_offset = @intCast(current_row),
+            .col_offset = 0,
+        });
+    } else {
+        var segments = [_]vaxis.Cell.Segment{
+            .{ .text = status_text, .style = status_style },
+            .{ .text = name, .style = name_style },
+        };
+        _ = win.print(&segments, .{
+            .row_offset = @intCast(current_row),
+            .col_offset = 0,
+        });
+    }
+    current_row += 1;
+
+    // Output line if present (for completed tools)
+    if (stdout) |output| {
+        if (current_row < win.height and output.len > 0) {
+            const output_style: vaxis.Style = .{ .fg = Color.dim };
+            var output_seg = [_]vaxis.Cell.Segment{
+                .{ .text = "  ", .style = output_style },
+                .{ .text = output, .style = output_style },
+            };
+            _ = win.print(&output_seg, .{
+                .row_offset = @intCast(current_row),
+                .col_offset = 0,
+            });
+            current_row += 1;
+        }
+    }
+
+    return current_row;
+}
+
+// =============================================================================
 // Tests - Builder
 // =============================================================================
 const harness = @import("harness.zig");

@@ -1,0 +1,8 @@
+You: How do I fix the null pointer error?
+
+Agent: Let me check the code.
+
+[Done] Read: src/parser.zig
+  // parser implementation
+
+Agent: Found it! The issue is on line 42.

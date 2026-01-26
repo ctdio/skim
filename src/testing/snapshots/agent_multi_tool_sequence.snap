@@ -1,0 +1,12 @@
+You: Find and fix the bug in the parser
+
+Agent: Let me search for the parser file.
+
+[Done] Glob: src/**/*parser*.zig
+  src/parser.zig
+
+[Done] Read: src/parser.zig
+  fn parse() { ... }
+
+[Done] Edit: src/parser.zig:42
+  Fixed null check

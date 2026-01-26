@@ -1,0 +1,6 @@
+src/old_name.zig -> src/new_name.zig  +2 -1
+┃@@ -1,3 +1,4 @@ module header
+┃  1   //! Old module description
+┃  2-  const OldName = @This();
+┃  2+  const NewName = @This();
+┃  3+  pub const VERSION = "2.0.0";
