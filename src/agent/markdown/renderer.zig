@@ -42,6 +42,8 @@ pub const MarkdownRenderer = struct {
     highlight_ctx: HighlightContext,
     /// Maximum width for rendering (affects tables, code blocks)
     max_width: usize,
+    /// Track if we rendered a formatted table (box-drawn, not dimmed)
+    rendered_formatted_table: bool,
 
     /// Initialize a new markdown renderer
     pub fn init(allocator: std.mem.Allocator, md_colors: MarkdownColors) MarkdownRenderer {
@@ -61,6 +63,7 @@ pub const MarkdownRenderer = struct {
             .ended_major_block = false,
             .highlight_ctx = highlight_ctx,
             .max_width = max_width,
+            .rendered_formatted_table = false,
         };
     }
 
@@ -234,6 +237,57 @@ pub const MarkdownRenderer = struct {
 
     /// Render inline content using the inline grammar parser
     fn renderInlineContent(self: *MarkdownRenderer, content: []const u8, md_parser: *const MarkdownParser) std.mem.Allocator.Error!void {
+        if (content.len == 0) return;
+
+        // Check if content contains table-like patterns.
+        // If so, split and render: non-table content normally, table content as dimmed.
+        // This prevents flashing to plain text when tree-sitter briefly doesn't
+        // recognize table content during streaming.
+        if (findTableContentStart(content)) |table_start| {
+            // Render content before the table normally
+            const before_table = std.mem.trimRight(u8, content[0..table_start], " \t\n\r");
+            if (before_table.len > 0) {
+                const inline_tree = md_parser.parseInline(before_table);
+                if (inline_tree) |tree| {
+                    defer tree.destroy();
+                    try self.renderInlineNode(tree.rootNode(), before_table, 0);
+                } else {
+                    try self.spans.append(self.allocator, .{
+                        .text = before_table,
+                        .style = self.currentStyle(),
+                        .indent = self.getCurrentIndent(),
+                        .node_type = .text,
+                    });
+                }
+            }
+
+            // Render table content as dimmed
+            const table_content = content[table_start..];
+            if (table_content.len > 0) {
+                // Add newline separator if we had content before
+                if (before_table.len > 0) {
+                    try self.spans.append(self.allocator, .{
+                        .text = "\n",
+                        .style = self.colors.text,
+                        .indent = 0,
+                        .node_type = .softbreak,
+                    });
+                }
+
+                const pending_style = vaxis.Style{
+                    .fg = .{ .index = 8 }, // Dim gray
+                };
+                try self.spans.append(self.allocator, .{
+                    .text = table_content,
+                    .style = pending_style,
+                    .indent = 0,
+                    .node_type = .table, // Consistent layout with formatted tables
+                });
+            }
+            return;
+        }
+
+        // No table content detected - render normally
         const inline_tree = md_parser.parseInline(content) orelse {
             // Fallback: emit raw text if inline parsing fails
             try self.spans.append(self.allocator, .{
@@ -248,6 +302,41 @@ pub const MarkdownRenderer = struct {
 
         const root = inline_tree.rootNode();
         try self.renderInlineNode(root, content, 0);
+    }
+
+    /// Find where table content starts in the text.
+    /// Returns byte offset of first line that starts a table pattern (2+ consecutive | lines),
+    /// or null if no table content found.
+    fn findTableContentStart(content: []const u8) ?usize {
+        var line_start: usize = 0;
+        var prev_line_was_pipe = false;
+        var prev_line_start: usize = 0;
+
+        for (content, 0..) |c, i| {
+            if (c == '\n' or i == content.len - 1) {
+                const line_end = if (c == '\n') i else i + 1;
+                const line = std.mem.trimLeft(u8, content[line_start..line_end], " \t");
+                const is_pipe_line = line.len > 0 and line[0] == '|';
+
+                if (is_pipe_line and prev_line_was_pipe) {
+                    // Found 2 consecutive pipe lines - table starts at prev line
+                    return prev_line_start;
+                }
+
+                if (is_pipe_line) {
+                    prev_line_was_pipe = true;
+                    prev_line_start = line_start;
+                } else if (line.len > 0) {
+                    // Non-empty, non-pipe line - reset
+                    prev_line_was_pipe = false;
+                }
+                // Empty lines don't reset (tables can have blank lines before them)
+
+                line_start = i + 1;
+            }
+        }
+
+        return null;
     }
 
     /// Recursively render inline AST nodes
@@ -734,6 +823,41 @@ pub const MarkdownRenderer = struct {
             error.OutOfMemory => return error.OutOfMemory,
         };
 
+        // If table rendering produced no spans, the table structure couldn't be parsed.
+        // This can happen during streaming when the table is incomplete.
+        // Fall back to rendering the raw text so content doesn't disappear.
+        if (table_result.spans.items.len == 0) {
+            table_result.spans.deinit(self.allocator);
+            table_result.strings.deinit(self.allocator);
+
+            // Render raw table text as dimmed to indicate it's being processed
+            // Keep node_type = .table so layout behavior (no wrapping) is consistent
+            // with the final formatted table - only the visual style changes
+            const raw_text = md_parser.getNodeText(node);
+            if (raw_text.len > 0) {
+                // Use a dimmed style to indicate pending table
+                const pending_style = vaxis.Style{
+                    .fg = .{ .index = 8 }, // Dim gray
+                };
+                try self.spans.append(self.allocator, .{
+                    .text = raw_text,
+                    .style = pending_style,
+                    .indent = 0,
+                    .node_type = .table, // Keep as table for consistent layout
+                });
+                try self.spans.append(self.allocator, .{
+                    .text = "\n",
+                    .style = self.colors.text,
+                    .indent = 0,
+                    .node_type = .softbreak,
+                });
+            }
+            return;
+        }
+
+        // Successfully rendered a formatted table!
+        self.rendered_formatted_table = true;
+
         // Append all table spans to our span list
         for (table_result.spans.items) |span| {
             try self.spans.append(self.allocator, span);
@@ -904,6 +1028,125 @@ fn isMarkerNode(node_type_str: []const u8) bool {
         }
     }
     return false;
+}
+
+/// Check if a line looks like a table row (starts with optional whitespace then |)
+fn looksLikeTableRow(line: []const u8) bool {
+    const trimmed = std.mem.trimLeft(u8, line, " \t");
+    return trimmed.len > 0 and trimmed[0] == '|';
+}
+
+/// Check if a line looks like a table delimiter row (contains |---| pattern)
+fn looksLikeDelimiterRow(line: []const u8) bool {
+    // Must contain at least one | followed by dashes
+    const trimmed = std.mem.trimLeft(u8, line, " \t");
+    if (trimmed.len < 3) return false;
+    if (trimmed[0] != '|') return false;
+
+    // Check for pattern: |---| or |:---| or |---:| etc.
+    var has_dash_sequence = false;
+    var consecutive_dashes: usize = 0;
+    for (trimmed) |c| {
+        if (c == '-') {
+            consecutive_dashes += 1;
+            if (consecutive_dashes >= 3) {
+                has_dash_sequence = true;
+            }
+        } else {
+            consecutive_dashes = 0;
+        }
+    }
+    return has_dash_sequence;
+}
+
+/// Find where incomplete table content starts at the end of text.
+/// Returns the byte position where the incomplete table starts, or null if no incomplete table.
+/// An incomplete table is: table-like rows at the end that don't form a complete table
+/// (missing delimiter row, or have delimiter but no body rows yet).
+fn findIncompleteTableStart(text: []const u8) ?usize {
+    if (text.len == 0) return null;
+
+    // Split into lines and check from the end
+    var lines_list: [64]struct { start: usize, end: usize } = undefined;
+    var line_count: usize = 0;
+
+    var line_start: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (text[i] == '\n') {
+            if (line_count < 64) {
+                lines_list[line_count] = .{ .start = line_start, .end = i };
+                line_count += 1;
+            }
+            line_start = i + 1;
+        }
+    }
+    // Add last line if it doesn't end with newline
+    if (line_start < text.len and line_count < 64) {
+        lines_list[line_count] = .{ .start = line_start, .end = text.len };
+        line_count += 1;
+    }
+
+    if (line_count == 0) return null;
+
+    // Work backwards from the end to find table-like lines
+    var table_start_idx: ?usize = null;
+    var has_delimiter = false;
+    var header_count: usize = 0;
+    var body_count: usize = 0;
+
+    var j: usize = line_count;
+    while (j > 0) {
+        j -= 1;
+        const line_info = lines_list[j];
+        const line = text[line_info.start..line_info.end];
+        const trimmed_line = std.mem.trim(u8, line, " \t\r");
+
+        if (trimmed_line.len == 0) {
+            // Empty line breaks the table pattern
+            break;
+        }
+
+        if (looksLikeDelimiterRow(trimmed_line)) {
+            has_delimiter = true;
+            table_start_idx = line_info.start;
+        } else if (looksLikeTableRow(trimmed_line)) {
+            if (has_delimiter) {
+                // This is either a header row (above delimiter) or body row (below)
+                // Since we're going backwards, rows after we found delimiter are headers
+                header_count += 1;
+            } else {
+                // Haven't found delimiter yet, this could be a body row or incomplete
+                body_count += 1;
+            }
+            table_start_idx = line_info.start;
+        } else {
+            // Non-table line, stop
+            break;
+        }
+    }
+
+    // If we found table-like content, check if it's incomplete
+    if (table_start_idx) |start| {
+        // A complete table needs: header + delimiter + at least one body row
+        // If we have delimiter but no body rows yet, it's incomplete
+        // If we have rows but no delimiter, it's incomplete
+        if (!has_delimiter) {
+            // No delimiter row found - this is definitely incomplete
+            return start;
+        }
+        if (body_count == 0) {
+            // Has delimiter but no body rows after it - incomplete
+            return start;
+        }
+        // Has header, delimiter, and body - looks complete
+        // If tree-sitter didn't recognize it as a table, it might have
+        // formatting issues, but we should show it since the user wrote it.
+        // Only hide truly incomplete tables during streaming.
+        return null;
+    }
+
+    return null;
 }
 
 // =============================================================================
@@ -1364,4 +1607,116 @@ test "render table respects max_width" {
 
     // Verify it doesn't crash and produces output
     try std.testing.expect(spans.len > 0);
+}
+
+// =============================================================================
+// Incomplete Table Detection Tests
+// =============================================================================
+
+test "looksLikeTableRow - basic pipe row" {
+    try std.testing.expect(looksLikeTableRow("| Header 1 | Header 2 |"));
+    try std.testing.expect(looksLikeTableRow("  | Header 1 | Header 2 |")); // with leading spaces
+    try std.testing.expect(looksLikeTableRow("\t| Header 1 |")); // with tab
+}
+
+test "looksLikeTableRow - not table row" {
+    try std.testing.expect(!looksLikeTableRow("Normal text"));
+    try std.testing.expect(!looksLikeTableRow(""));
+    try std.testing.expect(!looksLikeTableRow("Text with | pipe in middle"));
+}
+
+test "looksLikeDelimiterRow - valid delimiters" {
+    try std.testing.expect(looksLikeDelimiterRow("|---|"));
+    try std.testing.expect(looksLikeDelimiterRow("| --- |"));
+    try std.testing.expect(looksLikeDelimiterRow("|:---|"));
+    try std.testing.expect(looksLikeDelimiterRow("|---:|"));
+    try std.testing.expect(looksLikeDelimiterRow("|:---:|"));
+    try std.testing.expect(looksLikeDelimiterRow("|-------|-------|"));
+}
+
+test "looksLikeDelimiterRow - not delimiter" {
+    try std.testing.expect(!looksLikeDelimiterRow("| Header |"));
+    try std.testing.expect(!looksLikeDelimiterRow("| -- |")); // only 2 dashes
+    try std.testing.expect(!looksLikeDelimiterRow("Normal text"));
+    try std.testing.expect(!looksLikeDelimiterRow(""));
+}
+
+test "findIncompleteTableStart - no table content" {
+    try std.testing.expect(findIncompleteTableStart("Normal text here") == null);
+    try std.testing.expect(findIncompleteTableStart("") == null);
+    try std.testing.expect(findIncompleteTableStart("Text with | pipe") == null);
+}
+
+test "findIncompleteTableStart - header only (incomplete)" {
+    const text = "Some text\n| Header 1 | Header 2 |";
+    const start = findIncompleteTableStart(text);
+    try std.testing.expect(start != null);
+    try std.testing.expectEqualStrings("| Header 1 | Header 2 |", text[start.?..]);
+}
+
+test "findIncompleteTableStart - header and delimiter only (incomplete)" {
+    const text = "Some text\n| Header 1 |\n|---------|";
+    const start = findIncompleteTableStart(text);
+    try std.testing.expect(start != null);
+    // Should start at the header row
+    try std.testing.expect(std.mem.startsWith(u8, text[start.?..], "| Header 1 |"));
+}
+
+test "findIncompleteTableStart - complete table not hidden" {
+    // A structurally complete table (header + delimiter + body) should not be hidden
+    // even if tree-sitter didn't recognize it - the user intentionally wrote it
+    const text = "Text\n| H |\n|---|\n| B |";
+    const start = findIncompleteTableStart(text);
+    try std.testing.expect(start == null);
+}
+
+test "findIncompleteTableStart - table in middle with text after" {
+    // If there's non-table content after table rows, they're not at the end
+    const text = "| Header |\n|--------|\n| Cell |\nNormal text after";
+    const start = findIncompleteTableStart(text);
+    // Should be null because the table-like content is followed by non-table text
+    try std.testing.expect(start == null);
+}
+
+test "render table-like content in paragraph as dimmed" {
+    // Test that table-like content in a paragraph is rendered as dimmed
+    // This prevents flashing to plain text during streaming
+    var parser = try MarkdownParser.init();
+    defer parser.deinit();
+
+    // Two consecutive lines starting with | should be detected as table content
+    const table_in_paragraph = "Some intro text.\n| Header 1 | Header 2 |\n|----------|----------|";
+    try parser.parse(table_in_paragraph);
+
+    var renderer = MarkdownRenderer.init(std.testing.allocator, colors_mod.default);
+    defer renderer.deinit();
+
+    const spans = try renderer.render(&parser);
+
+    // Should find the table header text
+    var found_table_content = false;
+    var table_is_dimmed = false;
+    for (spans) |span| {
+        if (std.mem.indexOf(u8, span.text, "Header 1") != null) {
+            found_table_content = true;
+            // Check if it's dimmed (fg index 8)
+            switch (span.style.fg) {
+                .index => |idx| table_is_dimmed = (idx == 8),
+                else => {},
+            }
+            break;
+        }
+    }
+    try std.testing.expect(found_table_content);
+    try std.testing.expect(table_is_dimmed);
+
+    // The intro text should also be present
+    var found_intro = false;
+    for (spans) |span| {
+        if (std.mem.indexOf(u8, span.text, "intro") != null) {
+            found_intro = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_intro);
 }

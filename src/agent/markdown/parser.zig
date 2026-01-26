@@ -5,7 +5,7 @@
 //! Supports incremental parsing for streaming content updates.
 
 const std = @import("std");
-const ts = @import("tree-sitter");
+pub const ts = @import("tree-sitter");
 const types = @import("types.zig");
 
 pub const NodeType = types.NodeType;

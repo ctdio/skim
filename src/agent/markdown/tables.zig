@@ -96,7 +96,15 @@ pub const TableRenderer = struct {
         // Parse the table structure from tree-sitter nodes
         try self.parseTableNode(node, md_parser, &header_cells, &alignments, &body_rows);
 
-        // If no valid table data found, return empty
+        // If tree-sitter parsing failed, try text-based fallback parsing.
+        // This handles cases where tree-sitter's AST is temporarily inconsistent
+        // during streaming (e.g., when a new row is being typed).
+        if (header_cells.items.len == 0) {
+            const raw_text = md_parser.getNodeText(node);
+            try self.parseTableFromText(raw_text, &header_cells, &alignments, &body_rows);
+        }
+
+        // If still no valid table data, return empty to trigger dimmed fallback
         if (header_cells.items.len == 0) {
             return result;
         }
@@ -174,6 +182,107 @@ pub const TableRenderer = struct {
                 }
             }
         }
+    }
+
+    /// Fallback text-based table parser for when tree-sitter AST is inconsistent.
+    /// Parses table structure directly from raw text.
+    fn parseTableFromText(
+        self: *TableRenderer,
+        text: []const u8,
+        header_cells: *std.ArrayList([]const u8),
+        alignments: *std.ArrayList(Alignment),
+        body_rows: *std.ArrayList(std.ArrayList([]const u8)),
+    ) !void {
+        var line_iter = std.mem.splitScalar(u8, text, '\n');
+        var found_header = false;
+        var found_delimiter = false;
+
+        while (line_iter.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0) continue;
+
+            // Skip lines that don't start with |
+            if (trimmed[0] != '|') continue;
+
+            if (!found_header) {
+                // First | line is header
+                try self.parseCellsFromText(trimmed, header_cells);
+                found_header = true;
+            } else if (!found_delimiter) {
+                // Second | line should be delimiter
+                if (isDelimiterRow(trimmed)) {
+                    try self.parseAlignmentsFromText(trimmed, alignments);
+                    found_delimiter = true;
+                } else {
+                    // Not a delimiter - might be malformed, treat as body
+                    var row: std.ArrayList([]const u8) = .{};
+                    try self.parseCellsFromText(trimmed, &row);
+                    if (row.items.len > 0) {
+                        try body_rows.append(self.allocator, row);
+                    }
+                }
+            } else {
+                // After delimiter, all | lines are body rows
+                var row: std.ArrayList([]const u8) = .{};
+                try self.parseCellsFromText(trimmed, &row);
+                if (row.items.len > 0) {
+                    try body_rows.append(self.allocator, row);
+                }
+            }
+        }
+    }
+
+    /// Parse cells from a text line (split by |)
+    fn parseCellsFromText(
+        self: *TableRenderer,
+        line: []const u8,
+        cells: *std.ArrayList([]const u8),
+    ) !void {
+        var iter = std.mem.splitScalar(u8, line, '|');
+        while (iter.next()) |cell| {
+            const trimmed = std.mem.trim(u8, cell, " \t");
+            // Skip empty cells at start/end from leading/trailing |
+            if (trimmed.len > 0 or cells.items.len > 0) {
+                // Only add non-empty cells, or empty cells in the middle
+                if (trimmed.len > 0) {
+                    try cells.append(self.allocator, trimmed);
+                }
+            }
+        }
+    }
+
+    /// Parse alignments from delimiter row text
+    fn parseAlignmentsFromText(
+        self: *TableRenderer,
+        line: []const u8,
+        alignments: *std.ArrayList(Alignment),
+    ) !void {
+        var iter = std.mem.splitScalar(u8, line, '|');
+        while (iter.next()) |cell| {
+            const trimmed = std.mem.trim(u8, cell, " \t");
+            if (trimmed.len == 0) continue;
+            // Check if it looks like a delimiter cell (contains ---)
+            if (std.mem.indexOf(u8, trimmed, "---") != null or
+                std.mem.indexOf(u8, trimmed, "--") != null)
+            {
+                try alignments.append(self.allocator, parseAlignment(trimmed));
+            }
+        }
+    }
+
+    /// Check if a line looks like a delimiter row
+    fn isDelimiterRow(line: []const u8) bool {
+        // Must contain at least one sequence of 3+ dashes
+        var consecutive_dashes: usize = 0;
+        for (line) |c| {
+            if (c == '-') {
+                consecutive_dashes += 1;
+                if (consecutive_dashes >= 3) return true;
+            } else {
+                consecutive_dashes = 0;
+            }
+        }
+        return false;
     }
 
     /// Parse cells from a row node

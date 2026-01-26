@@ -148,6 +148,9 @@ pub const ChatLineMap = struct {
     last_msg_highlights_start: usize, // Cached index where last message's highlights start
     // Reference to expanded user messages set (set during build, used for collapsed/expanded state)
     expanded_user_messages: ?*const std.AutoHashMap(usize, void),
+    // Track which message indices have successfully rendered formatted tables.
+    // Once a message renders a formatted table, we should never downgrade to dimmed/plain.
+    messages_with_formatted_tables: std.AutoHashMap(usize, void),
 
     /// Initialize an empty chat line map
     pub fn init(allocator: Allocator) ChatLineMap {
@@ -163,6 +166,7 @@ pub const ChatLineMap = struct {
             .last_msg_strings_start = 0,
             .last_msg_highlights_start = 0,
             .expanded_user_messages = null,
+            .messages_with_formatted_tables = std.AutoHashMap(usize, void).init(allocator),
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message
@@ -184,6 +188,7 @@ pub const ChatLineMap = struct {
         self.freeHighlights(0);
         self.highlights.deinit(self.allocator);
         self.records.deinit(self.allocator);
+        self.messages_with_formatted_tables.deinit();
     }
 
     /// Free highlight arrays starting from index
@@ -214,6 +219,8 @@ pub const ChatLineMap = struct {
         self.freeHighlights(0);
         self.highlights.clearRetainingCapacity();
         self.records.clearRetainingCapacity();
+        // Clear table tracking - will be repopulated during this build
+        self.messages_with_formatted_tables.clearRetainingCapacity();
 
         self.wrap_width = wrap_width;
         self.message_count = messages.len;
@@ -414,6 +421,19 @@ pub const ChatLineMap = struct {
 
         // Validate the cached index is reasonable
         if (idx <= self.records.items.len) {
+            // Check if this update would downgrade a formatted table.
+            // If a message previously rendered a formatted table, we should only update
+            // if the new content also has a complete table in the parse tree.
+            // This prevents flashing during streaming when tables are temporarily incomplete.
+            if ((msg.role == .agent or msg.role == .user) and
+                self.messages_with_formatted_tables.contains(last_msg_idx))
+            {
+                if (!hasCompleteTableInParseTree(msg.*)) {
+                    // Skip this update entirely - keep old formatted table content
+                    return;
+                }
+            }
+
             // Free strings added by the last message (O(1) using cached index)
             const strings_start = self.last_msg_strings_start;
             if (strings_start < self.strings.items.len) {
@@ -527,6 +547,48 @@ pub const ChatLineMap = struct {
                 // Skip completed Edit/Write tools even without a diff
                 // (the diff might have arrived before the tool_call was added to state)
                 if (msg.tool_status == .completed) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// Check if a message's markdown parse tree contains a complete table.
+    /// A complete table has a pipe_table node with a delimiter_row child.
+    /// This is used to avoid downgrading formatted tables during streaming.
+    fn hasCompleteTableInParseTree(msg: Message) bool {
+        const md_parser = msg.md_parser orelse return false;
+        const root = md_parser.getRoot() orelse return false;
+        return checkNodeForCompleteTable(root);
+    }
+
+    /// Recursively check if a node or its descendants contain a complete table.
+    fn checkNodeForCompleteTable(node: markdown.parser.ts.Node) bool {
+        const kind = node.kind();
+
+        // Check for pipe_table (the table container node)
+        if (std.mem.eql(u8, kind, "pipe_table")) {
+            // Check if it has a delimiter_row child (makes it a complete table)
+            const child_count = node.childCount();
+            var i: u32 = 0;
+            while (i < child_count) : (i += 1) {
+                if (node.child(i)) |child| {
+                    const child_kind = child.kind();
+                    if (std.mem.eql(u8, child_kind, "pipe_table_delimiter_row")) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Recursively check children
+        const child_count = node.childCount();
+        var i: u32 = 0;
+        while (i < child_count) : (i += 1) {
+            if (node.child(i)) |child| {
+                if (checkNodeForCompleteTable(child)) {
                     return true;
                 }
             }
@@ -1055,6 +1117,9 @@ pub const ChatLineMap = struct {
     fn addMarkdownContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize, highlighter: ?*SyntaxHighlighter) !void {
         const md_parser = &(msg.md_parser orelse return);
 
+        // Check if this message previously rendered a formatted table
+        const had_formatted_table = self.messages_with_formatted_tables.contains(msg_idx);
+
         // Create highlight context if we have a highlighter
         const highlight_ctx = if (highlighter) |hl|
             HighlightContext{ .ctx = @ptrCast(hl), .func = highlightCallback }
@@ -1066,10 +1131,26 @@ pub const ChatLineMap = struct {
         defer renderer.deinit();
 
         const spans = renderer.render(md_parser) catch {
+            // If we previously had a formatted table, don't downgrade to plain text
+            // Just skip this render - the old content will be preserved
+            if (had_formatted_table) {
+                return;
+            }
             // Fall back to plain text if rendering fails
             try self.addPlainTextContent(global_line, msg_idx, msg, wrap_width);
             return;
         };
+
+        // If this message previously had a formatted table but we didn't render one now,
+        // skip this update to avoid flashing. The old formatted table content will be preserved.
+        if (had_formatted_table and !renderer.rendered_formatted_table) {
+            return;
+        }
+
+        // Track if we rendered a formatted table
+        if (renderer.rendered_formatted_table) {
+            self.messages_with_formatted_tables.put(msg_idx, {}) catch {};
+        }
 
         // Base indent for agent messages
         const base_indent: usize = 1;

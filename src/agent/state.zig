@@ -2092,6 +2092,9 @@ pub const Message = struct {
     md_parser: ?MarkdownParser = null,
     md_tree_valid: bool = false,
     md_parsed_len: usize = 0, // Length when tree was last parsed (for incremental updates)
+    // Track if this message has successfully rendered a formatted table.
+    // Once true, we should never downgrade to dimmed/plain text rendering.
+    had_formatted_table: bool = false,
 
     pub const ToolStatus = enum {
         pending,
