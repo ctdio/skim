@@ -1,0 +1,19 @@
+┌────────────┬───────┬────────────────┬─────────┬─────────────────────┬───────────────────────────┬──────────────────────────┬───────────────────┐
+│ Language   │ Year  │ Paradigm       │ Typing  │ Memory Management   │ Primary Use Case          │ Notable Feature          │ Creator           │
+├────────────┼───────┼────────────────┼─────────┼─────────────────────┼───────────────────────────┼──────────────────────────┼───────────────────┤
+│ Zig        │ 2016  │ Imperative     │ Static  │ Manual              │ Systems programming       │ Comptime metaprogramming │ Andrew Kelley     │
+├────────────┼───────┼────────────────┼─────────┼─────────────────────┼───────────────────────────┼──────────────────────────┼───────────────────┤
+│ Rust       │ 2010  │ Multi-paradigm │ Static  │ Ownership/Borrowing │ Systems programming       │ Borrow checker           │ Graydon Hoare     │
+├────────────┼───────┼────────────────┼─────────┼─────────────────────┼───────────────────────────┼──────────────────────────┼───────────────────┤
+│ Go         │ 2009  │ Imperative     │ Static  │ Garbage collected   │ Cloud infrastructure      │ Goroutines and channels  │ Rob Pike          │
+├────────────┼───────┼────────────────┼─────────┼─────────────────────┼───────────────────────────┼──────────────────────────┼───────────────────┤
+│ Python     │ 1991  │ Multi-paradigm │ Dynamic │ Garbage collected   │ General purpose scripting │ Readable syntax          │ Guido van Rossum  │
+├────────────┼───────┼────────────────┼─────────┼─────────────────────┼───────────────────────────┼──────────────────────────┼───────────────────┤
+│ JavaScript │ 1995  │ Multi-paradigm │ Dynamic │ Garbage collected   │ Web development           │ Event loop model         │ Brendan Eich      │
+├────────────┼───────┼────────────────┼─────────┼─────────────────────┼───────────────────────────┼──────────────────────────┼───────────────────┤
+│ TypeScript │ 2012  │ Multi-paradigm │ Static  │ Garbage collected   │ Large-scale web apps      │ Structural typing        │ Microsoft         │
+├────────────┼───────┼────────────────┼─────────┼─────────────────────┼───────────────────────────┼──────────────────────────┼───────────────────┤
+│ C          │ 1972  │ Imperative     │ Static  │ Manual              │ Operating systems         │ Portability              │ Dennis Ritchie    │
+├────────────┼───────┼────────────────┼─────────┼─────────────────────┼───────────────────────────┼──────────────────────────┼───────────────────┤
+│ C++        │ 1985  │ Multi-paradigm │ Static  │ Manual with RAII    │ Games and systems         │ Template metaprogramming │ Bjarne Stroustrup │
+└────────────┴───────┴────────────────┴─────────┴─────────────────────┴───────────────────────────┴──────────────────────────┴───────────────────┘

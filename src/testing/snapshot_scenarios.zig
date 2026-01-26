@@ -1019,6 +1019,37 @@ test "snapshot: md_table_narrow_terminal" {
     try snapshot.expectSnapshot(allocator, "md_table_narrow_terminal", text);
 }
 
+test "snapshot: md_table_many_columns" {
+    const allocator = std.testing.allocator;
+    // Wide terminal to test large table rendering with many columns
+    var ctx = try harness.createTestContext(allocator, 160, 30);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame_alloc = ctx.frameAllocator();
+
+    // Large table with 8 columns and longer content to stress-test border rendering
+    const table_md =
+        \\| Language | Year | Paradigm | Typing | Memory Management | Primary Use Case | Notable Feature | Creator |
+        \\|:---------|:-----|:---------|:-------|:------------------|:-----------------|:----------------|:--------|
+        \\| Zig | 2016 | Imperative | Static | Manual | Systems programming | Comptime metaprogramming | Andrew Kelley |
+        \\| Rust | 2010 | Multi-paradigm | Static | Ownership/Borrowing | Systems programming | Borrow checker | Graydon Hoare |
+        \\| Go | 2009 | Imperative | Static | Garbage collected | Cloud infrastructure | Goroutines and channels | Rob Pike |
+        \\| Python | 1991 | Multi-paradigm | Dynamic | Garbage collected | General purpose scripting | Readable syntax | Guido van Rossum |
+        \\| JavaScript | 1995 | Multi-paradigm | Dynamic | Garbage collected | Web development | Event loop model | Brendan Eich |
+        \\| TypeScript | 2012 | Multi-paradigm | Static | Garbage collected | Large-scale web apps | Structural typing | Microsoft |
+        \\| C | 1972 | Imperative | Static | Manual | Operating systems | Portability | Dennis Ritchie |
+        \\| C++ | 1985 | Multi-paradigm | Static | Manual with RAII | Games and systems | Template metaprogramming | Bjarne Stroustrup |
+    ;
+
+    try md_helpers.renderMarkdown(frame_alloc, win, table_md, 160);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "md_table_many_columns", text);
+}
+
 test "snapshot: md_code_block" {
     const allocator = std.testing.allocator;
     var ctx = try harness.createTestContext(allocator, 50, 6);
