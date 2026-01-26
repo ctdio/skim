@@ -946,42 +946,77 @@ test "snapshot: md_horizontal_rule" {
 
 test "snapshot: md_simple_table" {
     const allocator = std.testing.allocator;
-    var ctx = try harness.createTestContext(allocator, 50, 6);
+    var ctx = try harness.createTestContext(allocator, 50, 8);
     defer ctx.deinit();
 
     const win = ctx.window();
+    // Use frame allocator so strings persist until ctx.deinit()
+    const frame_alloc = ctx.frameAllocator();
 
-    // Table header row
-    var col: usize = 0;
-    col = md_helpers.renderTableBorder(win, "| ", 0, col);
-    col = md_helpers.renderTableHeader(win, "Name", 0, col);
-    col = md_helpers.renderTableBorder(win, " | ", 0, col);
-    col = md_helpers.renderTableHeader(win, "Value", 0, col);
-    _ = md_helpers.renderTableBorder(win, " |", 0, col);
+    // Use full markdown rendering pipeline
+    const table_md =
+        \\| Name | Value |
+        \\|:-----|:------|
+        \\| foo  | 42    |
+        \\| bar  | 99    |
+    ;
 
-    // Separator row
-    _ = md_helpers.renderTableBorder(win, "|------|-------|", 1, 0);
-
-    // Data row 1
-    col = 0;
-    col = md_helpers.renderTableBorder(win, "| ", 2, col);
-    col = md_helpers.renderTableCell(win, "foo", 2, col);
-    col = md_helpers.renderTableBorder(win, "  | ", 2, col);
-    col = md_helpers.renderTableCell(win, "42", 2, col);
-    _ = md_helpers.renderTableBorder(win, "    |", 2, col);
-
-    // Data row 2
-    col = 0;
-    col = md_helpers.renderTableBorder(win, "| ", 3, col);
-    col = md_helpers.renderTableCell(win, "bar", 3, col);
-    col = md_helpers.renderTableBorder(win, "  | ", 3, col);
-    col = md_helpers.renderTableCell(win, "99", 3, col);
-    _ = md_helpers.renderTableBorder(win, "    |", 3, col);
+    try md_helpers.renderMarkdown(frame_alloc, win, table_md, 50);
 
     const text = try ctx.captureToText();
     defer allocator.free(text);
 
     try snapshot.expectSnapshot(allocator, "md_simple_table", text);
+}
+
+test "snapshot: md_wide_table_truncated" {
+    const allocator = std.testing.allocator;
+    // Use 80 width terminal, but table has many columns
+    var ctx = try harness.createTestContext(allocator, 80, 12);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame_alloc = ctx.frameAllocator();
+
+    // Table with many columns that must be truncated
+    const wide_table_md =
+        \\| Category | Feature | Status | Priority | Owner | Notes |
+        \\|:---------|:--------|:-------|:---------|:------|:------|
+        \\| Core | Event Loop | Completed | P0 | @alice | Uses io_uring |
+        \\| Rendering | Virtual Scroll | In Progress | P1 | @bob | Renders visible only |
+        \\| Git | Blame View | Planned | P2 | TBD | Shows commit info |
+    ;
+
+    try md_helpers.renderMarkdown(frame_alloc, win, wide_table_md, 80);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "md_wide_table_truncated", text);
+}
+
+test "snapshot: md_table_narrow_terminal" {
+    const allocator = std.testing.allocator;
+    // Very narrow terminal - 40 chars
+    var ctx = try harness.createTestContext(allocator, 40, 10);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame_alloc = ctx.frameAllocator();
+
+    const table_md =
+        \\| Column A | Column B | Column C |
+        \\|:---------|:---------|:---------|
+        \\| Long content here | More text | Extra |
+        \\| Another row | Data | Values |
+    ;
+
+    try md_helpers.renderMarkdown(frame_alloc, win, table_md, 40);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "md_table_narrow_terminal", text);
 }
 
 test "snapshot: md_code_block" {

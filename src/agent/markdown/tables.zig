@@ -74,6 +74,9 @@ pub const TableRenderer = struct {
         };
         errdefer result.deinit();
 
+        // Ensure max_width is reasonable (minimum 20 for any table)
+        const safe_max_width = @max(max_width, 20);
+
         // Extract table data
         var header_cells: std.ArrayList([]const u8) = .{};
         defer header_cells.deinit(self.allocator);
@@ -102,7 +105,10 @@ pub const TableRenderer = struct {
         const widths = try self.allocator.alloc(usize, num_cols);
         defer self.allocator.free(widths);
 
-        self.calculateWidths(header_cells.items, body_rows.items, widths, max_width);
+        // Initialize to safe default before calculation
+        @memset(widths, 5);
+
+        self.calculateWidths(header_cells.items, body_rows.items, widths, safe_max_width);
 
         // Ensure alignments match column count
         while (alignments.items.len < num_cols) {
@@ -228,6 +234,8 @@ pub const TableRenderer = struct {
     }
 
     /// Calculate column widths based on content
+    /// Uses proportional distribution when space is constrained
+    /// Guarantees total width <= max_total
     fn calculateWidths(
         self: *TableRenderer,
         header: []const []const u8,
@@ -236,14 +244,24 @@ pub const TableRenderer = struct {
         max_total: usize,
     ) void {
         _ = self;
-        // Initialize with minimum width and header content
+        const absolute_min_width = 5; // Absolute minimum (enough for "ab…")
+
+        // Calculate overhead
+        const overhead_per_col: usize = 3; // " │ " between columns
+        const border_overhead: usize = 2; // "│ " at start
+        const total_overhead = border_overhead + (widths.len * overhead_per_col);
+
+        // Calculate available content space
+        const available_content = if (max_total > total_overhead) max_total - total_overhead else widths.len * absolute_min_width;
+
+        // Initialize with header content widths
         for (header, 0..) |cell, i| {
             if (i < widths.len) {
-                widths[i] = @max(3, cell.len);
+                widths[i] = @max(absolute_min_width, cell.len);
             }
         }
 
-        // Update with body content
+        // Update with body content (use max of all cells in column)
         for (body) |row| {
             for (row.items, 0..) |cell, i| {
                 if (i < widths.len) {
@@ -252,26 +270,48 @@ pub const TableRenderer = struct {
             }
         }
 
-        // Cap individual column widths
+        // Cap extremely wide columns
         for (widths) |*w| {
-            w.* = @min(w.*, 40); // Max 40 chars per column
+            w.* = @min(w.*, 50);
         }
 
-        // Shrink if total exceeds max_total
-        var total: usize = 0;
+        // Calculate total content needed
+        var total_content: usize = 0;
         for (widths) |w| {
-            total += w + 3; // +3 for " | "
+            total_content += w;
         }
 
-        if (total > max_total and widths.len > 0) {
-            const per_col = @max(5, (max_total - 4) / widths.len);
+        // If fits with preferred minimum, we're done
+        if (total_content <= available_content) {
+            return;
+        }
+
+        // Need to shrink - use proportional distribution
+        // Calculate proportion factor
+        if (total_content > 0) {
             for (widths) |*w| {
-                w.* = @min(w.*, per_col);
+                // Proportional share, but respect minimum
+                const proportional = (w.* * available_content) / total_content;
+                w.* = @max(absolute_min_width, @min(proportional, w.*));
+            }
+        }
+
+        // Final verification and adjustment - strictly enforce max_total
+        var final_total: usize = 0;
+        for (widths) |w| {
+            final_total += w;
+        }
+
+        // If still over budget, uniformly shrink all columns
+        if (final_total > available_content and widths.len > 0) {
+            const uniform_width = @max(absolute_min_width, available_content / widths.len);
+            for (widths) |*w| {
+                w.* = uniform_width;
             }
         }
     }
 
-    /// Render a single row (header or body)
+    /// Render a single row (header or body) with word-wrapped cells
     fn renderRow(
         self: *TableRenderer,
         result: *TableRenderResult,
@@ -282,45 +322,70 @@ pub const TableRenderer = struct {
     ) !void {
         const style = if (is_header) self.colors.table_header else self.colors.table_cell;
 
-        // Start border with box-drawing vertical bar
-        try result.spans.append(self.allocator, .{
-            .text = "│ ",
-            .style = self.colors.table_border,
-            .indent = 0,
-            .node_type = .table,
-        });
+        // Wrap each cell's content and track the lines
+        const wrapped_cells = try self.allocator.alloc([]const []const u8, cells.len);
+        defer {
+            for (wrapped_cells) |cell_lines| {
+                for (cell_lines) |line| {
+                    self.allocator.free(line);
+                }
+                self.allocator.free(cell_lines);
+            }
+            self.allocator.free(wrapped_cells);
+        }
 
-        // Render each cell
+        var max_lines: usize = 1;
         for (cells, 0..) |cell, i| {
             const width = if (i < widths.len) widths[i] else 10;
-            const col_align = if (i < alignments.len) alignments[i] else .left;
+            wrapped_cells[i] = try wrapTextAlloc(self.allocator, cell, width);
+            max_lines = @max(max_lines, wrapped_cells[i].len);
+        }
 
-            // Pad and align cell content - allocate the result
-            const padded = try padCellAlloc(self.allocator, cell, width, col_align);
-            try result.strings.append(self.allocator, padded);
-
+        // Render each line of the row
+        for (0..max_lines) |line_idx| {
+            // Start border with box-drawing vertical bar
             try result.spans.append(self.allocator, .{
-                .text = padded,
-                .style = style,
-                .indent = 0,
-                .node_type = .table,
-            });
-
-            try result.spans.append(self.allocator, .{
-                .text = " │ ",
+                .text = "│ ",
                 .style = self.colors.table_border,
                 .indent = 0,
                 .node_type = .table,
             });
-        }
 
-        // Newline
-        try result.spans.append(self.allocator, .{
-            .text = "\n",
-            .style = self.colors.text,
-            .indent = 0,
-            .node_type = .softbreak,
-        });
+            // Render each cell's line (or empty padding if cell has fewer lines)
+            for (0..cells.len) |i| {
+                const width = if (i < widths.len) widths[i] else 10;
+                const col_align = if (i < alignments.len) alignments[i] else .left;
+                const cell_lines = wrapped_cells[i];
+
+                const line_text = if (line_idx < cell_lines.len) cell_lines[line_idx] else "";
+
+                // Pad and align cell content
+                const padded = try padLineAlloc(self.allocator, line_text, width, col_align);
+                try result.strings.append(self.allocator, padded);
+
+                try result.spans.append(self.allocator, .{
+                    .text = padded,
+                    .style = style,
+                    .indent = 0,
+                    .node_type = .table,
+                });
+
+                try result.spans.append(self.allocator, .{
+                    .text = " │ ",
+                    .style = self.colors.table_border,
+                    .indent = 0,
+                    .node_type = .table,
+                });
+            }
+
+            // Newline
+            try result.spans.append(self.allocator, .{
+                .text = "\n",
+                .style = self.colors.text,
+                .indent = 0,
+                .node_type = .softbreak,
+            });
+        }
     }
 
     /// Border position for box-drawing
@@ -362,7 +427,9 @@ pub const TableRenderer = struct {
         // Render horizontal line for each column
         for (widths, 0..) |w, i| {
             // Build horizontal line (width + 2 for padding spaces)
-            const line = try buildHorizontalLineAlloc(self.allocator, w + 2);
+            // Guard against overflow and unreasonable widths
+            const safe_width = @min(w, 100);
+            const line = try buildHorizontalLineAlloc(self.allocator, safe_width + 2);
             try result.strings.append(self.allocator, line);
 
             try result.spans.append(self.allocator, .{
@@ -405,33 +472,119 @@ fn parseAlignment(text: []const u8) Alignment {
     return .left;
 }
 
-/// Pad cell content to specified width with alignment - allocates result
-fn padCellAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize, col_align: Alignment) ![]const u8 {
+/// Pad a single line of text to specified width with alignment - allocates result
+fn padLineAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize, col_align: Alignment) ![]const u8 {
     const actual_width = @min(width, 126);
     const text_len = @min(text.len, actual_width);
+    const padding = actual_width -| text_len;
+    const buf_size = actual_width;
 
-    const buf = try allocator.alloc(u8, actual_width);
+    const buf = try allocator.alloc(u8, buf_size);
     @memset(buf, ' ');
 
     const offset: usize = switch (col_align) {
         .left => 0,
-        .right => actual_width -| text_len,
-        .center => (actual_width -| text_len) / 2,
+        .right => padding,
+        .center => padding / 2,
     };
 
+    // Copy text
     @memcpy(buf[offset..][0..text_len], text[0..text_len]);
+
     return buf;
+}
+
+/// Wrap text to fit within a column width
+/// Uses word-break where possible, character-break as fallback
+/// Returns array of lines (caller owns all memory)
+fn wrapTextAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize) ![]const []const u8 {
+    if (width == 0) {
+        const lines = try allocator.alloc([]const u8, 1);
+        lines[0] = "";
+        return lines;
+    }
+
+    // If text fits, return single line
+    if (text.len <= width) {
+        const lines = try allocator.alloc([]const u8, 1);
+        const line_copy = try allocator.alloc(u8, text.len);
+        @memcpy(line_copy, text);
+        lines[0] = line_copy;
+        return lines;
+    }
+
+    var lines_list: std.ArrayList([]const u8) = .{};
+    errdefer {
+        for (lines_list.items) |line| {
+            allocator.free(line);
+        }
+        lines_list.deinit(allocator);
+    }
+
+    var remaining = text;
+
+    while (remaining.len > 0) {
+        if (remaining.len <= width) {
+            // Last chunk fits
+            const line_copy = try allocator.alloc(u8, remaining.len);
+            @memcpy(line_copy, remaining);
+            try lines_list.append(allocator, line_copy);
+            break;
+        }
+
+        // Find break point - prefer word boundary
+        var break_pos = width;
+
+        // Look backwards for a space (word boundary)
+        var i = width;
+        while (i > 0) : (i -= 1) {
+            if (remaining[i - 1] == ' ') {
+                break_pos = i - 1; // Break before the space
+                break;
+            }
+        }
+
+        // If no space found, use character break at width
+        if (i == 0) {
+            break_pos = width;
+        }
+
+        // Don't create empty lines
+        if (break_pos == 0) {
+            break_pos = width;
+        }
+
+        // Copy this line
+        const line_copy = try allocator.alloc(u8, break_pos);
+        @memcpy(line_copy, remaining[0..break_pos]);
+        try lines_list.append(allocator, line_copy);
+
+        // Skip past break point and any leading spaces
+        remaining = remaining[break_pos..];
+        while (remaining.len > 0 and remaining[0] == ' ') {
+            remaining = remaining[1..];
+        }
+    }
+
+    // Handle empty input
+    if (lines_list.items.len == 0) {
+        const line_copy = try allocator.alloc(u8, 0);
+        try lines_list.append(allocator, line_copy);
+    }
+
+    return try lines_list.toOwnedSlice(allocator);
 }
 
 /// Build a horizontal line of box-drawing characters - allocates result
 /// Uses ─ (U+2500) which is 3 bytes in UTF-8
 fn buildHorizontalLineAlloc(allocator: std.mem.Allocator, char_width: usize) ![]const u8 {
-    const actual_width = @min(char_width, 62);
+    // Cap width to prevent overflow (62 * 3 = 186 bytes max)
+    const capped_width: usize = if (char_width > 62) 62 else char_width;
     // ─ is 3 bytes in UTF-8 (0xE2 0x94 0x80)
-    const buf = try allocator.alloc(u8, actual_width * 3);
+    const buf = try allocator.alloc(u8, capped_width * 3);
 
     var i: usize = 0;
-    while (i < actual_width) : (i += 1) {
+    while (i < capped_width) : (i += 1) {
         buf[i * 3] = 0xE2;
         buf[i * 3 + 1] = 0x94;
         buf[i * 3 + 2] = 0x80;
@@ -461,25 +614,76 @@ test "parseAlignment - center" {
     try std.testing.expectEqual(Alignment.center, parseAlignment(":--:"));
 }
 
-test "padCellAlloc - left alignment" {
+test "padLineAlloc - left alignment" {
     const allocator = std.testing.allocator;
-    const result = try padCellAlloc(allocator, "Hi", 6, .left);
+    const result = try padLineAlloc(allocator, "Hi", 6, .left);
     defer allocator.free(result);
     try std.testing.expectEqualStrings("Hi    ", result);
 }
 
-test "padCellAlloc - right alignment" {
+test "padLineAlloc - right alignment" {
     const allocator = std.testing.allocator;
-    const result = try padCellAlloc(allocator, "Hi", 6, .right);
+    const result = try padLineAlloc(allocator, "Hi", 6, .right);
     defer allocator.free(result);
     try std.testing.expectEqualStrings("    Hi", result);
 }
 
-test "padCellAlloc - center alignment" {
+test "padLineAlloc - center alignment" {
     const allocator = std.testing.allocator;
-    const result = try padCellAlloc(allocator, "Hi", 6, .center);
+    const result = try padLineAlloc(allocator, "Hi", 6, .center);
     defer allocator.free(result);
     try std.testing.expectEqualStrings("  Hi  ", result);
+}
+
+test "wrapTextAlloc - text fits in width" {
+    const allocator = std.testing.allocator;
+    const lines = try wrapTextAlloc(allocator, "Hello", 10);
+    defer {
+        for (lines) |line| allocator.free(line);
+        allocator.free(lines);
+    }
+    try std.testing.expectEqual(@as(usize, 1), lines.len);
+    try std.testing.expectEqualStrings("Hello", lines[0]);
+}
+
+test "wrapTextAlloc - word wrap" {
+    const allocator = std.testing.allocator;
+    const lines = try wrapTextAlloc(allocator, "Hello world today", 10);
+    defer {
+        for (lines) |line| allocator.free(line);
+        allocator.free(lines);
+    }
+    try std.testing.expectEqual(@as(usize, 3), lines.len);
+    try std.testing.expectEqualStrings("Hello", lines[0]);
+    try std.testing.expectEqualStrings("world", lines[1]);
+    try std.testing.expectEqualStrings("today", lines[2]);
+}
+
+test "wrapTextAlloc - character wrap fallback" {
+    const allocator = std.testing.allocator;
+    const lines = try wrapTextAlloc(allocator, "Superlongword", 5);
+    defer {
+        for (lines) |line| allocator.free(line);
+        allocator.free(lines);
+    }
+    try std.testing.expectEqual(@as(usize, 3), lines.len);
+    try std.testing.expectEqualStrings("Super", lines[0]);
+    try std.testing.expectEqualStrings("longw", lines[1]);
+    try std.testing.expectEqualStrings("ord", lines[2]);
+}
+
+test "wrapTextAlloc - mixed word and char wrap" {
+    const allocator = std.testing.allocator;
+    const lines = try wrapTextAlloc(allocator, "Hi superlongword bye", 8);
+    defer {
+        for (lines) |line| allocator.free(line);
+        allocator.free(lines);
+    }
+    try std.testing.expectEqual(@as(usize, 4), lines.len);
+    try std.testing.expectEqualStrings("Hi", lines[0]);
+    try std.testing.expectEqualStrings("superlon", lines[1]);
+    try std.testing.expectEqualStrings("gword", lines[2]);
+    try std.testing.expectEqualStrings("bye", lines[3]);
 }
 
 test "buildHorizontalLineAlloc - creates box drawing line" {
@@ -501,4 +705,63 @@ test "table renderer init" {
     // Just verify it doesn't crash and has expected fields
     try std.testing.expect(renderer.colors.table_header.bold);
     try std.testing.expect(renderer.colors.table_border.fg != .default);
+}
+
+test "calculateWidths - respects max width with many columns" {
+    const allocator = std.testing.allocator;
+    var renderer = TableRenderer.init(allocator, colors_mod.default);
+
+    // Simulate 5 columns with long content
+    const header = [_][]const u8{
+        "Category",
+        "Feature Name",
+        "Status",
+        "Priority",
+        "Description",
+    };
+
+    // No body rows for this test
+    const body = [_]std.ArrayList([]const u8){};
+
+    const widths = try allocator.alloc(usize, 5);
+    defer allocator.free(widths);
+    @memset(widths, 5);
+
+    // Test with narrow terminal (60 chars)
+    renderer.calculateWidths(&header, &body, widths, 60);
+
+    // Calculate total width (content + overhead)
+    var total: usize = 2; // "│ " at start
+    for (widths) |w| {
+        total += w + 3; // content + " │ "
+    }
+
+    // Should fit within max_width
+    try std.testing.expect(total <= 60);
+
+    // All widths should be reasonable (>= 5, the absolute minimum)
+    for (widths) |w| {
+        try std.testing.expect(w >= 5);
+        try std.testing.expect(w <= 100); // Sanity check
+    }
+}
+
+test "calculateWidths - handles very narrow width" {
+    const allocator = std.testing.allocator;
+    var renderer = TableRenderer.init(allocator, colors_mod.default);
+
+    const header = [_][]const u8{ "Col1", "Col2", "Col3" };
+    const body = [_]std.ArrayList([]const u8){};
+
+    const widths = try allocator.alloc(usize, 3);
+    defer allocator.free(widths);
+    @memset(widths, 5);
+
+    // Very narrow terminal (should use minimum widths)
+    renderer.calculateWidths(&header, &body, widths, 20);
+
+    // All widths should still be valid (>= absolute minimum of 5)
+    for (widths) |w| {
+        try std.testing.expect(w >= 5);
+    }
 }

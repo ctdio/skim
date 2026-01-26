@@ -236,7 +236,18 @@ pub fn build(b: *std.Build) void {
     const run_acp_replay_tests = b.addRunArtifact(acp_replay_tests);
     test_step.dependOn(&run_acp_replay_tests.step);
 
-    // Snapshot scenario tests
+    // Snapshot scenario tests (needs markdown rendering for full-pipeline tests)
+    // Create markdown module for snapshot tests
+    const markdown_module = b.createModule(.{
+        .root_source_file = b.path("src/agent/markdown/markdown.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "vaxis", .module = vaxis },
+            .{ .name = "tree-sitter", .module = tree_sitter },
+        },
+    });
+
     const snapshot_scenarios_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/testing/snapshot_scenarios.zig"),
@@ -245,6 +256,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     snapshot_scenarios_tests.root_module.addImport("vaxis", vaxis);
+    snapshot_scenarios_tests.root_module.addImport("tree-sitter", tree_sitter);
+    snapshot_scenarios_tests.root_module.addImport("markdown", markdown_module);
+    for (grammars) |grammar| {
+        snapshot_scenarios_tests.linkLibrary(grammar);
+    }
+    snapshot_scenarios_tests.linkLibC();
     const run_snapshot_scenarios_tests = b.addRunArtifact(snapshot_scenarios_tests);
     test_step.dependOn(&run_snapshot_scenarios_tests.step);
 }

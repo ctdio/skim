@@ -1,0 +1,8 @@
+┌────────────────┬─────────┬────────┐
+│ Column A       │ Column  │ Column │
+│                │ B       │ C      │
+├────────────────┼─────────┼────────┤
+│ Long content   │ More    │ Extra  │
+│ here           │ text    │        │
+│ Another row    │ Data    │ Values │
+└────────────────┴─────────┴────────┘

@@ -17,6 +17,11 @@ pub const SnapshotError = error{
 /// - If snapshot file doesn't exist and not in update mode, returns SnapshotMissing
 /// - If content differs and not in update mode, returns SnapshotMismatch
 pub fn expectSnapshot(allocator: std.mem.Allocator, name: []const u8, actual: []const u8) !void {
+    return expectSnapshotQuiet(allocator, name, actual, false);
+}
+
+/// Internal version with quiet mode (used by meta-tests to suppress output)
+fn expectSnapshotQuiet(allocator: std.mem.Allocator, name: []const u8, actual: []const u8, quiet: bool) !void {
     if (shouldUpdate()) {
         try writeSnapshot(name, actual);
         return;
@@ -24,15 +29,17 @@ pub fn expectSnapshot(allocator: std.mem.Allocator, name: []const u8, actual: []
 
     const expected = loadSnapshot(allocator, name) catch |err| switch (err) {
         error.FileNotFound => {
-            std.debug.print(
-                \\
-                \\Snapshot not found: {s}
-                \\
-                \\To create the snapshot, run:
-                \\  SKIM_UPDATE_SNAPSHOTS=1 zig build test
-                \\
-                \\
-            , .{name});
+            if (!quiet) {
+                std.debug.print(
+                    \\
+                    \\Snapshot not found: {s}
+                    \\
+                    \\To create the snapshot, run:
+                    \\  SKIM_UPDATE_SNAPSHOTS=1 zig build test
+                    \\
+                    \\
+                , .{name});
+            }
             return SnapshotError.SnapshotMissing;
         },
         else => return SnapshotError.FileReadFailed,
@@ -40,7 +47,9 @@ pub fn expectSnapshot(allocator: std.mem.Allocator, name: []const u8, actual: []
     defer allocator.free(expected);
 
     if (!std.mem.eql(u8, expected, actual)) {
-        printDiff(expected, actual, name);
+        if (!quiet) {
+            printDiff(expected, actual, name);
+        }
         return SnapshotError.SnapshotMismatch;
     }
 }
@@ -124,7 +133,8 @@ test "expectSnapshot fails when content differs" {
     const allocator = std.testing.allocator;
 
     // This should fail because the content doesn't match
-    const result = expectSnapshot(allocator, "_test_simple", "Wrong content!");
+    // Use quiet mode to suppress output during this meta-test
+    const result = expectSnapshotQuiet(allocator, "_test_simple", "Wrong content!", true);
     try std.testing.expectError(SnapshotError.SnapshotMismatch, result);
 }
 
@@ -135,7 +145,8 @@ test "expectSnapshot fails when snapshot missing" {
     const allocator = std.testing.allocator;
 
     // This should fail because the snapshot file doesn't exist
-    const result = expectSnapshot(allocator, "_nonexistent_snapshot_xyz123", "Some content");
+    // Use quiet mode to suppress output during this meta-test
+    const result = expectSnapshotQuiet(allocator, "_nonexistent_snapshot_xyz123", "Some content", true);
     try std.testing.expectError(SnapshotError.SnapshotMissing, result);
 }
 

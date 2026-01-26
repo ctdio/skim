@@ -1062,7 +1062,7 @@ pub const ChatLineMap = struct {
             HighlightContext{ .ctx = null, .func = null };
 
         // Create renderer with highlight context for code blocks
-        var renderer = MarkdownRenderer.initWithHighlighter(self.allocator, markdown.colors.default, highlight_ctx);
+        var renderer = MarkdownRenderer.initWithHighlighter(self.allocator, markdown.colors.default, highlight_ctx, wrap_width);
         defer renderer.deinit();
 
         const spans = renderer.render(md_parser) catch {

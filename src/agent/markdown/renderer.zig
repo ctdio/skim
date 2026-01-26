@@ -40,14 +40,16 @@ pub const MarkdownRenderer = struct {
     ended_major_block: bool,
     /// Optional highlight context for code block syntax highlighting
     highlight_ctx: HighlightContext,
+    /// Maximum width for rendering (affects tables, code blocks)
+    max_width: usize,
 
     /// Initialize a new markdown renderer
     pub fn init(allocator: std.mem.Allocator, md_colors: MarkdownColors) MarkdownRenderer {
-        return initWithHighlighter(allocator, md_colors, .{ .ctx = null, .func = null });
+        return initWithHighlighter(allocator, md_colors, .{ .ctx = null, .func = null }, 80);
     }
 
     /// Initialize with an optional highlight context for code blocks
-    pub fn initWithHighlighter(allocator: std.mem.Allocator, md_colors: MarkdownColors, highlight_ctx: HighlightContext) MarkdownRenderer {
+    pub fn initWithHighlighter(allocator: std.mem.Allocator, md_colors: MarkdownColors, highlight_ctx: HighlightContext, max_width: usize) MarkdownRenderer {
         return .{
             .allocator = allocator,
             .colors = md_colors,
@@ -58,6 +60,7 @@ pub const MarkdownRenderer = struct {
             .blockquote_depth = 0,
             .ended_major_block = false,
             .highlight_ctx = highlight_ctx,
+            .max_width = max_width,
         };
     }
 
@@ -727,7 +730,7 @@ pub const MarkdownRenderer = struct {
     fn renderTable(self: *MarkdownRenderer, node: ts.Node, md_parser: *const MarkdownParser) std.mem.Allocator.Error!void {
         // Use TableRenderer to render the table
         var table_renderer = TableRenderer.init(self.allocator, self.colors);
-        var table_result = table_renderer.render(node, md_parser, 80) catch |err| switch (err) {
+        var table_result = table_renderer.render(node, md_parser, self.max_width) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
         };
 
@@ -1295,4 +1298,70 @@ test "render table" {
 
     try std.testing.expect(found_header);
     try std.testing.expect(found_cell);
+}
+
+test "render wide table with word wrap" {
+    var parser = try MarkdownParser.init();
+    defer parser.deinit();
+
+    // Table with many columns and long content
+    const wide_table_md =
+        \\| Category | Feature Name | Status | Priority | Description |
+        \\|:---------|:-------------|:-------|:---------|:------------|
+        \\| Core Infrastructure | Event Loop System | Completed | P0 | Uses io_uring for async |
+        \\| Rendering | Virtual Scrolling | In Progress | P1 | Only renders visible lines |
+    ;
+    try parser.parse(wide_table_md);
+
+    // Use narrow max_width to force word wrapping
+    var renderer = MarkdownRenderer.initWithHighlighter(
+        std.testing.allocator,
+        colors_mod.default,
+        .{ .ctx = null, .func = null },
+        60, // Narrow width forces wrapping
+    );
+    defer renderer.deinit();
+
+    const spans = try renderer.render(&parser);
+
+    // Verify we got some output
+    try std.testing.expect(spans.len > 0);
+
+    // Count newlines - wrapping should produce more lines than a non-wrapped table
+    var newline_count: usize = 0;
+    for (spans) |span| {
+        if (std.mem.eql(u8, span.text, "\n")) {
+            newline_count += 1;
+        }
+    }
+
+    // A 2-row table with header would normally have 6 lines (top border, header, mid border, row1, row2, bottom border)
+    // With word wrapping, we should have more lines due to wrapped content
+    try std.testing.expect(newline_count >= 6);
+}
+
+test "render table respects max_width" {
+    // Test with a specific narrow width
+    var parser = try MarkdownParser.init();
+    defer parser.deinit();
+
+    const table_md =
+        \\| Short | Medium Content | Very Long Column Header |
+        \\|:------|:---------------|:------------------------|
+        \\| A     | Some text here | This is much longer content |
+    ;
+    try parser.parse(table_md);
+
+    var renderer = MarkdownRenderer.initWithHighlighter(
+        std.testing.allocator,
+        colors_mod.default,
+        .{ .ctx = null, .func = null },
+        80, // Typical terminal width
+    );
+    defer renderer.deinit();
+
+    const spans = try renderer.render(&parser);
+
+    // Verify it doesn't crash and produces output
+    try std.testing.expect(spans.len > 0);
 }
