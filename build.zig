@@ -211,6 +211,30 @@ pub fn build(b: *std.Build) void {
     diff_helpers_tests.root_module.addImport("vaxis", vaxis);
     const run_diff_helpers_tests = b.addRunArtifact(diff_helpers_tests);
     test_step.dependOn(&run_diff_helpers_tests.step);
+
+    // Testing agent_test_helpers tests
+    const agent_helpers_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/agent_test_helpers.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    agent_helpers_tests.root_module.addImport("vaxis", vaxis);
+    const run_agent_helpers_tests = b.addRunArtifact(agent_helpers_tests);
+    test_step.dependOn(&run_agent_helpers_tests.step);
+
+    // Testing acp_replay tests
+    const acp_replay_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/acp_replay.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    acp_replay_tests.root_module.addImport("vaxis", vaxis);
+    const run_acp_replay_tests = b.addRunArtifact(acp_replay_tests);
+    test_step.dependOn(&run_acp_replay_tests.step);
 }
 
 // Grammar metadata for building

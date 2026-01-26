@@ -1,0 +1,5 @@
+{"kind":"user_message","content":"What files are in src/?"}
+{"kind":"tool_call","tool_name":"Bash","tool_command":"ls src/","tool_status":"running"}
+{"kind":"tool_update","tool_name":"Bash","tool_status":"completed","tool_stdout":"main.zig\napp.zig\nui.zig"}
+{"kind":"agent_message","content":"The src/ directory contains:\n- main.zig\n- app.zig\n- ui.zig"}
+{"kind":"plan_update","plan_entries":[{"priority":"high","status":"completed","content":"List files"}]}
