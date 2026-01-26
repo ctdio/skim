@@ -124,9 +124,13 @@ pub const TableRenderer = struct {
         // Render separator between header and body
         try self.renderBorder(&result, widths, .middle);
 
-        // Render body rows
-        for (body_rows.items) |row| {
+        // Render body rows with separators between them
+        for (body_rows.items, 0..) |row, row_idx| {
             try self.renderRow(&result, row.items, widths, alignments.items, false);
+            // Add separator after each row except the last
+            if (row_idx < body_rows.items.len - 1) {
+                try self.renderBorder(&result, widths, .middle);
+            }
         }
 
         // Render bottom border
