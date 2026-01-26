@@ -913,7 +913,7 @@ pub const ChatLineMap = struct {
         return false;
     }
 
-    /// Add collapsed user content (single line, truncated with "…" if needed)
+    /// Add collapsed user content (up to 5 lines, with "…" on last line if truncated)
     fn addCollapsedUserContent(
         self: *ChatLineMap,
         global_line: *usize,
@@ -923,37 +923,69 @@ pub const ChatLineMap = struct {
         indent: usize,
         wrap_width: usize,
     ) !void {
-        // Get first line of content
-        const first_newline = std.mem.indexOfScalar(u8, content, '\n');
-        const first_line = if (first_newline) |idx| content[0..idx] else content;
-        const has_more = first_newline != null or first_line.len > wrap_width;
+        const max_collapsed_lines: usize = 5;
 
-        // Truncate if too long, leaving room for "…"
-        const max_display_width = if (wrap_width > 3) wrap_width - 3 else wrap_width;
-        const display_text = if (first_line.len > max_display_width)
-            first_line[0..max_display_width]
-        else
-            first_line;
+        // First, wrap all content to get total line count
+        var all_wrapped_lines: std.ArrayList([]const u8) = .{};
+        defer all_wrapped_lines.deinit(self.allocator);
 
-        // Build the display string with truncation indicator
-        var text_buf: [1024]u8 = undefined;
-        const display_with_ellipsis = if (has_more)
-            std.fmt.bufPrint(&text_buf, "{s} …", .{display_text}) catch display_text
-        else
-            display_text;
+        var content_iter = std.mem.splitScalar(u8, content, '\n');
+        while (content_iter.next()) |line| {
+            if (line.len == 0) {
+                try all_wrapped_lines.append(self.allocator, "");
+            } else {
+                var wrapped = try RenderUtils.wrapText(self.allocator, line, wrap_width);
+                defer wrapped.deinit(self.allocator);
+                for (wrapped.items) |wrapped_line| {
+                    try all_wrapped_lines.append(self.allocator, wrapped_line);
+                }
+            }
+        }
 
-        const content_copy = try self.allocator.dupe(u8, display_with_ellipsis);
-        try self.strings.append(self.allocator, content_copy);
+        const total_lines = all_wrapped_lines.items.len;
+        const has_more = total_lines > max_collapsed_lines;
+        const lines_to_show = @min(total_lines, max_collapsed_lines);
 
-        try self.records.append(self.allocator, .{
-            .global_line = global_line.*,
-            .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = 1 } },
-            .text = content_copy,
-            .style = style,
-            .indent = indent,
-            .fill_bg = true,
-        });
-        global_line.* += 1;
+        var line_idx: usize = 1; // Start at 1 since 0 is the padding line
+        for (0..lines_to_show) |i| {
+            const line_text = all_wrapped_lines.items[i];
+            const is_last_visible = i == lines_to_show - 1;
+
+            // On last visible line, add "…" if there's more content
+            if (is_last_visible and has_more) {
+                var text_buf: [1024]u8 = undefined;
+                const truncated_text = if (line_text.len > wrap_width -| 4)
+                    line_text[0 .. wrap_width -| 4]
+                else
+                    line_text;
+                const display = std.fmt.bufPrint(&text_buf, "{s} …", .{truncated_text}) catch line_text;
+                const content_copy = try self.allocator.dupe(u8, display);
+                try self.strings.append(self.allocator, content_copy);
+
+                try self.records.append(self.allocator, .{
+                    .global_line = global_line.*,
+                    .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
+                    .text = content_copy,
+                    .style = style,
+                    .indent = indent,
+                    .fill_bg = true,
+                });
+            } else {
+                const content_copy = try self.allocator.dupe(u8, line_text);
+                try self.strings.append(self.allocator, content_copy);
+
+                try self.records.append(self.allocator, .{
+                    .global_line = global_line.*,
+                    .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
+                    .text = content_copy,
+                    .style = style,
+                    .indent = indent,
+                    .fill_bg = true,
+                });
+            }
+            global_line.* += 1;
+            line_idx += 1;
+        }
     }
 
     /// Add expanded content with full wrapping (existing behavior)

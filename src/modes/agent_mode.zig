@@ -133,6 +133,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.needs_render = true;
                 return;
             }
+            // o - toggle expand/collapse of user message under cursor (also works in visual mode)
+            if (key.codepoint == 'o') {
+                if (agent_state.toggleUserMessageUnderCursor()) {
+                    agent_state.history.pending_g = false;
+                    app.needs_render = true;
+                }
+                return;
+            }
             // Consume other keys in visual mode
             return;
         }
