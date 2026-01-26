@@ -199,6 +199,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_testing_snapshot_tests = b.addRunArtifact(testing_snapshot_tests);
     test_step.dependOn(&run_testing_snapshot_tests.step);
+
+    // Testing diff_test_helpers tests
+    const diff_helpers_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/diff_test_helpers.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    diff_helpers_tests.root_module.addImport("vaxis", vaxis);
+    const run_diff_helpers_tests = b.addRunArtifact(diff_helpers_tests);
+    test_step.dependOn(&run_diff_helpers_tests.step);
 }
 
 // Grammar metadata for building
