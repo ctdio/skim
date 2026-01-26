@@ -176,6 +176,29 @@ pub fn build(b: *std.Build) void {
     markdown_tests.linkLibC();
     const run_markdown_tests = b.addRunArtifact(markdown_tests);
     test_step.dependOn(&run_markdown_tests.step);
+
+    // Testing harness tests
+    const testing_harness_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/harness.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    testing_harness_tests.root_module.addImport("vaxis", vaxis);
+    const run_testing_harness_tests = b.addRunArtifact(testing_harness_tests);
+    test_step.dependOn(&run_testing_harness_tests.step);
+
+    // Testing snapshot tests
+    const testing_snapshot_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/snapshot.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_testing_snapshot_tests = b.addRunArtifact(testing_snapshot_tests);
+    test_step.dependOn(&run_testing_snapshot_tests.step);
 }
 
 // Grammar metadata for building
