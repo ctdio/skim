@@ -1,0 +1,4 @@
+```zig
+const x = 42;
+return x * 2;
+```

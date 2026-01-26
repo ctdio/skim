@@ -9,9 +9,13 @@ pub const Cell = vaxis.Cell;
 /// TestContext provides a mock screen and window for testing rendering functions.
 /// Use createTestContext() to instantiate, then call window() to get a Window for rendering.
 /// After rendering, use captureToText() to serialize the screen buffer to a string.
+///
+/// Includes a frame allocator for temporary strings used during rendering - allocated
+/// strings persist until deinit() is called.
 pub const TestContext = struct {
     allocator: std.mem.Allocator,
     screen: Screen,
+    arena: std.heap.ArenaAllocator,
 
     /// Returns a Window that covers the entire screen.
     pub fn window(self: *TestContext) Window {
@@ -24,6 +28,12 @@ pub const TestContext = struct {
             .height = self.screen.height,
             .screen = &self.screen,
         };
+    }
+
+    /// Returns the frame allocator for temporary strings during rendering.
+    /// Allocated memory persists until deinit() is called.
+    pub fn frameAllocator(self: *TestContext) std.mem.Allocator {
+        return self.arena.allocator();
     }
 
     /// Captures the current screen content as a text string.
@@ -49,6 +59,14 @@ pub const TestContext = struct {
 
                 // Skip continuation cells (width 0 indicates part of wide char)
                 if (width == 0) {
+                    col += 1;
+                    continue;
+                }
+
+                // Skip cells with empty graphemes (unwritten cells)
+                // If the grapheme has no content, treat it as a space
+                if (grapheme.len == 0) {
+                    try result.append(self.allocator, ' ');
                     col += 1;
                     continue;
                 }
@@ -84,6 +102,7 @@ pub const TestContext = struct {
     }
 
     pub fn deinit(self: *TestContext) void {
+        self.arena.deinit();
         self.screen.deinit(self.allocator);
     }
 };
@@ -99,6 +118,7 @@ pub fn createTestContext(allocator: std.mem.Allocator, cols: u16, rows: u16) !Te
     return .{
         .allocator = allocator,
         .screen = screen,
+        .arena = std.heap.ArenaAllocator.init(allocator),
     };
 }
 
