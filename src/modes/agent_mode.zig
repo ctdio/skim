@@ -939,19 +939,15 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 const raw_text = agent_state.input.getText();
                 const text = std.mem.trim(u8, raw_text, &std.ascii.whitespace);
                 const is_thinking = if (app.getActiveAcpManager()) |mgr| mgr.status == .prompting else false;
+                const session_not_ready = if (app.getActiveAcpManager()) |mgr|
+                    mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected
+                else
+                    false;
 
-                // Block prompt submission if session is not ready yet
-                if (app.getActiveAcpManager()) |mgr| {
-                    if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected) {
-                        // Session not ready - ignore submission
-                        return;
-                    }
-                }
-
-                // Handle staged message scenarios first
-                if (is_thinking and agent_state.hasStagedPrompt()) {
-                    if (text.len == 0) {
-                        // Empty prompt + staged message = interrupt and send immediately
+                // Handle staged message scenarios first (agent thinking or session not ready)
+                if ((is_thinking or session_not_ready) and agent_state.hasStagedPrompt()) {
+                    if (text.len == 0 and is_thinking) {
+                        // Empty prompt + staged message + agent thinking = interrupt and send immediately
                         if (app.getActiveAcpManager()) |mgr| {
                             if (mgr.cancelPrompt()) {
                                 std.log.info("Agent: Interrupted via staged message immediate send", .{});
@@ -977,6 +973,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                         }
 
                         agent_state.clearStagedPrompt();
+                    } else if (text.len == 0) {
+                        // Empty prompt + staged message + session not ready = do nothing (already queued)
+                        // Message will be sent automatically when session becomes ready
                     } else {
                         // Non-empty prompt + staged message = append to staged message
                         const current_staged = agent_state.getStagedPrompt();
@@ -986,8 +985,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                         agent_state.input.clear();
                     }
                 } else if (text.len > 0) {
-                    if (is_thinking) {
-                        // Agent thinking, no staged message - stage this one
+                    if (is_thinking or session_not_ready) {
+                        // Agent thinking or session not ready - stage for later
                         agent_state.stagePrompt(text);
                         agent_state.input.clear();
                     } else {

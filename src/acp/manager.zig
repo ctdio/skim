@@ -568,14 +568,14 @@ pub const AcpManager = struct {
 
     /// Send a prompt to the agent (non-blocking).
     /// If the agent is already responding to a prompt, queues the message.
-    /// If still connecting/creating session, queues for when session is ready.
+    /// If still discovering/connecting/creating session, queues for when session is ready.
     /// The manager will collect responses via poll().
     pub fn sendPrompt(self: *AcpManager, prompt_text: []const u8) Error!void {
-        // Queue prompts while connecting or creating session - will send when ready
-        if (self.status == .connecting or self.status == .connected) {
+        // Queue prompts while discovering, connecting, or creating session - will send when ready
+        if (self.status == .discovering or self.status == .connecting or self.status == .connected) {
             const queued = try self.allocator.dupe(u8, prompt_text);
             try self.queued_prompts.append(self.allocator, queued);
-            std.log.info("ACP Manager: queued prompt (session not ready), queue size: {d}", .{self.queued_prompts.items.len});
+            std.log.info("ACP Manager: queued prompt (session not ready, status={s}), queue size: {d}", .{ @tagName(self.status), self.queued_prompts.items.len });
             return;
         }
 

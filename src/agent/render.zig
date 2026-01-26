@@ -950,11 +950,16 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         break :blk 1 + visible_entries;
     } else 0;
 
-    // Calculate status area height (shown between messages and plan when agent is thinking)
-    // Layout: empty row + "Generating..." + empty row + optional queued message + empty row
+    // Calculate status area height (shown between messages and plan when agent is thinking or session initializing with queued message)
+    // Layout: empty row + "Generating..."/"Waiting..." + empty row + optional queued message + empty row
     const is_thinking = if (app.getActiveAcpManager()) |mgr| mgr.status == .prompting else false;
-    const status_height: usize = if (is_thinking) blk: {
-        var height: usize = 3; // empty + "Generating..." + empty
+    const session_initializing = if (app.getActiveAcpManager()) |mgr|
+        mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected
+    else
+        false;
+    const show_status_area = is_thinking or (session_initializing and agent_state.hasStagedPrompt());
+    const status_height: usize = if (show_status_area) blk: {
+        var height: usize = 3; // empty + "Generating..."/"Waiting..." + empty
         // Add queued message height if present
         if (agent_state.hasStagedPrompt()) {
             const staged_text = agent_state.getStagedPrompt();
@@ -1012,7 +1017,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     });
     try renderMessages(app, messages_win, agent_state);
 
-    // Render status area (if agent is thinking)
+    // Render status area (if agent is thinking or session initializing with queued message)
     if (status_height > 0) {
         const status_win = win.child(.{
             .x_off = 0,
@@ -1020,7 +1025,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
             .width = win.width,
             .height = @intCast(status_height),
         });
-        renderStatusArea(status_win, agent_state);
+        renderStatusArea(status_win, agent_state, is_thinking);
     }
 
     // Render plan area (if visible and has entries)
@@ -1093,9 +1098,19 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
             .prompting => " Thinking...",
             .failed => " Failed",
         };
-        // Show queued message count when prompting
-        if (mgr.status == .prompting and mgr.queuedPromptCount() > 0) {
-            break :blk std.fmt.bufPrint(&status_buf, " Thinking... ({d} queued)", .{mgr.queuedPromptCount()}) catch base_status;
+        // Show queued message count when prompting or during session initialization
+        const queued = mgr.queuedPromptCount();
+        if (queued > 0) {
+            const fmt_result: ?[]const u8 = switch (mgr.status) {
+                .discovering => std.fmt.bufPrint(&status_buf, " Discovering... ({d} queued)", .{queued}) catch null,
+                .connecting => std.fmt.bufPrint(&status_buf, " Connecting... ({d} queued)", .{queued}) catch null,
+                .connected => std.fmt.bufPrint(&status_buf, " Creating session... ({d} queued)", .{queued}) catch null,
+                .prompting => std.fmt.bufPrint(&status_buf, " Thinking... ({d} queued)", .{queued}) catch null,
+                else => null,
+            };
+            if (fmt_result) |result| {
+                break :blk result;
+            }
         }
         break :blk base_status;
     } else " Not connected";
@@ -1733,9 +1748,9 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     }
 }
 
-/// Render the status area shown between messages and plan when agent is thinking
-/// Layout: empty row + "Generating..." + empty row + optional queued message
-fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState) void {
+/// Render the status area shown between messages and plan when agent is thinking or waiting
+/// Layout: empty row + "Generating..."/"Waiting..." + empty row + optional queued message
+fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bool) void {
     if (win.height == 0) return;
 
     const blank_cell = vaxis.Cell{
@@ -1749,9 +1764,14 @@ fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState) void {
     // Row 0: empty padding
     row += 1;
 
-    // Row 1: "Generating..." indicator with shimmer
+    // Row 1: Status indicator with shimmer
     if (row < win.height) {
-        renderThinkingIndicator(win, row);
+        if (is_thinking) {
+            renderThinkingIndicator(win, row, "Generating...");
+        } else {
+            // Session initializing with queued message
+            renderThinkingIndicator(win, row, "Waiting...");
+        }
         row += 1;
     }
 
@@ -1872,12 +1892,11 @@ fn renderStagedMessagePreview(win: vaxis.Window, text: []const u8, start_row: us
     }
 }
 
-/// Render a shimmering "Generating..." indicator
-fn renderThinkingIndicator(win: vaxis.Window, row: usize) void {
+/// Render a shimmering status indicator (e.g., "Generating...", "Waiting...")
+fn renderThinkingIndicator(win: vaxis.Window, row: usize, text: []const u8) void {
     if (win.width < 20 or row >= win.height) return;
 
     const now = std.time.milliTimestamp();
-    const text = "Generating...";
     const shimmer_speed: i64 = 80;
     const phase: usize = @intCast(@mod(@divFloor(now, shimmer_speed), 10));
 
