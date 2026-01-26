@@ -97,6 +97,20 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.needs_render = true;
                 return;
             }
+            // Ctrl+D - page down while extending selection
+            if (key.mods.ctrl and key.codepoint == 'd') {
+                agent_state.historyPageDown();
+                agent_state.history.pending_g = false;
+                app.needs_render = true;
+                return;
+            }
+            // Ctrl+U - page up while extending selection
+            if (key.mods.ctrl and key.codepoint == 'u') {
+                agent_state.historyPageUp();
+                agent_state.history.pending_g = false;
+                app.needs_render = true;
+                return;
+            }
             if (key.codepoint == 'j') {
                 // Extend selection down
                 agent_state.historyCursorDown();
