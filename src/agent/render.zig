@@ -14,6 +14,7 @@ const DiffLine = diff_algo.DiffLine;
 const chat_line_map = @import("chat_line_map.zig");
 const ChatLineMap = chat_line_map.ChatLineMap;
 const ChatLineRecord = chat_line_map.ChatLineRecord;
+const StyledSegment = chat_line_map.StyledSegment;
 const SideLineKind = chat_line_map.SideLineKind;
 const protocol = @import("../acp/protocol.zig");
 const command_palette = @import("command_palette.zig");
@@ -1642,19 +1643,30 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
         // Print text - special handling for tool headers and agent messages
         switch (record.line_type) {
             .message_content => |mc| {
-                // Check if this is an agent message with markdown
-                const messages = agent_state.messages.items;
-                if (mc.msg_idx < messages.len) {
-                    const msg = &messages[mc.msg_idx];
-                    // For agent messages, try to render with markdown styling
-                    if (msg.role == .agent and record.text.len > 0) {
-                        renderTextWithMarkdown(win, record.text, msg, record.style, is_cursor_line, is_in_visual, row, col_offset);
-                    } else {
-                        // Non-agent messages or empty text - use plain rendering
-                        _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
+                // Check if we have pre-computed styled segments
+                if (record.segments) |segments| {
+                    // Render each segment with its own style
+                    var col: usize = col_offset;
+                    for (segments) |seg| {
+                        const seg_style = withHighlightBg(seg.style, is_cursor_line, is_in_visual);
+                        const result = safePrint(win, seg.text, seg_style, row, col);
+                        col = result.col; // result.col is the final column position
                     }
                 } else {
-                    _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
+                    // Fall back to traditional rendering
+                    const messages = agent_state.messages.items;
+                    if (mc.msg_idx < messages.len) {
+                        const msg = &messages[mc.msg_idx];
+                        // For agent messages, try to render with markdown styling
+                        if (msg.role == .agent and record.text.len > 0) {
+                            renderTextWithMarkdown(win, record.text, msg, record.style, is_cursor_line, is_in_visual, row, col_offset);
+                        } else {
+                            // Non-agent messages or empty text - use plain rendering
+                            _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
+                        }
+                    } else {
+                        _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
+                    }
                 }
             },
             .tool_header => |th| {

@@ -28,6 +28,16 @@ const Allocator = std.mem.Allocator;
 const MAX_VISIBLE_DIFF_LINES: usize = 500;
 
 // =============================================================================
+// Styled Segment for inline formatting
+// =============================================================================
+
+/// A segment of text with its own style (for inline formatting like bold, code, etc.)
+pub const StyledSegment = struct {
+    text: []const u8,
+    style: vaxis.Style,
+};
+
+// =============================================================================
 // Chat Line Types
 // =============================================================================
 
@@ -84,9 +94,12 @@ pub const ChatLineType = union(enum) {
 pub const ChatLineRecord = struct {
     global_line: usize,
     line_type: ChatLineType,
-    text: []const u8, // Owned by ChatLineMap
-    style: vaxis.Style,
+    text: []const u8, // Owned by ChatLineMap (used when segments is null)
+    style: vaxis.Style, // Default style (used when segments is null)
     indent: usize,
+    /// Multiple styled segments for inline formatting (e.g., bold, code within text)
+    /// When set, overrides text/style fields for rendering
+    segments: ?[]const StyledSegment = null,
     // Optional prefix for special lines
     prefix: ?[]const u8 = null,
     prefix_style: ?vaxis.Style = null,
@@ -920,14 +933,13 @@ pub const ChatLineMap = struct {
         // Base indent for agent messages
         const base_indent: usize = 1;
 
-        // Convert spans to line records
-        // Spans contain text with embedded newlines and indent levels
+        // Collect styled segments per line, preserving per-span styling
         var line_idx: usize = 0;
-        var current_line_text: std.ArrayList(u8) = .{};
-        defer current_line_text.deinit(self.allocator);
-        var current_line_style: vaxis.Style = .{ .fg = Color.chat_content };
+        var current_line_segments: std.ArrayList(StyledSegment) = .{};
+        defer current_line_segments.deinit(self.allocator);
         var current_indent: usize = base_indent;
         var current_node_type: NodeType = .text;
+        var current_line_len: usize = 0;
 
         for (spans) |span| {
             // Check if this span contains newlines
@@ -937,58 +949,36 @@ pub const ChatLineMap = struct {
             while (span_iter.next()) |segment| {
                 if (!first_segment) {
                     // Flush the current line before starting a new one
-                    if (current_line_text.items.len > 0) {
-                        // Word-wrap the accumulated line
-                        const effective_width = if (wrap_width > current_indent) wrap_width - current_indent else 1;
-                        var wrapped = try RenderUtils.wrapText(self.allocator, current_line_text.items, effective_width);
-                        defer wrapped.deinit(self.allocator);
-
-                        // Check if current line is a code block (fill background)
-                        const is_code_block = current_node_type == .fenced_code_block or current_node_type == .code_block;
-
-                        for (wrapped.items) |wrapped_segment| {
-                            const content_copy = try self.allocator.dupe(u8, wrapped_segment);
-                            try self.strings.append(self.allocator, content_copy);
-
-                            try self.records.append(self.allocator, .{
-                                .global_line = global_line.*,
-                                .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
-                                .text = content_copy,
-                                .style = current_line_style,
-                                .indent = current_indent,
-                                .fill_bg = is_code_block,
-                            });
-                            global_line.* += 1;
-                            line_idx += 1;
-                        }
-                    } else {
-                        // Empty line - preserve code block background if in code block
-                        const is_code_block = current_node_type == .fenced_code_block or current_node_type == .code_block;
-                        try self.records.append(self.allocator, .{
-                            .global_line = global_line.*,
-                            .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
-                            .text = "",
-                            .style = if (is_code_block) current_line_style else .{},
-                            .indent = current_indent,
-                            .fill_bg = is_code_block,
-                        });
-                        global_line.* += 1;
-                        line_idx += 1;
-                    }
+                    try self.flushMarkdownLine(
+                        global_line,
+                        msg_idx,
+                        &line_idx,
+                        &current_line_segments,
+                        current_indent,
+                        current_node_type,
+                        wrap_width,
+                    );
 
                     // Reset for new line
-                    current_line_text.clearRetainingCapacity();
+                    current_line_segments.clearRetainingCapacity();
                     current_indent = base_indent + span.indent;
-                    current_line_style = span.style;
                     current_node_type = span.node_type;
+                    current_line_len = 0;
                 }
 
-                // Append segment to current line
+                // Add segment to current line
                 if (segment.len > 0) {
-                    try current_line_text.appendSlice(self.allocator, segment);
-                    current_line_style = span.style;
+                    // Copy segment text for storage
+                    const text_copy = try self.allocator.dupe(u8, segment);
+                    try self.strings.append(self.allocator, text_copy);
+
+                    try current_line_segments.append(self.allocator, .{
+                        .text = text_copy,
+                        .style = span.style,
+                    });
                     current_indent = base_indent + span.indent;
                     current_node_type = span.node_type;
+                    current_line_len += segment.len;
                 }
 
                 first_segment = false;
@@ -996,30 +986,92 @@ pub const ChatLineMap = struct {
         }
 
         // Flush any remaining content
-        if (current_line_text.items.len > 0) {
-            const effective_width = if (wrap_width > current_indent) wrap_width - current_indent else 1;
-            var wrapped = try RenderUtils.wrapText(self.allocator, current_line_text.items, effective_width);
-            defer wrapped.deinit(self.allocator);
-
-            // Check if remaining content is a code block
-            const is_code_block = current_node_type == .fenced_code_block or current_node_type == .code_block;
-
-            for (wrapped.items) |wrapped_segment| {
-                const content_copy = try self.allocator.dupe(u8, wrapped_segment);
-                try self.strings.append(self.allocator, content_copy);
-
-                try self.records.append(self.allocator, .{
-                    .global_line = global_line.*,
-                    .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx } },
-                    .text = content_copy,
-                    .style = current_line_style,
-                    .indent = current_indent,
-                    .fill_bg = is_code_block,
-                });
-                global_line.* += 1;
-                line_idx += 1;
-            }
+        if (current_line_segments.items.len > 0) {
+            try self.flushMarkdownLine(
+                global_line,
+                msg_idx,
+                &line_idx,
+                &current_line_segments,
+                current_indent,
+                current_node_type,
+                wrap_width,
+            );
         }
+    }
+
+    /// Flush accumulated markdown segments as a line record
+    fn flushMarkdownLine(
+        self: *ChatLineMap,
+        global_line: *usize,
+        msg_idx: usize,
+        line_idx: *usize,
+        segments: *std.ArrayList(StyledSegment),
+        indent: usize,
+        node_type: NodeType,
+        wrap_width: usize,
+    ) !void {
+        _ = wrap_width; // TODO: implement word wrapping for segments
+
+        const is_code_block = node_type == .fenced_code_block or node_type == .code_block;
+
+        if (segments.items.len == 0) {
+            // Empty line
+            try self.records.append(self.allocator, .{
+                .global_line = global_line.*,
+                .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx.* } },
+                .text = "",
+                .style = .{},
+                .indent = indent,
+                .fill_bg = is_code_block,
+            });
+            global_line.* += 1;
+            line_idx.* += 1;
+            return;
+        }
+
+        // If only one segment, use simple text/style fields
+        if (segments.items.len == 1) {
+            try self.records.append(self.allocator, .{
+                .global_line = global_line.*,
+                .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx.* } },
+                .text = segments.items[0].text,
+                .style = segments.items[0].style,
+                .indent = indent,
+                .fill_bg = is_code_block,
+            });
+            global_line.* += 1;
+            line_idx.* += 1;
+            return;
+        }
+
+        // Multiple segments - store them for per-segment rendering
+        // Copy segments slice for storage
+        const segments_copy = try self.allocator.dupe(StyledSegment, segments.items);
+
+        // Calculate total text for fallback rendering
+        var total_len: usize = 0;
+        for (segments.items) |seg| {
+            total_len += seg.text.len;
+        }
+        var combined_text = try self.allocator.alloc(u8, total_len);
+        var offset: usize = 0;
+        for (segments.items) |seg| {
+            @memcpy(combined_text[offset..][0..seg.text.len], seg.text);
+            offset += seg.text.len;
+        }
+        try self.strings.append(self.allocator, combined_text);
+
+        try self.records.append(self.allocator, .{
+            .global_line = global_line.*,
+            .line_type = .{ .message_content = .{ .msg_idx = msg_idx, .line_idx = line_idx.* } },
+            .text = combined_text, // Fallback for non-segment-aware rendering
+            .style = segments.items[0].style, // Default to first segment's style
+            .indent = indent,
+            .segments = segments_copy,
+            .fill_bg = is_code_block,
+        });
+        global_line.* += 1;
+        line_idx.* += 1;
     }
 
     fn addPlanSnapshotEntries(self: *ChatLineMap, global_line: *usize, msg_idx: usize, entries: []const state.OwnedPlanEntry) !void {
