@@ -1196,7 +1196,9 @@ pub const AgentState = struct {
         } else {
             self.expanded_user_messages.put(msg_idx, {}) catch {};
         }
+        // Need full rebuild since we're changing how a message renders
         self.line_map_dirty = true;
+        self.earlier_message_dirty = true;
     }
 
     /// Toggle expansion of the user message under the cursor in history mode.
