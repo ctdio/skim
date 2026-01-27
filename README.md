@@ -25,23 +25,6 @@ A keyboard-driven TUI for code reviews built in Zig.
 
 ## Installation
 
-### Pre-built Binaries
-
-Download the latest release for your platform from [GitHub Releases](https://github.com/ctdio/skim/releases):
-
-| Platform | Download |
-|----------|----------|
-| macOS (Apple Silicon) | `skim-macos-arm64.tar.gz` |
-| macOS (Intel) | `skim-macos-x86_64.tar.gz` |
-| Linux (x86_64) | `skim-linux-x86_64.tar.gz` |
-| Linux (ARM64) | `skim-linux-arm64.tar.gz` |
-
-```bash
-# Example: macOS Apple Silicon
-curl -L https://github.com/ctdio/skim/releases/latest/download/skim-macos-arm64.tar.gz | tar xz
-sudo mv skim /usr/local/bin/
-```
-
 ### Building from Source
 
 #### Prerequisites
@@ -304,15 +287,17 @@ Configure agents and panel settings in `~/.skim/config.json`:
 {
   "agent_servers": {
     "Claude Code": {
-      "command": "claude",
-      "args": ["acp"],
+      "command": "claude-code-acp",
       "skim": {
         "default": true,
         "model": "opus"
       }
     },
     "Codex": {
-      "command": "codex",
+      "command": "codex-acp"
+    },
+    "OpenCode": {
+      "command": "opencode",
       "args": ["acp"]
     }
   }
@@ -361,7 +346,7 @@ Type `@` in the agent prompt to fuzzy-search and embed file contents:
 
 The agent panel uses vim-style modal editing.
 
-**Global (work in any mode)**
+##### Global
 
 | Key | Action |
 |-----|--------|
@@ -373,19 +358,19 @@ The agent panel uses vim-style modal editing.
 | `Ctrl-S` | Stash/unstash prompt |
 | `Ctrl-T` | Toggle todo list expansion |
 
-**Insert Mode (typing in prompt)**
+##### Insert Mode
 
 | Key | Action |
 |-----|--------|
 | `Enter` | Send prompt to agent |
 | `Ctrl-J` | Insert newline in prompt |
 | `ESC` / `Ctrl-C` | Exit to normal mode |
-| `/` | Show slash command menu (at start) |
-| `@` | Show file picker (at start) |
+| `/` | Show slash command menu (at prompt start) |
+| `@` | Show file picker (at word boundary) |
 | `!` | Toggle shell command mode (empty input) |
-| `Up` | Restore staged prompt (empty input) |
+| `Up` | Restore stashed prompt (empty input) |
 
-**Normal Mode (vim on prompt)**
+##### Normal Mode
 
 | Key | Action |
 |-----|--------|
@@ -398,15 +383,16 @@ The agent panel uses vim-style modal editing.
 | `x` / `dd` | Delete char/line |
 | `:` | Open command palette |
 | `?` | Show help |
-| `gb` | Enter history mode |
+| `gb` / `Space+b` | Enter history mode |
 | `gt` / `gT` | Next/previous tab |
-| `Space+b` | Enter history mode |
 | `Space+f` | Scroll to bottom, enable follow |
 | `V` | Toggle diff view mode |
 | `Tab` | Cycle session modes |
 | `ESC ESC` | Interrupt agent (double-tap) |
 
-**History Mode (enter with `gb` or `Space+b`)**
+##### History Mode
+
+Enter with `gb` or `Space+b`. Browse and yank from message history.
 
 | Key | Action |
 |-----|--------|
@@ -414,7 +400,7 @@ The agent panel uses vim-style modal editing.
 | `h` / `l` | Jump to prev/next message |
 | `gg` / `G` | Jump to top/bottom |
 | `Ctrl-D` / `Ctrl-U` | Page down/up |
-| `M` | Move cursor to middle of viewport |
+| `M` | Center cursor in viewport |
 | `v` | Enter visual selection mode |
 | `y` | Yank user message at cursor |
 | `yy` | Yank current line |
@@ -423,7 +409,9 @@ The agent panel uses vim-style modal editing.
 | `i` | Exit to insert mode |
 | `ESC` / `q` | Exit to normal mode |
 
-**Visual Mode (in history, enter with `v`)**
+##### Visual Mode
+
+Enter with `v` from history mode.
 
 | Key | Action |
 |-----|--------|
@@ -431,7 +419,9 @@ The agent panel uses vim-style modal editing.
 | `y` | Yank selection to clipboard |
 | `ESC` / `v` | Exit visual mode |
 
-**Permission Prompt (when agent requests permission)**
+##### Permission Prompt
+
+When agent requests permission:
 
 | Key | Action |
 |-----|--------|
@@ -440,7 +430,7 @@ The agent panel uses vim-style modal editing.
 | `Enter` / `y` | Accept selected option |
 | `ESC` / `n` | Reject/cancel |
 
-**Slash Menu / File Picker / Command Palette**
+##### Menus (Slash, File Picker, Command Palette)
 
 | Key | Action |
 |-----|--------|
@@ -449,7 +439,7 @@ The agent panel uses vim-style modal editing.
 | `Enter` | Insert and execute |
 | `ESC` | Close menu |
 
-**Built-in Slash Commands**
+##### Slash Commands
 
 | Command | Action |
 |---------|--------|
@@ -526,7 +516,7 @@ For AI agents that support MCP (Model Context Protocol), add skim to your agent'
 
 ### Claude Code Skill
 
-Install the `/skim` skill to teach Claude Code how to review code with skim:
+Install the skim skill to teach Claude Code how to review code with skim:
 
 ```bash
 npx skills add ctdio/skim
