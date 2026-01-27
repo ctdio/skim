@@ -276,47 +276,59 @@ Edit comments with vim-style editing:
 
 ## AI Agent Integration
 
-MCP (Model Context Protocol) server for AI agent code reviews. Agents can read diffs, add comments, and see results in real-time.
+Skim provides two ways for AI agents to interact with code reviews:
 
-### Quick Start for AI Reviews
+1. **CLI commands** (`skim session`) - Simple and direct
+2. **MCP server** - For agents with MCP support
 
-```bash
-# 1. Start the skim daemon (runs in background)
-skim daemon start
+**Note:** MCP is optional. Agents can use the CLI commands below to interact with running skim sessions directly.
 
-# 2. Open your diff in skim
-skim --staged
+### CLI Commands for Agents
 
-# 3. Use MCP tools from your AI agent to interact with skim
-```
-
-### Daemon Commands
+The `skim session` command lets agents interact with running skim TUI instances:
 
 ```bash
-# Start the daemon (runs in background by default)
-skim daemon start
-skim daemon start --foreground  # Run in foreground for debugging
-skim daemon start --port 8888   # Use custom port
+# List running skim sessions
+skim session list
+skim session list --json
 
-# Check daemon status
-skim daemon status
+# Get session context (files, diff ref, view mode)
+skim session context
+skim session context --json
 
-# Stop the daemon
-skim daemon stop
+# Get diff content (with line numbers for commenting)
+skim session diff
+skim session diff --file src/app.zig
 
-# Restart the daemon
-skim daemon restart
+# Add a comment
+skim session comment add --file src/app.zig --line 42 "Check for null"
+skim session comment add -f main.zig -l 10 --type old "Remove this"
+
+# List comments
+skim session comment list
+skim session comment list --json
+
+# Delete a comment by index
+skim session comment delete 0
 ```
 
-The daemon listens on two ports:
-- **TUI port (default 9999)**: For skim TUI clients to connect
-- **Adapter port (default 9998)**: For MCP adapters (AI agents)
+**Options:**
+- `--id <PID>` - Target a specific session when multiple are running
+- `--json` - Output in JSON format (for programmatic parsing)
+- `--type <old|new>` - For comments: `new` for added lines, `old` for deleted lines
 
-### MCP Server Configuration
+**Diff output format:**
+```
+MARKER OLD_LINE NEW_LINE | CONTENT
++       -       42       | const x = 1;    # added line (use --type new)
+-       15      -        | const y = 2;    # deleted line (use --type old)
+        16      43       | const z = 3;    # context line
+```
 
-Add skim to your AI assistant's MCP configuration:
+### MCP Server (Optional)
 
-**Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):**
+For AI agents that support MCP (Model Context Protocol), add skim to your agent's configuration:
+
 ```json
 {
   "mcpServers": {
@@ -324,16 +336,6 @@ Add skim to your AI assistant's MCP configuration:
       "command": "skim",
       "args": ["mcp", "--stdio"]
     }
-  }
-}
-```
-
-**Cursor or other MCP-compatible tools:**
-```json
-{
-  "skim": {
-    "command": "skim",
-    "args": ["mcp", "--stdio"]
   }
 }
 ```
@@ -395,7 +397,6 @@ The skim MCP server exposes these tools to AI agents:
 
 Skim writes logs to `~/.skim/`:
 - `tui.log` - TUI client logs
-- `daemon.log` - Daemon process logs
 - `mcp.log` - MCP adapter logs
 
 ---
@@ -407,16 +408,7 @@ Built-in chat interface for AI agents. Uses ACP (Agent Client Protocol) to commu
 ### Quick Start
 
 ```bash
-# 1. Configure agents in ~/.skim/config.json:
-# {
-#   "agent_servers": {
-#     "Claude Code": {
-#       "command": "claude",
-#       "args": ["acp"],
-#       "skim": { "default": true, "model": "sonnet" }
-#     }
-#   }
-# }
+# 1. Configure agents in ~/.skim/config.json (see Configuration below)
 
 # 2. Open your diff in skim
 skim --staged
@@ -566,18 +558,13 @@ Configure agents and panel settings in `~/.skim/config.json`:
 
 ```json
 {
-  "agent_panel_side": "right",
   "agent_servers": {
     "Claude Code": {
       "command": "claude",
       "args": ["acp"],
-      "env": {
-        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"
-      },
       "skim": {
         "default": true,
-        "model": "sonnet",
-        "mode": "plan"
+        "model": "opus"
       }
     },
     "Codex": {
@@ -596,7 +583,7 @@ Configure agents and panel settings in `~/.skim/config.json`:
 | `args` | string[] | No | Additional CLI arguments to pass to the agent |
 | `env` | object | No | Environment variables (supports `${VAR}` expansion) |
 | `skim.default` | bool | No | Auto-connect to this agent (default: `false`) |
-| `skim.model` | string | No | AI model to use (e.g., `"sonnet"`, `"opus"`) |
+| `skim.model` | string | No | AI model to use (e.g., `"opus"`, `"sonnet"`) |
 | `skim.mode` | string | No | Agent session mode (e.g., `"plan"`, `"code"`) |
 
 #### Agent Selection Behavior
