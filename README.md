@@ -274,14 +274,188 @@ Edit comments with vim-style editing:
 | `dd` | Delete entire line |
 | `Backspace` | Delete character before cursor |
 
-## AI Agent Integration
+## AI Integration
 
-Skim provides two ways for AI agents to interact with code reviews:
+Skim integrates with AI agents in two ways:
 
-1. **CLI commands** (`skim session`) - Simple and direct
-2. **MCP server** - For agents with MCP support
+1. **Agent Panel** - Built-in chat interface (`Ctrl-e`) using the Agent Client Protocol (ACP)
+2. **External Integration** - CLI commands and MCP server for agents to control skim
 
-**Note:** MCP is optional. Agents can use the CLI commands below to interact with running skim sessions directly.
+### Agent Panel
+
+Built-in chat interface for AI agents. Press `Ctrl-e` to toggle.
+
+#### Quick Start
+
+```bash
+# 1. Configure agents in ~/.skim/config.json (see Configuration below)
+
+# 2. Open your diff in skim
+skim --staged
+
+# 3. Press Ctrl-e to toggle the agent panel
+```
+
+#### Configuration
+
+Configure agents and panel settings in `~/.skim/config.json`:
+
+```json
+{
+  "agent_servers": {
+    "Claude Code": {
+      "command": "claude",
+      "args": ["acp"],
+      "skim": {
+        "default": true,
+        "model": "opus"
+      }
+    },
+    "Codex": {
+      "command": "codex",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `command` | string | Yes | CLI command to spawn the agent |
+| `args` | string[] | No | Additional CLI arguments to pass to the agent |
+| `env` | object | No | Environment variables (supports `${VAR}` expansion) |
+| `skim.default` | bool | No | Auto-connect to this agent (default: `false`) |
+| `skim.model` | string | No | AI model to use (e.g., `"opus"`, `"sonnet"`) |
+| `skim.mode` | string | No | Agent session mode (e.g., `"plan"`, `"code"`) |
+
+**Agent Selection:**
+- **Single agent**: Auto-connects immediately
+- **Multiple agents with default**: Auto-connects to the agent marked `"default": true`
+- **Multiple agents, no default**: Shows selection menu (`j`/`k` to navigate, `Enter` to select)
+
+Switch agents anytime via the command palette (`Ctrl-p`, then `>Switch Agent`).
+
+**Other options:**
+
+| Option | Values | Default |
+|--------|--------|---------|
+| `agent_panel_side` | `"left"`, `"right"` | `"right"` |
+
+#### @file References
+
+Type `@` in the agent prompt to fuzzy-search and embed file contents:
+
+```
+@src/m     → fuzzy matches src/main.zig, src/modes/*, etc.
+@readme    → matches README.md
+```
+
+| Key | Action |
+|-----|--------|
+| `@` | Open file picker (at word boundary) |
+| `↑`/`↓` or `Ctrl-p`/`Ctrl-n` | Navigate file list |
+| `Enter` or `Tab` | Insert selected file |
+| `ESC` | Close file picker |
+
+#### Agent Panel Keybindings
+
+The agent panel uses vim-style modal editing.
+
+**Global (work in any mode)**
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-E` | Close panel, return to diff |
+| `Ctrl-G` | Edit prompt in $EDITOR |
+| `Ctrl-W h/l` | Focus diff/agent panel |
+| `Ctrl-W w` | Cycle focus between panels |
+| `Ctrl-W o` | Toggle full screen |
+| `Ctrl-S` | Stash/unstash prompt |
+| `Ctrl-T` | Toggle todo list expansion |
+
+**Insert Mode (typing in prompt)**
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Send prompt to agent |
+| `Ctrl-J` | Insert newline in prompt |
+| `ESC` / `Ctrl-C` | Exit to normal mode |
+| `/` | Show slash command menu (at start) |
+| `@` | Show file picker (at start) |
+| `!` | Toggle shell command mode (empty input) |
+| `Up` | Restore staged prompt (empty input) |
+
+**Normal Mode (vim on prompt)**
+
+| Key | Action |
+|-----|--------|
+| `i` / `a` / `I` / `A` | Enter insert mode |
+| `h` / `l` | Move cursor left/right |
+| `w` / `b` / `e` | Word motions |
+| `0` / `$` | Line start/end |
+| `gg` / `G` | Jump to top/bottom of input |
+| `Ctrl-D` / `Ctrl-U` | Half-page down/up in input |
+| `x` / `dd` | Delete char/line |
+| `:` | Open command palette |
+| `?` | Show help |
+| `gb` | Enter history mode |
+| `gt` / `gT` | Next/previous tab |
+| `Space+b` | Enter history mode |
+| `Space+f` | Scroll to bottom, enable follow |
+| `V` | Toggle diff view mode |
+| `Tab` | Cycle session modes |
+| `ESC ESC` | Interrupt agent (double-tap) |
+
+**History Mode (enter with `gb` or `Space+b`)**
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Move cursor down/up |
+| `h` / `l` | Jump to prev/next message |
+| `gg` / `G` | Jump to top/bottom |
+| `Ctrl-D` / `Ctrl-U` | Page down/up |
+| `M` | Move cursor to middle of viewport |
+| `v` | Enter visual selection mode |
+| `y` | Yank user message at cursor |
+| `yy` | Yank current line |
+| `Y` | Yank entire current message |
+| `Space+f` | Resume follow mode, exit history |
+| `i` | Exit to insert mode |
+| `ESC` / `q` | Exit to normal mode |
+
+**Visual Mode (in history, enter with `v`)**
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Extend selection down/up |
+| `y` | Yank selection to clipboard |
+| `ESC` / `v` | Exit visual mode |
+
+**Permission Prompt (when agent requests permission)**
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` or `Up` / `Down` | Navigate options |
+| `Ctrl-D` / `Ctrl-U` | Scroll message history |
+| `Enter` / `y` | Accept selected option |
+| `ESC` / `n` | Reject/cancel |
+
+**Slash Menu / File Picker / Command Palette**
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-N` / `Ctrl-P` | Navigate menu |
+| `Tab` | Insert selected item |
+| `Enter` | Insert and execute |
+| `ESC` | Close menu |
+
+**Built-in Slash Commands**
+
+| Command | Action |
+|---------|--------|
+| `/clear` | Clear session and start fresh |
+| `/model` | Switch AI model |
+| `/resume` | Resume previous session |
 
 ### CLI Commands for Agents
 
@@ -340,50 +514,7 @@ For AI agents that support MCP (Model Context Protocol), add skim to your agent'
 }
 ```
 
-### Claude Code Plugin
-
-This repo includes a Claude Code plugin with a `/skim` skill that teaches Claude Code how to review code with skim.
-
-**Install from GitHub:**
-
-```bash
-# Add the skim marketplace
-/plugin marketplace add ctdio/skim
-
-# Install the plugin
-/plugin install skim@ctdio-skim
-```
-
-**Or install from a local clone:**
-
-```bash
-# Clone the repo
-git clone https://github.com/ctdio/skim.git
-
-# Add as a local marketplace (point to .claude-plugin directory)
-/plugin marketplace add ./skim/.claude-plugin
-
-# Install the plugin
-/plugin install skim@skim
-```
-
-**Usage:**
-
-Once installed, invoke the skill in Claude Code:
-
-```
-/skim                    # Show help and find sessions
-/skim review this code   # Ask Claude to review the diff
-```
-
-The skill provides Claude Code with:
-- Instructions for using skim MCP tools (`mcp__skim__*`)
-- Fallback CLI commands if MCP is unavailable
-- Guidance on line types and comment workflows
-
-### MCP Tools Available
-
-The skim MCP server exposes these tools to AI agents:
+**Available MCP Tools:**
 
 | Tool | Description |
 |------|-------------|
@@ -393,220 +524,29 @@ The skim MCP server exposes these tools to AI agents:
 | `add_comment` | Add a review comment to a specific line |
 | `get_comments` | Get all comments from a skim instance |
 
+### Claude Code Skill
+
+Install the `/skim` skill to teach Claude Code how to review code with skim:
+
+```bash
+npx skills add ctdio/skim
+```
+
+**Usage:**
+
+Once installed, ask your agent to review your code with skim:
+
+```
+Use skim to review this code, post comments in areas I should focus my attention
+```
+
+The agent will automatically find skim sessions running in the same directory. The skill provides instructions for using skim MCP tools (`mcp__skim__*`) with fallback CLI commands if MCP is unavailable.
+
 ### Log Files
 
 Skim writes logs to `~/.skim/`:
 - `tui.log` - TUI client logs
 - `mcp.log` - MCP adapter logs
-
----
-
-## Agent Panel
-
-Built-in chat interface for AI agents. Uses ACP (Agent Client Protocol) to communicate with agents like Claude Code.
-
-### Quick Start
-
-```bash
-# 1. Configure agents in ~/.skim/config.json (see Configuration below)
-
-# 2. Open your diff in skim
-skim --staged
-
-# 3. Press Ctrl-e to toggle the agent panel
-```
-
-### Agent Panel Keybindings
-
-The agent panel uses vim-style modal editing. Keybindings are organized by mode.
-
-#### Global (work in any mode)
-
-| Key | Action |
-|-----|--------|
-| `Ctrl-E` | Close panel, return to diff |
-| `Ctrl-G` | Edit prompt in $EDITOR |
-| `Ctrl-W h/l` | Focus diff/agent panel |
-| `Ctrl-W w` | Cycle focus between panels |
-| `Ctrl-W o` | Toggle full screen |
-| `Ctrl-S` | Stash/unstash prompt |
-| `Ctrl-T` | Toggle todo list expansion |
-
-#### Insert Mode (typing in prompt)
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Send prompt to agent |
-| `Ctrl-J` | Insert newline in prompt |
-| `ESC` / `Ctrl-C` | Exit to normal mode |
-| `/` | Show slash command menu (at start) |
-| `@` | Show file picker (at start) |
-| `!` | Toggle shell command mode (empty input) |
-| `Up` | Restore staged prompt (empty input) |
-
-#### Normal Mode (vim on prompt)
-
-| Key | Action |
-|-----|--------|
-| `i` / `a` / `I` / `A` | Enter insert mode |
-| `h` / `l` | Move cursor left/right |
-| `w` / `b` / `e` | Word motions |
-| `0` / `$` | Line start/end |
-| `gg` / `G` | Jump to top/bottom of input |
-| `Ctrl-D` / `Ctrl-U` | Half-page down/up in input |
-| `x` / `dd` | Delete char/line |
-| `:` | Open command palette |
-| `?` | Show help |
-| `gb` | Enter history mode |
-| `gt` / `gT` | Next/previous tab |
-| `Space+b` | Enter history mode |
-| `Space+f` | Scroll to bottom, enable follow |
-| `V` | Toggle diff view mode |
-| `Tab` | Cycle session modes |
-| `ESC ESC` | Interrupt agent (double-tap) |
-
-#### History Mode (enter with `gb` or `Space+b`)
-
-Browse and yank from message history.
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Move cursor down/up |
-| `h` / `l` | Jump to prev/next message |
-| `gg` / `G` | Jump to top/bottom |
-| `Ctrl-D` / `Ctrl-U` | Page down/up |
-| `M` | Move cursor to middle of viewport |
-| `v` | Enter visual selection mode |
-| `y` | Yank user message at cursor |
-| `yy` | Yank current line |
-| `Y` | Yank entire current message |
-| `Space+f` | Resume follow mode, exit history |
-| `i` | Exit to insert mode |
-| `ESC` / `q` | Exit to normal mode |
-
-#### Visual Mode (in history, enter with `v`)
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Extend selection down/up |
-| `y` | Yank selection to clipboard |
-| `ESC` / `v` | Exit visual mode |
-
-#### Permission Prompt (when agent requests permission)
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` or `Up` / `Down` | Navigate options |
-| `Ctrl-D` / `Ctrl-U` | Scroll message history |
-| `Enter` / `y` | Accept selected option |
-| `ESC` / `n` | Reject/cancel |
-
-#### Slash Menu (when visible after `/`)
-
-| Key | Action |
-|-----|--------|
-| `Ctrl-N` / `Ctrl-P` | Navigate menu |
-| `Tab` | Insert selected command |
-| `Enter` | Insert and send command |
-| `ESC` | Close menu |
-
-#### File Picker (when visible after `@`)
-
-| Key | Action |
-|-----|--------|
-| `Ctrl-N` / `Ctrl-P` | Navigate files |
-| `Enter` / `Tab` | Insert selected file |
-| `ESC` | Close picker |
-
-#### Command Palette (opened with `:`)
-
-| Key | Action |
-|-----|--------|
-| `Up` / `Down` or `Ctrl-P` / `Ctrl-N` | Navigate commands |
-| `Enter` | Execute selected command |
-| `ESC` | Close palette |
-
-#### Built-in Slash Commands
-
-| Command | Action |
-|---------|--------|
-| `/clear` | Clear session and start fresh |
-| `/model` | Switch AI model |
-| `/resume` | Resume previous session |
-
-### @file References
-
-Type `@` in the agent prompt to fuzzy-search and embed file contents:
-
-```
-@src/m     → fuzzy matches src/main.zig, src/modes/*, etc.
-@readme    → matches README.md
-```
-
-When you send the prompt, `@file` references are replaced with the file's contents as embedded resources for the AI agent.
-
-| Key | Action |
-|-----|--------|
-| `@` | Open file picker (at word boundary) |
-| `↑`/`↓` or `Ctrl-p`/`Ctrl-n` | Navigate file list |
-| `Enter` or `Tab` | Insert selected file |
-| `ESC` | Close file picker |
-
-### Configuration
-
-Configure agents and panel settings in `~/.skim/config.json`:
-
-```json
-{
-  "agent_servers": {
-    "Claude Code": {
-      "command": "claude",
-      "args": ["acp"],
-      "skim": {
-        "default": true,
-        "model": "opus"
-      }
-    },
-    "Codex": {
-      "command": "codex",
-      "args": ["acp"]
-    }
-  }
-}
-```
-
-#### Agent Configuration Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `command` | string | Yes | CLI command to spawn the agent |
-| `args` | string[] | No | Additional CLI arguments to pass to the agent |
-| `env` | object | No | Environment variables (supports `${VAR}` expansion) |
-| `skim.default` | bool | No | Auto-connect to this agent (default: `false`) |
-| `skim.model` | string | No | AI model to use (e.g., `"opus"`, `"sonnet"`) |
-| `skim.mode` | string | No | Agent session mode (e.g., `"plan"`, `"code"`) |
-
-#### Agent Selection Behavior
-
-- **No agents configured**: Shows error message in agent panel
-- **Single agent**: Auto-connects immediately
-- **Multiple agents with default**: Auto-connects to the agent marked `"default": true`
-- **Multiple agents, no default**: Shows selection menu (navigate with `j`/`k`, select with `Enter`)
-
-You can switch agents anytime via the command palette (`Ctrl-p`, then `>Switch Agent`).
-
-#### Other Options
-
-| Option | Values | Default |
-|--------|--------|---------|
-| `agent_panel_side` | `"left"`, `"right"` | `"right"` |
-
-### ACP Protocol
-
-The Agent Client Protocol (ACP) enables communication between skim and AI coding agents via stdio transport.
-
-**Supported agents:**
-- Agents implementing the ACP stdio transport (e.g., `claude acp`, `codex acp`)
 
 ---
 
