@@ -711,6 +711,11 @@ pub const App = struct {
         return tm.full_screen;
     }
 
+    /// Check if both diff and agent panels are visible (split view)
+    pub fn areBothPanelsVisible(self: *const App) bool {
+        return self.isAgentPanelVisible() and !self.isAgentFullScreen();
+    }
+
     /// Get the agent panel side
     pub fn getAgentPanelSide(self: *const App) agent.AgentState.PanelSide {
         const tm = self.tab_manager orelse return .right;

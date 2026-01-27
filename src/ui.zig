@@ -1194,6 +1194,11 @@ pub const UI = struct {
 
         const file_path = if (current_file.new_path.len > 0) current_file.new_path else current_file.old_path;
 
+        // Show [focused] when diff is focused and both panels are visible
+        const is_diff_focused = app.mode != .agent;
+        const show_focus = app.areBothPanelsVisible() and is_diff_focused;
+        const focus_suffix = if (show_focus) " [focused]" else "";
+
         // First line: File info with stats
         var buf1: [512]u8 = undefined;
         const file_info = try std.fmt.bufPrint(&buf1, "File {d} of {d}  ", .{
@@ -1213,6 +1218,7 @@ pub const UI = struct {
         const additions_copy = try RenderUtils.copyFrameText(app, additions_text);
         const deletions_copy = try RenderUtils.copyFrameText(app, deletions_text);
         const spacer = try RenderUtils.copyFrameText(app, "  ");
+        const focus_copy = try RenderUtils.copyFrameText(app, focus_suffix);
 
         // Create segments with different colors
         var segments = [_]vaxis.Cell.Segment{
@@ -1221,6 +1227,7 @@ pub const UI = struct {
             .{ .text = spacer, .style = .{ .fg = Color.white } },
             .{ .text = additions_copy, .style = .{ .fg = Color.diff_sign_add, .bold = true } },
             .{ .text = deletions_copy, .style = .{ .fg = Color.diff_sign_delete, .bold = true } },
+            .{ .text = focus_copy, .style = .{ .fg = Color.white, .bold = true } },
         };
 
         _ = win.print(&segments, .{ .row_offset = 0, .col_offset = @intCast(0) });
@@ -1356,6 +1363,12 @@ pub const UI = struct {
         // Build status bar using segments with colors
         var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
         defer segments.deinit(app.allocator);
+
+        // Add panel indicator when both panels are visible
+        if (app.areBothPanelsVisible()) {
+            const panel_indicator = if (app.mode == .agent) "AGENT " else "DIFF ";
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, panel_indicator), .style = .{ .fg = Color.cyan, .bold = true } });
+        }
 
         if (app.mode == .comment and app.state.active_comment_input != null and
             app.state.active_comment_input.?.vim.vim_mode == .command)
