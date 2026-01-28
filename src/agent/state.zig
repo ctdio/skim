@@ -1941,6 +1941,22 @@ pub const AgentState = struct {
         self.last_ctrl_c_timestamp = 0;
     }
 
+    /// Check if waiting for a second Ctrl+C press (within threshold window)
+    pub fn isPendingCtrlC(self: *const AgentState) bool {
+        if (self.last_ctrl_c_timestamp == 0) return false;
+        const now_ms = std.time.milliTimestamp();
+        const elapsed = now_ms - self.last_ctrl_c_timestamp;
+        return elapsed <= DOUBLE_KEY_THRESHOLD_MS;
+    }
+
+    /// Check if waiting for a second ESC press (within threshold window)
+    pub fn isPendingEsc(self: *const AgentState) bool {
+        if (self.last_esc_timestamp == 0) return false;
+        const now_ms = std.time.milliTimestamp();
+        const elapsed = now_ms - self.last_esc_timestamp;
+        return elapsed <= DOUBLE_KEY_THRESHOLD_MS;
+    }
+
     // =========================================================================
     // Shell Command Mode
     // =========================================================================

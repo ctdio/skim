@@ -382,6 +382,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 }
             }
             // No active prompt to cancel, just ignore
+        } else {
+            // First ESC - re-render to show "press esc again" hint
+            app.needs_render = true;
         }
         // First ESC or no cancellation - continue to other ESC handling
     }

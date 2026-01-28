@@ -1428,15 +1428,20 @@ pub const UI = struct {
                 // Keybindings on the right
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
 
-                // Agent-specific keybindings based on vim mode
-                const has_modes = if (app.getActiveAcpManager()) |mgr| mgr.hasModes() else false;
-                const agent_keybindings = switch (agent_state.input.vim.vim_mode) {
-                    .insert => "S-Enter:newline  Enter:send  ESC:normal",
-                    .normal => if (has_modes) "Tab:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",
-                    .visual => "ESC:exit",
-                    .command => "Enter:execute  ESC:cancel",
-                };
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, agent_keybindings), .style = .{ .fg = Color.dim_gray } });
+                // Check for pending Ctrl+C in normal vim mode - show quit hint
+                if (agent_state.input.vim.vim_mode == .normal and agent_state.isPendingCtrlC()) {
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "Ctrl+C again to quit"), .style = .{ .fg = Color.yellow, .bold = true } });
+                } else {
+                    // Agent-specific keybindings based on vim mode
+                    const has_modes = if (app.getActiveAcpManager()) |mgr| mgr.hasModes() else false;
+                    const agent_keybindings = switch (agent_state.input.vim.vim_mode) {
+                        .insert => "S-Enter:newline  Enter:send  ESC:normal",
+                        .normal => if (has_modes) "Tab:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",
+                        .visual => "ESC:exit",
+                        .command => "Enter:execute  ESC:cancel",
+                    };
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, agent_keybindings), .style = .{ .fg = Color.dim_gray } });
+                }
             } else {
                 // Fallback if no agent state
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
@@ -1513,7 +1518,13 @@ pub const UI = struct {
             }
 
             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+
+            // Check for pending Ctrl+C in normal/comment modes - show quit hint
+            if ((app.mode == .normal or app.mode == .comment) and app.isPendingCtrlC()) {
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "Ctrl+C again to quit"), .style = .{ .fg = Color.yellow, .bold = true } });
+            } else {
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+            }
         }
 
         _ = win.print(segments.items, .{ .row_offset = @intCast(0) });

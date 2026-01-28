@@ -954,13 +954,15 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     } else 0;
 
     // Calculate status area height (shown between messages and plan when agent is thinking or session initializing with queued message)
-    // Layout: empty row + "Generating..."/"Waiting..." + empty row + optional queued message + empty row
+    // Layout: empty row + "Generating..."/"Waiting..." (with inline hint) + empty row + optional queued message + empty row
     const is_thinking = if (app.getActiveAcpManager()) |mgr| mgr.status == .prompting else false;
     const session_initializing = if (app.getActiveAcpManager()) |mgr|
         mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected
     else
         false;
     const show_status_area = is_thinking or (session_initializing and agent_state.hasStagedPrompt());
+    // Show interrupt hint inline when agent is thinking and vim is in normal mode
+    const show_interrupt_hint = is_thinking and agent_state.input.vim.vim_mode == .normal;
     const status_height: usize = if (show_status_area) blk: {
         var height: usize = 3; // empty + "Generating..."/"Waiting..." + empty
         // Add queued message height if present
@@ -1028,7 +1030,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
             .width = win.width,
             .height = @intCast(status_height),
         });
-        renderStatusArea(status_win, agent_state, is_thinking);
+        renderStatusArea(status_win, agent_state, is_thinking, show_interrupt_hint);
     }
 
     // Render plan area (if visible and has entries)
@@ -1752,8 +1754,8 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 }
 
 /// Render the status area shown between messages and plan when agent is thinking or waiting
-/// Layout: empty row + status message + empty row + optional queued message
-fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bool) void {
+/// Layout: empty row + status message (with inline hint) + empty row + optional queued message
+fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bool, show_interrupt_hint: bool) void {
     if (win.height == 0) return;
 
     const blank_cell = vaxis.Cell{
@@ -1767,7 +1769,7 @@ fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bo
     // Row 0: empty padding
     row += 1;
 
-    // Row 1: Status indicator with shimmer (message selected per turn based on user message count)
+    // Row 1: Status indicator with shimmer + inline interrupt hint
     if (row < win.height) {
         // Count only user messages for stable turn seed (agent messages change during streaming)
         var user_msg_count: usize = 0;
@@ -1775,6 +1777,32 @@ fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bo
             if (msg.role == .user) user_msg_count += 1;
         }
         renderThinkingIndicator(win, row, is_thinking, user_msg_count);
+
+        // Add inline interrupt hint after the thinking indicator (when in normal mode)
+        if (show_interrupt_hint) {
+            // Position hint after the thinking message (max ~14 chars) + spacing
+            const hint_col: usize = 16; // "Generating..." is 13 chars + some padding
+            const pending_esc = agent_state.isPendingEsc();
+            const has_queued = agent_state.hasStagedPrompt();
+
+            // Show different hint based on whether first ESC was pressed
+            const hint_text = if (pending_esc)
+                if (has_queued) "(press esc again to interrupt and send queued)" else "(press esc again to interrupt)"
+            else if (has_queued)
+                "(esc to interrupt and send queued)"
+            else
+                "(esc to interrupt)";
+
+            const hint_style = if (pending_esc)
+                vaxis.Style{ .fg = Color.yellow, .bold = true }
+            else
+                vaxis.Style{ .fg = Color.dim_gray };
+
+            var hint_seg = [_]vaxis.Cell.Segment{
+                .{ .text = hint_text, .style = hint_style },
+            };
+            _ = win.print(&hint_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(hint_col) });
+        }
         row += 1;
     }
 

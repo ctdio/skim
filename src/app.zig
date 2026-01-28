@@ -662,6 +662,13 @@ pub const App = struct {
         return tm.panel_visible;
     }
 
+    /// Check if waiting for a second Ctrl+C press (for normal/comment modes)
+    pub fn isPendingCtrlC(self: *const App) bool {
+        if (self.last_ctrl_c == 0) return false;
+        const now: i64 = @intCast(std.time.nanoTimestamp());
+        return (now - self.last_ctrl_c) < App.CTRL_C_TIMEOUT_NS;
+    }
+
     /// Update the filtered model indices based on the current filter query
     pub fn updateModelFilter(self: *App) void {
         const mgr = self.getActiveAcpManager() orelse return;
@@ -1451,8 +1458,10 @@ pub const App = struct {
                             if (agent_state.recordCtrlCPress()) {
                                 // Double Ctrl+C detected - exit the app
                                 self.should_quit = true;
+                            } else {
+                                // Single Ctrl+C - show hint in status bar
+                                self.needs_render = true;
                             }
-                            // Single Ctrl+C - wait for second press (do nothing)
                             return;
                         }
                     }
@@ -1465,6 +1474,7 @@ pub const App = struct {
                         return;
                     }
                     self.last_ctrl_c = now;
+                    self.needs_render = true; // Show hint in status bar
                     return;
                 },
             }
