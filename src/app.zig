@@ -8,7 +8,6 @@ const comments = @import("comments/store.zig");
 const line_map = @import("line_map.zig");
 const tui_server = @import("mcp/tui_server.zig");
 const session_mgr = @import("mcp/session.zig");
-const mcp_handlers = @import("mcp/handlers.zig");
 const navigation = @import("navigation.zig");
 const search = @import("search.zig");
 const clipboard = @import("clipboard.zig");
@@ -32,8 +31,6 @@ const command_palette_mode = @import("modes/command_palette_mode.zig");
 const help_mode = @import("modes/help_mode.zig");
 const branch_selection_mode = @import("modes/branch_selection_mode.zig");
 const commit_selection_mode = @import("modes/commit_selection_mode.zig");
-const mcp_status_mode = @import("modes/mcp_status_mode.zig");
-const mcp_status = @import("mcp_status.zig");
 const graphite_mode = @import("modes/graphite_mode.zig");
 const model_selection_mode = @import("modes/model_selection_mode.zig");
 const agent_selection_mode = @import("modes/agent_selection_mode.zig");
@@ -145,7 +142,6 @@ pub const App = struct {
         branch_selection, // Branch selection menu (when empty)
         commit_selection, // Commit selection menu
         commit_diff_mode, // Submenu to select diff mode after commit selection
-        mcp_status, // MCP server connection status
         graphite_stack, // Graphite stack picker
         agent, // Agent chat panel
         model_selection, // AI model selection menu
@@ -1416,11 +1412,6 @@ pub const App = struct {
                     self.state.visual_anchor = null;
                     return;
                 },
-                .mcp_status => {
-                    self.mode = .normal;
-                    self.needs_render = true;
-                    return;
-                },
                 .graphite_stack => {
                     self.mode = .normal;
                     self.needs_render = true;
@@ -1492,7 +1483,6 @@ pub const App = struct {
             .branch_selection => try branch_selection_mode.handleKey(self, key),
             .commit_selection => try commit_selection_mode.handleKey(self, key),
             .commit_diff_mode => try commit_selection_mode.handleDiffModeKey(self, key),
-            .mcp_status => try mcp_status_mode.handleKey(self, key),
             .graphite_stack => try graphite_mode.handleKey(self, key),
             .model_selection => try model_selection_mode.handleKey(self, key),
             .agent_selection => try agent_selection_mode.handleKey(self, key),
@@ -2482,9 +2472,6 @@ pub const App = struct {
             .switch_diff_mode => |mode| {
                 try self.switchDiffMode(mode);
             },
-            .show_mcp_status => {
-                self.mode = .mcp_status;
-            },
             .switch_agent => {
                 // Disconnect current tab's agent if connected
                 if (self.getActiveAcpManager()) |mgr| {
@@ -3373,11 +3360,6 @@ pub const App = struct {
         // Render help overlay if in help mode
         if (self.mode == .help) {
             try help.renderHelpPopup(self, win);
-        }
-
-        // Render MCP status overlay if in mcp_status mode
-        if (self.mode == .mcp_status) {
-            try mcp_status.renderMcpStatusPopup(self, win);
         }
 
         // Render graphite stack dialog if in graphite_stack mode

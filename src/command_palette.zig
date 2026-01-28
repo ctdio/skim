@@ -37,7 +37,6 @@ pub const CommandAction = union(enum) {
     show_help: void,
     quit: void,
     switch_diff_mode: DiffMode,
-    show_mcp_status: void,
     switch_agent: void,
     select_commit: void,
 };
@@ -168,17 +167,6 @@ pub const CommandPaletteState = struct {
             .display_name = "Show Help",
             .description = "Display help overlay",
             .action = .show_help,
-            .category = .help,
-            .owns_display_name = false,
-            .additions = 0,
-            .deletions = 0,
-        });
-
-        try self.commands.append(self.allocator, .{
-            .name = "Daemon Status",
-            .display_name = "Daemon Status",
-            .description = "Show daemon connection status",
-            .action = .show_mcp_status,
             .category = .help,
             .owns_display_name = false,
             .additions = 0,
