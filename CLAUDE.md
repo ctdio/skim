@@ -6,12 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Skim is a keyboard-driven TUI for code reviews built in Zig. Vim-style navigation, sub-10ms startup, 60 FPS scrolling.
 
-**Current Status**: Alpha - Phase 4 in progress (MCP daemon, AI agent integration).
+**Current Status**: Alpha - AI agent integration complete (ACP + MCP support).
 
 ## Build System
 
 ### Prerequisites
-- Zig 0.13.0 or later
+- Zig 0.15.1 or later
 - Git must be available in PATH
 
 ### Common Commands
@@ -47,8 +47,8 @@ zig build test
 ### Build Configuration
 - Output: `./zig-out/bin/skim`
 - Dependencies (in `build.zig.zon`):
-  - vaxis v0.5.1 (TUI rendering)
-  - z-tree-sitter (syntax highlighting - JS, TS, Zig, Python, Rust, Go, C, C++)
+  - vaxis (TUI rendering)
+  - tree-sitter + language grammars (syntax highlighting - JS, TS, Zig, Python, Rust, Go, C, C++, JSON, YAML, TOML, Markdown, HTML, CSS, Bash)
 - Release builds strip symbols (~209KB)
 
 ## Architecture
@@ -61,8 +61,11 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 - **Line Tracking** (`line_map.zig`): Position registry
 - **Git Integration** (`git/`): Command execution, diff parsing
 - **Rendering** (`rendering/`): Unified/side-by-side views
-- **Syntax Highlighting** (`syntax.zig`): Async tree-sitter
-- **MCP System** (`mcp/`): Daemon, adapters, protocol for AI agents
+- **Syntax Highlighting** (`highlighting/`): Async tree-sitter with parser caching
+- **ACP System** (`acp/`): Agent Client Protocol for built-in agent panel
+- **Agent UI** (`agent/`): Chat panel, markdown rendering, message history
+- **MCP Server** (`mcp/`): Model Context Protocol for external agent integration
+- **CLI Commands** (`cli/`): Session management, comment operations
 - **Logging** (`logging.zig`): File logging to `~/.skim/*.log`
 
 **Key Design Principles:**
@@ -70,8 +73,8 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 - Shell-out to git (respects user config)
 - LineMap registry for positioning
 - Virtual scrolling (render visible lines only)
-- Minimal dependencies (vaxis + z-tree-sitter)
-- Daemon architecture for AI agents
+- Minimal dependencies (vaxis + tree-sitter)
+- Direct subprocess spawning for AI agents (no daemon)
 
 ## Logging System
 
@@ -80,7 +83,6 @@ Logs are written to files in `~/.skim/` instead of stderr (since stdout/stderr a
 ```bash
 ~/.skim/
 ├── tui.log      # TUI client logs
-├── daemon.log   # Daemon process logs
 └── mcp.log      # MCP adapter logs
 ```
 
@@ -88,50 +90,54 @@ Logs are written to files in `~/.skim/` instead of stderr (since stdout/stderr a
 ```bash
 # Watch TUI logs in real-time
 tail -f ~/.skim/tui.log
-
-# Watch daemon logs
-tail -f ~/.skim/daemon.log
 ```
 
 The logging module (`src/logging.zig`) overrides `std.log` to write to these files with timestamps and log levels.
 
-## MCP System Overview
+## AI Integration Overview
 
-The MCP (Model Context Protocol) system enables AI agents to interact with skim. It uses a daemon architecture:
+Skim integrates with AI agents in two ways:
+
+### 1. Agent Panel (ACP - Built-in)
+
+The built-in agent panel (`Ctrl-e`) uses the Agent Client Protocol for direct communication with AI agents. Agents are spawned as subprocesses with stdio communication.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     AI Agent (Claude, etc.)                     │
+│                      Skim TUI                                   │
+│  - Spawns agent as child process                                │
+│  - Communicates via JSON-RPC over stdio                         │
+│  - Renders agent responses in chat panel                        │
 └───────────────────────────┬─────────────────────────────────────┘
-                            │ JSON-RPC over stdio
+                            │ stdio (JSON-RPC)
 ┌───────────────────────────▼─────────────────────────────────────┐
-│                    MCP Adapter (skim mcp --stdio)               │
-│                    Translates MCP ↔ Internal Protocol           │
-└───────────────────────────┬─────────────────────────────────────┘
-                            │ TCP (port 9998)
-┌───────────────────────────▼─────────────────────────────────────┐
-│                         Daemon                                  │
-│  - Manages TUI client registry                                  │
-│  - Routes messages between adapters and TUI clients             │
-│  - Implements MCP tools (list_clients, add_comment, etc.)       │
-└───────────────────────────┬─────────────────────────────────────┘
-                            │ TCP (port 9999)
-┌───────────────────────────▼─────────────────────────────────────┐
-│                      Skim TUI Client                            │
-│  - Connects to daemon on startup                                │
-│  - Registers with session info (cwd, diff_ref, files)           │
-│  - Responds to daemon requests (add_comment, get_diff, etc.)    │
+│                    AI Agent Process                             │
+│  (Claude Code, Codex, etc.)                                     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+**Key ACP files:**
+- `acp/manager.zig`: Session lifecycle and agent discovery
+- `acp/client.zig`: Agent communication and message handling
+- `acp/codec.zig`: JSON-RPC encoding/decoding
+- `acp/transport.zig`: Stdio transport layer
+- `acp/process.zig`: Agent process spawning
+- `acp/sessions/`: Vendor-specific adapters (Claude, Codex)
+
+**Key Agent UI files:**
+- `agent/state.zig`: Agent panel state machine
+- `agent/render.zig`: Chat panel rendering
+- `agent/chat_line_map.zig`: Message line registry
+- `agent/markdown/`: Markdown parsing and rendering
+
+### 2. MCP Server (External Agents)
+
+For AI agents that support MCP (Model Context Protocol), skim provides a stdio-based MCP server (`skim mcp --stdio`).
+
 **Key MCP files:**
-- `daemon.zig`: Central server managing clients and adapters
-- `adapter.zig`: stdio adapter for AI agents (MCP JSON-RPC)
-- `client.zig`: TUI-side client connecting to daemon
-- `protocol.zig`: TUI ↔ Daemon message protocol
-- `tools.zig`: MCP tool implementations (list_clients, add_comment, etc.)
-- `discovery.zig`: Daemon discovery via `~/.skim/daemon.json`
-- `framework.zig`: Mini MCP JSON-RPC framework
+- `mcp/adapter.zig`: stdio MCP server for external agents
+- `mcp/tools.zig`: MCP tool implementations (list_clients, add_comment, etc.)
+- `mcp/framework.zig`: Mini MCP JSON-RPC framework
 
 ## Development Workflow
 
@@ -211,15 +217,15 @@ See [docs/architecture.md](docs/architecture.md).
 - Rebuilt on: init, refresh, comment add/delete
 
 ### Modal State Machine
-- Modes: normal, comment, search, visual, command_palette, help, branch_selection
+- Modes: normal, comment, search, visual, command_palette, help, branch_selection, commit_selection, graphite_stack, agent, model_selection, agent_selection, session_picker
 - Mode handlers in `src/modes/`
 - When adding modes: update `Mode` enum, create handler file, update status bar
 
 ### Adding Features
 - **New keybinding**: Update mode handler in `src/modes/`, update status bar help, update README
-- **New language**: Add grammar to `build.zig.zon`, update `syntax.zig`, add `.scm` query file
+- **New language**: Add grammar to `build.zig.zon`, update `highlighting/core.zig`, add `.scm` query file in `queries/`
 - **New line type**: Update `LineType` enum, update `LineMap.build()`, update renderers, **add snapshot tests**
-- **New MCP tool**: Add to `src/mcp/tools.zig`, register in `createServer()`, update tool docs
+- **New MCP tool**: Add to `src/mcp/tools.zig`, update tool docs
 - **UI rendering changes**: Update renderers, **add/update snapshot tests in `src/testing/`**
 
 ## Git Integration
