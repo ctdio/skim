@@ -69,6 +69,15 @@ const HunkKey = struct {
     hunk_idx: usize,
 };
 
+/// Anchor for preserving viewport position across LineMap rebuilds.
+/// Captures position relative to a stable reference (file/hunk header).
+const ViewportAnchor = struct {
+    file_idx: usize,
+    hunk_idx: ?usize, // null = anchor to file header
+    scroll_offset_from_anchor: isize,
+    cursor_offset_from_anchor: isize,
+};
+
 const PendingJob = struct {
     content: []const u8, // Owned NEW hunk content
     old_content: []const u8, // Owned OLD hunk content
@@ -1502,9 +1511,8 @@ pub const App = struct {
     }
 
     pub fn toggleViewMode(self: *App) void {
-        // Capture current position for anchoring
-        const old_cursor = self.state.global_cursor_line;
-        const old_scroll = self.state.global_scroll_offset;
+        // Capture viewport anchor before toggle (anchor to viewport top for stable view)
+        const anchor = self.captureViewportAnchor(self.state.global_scroll_offset);
 
         // Toggle view mode
         self.state.view_mode = switch (self.state.view_mode) {
@@ -1527,16 +1535,8 @@ pub const App = struct {
             return;
         };
 
-        // Restore cursor and scroll positions (simple preservation since line count may have changed)
-        const total_lines = self.getTotalGlobalLines();
-        if (total_lines > 0) {
-            self.state.global_cursor_line = @min(old_cursor, total_lines - 1);
-            self.state.global_scroll_offset = @min(old_scroll, total_lines - 1);
-        } else {
-            self.state.global_cursor_line = 0;
-            self.state.global_scroll_offset = 0;
-        }
-        Navigation.clampScrollOffset(self);
+        // Restore viewport position from anchor
+        _ = self.restoreViewportFromAnchor(anchor);
     }
 
     pub fn toggleBlame(self: *App) void {
@@ -1632,59 +1632,8 @@ pub const App = struct {
         // Only apply in unified mode
         if (!self.shouldApplyHunkFiltering()) return;
 
-        // Same logic as cycleHunkViewMode but cycles backwards
-        const old_record = self.state.line_map.getLineRecord(self.state.global_cursor_line);
-
-        var anchor: ?struct {
-            file_idx: usize,
-            hunk_idx: ?usize,
-            cursor_offset: isize,
-            scroll_offset: isize,
-        } = null;
-
-        if (old_record) |rec| {
-            var anchor_line: ?usize = null;
-            var anchor_file: usize = rec.file_idx;
-            var anchor_hunk: ?usize = null;
-
-            switch (rec.line_type) {
-                .file_header => {
-                    anchor_line = self.state.global_cursor_line;
-                    anchor_hunk = null;
-                },
-                .hunk_header => |hunk_info| {
-                    anchor_line = self.state.global_cursor_line;
-                    anchor_hunk = hunk_info.hunk_idx;
-                },
-                .code_line => |code_info| {
-                    anchor_line = self.findHunkHeaderLine(rec.file_idx, code_info.hunk_idx);
-                    anchor_hunk = code_info.hunk_idx;
-                },
-                .comment_line => |comment_info| {
-                    anchor_line = self.findHunkHeaderLine(rec.file_idx, comment_info.parent_hunk_idx);
-                    anchor_hunk = comment_info.parent_hunk_idx;
-                },
-                .spacer => |spacer_info| {
-                    const next_file_idx = if (spacer_info.is_header_spacer)
-                        spacer_info.after_file_idx
-                    else
-                        spacer_info.after_file_idx + 1;
-
-                    anchor_file = next_file_idx;
-                    anchor_line = self.state.line_map.getFileHeaderLine(next_file_idx);
-                    anchor_hunk = null;
-                },
-            }
-
-            if (anchor_line) |anc_line| {
-                anchor = .{
-                    .file_idx = anchor_file,
-                    .hunk_idx = anchor_hunk,
-                    .cursor_offset = @as(isize, @intCast(self.state.global_cursor_line)) - @as(isize, @intCast(anc_line)),
-                    .scroll_offset = @as(isize, @intCast(self.state.global_scroll_offset)) - @as(isize, @intCast(anc_line)),
-                };
-            }
-        }
+        // Capture anchor based on cursor position (for hunk cycling, cursor is the reference)
+        const anchor = self.captureViewportAnchor(self.state.global_cursor_line);
 
         // Cycle to previous mode
         self.state.hunk_view_mode = self.state.hunk_view_mode.prev();
@@ -1693,108 +1642,16 @@ pub const App = struct {
         self.state.line_map.deinit();
         self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
 
-        // Restore positions
-        if (anchor) |anc| {
-            if (anc.file_idx < self.state.files.len) {
-                const new_anchor_line = if (anc.hunk_idx) |hunk_idx|
-                    self.findHunkHeaderLine(anc.file_idx, hunk_idx)
-                else
-                    self.state.line_map.getFileHeaderLine(anc.file_idx);
-
-                if (new_anchor_line) |anchor_line| {
-                    const total_lines = self.getTotalGlobalLines();
-                    if (total_lines == 0) {
-                        self.state.global_cursor_line = 0;
-                        self.state.global_scroll_offset = 0;
-                        return;
-                    }
-
-                    const target_cursor_signed = @as(isize, @intCast(anchor_line)) + anc.cursor_offset;
-                    const target_cursor = if (target_cursor_signed < 0) 0 else @as(usize, @intCast(target_cursor_signed));
-                    self.state.global_cursor_line = @min(target_cursor, total_lines - 1);
-
-                    const target_scroll_signed = @as(isize, @intCast(anchor_line)) + anc.scroll_offset;
-                    const target_scroll = if (target_scroll_signed < 0) 0 else @as(usize, @intCast(target_scroll_signed));
-                    self.state.global_scroll_offset = target_scroll;
-
-                    Navigation.clampScrollOffset(self);
-                    return;
-                }
-            }
-        }
-
-        const total_lines = self.getTotalGlobalLines();
-        if (total_lines > 0 and self.state.global_cursor_line >= total_lines) {
-            self.state.global_cursor_line = total_lines - 1;
-        }
-        Navigation.clampScrollOffset(self);
+        // Restore positions from anchor
+        _ = self.restoreViewportFromAnchor(anchor);
     }
 
     pub fn cycleHunkViewMode(self: *App) !void {
         // Only apply in unified mode
         if (!self.shouldApplyHunkFiltering()) return;
 
-        // Before rebuilding, capture anchor information to preserve BOTH cursor and scroll positions
-        // This prevents the viewport from jumping around
-        const old_record = self.state.line_map.getLineRecord(self.state.global_cursor_line);
-
-        var anchor: ?struct {
-            file_idx: usize,
-            hunk_idx: ?usize, // null means anchor to file header
-            cursor_offset: isize, // signed offset of cursor from anchor line
-            scroll_offset: isize, // signed offset of scroll from anchor line
-        } = null;
-
-        if (old_record) |rec| {
-            // Find the anchor line for this record
-            var anchor_line: ?usize = null;
-            var anchor_file: usize = rec.file_idx;
-            var anchor_hunk: ?usize = null;
-
-            switch (rec.line_type) {
-                .file_header => {
-                    // Cursor is on file header - anchor to it
-                    anchor_line = self.state.global_cursor_line;
-                    anchor_hunk = null;
-                },
-                .hunk_header => |hunk_info| {
-                    // Cursor is on hunk header - anchor to it
-                    anchor_line = self.state.global_cursor_line;
-                    anchor_hunk = hunk_info.hunk_idx;
-                },
-                .code_line => |code_info| {
-                    // Cursor is on code line - anchor to the hunk header
-                    anchor_line = self.findHunkHeaderLine(rec.file_idx, code_info.hunk_idx);
-                    anchor_hunk = code_info.hunk_idx;
-                },
-                .comment_line => |comment_info| {
-                    // Cursor is on comment - anchor to the hunk header
-                    anchor_line = self.findHunkHeaderLine(rec.file_idx, comment_info.parent_hunk_idx);
-                    anchor_hunk = comment_info.parent_hunk_idx;
-                },
-                .spacer => |spacer_info| {
-                    // Cursor is on spacer - anchor to the file header
-                    const next_file_idx = if (spacer_info.is_header_spacer)
-                        spacer_info.after_file_idx
-                    else
-                        spacer_info.after_file_idx + 1;
-
-                    anchor_file = next_file_idx;
-                    anchor_line = self.state.line_map.getFileHeaderLine(next_file_idx);
-                    anchor_hunk = null;
-                },
-            }
-
-            // If we found an anchor, calculate offsets
-            if (anchor_line) |anc_line| {
-                anchor = .{
-                    .file_idx = anchor_file,
-                    .hunk_idx = anchor_hunk,
-                    .cursor_offset = @as(isize, @intCast(self.state.global_cursor_line)) - @as(isize, @intCast(anc_line)),
-                    .scroll_offset = @as(isize, @intCast(self.state.global_scroll_offset)) - @as(isize, @intCast(anc_line)),
-                };
-            }
-        }
+        // Capture anchor based on cursor position (for hunk cycling, cursor is the reference)
+        const anchor = self.captureViewportAnchor(self.state.global_cursor_line);
 
         // Cycle to next mode
         self.state.hunk_view_mode = self.state.hunk_view_mode.next();
@@ -1803,46 +1660,8 @@ pub const App = struct {
         self.state.line_map.deinit();
         self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
 
-        // Restore both cursor and scroll positions using anchor
-        if (anchor) |anc| {
-            if (anc.file_idx < self.state.files.len) {
-                // Find the anchor line in the new LineMap
-                const new_anchor_line = if (anc.hunk_idx) |hunk_idx|
-                    self.findHunkHeaderLine(anc.file_idx, hunk_idx)
-                else
-                    self.state.line_map.getFileHeaderLine(anc.file_idx);
-
-                if (new_anchor_line) |anchor_line| {
-                    const total_lines = self.getTotalGlobalLines();
-                    if (total_lines == 0) {
-                        self.state.global_cursor_line = 0;
-                        self.state.global_scroll_offset = 0;
-                        return;
-                    }
-
-                    // Restore cursor: anchor + offset
-                    const target_cursor_signed = @as(isize, @intCast(anchor_line)) + anc.cursor_offset;
-                    const target_cursor = if (target_cursor_signed < 0) 0 else @as(usize, @intCast(target_cursor_signed));
-                    self.state.global_cursor_line = @min(target_cursor, total_lines - 1);
-
-                    // Restore scroll: anchor + offset
-                    const target_scroll_signed = @as(isize, @intCast(anchor_line)) + anc.scroll_offset;
-                    const target_scroll = if (target_scroll_signed < 0) 0 else @as(usize, @intCast(target_scroll_signed));
-                    self.state.global_scroll_offset = target_scroll;
-
-                    // Only clamp scroll if it's out of bounds (minimal adjustment)
-                    Navigation.clampScrollOffset(self);
-                    return;
-                }
-            }
-        }
-
-        // Fallback: if anchor restoration failed, just clamp cursor and scroll
-        const total_lines = self.getTotalGlobalLines();
-        if (total_lines > 0 and self.state.global_cursor_line >= total_lines) {
-            self.state.global_cursor_line = total_lines - 1;
-        }
-        Navigation.clampScrollOffset(self);
+        // Restore positions from anchor
+        _ = self.restoreViewportFromAnchor(anchor);
     }
 
     // Helper: Find the global line number of a hunk header
@@ -1855,6 +1674,110 @@ pub const App = struct {
             }
         }
         return null;
+    }
+
+    // Helper: Find the global line number of a specific code line
+    fn findCodeLine(self: *App, file_idx: usize, hunk_idx: usize, line_idx_in_hunk: usize) ?usize {
+        for (self.state.line_map.records) |*record| {
+            if (record.file_idx == file_idx and record.line_type == .code_line) {
+                const code_info = record.line_type.code_line;
+                if (code_info.hunk_idx == hunk_idx and code_info.line_idx_in_hunk == line_idx_in_hunk) {
+                    return record.global_line;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Capture viewport anchor for preserving position across LineMap rebuilds.
+    /// Uses the viewport top (global_scroll_offset) as reference by default.
+    /// Pass a specific reference_line to anchor from a different position (e.g., cursor).
+    fn captureViewportAnchor(self: *App, reference_line: usize) ?ViewportAnchor {
+        const record = self.state.line_map.getLineRecord(reference_line) orelse return null;
+
+        var anchor_line: ?usize = null;
+        var anchor_file: usize = record.file_idx;
+        var anchor_hunk: ?usize = null;
+
+        switch (record.line_type) {
+            .file_header => {
+                anchor_line = reference_line;
+                anchor_hunk = null;
+            },
+            .hunk_header => |hunk_info| {
+                anchor_line = reference_line;
+                anchor_hunk = hunk_info.hunk_idx;
+            },
+            .code_line => |code_info| {
+                anchor_line = self.findHunkHeaderLine(record.file_idx, code_info.hunk_idx);
+                anchor_hunk = code_info.hunk_idx;
+            },
+            .comment_line => |comment_info| {
+                anchor_line = self.findHunkHeaderLine(record.file_idx, comment_info.parent_hunk_idx);
+                anchor_hunk = comment_info.parent_hunk_idx;
+            },
+            .spacer => |spacer_info| {
+                const next_file_idx = if (spacer_info.is_header_spacer)
+                    spacer_info.after_file_idx
+                else
+                    spacer_info.after_file_idx + 1;
+
+                anchor_file = next_file_idx;
+                anchor_line = self.state.line_map.getFileHeaderLine(next_file_idx);
+                anchor_hunk = null;
+            },
+        }
+
+        const anc_line = anchor_line orelse return null;
+        return ViewportAnchor{
+            .file_idx = anchor_file,
+            .hunk_idx = anchor_hunk,
+            .scroll_offset_from_anchor = @as(isize, @intCast(self.state.global_scroll_offset)) - @as(isize, @intCast(anc_line)),
+            .cursor_offset_from_anchor = @as(isize, @intCast(self.state.global_cursor_line)) - @as(isize, @intCast(anc_line)),
+        };
+    }
+
+    /// Restore viewport position from anchor after LineMap rebuild.
+    /// Returns true if anchor was found and positions restored, false if fallback clamping was used.
+    fn restoreViewportFromAnchor(self: *App, anchor: ?ViewportAnchor) bool {
+        const total_lines = self.getTotalGlobalLines();
+        if (total_lines == 0) {
+            self.state.global_cursor_line = 0;
+            self.state.global_scroll_offset = 0;
+            return false;
+        }
+
+        if (anchor) |anc| {
+            if (anc.file_idx < self.state.files.len) {
+                // Find anchor line in new LineMap
+                const new_anchor_line = if (anc.hunk_idx) |hunk_idx|
+                    self.findHunkHeaderLine(anc.file_idx, hunk_idx)
+                else
+                    self.state.line_map.getFileHeaderLine(anc.file_idx);
+
+                if (new_anchor_line) |anchor_line| {
+                    // Restore cursor position
+                    const target_cursor_signed = @as(isize, @intCast(anchor_line)) + anc.cursor_offset_from_anchor;
+                    const target_cursor = if (target_cursor_signed < 0) 0 else @as(usize, @intCast(target_cursor_signed));
+                    self.state.global_cursor_line = @min(target_cursor, total_lines - 1);
+
+                    // Restore scroll position
+                    const target_scroll_signed = @as(isize, @intCast(anchor_line)) + anc.scroll_offset_from_anchor;
+                    const target_scroll = if (target_scroll_signed < 0) 0 else @as(usize, @intCast(target_scroll_signed));
+                    self.state.global_scroll_offset = target_scroll;
+
+                    Navigation.clampScrollOffset(self);
+                    return true;
+                }
+            }
+        }
+
+        // Fallback: clamp positions if anchor restoration failed
+        if (self.state.global_cursor_line >= total_lines) {
+            self.state.global_cursor_line = total_lines - 1;
+        }
+        Navigation.clampScrollOffset(self);
+        return false;
     }
 
     // Convert App.State.HunkViewMode to LineMap.HunkViewMode
@@ -2248,6 +2171,15 @@ pub const App = struct {
 
         switch (record.line_type) {
             .comment_line => |comment_info| {
+                const parent_file_idx = record.file_idx;
+                const parent_hunk_idx = comment_info.parent_hunk_idx;
+                const parent_line_idx = comment_info.parent_line_idx;
+
+                // Capture positions BEFORE deletion
+                const old_parent_pos = self.findCodeLine(parent_file_idx, parent_hunk_idx, parent_line_idx);
+                const old_scroll = self.state.global_scroll_offset;
+                const comment_line = self.state.global_cursor_line; // cursor is on the comment
+
                 // Delete the comment
                 try self.state.comment_store.deleteComment(comment_info.comment_idx);
 
@@ -2255,11 +2187,46 @@ pub const App = struct {
                 self.state.line_map.deinit();
                 self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
 
-                // After deletion, move cursor up one line (to the parent code line)
-                // since the comment line no longer exists
-                if (self.state.global_cursor_line > 0) {
-                    self.state.global_cursor_line -= 1;
+                const total_lines = self.getTotalGlobalLines();
+                if (total_lines == 0) {
+                    self.state.global_cursor_line = 0;
+                    self.state.global_scroll_offset = 0;
+                    return;
                 }
+
+                // Find parent in new LineMap (position unchanged since it's above the deleted comment)
+                if (self.findCodeLine(parent_file_idx, parent_hunk_idx, parent_line_idx)) |new_parent_line| {
+                    self.state.global_cursor_line = new_parent_line;
+
+                    // Determine scroll position based on where scroll was relative to parent/comment
+                    if (old_parent_pos) |parent_pos| {
+                        if (old_scroll <= parent_pos) {
+                            // Scroll was at or before parent - content at scroll unchanged
+                            self.state.global_scroll_offset = old_scroll;
+                        } else if (old_scroll <= comment_line) {
+                            // Scroll was between parent and comment (or on comment)
+                            // Show parent at top (cursor is there anyway)
+                            self.state.global_scroll_offset = new_parent_line;
+                        } else {
+                            // Scroll was AFTER the comment - content shifted up by 1
+                            // Reduce scroll by 1 to show same visual content
+                            self.state.global_scroll_offset = if (old_scroll > 0) old_scroll - 1 else 0;
+                        }
+                    } else {
+                        // Couldn't find old parent, keep scroll at same position minus 1
+                        self.state.global_scroll_offset = if (old_scroll > 0) old_scroll - 1 else 0;
+                    }
+
+                    // Clamp to valid range
+                    if (self.state.global_scroll_offset >= total_lines) {
+                        self.state.global_scroll_offset = total_lines - 1;
+                    }
+                } else {
+                    // Fallback: keep cursor and scroll in valid range
+                    self.state.global_cursor_line = @min(self.state.global_cursor_line, total_lines - 1);
+                    self.state.global_scroll_offset = @min(old_scroll, total_lines - 1);
+                }
+
                 Navigation.clampScrollOffset(self);
             },
             else => {
@@ -2286,11 +2253,56 @@ pub const App = struct {
     }
 
     pub fn clearAllComments(self: *App) !void {
+        // Count comments above the current scroll position (these affect viewport)
+        var comments_above_scroll: usize = 0;
+        var comments_above_cursor: usize = 0;
+        for (self.state.line_map.records) |*record| {
+            if (record.line_type == .comment_line) {
+                if (record.global_line < self.state.global_scroll_offset) {
+                    comments_above_scroll += 1;
+                }
+                if (record.global_line < self.state.global_cursor_line) {
+                    comments_above_cursor += 1;
+                }
+            }
+        }
+
         self.state.comment_store.clearAll();
 
         // Rebuild LineMap since comment count changed
         self.state.line_map.deinit();
         self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+
+        // Adjust scroll and cursor to account for removed comments above them
+        const total_lines = self.getTotalGlobalLines();
+        if (total_lines == 0) {
+            self.state.global_scroll_offset = 0;
+            self.state.global_cursor_line = 0;
+            return;
+        }
+
+        // Reduce positions by the number of comments that were above them
+        if (self.state.global_scroll_offset >= comments_above_scroll) {
+            self.state.global_scroll_offset -= comments_above_scroll;
+        } else {
+            self.state.global_scroll_offset = 0;
+        }
+
+        if (self.state.global_cursor_line >= comments_above_cursor) {
+            self.state.global_cursor_line -= comments_above_cursor;
+        } else {
+            self.state.global_cursor_line = 0;
+        }
+
+        // Clamp to valid range
+        if (self.state.global_scroll_offset >= total_lines) {
+            self.state.global_scroll_offset = total_lines - 1;
+        }
+        if (self.state.global_cursor_line >= total_lines) {
+            self.state.global_cursor_line = total_lines - 1;
+        }
+
+        Navigation.clampScrollOffset(self);
     }
 
     pub fn openInEditor(self: *App) !void {

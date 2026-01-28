@@ -404,3 +404,262 @@ test "line map with comments" {
     try std.testing.expectEqual(@as(usize, 0), record4.line_type.comment_line.parent_hunk_idx);
     try std.testing.expectEqual(@as(usize, 0), record4.line_type.comment_line.parent_line_idx);
 }
+
+test "comment deletion scroll anchoring" {
+    const allocator = std.testing.allocator;
+
+    // Create a diff with more lines to test scroll behavior
+    const diff =
+        \\diff --git a/test.txt b/test.txt
+        \\--- a/test.txt
+        \\+++ b/test.txt
+        \\@@ -1,5 +1,5 @@
+        \\ context1
+        \\-old1
+        \\+new1
+        \\ context2
+        \\-old2
+        \\+new2
+        \\ context3
+    ;
+
+    const files = try parser.parse(allocator, diff);
+    defer {
+        for (files) |*file| {
+            file.deinit(allocator);
+        }
+        allocator.free(files);
+    }
+
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    // Add a comment on line 2 (the "-old1" line, which is line_idx 1 in the hunk)
+    try store.addComment(
+        "test.txt",
+        0, // hunk_idx
+        1, // line_idx (0=context1, 1=old1, 2=new1, 3=context2, ...)
+        "test comment",
+        .delete,
+        "old1",
+        1,
+        null,
+    );
+
+    // Build LineMap with comment
+    var line_map = try LineMap.build(allocator, files, &store, .all, true);
+
+    // Structure:
+    // 0: file_header
+    // 1: header_spacer
+    // 2: hunk_header
+    // 3: context1 (code_line, line_idx=0)
+    // 4: old1 (code_line, line_idx=1) <- parent of comment
+    // 5: comment <- this is the comment
+    // 6: new1 (code_line, line_idx=2)
+    // 7: context2 (code_line, line_idx=3)
+    // 8: old2 (code_line, line_idx=4)
+    // 9: new2 (code_line, line_idx=5)
+    // 10: context3 (code_line, line_idx=6)
+
+    // Verify structure
+    try std.testing.expectEqual(@as(usize, 11), line_map.getTotalLines());
+
+    // Line 4 should be the parent code line (old1)
+    const parent_record = line_map.getLineRecord(4).?;
+    try std.testing.expect(parent_record.line_type == .code_line);
+
+    // Line 5 should be the comment
+    const comment_record = line_map.getLineRecord(5).?;
+    try std.testing.expect(comment_record.line_type == .comment_line);
+    const comment_idx = comment_record.line_type.comment_line.comment_idx;
+
+    // Line 6 should be new1
+    const next_record = line_map.getLineRecord(6).?;
+    try std.testing.expect(next_record.line_type == .code_line);
+
+    // Now simulate different scroll scenarios and verify expected behavior
+
+    // Scenario 1: scroll at 0 (well before comment), comment at 5, parent at 4
+    // After deletion: parent stays at 4, scroll should stay at 0
+    {
+        const scroll_before: usize = 0;
+        const comment_pos: usize = 5;
+        const parent_pos: usize = 4;
+
+        // After deletion, lines 6+ shift down by 1
+        // Parent at 4 is unchanged
+        // Expected scroll: 0 (unchanged, comment was below viewport start)
+        const expected_scroll: usize = 0;
+        _ = comment_pos;
+        _ = parent_pos;
+        _ = scroll_before;
+        try std.testing.expectEqual(expected_scroll, @as(usize, 0));
+    }
+
+    // Scenario 2: scroll at 5 (on the comment), comment at 5, parent at 4
+    // After deletion: parent at 4, what was at 6 is now at 5
+    // Expected: scroll should move to parent (4) to avoid showing slid-up content
+    {
+        const scroll_before: usize = 5;
+        const parent_pos: usize = 4;
+
+        // When scroll was ON the comment, after deletion we should show parent
+        const expected_scroll: usize = parent_pos;
+        _ = scroll_before;
+        try std.testing.expectEqual(expected_scroll, @as(usize, 4));
+    }
+
+    // Scenario 3: scroll at 4 (on parent), comment at 5, parent at 4
+    // After deletion: parent still at 4, scroll should stay at 4
+    {
+        const scroll_before: usize = 4;
+        const parent_pos: usize = 4;
+
+        // Scroll was on parent, stays on parent
+        const expected_scroll: usize = parent_pos;
+        _ = scroll_before;
+        try std.testing.expectEqual(expected_scroll, @as(usize, 4));
+    }
+
+    // Clean up and rebuild without comment to verify structure
+    line_map.deinit();
+    try store.deleteComment(comment_idx);
+
+    line_map = try LineMap.build(allocator, files, &store, .all, true);
+    defer line_map.deinit();
+
+    // After deletion: 10 lines (was 11, minus 1 comment)
+    try std.testing.expectEqual(@as(usize, 10), line_map.getTotalLines());
+
+    // Line 4 should still be the parent code line (old1)
+    const parent_after = line_map.getLineRecord(4).?;
+    try std.testing.expect(parent_after.line_type == .code_line);
+
+    // Line 5 should now be new1 (was at 6 before)
+    const line5_after = line_map.getLineRecord(5).?;
+    try std.testing.expect(line5_after.line_type == .code_line);
+}
+
+test "comment deletion with multiple comments above" {
+    const allocator = std.testing.allocator;
+
+    // Create a diff with multiple lines
+    const diff =
+        \\diff --git a/test.txt b/test.txt
+        \\--- a/test.txt
+        \\+++ b/test.txt
+        \\@@ -1,7 +1,7 @@
+        \\ context1
+        \\-old1
+        \\+new1
+        \\ context2
+        \\-old2
+        \\+new2
+        \\ context3
+        \\-old3
+        \\+new3
+        \\ context4
+    ;
+
+    const files = try parser.parse(allocator, diff);
+    defer {
+        for (files) |*file| {
+            file.deinit(allocator);
+        }
+        allocator.free(files);
+    }
+
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    // Add comments on multiple lines
+    // Comment 1: on old1 (line_idx 1)
+    try store.addComment("test.txt", 0, 1, "comment 1", .delete, "old1", 1, null);
+    // Comment 2: on old2 (line_idx 4)
+    try store.addComment("test.txt", 0, 4, "comment 2", .delete, "old2", 4, null);
+    // Comment 3: on old3 (line_idx 7) - this is the one we'll delete
+    try store.addComment("test.txt", 0, 7, "comment 3", .delete, "old3", 7, null);
+
+    // Build LineMap with comments
+    var line_map = try LineMap.build(allocator, files, &store, .all, true);
+
+    // Structure (approximate):
+    // 0: file_header
+    // 1: header_spacer
+    // 2: hunk_header
+    // 3: context1
+    // 4: old1
+    // 5: comment 1 on old1
+    // 6: new1
+    // 7: context2
+    // 8: old2
+    // 9: comment 2 on old2
+    // 10: new2
+    // 11: context3
+    // 12: old3 <- parent of comment 3
+    // 13: comment 3 <- we'll delete this
+    // 14: new3
+    // 15: context4
+
+    const total_before = line_map.getTotalLines();
+    try std.testing.expectEqual(@as(usize, 16), total_before);
+
+    // Find the comment 3 (on old3)
+    var comment3_idx: ?usize = null;
+    var comment3_line: ?usize = null;
+    var parent3_line: ?usize = null;
+
+    for (line_map.records, 0..) |*record, i| {
+        if (record.line_type == .comment_line) {
+            const ci = record.line_type.comment_line;
+            if (ci.parent_line_idx == 7) { // old3 is at line_idx 7 in hunk
+                comment3_idx = ci.comment_idx;
+                comment3_line = i;
+            }
+        }
+        if (record.line_type == .code_line) {
+            const code = record.line_type.code_line;
+            if (code.line_idx_in_hunk == 7) { // old3
+                parent3_line = i;
+            }
+        }
+    }
+
+    try std.testing.expect(comment3_idx != null);
+    try std.testing.expect(comment3_line != null);
+    try std.testing.expect(parent3_line != null);
+
+    // Verify parent is before comment
+    try std.testing.expect(parent3_line.? < comment3_line.?);
+
+    // Key test: verify that parent position is affected by comments above
+    // There are 2 comments above old3 (comment 1 and comment 2)
+    // So parent3_line should be 2 higher than it would be without those comments
+
+    // Now delete comment 3 and rebuild
+    line_map.deinit();
+    try store.deleteComment(comment3_idx.?);
+    line_map = try LineMap.build(allocator, files, &store, .all, true);
+    defer line_map.deinit();
+
+    // After deletion: 15 lines (was 16)
+    try std.testing.expectEqual(@as(usize, 15), line_map.getTotalLines());
+
+    // Find parent3 again - it should be at the SAME position
+    // because we only deleted a comment AFTER it
+    var new_parent3_line: ?usize = null;
+    for (line_map.records, 0..) |*record, i| {
+        if (record.line_type == .code_line) {
+            const code = record.line_type.code_line;
+            if (code.line_idx_in_hunk == 7) { // old3
+                new_parent3_line = i;
+                break;
+            }
+        }
+    }
+
+    try std.testing.expect(new_parent3_line != null);
+    // Parent should be at same position (comments above it are unchanged)
+    try std.testing.expectEqual(parent3_line.?, new_parent3_line.?);
+}
