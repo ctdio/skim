@@ -5,6 +5,8 @@ const App = @import("app.zig").App;
 const session_mgr = @import("mcp/session.zig");
 const Color = @import("rendering/common.zig").Color;
 
+const DIALOG_PADDING: usize = 1; // Horizontal padding inside dialogs
+
 pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     // Calculate popup dimensions - smaller than help since less content
     const popup_width = @min(60, win.width - 4);
@@ -36,26 +38,26 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     const connected_style = vaxis.Style{ .fg = Color.green, .bg = Color.dialog_bg };
     const disconnected_style = vaxis.Style{ .fg = Color.red, .bg = Color.dialog_bg };
 
-    var row: usize = 0;
+    var row: usize = DIALOG_PADDING;
 
     // Title - changed from "Daemon Connection" to "Session Server"
     var title_seg = [_]vaxis.Cell.Segment{
         .{ .text = "Session Server", .style = title_style },
     };
-    _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(row) });
+    _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
     row += 1;
 
     // Separator
-    if (popup_width > 2) {
+    if (popup_width > DIALOG_PADDING * 2) {
         const render_utils = @import("rendering/utils.zig");
         const RenderUtils = render_utils.RenderUtils;
-        const sep_width = popup_width - 2;
+        const sep_width = popup_width - (DIALOG_PADDING * 2);
         const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
         @memset(sep_text, '-');
         var sep_seg = [_]vaxis.Cell.Segment{
             .{ .text = sep_text, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
-        _ = popup_win.print(&sep_seg, .{ .row_offset = @intCast(row) });
+        _ = popup_win.print(&sep_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
     }
     row += 2;
 
@@ -67,7 +69,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
                 .{ .text = "  Status:     ", .style = label_style },
                 .{ .text = "Running", .style = connected_style },
             };
-            _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row) });
+            _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
             row += 1;
 
             // Port
@@ -77,7 +79,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
                 .{ .text = "  Port:       ", .style = label_style },
                 .{ .text = port_str, .style = value_style },
             };
-            _ = popup_win.print(&port_seg, .{ .row_offset = @intCast(row) });
+            _ = popup_win.print(&port_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
             row += 1;
 
             // PID
@@ -88,7 +90,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
                     .{ .text = "  PID:        ", .style = label_style },
                     .{ .text = pid_str, .style = value_style },
                 };
-                _ = popup_win.print(&pid_seg, .{ .row_offset = @intCast(row) });
+                _ = popup_win.print(&pid_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
                 row += 1;
             }
 
@@ -99,33 +101,33 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
                 .{ .text = "  Clients:    ", .style = label_style },
                 .{ .text = clients_str, .style = value_style },
             };
-            _ = popup_win.print(&clients_seg, .{ .row_offset = @intCast(row) });
+            _ = popup_win.print(&clients_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
             row += 2;
 
             // Description
             var desc_seg = [_]vaxis.Cell.Segment{
                 .{ .text = "  CLI commands and AI agents can connect", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
             };
-            _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row) });
+            _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
             row += 1;
 
             var desc2_seg = [_]vaxis.Cell.Segment{
                 .{ .text = "  to this session via TCP.", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
             };
-            _ = popup_win.print(&desc2_seg, .{ .row_offset = @intCast(row) });
+            _ = popup_win.print(&desc2_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
         } else {
             // Server not running
             var status_seg = [_]vaxis.Cell.Segment{
                 .{ .text = "  Status:     ", .style = label_style },
                 .{ .text = "Not Running", .style = disconnected_style },
             };
-            _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row) });
+            _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
             row += 2;
 
             var info_seg = [_]vaxis.Cell.Segment{
                 .{ .text = "  Server failed to start.", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
             };
-            _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(row) });
+            _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
         }
     } else {
         // No TUI server
@@ -133,13 +135,13 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
             .{ .text = "  Status:     ", .style = label_style },
             .{ .text = "Not Initialized", .style = disconnected_style },
         };
-        _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row) });
+        _ = popup_win.print(&status_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
         row += 2;
 
         var info_seg = [_]vaxis.Cell.Segment{
             .{ .text = "  Session server not available.", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
-        _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(row) });
+        _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
     }
 
     // Footer
@@ -147,5 +149,5 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     var footer_seg = [_]vaxis.Cell.Segment{
         .{ .text = "  Press ESC or q to close", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
     };
-    _ = popup_win.print(&footer_seg, .{ .row_offset = @intCast(row) });
+    _ = popup_win.print(&footer_seg, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
 }

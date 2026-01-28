@@ -508,7 +508,10 @@ const MAX_TRACKED_LINES: usize = 100;
 const MAX_PLAN_ENTRIES: usize = 5;
 
 // Maximum width for slash command menu
-const MAX_SLASH_MENU_WIDTH: usize = 120;
+// Fixed widths for menus - prevents jarring resize on content change
+const SLASH_MENU_WIDTH: usize = 60;
+const FILE_PICKER_WIDTH: usize = 70;
+const MENU_PADDING: usize = 1; // Horizontal padding inside menus
 
 /// Merge a style with highlight background for history mode cursor/visual selection.
 /// Visual selection takes precedence over cursor highlighting.
@@ -1979,29 +1982,26 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     const visible_count = @min(filtered_count, MAX_SLASH_MENU_VISIBLE);
     const max_scroll = if (filtered_count > visible_count) filtered_count - visible_count else 0;
     const scroll_offset = @min(agent_state.slash_menu.scroll_offset, max_scroll);
-    const menu_height = visible_count + 2; // +2 for top/bottom border
-    const menu_width = @min(win.width -| 4, MAX_SLASH_MENU_WIDTH); // leave some margin
+    const menu_height = visible_count + 1 + (MENU_PADDING * 2); // +1 for title row + vertical padding
+    const menu_width = @min(SLASH_MENU_WIDTH, win.width -| 4); // fixed width, capped to window
 
     // Calculate maximum possible menu size (for clearing artifacts)
-    const max_menu_height = MAX_SLASH_MENU_VISIBLE + 2;
+    const max_menu_height = MAX_SLASH_MENU_VISIBLE + 1;
     const max_menu_y = if (input_top > max_menu_height) input_top - max_menu_height else 0;
 
-    // Position menu just above the input area
+    // Position menu just above the input area (bottom-anchored)
     const menu_y = if (input_top > menu_height) input_top - menu_height else 0;
     const menu_x: usize = 2; // Small left margin
 
     // Clear the maximum possible menu area first to prevent artifacts when filtering
+    // Use default background (not dialog_bg) so only the actual menu area has the dialog background
     const clear_win = win.child(.{
         .x_off = @intCast(menu_x),
         .y_off = @intCast(max_menu_y),
         .width = @intCast(menu_width),
         .height = @intCast(max_menu_height),
     });
-    const bg_cell = vaxis.Cell{
-        .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{ .bg = Color.dialog_bg },
-    };
-    clear_win.fill(bg_cell);
+    clear_win.clear();
 
     // Create menu window at actual position
     const menu_win = win.child(.{
@@ -2011,60 +2011,32 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
         .height = @intCast(menu_height),
     });
 
-    // Draw menu background and border (neutral colors)
-    const border_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
-    const bg_style = vaxis.Style{ .bg = Color.dialog_bg };
+    // Fill background with dialog color
+    const bg_cell = vaxis.Cell{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{ .bg = Color.dialog_bg },
+    };
+    menu_win.fill(bg_cell);
 
-    // Fill background
-    for (0..menu_height) |row| {
-        for (0..menu_width) |col| {
-            menu_win.writeCell(@intCast(col), @intCast(row), .{
-                .char = .{ .grapheme = " ", .width = 1 },
-                .style = bg_style,
-            });
-        }
-    }
-
-    // Top border: ┌─ Commands ─────────────────────────────┐
-    // Add scroll indicator (▲) if there are items above
+    // Row 0: Title with scroll indicators
     const has_more_above = scroll_offset > 0;
-    menu_win.writeCell(0, 0, .{ .char = .{ .grapheme = "┌", .width = 1 }, .style = border_style });
-    menu_win.writeCell(@intCast(menu_width - 1), 0, .{ .char = .{ .grapheme = "┐", .width = 1 }, .style = border_style });
-
-    // Draw header: "─ Commands " then fill rest with "─", add scroll indicator at end
-    const header_parts = [_][]const u8{ "─", " ", "C", "o", "m", "m", "a", "n", "d", "s", " " };
-    for (1..menu_width - 1) |col| {
-        const char_idx = col - 1;
-        // Show ▲ indicator near the right if there are more items above
-        const char: []const u8 = if (has_more_above and col == menu_width - 4)
-            "▲"
-        else if (char_idx < header_parts.len)
-            header_parts[char_idx]
-        else
-            "─";
-        menu_win.writeCell(@intCast(col), 0, .{
-            .char = .{ .grapheme = char, .width = 1 },
-            .style = border_style,
-        });
-    }
-
-    // Bottom border - add scroll indicator (▼) if there are items below
     const has_more_below = scroll_offset + visible_count < filtered_count;
-    menu_win.writeCell(0, @intCast(menu_height - 1), .{ .char = .{ .grapheme = "└", .width = 1 }, .style = border_style });
-    menu_win.writeCell(@intCast(menu_width - 1), @intCast(menu_height - 1), .{ .char = .{ .grapheme = "┘", .width = 1 }, .style = border_style });
-    for (1..menu_width - 1) |col| {
-        // Show ▼ indicator near the right if there are more items below
-        const char: []const u8 = if (has_more_below and col == menu_width - 4) "▼" else "─";
-        menu_win.writeCell(@intCast(col), @intCast(menu_height - 1), .{
-            .char = .{ .grapheme = char, .width = 1 },
-            .style = border_style,
-        });
-    }
+    const title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
+    const indicator_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
 
-    // Side borders
-    for (1..menu_height - 1) |row| {
-        menu_win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
-        menu_win.writeCell(@intCast(menu_width - 1), @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
+    var title_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "Commands", .style = title_style },
+    };
+    _ = menu_win.print(&title_seg, .{ .row_offset = 0, .col_offset = MENU_PADDING });
+
+    // Show scroll indicators on the right (inside padding)
+    if (has_more_above) {
+        var up_seg = [_]vaxis.Cell.Segment{.{ .text = "▲", .style = indicator_style }};
+        _ = menu_win.print(&up_seg, .{ .row_offset = 0, .col_offset = @intCast(menu_width -| 4) });
+    }
+    if (has_more_below) {
+        var down_seg = [_]vaxis.Cell.Segment{.{ .text = "▼", .style = indicator_style }};
+        _ = menu_win.print(&down_seg, .{ .row_offset = 0, .col_offset = @intCast(menu_width -| 2) });
     }
 
     // Clamp selection to valid range
@@ -2078,7 +2050,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
         const cmd_idx = indices[item_idx];
         const cmd = &agent_state.available_commands.items[cmd_idx];
         const is_selected = (item_idx == selection);
-        const row = i + 1; // +1 for top border
+        const row = i + 1; // title row + item index
 
         // Style based on selection (neutral colors)
         const name_style: vaxis.Style = if (is_selected)
@@ -2093,7 +2065,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
 
         // Fill row background if selected
         if (is_selected) {
-            for (1..menu_width - 1) |col| {
+            for (0..menu_width) |col| {
                 menu_win.writeCell(@intCast(col), @intCast(row), .{
                     .char = .{ .grapheme = " ", .width = 1 },
                     .style = .{ .bg = Color.white },
@@ -2102,7 +2074,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
         }
 
         // Format: " /command  description"
-        var col: usize = 2;
+        var col: usize = MENU_PADDING;
 
         // Print "/" prefix
         var slash_seg = [_]vaxis.Cell.Segment{
@@ -2120,8 +2092,8 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
         _ = menu_win.print(&name_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
         col += max_name_len + 2; // +2 for spacing
 
-        // Print description (truncate to fit)
-        const remaining_width = if (menu_width > col + 3) menu_width - col - 3 else 0;
+        // Print description (truncate to fit, accounting for right padding)
+        const remaining_width = if (menu_width > col + MENU_PADDING) menu_width - col - MENU_PADDING else 0;
         if (remaining_width > 0 and cmd.description.len > 0) {
             const desc_len = @min(cmd.description.len, remaining_width);
             const desc_text = cmd.description[0..desc_len];
@@ -2143,29 +2115,26 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
     const visible_count = @min(filtered_count, state.MAX_FILE_MENU_VISIBLE);
     const max_scroll = if (filtered_count > visible_count) filtered_count - visible_count else 0;
     const scroll_offset = @min(agent_state.file_picker.scroll_offset, max_scroll);
-    const menu_height = visible_count + 2; // +2 for top/bottom border
-    const menu_width = @min(win.width -| 4, 80); // max 80 chars wide
+    const menu_height = visible_count + 1; // title row only, no vertical padding
+    const menu_width = @min(FILE_PICKER_WIDTH, win.width -| 4); // fixed width, capped to window
 
     // Calculate maximum possible menu size (for clearing artifacts)
-    const max_menu_height = state.MAX_FILE_MENU_VISIBLE + 2;
+    const max_menu_height = state.MAX_FILE_MENU_VISIBLE + 1;
     const max_menu_y = if (input_top > max_menu_height) input_top - max_menu_height else 0;
 
-    // Position menu just above the input area
+    // Position menu just above the input area (bottom-anchored)
     const menu_y = if (input_top > menu_height) input_top - menu_height else 0;
     const menu_x: usize = 2; // Small left margin
 
     // Clear the maximum possible menu area first to prevent artifacts when filtering
+    // Use default background (not dialog_bg) so only the actual menu area has the dialog background
     const clear_win = win.child(.{
         .x_off = @intCast(menu_x),
         .y_off = @intCast(max_menu_y),
         .width = @intCast(menu_width),
         .height = @intCast(max_menu_height),
     });
-    const bg_cell = vaxis.Cell{
-        .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{ .bg = Color.dialog_bg },
-    };
-    clear_win.fill(bg_cell);
+    clear_win.clear();
 
     // Create menu window at actual position
     const menu_win = win.child(.{
@@ -2175,57 +2144,32 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
         .height = @intCast(menu_height),
     });
 
-    // Draw menu background and border (neutral colors)
-    const border_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
-    const bg_style = vaxis.Style{ .bg = Color.dialog_bg };
+    // Fill background with dialog color
+    const bg_cell = vaxis.Cell{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{ .bg = Color.dialog_bg },
+    };
+    menu_win.fill(bg_cell);
 
-    // Fill background
-    for (0..menu_height) |row| {
-        for (0..menu_width) |col| {
-            menu_win.writeCell(@intCast(col), @intCast(row), .{
-                .char = .{ .grapheme = " ", .width = 1 },
-                .style = bg_style,
-            });
-        }
-    }
-
-    // Top border: ┌─ Files ─────────────────────────────┐
+    // Row 0: Title with scroll indicators
     const has_more_above = scroll_offset > 0;
-    menu_win.writeCell(0, 0, .{ .char = .{ .grapheme = "┌", .width = 1 }, .style = border_style });
-    menu_win.writeCell(@intCast(menu_width - 1), 0, .{ .char = .{ .grapheme = "┐", .width = 1 }, .style = border_style });
-
-    // Draw header: "─ Files " then fill rest with "─"
-    const header_parts = [_][]const u8{ "─", " ", "F", "i", "l", "e", "s", " " };
-    for (1..menu_width - 1) |col| {
-        const char_idx = col - 1;
-        const char: []const u8 = if (has_more_above and col == menu_width - 4)
-            "▲"
-        else if (char_idx < header_parts.len)
-            header_parts[char_idx]
-        else
-            "─";
-        menu_win.writeCell(@intCast(col), 0, .{
-            .char = .{ .grapheme = char, .width = 1 },
-            .style = border_style,
-        });
-    }
-
-    // Bottom border with scroll indicator
     const has_more_below = scroll_offset + visible_count < filtered_count;
-    menu_win.writeCell(0, @intCast(menu_height - 1), .{ .char = .{ .grapheme = "└", .width = 1 }, .style = border_style });
-    menu_win.writeCell(@intCast(menu_width - 1), @intCast(menu_height - 1), .{ .char = .{ .grapheme = "┘", .width = 1 }, .style = border_style });
-    for (1..menu_width - 1) |col| {
-        const char: []const u8 = if (has_more_below and col == menu_width - 4) "▼" else "─";
-        menu_win.writeCell(@intCast(col), @intCast(menu_height - 1), .{
-            .char = .{ .grapheme = char, .width = 1 },
-            .style = border_style,
-        });
-    }
+    const title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
+    const indicator_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
 
-    // Side borders
-    for (1..menu_height - 1) |row| {
-        menu_win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
-        menu_win.writeCell(@intCast(menu_width - 1), @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
+    var title_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "Files", .style = title_style },
+    };
+    _ = menu_win.print(&title_seg, .{ .row_offset = 0, .col_offset = MENU_PADDING });
+
+    // Show scroll indicators on the right (inside padding)
+    if (has_more_above) {
+        var up_seg = [_]vaxis.Cell.Segment{.{ .text = "▲", .style = indicator_style }};
+        _ = menu_win.print(&up_seg, .{ .row_offset = 0, .col_offset = @intCast(menu_width -| 4) });
+    }
+    if (has_more_below) {
+        var down_seg = [_]vaxis.Cell.Segment{.{ .text = "▼", .style = indicator_style }};
+        _ = menu_win.print(&down_seg, .{ .row_offset = 0, .col_offset = @intCast(menu_width -| 2) });
     }
 
     // Clamp selection to valid range
@@ -2239,7 +2183,7 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
         const file_idx = agent_state.file_picker.filtered_indices.items[item_idx];
         const file_path = agent_state.file_picker.files.items[file_idx];
         const is_selected = (item_idx == selection);
-        const row = i + 1; // +1 for top border
+        const row = i + 1; // title row + item index
 
         // Style based on selection
         const path_style: vaxis.Style = if (is_selected)
@@ -2249,7 +2193,7 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
 
         // Fill row background if selected
         if (is_selected) {
-            for (1..menu_width - 1) |col| {
+            for (0..menu_width) |col| {
                 menu_win.writeCell(@intCast(col), @intCast(row), .{
                     .char = .{ .grapheme = " ", .width = 1 },
                     .style = .{ .bg = Color.white },
@@ -2258,7 +2202,7 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
         }
 
         // Print file path with @ prefix
-        var col: usize = 2;
+        var col: usize = MENU_PADDING;
 
         // Print "@" prefix
         var at_seg = [_]vaxis.Cell.Segment{
@@ -2267,8 +2211,8 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
         _ = menu_win.print(&at_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
         col += 1;
 
-        // Print file path (truncate if needed)
-        const max_path_len = if (menu_width > col + 3) menu_width - col - 3 else 1;
+        // Print file path (truncate if needed, accounting for right padding)
+        const max_path_len = if (menu_width > col + MENU_PADDING) menu_width - col - MENU_PADDING else 1;
         const path_len = @min(file_path.len, max_path_len);
         const path_text = file_path[0..path_len];
         var path_seg = [_]vaxis.Cell.Segment{
@@ -2823,13 +2767,21 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
     const filtered = cmd_palette.filtered_indices.items;
     if (filtered.len == 0 and cmd_palette.mode != .rename_input) return;
 
-    // Fixed dimensions - match diff view's command palette (no shrinking)
+    // Fixed width, dynamic height based on content
     const palette_width: usize = 60;
-    const palette_height = @min(MAX_CMD_PALETTE_VISIBLE + 4, win.height -| 4); // Fixed height
     const visible_count = @min(filtered.len, MAX_CMD_PALETTE_VISIBLE);
 
+    // Dynamic height: 3 header rows (title, input, separator) + visible items (min 1 for no results) + vertical padding
+    const header_rows: usize = 3;
+    const content_rows = @max(1, visible_count);
+    const content_height = header_rows + content_rows + (MENU_PADDING * 2); // add top and bottom padding
+    const palette_height = @min(content_height, win.height -| 4);
+
     const x_offset = if (win.width > palette_width) (win.width - palette_width) / 2 else 0;
-    const y_offset = if (win.height > palette_height) (win.height - palette_height) / 2 else 0;
+    // Calculate y_offset based on where the dialog would be if at max height (centered)
+    // This creates a stable anchor point that expands downward
+    const max_height = header_rows + MAX_CMD_PALETTE_VISIBLE + (MENU_PADDING * 2);
+    const y_offset = if (win.height > max_height) (win.height - max_height) / 2 else 0;
 
     // Create palette window
     const palette_win = win.child(.{
@@ -2847,11 +2799,11 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
     };
     palette_win.fill(bg_cell);
 
-    // Line 0: Title
+    // Line 0: Title (with vertical padding)
     const title: []const u8 = if (cmd_palette.mode == .rename_input) "Rename Tab" else "Commands";
     const title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
     var title_seg = [_]vaxis.Cell.Segment{.{ .text = title, .style = title_style }};
-    _ = palette_win.print(&title_seg, .{});
+    _ = palette_win.print(&title_seg, .{ .row_offset = MENU_PADDING, .col_offset = MENU_PADDING });
 
     // Line 1: Input field
     const input_prompt: []const u8 = if (cmd_palette.mode == .rename_input) "Name: " else ": ";
@@ -2864,23 +2816,23 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
         .{ .text = input_prompt, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
         .{ .text = input_text, .style = .{ .fg = Color.white, .bg = Color.dialog_bg } },
     };
-    _ = palette_win.print(&input_seg, .{ .row_offset = 1 });
+    _ = palette_win.print(&input_seg, .{ .row_offset = MENU_PADDING + 1, .col_offset = MENU_PADDING });
 
     // Show cursor
-    const cursor_x = input_prompt.len + input_text.len;
-    palette_win.showCursor(@intCast(cursor_x), 1);
+    const cursor_x = MENU_PADDING + input_prompt.len + input_text.len;
+    palette_win.showCursor(@intCast(cursor_x), @intCast(MENU_PADDING + 1));
 
     // Line 2: Separator
-    if (palette_win.width > 2) {
-        for (0..palette_win.width - 2) |col| {
-            palette_win.writeCell(@intCast(col), 2, .{
+    if (palette_win.width > MENU_PADDING * 2) {
+        for (MENU_PADDING..palette_win.width - MENU_PADDING) |col| {
+            palette_win.writeCell(@intCast(col), @intCast(MENU_PADDING + 2), .{
                 .char = .{ .grapheme = "-", .width = 1 },
                 .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg },
             });
         }
     }
 
-    // Lines 3+: Items (only in search mode)
+    // Lines 3+: Items (only in search mode, with vertical padding)
     if (cmd_palette.mode == .search and filtered.len > 0) {
         const scroll = cmd_palette.scroll_offset;
 
@@ -2891,7 +2843,7 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
             const cmd_idx = filtered[item_idx];
             const cmd = command_palette.COMMANDS[cmd_idx];
             const is_selected = item_idx == cmd_palette.selected_idx;
-            const row = 3 + i;
+            const row = MENU_PADDING + 3 + i;
 
             // Selection indicator
             const indicator: []const u8 = if (is_selected) "▶ " else "  ";
@@ -2916,14 +2868,14 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
                 .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } },
                 .{ .text = cmd.aliases[0], .style = desc_style },
             };
-            _ = palette_win.print(&item_seg, .{ .row_offset = @intCast(row) });
+            _ = palette_win.print(&item_seg, .{ .row_offset = @intCast(row), .col_offset = MENU_PADDING });
         }
     } else if (cmd_palette.mode == .search and filtered.len == 0) {
         // No matching commands
         var no_match_seg = [_]vaxis.Cell.Segment{
             .{ .text = "No matching commands", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
-        _ = palette_win.print(&no_match_seg, .{ .row_offset = 3 });
+        _ = palette_win.print(&no_match_seg, .{ .row_offset = MENU_PADDING + 3, .col_offset = MENU_PADDING });
     }
 }
 

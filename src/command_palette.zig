@@ -406,45 +406,34 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
+// Fixed width for command palette - prevents jarring resize on content change
+const COMMAND_PALETTE_WIDTH: usize = 80;
+const DIALOG_PADDING: usize = 1; // Horizontal padding inside dialogs
+
 pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     const state = &app.state.command_palette_state;
 
-    // Calculate required width based on visible commands
-    var max_content_width: usize = 60; // Minimum width
+    // Calculate visible range for rendering
     const calc_start_idx = state.scroll_offset;
     const calc_end_idx = @min(calc_start_idx + CommandPaletteState.max_visible_items, state.filtered_commands.items.len);
 
-    for (calc_start_idx..calc_end_idx) |i| {
-        const cmd_idx = state.filtered_commands.items[i];
-        const cmd = &state.commands.items[cmd_idx];
+    // Use fixed width, capped to window size
+    const palette_width = @min(COMMAND_PALETTE_WIDTH, win.width -| 4);
 
-        // Calculate total width needed for this command: indicator + name + spacing + description + stats
-        const indicator_width: usize = 2; // "▶ " or "  "
-        const spacing_width: usize = 2; // "  "
-        const stats_width: usize = if ((cmd.category == .file or cmd.category == .diff) and (cmd.additions > 0 or cmd.deletions > 0))
-            32 // Approximate: " (+123, -456)" with padding
-        else
-            0;
-
-        const line_width = indicator_width + cmd.display_name.len + spacing_width + cmd.description.len + stats_width;
-        if (line_width > max_content_width) {
-            max_content_width = line_width;
-        }
-    }
-
-    // Add padding for borders and margins
-    const border_padding: usize = 4;
-    const desired_width = max_content_width + border_padding;
-
-    // Use calculated width, but cap at 95% of screen width to leave room for status bar
-    const palette_width = @min(desired_width, (win.width * 95) / 100);
-    const palette_height = @min(25, win.height - 4);
+    // Dynamic height based on content: 3 header rows + visible items (min 1 for "no results") + vertical padding
+    const header_rows: usize = 3; // title, input, separator
+    const visible_items = @max(1, @min(state.filtered_commands.items.len, CommandPaletteState.max_visible_items));
+    const content_height = header_rows + visible_items + (DIALOG_PADDING * 2); // add top and bottom padding
+    const palette_height = @min(content_height, win.height -| 4);
     const x_offset = if (win.width > palette_width) (win.width - palette_width) / 2 else 0;
-    const y_offset = if (win.height > palette_height) (win.height - palette_height) / 2 else 0;
+    // Calculate y_offset based on where the dialog would be if at max height (centered)
+    // This creates a stable anchor point that expands downward
+    const max_height = header_rows + CommandPaletteState.max_visible_items + (DIALOG_PADDING * 2);
+    const y_offset = if (win.height > max_height) (win.height - max_height) / 2 else 0;
 
     const palette_win = win.child(.{
         .x_off = x_offset,
-        .y_off = y_offset,
+        .y_off = @intCast(y_offset),
         .width = @intCast(palette_width),
         .height = @intCast(palette_height),
     });
@@ -483,7 +472,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     var title_segments = [_]vaxis.Cell.Segment{
         .{ .text = title, .style = title_style },
     };
-    _ = palette_win.print(&title_segments, .{});
+    _ = palette_win.print(&title_segments, .{ .row_offset = DIALOG_PADDING, .col_offset = DIALOG_PADDING });
 
     // Line 1: Input field
     const input_style = vaxis.Style{
@@ -494,28 +483,27 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         .{ .text = "> ", .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
         .{ .text = query, .style = input_style },
     };
-    _ = palette_win.print(&input_segments, .{ .row_offset = 1  });
+    _ = palette_win.print(&input_segments, .{ .row_offset = DIALOG_PADDING + 1, .col_offset = DIALOG_PADDING });
 
     // Show cursor after the query text
-    palette_win.showCursor(@intCast(2 + query.len), 1);
+    palette_win.showCursor(@intCast(DIALOG_PADDING + 2 + query.len), @intCast(DIALOG_PADDING + 1));
 
-    // Line 2: Separator (account for border width like help.zig does)
+    // Line 2: Separator (account for padding on both sides)
     const sep_style = vaxis.Style{
         .fg = Color.dim_gray,
         .bg = Color.dialog_bg,
     };
-    if (palette_win.width > 2) {
-        // Subtract 2 for border padding (1 on each side)
-        const sep_width = palette_win.width - 2;
+    if (palette_win.width > DIALOG_PADDING * 2) {
+        const sep_width = palette_win.width - (DIALOG_PADDING * 2);
         const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
         @memset(sep_text, '-');
         var sep_segments = [_]vaxis.Cell.Segment{
             .{ .text = sep_text, .style = sep_style },
         };
-        _ = palette_win.print(&sep_segments, .{ .row_offset = 2  });
+        _ = palette_win.print(&sep_segments, .{ .row_offset = DIALOG_PADDING + 2, .col_offset = DIALOG_PADDING });
     }
 
-    // Lines 3+: Command list
+    // Lines 3+: Command list (with vertical padding offset)
     if (state.filtered_commands.items.len == 0) {
         const no_results = "No matching commands";
         const no_results_style = vaxis.Style{
@@ -525,16 +513,14 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         var no_results_segments = [_]vaxis.Cell.Segment{
             .{ .text = no_results, .style = no_results_style },
         };
-        _ = palette_win.print(&no_results_segments, .{ .row_offset = 3  });
+        _ = palette_win.print(&no_results_segments, .{ .row_offset = DIALOG_PADDING + 3, .col_offset = DIALOG_PADDING });
     } else {
-        // Use the already-declared calc_start_idx and calc_end_idx from above (line 393)
-
         for (calc_start_idx..calc_end_idx) |i| {
             const cmd_idx = state.filtered_commands.items[i];
             const cmd = &state.commands.items[cmd_idx];
             const is_selected = (i == state.selected_idx);
 
-            const row = 3 + (i - calc_start_idx);
+            const row = DIALOG_PADDING + 3 + (i - calc_start_idx);
 
             // Selection indicator
             const indicator = if (is_selected) "▶ " else "  ";
@@ -609,7 +595,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, deletions_text), .style = .{ .fg = Color.red, .bg = Color.dialog_bg, .bold = true } });
             }
 
-            _ = palette_win.print(segments.items, .{ .row_offset = @intCast(row ) });
+            _ = palette_win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
         }
 
         // Show scroll indicator if there are more items
@@ -622,8 +608,8 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
             var more_segments = [_]vaxis.Cell.Segment{
                 .{ .text = more_text, .style = more_style },
             };
-            const last_row = 3 + CommandPaletteState.max_visible_items;
-            _ = palette_win.print(&more_segments, .{ .row_offset = @intCast(last_row ) });
+            const last_row = DIALOG_PADDING + 3 + CommandPaletteState.max_visible_items;
+            _ = palette_win.print(&more_segments, .{ .row_offset = @intCast(last_row), .col_offset = DIALOG_PADDING });
         }
     }
 }

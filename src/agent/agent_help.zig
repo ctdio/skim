@@ -8,6 +8,7 @@ const AgentState = @import("state.zig").AgentState;
 
 // Total number of content rows in help popup (approximate)
 const HELP_CONTENT_ROWS = 70;
+const DIALOG_PADDING: usize = 1; // Horizontal padding inside dialogs
 
 /// Render the agent help popup overlay
 pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !void {
@@ -35,15 +36,29 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     };
     popup_win.fill(bg_cell);
 
-    // Build content lines
+    // Render fixed header (title + separator) - these don't scroll
+    const header_title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
+    var title_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "Agent Mode - Keybindings", .style = header_title_style },
+    };
+    _ = popup_win.print(&title_seg, .{ .row_offset = DIALOG_PADDING, .col_offset = DIALOG_PADDING });
+
+    // Separator line
+    if (popup_width > DIALOG_PADDING * 2) {
+        const sep_width = popup_width - (DIALOG_PADDING * 2);
+        const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
+        @memset(sep_text, '-');
+        var sep_segments = [_]vaxis.Cell.Segment{
+            .{ .text = sep_text, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
+        };
+        _ = popup_win.print(&sep_segments, .{ .row_offset = DIALOG_PADDING + 1, .col_offset = DIALOG_PADDING });
+    }
+
+    const header_rows: usize = 2; // title + separator (fixed, don't scroll)
+
+    // Build scrollable content lines (excluding title/separator)
     var content_lines: std.ArrayList(ContentLine) = .{};
     defer content_lines.deinit(app.allocator);
-
-    // Title
-    try content_lines.append(app.allocator, .{ .text = "Agent Mode - Keybindings", .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true } });
-
-    // Separator
-    try content_lines.append(app.allocator, .{ .text = null, .style = .{ .bg = Color.dialog_bg }, .is_separator = true });
 
     const section_style = vaxis.Style{
         .fg = Color.yellow,
@@ -208,39 +223,41 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     try content_lines.append(app.allocator, .{ .text = "j/k: Scroll  |  Ctrl+D/U: Page  |  g/G: Top/Bottom  |  ? or ESC: Close", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } });
 
     // Calculate visible range based on scroll offset
+    // Account for: top padding + fixed header rows + bottom padding
     const scroll_offset = agent_state.help_scroll_offset;
-    const max_visible_rows = popup_height -| 2; // Account for borders
+    const content_area_start = DIALOG_PADDING + header_rows; // Start after padding + header
+    const max_visible_rows = popup_height -| (DIALOG_PADDING * 2 + header_rows + 1); // -1 for bottom indicator
     const total_content_rows = content_lines.items.len;
     const visible_start = scroll_offset;
     const visible_end = @min(visible_start + max_visible_rows, total_content_rows);
 
     // Show scroll indicator at top if scrolled down
-    var current_row: usize = 0;
+    var current_row: usize = content_area_start;
     if (scroll_offset > 0) {
         const indicator = "\xe2\x96\xb2 (scroll up for more)"; // ▲
         var indicator_seg = [_]vaxis.Cell.Segment{
             .{ .text = indicator, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
-        _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row) });
+        _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row), .col_offset = DIALOG_PADDING });
         current_row += 1;
     }
 
     // Render visible content
     for (visible_start..visible_end) |content_idx| {
-        if (current_row >= max_visible_rows -| 1) break; // Leave room for bottom indicator
+        if (current_row >= popup_height -| (DIALOG_PADDING + 1)) break; // Leave room for bottom padding + indicator
 
         const line = content_lines.items[content_idx];
 
         if (line.is_separator) {
             // Render separator
-            if (popup_width > 2) {
-                const sep_width = popup_width - 2;
-                const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
-                @memset(sep_text, '-');
+            if (popup_width > DIALOG_PADDING * 2) {
+                const local_sep_width = popup_width - (DIALOG_PADDING * 2);
+                const local_sep_text = try RenderUtils.frameTextSlice(app, local_sep_width);
+                @memset(local_sep_text, '-');
                 var sep_segments = [_]vaxis.Cell.Segment{
-                    .{ .text = sep_text, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
+                    .{ .text = local_sep_text, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
                 };
-                _ = popup_win.print(&sep_segments, .{ .row_offset = @intCast(current_row) });
+                _ = popup_win.print(&sep_segments, .{ .row_offset = @intCast(current_row), .col_offset = DIALOG_PADDING });
             }
         } else if (line.key) |key| {
             // Render keybinding
@@ -250,25 +267,25 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
                 .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } },
                 .{ .text = line.desc.?, .style = line.desc_style.? },
             };
-            _ = popup_win.print(&segments, .{ .row_offset = @intCast(current_row) });
+            _ = popup_win.print(&segments, .{ .row_offset = @intCast(current_row), .col_offset = DIALOG_PADDING });
         } else if (line.text) |text| {
             // Render regular text
             var text_seg = [_]vaxis.Cell.Segment{
                 .{ .text = text, .style = line.style },
             };
-            _ = popup_win.print(&text_seg, .{ .row_offset = @intCast(current_row) });
+            _ = popup_win.print(&text_seg, .{ .row_offset = @intCast(current_row), .col_offset = DIALOG_PADDING });
         }
 
         current_row += 1;
     }
 
     // Show scroll indicator at bottom if there's more content
-    if (visible_end < total_content_rows and current_row < max_visible_rows) {
+    if (visible_end < total_content_rows and current_row < popup_height -| DIALOG_PADDING) {
         const indicator = "\xe2\x96\xbc (scroll down for more)"; // ▼
         var indicator_seg = [_]vaxis.Cell.Segment{
             .{ .text = indicator, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
-        _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row) });
+        _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row), .col_offset = DIALOG_PADDING });
     }
 }
 
