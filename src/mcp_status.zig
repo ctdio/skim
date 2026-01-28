@@ -17,30 +17,24 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
         .y_off = y_offset,
         .width = @intCast(popup_width),
         .height = @intCast(popup_height),
-        .border = .{
-            .where = .all,
-            .style = .{
-                .fg = Color.cyan,
-            },
-        },
     });
 
     popup_win.clear();
 
-    // Fill with solid background
+    // Fill with dark gray background to differentiate from main content
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
         .style = .{
-            .bg = Color.black,
+            .bg = Color.dialog_bg,
         },
     };
     popup_win.fill(bg_cell);
 
-    const title_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
-    const label_style = vaxis.Style{ .fg = Color.yellow };
-    const value_style = vaxis.Style{ .fg = Color.white };
-    const connected_style = vaxis.Style{ .fg = Color.green };
-    const disconnected_style = vaxis.Style{ .fg = Color.red };
+    const title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
+    const label_style = vaxis.Style{ .fg = Color.yellow, .bg = Color.dialog_bg };
+    const value_style = vaxis.Style{ .fg = Color.white, .bg = Color.dialog_bg };
+    const connected_style = vaxis.Style{ .fg = Color.green, .bg = Color.dialog_bg };
+    const disconnected_style = vaxis.Style{ .fg = Color.red, .bg = Color.dialog_bg };
 
     var row: usize = 0;
 
@@ -59,7 +53,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
         const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
         @memset(sep_text, '-');
         var sep_seg = [_]vaxis.Cell.Segment{
-            .{ .text = sep_text, .style = .{ .fg = Color.dim_gray } },
+            .{ .text = sep_text, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
         _ = popup_win.print(&sep_seg, .{ .row_offset = @intCast(row) });
     }
@@ -110,13 +104,13 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
 
             // Description
             var desc_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "  CLI commands and AI agents can connect", .style = .{ .fg = Color.dim_gray } },
+                .{ .text = "  CLI commands and AI agents can connect", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
             };
             _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row) });
             row += 1;
 
             var desc2_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "  to this session via TCP.", .style = .{ .fg = Color.dim_gray } },
+                .{ .text = "  to this session via TCP.", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
             };
             _ = popup_win.print(&desc2_seg, .{ .row_offset = @intCast(row) });
         } else {
@@ -129,7 +123,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
             row += 2;
 
             var info_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "  Server failed to start.", .style = .{ .fg = Color.dim_gray } },
+                .{ .text = "  Server failed to start.", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
             };
             _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(row) });
         }
@@ -143,7 +137,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
         row += 2;
 
         var info_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "  Session server not available.", .style = .{ .fg = Color.dim_gray } },
+            .{ .text = "  Session server not available.", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
         _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(row) });
     }
@@ -151,7 +145,7 @@ pub fn renderMcpStatusPopup(app: *App, win: vaxis.Window) !void {
     // Footer
     row = popup_height - 3;
     var footer_seg = [_]vaxis.Cell.Segment{
-        .{ .text = "  Press ESC or q to close", .style = .{ .fg = Color.dim_gray } },
+        .{ .text = "  Press ESC or q to close", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
     };
     _ = popup_win.print(&footer_seg, .{ .row_offset = @intCast(row) });
 }

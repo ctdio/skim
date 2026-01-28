@@ -30,6 +30,9 @@ pub const Color = struct {
     pub const diff_sign_add: vaxis.Cell.Color = .{ .rgb = [3]u8{ 63, 185, 80 } }; // Bright green #3FB950
     pub const diff_sign_delete: vaxis.Cell.Color = .{ .rgb = [3]u8{ 247, 81, 73 } }; // Bright red #F75149
 
+    // Dialog background - deep dark gray that contrasts with black terminal background
+    pub const dialog_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 22, 22, 22 } }; // Deep dark gray #161616
+
     // Comment colors - darker, subdued grays
     pub const comment_border: vaxis.Cell.Color = .{ .rgb = [3]u8{ 80, 80, 80 } }; // Dark gray #505050
     pub const comment_border_focus: vaxis.Cell.Color = .{ .rgb = [3]u8{ 100, 100, 100 } }; // Medium gray when focused #646464

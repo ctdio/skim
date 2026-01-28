@@ -447,22 +447,16 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         .y_off = y_offset,
         .width = @intCast(palette_width),
         .height = @intCast(palette_height),
-        .border = .{
-            .where = .all,
-            .style = .{
-                .fg = Color.cyan,
-            },
-        },
     });
 
     // Clear the palette window
     palette_win.clear();
 
-    // Fill with solid background to prevent text bleeding
+    // Fill with dark gray background to differentiate from main content
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
         .style = .{
-            .bg = Color.black,
+            .bg = Color.dialog_bg,
         },
     };
     palette_win.fill(bg_cell);
@@ -483,6 +477,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
 
     const title_style = vaxis.Style{
         .fg = Color.cyan,
+        .bg = Color.dialog_bg,
         .bold = true,
     };
     var title_segments = [_]vaxis.Cell.Segment{
@@ -493,9 +488,10 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     // Line 1: Input field
     const input_style = vaxis.Style{
         .fg = Color.white,
+        .bg = Color.dialog_bg,
     };
     var input_segments = [_]vaxis.Cell.Segment{
-        .{ .text = "> ", .style = .{ .fg = Color.cyan } },
+        .{ .text = "> ", .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
         .{ .text = query, .style = input_style },
     };
     _ = palette_win.print(&input_segments, .{ .row_offset = 1  });
@@ -506,6 +502,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     // Line 2: Separator (account for border width like help.zig does)
     const sep_style = vaxis.Style{
         .fg = Color.dim_gray,
+        .bg = Color.dialog_bg,
     };
     if (palette_win.width > 2) {
         // Subtract 2 for border padding (1 on each side)
@@ -523,6 +520,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         const no_results = "No matching commands";
         const no_results_style = vaxis.Style{
             .fg = Color.dim_gray,
+            .bg = Color.dialog_bg,
         };
         var no_results_segments = [_]vaxis.Cell.Segment{
             .{ .text = no_results, .style = no_results_style },
@@ -542,17 +540,20 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
             const indicator = if (is_selected) "▶ " else "  ";
             const indicator_style = vaxis.Style{
                 .fg = if (is_selected) Color.cyan else Color.dim_gray,
+                .bg = Color.dialog_bg,
             };
 
             // Command name
             const name_style = vaxis.Style{
                 .fg = if (is_selected) Color.white else Color.white,
+                .bg = Color.dialog_bg,
                 .bold = is_selected,
             };
 
             // Description
             const desc_style = vaxis.Style{
                 .fg = Color.dim_gray,
+                .bg = Color.dialog_bg,
             };
 
             // Format: "▶ Name             Description" with stats right-justified
@@ -564,7 +565,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
 
             try segments.append(app.allocator, .{ .text = indicator, .style = indicator_style });
             try segments.append(app.allocator, .{ .text = cmd.display_name, .style = name_style });
-            try segments.append(app.allocator, .{ .text = spacing, .style = .{} });
+            try segments.append(app.allocator, .{ .text = spacing, .style = .{ .bg = Color.dialog_bg } });
             try segments.append(app.allocator, .{ .text = cmd.description, .style = desc_style });
 
             // Add colored stats for file commands and diff commands (right-justified)
@@ -594,18 +595,18 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
                 var padding_buf: [100]u8 = undefined;
                 @memset(&padding_buf, ' ');
                 const padding = padding_buf[0..@min(padding_needed, padding_buf.len)];
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, padding), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, padding), .style = .{ .bg = Color.dialog_bg } });
 
                 // Add colored stats segments
                 const additions_text = try std.fmt.allocPrint(app.allocator, "+{d}", .{cmd.additions});
                 defer app.allocator.free(additions_text);
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, additions_text), .style = .{ .fg = Color.green, .bold = true } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, additions_text), .style = .{ .fg = Color.green, .bg = Color.dialog_bg, .bold = true } });
 
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ", "), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ", "), .style = .{ .bg = Color.dialog_bg } });
 
                 const deletions_text = try std.fmt.allocPrint(app.allocator, "-{d}", .{cmd.deletions});
                 defer app.allocator.free(deletions_text);
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, deletions_text), .style = .{ .fg = Color.red, .bold = true } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, deletions_text), .style = .{ .fg = Color.red, .bg = Color.dialog_bg, .bold = true } });
             }
 
             _ = palette_win.print(segments.items, .{ .row_offset = @intCast(row ) });
@@ -616,6 +617,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
             const more_text = "...";
             const more_style = vaxis.Style{
                 .fg = Color.dim_gray,
+                .bg = Color.dialog_bg,
             };
             var more_segments = [_]vaxis.Cell.Segment{
                 .{ .text = more_text, .style = more_style },

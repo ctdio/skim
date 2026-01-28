@@ -22,21 +22,15 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .y_off = y_offset,
         .width = @intCast(popup_width),
         .height = @intCast(popup_height),
-        .border = .{
-            .where = .all,
-            .style = .{
-                .fg = Color.cyan,
-            },
-        },
     });
 
     popup_win.clear();
 
-    // Fill with solid background
+    // Fill with dark gray background to differentiate from main content
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
         .style = .{
-            .bg = Color.black,
+            .bg = Color.dialog_bg,
         },
     };
     popup_win.fill(bg_cell);
@@ -46,20 +40,23 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     defer content_lines.deinit(app.allocator);
 
     // Title
-    try content_lines.append(app.allocator, .{ .text = "Agent Mode - Keybindings", .style = .{ .fg = Color.cyan, .bold = true } });
+    try content_lines.append(app.allocator, .{ .text = "Agent Mode - Keybindings", .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true } });
 
     // Separator
-    try content_lines.append(app.allocator, .{ .text = null, .style = .{}, .is_separator = true });
+    try content_lines.append(app.allocator, .{ .text = null, .style = .{ .bg = Color.dialog_bg }, .is_separator = true });
 
     const section_style = vaxis.Style{
         .fg = Color.yellow,
+        .bg = Color.dialog_bg,
         .bold = true,
     };
     const key_style = vaxis.Style{
         .fg = Color.cyan,
+        .bg = Color.dialog_bg,
     };
     const desc_style = vaxis.Style{
         .fg = Color.white,
+        .bg = Color.dialog_bg,
     };
 
     // GLOBAL section - keybinds that work in any mode
@@ -78,7 +75,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     for (global_bindings) |binding| {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
 
     // INSERT MODE section
     try content_lines.append(app.allocator, .{ .text = "INSERT MODE (typing in prompt)", .style = section_style });
@@ -96,7 +93,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     for (input_bindings) |binding| {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
 
     // NORMAL MODE section
     try content_lines.append(app.allocator, .{ .text = "NORMAL MODE (vim on prompt)", .style = section_style });
@@ -123,7 +120,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     for (normal_bindings) |binding| {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
 
     // HISTORY MODE section
     try content_lines.append(app.allocator, .{ .text = "HISTORY MODE (gb or Space+b)", .style = section_style });
@@ -146,7 +143,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     for (history_bindings) |binding| {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
 
     // VISUAL MODE section (in history)
     try content_lines.append(app.allocator, .{ .text = "VISUAL MODE (in history, v)", .style = section_style });
@@ -160,7 +157,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     for (visual_bindings) |binding| {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
 
     // PERMISSION PROMPT section
     try content_lines.append(app.allocator, .{ .text = "PERMISSION PROMPT", .style = section_style });
@@ -175,7 +172,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     for (perm_bindings) |binding| {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
 
     // MENUS section
     try content_lines.append(app.allocator, .{ .text = "MENUS (/, @, :)", .style = section_style });
@@ -191,7 +188,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     for (menu_bindings) |binding| {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
 
     // SLASH COMMANDS section
     try content_lines.append(app.allocator, .{ .text = "SLASH COMMANDS", .style = section_style });
@@ -205,10 +202,10 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     for (slash_bindings) |binding| {
         try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{} });
+    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
 
     // Footer
-    try content_lines.append(app.allocator, .{ .text = "j/k: Scroll  |  Ctrl+D/U: Page  |  g/G: Top/Bottom  |  ? or ESC: Close", .style = .{ .fg = Color.dim_gray } });
+    try content_lines.append(app.allocator, .{ .text = "j/k: Scroll  |  Ctrl+D/U: Page  |  g/G: Top/Bottom  |  ? or ESC: Close", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } });
 
     // Calculate visible range based on scroll offset
     const scroll_offset = agent_state.help_scroll_offset;
@@ -222,7 +219,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     if (scroll_offset > 0) {
         const indicator = "\xe2\x96\xb2 (scroll up for more)"; // ▲
         var indicator_seg = [_]vaxis.Cell.Segment{
-            .{ .text = indicator, .style = .{ .fg = Color.dim_gray } },
+            .{ .text = indicator, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
         _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row) });
         current_row += 1;
@@ -241,16 +238,16 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
                 const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
                 @memset(sep_text, '-');
                 var sep_segments = [_]vaxis.Cell.Segment{
-                    .{ .text = sep_text, .style = .{ .fg = Color.dim_gray } },
+                    .{ .text = sep_text, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
                 };
                 _ = popup_win.print(&sep_segments, .{ .row_offset = @intCast(current_row) });
             }
         } else if (line.key) |key| {
             // Render keybinding
             var segments = [_]vaxis.Cell.Segment{
-                .{ .text = "  ", .style = .{} },
+                .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } },
                 .{ .text = key, .style = line.key_style.? },
-                .{ .text = "  ", .style = .{} },
+                .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } },
                 .{ .text = line.desc.?, .style = line.desc_style.? },
             };
             _ = popup_win.print(&segments, .{ .row_offset = @intCast(current_row) });
@@ -269,7 +266,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     if (visible_end < total_content_rows and current_row < max_visible_rows) {
         const indicator = "\xe2\x96\xbc (scroll down for more)"; // ▼
         var indicator_seg = [_]vaxis.Cell.Segment{
-            .{ .text = indicator, .style = .{ .fg = Color.dim_gray } },
+            .{ .text = indicator, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
         _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row) });
     }

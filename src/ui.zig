@@ -401,18 +401,14 @@ pub const UI = struct {
             .y_off = @intCast(y_offset),
             .width = @intCast(popup_width),
             .height = @intCast(popup_height),
-            .border = .{
-                .where = .all,
-                .style = .{ .fg = Color.cyan },
-            },
         });
 
         popup_win.clear();
 
-        // Fill with solid background
+        // Fill with dark gray background to differentiate from main content
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = Color.black },
+            .style = .{ .bg = Color.dialog_bg },
         };
         popup_win.fill(bg_cell);
 
@@ -420,7 +416,7 @@ pub const UI = struct {
         const title_copy = try RenderUtils.copyFrameText(app, title);
         var title_seg = [_]vaxis.Cell.Segment{.{
             .text = title_copy,
-            .style = .{ .fg = Color.cyan, .bold = true },
+            .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true },
         }};
         _ = popup_win.print(&title_seg, .{ .row_offset = 0 });
 
@@ -435,7 +431,7 @@ pub const UI = struct {
         const search_copy = try RenderUtils.copyFrameText(app, search_line);
         var search_seg = [_]vaxis.Cell.Segment{.{
             .text = search_copy,
-            .style = .{ .fg = if (query.len > 0) Color.white else Color.dim },
+            .style = .{ .fg = if (query.len > 0) Color.white else Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&search_seg, .{ .row_offset = 1, .col_offset = 1 });
 
@@ -446,7 +442,7 @@ pub const UI = struct {
             @memset(sep_text, '-');
             var sep_seg = [_]vaxis.Cell.Segment{.{
                 .text = sep_text,
-                .style = .{ .fg = Color.dim },
+                .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
             }};
             _ = popup_win.print(&sep_seg, .{ .row_offset = 2 });
         }
@@ -457,7 +453,7 @@ pub const UI = struct {
             const no_commits_copy = try RenderUtils.copyFrameText(app, no_commits);
             var no_commits_seg = [_]vaxis.Cell.Segment{.{
                 .text = no_commits_copy,
-                .style = .{ .fg = Color.dim },
+                .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
             }};
             _ = popup_win.print(&no_commits_seg, .{ .row_offset = 3, .col_offset = 1 });
         } else {
@@ -468,7 +464,7 @@ pub const UI = struct {
                 const no_matches_copy = try RenderUtils.copyFrameText(app, no_matches);
                 var no_matches_seg = [_]vaxis.Cell.Segment{.{
                     .text = no_matches_copy,
-                    .style = .{ .fg = Color.dim },
+                    .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
                 }};
                 _ = popup_win.print(&no_matches_seg, .{ .row_offset = 3, .col_offset = 1 });
             } else {
@@ -491,33 +487,33 @@ pub const UI = struct {
                     // Caret
                     const caret = if (is_selected) "▶ " else "  ";
                     const caret_copy = try RenderUtils.copyFrameText(app, caret);
-                    try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+                    try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } });
 
                     // Short hash (yellow)
                     const hash_copy = try RenderUtils.copyFrameText(app, commit.short_hash);
-                    try segments.append(app.allocator, .{ .text = hash_copy, .style = .{ .fg = Color.yellow, .bold = is_selected } });
+                    try segments.append(app.allocator, .{ .text = hash_copy, .style = .{ .fg = Color.yellow, .bg = Color.dialog_bg, .bold = is_selected } });
 
                     // Separator
                     const sep1 = try RenderUtils.copyFrameText(app, "  ");
-                    try segments.append(app.allocator, .{ .text = sep1, .style = .{} });
+                    try segments.append(app.allocator, .{ .text = sep1, .style = .{ .bg = Color.dialog_bg } });
 
                     // Subject (truncate if too long)
                     const available_width = popup_width -| 25; // account for hash, author, date, padding
                     const max_subject_len = @min(available_width, 45);
                     const subject_display = if (commit.subject.len > max_subject_len) commit.subject[0..max_subject_len] else commit.subject;
                     const subject_copy = try RenderUtils.copyFrameText(app, subject_display);
-                    try segments.append(app.allocator, .{ .text = subject_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+                    try segments.append(app.allocator, .{ .text = subject_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bg = Color.dialog_bg, .bold = is_selected } });
 
                     if (commit.subject.len > max_subject_len) {
                         const ellipsis = try RenderUtils.copyFrameText(app, "...");
-                        try segments.append(app.allocator, .{ .text = ellipsis, .style = .{ .fg = Color.dim } });
+                        try segments.append(app.allocator, .{ .text = ellipsis, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } });
                     }
 
                     // Author and date in parentheses
                     var author_buf: [64]u8 = undefined;
                     const author_text = try std.fmt.bufPrint(&author_buf, "  ({s}, {s})", .{ commit.author, commit.date });
                     const author_copy = try RenderUtils.copyFrameText(app, author_text);
-                    try segments.append(app.allocator, .{ .text = author_copy, .style = .{ .fg = Color.dim } });
+                    try segments.append(app.allocator, .{ .text = author_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } });
 
                     // Render the commit line
                     _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = 1 });
@@ -530,7 +526,7 @@ pub const UI = struct {
                     const more_copy = try RenderUtils.copyFrameText(app, more_text);
                     var more_seg = [_]vaxis.Cell.Segment{.{
                         .text = more_copy,
-                        .style = .{ .fg = Color.dim },
+                        .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
                     }};
                     _ = popup_win.print(&more_seg, .{ .row_offset = @intCast(3 + max_visible), .col_offset = 1 });
                 }
@@ -541,7 +537,7 @@ pub const UI = struct {
         const instr_copy = try RenderUtils.copyFrameText(app, instructions);
         var instr_seg = [_]vaxis.Cell.Segment{.{
             .text = instr_copy,
-            .style = .{ .fg = Color.dim },
+            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = 1 });
     }
@@ -568,18 +564,14 @@ pub const UI = struct {
             .y_off = y_offset,
             .width = @intCast(popup_width),
             .height = @intCast(popup_height),
-            .border = .{
-                .where = .all,
-                .style = .{ .fg = Color.cyan },
-            },
         });
 
         popup_win.clear();
 
-        // Fill with solid background
+        // Fill with dark gray background to differentiate from main content
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = Color.black },
+            .style = .{ .bg = Color.dialog_bg },
         };
         popup_win.fill(bg_cell);
 
@@ -587,7 +579,7 @@ pub const UI = struct {
         const title_copy = try RenderUtils.copyFrameText(app, title);
         var title_seg = [_]vaxis.Cell.Segment{.{
             .text = title_copy,
-            .style = .{ .fg = Color.cyan, .bold = true },
+            .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true },
         }};
         _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
 
@@ -598,7 +590,7 @@ pub const UI = struct {
         const info_copy = try RenderUtils.copyFrameText(app, info_text);
         var info_seg = [_]vaxis.Cell.Segment{.{
             .text = info_copy,
-            .style = .{ .fg = Color.dim },
+            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(1), .col_offset = 1 });
 
@@ -608,8 +600,8 @@ pub const UI = struct {
         const caret1_copy = try RenderUtils.copyFrameText(app, caret1);
         const opt1_copy = try RenderUtils.copyFrameText(app, option1);
         var opt1_seg = [_]vaxis.Cell.Segment{
-            .{ .text = caret1_copy, .style = .{ .fg = Color.cyan } },
-            .{ .text = opt1_copy, .style = .{ .fg = if (is_opt1_selected) Color.white else Color.dim, .bold = is_opt1_selected } },
+            .{ .text = caret1_copy, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
+            .{ .text = opt1_copy, .style = .{ .fg = if (is_opt1_selected) Color.white else Color.dim, .bg = Color.dialog_bg, .bold = is_opt1_selected } },
         };
         _ = popup_win.print(&opt1_seg, .{ .row_offset = @intCast(3), .col_offset = 1 });
 
@@ -619,8 +611,8 @@ pub const UI = struct {
         const caret2_copy = try RenderUtils.copyFrameText(app, caret2);
         const opt2_copy = try RenderUtils.copyFrameText(app, option2);
         var opt2_seg = [_]vaxis.Cell.Segment{
-            .{ .text = caret2_copy, .style = .{ .fg = Color.cyan } },
-            .{ .text = opt2_copy, .style = .{ .fg = if (is_opt2_selected) Color.white else Color.dim, .bold = is_opt2_selected } },
+            .{ .text = caret2_copy, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
+            .{ .text = opt2_copy, .style = .{ .fg = if (is_opt2_selected) Color.white else Color.dim, .bg = Color.dialog_bg, .bold = is_opt2_selected } },
         };
         _ = popup_win.print(&opt2_seg, .{ .row_offset = @intCast(4), .col_offset = 1 });
 
@@ -628,7 +620,7 @@ pub const UI = struct {
         const instr_copy = try RenderUtils.copyFrameText(app, instructions);
         var instr_seg = [_]vaxis.Cell.Segment{.{
             .text = instr_copy,
-            .style = .{ .fg = Color.dim },
+            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = 1 });
     }
@@ -664,18 +656,14 @@ pub const UI = struct {
             .y_off = y_offset,
             .width = @intCast(popup_width),
             .height = @intCast(popup_height),
-            .border = .{
-                .where = .all,
-                .style = .{ .fg = Color.cyan },
-            },
         });
 
         popup_win.clear();
 
-        // Fill with solid background
+        // Fill with dark gray background to differentiate from main content
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = Color.black },
+            .style = .{ .bg = Color.dialog_bg },
         };
         popup_win.fill(bg_cell);
 
@@ -683,7 +671,7 @@ pub const UI = struct {
         const title_copy = try RenderUtils.copyFrameText(app, title);
         var title_seg = [_]vaxis.Cell.Segment{.{
             .text = title_copy,
-            .style = .{ .fg = Color.cyan, .bold = true },
+            .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true },
         }};
         _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
 
@@ -701,28 +689,28 @@ pub const UI = struct {
             // Selection caret
             const caret = if (is_selected) "▶ " else "  ";
             const caret_copy = try RenderUtils.copyFrameText(app, caret);
-            try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+            try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } });
 
             // Tree symbol (trunk at bottom, tip branches at top)
             const is_tip = array_idx == branch_count - 1;
             const tree_symbol = if (branch.is_trunk) "◉ " else if (is_tip) "◇ " else "○ ";
             const tree_copy = try RenderUtils.copyFrameText(app, tree_symbol);
-            try segments.append(app.allocator, .{ .text = tree_copy, .style = .{ .fg = if (is_current) Color.green else Color.dim } });
+            try segments.append(app.allocator, .{ .text = tree_copy, .style = .{ .fg = if (is_current) Color.green else Color.dim, .bg = Color.dialog_bg } });
 
             // Branch name
             const name_copy = try RenderUtils.copyFrameText(app, branch.name);
-            try segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+            try segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bg = Color.dialog_bg, .bold = is_selected } });
 
             // Current indicator
             if (is_current) {
                 const current_copy = try RenderUtils.copyFrameText(app, " ← you");
-                try segments.append(app.allocator, .{ .text = current_copy, .style = .{ .fg = Color.green } });
+                try segments.append(app.allocator, .{ .text = current_copy, .style = .{ .fg = Color.green, .bg = Color.dialog_bg } });
             }
 
             // Needs restack indicator
             if (branch.needs_restack) {
                 const restack_copy = try RenderUtils.copyFrameText(app, " !");
-                try segments.append(app.allocator, .{ .text = restack_copy, .style = .{ .fg = Color.yellow, .bold = true } });
+                try segments.append(app.allocator, .{ .text = restack_copy, .style = .{ .fg = Color.yellow, .bg = Color.dialog_bg, .bold = true } });
             }
 
             _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(1) });
@@ -732,7 +720,7 @@ pub const UI = struct {
         const instr_copy = try RenderUtils.copyFrameText(app, instructions);
         var instr_seg = [_]vaxis.Cell.Segment{.{
             .text = instr_copy,
-            .style = .{ .fg = Color.dim },
+            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
     }
@@ -780,18 +768,14 @@ pub const UI = struct {
             .y_off = y_offset,
             .width = @intCast(popup_width),
             .height = @intCast(popup_height),
-            .border = .{
-                .where = .all,
-                .style = .{ .fg = Color.cyan },
-            },
         });
 
         popup_win.clear();
 
-        // Fill with solid background
+        // Fill with dark gray background to differentiate from main content
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = Color.black },
+            .style = .{ .bg = Color.dialog_bg },
         };
         popup_win.fill(bg_cell);
 
@@ -799,7 +783,7 @@ pub const UI = struct {
         const title_copy = try RenderUtils.copyFrameText(app, title);
         var title_seg = [_]vaxis.Cell.Segment{.{
             .text = title_copy,
-            .style = .{ .fg = Color.cyan, .bold = true },
+            .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true },
         }};
         _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
 
@@ -814,7 +798,7 @@ pub const UI = struct {
         const search_copy = try RenderUtils.copyFrameText(app, search_line);
         var search_seg = [_]vaxis.Cell.Segment{.{
             .text = search_copy,
-            .style = .{ .fg = if (query.len > 0) Color.cyan else Color.dim },
+            .style = .{ .fg = if (query.len > 0) Color.cyan else Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&search_seg, .{ .row_offset = @intCast(1), .col_offset = 1 });
 
@@ -824,7 +808,7 @@ pub const UI = struct {
             const no_matches_copy = try RenderUtils.copyFrameText(app, no_matches);
             var no_matches_seg = [_]vaxis.Cell.Segment{.{
                 .text = no_matches_copy,
-                .style = .{ .fg = Color.dim },
+                .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
             }};
             _ = popup_win.print(&no_matches_seg, .{ .row_offset = @intCast(3), .col_offset = 1 });
         } else {
@@ -862,15 +846,15 @@ pub const UI = struct {
 
                 const caret = if (is_selected) "▶ " else "  ";
                 const caret_copy = try RenderUtils.copyFrameText(app, caret);
-                try name_segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+                try name_segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } });
 
                 const model_name = model.name orelse model.model_id;
                 const name_copy = try RenderUtils.copyFrameText(app, model_name);
-                try name_segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+                try name_segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bg = Color.dialog_bg, .bold = is_selected } });
 
                 if (is_current) {
                     const check_copy = try RenderUtils.copyFrameText(app, " ✓");
-                    try name_segments.append(app.allocator, .{ .text = check_copy, .style = .{ .fg = Color.green } });
+                    try name_segments.append(app.allocator, .{ .text = check_copy, .style = .{ .fg = Color.green, .bg = Color.dialog_bg } });
                 }
 
                 _ = popup_win.print(name_segments.items, .{ .row_offset = @intCast(row) });
@@ -884,7 +868,7 @@ pub const UI = struct {
                         const desc_copy = try RenderUtils.copyFrameText(app, truncated);
                         var desc_seg = [_]vaxis.Cell.Segment{.{
                             .text = desc_copy,
-                            .style = .{ .fg = Color.dim },
+                            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
                         }};
                         _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
                     }
@@ -895,12 +879,12 @@ pub const UI = struct {
             // Scroll indicators
             if (scroll_offset > 0) {
                 const up_copy = try RenderUtils.copyFrameText(app, "↑");
-                var up_seg = [_]vaxis.Cell.Segment{.{ .text = up_copy, .style = .{ .fg = Color.dim } }};
+                var up_seg = [_]vaxis.Cell.Segment{.{ .text = up_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } }};
                 _ = popup_win.print(&up_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 4) });
             }
             if (scroll_offset + visible_count < filtered_count) {
                 const down_copy = try RenderUtils.copyFrameText(app, "↓");
-                var down_seg = [_]vaxis.Cell.Segment{.{ .text = down_copy, .style = .{ .fg = Color.dim } }};
+                var down_seg = [_]vaxis.Cell.Segment{.{ .text = down_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } }};
                 _ = popup_win.print(&down_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 2) });
             }
         }
@@ -909,7 +893,7 @@ pub const UI = struct {
         const instr_copy = try RenderUtils.copyFrameText(app, instructions);
         var instr_seg = [_]vaxis.Cell.Segment{.{
             .text = instr_copy,
-            .style = .{ .fg = Color.dim },
+            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
     }
@@ -946,18 +930,14 @@ pub const UI = struct {
             .y_off = y_offset,
             .width = @intCast(popup_width),
             .height = @intCast(popup_height),
-            .border = .{
-                .where = .all,
-                .style = .{ .fg = Color.cyan },
-            },
         });
 
         popup_win.clear();
 
-        // Fill with solid background
+        // Fill with dark gray background to differentiate from main content
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = Color.black },
+            .style = .{ .bg = Color.dialog_bg },
         };
         popup_win.fill(bg_cell);
 
@@ -965,7 +945,7 @@ pub const UI = struct {
         const title_copy = try RenderUtils.copyFrameText(app, title);
         var title_seg = [_]vaxis.Cell.Segment{.{
             .text = title_copy,
-            .style = .{ .fg = Color.cyan, .bold = true },
+            .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true },
         }};
         _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
 
@@ -980,23 +960,23 @@ pub const UI = struct {
             // Selection caret
             const caret = if (is_selected) "▶ " else "  ";
             const caret_copy = try RenderUtils.copyFrameText(app, caret);
-            try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+            try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } });
 
             // Agent name
             const name_copy = try RenderUtils.copyFrameText(app, agt.name);
-            try segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bold = is_selected } });
+            try segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bg = Color.dialog_bg, .bold = is_selected } });
 
             // Separator
             const sep_copy = try RenderUtils.copyFrameText(app, " (");
-            try segments.append(app.allocator, .{ .text = sep_copy, .style = .{ .fg = Color.dim } });
+            try segments.append(app.allocator, .{ .text = sep_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } });
 
             // Command
             const cmd_copy = try RenderUtils.copyFrameText(app, agt.command);
-            try segments.append(app.allocator, .{ .text = cmd_copy, .style = .{ .fg = Color.dim } });
+            try segments.append(app.allocator, .{ .text = cmd_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } });
 
             // Close paren
             const close_copy = try RenderUtils.copyFrameText(app, ")");
-            try segments.append(app.allocator, .{ .text = close_copy, .style = .{ .fg = Color.dim } });
+            try segments.append(app.allocator, .{ .text = close_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } });
 
             _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row) });
         }
@@ -1005,7 +985,7 @@ pub const UI = struct {
         const instr_copy = try RenderUtils.copyFrameText(app, instructions);
         var instr_seg = [_]vaxis.Cell.Segment{.{
             .text = instr_copy,
-            .style = .{ .fg = Color.dim },
+            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
     }
@@ -1047,18 +1027,14 @@ pub const UI = struct {
             .y_off = y_offset,
             .width = @intCast(popup_width),
             .height = @intCast(popup_height),
-            .border = .{
-                .where = .all,
-                .style = .{ .fg = Color.cyan },
-            },
         });
 
         popup_win.clear();
 
-        // Fill with solid background
+        // Fill with dark gray background to differentiate from main content
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = Color.black },
+            .style = .{ .bg = Color.dialog_bg },
         };
         popup_win.fill(bg_cell);
 
@@ -1066,7 +1042,7 @@ pub const UI = struct {
         const title_copy = try RenderUtils.copyFrameText(app, title);
         var title_seg = [_]vaxis.Cell.Segment{.{
             .text = title_copy,
-            .style = .{ .fg = Color.cyan, .bold = true },
+            .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true },
         }};
         _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
 
@@ -1104,33 +1080,33 @@ pub const UI = struct {
 
             const caret = if (is_selected) "▶ " else "  ";
             const caret_copy = try RenderUtils.copyFrameText(app, caret);
-            try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan } });
+            try segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } });
 
             // Display text (truncated if needed) - show first
             const max_display = if (popup_width > 40) popup_width - 40 else 20;
             const display_text = if (session.display.len > max_display) session.display[0..max_display] else session.display;
             const display_copy = try RenderUtils.copyFrameText(app, display_text);
-            try segments.append(app.allocator, .{ .text = display_copy, .style = .{ .fg = Color.white, .bold = is_selected } });
+            try segments.append(app.allocator, .{ .text = display_copy, .style = .{ .fg = Color.white, .bg = Color.dialog_bg, .bold = is_selected } });
 
             // Time in dim color
             const time_copy = try RenderUtils.copyFrameText(app, time_str);
-            try segments.append(app.allocator, .{ .text = "  ", .style = .{} });
-            try segments.append(app.allocator, .{ .text = time_copy, .style = .{ .fg = Color.dim } });
+            try segments.append(app.allocator, .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } });
+            try segments.append(app.allocator, .{ .text = time_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } });
 
             // Message count
             if (session.message_count > 0) {
                 var msg_buf: [32]u8 = undefined;
                 const msg_str = std.fmt.bufPrint(&msg_buf, " · {d} messages", .{session.message_count}) catch " · ? messages";
                 const msg_copy = try RenderUtils.copyFrameText(app, msg_str);
-                try segments.append(app.allocator, .{ .text = msg_copy, .style = .{ .fg = Color.dim } });
+                try segments.append(app.allocator, .{ .text = msg_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } });
             }
 
             // Branch (if available)
             if (session.branch) |branch| {
                 const branch_sep_copy = try RenderUtils.copyFrameText(app, " · ");
-                try segments.append(app.allocator, .{ .text = branch_sep_copy, .style = .{ .fg = Color.dim } });
+                try segments.append(app.allocator, .{ .text = branch_sep_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } });
                 const branch_copy = try RenderUtils.copyFrameText(app, branch);
-                try segments.append(app.allocator, .{ .text = branch_copy, .style = .{ .fg = Color.yellow } });
+                try segments.append(app.allocator, .{ .text = branch_copy, .style = .{ .fg = Color.yellow, .bg = Color.dialog_bg } });
             }
 
             _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row) });
@@ -1145,15 +1121,15 @@ pub const UI = struct {
                     const preview_copy = try RenderUtils.copyFrameText(app, preview_text);
                     if (is_truncated) {
                         var preview_seg = [_]vaxis.Cell.Segment{
-                            .{ .text = "  ↳ ", .style = .{ .fg = Color.dim } },
-                            .{ .text = preview_copy, .style = .{ .fg = Color.dim } },
-                            .{ .text = "...", .style = .{ .fg = Color.dim } },
+                            .{ .text = "  ↳ ", .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } },
+                            .{ .text = preview_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } },
+                            .{ .text = "...", .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } },
                         };
                         _ = popup_win.print(&preview_seg, .{ .row_offset = @intCast(row) });
                     } else {
                         var preview_seg = [_]vaxis.Cell.Segment{
-                            .{ .text = "  ↳ ", .style = .{ .fg = Color.dim } },
-                            .{ .text = preview_copy, .style = .{ .fg = Color.dim } },
+                            .{ .text = "  ↳ ", .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } },
+                            .{ .text = preview_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } },
                         };
                         _ = popup_win.print(&preview_seg, .{ .row_offset = @intCast(row) });
                     }
@@ -1166,19 +1142,19 @@ pub const UI = struct {
         const instr_copy = try RenderUtils.copyFrameText(app, instructions);
         var instr_seg = [_]vaxis.Cell.Segment{.{
             .text = instr_copy,
-            .style = .{ .fg = Color.dim },
+            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
 
         // Scroll indicators
         if (scroll_offset > 0) {
             const up_copy = try RenderUtils.copyFrameText(app, "↑");
-            var up_seg = [_]vaxis.Cell.Segment{.{ .text = up_copy, .style = .{ .fg = Color.dim } }};
+            var up_seg = [_]vaxis.Cell.Segment{.{ .text = up_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } }};
             _ = popup_win.print(&up_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 4) });
         }
         if (scroll_offset + visible_count < session_count) {
             const down_copy = try RenderUtils.copyFrameText(app, "↓");
-            var down_seg = [_]vaxis.Cell.Segment{.{ .text = down_copy, .style = .{ .fg = Color.dim } }};
+            var down_seg = [_]vaxis.Cell.Segment{.{ .text = down_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } }};
             _ = popup_win.print(&down_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 2) });
         }
     }

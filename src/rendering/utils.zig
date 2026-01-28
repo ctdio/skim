@@ -1393,7 +1393,7 @@ pub const RenderUtils = struct {
         visible_width: usize, // Usable width for content (excludes borders)
     };
 
-    /// Render a centered dialog with border, title, input field, and separator.
+    /// Render a centered dialog with title, input field, and separator.
     /// Returns a window for rendering content items.
     pub fn renderCenteredDialog(
         win: vaxis.Window,
@@ -1401,18 +1401,18 @@ pub const RenderUtils = struct {
     ) DialogResult {
         // Calculate dialog dimensions
         const visible_items = @min(config.item_count, config.max_visible_items);
-        // Height: top border (1) + input (1) + separator (1) + items + bottom border (1) = items + 4
+        // Height: title (1) + input (1) + separator (1) + items + hints (1) = items + 4
         const dialog_height = @min(visible_items + 4, win.height -| 4);
 
         // Calculate width based on content
-        var content_width: usize = config.title.len + 4; // Title + borders
-        content_width = @max(content_width, config.hints.len + 4); // Hints + borders
+        var content_width: usize = config.title.len + 2; // Title + padding
+        content_width = @max(content_width, config.hints.len + 2); // Hints + padding
 
         // Calculate width from items if provided
         if (config.items) |items| {
             for (items) |item| {
-                // "▶ " (2) + name + "  " (2) + description + border (2)
-                const item_width = 2 + item.name.len + 2 + item.description.len + 4;
+                // "▶ " (2) + name + "  " (2) + description + padding (2)
+                const item_width = 2 + item.name.len + 2 + item.description.len + 2;
                 content_width = @max(content_width, item_width);
             }
         }
@@ -1437,10 +1437,10 @@ pub const RenderUtils = struct {
             .height = @intCast(max_dialog_height),
         });
 
-        // Clear with background color (also makes text behind dialog less distracting)
+        // Clear with dark gray background to differentiate from main content
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
-            .style = .{ .bg = Color.black },
+            .style = .{ .bg = Color.dialog_bg },
         };
         clear_win.fill(bg_cell);
 
@@ -1456,87 +1456,47 @@ pub const RenderUtils = struct {
         });
 
         // Styles
-        const border_style = vaxis.Style{ .fg = Color.cyan };
-        const title_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
-        const input_style = vaxis.Style{ .fg = Color.white };
-        const prompt_style = vaxis.Style{ .fg = Color.cyan };
-        const sep_style = vaxis.Style{ .fg = Color.dim_gray };
+        const title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
+        const input_style = vaxis.Style{ .fg = Color.white, .bg = Color.dialog_bg };
+        const prompt_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg };
+        const sep_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
 
         // Fill dialog background (in case max clear area is smaller than dialog)
         dialog_win.fill(bg_cell);
 
-        // Row 0: Top border with title
-        dialog_win.writeCell(0, 0, .{ .char = .{ .grapheme = "┌", .width = 1 }, .style = border_style });
-        dialog_win.writeCell(@intCast(dialog_width - 1), 0, .{ .char = .{ .grapheme = "┐", .width = 1 }, .style = border_style });
-
-        // Draw title in top border
-        const title_start: usize = 2;
-        for (1..dialog_width - 1) |col| {
-            if (col >= title_start and col < title_start + config.title.len) {
-                const char_idx = col - title_start;
-                if (char_idx < config.title.len) {
-                    dialog_win.writeCell(@intCast(col), 0, .{
-                        .char = .{ .grapheme = config.title[char_idx .. char_idx + 1], .width = 1 },
-                        .style = title_style,
-                    });
-                }
-            } else {
-                dialog_win.writeCell(@intCast(col), 0, .{
-                    .char = .{ .grapheme = "─", .width = 1 },
-                    .style = border_style,
-                });
-            }
-        }
+        // Row 0: Title
+        var title_seg = [_]vaxis.Cell.Segment{
+            .{ .text = config.title, .style = title_style },
+        };
+        _ = dialog_win.print(&title_seg, .{ .row_offset = 0, .col_offset = 1 });
 
         // Row 1: Input field
-        dialog_win.writeCell(0, 1, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
-        dialog_win.writeCell(@intCast(dialog_width - 1), 1, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
-
         var prompt_seg = [_]vaxis.Cell.Segment{
             .{ .text = config.input_prompt, .style = prompt_style },
         };
-        _ = dialog_win.print(&prompt_seg, .{ .row_offset = 1, .col_offset = 2 });
+        _ = dialog_win.print(&prompt_seg, .{ .row_offset = 1, .col_offset = 1 });
 
         const prompt_len = config.input_prompt.len;
         var input_seg = [_]vaxis.Cell.Segment{
             .{ .text = config.input_text, .style = input_style },
         };
-        _ = dialog_win.print(&input_seg, .{ .row_offset = 1, .col_offset = @intCast(2 + prompt_len) });
+        _ = dialog_win.print(&input_seg, .{ .row_offset = 1, .col_offset = @intCast(1 + prompt_len) });
 
         // Show cursor
-        dialog_win.showCursor(@intCast(2 + prompt_len + config.cursor_pos), 1);
+        dialog_win.showCursor(@intCast(1 + prompt_len + config.cursor_pos), 1);
 
-        // Row 2: Separator
-        dialog_win.writeCell(0, 2, .{ .char = .{ .grapheme = "├", .width = 1 }, .style = border_style });
-        dialog_win.writeCell(@intCast(dialog_width - 1), 2, .{ .char = .{ .grapheme = "┤", .width = 1 }, .style = border_style });
-        for (1..dialog_width - 1) |col| {
+        // Row 2: Separator (simple dashes)
+        for (0..dialog_width) |col| {
             dialog_win.writeCell(@intCast(col), 2, .{
-                .char = .{ .grapheme = "─", .width = 1 },
+                .char = .{ .grapheme = "-", .width = 1 },
                 .style = sep_style,
             });
         }
 
-        // Draw side borders for content area (rows 3 to dialog_height-2)
-        for (3..dialog_height - 1) |row| {
-            dialog_win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
-            dialog_win.writeCell(@intCast(dialog_width - 1), @intCast(row), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
-        }
-
-        // Bottom border with hints
-        const bottom_row = dialog_height - 1;
-        dialog_win.writeCell(0, @intCast(bottom_row), .{ .char = .{ .grapheme = "└", .width = 1 }, .style = border_style });
-        dialog_win.writeCell(@intCast(dialog_width - 1), @intCast(bottom_row), .{ .char = .{ .grapheme = "┘", .width = 1 }, .style = border_style });
-
-        for (1..dialog_width - 1) |col| {
-            dialog_win.writeCell(@intCast(col), @intCast(bottom_row), .{
-                .char = .{ .grapheme = "─", .width = 1 },
-                .style = border_style,
-            });
-        }
-
-        // Draw hints on bottom border
-        if (config.hints.len > 0 and dialog_width > config.hints.len + 4) {
-            const hints_start = dialog_width - config.hints.len - 2;
+        // Hints at bottom
+        if (config.hints.len > 0 and dialog_height > 3) {
+            const bottom_row = dialog_height - 1;
+            const hints_start = if (dialog_width > config.hints.len) dialog_width - config.hints.len - 1 else 0;
             for (config.hints, 0..) |c, i| {
                 var char_buf: [1]u8 = .{c};
                 dialog_win.writeCell(@intCast(hints_start + i), @intCast(bottom_row), .{
@@ -1546,11 +1506,11 @@ pub const RenderUtils = struct {
             }
         }
 
-        // Return content window (inside borders, after separator)
+        // Return content window (after separator)
         return .{
             .content_win = dialog_win,
             .content_start_row = 3,
-            .visible_width = dialog_width - 2, // Exclude left/right borders
+            .visible_width = dialog_width, // Full width available
         };
     }
 
@@ -1564,9 +1524,9 @@ pub const RenderUtils = struct {
         description: []const u8,
         max_width: usize,
     ) void {
-        const normal_style = vaxis.Style{ .fg = Color.white };
+        const normal_style = vaxis.Style{ .fg = Color.white, .bg = Color.dialog_bg };
         const selected_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
-        const desc_style = vaxis.Style{ .fg = Color.dim_gray };
+        const desc_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
 
         const style = if (is_selected) selected_style else normal_style;
 

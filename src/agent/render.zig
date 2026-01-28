@@ -1999,7 +1999,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     });
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{ .bg = Color.black },
+        .style = .{ .bg = Color.dialog_bg },
     };
     clear_win.fill(bg_cell);
 
@@ -2012,8 +2012,8 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     });
 
     // Draw menu background and border (neutral colors)
-    const border_style = vaxis.Style{ .fg = Color.dim_gray };
-    const bg_style = vaxis.Style{ .bg = Color.black };
+    const border_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
+    const bg_style = vaxis.Style{ .bg = Color.dialog_bg };
 
     // Fill background
     for (0..menu_height) |row| {
@@ -2084,12 +2084,12 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
         const name_style: vaxis.Style = if (is_selected)
             .{ .fg = Color.black, .bg = Color.white, .bold = true }
         else
-            .{ .fg = Color.white, .bold = true };
+            .{ .fg = Color.white, .bg = Color.dialog_bg, .bold = true };
 
         const desc_style: vaxis.Style = if (is_selected)
             .{ .fg = Color.black, .bg = Color.white }
         else
-            .{ .fg = Color.dim_gray };
+            .{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
 
         // Fill row background if selected
         if (is_selected) {
@@ -2163,7 +2163,7 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
     });
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{ .bg = Color.black },
+        .style = .{ .bg = Color.dialog_bg },
     };
     clear_win.fill(bg_cell);
 
@@ -2176,8 +2176,8 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
     });
 
     // Draw menu background and border (neutral colors)
-    const border_style = vaxis.Style{ .fg = Color.dim_gray };
-    const bg_style = vaxis.Style{ .bg = Color.black };
+    const border_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
+    const bg_style = vaxis.Style{ .bg = Color.dialog_bg };
 
     // Fill background
     for (0..menu_height) |row| {
@@ -2245,7 +2245,7 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
         const path_style: vaxis.Style = if (is_selected)
             .{ .fg = Color.black, .bg = Color.white, .bold = true }
         else
-            .{ .fg = Color.white };
+            .{ .fg = Color.white, .bg = Color.dialog_bg };
 
         // Fill row background if selected
         if (is_selected) {
@@ -2654,23 +2654,19 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
     const x_offset = if (win.width > dialog_width) (win.width - dialog_width) / 2 else 0;
     const y_offset = if (win.height > dialog_height) (win.height - dialog_height) / 2 else 0;
 
-    // Create dialog window with border
+    // Create dialog window
     const dialog_win = win.child(.{
         .x_off = @intCast(x_offset),
         .y_off = @intCast(y_offset),
         .width = @intCast(@min(dialog_width, win.width)),
         .height = @intCast(@min(dialog_height, win.height)),
-        .border = .{
-            .where = .all,
-            .style = .{ .fg = Color.cyan },
-        },
     });
 
-    // Clear and fill with background
+    // Clear and fill with dark gray background to differentiate from main content
     dialog_win.clear();
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{ .bg = Color.black },
+        .style = .{ .bg = Color.dialog_bg },
     };
     dialog_win.fill(bg_cell);
 
@@ -2678,7 +2674,7 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
     const content_width = dialog_win.width;
 
     // Row 0: Title
-    const title_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
+    const title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
     var title_seg = [_]vaxis.Cell.Segment{
         .{ .text = "Switch Model", .style = title_style },
     };
@@ -2686,7 +2682,7 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
 
     // Row 1: Search input - print prompt first, then query text separately
     var prompt_seg = [_]vaxis.Cell.Segment{
-        .{ .text = "> ", .style = .{ .fg = Color.cyan } },
+        .{ .text = "> ", .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
     };
     _ = dialog_win.print(&prompt_seg, .{ .row_offset = 1 });
 
@@ -2695,7 +2691,7 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
     if (query_len > 0) {
         const query = app.state.model_filter_query[0..query_len];
         var query_seg = [_]vaxis.Cell.Segment{
-            .{ .text = query, .style = .{ .fg = Color.white } },
+            .{ .text = query, .style = .{ .fg = Color.white, .bg = Color.dialog_bg } },
         };
         _ = dialog_win.print(&query_seg, .{ .row_offset = 1, .col_offset = 2 });
     }
@@ -2709,7 +2705,7 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
         for (0..content_width) |col| {
             dialog_win.writeCell(@intCast(col), 2, .{
                 .char = .{ .grapheme = "─", .width = 1 },
-                .style = .{ .fg = Color.dim_gray },
+                .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg },
             });
         }
     }
@@ -2728,7 +2724,7 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
     // Rows 3+: Model list or "No matches"
     if (filtered_count == 0) {
         var no_match_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "No matching models", .style = .{ .fg = Color.dim_gray } },
+            .{ .text = "No matching models", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
         _ = dialog_win.print(&no_match_seg, .{ .row_offset = 3, .col_offset = 1 });
     } else {
@@ -2751,31 +2747,33 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
             const indicator: []const u8 = if (is_selected) "▶ " else "  ";
             const indicator_style = vaxis.Style{
                 .fg = if (is_selected) Color.cyan else Color.dim_gray,
+                .bg = Color.dialog_bg,
             };
 
             // Model name
             const model_name = model.name orelse model.model_id;
             const name_style = vaxis.Style{
                 .fg = Color.white,
+                .bg = Color.dialog_bg,
                 .bold = is_selected,
             };
 
             // Current marker
             const current_marker: []const u8 = if (is_current) " ✓" else "";
-            const current_style = vaxis.Style{ .fg = Color.green };
+            const current_style = vaxis.Style{ .fg = Color.green, .bg = Color.dialog_bg };
 
             // Description (truncated to fit)
             const desc = model.description orelse "";
             const name_and_marker_len = 2 + model_name.len + current_marker.len + 2;
             const max_desc_len = if (content_width > name_and_marker_len) content_width - name_and_marker_len else 0;
             const truncated_desc = if (desc.len > max_desc_len) desc[0..max_desc_len] else desc;
-            const desc_style = vaxis.Style{ .fg = Color.dim_gray };
+            const desc_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
 
             var item_seg = [_]vaxis.Cell.Segment{
                 .{ .text = indicator, .style = indicator_style },
                 .{ .text = model_name, .style = name_style },
                 .{ .text = current_marker, .style = current_style },
-                .{ .text = "  ", .style = .{} },
+                .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } },
                 .{ .text = truncated_desc, .style = desc_style },
             };
             _ = dialog_win.print(&item_seg, .{ .row_offset = @intCast(row) });
@@ -2784,14 +2782,14 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
         // Show scroll indicators in the model list area (right edge)
         if (scroll_offset > 0 and content_width > 1) {
             var up_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "↑", .style = .{ .fg = Color.dim_gray } },
+                .{ .text = "↑", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
             };
             _ = dialog_win.print(&up_seg, .{ .row_offset = 3, .col_offset = @intCast(content_width - 1) });
         }
         if (scroll_offset + visible_count < filtered_count and content_width > 1) {
             const last_row = 3 + visible_count - 1;
             var down_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "↓", .style = .{ .fg = Color.dim_gray } },
+                .{ .text = "↓", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
             };
             _ = dialog_win.print(&down_seg, .{ .row_offset = @intCast(last_row), .col_offset = @intCast(content_width - 1) });
         }
@@ -2805,7 +2803,7 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
 
     if (footer_row < dialog_win.height) {
         const footer = "↑↓:navigate  Enter:select  ESC:cancel";
-        const footer_style = vaxis.Style{ .fg = Color.dim_gray };
+        const footer_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
         var footer_seg = [_]vaxis.Cell.Segment{
             .{ .text = footer, .style = footer_style },
         };
@@ -2833,29 +2831,25 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
     const x_offset = if (win.width > palette_width) (win.width - palette_width) / 2 else 0;
     const y_offset = if (win.height > palette_height) (win.height - palette_height) / 2 else 0;
 
-    // Create palette window with border - exactly like diff view
+    // Create palette window
     const palette_win = win.child(.{
         .x_off = @intCast(x_offset),
         .y_off = @intCast(y_offset),
         .width = @intCast(palette_width),
         .height = @intCast(palette_height),
-        .border = .{
-            .where = .all,
-            .style = .{ .fg = Color.cyan },
-        },
     });
 
-    // Clear and fill - exactly like diff view
+    // Clear and fill with dark gray background to differentiate from main content
     palette_win.clear();
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{ .bg = Color.black }, // black background
+        .style = .{ .bg = Color.dialog_bg },
     };
     palette_win.fill(bg_cell);
 
     // Line 0: Title
     const title: []const u8 = if (cmd_palette.mode == .rename_input) "Rename Tab" else "Commands";
-    const title_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
+    const title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
     var title_seg = [_]vaxis.Cell.Segment{.{ .text = title, .style = title_style }};
     _ = palette_win.print(&title_seg, .{});
 
@@ -2867,8 +2861,8 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
         cmd_palette.query_buffer[0..cmd_palette.query_len];
 
     var input_seg = [_]vaxis.Cell.Segment{
-        .{ .text = input_prompt, .style = .{ .fg = Color.cyan } },
-        .{ .text = input_text, .style = .{ .fg = Color.white } },
+        .{ .text = input_prompt, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
+        .{ .text = input_text, .style = .{ .fg = Color.white, .bg = Color.dialog_bg } },
     };
     _ = palette_win.print(&input_seg, .{ .row_offset = 1 });
 
@@ -2881,7 +2875,7 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
         for (0..palette_win.width - 2) |col| {
             palette_win.writeCell(@intCast(col), 2, .{
                 .char = .{ .grapheme = "-", .width = 1 },
-                .style = .{ .fg = Color.dim_gray },
+                .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg },
             });
         }
     }
@@ -2903,21 +2897,23 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
             const indicator: []const u8 = if (is_selected) "▶ " else "  ";
             const indicator_style = vaxis.Style{
                 .fg = if (is_selected) Color.cyan else Color.dim_gray,
+                .bg = Color.dialog_bg,
             };
 
             // Command name
             const name_style = vaxis.Style{
                 .fg = Color.white,
+                .bg = Color.dialog_bg,
                 .bold = is_selected,
             };
 
             // Alias/description
-            const desc_style = vaxis.Style{ .fg = Color.dim_gray };
+            const desc_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
 
             var item_seg = [_]vaxis.Cell.Segment{
                 .{ .text = indicator, .style = indicator_style },
                 .{ .text = cmd.name, .style = name_style },
-                .{ .text = "  ", .style = .{} },
+                .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } },
                 .{ .text = cmd.aliases[0], .style = desc_style },
             };
             _ = palette_win.print(&item_seg, .{ .row_offset = @intCast(row) });
@@ -2925,7 +2921,7 @@ fn renderAgentCommandPalette(win: vaxis.Window, cmd_palette: *command_palette.Ag
     } else if (cmd_palette.mode == .search and filtered.len == 0) {
         // No matching commands
         var no_match_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "No matching commands", .style = .{ .fg = Color.dim_gray } },
+            .{ .text = "No matching commands", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
         _ = palette_win.print(&no_match_seg, .{ .row_offset = 3 });
     }
