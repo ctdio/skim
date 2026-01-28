@@ -15,6 +15,8 @@ const RenderUtils = render_utils.RenderUtils;
 const StateHelpers = state_helpers.StateHelpers;
 const DiffSource = git.DiffSource;
 
+const DIALOG_PADDING: usize = 1; // Padding inside dialogs
+
 pub const DividerPosition = enum {
     top,
     middle,
@@ -905,7 +907,7 @@ pub const UI = struct {
         const agent_count = agents.len;
 
         // Calculate dialog dimensions
-        const title = " Select Agent ";
+        const title = "Select Agent";
         const instructions = "j/k:Navigate  Enter:Select  ESC:Cancel";
 
         // Find max width needed for agent entries
@@ -918,7 +920,7 @@ pub const UI = struct {
         }
 
         const dialog_width = @max(@max(max_entry_len + 4, title.len + 4), instructions.len + 4);
-        const dialog_height = agent_count + 5; // title + agents + instructions + padding
+        const dialog_height = agent_count + 5 + (DIALOG_PADDING * 2); // title + agents + instructions + vertical padding
 
         const popup_width = @min(dialog_width, win.width - 4);
         const popup_height = @min(dialog_height, win.height - 4);
@@ -947,11 +949,11 @@ pub const UI = struct {
             .text = title_copy,
             .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true },
         }};
-        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
+        _ = popup_win.print(&title_seg, .{ .row_offset = DIALOG_PADDING, .col_offset = DIALOG_PADDING });
 
         // Render agent options
         for (agents, 0..) |agt, idx| {
-            const row = idx + 2;
+            const row = DIALOG_PADDING + 2 + idx;
             const is_selected = idx == app.state.agent_selection_idx;
 
             var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
@@ -978,7 +980,7 @@ pub const UI = struct {
             const close_copy = try RenderUtils.copyFrameText(app, ")");
             try segments.append(app.allocator, .{ .text = close_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } });
 
-            _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row) });
+            _ = popup_win.print(segments.items, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
         }
 
         // Instructions at bottom
@@ -987,7 +989,7 @@ pub const UI = struct {
             .text = instr_copy,
             .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
-        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
+        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height -| (DIALOG_PADDING + 1)), .col_offset = DIALOG_PADDING });
     }
 
     pub fn renderSessionPickerDialog(app: *App, win: vaxis.Window) !void {
@@ -1266,7 +1268,6 @@ pub const UI = struct {
             .branch_selection => "-- BRANCH SELECTION --",
             .commit_selection => "-- COMMIT SELECTION --",
             .commit_diff_mode => "-- COMMIT DIFF MODE --",
-            .mcp_status => "-- MCP STATUS --",
             .graphite_stack => "-- GRAPHITE STACK --",
             .model_selection => "-- MODEL SELECTION --",
             .agent_selection => "-- AGENT SELECTION --",
@@ -1314,7 +1315,6 @@ pub const UI = struct {
             .branch_selection => "j/k:Move  |  Enter:Select  |  ESC:Back",
             .commit_selection => "j/k:Move  |  Enter:Select  |  ESC:Back",
             .commit_diff_mode => "j/k/1/2:Select  |  Enter:Confirm  |  ESC:Back",
-            .mcp_status => "q/ESC:Close",
             .graphite_stack => "j/k:Move  |  Enter:Select  |  ESC:Back  |  [s/]s:Navigate",
             .model_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .agent_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
