@@ -1184,3 +1184,304 @@ test "snapshot: md_complex_document" {
 
     try snapshot.expectSnapshot(allocator, "md_complex_document", text);
 }
+
+// =============================================================================
+// Blame Rendering Snapshot Tests
+// =============================================================================
+
+const blame_helpers = @import("blame_test_helpers.zig");
+
+test "snapshot: blame_first_line_basic" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    // Jan 15, 2024 = 1705276800, "now" is 3 months later
+    const blame = blame_helpers.createBlameLine("a1b2c3d4", "John Doe", "johndoe", "Fix critical bug in parser", 1705276800);
+    const now: i64 = 1705276800 + (90 * 86400); // 90 days later
+
+    blame_helpers.renderBlameFirstLine(frame, win, blame, 0, 0, null, now);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_first_line_basic", text);
+}
+
+test "snapshot: blame_first_line_with_username" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    // When username differs from author, username is shown
+    const blame = blame_helpers.createBlameLine("deadbeef", "Alice Smith", "asmith", "Add new feature", 1700000000);
+    const now: i64 = 1700000000 + (30 * 86400); // 30 days later
+
+    blame_helpers.renderBlameFirstLine(frame, win, blame, 0, 0, null, now);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_first_line_username", text);
+}
+
+test "snapshot: blame_first_line_long_author" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    // Long author name should be truncated to 12 chars
+    const blame = blame_helpers.createBlameLine("12345678", "Christopher Alexander Johnson", "", "Refactor module", 1690000000);
+    const now: i64 = 1690000000 + (365 * 86400); // 1 year later
+
+    blame_helpers.renderBlameFirstLine(frame, win, blame, 0, 0, null, now);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_first_line_long_author", text);
+}
+
+test "snapshot: blame_uncommitted" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    const blame = blame_helpers.createUncommittedBlameLine();
+
+    blame_helpers.renderBlameFirstLine(frame, win, blame, 0, 0, null, 1700000000);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_uncommitted", text);
+}
+
+test "snapshot: blame_second_line_message" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    const blame = blame_helpers.createBlameLine("abcd1234", "Bob Wilson", "bwilson", "Implement async file loading for better performance", 1705276800);
+
+    blame_helpers.renderBlameSecondLine(frame, win, blame, 0, 0, null);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_second_line_message", text);
+}
+
+test "snapshot: blame_empty_line" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    // Empty blame (3rd+ line of same commit)
+    blame_helpers.renderBlameEmpty(frame, win, 0, 0, null);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_empty_line", text);
+}
+
+test "snapshot: blame_with_add_line" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 100, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    const blame = blame_helpers.createBlameLine("f00dcafe", "Developer", "dev", "Add logging", 1705276800);
+    const now: i64 = 1705276800 + (7 * 86400); // 1 week later
+
+    blame_helpers.renderDiffLineWithBlame(
+        frame,
+        win,
+        blame,
+        .first_line,
+        42,
+        "    log.info(\"Processing request\");",
+        .add,
+        0,
+        5,
+        now,
+    );
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_with_add_line", text);
+}
+
+test "snapshot: blame_with_delete_line" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 100, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    const blame = blame_helpers.createBlameLine("badf00d1", "OldDev", "olddev", "Original code", 1600000000);
+    const now: i64 = 1700000000; // ~3 years later
+
+    blame_helpers.renderDiffLineWithBlame(
+        frame,
+        win,
+        blame,
+        .first_line,
+        15,
+        "    // TODO: fix this later",
+        .delete,
+        0,
+        5,
+        now,
+    );
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_with_delete_line", text);
+}
+
+test "snapshot: blame_with_context_line" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 100, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    const blame = blame_helpers.createBlameLine("c0ffee42", "Maintainer", "maint", "Setup function", 1680000000);
+    const now: i64 = 1700000000;
+
+    blame_helpers.renderDiffLineWithBlame(
+        frame,
+        win,
+        blame,
+        .first_line,
+        10,
+        "fn init() void {",
+        .context,
+        0,
+        5,
+        now,
+    );
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_with_context_line", text);
+}
+
+test "snapshot: blame_commit_block" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 100, 6);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    // Simulate a block of lines from the same commit
+    const blame = blame_helpers.createBlameLine("abc12345", "TeamLead", "lead", "Refactor error handling for clarity", 1705000000);
+    const now: i64 = 1705000000 + (14 * 86400); // 2 weeks later
+
+    // First line shows full blame info
+    blame_helpers.renderDiffLineWithBlame(frame, win, blame, .first_line, 20, "    if (err) |e| {", .context, 0, 5, now);
+
+    // Second line shows commit message
+    blame_helpers.renderDiffLineWithBlame(frame, win, blame, .second_line, 21, "        log.err(\"Failed: {}\", .{e});", .context, 1, 5, now);
+
+    // Third+ lines show empty blame
+    blame_helpers.renderDiffLineWithBlame(frame, win, blame, .empty, 22, "        return error.Failed;", .context, 2, 5, now);
+    blame_helpers.renderDiffLineWithBlame(frame, win, blame, .empty, 23, "    }", .context, 3, 5, now);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_commit_block", text);
+}
+
+test "snapshot: blame_mixed_commits" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 110, 8);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    const now: i64 = 1710000000;
+
+    // Different commits for different lines
+    const blame1 = blame_helpers.createBlameLine("11111111", "Alice", "alice", "Initial impl", 1700000000);
+    const blame2 = blame_helpers.createBlameLine("22222222", "Bob", "bob", "Add validation", 1705000000);
+    const blame3 = blame_helpers.createBlameLine("33333333", "Charlie", "charlie", "Fix edge case", 1708000000);
+
+    // Alice's code (1 line)
+    blame_helpers.renderDiffLineWithBlame(frame, win, blame1, .first_line, 10, "fn process(data: []const u8) !void {", .context, 0, 5, now);
+
+    // Bob's code (2 lines)
+    blame_helpers.renderDiffLineWithBlame(frame, win, blame2, .first_line, 11, "    if (data.len == 0) return error.Empty;", .context, 1, 5, now);
+    blame_helpers.renderDiffLineWithBlame(frame, win, blame2, .second_line, 12, "    if (data.len > MAX) return error.TooLarge;", .context, 2, 5, now);
+
+    // Charlie's fix (deleted old, added new)
+    blame_helpers.renderDiffLineWithBlame(frame, win, blame3, .first_line, 13, "    // Old buggy line", .delete, 3, 5, now);
+    blame_helpers.renderDiffLineWithBlame(frame, win, blame3, .second_line, 13, "    // Fixed line with proper check", .add, 4, 5, now);
+
+    // Alice's code continues
+    blame_helpers.renderDiffLineWithBlame(frame, win, blame1, .first_line, 14, "    return processInternal(data);", .context, 5, 5, now);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_mixed_commits", text);
+}
+
+test "snapshot: blame_relative_times" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 7);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+
+    const now: i64 = 1710000000;
+
+    // Various relative times
+    const blame_2y = blame_helpers.createBlameLine("aaaa1111", "Author", "", "2 years ago", now - (2 * 365 * 86400));
+    const blame_6mo = blame_helpers.createBlameLine("bbbb2222", "Author", "", "6 months ago", now - (6 * 30 * 86400));
+    const blame_3w = blame_helpers.createBlameLine("cccc3333", "Author", "", "3 weeks ago", now - (3 * 7 * 86400));
+    const blame_5d = blame_helpers.createBlameLine("dddd4444", "Author", "", "5 days ago", now - (5 * 86400));
+    const blame_2h = blame_helpers.createBlameLine("eeee5555", "Author", "", "2 hours ago", now - (2 * 3600));
+
+    blame_helpers.renderBlameFirstLine(frame, win, blame_2y, 0, 0, null, now);
+    blame_helpers.renderBlameFirstLine(frame, win, blame_6mo, 1, 0, null, now);
+    blame_helpers.renderBlameFirstLine(frame, win, blame_3w, 2, 0, null, now);
+    blame_helpers.renderBlameFirstLine(frame, win, blame_5d, 3, 0, null, now);
+    blame_helpers.renderBlameFirstLine(frame, win, blame_2h, 4, 0, null, now);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "blame_relative_times", text);
+}

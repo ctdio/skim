@@ -1,0 +1,6 @@
+┃11111111 alice        Nov 14 2023 3mo                   │  10   fn process(data: []const u8) !void {
+┃22222222 bob          Jan 11 2024 1mo                   │  11       if (data.len == 0) return error.Empty;
+┃Add validation                                          │  12       if (data.len > MAX) return error.TooLarge
+┃33333333 charlie      Feb 15 2024 3w                    │  13-      // Old buggy line
+┃Fix edge case                                           │  13+      // Fixed line with proper check
+┃11111111 alice        Nov 14 2023 3mo                   │  14       return processInternal(data);

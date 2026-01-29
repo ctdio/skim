@@ -632,6 +632,24 @@ pub const RenderUtils = struct {
                 _ = win.print(&blame_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset ) });
             }
             col_offset += blame_width;
+
+            // Render separator between blame and line number
+            const separator_style: vaxis.Style = if (is_visual)
+                .{ .fg = Color.dim, .bg = Color.visual_select_bg }
+            else if (is_cursor)
+                .{ .fg = Color.dim, .bg = Color.cursor_bg }
+            else if (line_type) |lt| switch (lt) {
+                .add => .{ .fg = Color.dim, .bg = Color.diff_add_bg },
+                .delete => .{ .fg = Color.dim, .bg = Color.diff_delete_bg },
+                .context => .{ .fg = Color.dim },
+            } else .{ .fg = Color.dim };
+
+            var separator_seg = [_]vaxis.Cell.Segment{.{
+                .text = FrameChars.vertical,
+                .style = separator_style,
+            }};
+            _ = win.print(&separator_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+            col_offset += 1;
         }
 
         // Render line number and sign

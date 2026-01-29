@@ -60,6 +60,7 @@ pub const StateHelpers = struct {
     // Blame format: "12ab34cd username____ Dec  5 2024 2mo msg_trunc... " = 8 + 1 + 12 + 1 + 11 + 1 + 4 + 1 + 16 + 1 = 56 chars
     // Or continuation: "│" (same commit as previous line)
     pub const BLAME_GUTTER_WIDTH: usize = 56;
+    pub const BLAME_SEPARATOR_WIDTH: usize = 1; // "│" separator between blame and line number
 
     pub fn getGlobalGutterWidthWithBlame(files: []const parser.FileDiff, show_blame: bool) usize {
         var max_lineno: u32 = 0;
@@ -72,7 +73,7 @@ pub const StateHelpers = struct {
         const base_width = @max(calculated, Layout.min_gutter_width);
 
         if (show_blame) {
-            return base_width + BLAME_GUTTER_WIDTH;
+            return base_width + BLAME_GUTTER_WIDTH + BLAME_SEPARATOR_WIDTH;
         }
         return base_width;
     }

@@ -1,0 +1,4 @@
+┃abc12345 lead         Jan 11 2024 2w                    │  20       if (err) |e| {
+┃Refactor error handling for clarity                     │  21           log.err("Failed: {}", .{e})
+┃                                                        │  22           return error.Failed;
+┃                                                        │  23       }
