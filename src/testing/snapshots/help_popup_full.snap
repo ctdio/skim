@@ -1,0 +1,25 @@
+╭──────────────────────────── Keybindings ─────────────────────────────╮
+│                                                                      │
+│ NORMAL MODE                                                          │
+│  h / l          │ Previous / next file                               │
+│  j / k          │ Cursor down / up                                   │
+│  g / G          │ Jump to top / bottom                               │
+│  Ctrl-d / u     │ Page down / up                                     │
+│  M              │ Center cursor in viewport                          │
+│  [h / ]h        │ Previous / next hunk                               │
+│  /              │ Search                                             │
+│  n / N          │ Next / previous match                              │
+│  Ctrl-p         │ File picker                                        │
+│  :              │ Command palette                                    │
+│  ?              │ This help                                          │
+│  Enter          │ Add / edit comment                                 │
+│  Ctrl-e         │ Toggle agent panel                                 │
+│                                                                      │
+│ VISUAL MODE                                                          │
+│  j / k          │ Extend selection                                   │
+│  y              │ Yank selection                                     │
+│  v / Esc        │ Exit                                               │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+╰───────────────────────── ? or Esc to close ──────────────────────────╯

@@ -3,17 +3,15 @@ const vaxis = @import("vaxis");
 
 const App = @import("../app.zig").App;
 const Color = @import("../rendering/common.zig").Color;
-const RenderUtils = @import("../rendering/utils.zig").RenderUtils;
+const FrameChars = @import("../rendering/common.zig").FrameChars;
 const AgentState = @import("state.zig").AgentState;
 
-// Total number of content rows in help popup (approximate)
-const HELP_CONTENT_ROWS = 70;
-const DIALOG_PADDING: usize = 1; // Horizontal padding inside dialogs
+const KEY_COL_WIDTH: usize = 14; // Fixed width for key column alignment
 
 /// Render the agent help popup overlay
 pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !void {
-    // Calculate popup dimensions - sized for help content
-    const popup_width = @min(80, win.width -| 4);
+    // Calculate popup dimensions
+    const popup_width = @min(72, win.width -| 4);
     const popup_height = @min(35, win.height -| 4);
     const x_offset = if (win.width > popup_width) (win.width - popup_width) / 2 else 0;
     const y_offset = if (win.height > popup_height) (win.height - popup_height) / 2 else 0;
@@ -27,267 +25,259 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
 
     popup_win.clear();
 
-    // Fill with dark gray background to differentiate from main content
+    // Fill with dark gray background
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{
-            .bg = Color.dialog_bg,
-        },
+        .style = .{ .bg = Color.dialog_bg },
     };
     popup_win.fill(bg_cell);
 
-    // Render fixed header (title + separator) - these don't scroll
-    const header_title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
-    var title_seg = [_]vaxis.Cell.Segment{
-        .{ .text = "Agent Mode - Keybindings", .style = header_title_style },
-    };
-    _ = popup_win.print(&title_seg, .{ .row_offset = DIALOG_PADDING, .col_offset = DIALOG_PADDING });
+    const border_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
+    const title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
 
-    // Separator line
-    if (popup_width > DIALOG_PADDING * 2) {
-        const sep_width = popup_width - (DIALOG_PADDING * 2);
-        const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
-        @memset(sep_text, '-');
-        var sep_segments = [_]vaxis.Cell.Segment{
-            .{ .text = sep_text, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
-        };
-        _ = popup_win.print(&sep_segments, .{ .row_offset = DIALOG_PADDING + 1, .col_offset = DIALOG_PADDING });
-    }
+    // Draw box border
+    drawBoxBorder(popup_win, popup_width, popup_height, border_style);
 
-    const header_rows: usize = 2; // title + separator (fixed, don't scroll)
+    // Title centered in top border
+    const title = " Agent Keybindings ";
+    const title_x = if (popup_width > title.len) (popup_width - title.len) / 2 else 1;
+    var title_seg = [_]vaxis.Cell.Segment{.{ .text = title, .style = title_style }};
+    _ = popup_win.print(&title_seg, .{ .row_offset = 0, .col_offset = @intCast(title_x) });
 
-    // Build scrollable content lines (excluding title/separator)
+    // Build scrollable content
     var content_lines: std.ArrayList(ContentLine) = .{};
     defer content_lines.deinit(app.allocator);
 
-    const section_style = vaxis.Style{
-        .fg = Color.yellow,
-        .bg = Color.dialog_bg,
-        .bold = true,
-    };
-    const key_style = vaxis.Style{
-        .fg = Color.cyan,
-        .bg = Color.dialog_bg,
-    };
-    const desc_style = vaxis.Style{
-        .fg = Color.white,
-        .bg = Color.dialog_bg,
-    };
+    const section_style = vaxis.Style{ .fg = Color.yellow, .bg = Color.dialog_bg, .bold = true };
+    const key_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg };
+    const desc_style = vaxis.Style{ .fg = Color.white, .bg = Color.dialog_bg };
 
-    // GLOBAL section - keybinds that work in any mode
-    try content_lines.append(app.allocator, .{ .text = "GLOBAL (any mode)", .style = section_style });
-
-    const global_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-        .{ .key = "Ctrl+E", .desc = "Close panel, return to diff" },
-        .{ .key = "Ctrl+G", .desc = "Edit prompt in $EDITOR" },
-        .{ .key = "Ctrl+W h/l", .desc = "Focus diff/agent panel" },
-        .{ .key = "Ctrl+W w", .desc = "Cycle focus between panels" },
-        .{ .key = "Ctrl+W o", .desc = "Toggle full screen" },
-        .{ .key = "Ctrl+S", .desc = "Stash/unstash prompt" },
-        .{ .key = "Ctrl+T", .desc = "Toggle todo list expansion" },
+    // GLOBAL section
+    try content_lines.append(app.allocator, .{ .section = "GLOBAL" });
+    const global_bindings = [_]Binding{
+        .{ .key = "Ctrl-e", .desc = "Close panel, return to diff" },
+        .{ .key = "Ctrl-g", .desc = "Edit prompt in $EDITOR" },
+        .{ .key = "Ctrl-w h/l", .desc = "Focus diff / agent" },
+        .{ .key = "Ctrl-w w", .desc = "Cycle panel focus" },
+        .{ .key = "Ctrl-w o", .desc = "Toggle fullscreen" },
+        .{ .key = "Ctrl-s", .desc = "Stash / unstash prompt" },
+        .{ .key = "Ctrl-t", .desc = "Toggle todo list" },
     };
-
-    for (global_bindings) |binding| {
-        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+    for (global_bindings) |b| {
+        try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
+    try content_lines.append(app.allocator, .{ .blank = true });
 
-    // INSERT MODE section
-    try content_lines.append(app.allocator, .{ .text = "INSERT MODE (typing in prompt)", .style = section_style });
-
-    const input_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-        .{ .key = "Enter", .desc = "Send prompt to agent" },
-        .{ .key = "Ctrl+J", .desc = "Insert newline in prompt" },
-        .{ .key = "ESC/Ctrl+C", .desc = "Exit to normal mode" },
-        .{ .key = "/", .desc = "Show slash command menu (at start)" },
-        .{ .key = "@", .desc = "Show file picker (at start)" },
-        .{ .key = "!", .desc = "Toggle shell command mode (empty input)" },
-        .{ .key = "Up", .desc = "Restore staged prompt (empty input)" },
+    // INSERT MODE
+    try content_lines.append(app.allocator, .{ .section = "INSERT MODE" });
+    const insert_bindings = [_]Binding{
+        .{ .key = "Enter", .desc = "Send prompt" },
+        .{ .key = "Ctrl-j", .desc = "Insert newline" },
+        .{ .key = "Esc / Ctrl-c", .desc = "Exit to normal mode" },
+        .{ .key = "/", .desc = "Slash command menu" },
+        .{ .key = "@", .desc = "File picker" },
+        .{ .key = "!", .desc = "Toggle shell mode" },
+        .{ .key = "↑", .desc = "Restore stashed prompt" },
     };
-
-    for (input_bindings) |binding| {
-        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+    for (insert_bindings) |b| {
+        try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
+    try content_lines.append(app.allocator, .{ .blank = true });
 
-    // NORMAL MODE section
-    try content_lines.append(app.allocator, .{ .text = "NORMAL MODE (vim on prompt)", .style = section_style });
-
-    const normal_bindings = [_]struct { key: []const u8, desc: []const u8 }{
+    // NORMAL MODE
+    try content_lines.append(app.allocator, .{ .section = "NORMAL MODE" });
+    const normal_bindings = [_]Binding{
         .{ .key = "i/a/I/A", .desc = "Enter insert mode" },
-        .{ .key = "h/l", .desc = "Move cursor left/right" },
+        .{ .key = "h / l", .desc = "Cursor left / right" },
         .{ .key = "w/b/e", .desc = "Word motions" },
-        .{ .key = "0/$", .desc = "Line start/end" },
-        .{ .key = "gg/G", .desc = "Jump to top/bottom of input" },
-        .{ .key = "Ctrl+D/U", .desc = "Half-page down/up in input" },
-        .{ .key = "x/dd", .desc = "Delete char/line" },
-        .{ .key = ":", .desc = "Open command palette" },
-        .{ .key = "?", .desc = "Show this help" },
-        .{ .key = "gb", .desc = "Enter history mode" },
-        .{ .key = "gt/gT", .desc = "Next/previous tab" },
-        .{ .key = "Space+b", .desc = "Enter history mode" },
-        .{ .key = "Space+f", .desc = "Scroll to bottom, enable follow" },
-        .{ .key = "V", .desc = "Toggle diff view mode" },
+        .{ .key = "0 / $", .desc = "Line start / end" },
+        .{ .key = "gg / G", .desc = "Top / bottom of input" },
+        .{ .key = "Ctrl-d / u", .desc = "Half-page down / up" },
+        .{ .key = "x / dd", .desc = "Delete char / line" },
+        .{ .key = ":", .desc = "Command palette" },
+        .{ .key = "?", .desc = "This help" },
+        .{ .key = "gb", .desc = "History mode" },
+        .{ .key = "gt / gT", .desc = "Next / prev tab" },
+        .{ .key = "Space b", .desc = "History mode" },
+        .{ .key = "Space f", .desc = "Follow mode (scroll bottom)" },
+        .{ .key = "V", .desc = "Toggle diff view" },
         .{ .key = "Tab", .desc = "Cycle session modes" },
-        .{ .key = "ESC ESC", .desc = "Interrupt agent (double-tap)" },
+        .{ .key = "Esc Esc", .desc = "Interrupt agent" },
     };
-
-    for (normal_bindings) |binding| {
-        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+    for (normal_bindings) |b| {
+        try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
+    try content_lines.append(app.allocator, .{ .blank = true });
 
-    // HISTORY MODE section
-    try content_lines.append(app.allocator, .{ .text = "HISTORY MODE (gb or Space+b)", .style = section_style });
-
-    const history_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-        .{ .key = "j/k", .desc = "Move cursor down/up" },
-        .{ .key = "h/l", .desc = "Jump to prev/next message" },
-        .{ .key = "gg/G", .desc = "Jump to top/bottom" },
-        .{ .key = "Ctrl+D/U", .desc = "Page down/up" },
-        .{ .key = "M", .desc = "Move cursor to middle of viewport" },
-        .{ .key = "v", .desc = "Enter visual selection mode" },
-        .{ .key = "y", .desc = "Yank user message at cursor" },
+    // HISTORY MODE
+    try content_lines.append(app.allocator, .{ .section = "HISTORY MODE" });
+    const history_bindings = [_]Binding{
+        .{ .key = "j / k", .desc = "Cursor down / up" },
+        .{ .key = "h / l", .desc = "Prev / next message" },
+        .{ .key = "gg / G", .desc = "Top / bottom" },
+        .{ .key = "Ctrl-d / u", .desc = "Page down / up" },
+        .{ .key = "M", .desc = "Center cursor" },
+        .{ .key = "v", .desc = "Visual selection" },
+        .{ .key = "y", .desc = "Yank user message" },
         .{ .key = "yy", .desc = "Yank current line" },
-        .{ .key = "Y", .desc = "Yank entire current message" },
-        .{ .key = "Space+f", .desc = "Resume follow mode, exit history" },
-        .{ .key = "i", .desc = "Exit to insert mode" },
-        .{ .key = "ESC/q", .desc = "Exit to normal mode" },
+        .{ .key = "Y", .desc = "Yank entire message" },
+        .{ .key = "Space f", .desc = "Resume follow mode" },
+        .{ .key = "i", .desc = "Exit to insert" },
+        .{ .key = "Esc / q", .desc = "Exit to normal" },
     };
-
-    for (history_bindings) |binding| {
-        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+    for (history_bindings) |b| {
+        try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
+    try content_lines.append(app.allocator, .{ .blank = true });
 
-    // VISUAL MODE section (in history)
-    try content_lines.append(app.allocator, .{ .text = "VISUAL MODE (in history, v)", .style = section_style });
-
-    const visual_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-        .{ .key = "j/k", .desc = "Extend selection down/up" },
-        .{ .key = "y", .desc = "Yank selection to clipboard" },
-        .{ .key = "ESC/v", .desc = "Exit visual mode" },
+    // VISUAL MODE
+    try content_lines.append(app.allocator, .{ .section = "VISUAL MODE" });
+    const visual_bindings = [_]Binding{
+        .{ .key = "j / k", .desc = "Extend selection" },
+        .{ .key = "y", .desc = "Yank selection" },
+        .{ .key = "Esc / v", .desc = "Exit" },
     };
-
-    for (visual_bindings) |binding| {
-        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+    for (visual_bindings) |b| {
+        try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
+    try content_lines.append(app.allocator, .{ .blank = true });
 
-    // PERMISSION PROMPT section
-    try content_lines.append(app.allocator, .{ .text = "PERMISSION PROMPT", .style = section_style });
-
-    const perm_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-        .{ .key = "j/k/Up/Down", .desc = "Navigate options" },
-        .{ .key = "Ctrl+D/U", .desc = "Scroll message history" },
-        .{ .key = "Enter/y", .desc = "Accept selected option" },
-        .{ .key = "ESC/n", .desc = "Reject/cancel" },
+    // PERMISSION PROMPT
+    try content_lines.append(app.allocator, .{ .section = "PERMISSION PROMPT" });
+    const perm_bindings = [_]Binding{
+        .{ .key = "j/k / ↑↓", .desc = "Navigate options" },
+        .{ .key = "Ctrl-d / u", .desc = "Scroll history" },
+        .{ .key = "Enter / y", .desc = "Accept" },
+        .{ .key = "Esc / n", .desc = "Reject" },
     };
-
-    for (perm_bindings) |binding| {
-        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+    for (perm_bindings) |b| {
+        try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
+    try content_lines.append(app.allocator, .{ .blank = true });
 
-    // MENUS section
-    try content_lines.append(app.allocator, .{ .text = "MENUS (/, @, :)", .style = section_style });
-
-    const menu_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-        .{ .key = "Ctrl+N/P", .desc = "Navigate menu items" },
-        .{ .key = "Up/Down", .desc = "Navigate (command palette)" },
-        .{ .key = "Tab", .desc = "Insert selected (slash/file)" },
-        .{ .key = "Enter", .desc = "Execute/insert selected" },
-        .{ .key = "ESC", .desc = "Close menu" },
+    // MENUS
+    try content_lines.append(app.allocator, .{ .section = "MENUS (/ @ :)" });
+    const menu_bindings = [_]Binding{
+        .{ .key = "Ctrl-n / p", .desc = "Navigate items" },
+        .{ .key = "↑ / ↓", .desc = "Navigate (palette)" },
+        .{ .key = "Tab", .desc = "Insert selected" },
+        .{ .key = "Enter", .desc = "Execute" },
+        .{ .key = "Esc", .desc = "Close" },
     };
-
-    for (menu_bindings) |binding| {
-        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+    for (menu_bindings) |b| {
+        try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
+    try content_lines.append(app.allocator, .{ .blank = true });
 
-    // SLASH COMMANDS section
-    try content_lines.append(app.allocator, .{ .text = "SLASH COMMANDS", .style = section_style });
-
-    const slash_bindings = [_]struct { key: []const u8, desc: []const u8 }{
-        .{ .key = "/clear", .desc = "Clear session and start fresh" },
+    // SLASH COMMANDS
+    try content_lines.append(app.allocator, .{ .section = "SLASH COMMANDS" });
+    const slash_bindings = [_]Binding{
+        .{ .key = "/clear", .desc = "Clear session" },
         .{ .key = "/model", .desc = "Switch AI model" },
-        .{ .key = "/resume", .desc = "Resume previous session" },
+        .{ .key = "/resume", .desc = "Resume session" },
     };
-
-    for (slash_bindings) |binding| {
-        try content_lines.append(app.allocator, .{ .key = binding.key, .desc = binding.desc, .key_style = key_style, .desc_style = desc_style });
+    for (slash_bindings) |b| {
+        try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
-    try content_lines.append(app.allocator, .{ .text = "", .style = .{ .bg = Color.dialog_bg } });
 
-    // Footer
-    try content_lines.append(app.allocator, .{ .text = "j/k: Scroll  |  Ctrl+D/U: Page  |  g/G: Top/Bottom  |  ? or ESC: Close", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } });
-
-    // Calculate visible range based on scroll offset
-    // Account for: top padding + fixed header rows + bottom padding
+    // Calculate scroll bounds
+    const content_start_row: usize = 2;
+    const content_end_row = popup_height -| 2;
+    const max_visible = content_end_row -| content_start_row;
     const scroll_offset = agent_state.help_scroll_offset;
-    const content_area_start = DIALOG_PADDING + header_rows; // Start after padding + header
-    const max_visible_rows = popup_height -| (DIALOG_PADDING * 2 + header_rows + 1); // -1 for bottom indicator
-    const total_content_rows = content_lines.items.len;
+    const total_rows = content_lines.items.len;
     const visible_start = scroll_offset;
-    const visible_end = @min(visible_start + max_visible_rows, total_content_rows);
+    const visible_end = @min(visible_start + max_visible, total_rows);
 
-    // Show scroll indicator at top if scrolled down
-    var current_row: usize = content_area_start;
-    if (scroll_offset > 0) {
-        const indicator = "\xe2\x96\xb2 (scroll up for more)"; // ▲
-        var indicator_seg = [_]vaxis.Cell.Segment{
-            .{ .text = indicator, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
-        };
-        _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row), .col_offset = DIALOG_PADDING });
-        current_row += 1;
-    }
+    // Render content
+    var row: usize = content_start_row;
+    for (visible_start..visible_end) |idx| {
+        if (row >= content_end_row) break;
+        const line = content_lines.items[idx];
 
-    // Render visible content
-    for (visible_start..visible_end) |content_idx| {
-        if (current_row >= popup_height -| (DIALOG_PADDING + 1)) break; // Leave room for bottom padding + indicator
-
-        const line = content_lines.items[content_idx];
-
-        if (line.is_separator) {
-            // Render separator
-            if (popup_width > DIALOG_PADDING * 2) {
-                const local_sep_width = popup_width - (DIALOG_PADDING * 2);
-                const local_sep_text = try RenderUtils.frameTextSlice(app, local_sep_width);
-                @memset(local_sep_text, '-');
-                var sep_segments = [_]vaxis.Cell.Segment{
-                    .{ .text = local_sep_text, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
-                };
-                _ = popup_win.print(&sep_segments, .{ .row_offset = @intCast(current_row), .col_offset = DIALOG_PADDING });
-            }
+        if (line.section) |section| {
+            var sec_seg = [_]vaxis.Cell.Segment{.{ .text = section, .style = section_style }};
+            _ = popup_win.print(&sec_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
         } else if (line.key) |key| {
-            // Render keybinding
-            var segments = [_]vaxis.Cell.Segment{
-                .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } },
-                .{ .text = key, .style = line.key_style.? },
-                .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } },
-                .{ .text = line.desc.?, .style = line.desc_style.? },
-            };
-            _ = popup_win.print(&segments, .{ .row_offset = @intCast(current_row), .col_offset = DIALOG_PADDING });
-        } else if (line.text) |text| {
-            // Render regular text
-            var text_seg = [_]vaxis.Cell.Segment{
-                .{ .text = text, .style = line.style },
-            };
-            _ = popup_win.print(&text_seg, .{ .row_offset = @intCast(current_row), .col_offset = DIALOG_PADDING });
+            renderKeyBinding(popup_win, @intCast(row), key, line.desc.?, line.key_style.?, line.desc_style.?);
         }
-
-        current_row += 1;
+        row += 1;
     }
 
-    // Show scroll indicator at bottom if there's more content
-    if (visible_end < total_content_rows and current_row < popup_height -| DIALOG_PADDING) {
-        const indicator = "\xe2\x96\xbc (scroll down for more)"; // ▼
-        var indicator_seg = [_]vaxis.Cell.Segment{
-            .{ .text = indicator, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
-        };
-        _ = popup_win.print(&indicator_seg, .{ .row_offset = @intCast(current_row), .col_offset = DIALOG_PADDING });
+    // Footer with scroll hints
+    const footer_row = popup_height - 1;
+    const has_more_above = scroll_offset > 0;
+    const has_more_below = visible_end < total_rows;
+
+    if (has_more_above or has_more_below) {
+        var footer_buf: [64]u8 = undefined;
+        const arrows = if (has_more_above and has_more_below)
+            "↑↓"
+        else if (has_more_above)
+            "↑"
+        else
+            "↓";
+        const footer = std.fmt.bufPrint(&footer_buf, " j/k {s} scroll │ ? or Esc to close ", .{arrows}) catch " scroll │ ? to close ";
+        const footer_x = if (popup_width > footer.len) (popup_width - footer.len) / 2 else 1;
+        var footer_seg = [_]vaxis.Cell.Segment{.{ .text = footer, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } }};
+        _ = popup_win.print(&footer_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(footer_x) });
+    } else {
+        const footer = " ? or Esc to close ";
+        const footer_x = if (popup_width > footer.len) (popup_width - footer.len) / 2 else 1;
+        var footer_seg = [_]vaxis.Cell.Segment{.{ .text = footer, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } }};
+        _ = popup_win.print(&footer_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(footer_x) });
     }
 }
+
+fn drawBoxBorder(win: vaxis.Window, width: usize, height: usize, style: vaxis.Style) void {
+    if (width < 2 or height < 2) return;
+
+    // Corners
+    win.writeCell(0, 0, .{ .char = .{ .grapheme = FrameChars.top_left, .width = 1 }, .style = style });
+    win.writeCell(@intCast(width - 1), 0, .{ .char = .{ .grapheme = FrameChars.top_right, .width = 1 }, .style = style });
+    win.writeCell(0, @intCast(height - 1), .{ .char = .{ .grapheme = FrameChars.bottom_left, .width = 1 }, .style = style });
+    win.writeCell(@intCast(width - 1), @intCast(height - 1), .{ .char = .{ .grapheme = FrameChars.bottom_right, .width = 1 }, .style = style });
+
+    // Horizontal edges
+    for (1..width - 1) |x| {
+        win.writeCell(@intCast(x), 0, .{ .char = .{ .grapheme = FrameChars.horizontal, .width = 1 }, .style = style });
+        win.writeCell(@intCast(x), @intCast(height - 1), .{ .char = .{ .grapheme = FrameChars.horizontal, .width = 1 }, .style = style });
+    }
+
+    // Vertical edges
+    for (1..height - 1) |y| {
+        win.writeCell(0, @intCast(y), .{ .char = .{ .grapheme = FrameChars.vertical, .width = 1 }, .style = style });
+        win.writeCell(@intCast(width - 1), @intCast(y), .{ .char = .{ .grapheme = FrameChars.vertical, .width = 1 }, .style = style });
+    }
+}
+
+fn renderKeyBinding(win: vaxis.Window, row: u16, key: []const u8, desc: []const u8, key_style: vaxis.Style, desc_style: vaxis.Style) void {
+    const sep_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
+
+    // Print key (without padding first)
+    var key_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } },
+        .{ .text = key, .style = key_style },
+    };
+    const key_result = win.print(&key_seg, .{ .row_offset = row, .col_offset = 1 });
+
+    // Pad to fixed column position
+    const pad_col: u16 = 1 + 2 + KEY_COL_WIDTH; // offset + "  " + key column width
+    var col = key_result.col;
+    while (col < pad_col) : (col += 1) {
+        win.writeCell(col, row, .{ .char = .{ .grapheme = " ", .width = 1 }, .style = key_style });
+    }
+
+    // Print separator and description (using string literals that persist)
+    var desc_seg = [_]vaxis.Cell.Segment{
+        .{ .text = " │ ", .style = sep_style },
+        .{ .text = desc, .style = desc_style },
+    };
+    _ = win.print(&desc_seg, .{ .row_offset = row, .col_offset = pad_col });
+}
+
+// Total content rows (approximate, for scroll calculation)
+const HELP_CONTENT_ROWS = 80;
 
 /// Handle keyboard input when agent help is visible
 /// Returns true if key was handled, false to pass through
@@ -309,7 +299,6 @@ pub fn handleKey(agent_state: *AgentState, key: vaxis.Key) bool {
             return true;
         },
         'd', 'D' => {
-            // Page down (half page) - only without modifiers
             if (!key.mods.ctrl) {
                 const jump = max_visible / 2;
                 agent_state.help_scroll_offset = @min(agent_state.help_scroll_offset + jump, max_scroll);
@@ -317,7 +306,6 @@ pub fn handleKey(agent_state: *AgentState, key: vaxis.Key) bool {
             }
         },
         'u', 'U' => {
-            // Page up (half page) - only without modifiers
             if (!key.mods.ctrl) {
                 const jump = max_visible / 2;
                 if (agent_state.help_scroll_offset >= jump) {
@@ -329,17 +317,14 @@ pub fn handleKey(agent_state: *AgentState, key: vaxis.Key) bool {
             }
         },
         'g' => {
-            // Go to top
             agent_state.help_scroll_offset = 0;
             return true;
         },
         'G' => {
-            // Go to bottom
             agent_state.help_scroll_offset = max_scroll;
             return true;
         },
         'q', '?' => {
-            // Close help
             agent_state.help_visible = false;
             agent_state.help_scroll_offset = 0;
             return true;
@@ -347,7 +332,6 @@ pub fn handleKey(agent_state: *AgentState, key: vaxis.Key) bool {
         else => {},
     }
 
-    // Handle Ctrl+D and Ctrl+U for page navigation
     if (key.mods.ctrl) {
         switch (key.codepoint) {
             'd' => {
@@ -368,14 +352,12 @@ pub fn handleKey(agent_state: *AgentState, key: vaxis.Key) bool {
         }
     }
 
-    // Handle ESC to close
     if (key.codepoint == 27) {
         agent_state.help_visible = false;
         agent_state.help_scroll_offset = 0;
         return true;
     }
 
-    // Handle arrow keys
     if (key.matches(vaxis.Key.down, .{})) {
         if (agent_state.help_scroll_offset < max_scroll) {
             agent_state.help_scroll_offset += 1;
@@ -388,16 +370,19 @@ pub fn handleKey(agent_state: *AgentState, key: vaxis.Key) bool {
         return true;
     }
 
-    // Block other keys while help is visible
     return true;
 }
 
+const Binding = struct {
+    key: []const u8,
+    desc: []const u8,
+};
+
 const ContentLine = struct {
-    text: ?[]const u8 = null,
+    section: ?[]const u8 = null,
     key: ?[]const u8 = null,
     desc: ?[]const u8 = null,
-    style: vaxis.Style = .{},
     key_style: ?vaxis.Style = null,
     desc_style: ?vaxis.Style = null,
-    is_separator: bool = false,
+    blank: bool = false,
 };

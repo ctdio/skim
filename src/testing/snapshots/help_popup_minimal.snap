@@ -1,0 +1,12 @@
+╭───────────────── Keybindings ──────────────────╮
+│                                                │
+│ NAVIGATION                                     │
+│  j / k          │ Move down / up               │
+│  h / l          │ Previous / next file         │
+│  g / G          │ Top / bottom                 │
+│                                                │
+│ ACTIONS                                        │
+│  Enter          │ Add comment                  │
+│  ?              │ This help                    │
+│                                                │
+╰────────────── ? or Esc to close ───────────────╯

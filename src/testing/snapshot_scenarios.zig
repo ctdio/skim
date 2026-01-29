@@ -4,6 +4,7 @@ const snapshot = @import("snapshot.zig");
 const diff_helpers = @import("diff_test_helpers.zig");
 const agent_helpers = @import("agent_test_helpers.zig");
 const md_helpers = @import("markdown_test_helpers.zig");
+const help_helpers = @import("help_test_helpers.zig");
 
 // =============================================================================
 // Diff Rendering Snapshot Tests
@@ -1484,4 +1485,176 @@ test "snapshot: blame_relative_times" {
     defer allocator.free(text);
 
     try snapshot.expectSnapshot(allocator, "blame_relative_times", text);
+}
+
+// =============================================================================
+// Help Popup Rendering Snapshot Tests
+// =============================================================================
+
+test "snapshot: help_box_border" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 40, 10);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    help_helpers.fillBackground(win);
+    help_helpers.drawBoxBorder(win, 40, 10);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "help_box_border", text);
+}
+
+test "snapshot: help_box_with_title" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 50, 8);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    help_helpers.fillBackground(win);
+    help_helpers.drawBoxBorder(win, 50, 8);
+    help_helpers.renderTitle(win, " Keybindings ", 50);
+    help_helpers.renderFooter(win, " ? or Esc to close ", 7, 50);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "help_box_with_title", text);
+}
+
+test "snapshot: help_keybinding_alignment" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 50, 8);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    help_helpers.fillBackground(win);
+
+    // Test various key lengths to verify alignment
+    help_helpers.renderKeyBinding(win, 0, "j", "Short key");
+    help_helpers.renderKeyBinding(win, 1, "Ctrl-d", "Medium key");
+    help_helpers.renderKeyBinding(win, 2, "Ctrl-w h/l", "Long key");
+    help_helpers.renderKeyBinding(win, 3, "Space b", "With space");
+    help_helpers.renderKeyBinding(win, 4, "Esc Esc", "Double tap");
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "help_keybinding_alignment", text);
+}
+
+test "snapshot: help_section_header" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 50, 6);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    help_helpers.fillBackground(win);
+
+    help_helpers.renderSection(win, "NORMAL MODE", 0);
+    help_helpers.renderKeyBinding(win, 1, "j / k", "Move down / up");
+    help_helpers.renderKeyBinding(win, 2, "h / l", "Move left / right");
+    help_helpers.renderSection(win, "INSERT MODE", 4);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "help_section_header", text);
+}
+
+test "snapshot: help_popup_minimal" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 50, 12);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+
+    const bindings = [_]help_helpers.Binding{
+        help_helpers.section("NAVIGATION"),
+        help_helpers.binding("j / k", "Move down / up"),
+        help_helpers.binding("h / l", "Previous / next file"),
+        help_helpers.binding("g / G", "Top / bottom"),
+        help_helpers.blank(),
+        help_helpers.section("ACTIONS"),
+        help_helpers.binding("Enter", "Add comment"),
+        help_helpers.binding("?", "This help"),
+    };
+
+    help_helpers.renderHelpPopup(win, " Keybindings ", &bindings, 50, 12);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "help_popup_minimal", text);
+}
+
+test "snapshot: help_popup_full" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 72, 25);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+
+    const bindings = [_]help_helpers.Binding{
+        help_helpers.section("NORMAL MODE"),
+        help_helpers.binding("h / l", "Previous / next file"),
+        help_helpers.binding("j / k", "Cursor down / up"),
+        help_helpers.binding("g / G", "Jump to top / bottom"),
+        help_helpers.binding("Ctrl-d / u", "Page down / up"),
+        help_helpers.binding("M", "Center cursor in viewport"),
+        help_helpers.binding("[h / ]h", "Previous / next hunk"),
+        help_helpers.binding("/", "Search"),
+        help_helpers.binding("n / N", "Next / previous match"),
+        help_helpers.binding("Ctrl-p", "File picker"),
+        help_helpers.binding(":", "Command palette"),
+        help_helpers.binding("?", "This help"),
+        help_helpers.binding("Enter", "Add / edit comment"),
+        help_helpers.binding("Ctrl-e", "Toggle agent panel"),
+        help_helpers.blank(),
+        help_helpers.section("VISUAL MODE"),
+        help_helpers.binding("j / k", "Extend selection"),
+        help_helpers.binding("y", "Yank selection"),
+        help_helpers.binding("v / Esc", "Exit"),
+    };
+
+    help_helpers.renderHelpPopup(win, " Keybindings ", &bindings, 72, 25);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "help_popup_full", text);
+}
+
+test "snapshot: help_agent_popup" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 72, 20);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+
+    const bindings = [_]help_helpers.Binding{
+        help_helpers.section("GLOBAL"),
+        help_helpers.binding("Ctrl-e", "Close panel"),
+        help_helpers.binding("Ctrl-w h/l", "Focus diff / agent"),
+        help_helpers.binding("Ctrl-w o", "Toggle fullscreen"),
+        help_helpers.blank(),
+        help_helpers.section("INSERT MODE"),
+        help_helpers.binding("Enter", "Send prompt"),
+        help_helpers.binding("Ctrl-j", "Insert newline"),
+        help_helpers.binding("Esc", "Exit to normal"),
+        help_helpers.binding("/", "Slash commands"),
+        help_helpers.binding("@", "File picker"),
+        help_helpers.blank(),
+        help_helpers.section("NORMAL MODE"),
+        help_helpers.binding("i/a/I/A", "Enter insert"),
+        help_helpers.binding("?", "This help"),
+    };
+
+    help_helpers.renderHelpPopup(win, " Agent Keybindings ", &bindings, 72, 20);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "help_agent_popup", text);
 }

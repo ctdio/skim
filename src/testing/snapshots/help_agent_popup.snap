@@ -1,0 +1,20 @@
+╭───────────────────────── Agent Keybindings ──────────────────────────╮
+│                                                                      │
+│ GLOBAL                                                               │
+│  Ctrl-e         │ Close panel                                        │
+│  Ctrl-w h/l     │ Focus diff / agent                                 │
+│  Ctrl-w o       │ Toggle fullscreen                                  │
+│                                                                      │
+│ INSERT MODE                                                          │
+│  Enter          │ Send prompt                                        │
+│  Ctrl-j         │ Insert newline                                     │
+│  Esc            │ Exit to normal                                     │
+│  /              │ Slash commands                                     │
+│  @              │ File picker                                        │
+│                                                                      │
+│ NORMAL MODE                                                          │
+│  i/a/I/A        │ Enter insert                                       │
+│  ?              │ This help                                          │
+│                                                                      │
+│                                                                      │
+╰───────────────────────── ? or Esc to close ──────────────────────────╯
