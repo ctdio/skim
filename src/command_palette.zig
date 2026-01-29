@@ -124,7 +124,8 @@ pub const CommandPaletteState = struct {
             const stats = StateHelpers.calculateDiffStats(app, file);
 
             // Apply smart path truncation for display
-            const display_path = truncatePath(self.allocator, path, 70) catch path;
+            // Leave room for: indicator (2) + spacing (2) + description (12) + stats (~15) + padding (4) = ~35 chars
+            const display_path = truncatePath(self.allocator, path, 60) catch path;
             const owns_display = !std.mem.eql(u8, path, display_path);
 
             try self.commands.append(self.allocator, .{
@@ -331,8 +332,8 @@ pub const CommandPaletteState = struct {
     }
 };
 
-// Truncate path for display: keep last 2 components full, truncate rest to first char
-// Example: "projects/open-source/skim/src/file.zig" -> "p/o/s/src/file.zig"
+// Truncate path for display using middle-ellipsis strategy
+// Example: "apps/platform/app/(settings)/ai-configuration/page.tsx" -> "apps/platform/.../ai-configuration/page.tsx"
 fn truncatePath(allocator: Allocator, path: []const u8, max_length: usize) ![]const u8 {
     if (path.len <= max_length) return path;
 
@@ -347,25 +348,41 @@ fn truncatePath(allocator: Allocator, path: []const u8, max_length: usize) ![]co
         }
     }
 
-    if (components.items.len <= 2) return path;
+    if (components.items.len <= 3) return path;
 
-    // Keep last 2 components full, truncate earlier ones to first char
-    const keep_full = 2;
-    const truncate_count = components.items.len - keep_full;
+    // Strategy: Keep first 2 components + ellipsis + last 2 components
+    // Example: apps/platform/.../ai-configuration/page.tsx
+    const ellipsis = "...";
+    const keep_left: usize = 2;
+    const keep_right: usize = 2;
 
     var result: std.ArrayList(u8) = .{};
     errdefer result.deinit(allocator);
 
-    for (components.items, 0..) |component, i| {
+    // Add left components
+    for (components.items[0..keep_left], 0..) |component, i| {
         if (i > 0) try result.append(allocator, '/');
+        try result.appendSlice(allocator, component);
+    }
 
-        if (i < truncate_count) {
-            // Truncate to first character
-            if (component.len > 0) {
-                try result.append(allocator, component[0]);
-            }
-        } else {
-            // Keep full
+    // Add ellipsis
+    try result.append(allocator, '/');
+    try result.appendSlice(allocator, ellipsis);
+
+    // Add right components
+    const right_start = components.items.len - keep_right;
+    for (components.items[right_start..]) |component| {
+        try result.append(allocator, '/');
+        try result.appendSlice(allocator, component);
+    }
+
+    // If still too long, fall back to just keeping last 3 components with ellipsis
+    if (result.items.len > max_length and components.items.len > 3) {
+        result.clearRetainingCapacity();
+        try result.appendSlice(allocator, ellipsis);
+        const fallback_start = components.items.len - 3;
+        for (components.items[fallback_start..]) |component| {
+            try result.append(allocator, '/');
             try result.appendSlice(allocator, component);
         }
     }
@@ -395,7 +412,7 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 }
 
 // Fixed width for command palette - prevents jarring resize on content change
-const COMMAND_PALETTE_WIDTH: usize = 80;
+const COMMAND_PALETTE_WIDTH: usize = 100;
 const DIALOG_PADDING: usize = 1; // Horizontal padding inside dialogs
 
 pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
@@ -600,4 +617,46 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
             _ = palette_win.print(&more_segments, .{ .row_offset = @intCast(last_row), .col_offset = DIALOG_PADDING });
         }
     }
+}
+
+// Tests
+test "truncatePath: short path returns unchanged" {
+    const allocator = std.testing.allocator;
+    const path = "src/file.zig";
+    const result = try truncatePath(allocator, path, 85);
+    try std.testing.expectEqualStrings(path, result);
+}
+
+test "truncatePath: middle-ellipsis for long paths" {
+    const allocator = std.testing.allocator;
+    const path = "apps/platform/app/(settings)/ai-configuration/page.tsx";
+    const result = try truncatePath(allocator, path, 50);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("apps/platform/.../ai-configuration/page.tsx", result);
+}
+
+test "truncatePath: keeps first 2 and last 2 components" {
+    const allocator = std.testing.allocator;
+    const path = "a/b/c/d/e/f.txt";
+    const result = try truncatePath(allocator, path, 20);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("a/b/.../e/f.txt", result);
+}
+
+test "truncatePath: fallback for very long paths" {
+    const allocator = std.testing.allocator;
+    // Path with very long component names
+    const path = "very-long-dir-name/another-very-long-name/yet-another-long/deeply/nested/file.tsx";
+    const result = try truncatePath(allocator, path, 40);
+    defer allocator.free(result);
+    // Should fall back to last 3 components with ellipsis
+    try std.testing.expectEqualStrings(".../deeply/nested/file.tsx", result);
+}
+
+test "truncatePath: 3 or fewer components returns unchanged" {
+    const allocator = std.testing.allocator;
+    const path = "src/components/Button.tsx";
+    // Even if it exceeds max_length, with only 3 components we return as-is
+    const result = try truncatePath(allocator, path, 10);
+    try std.testing.expectEqualStrings(path, result);
 }
