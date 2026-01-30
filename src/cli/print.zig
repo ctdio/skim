@@ -38,7 +38,7 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
 
     // For stdin mode, we need special handling (parse directly)
     if (stdin_content) |content| {
-        try renderStdinDiff(allocator, content);
+        try renderStdinDiff(allocator, content, config.max_lines);
         return;
     }
 
@@ -58,10 +58,10 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
     }
 
     // Render to vaxis screen and convert to ANSI
-    try renderAndOutput(allocator, &app);
+    try renderAndOutput(allocator, &app, config.max_lines);
 }
 
-fn renderStdinDiff(allocator: Allocator, content: []const u8) !void {
+fn renderStdinDiff(allocator: Allocator, content: []const u8, max_lines: ?usize) !void {
     // Parse diff from stdin
     const clean_text = try parser.stripAnsi(allocator, content);
     defer allocator.free(clean_text);
@@ -95,19 +95,23 @@ fn renderStdinDiff(allocator: Allocator, content: []const u8) !void {
     const line_map_mod = @import("../line_map.zig");
     app.state.line_map = try line_map_mod.LineMap.build(allocator, files, &app.state.comment_store, .all, true);
 
-    try renderAndOutput(allocator, &app);
+    try renderAndOutput(allocator, &app, max_lines);
 
     // Prevent double-free - mark as stolen
     app.state.files = &[_]parser.FileDiff{};
 }
 
-fn renderAndOutput(allocator: Allocator, app: *App) !void {
+fn renderAndOutput(allocator: Allocator, app: *App, max_lines: ?usize) !void {
     // Apply syntax highlighting synchronously (print mode doesn't need async)
     applySyntaxHighlighting(allocator, app.state.files, &app.syntax_highlighter);
 
-    // Calculate exact height needed (no buffer - avoids trailing sidebar lines)
+    // Calculate height with limit
     const total_lines = app.state.line_map.records.len;
-    const height: u16 = @intCast(@min(total_lines, 10000));
+    const effective_limit = max_lines orelse total_lines;
+    const lines_to_render = @min(total_lines, effective_limit);
+    const truncated = total_lines > lines_to_render;
+
+    const height: u16 = @intCast(@min(lines_to_render, 10000));
     const width: u16 = 120; // Reasonable default width
 
     // Create test context (mock vaxis screen)
@@ -128,12 +132,22 @@ fn renderAndOutput(allocator: Allocator, app: *App) !void {
     const ansi_output = try ctx.captureToAnsi();
     defer allocator.free(ansi_output);
 
-    // Write to stdout (Zig 0.15 API)
+    // Write to stdout
     var stdout_buffer: [4096]u8 = undefined;
     var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    defer file_writer.interface.flush() catch {};
     try file_writer.interface.writeAll(ansi_output);
     try file_writer.interface.writeByte('\n');
+    
+    // Flush stdout before showing truncation warning so it appears at the end
+    file_writer.interface.flush() catch {};
+
+    // Show truncation warning on stderr (after stdout flush so it appears at the end)
+    if (truncated) {
+        std.debug.print(
+            "\x1b[33m[truncated: showing {d} of {d} lines. Use --no-limit to show all, or --limit=N]\x1b[0m\n",
+            .{ lines_to_render, total_lines },
+        );
+    }
 }
 
 /// Apply syntax highlighting synchronously to all hunks.
@@ -172,6 +186,7 @@ fn applySyntaxHighlighting(allocator: Allocator, files: []parser.FileDiff, highl
 
 const Config = struct {
     diff_source: git.DiffSource,
+    max_lines: ?usize, // null means no limit
 
     fn deinit(self: *const Config, allocator: Allocator) void {
         switch (self.diff_source) {
@@ -185,8 +200,12 @@ const Config = struct {
     }
 };
 
+// Default limit to prevent terminal lockup on massive diffs
+const DEFAULT_MAX_LINES: usize = 5000;
+
 fn parseArgs(allocator: Allocator, args: []const []const u8) !Config {
     var staged = false;
+    var max_lines: ?usize = DEFAULT_MAX_LINES;
     var positional_args: std.ArrayList([]const u8) = .{};
     defer positional_args.deinit(allocator);
 
@@ -197,6 +216,24 @@ fn parseArgs(allocator: Allocator, args: []const []const u8) !Config {
 
         if (std.mem.eql(u8, arg, "--staged") or std.mem.eql(u8, arg, "--cached")) {
             staged = true;
+        } else if (std.mem.eql(u8, arg, "--no-limit")) {
+            max_lines = null;
+        } else if (std.mem.startsWith(u8, arg, "--limit=")) {
+            const value = arg["--limit=".len..];
+            max_lines = std.fmt.parseInt(usize, value, 10) catch {
+                std.debug.print("Invalid --limit value: {s}\n", .{value});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--limit") or std.mem.eql(u8, arg, "-n")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("--limit requires a value\n", .{});
+                std.process.exit(1);
+            }
+            max_lines = std.fmt.parseInt(usize, args[i], 10) catch {
+                std.debug.print("Invalid --limit value: {s}\n", .{args[i]});
+                std.process.exit(1);
+            };
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             try printHelp();
             std.process.exit(0);
@@ -242,7 +279,7 @@ fn parseArgs(allocator: Allocator, args: []const []const u8) !Config {
         std.process.exit(1);
     };
 
-    return Config{ .diff_source = diff_source };
+    return Config{ .diff_source = diff_source, .max_lines = max_lines };
 }
 
 fn readStdinIfPiped(allocator: Allocator) !?[]const u8 {
@@ -271,6 +308,8 @@ fn printHelp() !void {
         \\
         \\OPTIONS:
         \\    --staged, --cached    Show staged changes
+        \\    -n, --limit <N>       Max lines to output (default: 5000)
+        \\    --no-limit            Remove line limit (use with caution)
         \\    -h, --help            Print this help message
         \\
         \\EXAMPLES:
@@ -278,6 +317,7 @@ fn printHelp() !void {
         \\    skim print --staged           # Staged changes
         \\    skim print main..feature      # Compare branches
         \\    skim print HEAD~5             # Last 5 commits
+        \\    skim print --no-limit HEAD~20 # Full output, no truncation
         \\    git diff | skim print         # Pipe diff from git
         \\    skim print | less -R          # Pipe to less with colors
         \\
