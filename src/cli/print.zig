@@ -101,15 +101,21 @@ fn renderStdinDiff(allocator: Allocator, content: []const u8, max_lines: ?usize)
     app.state.files = &[_]parser.FileDiff{};
 }
 
-fn renderAndOutput(allocator: Allocator, app: *App, max_lines: ?usize) !void {
+fn renderAndOutput(allocator: Allocator, app: *App, max_diff_lines: ?usize) !void {
     // Apply syntax highlighting synchronously (print mode doesn't need async)
     applySyntaxHighlighting(allocator, app.state.files, &app.syntax_highlighter);
 
-    // Calculate height with limit
-    const total_lines = app.state.line_map.records.len;
-    const effective_limit = max_lines orelse total_lines;
-    const lines_to_render = @min(total_lines, effective_limit);
-    const truncated = total_lines > lines_to_render;
+    // Count actual diff lines (lines in hunks, not headers/spacers)
+    const total_diff_lines = countDiffLines(app.state.files);
+    
+    // Calculate render height based on diff line limit
+    const total_render_lines = app.state.line_map.records.len;
+    const render_limit = if (max_diff_lines) |limit|
+        calcRenderLinesForDiffLimit(app.state.line_map, limit)
+    else
+        total_render_lines;
+    const lines_to_render = @min(total_render_lines, render_limit);
+    const truncated = total_diff_lines > (max_diff_lines orelse total_diff_lines);
 
     const height: u16 = @intCast(@min(lines_to_render, 10000));
     const width: u16 = 120; // Reasonable default width
@@ -137,17 +143,17 @@ fn renderAndOutput(allocator: Allocator, app: *App, max_lines: ?usize) !void {
     var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
     try file_writer.interface.writeAll(ansi_output);
     try file_writer.interface.writeByte('\n');
-    
-    // Flush stdout before showing truncation warning so it appears at the end
-    file_writer.interface.flush() catch {};
 
-    // Show truncation warning on stderr (after stdout flush so it appears at the end)
+    // Show truncation warning on stdout (same stream ensures ordering)
     if (truncated) {
-        std.debug.print(
-            "\x1b[33m[truncated: showing {d} of {d} lines. Use --no-limit to show all, or --limit=N]\x1b[0m\n",
-            .{ lines_to_render, total_lines },
+        const shown_diff_lines = max_diff_lines orelse total_diff_lines;
+        try file_writer.interface.print(
+            "\x1b[33m[truncated: showing {d} of {d} diff lines. Use --no-limit to show all, or --limit=N]\x1b[0m\n",
+            .{ shown_diff_lines, total_diff_lines },
         );
     }
+    
+    file_writer.interface.flush() catch {};
 }
 
 /// Apply syntax highlighting synchronously to all hunks.
@@ -182,6 +188,32 @@ fn applySyntaxHighlighting(allocator: Allocator, files: []parser.FileDiff, highl
             } else |_| {}
         }
     }
+}
+
+/// Count actual diff lines (lines in hunks, not headers/spacers).
+fn countDiffLines(files: []const parser.FileDiff) usize {
+    var count: usize = 0;
+    for (files) |file| {
+        for (file.hunks) |hunk| {
+            count += hunk.lines.len;
+        }
+    }
+    return count;
+}
+
+/// Calculate how many render lines are needed to show N diff lines.
+/// Returns the index to stop at (exclusive) in the line_map records.
+fn calcRenderLinesForDiffLimit(line_map: @import("../line_map.zig").LineMap, diff_line_limit: usize) usize {
+    var diff_count: usize = 0;
+    for (line_map.records, 0..) |record, i| {
+        if (record.line_type == .code_line) {
+            diff_count += 1;
+            if (diff_count >= diff_line_limit) {
+                return i + 1; // Include this line
+            }
+        }
+    }
+    return line_map.records.len; // Show all if limit not reached
 }
 
 const Config = struct {
