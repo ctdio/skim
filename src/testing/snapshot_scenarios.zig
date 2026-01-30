@@ -1079,6 +1079,37 @@ test "snapshot: md_table_with_emoji" {
     try snapshot.expectSnapshot(allocator, "md_table_with_emoji", text);
 }
 
+test "snapshot: md_table_proportional_widths" {
+    const allocator = std.testing.allocator;
+    // Test proportional width allocation: short columns stay compact, long columns get more space
+    // 70 char terminal forces some constraint but enough to show proportionality
+    var ctx = try harness.createTestContext(allocator, 70, 12);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame_alloc = ctx.frameAllocator();
+
+    // Table with drastically different column content lengths:
+    // - Year: 4 chars (should stay compact)
+    // - Event: medium length
+    // - Description: long content (should get most space)
+    const table_md =
+        \\| Year | Event | Description |
+        \\|:-----|:------|:------------|
+        \\| 2020 | Alpha | Initial release with basic functionality |
+        \\| 2021 | Beta | Added streaming support and bug fixes |
+        \\| 2022 | GA | General availability with full feature set |
+        \\| 2023 | v2.0 | Major rewrite with improved performance |
+    ;
+
+    try md_helpers.renderMarkdown(frame_alloc, win, table_md, 70);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "md_table_proportional_widths", text);
+}
+
 test "snapshot: md_code_block" {
     const allocator = std.testing.allocator;
     var ctx = try harness.createTestContext(allocator, 50, 6);
