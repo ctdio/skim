@@ -89,6 +89,33 @@ skim main...feature
 skim HEAD~5
 ```
 
+### As a Git Pager
+
+Skim can read diffs from stdin, making it usable as a git pager. Add to your `~/.gitconfig`:
+
+```ini
+[pager]
+    diff = skim diff
+    show = skim diff
+    log = skim diff
+```
+
+Or set via command line:
+
+```bash
+git config --global pager.diff "skim diff"
+git config --global pager.show "skim diff"
+git config --global pager.log "skim diff"
+```
+
+You can also pipe diffs directly:
+
+```bash
+git diff | skim diff
+git show HEAD | skim diff
+cat some.patch | skim diff
+```
+
 ## Keybindings
 
 ### NORMAL Mode (Default)
