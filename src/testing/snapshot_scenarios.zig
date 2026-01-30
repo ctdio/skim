@@ -1689,3 +1689,241 @@ test "snapshot: help_agent_popup" {
 
     try snapshot.expectSnapshot(allocator, "help_agent_popup", text);
 }
+
+// =============================================================================
+// ANSI Color Snapshot Tests
+// =============================================================================
+// These tests use captureToAnsi() to verify actual ANSI escape codes.
+// While harder to read in snapshot files, they verify colors are applied correctly.
+// The text snapshots above verify structure; these verify styling.
+
+test "snapshot: ansi_diff_file_header" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 50, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    diff_helpers.renderFileHeaderAlloc(win, "src/main.zig", 12, 5, 0, false, frame);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_diff_file_header", ansi);
+}
+
+test "snapshot: ansi_diff_line_add" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    const line = diff_helpers.createLine(.add, "    const new_value = 42;", null, 15);
+    diff_helpers.renderDiffLineAlloc(win, line, 0, 5, false, frame);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_diff_line_add", ansi);
+}
+
+test "snapshot: ansi_diff_line_delete" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    const line = diff_helpers.createLine(.delete, "    const old_value = 0;", 14, null);
+    diff_helpers.renderDiffLineAlloc(win, line, 0, 5, false, frame);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_diff_line_delete", ansi);
+}
+
+test "snapshot: ansi_diff_line_context" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    const line = diff_helpers.createLine(.context, "fn main() void {", 10, 10);
+    diff_helpers.renderDiffLineAlloc(win, line, 0, 5, false, frame);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_diff_line_context", ansi);
+}
+
+test "snapshot: ansi_diff_hunk_header" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    const hunk = diff_helpers.Hunk{
+        .header = .{
+            .old_start = 10,
+            .old_count = 7,
+            .new_start = 10,
+            .new_count = 9,
+            .context = "fn render()",
+        },
+        .lines = &[_]diff_helpers.Line{},
+        .highlights = null,
+        .old_highlights = null,
+    };
+    diff_helpers.renderHunkHeaderAlloc(win, hunk, 0, false, frame);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_diff_hunk_header", ansi);
+}
+
+test "snapshot: ansi_diff_mixed_changes" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 70, 8);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    const gutter_width: usize = 5;
+
+    // Render a sequence of mixed changes to verify all line type colors
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.context, "fn process(data: []const u8) void {", 10, 10), 0, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.delete, "    const result = old_function(data);", 11, null), 1, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.delete, "    log.debug(\"old\");", 12, null), 2, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.add, "    const result = new_function(data);", null, 11), 3, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.add, "    log.info(\"new\");", null, 12), 4, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.add, "    metrics.increment();", null, 13), 5, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.context, "    return result;", 13, 14), 6, gutter_width, false, frame);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_diff_mixed_changes", ansi);
+}
+
+test "snapshot: ansi_diff_cursor_line" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    const line = diff_helpers.createLine(.add, "    return result;", null, 25);
+    diff_helpers.renderDiffLineAlloc(win, line, 0, 5, true, frame);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_diff_cursor_line", ansi);
+}
+
+test "snapshot: ansi_diff_full_hunk" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 70, 10);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    const gutter_width: usize = 5;
+
+    // Complete hunk with header and all line types
+    const hunk = diff_helpers.Hunk{
+        .header = .{
+            .old_start = 15,
+            .old_count = 4,
+            .new_start = 15,
+            .new_count = 6,
+            .context = "pub fn calculate()",
+        },
+        .lines = &[_]diff_helpers.Line{},
+        .highlights = null,
+        .old_highlights = null,
+    };
+    diff_helpers.renderHunkHeaderAlloc(win, hunk, 0, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.context, "    var total: i32 = 0;", 15, 15), 1, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.delete, "    total += item.value;", 16, null), 2, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.add, "    total += item.value * multiplier;", null, 16), 3, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.add, "    if (total > MAX) total = MAX;", null, 17), 4, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.context, "    return total;", 17, 18), 5, gutter_width, false, frame);
+    diff_helpers.renderDiffLineAlloc(win, diff_helpers.createLine(.context, "}", 18, 19), 6, gutter_width, false, frame);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_diff_full_hunk", ansi);
+}
+
+test "snapshot: ansi_md_bold" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 50, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    var col: usize = 0;
+    col = md_helpers.renderText(win, "This is ", 0, col);
+    col = md_helpers.renderBold(win, "bold", 0, col);
+    _ = md_helpers.renderText(win, " text", 0, col);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_md_bold", ansi);
+}
+
+test "snapshot: ansi_md_inline_code" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 50, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    var col: usize = 0;
+    col = md_helpers.renderText(win, "Use ", 0, col);
+    col = md_helpers.renderInlineCode(win, "const x = 42", 0, col);
+    _ = md_helpers.renderText(win, " here", 0, col);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_md_inline_code", ansi);
+}
+
+test "snapshot: ansi_md_link" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 50, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    var col: usize = 0;
+    col = md_helpers.renderText(win, "Visit ", 0, col);
+    col = md_helpers.renderLink(win, "my website", 0, col);
+    _ = md_helpers.renderText(win, " for more", 0, col);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_md_link", ansi);
+}
+
+test "snapshot: ansi_md_header_h1" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 50, 3);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    md_helpers.renderHeader(win, "Main Title", 1, 0);
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_md_header_h1", ansi);
+}

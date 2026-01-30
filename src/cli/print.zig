@@ -9,6 +9,8 @@ const parser = @import("../git/parser.zig");
 const harness = @import("../testing/harness.zig");
 const App = @import("../app.zig").App;
 const render_unified = @import("../rendering/unified.zig");
+const syntax = @import("../highlighting/core.zig");
+const state_helpers = @import("../state.zig").StateHelpers;
 
 const Allocator = std.mem.Allocator;
 const UnifiedRenderer = render_unified.UnifiedRenderer;
@@ -100,6 +102,9 @@ fn renderStdinDiff(allocator: Allocator, content: []const u8) !void {
 }
 
 fn renderAndOutput(allocator: Allocator, app: *App) !void {
+    // Apply syntax highlighting synchronously (print mode doesn't need async)
+    applySyntaxHighlighting(allocator, app.state.files, &app.syntax_highlighter);
+
     // Calculate exact height needed (no buffer - avoids trailing sidebar lines)
     const total_lines = app.state.line_map.records.len;
     const height: u16 = @intCast(@min(total_lines, 10000));
@@ -129,6 +134,40 @@ fn renderAndOutput(allocator: Allocator, app: *App) !void {
     defer file_writer.interface.flush() catch {};
     try file_writer.interface.writeAll(ansi_output);
     try file_writer.interface.writeByte('\n');
+}
+
+/// Apply syntax highlighting synchronously to all hunks.
+/// In print mode we can afford to block since there's no UI to keep responsive.
+fn applySyntaxHighlighting(allocator: Allocator, files: []parser.FileDiff, highlighter: *syntax.SyntaxHighlighter) void {
+    for (files) |*file| {
+        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+        
+        // Skip unknown languages
+        const lang = syntax.Language.fromFilePath(file_path);
+        if (lang == .unknown) continue;
+
+        for (file.hunks) |*hunk| {
+            // Skip if already highlighted
+            if (hunk.highlights != null) continue;
+
+            // Build content for new file (add/context lines)
+            const content = state_helpers.buildHunkContent(allocator, hunk) catch continue;
+            defer allocator.free(content);
+
+            // Build content for old file (delete/context lines)
+            const old_content = state_helpers.buildHunkOldContent(allocator, hunk) catch continue;
+            defer allocator.free(old_content);
+
+            // Highlight synchronously
+            if (highlighter.highlightFile(file_path, content)) |highlights| {
+                hunk.highlights = highlights;
+            } else |_| {}
+
+            if (highlighter.highlightFile(file_path, old_content)) |old_highlights| {
+                hunk.old_highlights = old_highlights;
+            } else |_| {}
+        }
+    }
 }
 
 const Config = struct {

@@ -102,6 +102,22 @@ pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
             // Start new file
             current_file = PartialFileDiff.init();
         } else if (std.mem.startsWith(u8, line, "--- ")) {
+            // For standard unified diff (no "diff --git" header), start a new file here
+            // If we already have a file with content, save it first (multi-file unified diff)
+            if (current_file) |*file| {
+                // Check if we have hunks (finalized or pending)
+                const has_content = file.hunks.items.len > 0 or current_hunk != null;
+                if (has_content) {
+                    if (current_hunk) |*hunk| {
+                        try file.hunks.append(allocator, try hunk.finalize(allocator));
+                        current_hunk = null;
+                    }
+                    try files.append(allocator, try file.finalize(allocator));
+                    current_file = PartialFileDiff.init();
+                }
+            } else {
+                current_file = PartialFileDiff.init();
+            }
             if (current_file) |*file| {
                 const path = parsePath(line[4..]);
                 file.old_path = try allocator.dupe(u8, path);
@@ -210,17 +226,24 @@ const PartialHunk = struct {
 };
 
 fn parsePath(path_with_prefix: []const u8) []const u8 {
-    // Remove a/ or b/ prefix
-    if (std.mem.startsWith(u8, path_with_prefix, "a/") or
-        std.mem.startsWith(u8, path_with_prefix, "b/"))
+    var path = path_with_prefix;
+
+    // Strip timestamp suffix (standard unified diff: "filename\t2024-01-01 12:00:00")
+    if (std.mem.indexOfScalar(u8, path, '\t')) |tab_idx| {
+        path = path[0..tab_idx];
+    }
+
+    // Remove a/ or b/ prefix (git diff format)
+    if (std.mem.startsWith(u8, path, "a/") or
+        std.mem.startsWith(u8, path, "b/"))
     {
-        return path_with_prefix[2..];
+        return path[2..];
     }
     // Handle /dev/null for new/deleted files
-    if (std.mem.eql(u8, path_with_prefix, "/dev/null")) {
+    if (std.mem.eql(u8, path, "/dev/null")) {
         return "";
     }
-    return path_with_prefix;
+    return path;
 }
 
 fn parseHunkHeader(allocator: Allocator, line: []const u8) !PartialHunk {
@@ -443,6 +466,72 @@ test "parse path with prefix" {
     try std.testing.expectEqualStrings("foo/bar.txt", parsePath("a/foo/bar.txt"));
     try std.testing.expectEqualStrings("foo/bar.txt", parsePath("b/foo/bar.txt"));
     try std.testing.expectEqualStrings("", parsePath("/dev/null"));
+}
+
+test "parse path with timestamp" {
+    // Standard unified diff format: filename followed by tab and timestamp
+    try std.testing.expectEqualStrings("foo.txt", parsePath("foo.txt\t2024-01-01 12:00:00.000000000 -0500"));
+    try std.testing.expectEqualStrings("path/to/file.txt", parsePath("path/to/file.txt\t2024-01-01 12:00:00"));
+    // Git format with a/ prefix and timestamp (rare but possible)
+    try std.testing.expectEqualStrings("foo.txt", parsePath("a/foo.txt\t2024-01-01"));
+}
+
+test "parse standard unified diff (no git header)" {
+    const allocator = std.testing.allocator;
+
+    // Standard unified diff from `diff -u old.txt new.txt`
+    // Note: Using \t for tab since multiline strings don't allow literal tabs
+    const diff = "--- old.txt\t2024-01-01 12:00:00.000000000 -0500\n" ++
+        "+++ new.txt\t2024-01-02 12:00:00.000000000 -0500\n" ++
+        "@@ -1,3 +1,4 @@\n" ++
+        " context line\n" ++
+        "-removed line\n" ++
+        "+added line\n" ++
+        "+another added line\n";
+
+    const files = try parse(allocator, diff);
+    defer {
+        for (files) |*file| {
+            file.deinit(allocator);
+        }
+        allocator.free(files);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), files.len);
+    try std.testing.expectEqualStrings("old.txt", files[0].old_path);
+    try std.testing.expectEqualStrings("new.txt", files[0].new_path);
+    try std.testing.expectEqual(@as(usize, 1), files[0].hunks.len);
+
+    const hunk = files[0].hunks[0];
+    try std.testing.expectEqual(@as(usize, 4), hunk.lines.len);
+}
+
+test "parse multi-file standard unified diff" {
+    const allocator = std.testing.allocator;
+
+    // Multiple files in standard unified diff format
+    const diff = "--- file1.txt\t2024-01-01 12:00:00\n" ++
+        "+++ file1.txt\t2024-01-02 12:00:00\n" ++
+        "@@ -1 +1 @@\n" ++
+        "-old1\n" ++
+        "+new1\n" ++
+        "--- file2.txt\t2024-01-01 12:00:00\n" ++
+        "+++ file2.txt\t2024-01-02 12:00:00\n" ++
+        "@@ -1 +1 @@\n" ++
+        "-old2\n" ++
+        "+new2\n";
+
+    const files = try parse(allocator, diff);
+    defer {
+        for (files) |*file| {
+            file.deinit(allocator);
+        }
+        allocator.free(files);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), files.len);
+    try std.testing.expectEqualStrings("file1.txt", files[0].new_path);
+    try std.testing.expectEqualStrings("file2.txt", files[1].new_path);
 }
 
 test "parse diff with merge conflict markers" {
