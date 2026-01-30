@@ -2013,25 +2013,12 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     const menu_height = visible_count + 1 + (MENU_PADDING * 2); // +1 for title row + vertical padding
     const menu_width = @min(SLASH_MENU_WIDTH, win.width -| 4); // fixed width, capped to window
 
-    // Calculate maximum possible menu size (for clearing artifacts)
-    const max_menu_height = MAX_SLASH_MENU_VISIBLE + 1;
-    const max_menu_y = if (input_top > max_menu_height) input_top - max_menu_height else 0;
-
     // Position menu just above the input area (bottom-anchored)
     const menu_y = if (input_top > menu_height) input_top - menu_height else 0;
     const menu_x: usize = 2; // Small left margin
 
-    // Clear the maximum possible menu area first to prevent artifacts when filtering
-    // Use default background (not dialog_bg) so only the actual menu area has the dialog background
-    const clear_win = win.child(.{
-        .x_off = @intCast(menu_x),
-        .y_off = @intCast(max_menu_y),
-        .width = @intCast(menu_width),
-        .height = @intCast(max_menu_height),
-    });
-    clear_win.clear();
-
-    // Create menu window at actual position
+    // Create menu window - no pre-clearing needed since each frame re-renders
+    // the underlying content, and we fill the menu area with dialog_bg
     const menu_win = win.child(.{
         .x_off = @intCast(menu_x),
         .y_off = @intCast(menu_y),
@@ -2146,25 +2133,12 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
     const menu_height = visible_count + 1; // title row only, no vertical padding
     const menu_width = @min(FILE_PICKER_WIDTH, win.width -| 4); // fixed width, capped to window
 
-    // Calculate maximum possible menu size (for clearing artifacts)
-    const max_menu_height = state.MAX_FILE_MENU_VISIBLE + 1;
-    const max_menu_y = if (input_top > max_menu_height) input_top - max_menu_height else 0;
-
     // Position menu just above the input area (bottom-anchored)
     const menu_y = if (input_top > menu_height) input_top - menu_height else 0;
     const menu_x: usize = 2; // Small left margin
 
-    // Clear the maximum possible menu area first to prevent artifacts when filtering
-    // Use default background (not dialog_bg) so only the actual menu area has the dialog background
-    const clear_win = win.child(.{
-        .x_off = @intCast(menu_x),
-        .y_off = @intCast(max_menu_y),
-        .width = @intCast(menu_width),
-        .height = @intCast(max_menu_height),
-    });
-    clear_win.clear();
-
-    // Create menu window at actual position
+    // Create menu window - no pre-clearing needed since each frame re-renders
+    // the underlying content, and we fill the menu area with dialog_bg
     const menu_win = win.child(.{
         .x_off = @intCast(menu_x),
         .y_off = @intCast(menu_y),
