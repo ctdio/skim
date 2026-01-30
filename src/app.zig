@@ -113,8 +113,8 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 
 pub const App = struct {
     allocator: Allocator,
-    vx: Vaxis,
-    tty: vaxis.Tty,
+    vx: ?Vaxis, // null in headless mode (print command)
+    tty: ?vaxis.Tty, // null in headless mode (print command)
     mode: Mode,
     state: State,
     should_quit: bool,
@@ -533,6 +533,169 @@ pub const App = struct {
         return app;
     }
 
+    /// Initialize App in headless mode (no TUI, for print command).
+    /// Loads and parses the diff but skips TTY/vaxis initialization.
+    pub fn initHeadless(allocator: Allocator, diff_source: DiffSource) !App {
+        // Get git repository root
+        const git_repo_root = try git.getRepoRoot(allocator);
+        errdefer allocator.free(git_repo_root);
+
+        // Load and parse diff
+        const diff_result = try git.getDiffWithUntracked(allocator, diff_source);
+        defer diff_result.deinit(allocator);
+
+        const files = try parser.parse(allocator, diff_result.diff_text);
+        errdefer {
+            for (files) |*file| {
+                file.deinit(allocator);
+            }
+            allocator.free(files);
+        }
+        parser.markUntrackedFiles(files, diff_result.untracked_paths);
+
+        const header_buffers = std.mem.zeroes([Layout.header_height][HEADER_BUFFER_WIDTH]u8);
+
+        const frame_buffer = try allocator.alloc(u8, FRAME_TEXT_CAPACITY);
+        errdefer allocator.free(frame_buffer);
+        @memset(frame_buffer, 0);
+
+        var syntax_highlighter = try syntax.SyntaxHighlighter.init(allocator);
+        errdefer syntax_highlighter.deinit();
+
+        var comment_store = comments.CommentStore.init(allocator);
+        errdefer comment_store.deinit();
+
+        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true);
+        errdefer built_line_map.deinit();
+
+        // Deep copy diff_source
+        const owned_diff_source: DiffSource = switch (diff_source) {
+            .working_dir => |wd| .{ .working_dir = wd },
+            .single_ref => |sr| .{ .single_ref = .{
+                .ref = try allocator.dupe(u8, sr.ref),
+                .staged = sr.staged,
+            } },
+            .two_refs => |tr| blk: {
+                const ref1 = try allocator.dupe(u8, tr.ref1);
+                errdefer allocator.free(ref1);
+                const ref2 = try allocator.dupe(u8, tr.ref2);
+                break :blk .{ .two_refs = .{
+                    .ref1 = ref1,
+                    .ref2 = ref2,
+                    .use_merge_base = tr.use_merge_base,
+                } };
+            },
+            .stdin => .stdin,
+        };
+        errdefer switch (owned_diff_source) {
+            .working_dir, .stdin => {},
+            .single_ref => |sr| allocator.free(sr.ref),
+            .two_refs => |tr| {
+                allocator.free(tr.ref1);
+                allocator.free(tr.ref2);
+            },
+        };
+
+        return App{
+            .allocator = allocator,
+            .vx = null, // Headless mode - no TUI
+            .tty = null, // Headless mode - no TUI
+            .mode = .normal,
+            .state = State{
+                .diff_source = owned_diff_source,
+                .pager_mode = false,
+                .git_repo_root = git_repo_root,
+                .files = files,
+                .line_map = built_line_map,
+                .current_file_idx = 0,
+                .global_scroll_offset = 0,
+                .global_cursor_line = 0,
+                .cursor_column = 0,
+                .view_mode = .unified,
+                .hunk_view_mode = .all,
+                .viewport_height = 0,
+                .count_prefix = null,
+                .comment_store = comment_store,
+                .active_comment_input = null,
+                .search_state = SearchState.init(allocator),
+                .command_palette_state = command_palette.CommandPaletteState.init(allocator),
+                .visual_anchor = null,
+                .pending_find = null,
+                .last_find = null,
+                .pending_z = false,
+                .pending_g = false,
+                .pending_space = false,
+                .pending_bracket = false,
+                .pending_close_bracket = false,
+                .empty_menu_selection = 0,
+                .branch_list = &[_][]const u8{},
+                .branch_selection = 0,
+                .branch_search_query = undefined,
+                .branch_search_len = 0,
+                .filtered_branches = .{},
+                .help_scroll_offset = 0,
+                .commit_list = .{},
+                .commit_selection = 0,
+                .commit_search_query = undefined,
+                .commit_search_len = 0,
+                .filtered_commits = .{},
+                .commits_loaded_count = 0,
+                .commits_loading = false,
+                .selected_commit_for_diff = null,
+                .commit_diff_mode_selection = 0,
+                .session_list = &[_]sessions.SessionInfo{},
+                .session_selection = 0,
+                .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
+                .pending_ctrl_w = false,
+                .status_message = null,
+                .status_message_owned = null,
+                .status_message_time = 0,
+                .show_blame = false,
+                .menu_stats_cached = false,
+                .menu_stats_loading = false,
+                .working_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
+                .staged_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
+                .main_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
+                .default_branch_name = null,
+                .branch_stats_cache = std.AutoHashMap(usize, git.DiffStats).init(allocator),
+                .graphite_detected = false,
+                .graphite_available = false,
+                .graphite_stack = null,
+                .graphite_stack_selection = 0,
+                .model_selection = 0,
+                .model_filter_query = [_]u8{0} ** 256,
+                .model_filter_len = 0,
+                .model_filtered_indices = .{},
+                .configured_agents = null,
+                .agent_selection_idx = 0,
+                .pending_tab_for_selection = null,
+            },
+            .should_quit = false,
+            .should_suspend_for_editor = false,
+            .editor_file_path = null,
+            .editor_line_number = null,
+            .editor_is_prompt_edit = false,
+            .last_ctrl_c = 0,
+            .header_line_buffers = header_buffers,
+            .frame_text_buffer = frame_buffer,
+            .frame_text_used = 0,
+            .syntax_highlighter = syntax_highlighter,
+            .highlight_worker = null,
+            .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
+            .needs_render = false,
+            .needs_async_highlight = false, // No async highlighting in headless mode
+            .tui_server = null,
+            .session_manager = null,
+            .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+            .acp_connect_thread = null,
+            .acp_connect_ctx = null,
+            .connecting_tab_id = null,
+            .in_bracketed_paste = false,
+            .agent_only = false,
+            .tab_manager = null,
+        };
+    }
+
     pub fn deinit(self: *App) void {
         // Clean up highlight worker
         if (self.highlight_worker) |worker| {
@@ -627,8 +790,13 @@ pub const App = struct {
         }
         self.blame_cache.deinit();
         self.syntax_highlighter.deinit();
-        self.vx.deinit(self.allocator, self.tty.writer());
-        self.tty.deinit();
+        // Only deinit vx/tty in TUI mode (not headless)
+        if (self.vx) |*vx| {
+            if (self.tty) |*tty| {
+                vx.deinit(self.allocator, tty.writer());
+                tty.deinit();
+            }
+        }
     }
 
     // =========================================================================
@@ -924,17 +1092,19 @@ pub const App = struct {
     }
 
     pub fn run(self: *App) !void {
-        // Set up the terminal
-        const writer = self.tty.writer();
+        // Set up the terminal (requires TUI mode - vx/tty must be initialized)
+        const tty = &(self.tty orelse return error.HeadlessMode);
+        const vx = &(self.vx orelse return error.HeadlessMode);
+        const writer = tty.writer();
 
-        try self.vx.enterAltScreen(writer);
+        try vx.enterAltScreen(writer);
 
         // Query terminal capabilities (50ms timeout - enough for modern terminals)
-        try self.vx.queryTerminal(writer, 50 * std.time.ns_per_ms);
+        try vx.queryTerminal(writer, 50 * std.time.ns_per_ms);
 
         var loop: vaxis.Loop(Event) = .{
-            .tty = &self.tty,
-            .vaxis = &self.vx,
+            .tty = tty,
+            .vaxis = vx,
         };
         try loop.init();
         try loop.start();
@@ -1014,7 +1184,7 @@ pub const App = struct {
                 loop.stop();
 
                 // Exit alt screen
-                try self.vx.exitAltScreen(self.tty.writer());
+                try vx.exitAltScreen(tty.writer());
 
                 // Open editor (blocks until editor exits)
                 if (self.editor_file_path) |file_path| {
@@ -1050,7 +1220,7 @@ pub const App = struct {
                 }
 
                 // Re-enter alt screen
-                try self.vx.enterAltScreen(self.tty.writer());
+                try vx.enterAltScreen(tty.writer());
 
                 // Restart the event loop
                 try loop.start();
@@ -1121,9 +1291,9 @@ pub const App = struct {
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
-                const win = self.vx.window();
+                const win = vx.window();
                 try self.render(win);
-                try self.vx.render(self.tty.writer());
+                try vx.render(tty.writer());
                 // Don't clear needs_render if we're about to suspend for editor
                 // This prevents blocking on the next pollEvent()
                 if (!self.should_suspend_for_editor) {
@@ -1293,13 +1463,13 @@ pub const App = struct {
         }
 
         // Exit alt screen before returning
-        try self.vx.exitAltScreen(self.tty.writer());
+        try vx.exitAltScreen(tty.writer());
     }
 
     fn handleEvent(self: *App, event: Event) !void {
         switch (event) {
             .key_press => |key| try self.handleKey(key),
-            .winsize => |ws| try self.vx.resize(self.allocator, self.tty.writer(), ws),
+            .winsize => |ws| try self.vx.?.resize(self.allocator, self.tty.?.writer(), ws),
             .paste_start => {
                 self.in_bracketed_paste = true;
                 // Save undo state before bracketed paste begins

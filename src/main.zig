@@ -31,6 +31,8 @@ pub fn main() !void {
     if (args.len >= 2) {
         if (std.mem.eql(u8, args[1], "session")) {
             return cli.session.run(allocator, args);
+        } else if (std.mem.eql(u8, args[1], "print")) {
+            return cli.print.run(allocator, args);
         } else if (std.mem.eql(u8, args[1], "sessions")) {
             // Legacy: `skim sessions` -> `skim session list`
             return runSessionsCommand(allocator, args);
@@ -457,6 +459,7 @@ fn printHelp(_: std.mem.Allocator) !void {
         \\
         \\SUBCOMMANDS:
         \\    diff               Review diffs (same as running skim directly)
+        \\    print              Pretty-print diffs to stdout with colors
         \\    sessions           List running skim sessions
         \\    context            Get diff context from a running session
         \\    comment            Manage comments in a running session
