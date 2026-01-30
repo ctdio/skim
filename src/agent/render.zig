@@ -2010,7 +2010,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     const visible_count = @min(filtered_count, MAX_SLASH_MENU_VISIBLE);
     const max_scroll = if (filtered_count > visible_count) filtered_count - visible_count else 0;
     const scroll_offset = @min(agent_state.slash_menu.scroll_offset, max_scroll);
-    const menu_height = visible_count + 1 + (MENU_PADDING * 2); // +1 for title row + vertical padding
+    const menu_height = visible_count + 1; // title row + items
     const menu_width = @min(SLASH_MENU_WIDTH, win.width -| 4); // fixed width, capped to window
 
     // Position menu just above the input area (bottom-anchored)
