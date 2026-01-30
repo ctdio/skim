@@ -49,6 +49,9 @@ pub const LineRecord = struct {
 pub const LineMap = struct {
     records: []LineRecord,
     allocator: Allocator,
+    /// Cached file header line numbers for O(1) lookup
+    /// Index is file_idx, value is global line number of that file's header
+    file_header_lines: []usize,
 
     /// Hunk view mode for filtering lines
     pub const HunkViewMode = enum {
@@ -77,10 +80,17 @@ pub const LineMap = struct {
         var records: std.ArrayList(LineRecord) = .{};
         errdefer records.deinit(allocator);
 
+        // Pre-allocate file header cache
+        const file_header_lines = try allocator.alloc(usize, files.len);
+        errdefer allocator.free(file_header_lines);
+
         var global_line: usize = 0;
 
         for (files, 0..) |*file, file_idx| {
             const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+            // Cache the file header line number for O(1) lookup
+            file_header_lines[file_idx] = global_line;
 
             // Add file header line
             try records.append(allocator, .{
@@ -194,10 +204,12 @@ pub const LineMap = struct {
         return LineMap{
             .records = try records.toOwnedSlice(allocator),
             .allocator = allocator,
+            .file_header_lines = file_header_lines,
         };
     }
 
     pub fn deinit(self: *LineMap) void {
+        self.allocator.free(self.file_header_lines);
         self.allocator.free(self.records);
     }
 
@@ -212,14 +224,10 @@ pub const LineMap = struct {
         return &self.records[global_line];
     }
 
-    /// Find the global line number of a file's header
+    /// Find the global line number of a file's header (O(1) cached lookup)
     pub fn getFileHeaderLine(self: *const LineMap, file_idx: usize) ?usize {
-        for (self.records) |*record| {
-            if (record.file_idx == file_idx and record.line_type == .file_header) {
-                return record.global_line;
-            }
-        }
-        return null;
+        if (file_idx >= self.file_header_lines.len) return null;
+        return self.file_header_lines[file_idx];
     }
 
     /// Get the file index that contains a given global line
