@@ -352,6 +352,59 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
     // Graphite detection happens lazily when user selects it
     const menu_items_count: usize = 8;
 
+    // If waiting for second key in Ctrl+w chord (window navigation)
+    if (app.state.pending_ctrl_w) {
+        app.state.pending_ctrl_w = false;
+        // ESC cancels pending Ctrl+w
+        if (key.codepoint == 27) { // ESC
+            return;
+        }
+        // Support both Ctrl+w l and Ctrl+w Ctrl+l (vim-style)
+        const effective_key: u21 = blk: {
+            if (key.codepoint == 8 or key.codepoint == 127) break :blk 'h'; // Ctrl+h / backspace
+            if (key.codepoint == 12) break :blk 'l'; // Ctrl+l as control char
+            if (key.codepoint == 23) break :blk 'w'; // Ctrl+w as control char
+            if (key.mods.ctrl) {
+                if (key.codepoint == 'h') break :blk 'h';
+                if (key.codepoint == 'l') break :blk 'l';
+                if (key.codepoint == 'w') break :blk 'w';
+            }
+            break :blk key.codepoint;
+        };
+
+        const agent_panel_visible = app.isAgentPanelVisible();
+        const agent_on_left = app.getAgentPanelSide() == .left;
+
+        switch (effective_key) {
+            'l' => {
+                if (agent_panel_visible and !agent_on_left) {
+                    app.mode = .agent;
+                    app.needs_render = true;
+                }
+            },
+            'h' => {
+                if (agent_panel_visible and agent_on_left) {
+                    app.mode = .agent;
+                    app.needs_render = true;
+                }
+            },
+            'w' => {
+                if (agent_panel_visible) {
+                    app.mode = .agent;
+                    app.needs_render = true;
+                }
+            },
+            'o' => {
+                if (app.tab_manager) |*tm| {
+                    tm.toggleFullScreen();
+                    app.needs_render = true;
+                }
+            },
+            else => {},
+        }
+        return;
+    }
+
     // Handle Ctrl+key combinations
     if (key.mods.ctrl) {
         switch (key.codepoint) {
@@ -366,6 +419,11 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
             'e' => {
                 // Ctrl+E: Toggle agent panel
                 try app.toggleAgentPanel();
+                return;
+            },
+            'w' => {
+                // Start Ctrl+w chord for window navigation
+                app.state.pending_ctrl_w = true;
                 return;
             },
             else => {},
