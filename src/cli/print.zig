@@ -15,6 +15,31 @@ const state_helpers = @import("../state.zig").StateHelpers;
 const Allocator = std.mem.Allocator;
 const UnifiedRenderer = render_unified.UnifiedRenderer;
 
+const DEFAULT_WIDTH: u16 = 120;
+
+/// Attempt to detect terminal width using ioctl.
+/// Returns null if not a TTY or detection fails.
+fn getTerminalWidth() ?u16 {
+    // Try stderr first (often remains a TTY when stdout is piped)
+    const stderr = std.fs.File.stderr();
+    if (!std.posix.isatty(stderr.handle)) return null;
+
+    var ws: std.posix.winsize = undefined;
+    const result = std.posix.system.ioctl(stderr.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));
+    if (result == 0 and ws.col > 0) {
+        return ws.col;
+    }
+    return null;
+}
+
+/// Resolve the width to use for rendering.
+/// Priority: explicit config > terminal detection > default
+fn resolveWidth(config_width: ?u16) u16 {
+    if (config_width) |w| return w;
+    if (getTerminalWidth()) |w| return w;
+    return DEFAULT_WIDTH;
+}
+
 pub fn run(allocator: Allocator, args: []const []const u8) !void {
     const config = try parseArgs(allocator, args);
     defer config.deinit(allocator);
@@ -36,9 +61,11 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
     }
     defer if (stdin_content) |content| allocator.free(content);
 
+    const width = resolveWidth(config.width);
+
     // For stdin mode, we need special handling (parse directly)
     if (stdin_content) |content| {
-        try renderStdinDiff(allocator, content, config.max_lines);
+        try renderStdinDiff(allocator, content, config.max_lines, width);
         return;
     }
 
@@ -58,10 +85,10 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
     }
 
     // Render to vaxis screen and convert to ANSI
-    try renderAndOutput(allocator, &app, config.max_lines);
+    try renderAndOutput(allocator, &app, config.max_lines, width);
 }
 
-fn renderStdinDiff(allocator: Allocator, content: []const u8, max_lines: ?usize) !void {
+fn renderStdinDiff(allocator: Allocator, content: []const u8, max_lines: ?usize, width: u16) !void {
     // Parse diff from stdin
     const clean_text = try parser.stripAnsi(allocator, content);
     defer allocator.free(clean_text);
@@ -95,19 +122,19 @@ fn renderStdinDiff(allocator: Allocator, content: []const u8, max_lines: ?usize)
     const line_map_mod = @import("../line_map.zig");
     app.state.line_map = try line_map_mod.LineMap.build(allocator, files, &app.state.comment_store, .all, true);
 
-    try renderAndOutput(allocator, &app, max_lines);
+    try renderAndOutput(allocator, &app, max_lines, width);
 
     // Prevent double-free - mark as stolen
     app.state.files = &[_]parser.FileDiff{};
 }
 
-fn renderAndOutput(allocator: Allocator, app: *App, max_diff_lines: ?usize) !void {
+fn renderAndOutput(allocator: Allocator, app: *App, max_diff_lines: ?usize, width: u16) !void {
     // Apply syntax highlighting synchronously (print mode doesn't need async)
     applySyntaxHighlighting(allocator, app.state.files, &app.syntax_highlighter);
 
     // Count actual diff lines (lines in hunks, not headers/spacers)
     const total_diff_lines = countDiffLines(app.state.files);
-    
+
     // Calculate render height based on diff line limit
     const total_render_lines = app.state.line_map.records.len;
     const render_limit = if (max_diff_lines) |limit|
@@ -118,7 +145,6 @@ fn renderAndOutput(allocator: Allocator, app: *App, max_diff_lines: ?usize) !voi
     const truncated = total_diff_lines > (max_diff_lines orelse total_diff_lines);
 
     const height: u16 = @intCast(@min(lines_to_render, 10000));
-    const width: u16 = 120; // Reasonable default width
 
     // Create test context (mock vaxis screen)
     var ctx = try harness.createTestContext(allocator, width, height);
@@ -219,6 +245,7 @@ fn calcRenderLinesForDiffLimit(line_map: @import("../line_map.zig").LineMap, dif
 const Config = struct {
     diff_source: git.DiffSource,
     max_lines: ?usize, // null means no limit
+    width: ?u16, // null means auto-detect from terminal
 
     fn deinit(self: *const Config, allocator: Allocator) void {
         switch (self.diff_source) {
@@ -238,6 +265,7 @@ const DEFAULT_MAX_LINES: usize = 5000;
 fn parseArgs(allocator: Allocator, args: []const []const u8) !Config {
     var staged = false;
     var max_lines: ?usize = DEFAULT_MAX_LINES;
+    var width: ?u16 = null;
     var positional_args: std.ArrayList([]const u8) = .{};
     defer positional_args.deinit(allocator);
 
@@ -264,6 +292,23 @@ fn parseArgs(allocator: Allocator, args: []const []const u8) !Config {
             }
             max_lines = std.fmt.parseInt(usize, args[i], 10) catch {
                 std.debug.print("Invalid --limit value: {s}\n", .{args[i]});
+                std.process.exit(1);
+            };
+        } else if (std.mem.startsWith(u8, arg, "--width=") or std.mem.startsWith(u8, arg, "-w=")) {
+            const prefix_len = if (std.mem.startsWith(u8, arg, "--width=")) "--width=".len else "-w=".len;
+            const value = arg[prefix_len..];
+            width = std.fmt.parseInt(u16, value, 10) catch {
+                std.debug.print("Invalid --width value: {s}\n", .{value});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "--width") or std.mem.eql(u8, arg, "-w")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("--width requires a value\n", .{});
+                std.process.exit(1);
+            }
+            width = std.fmt.parseInt(u16, args[i], 10) catch {
+                std.debug.print("Invalid --width value: {s}\n", .{args[i]});
                 std.process.exit(1);
             };
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -311,7 +356,7 @@ fn parseArgs(allocator: Allocator, args: []const []const u8) !Config {
         std.process.exit(1);
     };
 
-    return Config{ .diff_source = diff_source, .max_lines = max_lines };
+    return Config{ .diff_source = diff_source, .max_lines = max_lines, .width = width };
 }
 
 fn readStdinIfPiped(allocator: Allocator) !?[]const u8 {
@@ -342,6 +387,7 @@ fn printHelp() !void {
         \\    --staged, --cached    Show staged changes
         \\    -n, --limit <N>       Max lines to output (default: 5000)
         \\    --no-limit            Remove line limit (use with caution)
+        \\    -w, --width <N>       Output width (default: auto-detect, fallback: 120)
         \\    -h, --help            Print this help message
         \\
         \\EXAMPLES:
@@ -350,6 +396,7 @@ fn printHelp() !void {
         \\    skim print main..feature      # Compare branches
         \\    skim print HEAD~5             # Last 5 commits
         \\    skim print --no-limit HEAD~20 # Full output, no truncation
+        \\    skim print -w 200             # Force 200 column width
         \\    git diff | skim print         # Pipe diff from git
         \\    skim print | less -R          # Pipe to less with colors
         \\
