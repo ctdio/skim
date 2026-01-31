@@ -3341,8 +3341,7 @@ pub const App = struct {
             if (show_agent_panel) {
                 const panel_side = self.getAgentPanelSide();
                 const panel_width = win.width * 3 / 10; // 30% for agent panel
-                const divider_width: usize = 1;
-                const diff_width = win.width - panel_width - divider_width;
+                const diff_width = win.width - panel_width;
 
                 if (panel_side == .left) {
                     // Agent panel on left
@@ -3354,18 +3353,9 @@ pub const App = struct {
                     });
                     try agent.renderAgentPanel(self, agent_win);
 
-                    // Vertical divider
-                    const divider_win = win.child(.{
-                        .x_off = @intCast(panel_width),
-                        .y_off = Layout.header_height,
-                        .width = @intCast(divider_width),
-                        .height = @intCast(content_height),
-                    });
-                    try UI.renderVerticalDivider(divider_win);
-
                     // Empty menu on right
                     const content_win = win.child(.{
-                        .x_off = @intCast(panel_width + divider_width),
+                        .x_off = @intCast(panel_width),
                         .y_off = 0,
                         .width = @intCast(diff_width),
                         .height = @intCast(win.height),
@@ -3399,18 +3389,9 @@ pub const App = struct {
                         try UI.renderEmptyMenu(self, content_win);
                     }
 
-                    // Vertical divider
-                    const divider_win = win.child(.{
-                        .x_off = @intCast(diff_width),
-                        .y_off = Layout.header_height,
-                        .width = @intCast(divider_width),
-                        .height = @intCast(content_height),
-                    });
-                    try UI.renderVerticalDivider(divider_win);
-
                     // Agent panel on right
                     const agent_win = win.child(.{
-                        .x_off = @intCast(diff_width + divider_width),
+                        .x_off = @intCast(diff_width),
                         .y_off = Layout.header_height,
                         .width = @intCast(panel_width),
                         .height = @intCast(content_height),
@@ -3436,8 +3417,7 @@ pub const App = struct {
             if (show_agent_panel) {
                 const panel_side = self.getAgentPanelSide();
                 const panel_width = win.width * 3 / 10; // 30% for agent panel
-                const divider_width: usize = 1;
-                const diff_width = win.width - panel_width - divider_width;
+                const diff_width = win.width - panel_width;
 
                 if (panel_side == .left) {
                     // Agent panel on left (starts at y=0, full height including header area)
@@ -3449,18 +3429,9 @@ pub const App = struct {
                     });
                     try agent.renderAgentPanel(self, agent_win);
 
-                    // Vertical divider (full height)
-                    const divider_win = win.child(.{
-                        .x_off = @intCast(panel_width),
-                        .y_off = 0,
-                        .width = @intCast(divider_width),
-                        .height = @intCast(content_height + Layout.header_height),
-                    });
-                    try UI.renderVerticalDivider(divider_win);
-
                     // Header above diff content (on right side)
                     const header_win = win.child(.{
-                        .x_off = @intCast(panel_width + divider_width),
+                        .x_off = @intCast(panel_width),
                         .y_off = 0,
                         .width = @intCast(diff_width),
                         .height = @intCast(Layout.header_height),
@@ -3469,7 +3440,7 @@ pub const App = struct {
 
                     // Diff content on right (below header)
                     const content_win = win.child(.{
-                        .x_off = @intCast(panel_width + divider_width),
+                        .x_off = @intCast(panel_width),
                         .y_off = Layout.header_height,
                         .width = @intCast(diff_width),
                         .height = @intCast(content_height),
@@ -3495,18 +3466,9 @@ pub const App = struct {
                     });
                     try self.renderContent(content_win);
 
-                    // Vertical divider (full height)
-                    const divider_win = win.child(.{
-                        .x_off = @intCast(diff_width),
-                        .y_off = 0,
-                        .width = @intCast(divider_width),
-                        .height = @intCast(content_height + Layout.header_height),
-                    });
-                    try UI.renderVerticalDivider(divider_win);
-
                     // Agent panel on right (starts at y=0, full height including header area)
                     const agent_win = win.child(.{
-                        .x_off = @intCast(diff_width + divider_width),
+                        .x_off = @intCast(diff_width),
                         .y_off = 0,
                         .width = @intCast(panel_width),
                         .height = @intCast(content_height + Layout.header_height),
