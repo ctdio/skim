@@ -81,13 +81,13 @@ pub const SideBySideRenderer = struct {
             // Render based on line type
             switch (record.line_type) {
                 .file_header => {
-                    const rows_used = try renderFileHeader(app, win, file, row, left_content_width, right_content_width, gutter_width, is_cursor);
+                    const rows_used = try renderFileHeader(app, win, file, file_idx, row, left_content_width, right_content_width, gutter_width, is_cursor);
                     row += rows_used;
                 },
                 .hunk_header => |hunk_info| {
                     const hunk = &file.hunks[hunk_info.hunk_idx];
                     const is_in_visual = app.isLineInVisualSelection(global_line);
-                    const rows_used = try renderHunkHeader(app, win, hunk.*, row, left_content_width, right_content_width, gutter_width, is_cursor, is_in_visual);
+                    const rows_used = try renderHunkHeader(app, win, hunk.*, file_idx, hunk_info.hunk_idx, row, left_content_width, right_content_width, gutter_width, is_cursor, is_in_visual);
                     row += rows_used;
                 },
                 .code_line => |code_info| {
@@ -239,6 +239,7 @@ pub const SideBySideRenderer = struct {
         app: *App,
         win: vaxis.Window,
         file: *const parser.FileDiff,
+        file_idx: usize,
         row: usize,
         _: usize, // left_width
         _: usize, // right_width
@@ -247,7 +248,7 @@ pub const SideBySideRenderer = struct {
     ) !usize {
         // For now, use simple file header similar to unified mode
         // TODO: Implement proper side-by-side file header if needed
-        const rows_used = try FileHeader.render(app, win, file, row, is_cursor);
+        const rows_used = try FileHeader.render(app, win, file, file_idx, row, is_cursor);
         return rows_used;
     }
 
@@ -255,6 +256,8 @@ pub const SideBySideRenderer = struct {
         app: *App,
         win: vaxis.Window,
         hunk: parser.Hunk,
+        file_idx: usize,
+        hunk_idx: usize,
         row: usize,
         left_width: usize,
         right_width: usize,
@@ -264,9 +267,21 @@ pub const SideBySideRenderer = struct {
     ) !usize {
         _ = right_width; // Same text on both sides, so right_width not needed
 
-        // Build header text using shared utility
+        const is_folded = app.isHunkFolded(file_idx, hunk_idx);
+
+        // Build header text with fold indicator using shared utility
         var buf: [256]u8 = undefined;
-        const header_text = try RenderUtils.buildHunkHeaderText(hunk, &buf);
+        const base_header = try RenderUtils.buildHunkHeaderText(hunk, &buf);
+
+        // Add fold indicator prefix and line count suffix for folded hunks
+        var header_buf: [512]u8 = undefined;
+        const fold_indicator = if (is_folded) "▶ " else "▼ ";
+        const header_text = if (is_folded) blk: {
+            const line_count = hunk.lines.len;
+            break :blk std.fmt.bufPrint(&header_buf, "{s}{s}  [{d} lines]", .{ fold_indicator, base_header, line_count }) catch base_header;
+        } else blk: {
+            break :blk std.fmt.bufPrint(&header_buf, "{s}{s}", .{ fold_indicator, base_header }) catch base_header;
+        };
 
         // Calculate number of rows needed for wrapping (use display width, not bytes)
         const text_display_width = RenderUtils.displayWidth(header_text);

@@ -13,21 +13,60 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // If waiting for second z for zz (center cursor)
+    // If waiting for second z for zz (center cursor) or fold commands (za/zc/zo/zM/zR)
     if (app.state.pending_z) {
         app.state.pending_z = false;
         // ESC cancels pending z
         if (key.codepoint == 27) { // ESC
             return;
         }
-        // If second z, center the viewport on cursor (like vim's zz)
-        if (key.codepoint == 'z') {
-            Navigation.centerViewportOnCursor(app);
-            app.state.cursor_column = 0;
-            app.updateCurrentFileAndTriggerHighlighting();
-            return;
+        switch (key.codepoint) {
+            'z' => {
+                // zz - center the viewport on cursor
+                Navigation.centerViewportOnCursor(app);
+                app.state.cursor_column = 0;
+                app.updateCurrentFileAndTriggerHighlighting();
+                return;
+            },
+            'a' => {
+                // za - toggle fold at cursor
+                try app.toggleFoldUnderCursor();
+                return;
+            },
+            'c' => {
+                // zc - close fold at cursor
+                try app.closeFoldUnderCursor();
+                return;
+            },
+            'o' => {
+                // zo - open fold at cursor (hunk level)
+                try app.openFoldUnderCursor();
+                return;
+            },
+            'C' => {
+                // zC - close file fold (fold entire file from anywhere)
+                try app.closeFileFoldUnderCursor();
+                return;
+            },
+            'O' => {
+                // zO - open file fold (unfold entire file from anywhere)
+                try app.openFileFoldUnderCursor();
+                return;
+            },
+            'M' => {
+                // zM - close all folds
+                try app.closeAllFoldsAndRebuild();
+                return;
+            },
+            'R' => {
+                // zR - open all folds
+                try app.openAllFoldsAndRebuild();
+                return;
+            },
+            else => {
+                // Any other key cancels the pending z, but still processes the key below
+            },
         }
-        // Any other key cancels the pending z, but still processes the key below
     }
 
     // If waiting for second character after g (like gg for top, gY for yank to agent)

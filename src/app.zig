@@ -69,6 +69,21 @@ const HunkKey = struct {
     hunk_idx: usize,
 };
 
+/// Packed key for fold state HashMap
+/// Bit 63: 0 = file fold, 1 = hunk fold
+/// Bits 0-30: file_idx (for files) or file_idx (for hunks)
+/// Bits 31-62: hunk_idx (for hunks, 0 for files)
+pub const FoldKey = struct {
+    pub fn fileKey(file_idx: usize) u64 {
+        return @as(u64, @intCast(file_idx)); // Bit 63 = 0 indicates file
+    }
+
+    pub fn hunkKey(file_idx: usize, hunk_idx: usize) u64 {
+        // Set bit 63 to indicate hunk, pack file_idx in low bits, hunk_idx in mid bits
+        return (@as(u64, 1) << 63) | (@as(u64, @intCast(hunk_idx)) << 31) | @as(u64, @intCast(file_idx));
+    }
+};
+
 /// Anchor for preserving viewport position across LineMap rebuilds.
 /// Captures position relative to a stable reference (file/hunk header).
 const ViewportAnchor = struct {
@@ -222,6 +237,7 @@ pub const App = struct {
         session_selection: usize, // Selected session index
 
         expanded_comments: std.AutoHashMap(usize, void), // Set of expanded comment indices
+        collapsed_folds: std.AutoHashMap(u64, void), // Set of collapsed file/hunk folds (keyed by FoldKey)
 
         pending_ctrl_w: bool, // Waiting for second key in Ctrl+w chord
 
@@ -397,7 +413,8 @@ pub const App = struct {
         errdefer comment_store.deinit();
 
         // Build the line map (default to showing all lines, filtering enabled for unified view)
-        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true);
+        // Note: collapsed_folds is null during init as it hasn't been initialized yet
+        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null);
         errdefer built_line_map.deinit();
 
         // Deep copy diff_source - App takes ownership of its own copy
@@ -479,6 +496,7 @@ pub const App = struct {
                 .session_list = &[_]sessions.SessionInfo{},
                 .session_selection = 0,
                 .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
+                .collapsed_folds = std.AutoHashMap(u64, void).init(allocator),
                 .pending_ctrl_w = false,
                 .status_message = null,
                 .status_message_owned = null,
@@ -565,7 +583,7 @@ pub const App = struct {
         var comment_store = comments.CommentStore.init(allocator);
         errdefer comment_store.deinit();
 
-        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true);
+        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null);
         errdefer built_line_map.deinit();
 
         // Deep copy diff_source
@@ -646,6 +664,7 @@ pub const App = struct {
                 .session_list = &[_]sessions.SessionInfo{},
                 .session_selection = 0,
                 .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
+                .collapsed_folds = std.AutoHashMap(u64, void).init(allocator),
                 .pending_ctrl_w = false,
                 .status_message = null,
                 .status_message_owned = null,
@@ -749,6 +768,7 @@ pub const App = struct {
             commit.deinit(self.allocator);
         }
         self.state.expanded_comments.deinit();
+        self.state.collapsed_folds.deinit();
         self.state.branch_stats_cache.deinit();
         self.state.model_filtered_indices.deinit(self.allocator);
         // Clean up cached default branch name
@@ -996,8 +1016,8 @@ pub const App = struct {
         self.allocator.free(self.state.files);
         self.state.line_map.deinit();
 
-        // Rebuild line map with new files (preserve hunk view mode)
-        const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+        // Rebuild line map with new files (preserve hunk view mode and fold state)
+        const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
         errdefer {
             // If LineMap.build failed, clean up new_files since old state is already freed
             for (new_files) |*file| {
@@ -1700,6 +1720,7 @@ pub const App = struct {
             &self.state.comment_store,
             self.convertHunkViewMode(),
             self.shouldApplyHunkFiltering(),
+            &self.state.collapsed_folds,
         ) catch |err| {
             std.log.err("Failed to rebuild LineMap on view toggle: {any}", .{err});
             return;
@@ -1810,7 +1831,7 @@ pub const App = struct {
 
         // Rebuild LineMap
         self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
 
         // Restore positions from anchor
         _ = self.restoreViewportFromAnchor(anchor);
@@ -1828,7 +1849,7 @@ pub const App = struct {
 
         // Rebuild LineMap to reflect new filtering
         self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
 
         // Restore positions from anchor
         _ = self.restoreViewportFromAnchor(anchor);
@@ -2259,7 +2280,7 @@ pub const App = struct {
 
         // Rebuild LineMap since comment count changed
         self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
 
         // Move cursor to the saved comment so it can be easily yanked
         if (self.state.line_map.findLineByCommentIdx(saved_comment_idx)) |comment_line| {
@@ -2355,7 +2376,7 @@ pub const App = struct {
 
                 // Rebuild LineMap since comment count changed
                 self.state.line_map.deinit();
-                self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+                self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
 
                 const total_lines = self.getTotalGlobalLines();
                 if (total_lines == 0) {
@@ -2441,7 +2462,7 @@ pub const App = struct {
 
         // Rebuild LineMap since comment count changed
         self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering());
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
 
         // Adjust scroll and cursor to account for removed comments above them
         const total_lines = self.getTotalGlobalLines();
@@ -3252,6 +3273,296 @@ pub const App = struct {
         } else {
             self.state.expanded_comments.put(comment_idx, {}) catch {};
         }
+    }
+
+    // Check if a file is folded (collapsed)
+    pub fn isFileFolded(self: *App, file_idx: usize) bool {
+        return self.state.collapsed_folds.contains(FoldKey.fileKey(file_idx));
+    }
+
+    // Check if a hunk is folded (collapsed)
+    pub fn isHunkFolded(self: *App, file_idx: usize, hunk_idx: usize) bool {
+        // If file is folded, hunk is implicitly folded
+        if (self.isFileFolded(file_idx)) return true;
+        return self.state.collapsed_folds.contains(FoldKey.hunkKey(file_idx, hunk_idx));
+    }
+
+    // Toggle file fold state
+    pub fn toggleFileFold(self: *App, file_idx: usize) void {
+        const key = FoldKey.fileKey(file_idx);
+        if (self.state.collapsed_folds.contains(key)) {
+            _ = self.state.collapsed_folds.remove(key);
+        } else {
+            self.state.collapsed_folds.put(key, {}) catch {};
+        }
+    }
+
+    // Toggle hunk fold state
+    pub fn toggleHunkFold(self: *App, file_idx: usize, hunk_idx: usize) void {
+        const key = FoldKey.hunkKey(file_idx, hunk_idx);
+        if (self.state.collapsed_folds.contains(key)) {
+            _ = self.state.collapsed_folds.remove(key);
+        } else {
+            self.state.collapsed_folds.put(key, {}) catch {};
+        }
+    }
+
+    // Close (fold) a file
+    pub fn closeFileFold(self: *App, file_idx: usize) void {
+        self.state.collapsed_folds.put(FoldKey.fileKey(file_idx), {}) catch {};
+    }
+
+    // Close (fold) a hunk
+    pub fn closeHunkFold(self: *App, file_idx: usize, hunk_idx: usize) void {
+        self.state.collapsed_folds.put(FoldKey.hunkKey(file_idx, hunk_idx), {}) catch {};
+    }
+
+    // Open (unfold) a file
+    pub fn openFileFold(self: *App, file_idx: usize) void {
+        _ = self.state.collapsed_folds.remove(FoldKey.fileKey(file_idx));
+    }
+
+    // Open (unfold) a hunk
+    pub fn openHunkFold(self: *App, file_idx: usize, hunk_idx: usize) void {
+        _ = self.state.collapsed_folds.remove(FoldKey.hunkKey(file_idx, hunk_idx));
+    }
+
+    // Close all folds (fold all files and hunks)
+    pub fn closeAllFolds(self: *App) void {
+        for (self.state.files, 0..) |file, file_idx| {
+            self.state.collapsed_folds.put(FoldKey.fileKey(file_idx), {}) catch {};
+            for (file.hunks, 0..) |_, hunk_idx| {
+                self.state.collapsed_folds.put(FoldKey.hunkKey(file_idx, hunk_idx), {}) catch {};
+            }
+        }
+    }
+
+    // Open all folds (unfold everything)
+    pub fn openAllFolds(self: *App) void {
+        self.state.collapsed_folds.clearRetainingCapacity();
+    }
+
+    // Count total lines in a hunk (for fold indicator)
+    pub fn getHunkLineCount(self: *App, file_idx: usize, hunk_idx: usize) usize {
+        if (file_idx >= self.state.files.len) return 0;
+        const file = &self.state.files[file_idx];
+        if (hunk_idx >= file.hunks.len) return 0;
+        return file.hunks[hunk_idx].lines.len;
+    }
+
+    // Count total lines in a file (for fold indicator)
+    pub fn getFileLineCount(self: *App, file_idx: usize) usize {
+        if (file_idx >= self.state.files.len) return 0;
+        const file = &self.state.files[file_idx];
+        var count: usize = 0;
+        for (file.hunks) |hunk| {
+            count += hunk.lines.len;
+        }
+        return count;
+    }
+
+    // Toggle fold at cursor position (file header -> fold file, hunk/code -> fold hunk)
+    pub fn toggleFoldUnderCursor(self: *App) !void {
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
+        const file_idx = record.file_idx;
+
+        // Track which fold was toggled for cursor positioning
+        var target_hunk_idx: ?usize = null;
+
+        switch (record.line_type) {
+            .file_header => {
+                self.toggleFileFold(file_idx);
+            },
+            .hunk_header => |hunk_info| {
+                self.toggleHunkFold(file_idx, hunk_info.hunk_idx);
+                target_hunk_idx = hunk_info.hunk_idx;
+            },
+            .code_line => |code_info| {
+                self.toggleHunkFold(file_idx, code_info.hunk_idx);
+                target_hunk_idx = code_info.hunk_idx;
+            },
+            .comment_line => |comment_info| {
+                self.toggleHunkFold(file_idx, comment_info.parent_hunk_idx);
+                target_hunk_idx = comment_info.parent_hunk_idx;
+            },
+            .spacer => {
+                // On spacer, no fold action
+                return;
+            },
+        }
+
+        // Rebuild LineMap and move cursor to fold header
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
+        self.moveCursorToFoldHeader(file_idx, target_hunk_idx);
+        self.needs_render = true;
+    }
+
+    // Close fold at cursor position
+    pub fn closeFoldUnderCursor(self: *App) !void {
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
+        const file_idx = record.file_idx;
+
+        // Track which fold was closed for cursor positioning
+        var target_hunk_idx: ?usize = null;
+
+        switch (record.line_type) {
+            .file_header => {
+                self.closeFileFold(file_idx);
+            },
+            .hunk_header => |hunk_info| {
+                self.closeHunkFold(file_idx, hunk_info.hunk_idx);
+                target_hunk_idx = hunk_info.hunk_idx;
+            },
+            .code_line => |code_info| {
+                self.closeHunkFold(file_idx, code_info.hunk_idx);
+                target_hunk_idx = code_info.hunk_idx;
+            },
+            .comment_line => |comment_info| {
+                self.closeHunkFold(file_idx, comment_info.parent_hunk_idx);
+                target_hunk_idx = comment_info.parent_hunk_idx;
+            },
+            .spacer => {
+                return;
+            },
+        }
+
+        // Rebuild LineMap and move cursor to fold header
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
+        self.moveCursorToFoldHeader(file_idx, target_hunk_idx);
+        self.needs_render = true;
+    }
+
+    // Open fold at cursor position
+    pub fn openFoldUnderCursor(self: *App) !void {
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
+        const file_idx = record.file_idx;
+
+        // Track which fold was opened for cursor positioning
+        var target_hunk_idx: ?usize = null;
+
+        switch (record.line_type) {
+            .file_header => {
+                self.openFileFold(file_idx);
+            },
+            .hunk_header => |hunk_info| {
+                self.openHunkFold(file_idx, hunk_info.hunk_idx);
+                target_hunk_idx = hunk_info.hunk_idx;
+            },
+            .code_line => |code_info| {
+                self.openHunkFold(file_idx, code_info.hunk_idx);
+                target_hunk_idx = code_info.hunk_idx;
+            },
+            .comment_line => |comment_info| {
+                self.openHunkFold(file_idx, comment_info.parent_hunk_idx);
+                target_hunk_idx = comment_info.parent_hunk_idx;
+            },
+            .spacer => {
+                return;
+            },
+        }
+
+        // Rebuild LineMap and move cursor to fold header
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
+        self.moveCursorToFoldHeader(file_idx, target_hunk_idx);
+        self.needs_render = true;
+    }
+
+    // Close all folds and rebuild LineMap
+    pub fn closeAllFoldsAndRebuild(self: *App) !void {
+        // Capture anchor before closing all
+        const anchor = self.captureViewportAnchor(self.state.global_cursor_line);
+
+        self.closeAllFolds();
+
+        // Rebuild LineMap
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
+        _ = self.restoreViewportFromAnchor(anchor);
+        self.needs_render = true;
+    }
+
+    // Open all folds and rebuild LineMap
+    pub fn openAllFoldsAndRebuild(self: *App) !void {
+        // Capture anchor before opening all
+        const anchor = self.captureViewportAnchor(self.state.global_cursor_line);
+
+        self.openAllFolds();
+
+        // Rebuild LineMap
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
+        _ = self.restoreViewportFromAnchor(anchor);
+        self.needs_render = true;
+    }
+
+    // Move cursor to the fold header (file or hunk) after folding
+    fn moveCursorToFoldHeader(self: *App, file_idx: usize, hunk_idx: ?usize) void {
+        // Search for the header line in the rebuilt LineMap
+        for (0..self.state.line_map.records.len) |line_idx| {
+            const record = self.state.line_map.getLineRecord(line_idx) orelse continue;
+            if (record.file_idx != file_idx) continue;
+
+            if (hunk_idx) |h_idx| {
+                // Looking for hunk header
+                switch (record.line_type) {
+                    .hunk_header => |hunk_info| {
+                        if (hunk_info.hunk_idx == h_idx) {
+                            self.state.global_cursor_line = line_idx;
+                            Navigation.ensureCursorVisible(self, true);
+                            return;
+                        }
+                    },
+                    else => {},
+                }
+            } else {
+                // Looking for file header
+                switch (record.line_type) {
+                    .file_header => {
+                        self.state.global_cursor_line = line_idx;
+                        Navigation.ensureCursorVisible(self, true);
+                        return;
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    // Close the file containing the cursor (zC - fold entire file from anywhere)
+    pub fn closeFileFoldUnderCursor(self: *App) !void {
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
+        const file_idx = record.file_idx;
+
+        // Close the file fold
+        self.closeFileFold(file_idx);
+
+        // Rebuild LineMap
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
+
+        // Move cursor to the file header
+        self.moveCursorToFoldHeader(file_idx, null);
+        self.needs_render = true;
+    }
+
+    // Open the file containing the cursor (zO - unfold entire file from anywhere)
+    pub fn openFileFoldUnderCursor(self: *App) !void {
+        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
+        const file_idx = record.file_idx;
+
+        // Open the file fold
+        self.openFileFold(file_idx);
+
+        // Rebuild LineMap
+        self.state.line_map.deinit();
+        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
+
+        // Move cursor to the file header
+        self.moveCursorToFoldHeader(file_idx, null);
+        self.needs_render = true;
     }
 
     pub fn yankVisualSelection(self: *App) !void {
@@ -4173,6 +4484,7 @@ pub const App = struct {
             &self.state.comment_store,
             self.convertHunkViewMode(),
             self.shouldApplyHunkFiltering(),
+            &self.state.collapsed_folds,
         ) catch {
             return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
         };
@@ -4243,6 +4555,7 @@ pub const App = struct {
             &self.state.comment_store,
             self.convertHunkViewMode(),
             self.shouldApplyHunkFiltering(),
+            &self.state.collapsed_folds,
         ) catch {
             return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
         };

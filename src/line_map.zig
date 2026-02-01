@@ -69,6 +69,18 @@ pub const LineMap = struct {
         }
     };
 
+    /// Packed key for fold state HashMap (imported from app.zig pattern)
+    /// Bit 63: 0 = file fold, 1 = hunk fold
+    pub const FoldKey = struct {
+        pub fn fileKey(file_idx: usize) u64 {
+            return @as(u64, @intCast(file_idx));
+        }
+
+        pub fn hunkKey(file_idx: usize, hunk_idx: usize) u64 {
+            return (@as(u64, 1) << 63) | (@as(u64, @intCast(hunk_idx)) << 31) | @as(u64, @intCast(file_idx));
+        }
+    };
+
     /// Build a line map from files and comments
     pub fn build(
         allocator: Allocator,
@@ -76,6 +88,7 @@ pub const LineMap = struct {
         comment_store: *comments.CommentStore,
         hunk_view_mode: HunkViewMode,
         apply_filtering: bool, // Only apply filtering in unified view
+        collapsed_folds: ?*const std.AutoHashMap(u64, void), // Optional fold state
     ) !LineMap {
         var records: std.ArrayList(LineRecord) = .{};
         errdefer records.deinit(allocator);
@@ -89,16 +102,46 @@ pub const LineMap = struct {
         for (files, 0..) |*file, file_idx| {
             const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
+            // Check if this file is folded
+            const file_is_folded = if (collapsed_folds) |folds|
+                folds.contains(FoldKey.fileKey(file_idx))
+            else
+                false;
+
             // Cache the file header line number for O(1) lookup
             file_header_lines[file_idx] = global_line;
 
-            // Add file header line
+            // Add file header line (always shown, even when folded)
             try records.append(allocator, .{
                 .global_line = global_line,
                 .file_idx = file_idx,
                 .line_type = .file_header,
             });
             global_line += 1;
+
+            // If file is folded, skip all content (hunks, code lines, comments)
+            // but still add spacers between files
+            if (file_is_folded) {
+                // Add spacers after this file (except for last file)
+                if (file_idx < files.len - 1) {
+                    var spacer_num: usize = 0;
+                    while (spacer_num < file_spacing) : (spacer_num += 1) {
+                        try records.append(allocator, .{
+                            .global_line = global_line,
+                            .file_idx = file_idx,
+                            .line_type = .{
+                                .spacer = .{
+                                    .after_file_idx = file_idx,
+                                    .spacer_line_num = spacer_num,
+                                    .is_header_spacer = false,
+                                },
+                            },
+                        });
+                        global_line += 1;
+                    }
+                }
+                continue; // Skip to next file
+            }
 
             // Add a single spacer after file header
             try records.append(allocator, .{
@@ -116,13 +159,24 @@ pub const LineMap = struct {
 
             // Add hunks and their lines
             for (file.hunks, 0..) |hunk, hunk_idx| {
-                // Add hunk header
+                // Check if this hunk is folded
+                const hunk_is_folded = if (collapsed_folds) |folds|
+                    folds.contains(FoldKey.hunkKey(file_idx, hunk_idx))
+                else
+                    false;
+
+                // Add hunk header (always shown, even when folded)
                 try records.append(allocator, .{
                     .global_line = global_line,
                     .file_idx = file_idx,
                     .line_type = .{ .hunk_header = .{ .hunk_idx = hunk_idx } },
                 });
                 global_line += 1;
+
+                // If hunk is folded, skip code lines and comments
+                if (hunk_is_folded) {
+                    continue;
+                }
 
                 // Add code lines (and any attached comments) - filter based on hunk_view_mode if enabled
                 for (hunk.lines, 0..) |line, line_idx_in_hunk| {
@@ -335,7 +389,7 @@ test "line map basic construction" {
     var store = comments.CommentStore.init(allocator);
     defer store.deinit();
 
-    var line_map = try LineMap.build(allocator, files, &store, .all, true);
+    var line_map = try LineMap.build(allocator, files, &store, .all, true, null);
     defer line_map.deinit();
 
     // File 1: header(0) + header_spacer(1) + hunk_header(2) + 2 lines(3,4) + file_spacers(5,6,7) = 8 lines
@@ -400,7 +454,7 @@ test "line map with comments" {
         null,
     );
 
-    var line_map = try LineMap.build(allocator, files, &store, .all, true);
+    var line_map = try LineMap.build(allocator, files, &store, .all, true, null);
     defer line_map.deinit();
 
     // header(0) + header_spacer(1) + hunk_header(2) + delete_line(3) + comment(4) + add_line(5) = 6 lines
@@ -455,7 +509,7 @@ test "comment deletion scroll anchoring" {
     );
 
     // Build LineMap with comment
-    var line_map = try LineMap.build(allocator, files, &store, .all, true);
+    var line_map = try LineMap.build(allocator, files, &store, .all, true, null);
 
     // Structure:
     // 0: file_header
@@ -534,7 +588,7 @@ test "comment deletion scroll anchoring" {
     line_map.deinit();
     try store.deleteComment(comment_idx);
 
-    line_map = try LineMap.build(allocator, files, &store, .all, true);
+    line_map = try LineMap.build(allocator, files, &store, .all, true, null);
     defer line_map.deinit();
 
     // After deletion: 10 lines (was 11, minus 1 comment)
@@ -590,7 +644,7 @@ test "comment deletion with multiple comments above" {
     try store.addComment("test.txt", 0, 7, "comment 3", .delete, "old3", 7, null);
 
     // Build LineMap with comments
-    var line_map = try LineMap.build(allocator, files, &store, .all, true);
+    var line_map = try LineMap.build(allocator, files, &store, .all, true, null);
 
     // Structure (approximate):
     // 0: file_header
@@ -648,7 +702,7 @@ test "comment deletion with multiple comments above" {
     // Now delete comment 3 and rebuild
     line_map.deinit();
     try store.deleteComment(comment3_idx.?);
-    line_map = try LineMap.build(allocator, files, &store, .all, true);
+    line_map = try LineMap.build(allocator, files, &store, .all, true, null);
     defer line_map.deinit();
 
     // After deletion: 15 lines (was 16)

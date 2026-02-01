@@ -178,6 +178,15 @@ Navigate files and position cursor with vim-style movements:
 | `Tab` / `Shift-Tab` | Cycle hunk view mode (all / additions only / deletions only) |
 | `B` | Toggle git blame in gutter |
 
+#### Folding
+
+| Key | Action |
+|-----|--------|
+| `za` | Toggle fold at cursor (hunk-level) |
+| `zc` / `zo` | Close / Open fold at cursor (hunk-level) |
+| `zC` / `zO` | Close / Open file fold (from anywhere in file) |
+| `zM` / `zR` | Close / Open all folds |
+
 #### Visual Mode
 
 | Key | Action |

@@ -63,13 +63,13 @@ pub const UnifiedRenderer = struct {
             // Render based on line type
             switch (record.line_type) {
                 .file_header => {
-                    const rows_used = try FileHeader.render(app, win, file, row, is_cursor);
+                    const rows_used = try FileHeader.render(app, win, file, file_idx, row, is_cursor);
                     row += rows_used;
                 },
                 .hunk_header => |hunk_info| {
                     const hunk = &file.hunks[hunk_info.hunk_idx];
                     const is_in_visual = app.isLineInVisualSelection(global_line);
-                    const rows_used = try renderHunkHeader(app, win, hunk.*, global_line, row, content_width, gutter_width, is_cursor, is_in_visual);
+                    const rows_used = try renderHunkHeader(app, win, hunk.*, file_idx, hunk_info.hunk_idx, row, content_width, gutter_width, is_cursor, is_in_visual);
                     row += rows_used;
                 },
                 .code_line => |code_info| {
@@ -214,16 +214,29 @@ pub const UnifiedRenderer = struct {
         app: *App,
         win: vaxis.Window,
         hunk: parser.Hunk,
-        _: usize, // line_idx kept for compatibility but cursor passed directly
+        file_idx: usize,
+        hunk_idx: usize,
         row: usize,
         content_width: usize,
         gutter_width: usize,
         is_cursor: bool,
         is_in_visual: bool,
     ) !usize {
-        // Build header text using shared utility
+        const is_folded = app.isHunkFolded(file_idx, hunk_idx);
+
+        // Build header text with fold indicator using shared utility
         var buf: [256]u8 = undefined;
-        const header_text = try RenderUtils.buildHunkHeaderText(hunk, &buf);
+        const base_header = try RenderUtils.buildHunkHeaderText(hunk, &buf);
+
+        // Add fold indicator prefix and line count suffix for folded hunks
+        var header_buf: [512]u8 = undefined;
+        const fold_indicator = if (is_folded) "▶ " else "▼ ";
+        const header_text = if (is_folded) blk: {
+            const line_count = hunk.lines.len;
+            break :blk std.fmt.bufPrint(&header_buf, "{s}{s}  [{d} lines]", .{ fold_indicator, base_header, line_count }) catch base_header;
+        } else blk: {
+            break :blk std.fmt.bufPrint(&header_buf, "{s}{s}", .{ fold_indicator, base_header }) catch base_header;
+        };
 
         // Calculate number of rows needed for wrapping (use display width, not bytes)
         const text_display_width = RenderUtils.displayWidth(header_text);
