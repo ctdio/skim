@@ -626,6 +626,7 @@ pub const AgentState = struct {
     // Staged prompt (queued to send after agent completes)
     staged_prompt: [8192]u8,
     staged_prompt_len: usize,
+    staged_is_shell_command: bool, // True if staged prompt is a shell command (! mode)
     // File picker state for @ mentions
     file_picker: FilePickerState,
     // Shell command state (mode, queued outputs, running command)
@@ -682,6 +683,7 @@ pub const AgentState = struct {
             .last_messages_viewport_height = 20, // Reasonable default
             .staged_prompt = undefined,
             .staged_prompt_len = 0,
+            .staged_is_shell_command = false,
             .file_picker = FilePickerState.init(allocator),
             .shell = ShellState.init(allocator),
             .cmd_palette = command_palette.AgentCommandPaletteState.init(allocator),
@@ -2020,14 +2022,30 @@ pub const AgentState = struct {
 
     /// Stage a prompt to be sent after the agent completes its current turn
     pub fn stagePrompt(self: *AgentState, text: []const u8) void {
+        self.stagePromptWithMode(text, false);
+    }
+
+    /// Stage a shell command to be executed after the agent completes
+    pub fn stageShellCommand(self: *AgentState, text: []const u8) void {
+        self.stagePromptWithMode(text, true);
+    }
+
+    /// Stage a prompt with explicit shell mode flag
+    fn stagePromptWithMode(self: *AgentState, text: []const u8, is_shell: bool) void {
         const copy_len = @min(text.len, self.staged_prompt.len);
         @memcpy(self.staged_prompt[0..copy_len], text[0..copy_len]);
         self.staged_prompt_len = copy_len;
+        self.staged_is_shell_command = is_shell;
     }
 
     /// Check if there's a staged prompt
     pub fn hasStagedPrompt(self: *const AgentState) bool {
         return self.staged_prompt_len > 0;
+    }
+
+    /// Check if the staged prompt is a shell command
+    pub fn isStagedShellCommand(self: *const AgentState) bool {
+        return self.staged_is_shell_command;
     }
 
     /// Get the staged prompt text
@@ -2038,6 +2056,7 @@ pub const AgentState = struct {
     /// Clear the staged prompt
     pub fn clearStagedPrompt(self: *AgentState) void {
         self.staged_prompt_len = 0;
+        self.staged_is_shell_command = false;
     }
 
     /// Take the staged prompt (returns it and clears it)
@@ -2045,6 +2064,7 @@ pub const AgentState = struct {
         if (self.staged_prompt_len == 0) return null;
         const text = self.staged_prompt[0..self.staged_prompt_len];
         self.staged_prompt_len = 0;
+        self.staged_is_shell_command = false;
         return text;
     }
     fn estimateMemoryUsage(self: *const AgentState) usize {

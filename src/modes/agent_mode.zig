@@ -377,6 +377,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 if (mgr.cancelPrompt()) {
                     std.log.info("Agent: Interrupted agent via double-ESC", .{});
                     try agent_state.addMessage(.system, "Interrupted");
+
+                    // Auto-execute staged shell commands after interrupt
+                    if (agent_state.hasStagedPrompt() and agent_state.isStagedShellCommand()) {
+                        const staged = agent_state.getStagedPrompt();
+                        try handleShellCommand(app, agent_state, staged);
+                        agent_state.clearStagedPrompt();
+                    }
+
                     app.needs_render = true;
                     return;
                 }
@@ -947,10 +955,21 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 else
                     false;
 
-                // Handle staged message scenarios first (agent thinking or session not ready)
-                if ((is_thinking or session_not_ready) and agent_state.hasStagedPrompt()) {
+                // Handle staged shell commands first - they can execute anytime with empty input
+                if (text.len == 0 and agent_state.hasStagedPrompt() and agent_state.isStagedShellCommand()) {
+                    const staged = agent_state.getStagedPrompt();
+                    try handleShellCommand(app, agent_state, staged);
+                    agent_state.clearStagedPrompt();
+                    app.needs_render = true;
+                    return; // Done - don't fall through to other handlers
+                }
+                // Handle staged message scenarios (agent thinking or session not ready)
+                else if ((is_thinking or session_not_ready) and agent_state.hasStagedPrompt()) {
                     if (text.len == 0 and is_thinking) {
                         // Empty prompt + staged message + agent thinking = interrupt and send immediately
+                        const staged = agent_state.getStagedPrompt();
+
+                        // Interrupt agent and send staged message
                         if (app.getActiveAcpManager()) |mgr| {
                             if (mgr.cancelPrompt()) {
                                 std.log.info("Agent: Interrupted via staged message immediate send", .{});
@@ -958,8 +977,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                             }
                         }
 
-                        // Send the staged message
-                        const staged = agent_state.getStagedPrompt();
                         try agent_state.addMessage(.user, staged);
 
                         // Auto-name the tab from the first user prompt
@@ -982,15 +999,26 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                     } else {
                         // Non-empty prompt + staged message = append to staged message
                         const current_staged = agent_state.getStagedPrompt();
+                        const was_shell = agent_state.isStagedShellCommand();
                         var combined_buf: [8192]u8 = undefined;
                         const combined = std.fmt.bufPrint(&combined_buf, "{s}\n{s}", .{ current_staged, text }) catch text;
-                        agent_state.stagePrompt(combined);
+                        // Preserve the shell command flag when appending
+                        if (was_shell) {
+                            agent_state.stageShellCommand(combined);
+                        } else {
+                            agent_state.stagePrompt(combined);
+                        }
                         agent_state.input.clear();
                     }
                 } else if (text.len > 0) {
                     if (is_thinking or session_not_ready) {
                         // Agent thinking or session not ready - stage for later
-                        agent_state.stagePrompt(text);
+                        if (agent_state.isShellMode()) {
+                            agent_state.stageShellCommand(text);
+                            agent_state.clearShellMode();
+                        } else {
+                            agent_state.stagePrompt(text);
+                        }
                         agent_state.input.clear();
                     } else {
                         // Check if in shell command mode
@@ -1140,7 +1168,9 @@ fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 
 /// Handle shell command execution (commands starting with !)
 /// Spawns the command asynchronously and streams output to the UI.
-fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []const u8) !void {
+/// Handle shell command execution (commands starting with !)
+/// Public so it can be called from app.zig for auto-executing staged shell commands
+pub fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []const u8) !void {
     // If a command is already running, reject
     if (agent_state.shell.running_cmd != null) {
         try agent_state.addMessage(.system, "A command is already running. Wait for it to complete.");

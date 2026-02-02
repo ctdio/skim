@@ -1812,24 +1812,28 @@ fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bo
     // Rows 3+: Queued message preview (if present)
     if (agent_state.hasStagedPrompt() and row < win.height) {
         const staged_text = agent_state.getStagedPrompt();
-        renderStagedMessagePreview(win, staged_text, row);
+        const is_shell = agent_state.isStagedShellCommand();
+        renderStagedMessagePreview(win, staged_text, row, is_shell);
     }
 }
 
 /// Render a preview of the staged message (up to 3 lines)
 /// Uses the same visual style as user messages (with bar and background)
-fn renderStagedMessagePreview(win: vaxis.Window, text: []const u8, start_row: usize) void {
+fn renderStagedMessagePreview(win: vaxis.Window, text: []const u8, start_row: usize, is_shell: bool) void {
     if (text.len == 0 or start_row >= win.height) return;
 
     const max_preview_lines: usize = 3;
-    // Use user message style (same as user messages in chat)
-    const bar_style = vaxis.Style{ .fg = Color.chat_user, .bg = Color.comment_bg };
+    // Use different colors for shell commands (green) vs regular messages (cyan/user color)
+    const bar_color = if (is_shell) Color.green else Color.chat_user;
+    const bar_style = vaxis.Style{ .fg = bar_color, .bg = Color.comment_bg };
     const text_style = vaxis.Style{ .fg = Color.white, .bg = Color.comment_bg };
-    const label_style = vaxis.Style{ .fg = Color.chat_user, .bg = Color.comment_bg, .bold = true };
+    const label_style = vaxis.Style{ .fg = bar_color, .bg = Color.comment_bg, .bold = true };
 
     var row: usize = start_row;
 
-    // Show label: "Queued:" with bar (same style as user messages)
+    // Show label with bar (different text for shell commands)
+    const label_text = if (is_shell) "Queued $:" else "Queued:";
+
     // Fill background for this row
     for (0..win.width) |col| {
         win.writeCell(@intCast(col), @intCast(row), .{
@@ -1844,7 +1848,7 @@ fn renderStagedMessagePreview(win: vaxis.Window, text: []const u8, start_row: us
     _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
     // Draw label
     var label_seg = [_]vaxis.Cell.Segment{
-        .{ .text = "Queued:", .style = label_style },
+        .{ .text = label_text, .style = label_style },
     };
     _ = win.print(&label_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
     row += 1;

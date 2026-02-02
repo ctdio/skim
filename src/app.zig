@@ -5018,6 +5018,15 @@ pub const App = struct {
         // This ensures the "Generating..." indicator is cleared when agent finishes
         if (mgr.status != status_before) {
             self.needs_render = true;
+
+            // Auto-execute staged shell commands when agent finishes
+            if (status_before == .prompting and mgr.status == .session_active) {
+                if (agent_state.hasStagedPrompt() and agent_state.isStagedShellCommand()) {
+                    const staged = agent_state.getStagedPrompt();
+                    agent_mode.handleShellCommand(self, agent_state, staged) catch {};
+                    agent_state.clearStagedPrompt();
+                }
+            }
         }
 
         // Process messages with a limit to prevent UI freezes during high-volume streaming
