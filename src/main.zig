@@ -27,6 +27,16 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    // EARLY CHECK: Fallback to git for unknown diff flags
+    // Must happen before ANY TUI/logging initialization
+    const has_args = args.len >= 2;
+    const is_subcommand = has_args and isSkimSubcommand(args[1]);
+    const should_fallback = has_args and !is_subcommand and shouldFallbackToGit(args[1..]);
+
+    if (should_fallback) {
+        return fallbackToGit(args);
+    }
+
     // Check for subcommands first
     if (args.len >= 2) {
         if (std.mem.eql(u8, args[1], "session")) {
@@ -48,7 +58,13 @@ pub fn main() !void {
             return runMcpCommand(allocator, args);
         } else if (std.mem.eql(u8, args[1], "diff")) {
             // `skim diff [args]` is an alias for `skim [args]`
-            // Strip the "diff" subcommand and parse remaining args
+            // Check for git fallback BEFORE any TUI initialization
+            const diff_should_fallback = shouldFallbackToGit(args[2..]);
+
+            if (diff_should_fallback) {
+                return fallbackToGit(args);
+            }
+
             logging.init(.tui);
             defer logging.deinit();
 
@@ -65,17 +81,19 @@ pub fn main() !void {
                 diff_args[i + 1] = arg;
             }
 
-            var config = try parseArgs(allocator, diff_args);
-            defer config.deinit();
+            const parse_result = try parseArgs(allocator, diff_args);
+            const config = parse_result.config; // fallback already handled above
+            var cfg = config;
+            defer cfg.deinit();
 
             // If stdin was piped, use it as the diff source
             if (stdin_content) |content| {
-                config.stdin_content = content;
-                config.diff_source = .stdin;
+                cfg.stdin_content = content;
+                cfg.diff_source = .stdin;
                 std.log.info("Pager mode: reading diff from stdin ({d} bytes)", .{content.len});
             }
 
-            var app = App.init(allocator, config) catch |err| {
+            var app = App.init(allocator, cfg) catch |err| {
                 switch (err) {
                     error.GitCommandFailed => std.process.exit(1),
                     else => return err,
@@ -124,18 +142,20 @@ pub fn main() !void {
     // Check for piped stdin (pager mode) BEFORE initializing TUI
     const stdin_content = try readStdinIfPiped(allocator);
 
-    var config = try parseArgs(allocator, args);
-    defer config.deinit();
+    const parse_result = try parseArgs(allocator, args);
+    const config = parse_result.config; // fallback already handled above
+    var cfg = config;
+    defer cfg.deinit();
 
     // If stdin was piped, use it as the diff source
     if (stdin_content) |content| {
-        config.stdin_content = content;
-        config.diff_source = .stdin;
+        cfg.stdin_content = content;
+        cfg.diff_source = .stdin;
         std.log.info("Pager mode: reading diff from stdin ({d} bytes)", .{content.len});
     }
 
     // Check if we should run as MCP server (deprecated --serve flag)
-    if (config.serve_port) |port| {
+    if (cfg.serve_port) |port| {
         std.debug.print("Warning: --serve is deprecated.\n", .{});
 
         const server = try McpServer.init(allocator, port);
@@ -147,7 +167,7 @@ pub fn main() !void {
     }
 
     // Initialize and run the app
-    var app = App.init(allocator, config) catch |err| {
+    var app = App.init(allocator, cfg) catch |err| {
         switch (err) {
             error.GitCommandFailed => {
                 // Git already printed stderr, just exit cleanly
@@ -305,6 +325,11 @@ fn printMcpHelp() !void {
     );
 }
 
+const ParseResult = union(enum) {
+    config: Config,
+    fallback_to_git: void, // Unknown git diff options - fallback to git
+};
+
 const Config = struct {
     allocator: std.mem.Allocator,
     diff_source: DiffSource,
@@ -332,7 +357,7 @@ const Config = struct {
     }
 };
 
-fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
+fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseResult {
     var staged = false;
     var mcp_port: ?u16 = null;
     var serve_port: ?u16 = null;
@@ -377,9 +402,8 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
             try printVersion();
             std.process.exit(0);
         } else if (arg[0] == '-') {
-            std.debug.print("Unknown option: {s}\n", .{arg});
-            try printHelp(allocator);
-            std.process.exit(1);
+            // Unknown option - fallback to git diff
+            return .fallback_to_git;
         } else {
             try positional_args.append(allocator, arg);
         }
@@ -420,14 +444,14 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
         std.process.exit(1);
     };
 
-    return Config{
+    return .{ .config = Config{
         .allocator = allocator,
         .diff_source = diff_source,
         .stdin_content = null,
         .mcp_port = mcp_port,
         .serve_port = serve_port,
         .agent_only = false,
-    };
+    } };
 }
 
 fn readStdinIfPiped(allocator: std.mem.Allocator) !?[]const u8 {
@@ -521,6 +545,86 @@ fn printVersion() !void {
     try stdout.writeAll("skim 0.1.0\n");
 }
 
+/// Check if arg is a skim subcommand (not a git diff flag)
+fn isSkimSubcommand(arg: []const u8) bool {
+    const subcommands = [_][]const u8{
+        "session", "print", "sessions", "context", "comment", "mcp", "diff", "agent",
+    };
+    for (subcommands) |cmd| {
+        if (std.mem.eql(u8, arg, cmd)) return true;
+    }
+    return false;
+}
+
+/// Check if we should fallback to git for unknown diff options.
+/// This is a quick check done BEFORE any TUI initialization.
+fn shouldFallbackToGit(args: []const []const u8) bool {
+    for (args) |arg| {
+        if (arg.len > 0 and arg[0] == '-') {
+            // Check if it's a known skim flag
+            if (std.mem.eql(u8, arg, "--staged") or
+                std.mem.eql(u8, arg, "--cached") or
+                std.mem.eql(u8, arg, "--connect") or
+                std.mem.eql(u8, arg, "--serve") or
+                std.mem.eql(u8, arg, "--help") or
+                std.mem.eql(u8, arg, "-h") or
+                std.mem.eql(u8, arg, "--version") or
+                std.mem.eql(u8, arg, "-v"))
+            {
+                continue;
+            }
+            // Unknown flag - fallback to git
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Fallback to running git diff directly for unsupported options.
+fn fallbackToGit(args: []const []const u8) !void {
+    // Build git diff command with all args after the program name
+    // Skip "diff" subcommand if present
+    var start_idx: usize = 1;
+    if (args.len > 1 and std.mem.eql(u8, args[1], "diff")) {
+        start_idx = 2;
+    }
+
+    // Count args: "git" + "--no-pager" + "diff" + remaining args
+    // We use --no-pager to avoid recursive calls when pager.diff=skim
+    const git_args_len = 3 + (args.len - start_idx);
+    var git_args: [64][]const u8 = undefined;
+    if (git_args_len > 64) {
+        std.debug.print("Too many arguments\n", .{});
+        std.process.exit(1);
+    }
+
+    git_args[0] = "git";
+    git_args[1] = "--no-pager";
+    git_args[2] = "diff";
+    for (args[start_idx..], 0..) |arg, i| {
+        git_args[3 + i] = arg;
+    }
+
+    // Use a temporary GPA for the child process
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    // Execute git diff with inherited stdio so output goes directly to terminal
+    var child = std.process.Child.init(git_args[0..git_args_len], alloc);
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    child.stdin_behavior = .Inherit;
+
+    try child.spawn();
+    const term = try child.wait();
+
+    switch (term) {
+        .Exited => |code| std.process.exit(code),
+        else => std.process.exit(1),
+    }
+}
+
 fn getCurrentPid() i32 {
     const builtin = @import("builtin");
     if (builtin.os.tag == .linux) {
@@ -536,7 +640,8 @@ test "parse args: working directory" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{"skim"};
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.diff_source == .working_dir);
@@ -547,7 +652,8 @@ test "parse args: staged" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{ "skim", "--staged" };
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.diff_source == .working_dir);
@@ -558,7 +664,8 @@ test "parse args: two refs with double-dot" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{ "skim", "main..feature" };
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.diff_source == .two_refs);
@@ -571,7 +678,8 @@ test "parse args: single ref" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{ "skim", "main" };
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.diff_source == .single_ref);
@@ -583,7 +691,8 @@ test "parse args: single ref with staged" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{ "skim", "--staged", "main" };
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.diff_source == .single_ref);
@@ -595,7 +704,8 @@ test "parse args: two refs separated" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{ "skim", "main", "feature" };
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.diff_source == .two_refs);
@@ -608,7 +718,8 @@ test "parse args: two refs with triple-dot" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{ "skim", "main...feature" };
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.diff_source == .two_refs);
@@ -621,7 +732,8 @@ test "parse args: connect to mcp server" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{ "skim", "--connect", "9999" };
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.diff_source == .working_dir);
@@ -633,7 +745,8 @@ test "parse args: connect with staged" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{ "skim", "--staged", "--connect", "8080" };
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.diff_source == .working_dir);
@@ -646,7 +759,8 @@ test "parse args: agent_only is false by default" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{"skim"};
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.agent_only == false);
@@ -656,8 +770,33 @@ test "parse args: agent_only is false for single ref" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{ "skim", "main" };
 
-    const config = try parseArgs(allocator, args);
+    const result = try parseArgs(allocator, args);
+    const config = result.config;
     defer config.deinit();
 
     try std.testing.expect(config.agent_only == false);
+}
+
+test "parse args: unknown option falls back to git" {
+    const allocator = std.testing.allocator;
+    const args = &[_][]const u8{ "skim", "--name-only" };
+
+    const result = try parseArgs(allocator, args);
+    try std.testing.expect(result == .fallback_to_git);
+}
+
+test "parse args: --stat falls back to git" {
+    const allocator = std.testing.allocator;
+    const args = &[_][]const u8{ "skim", "--stat" };
+
+    const result = try parseArgs(allocator, args);
+    try std.testing.expect(result == .fallback_to_git);
+}
+
+test "parse args: mixed known and unknown options falls back to git" {
+    const allocator = std.testing.allocator;
+    const args = &[_][]const u8{ "skim", "--staged", "--name-only" };
+
+    const result = try parseArgs(allocator, args);
+    try std.testing.expect(result == .fallback_to_git);
 }
