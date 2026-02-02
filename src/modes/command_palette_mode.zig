@@ -33,19 +33,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Handle Enter key
     if (key.matches(vaxis.Key.enter, .{})) {
-        // Check if we're in shell mode
-        if (palette_state.isShellMode()) {
-            const command = palette_state.getShellCommand();
-            if (command.len > 0) {
-                // Execute the shell command and show output
-                palette_state.executeShellCommand(command) catch |err| {
-                    std.log.err("Failed to execute shell command: {any}", .{err});
-                };
-                app.needs_render = true;
-            }
-            return;
-        }
-
         // Save the command action before resetting state
         const maybe_action = if (palette_state.getSelectedCommand()) |cmd| cmd.action else null;
 
@@ -63,21 +50,11 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     switch (key.codepoint) {
         27 => { // ESC - cancel
-            // In shell mode with output, clear output first
-            if (palette_state.isShellMode() and palette_state.shell_output != null) {
-                palette_state.clearShellOutput();
-                app.needs_render = true;
-                return;
-            }
             app.mode = .normal;
             palette_state.reset();
             app.needs_render = true; // Force full redraw after closing popup
         },
         127, 8 => { // Backspace / Delete
-            // Clear shell output on any edit
-            if (palette_state.shell_output != null) {
-                palette_state.clearShellOutput();
-            }
             if (palette_state.query_len > 0) {
                 palette_state.query_len -= 1;
                 // Update filtered results
@@ -85,10 +62,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             }
         },
         else => {
-            // Clear shell output on any edit
-            if (palette_state.shell_output != null) {
-                palette_state.clearShellOutput();
-            }
             // Regular character input
             if (key.codepoint >= 32 and key.codepoint < 127 and palette_state.query_len < palette_state.query_buffer.len) {
                 palette_state.query_buffer[palette_state.query_len] = @intCast(key.codepoint);
