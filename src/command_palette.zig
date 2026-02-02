@@ -60,6 +60,9 @@ pub const CommandPaletteState = struct {
     selected_idx: usize, // Index into filtered_commands
     scroll_offset: usize, // For scrolling long lists
     allocator: Allocator,
+    // Shell command mode ($ prefix)
+    shell_output: ?[]const u8, // Output from last executed command
+    shell_exit_code: ?u8, // Exit code from last command
 
     const max_visible_items = 10;
 
@@ -72,6 +75,8 @@ pub const CommandPaletteState = struct {
             .selected_idx = 0,
             .scroll_offset = 0,
             .allocator = allocator,
+            .shell_output = null,
+            .shell_exit_code = null,
         };
     }
 
@@ -84,6 +89,9 @@ pub const CommandPaletteState = struct {
         }
         self.commands.deinit(self.allocator);
         self.filtered_commands.deinit(self.allocator);
+        if (self.shell_output) |output| {
+            self.allocator.free(output);
+        }
     }
 
     pub fn reset(self: *CommandPaletteState) void {
@@ -98,6 +106,12 @@ pub const CommandPaletteState = struct {
         }
         self.commands.clearRetainingCapacity();
         self.filtered_commands.clearRetainingCapacity();
+        // Clear shell state
+        if (self.shell_output) |output| {
+            self.allocator.free(output);
+            self.shell_output = null;
+        }
+        self.shell_exit_code = null;
     }
 
     // Build command registry from current app state (both files and commands)
@@ -330,6 +344,79 @@ pub const CommandPaletteState = struct {
         const cmd_idx = self.filtered_commands.items[self.selected_idx];
         return &self.commands.items[cmd_idx];
     }
+
+    /// Check if we're in shell mode ($ prefix)
+    pub fn isShellMode(self: *const CommandPaletteState) bool {
+        const query = self.query_buffer[0..self.query_len];
+        return query.len > 0 and query[0] == '$';
+    }
+
+    /// Get the shell command text (without the $ prefix)
+    pub fn getShellCommand(self: *const CommandPaletteState) []const u8 {
+        const query = self.query_buffer[0..self.query_len];
+        if (query.len > 0 and query[0] == '$') {
+            // Skip $ and any leading space
+            var start: usize = 1;
+            if (start < query.len and query[start] == ' ') {
+                start += 1;
+            }
+            return query[start..];
+        }
+        return "";
+    }
+
+    /// Clear shell output (call before executing new command)
+    pub fn clearShellOutput(self: *CommandPaletteState) void {
+        if (self.shell_output) |output| {
+            self.allocator.free(output);
+            self.shell_output = null;
+        }
+        self.shell_exit_code = null;
+    }
+
+    /// Execute a shell command and store the output
+    pub fn executeShellCommand(self: *CommandPaletteState, command: []const u8) !void {
+        self.clearShellOutput();
+
+        // Run command using sh -c
+        const user_shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+        var argv_storage: [3][]const u8 = .{ user_shell, "-c", command };
+        var child = std.process.Child.init(&argv_storage, self.allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+        child.stdin_behavior = .Close;
+
+        try child.spawn();
+
+        // Collect output
+        var stdout_buf: std.ArrayList(u8) = .{};
+        defer stdout_buf.deinit(self.allocator);
+        var stderr_buf: std.ArrayList(u8) = .{};
+        defer stderr_buf.deinit(self.allocator);
+
+        // Read all output
+        child.collectOutput(self.allocator, &stdout_buf, &stderr_buf, 1024 * 1024) catch {};
+
+        const term = try child.wait();
+        const exit_code: u8 = if (term == .Exited) term.Exited else 1;
+
+        // Combine stdout and stderr
+        var result: std.ArrayList(u8) = .{};
+        errdefer result.deinit(self.allocator);
+
+        if (stdout_buf.items.len > 0) {
+            try result.appendSlice(self.allocator, stdout_buf.items);
+        }
+        if (stderr_buf.items.len > 0) {
+            if (result.items.len > 0 and result.items[result.items.len - 1] != '\n') {
+                try result.append(self.allocator, '\n');
+            }
+            try result.appendSlice(self.allocator, stderr_buf.items);
+        }
+
+        self.shell_output = try result.toOwnedSlice(self.allocator);
+        self.shell_exit_code = exit_code;
+    }
 };
 
 // Truncate path for display using middle-ellipsis strategy
@@ -458,19 +545,22 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     // Line 0: Title (dynamic based on mode) with stats
     const query = state.query_buffer[0..state.query_len];
     const is_command_mode = query.len > 0 and query[0] == '>';
+    const is_shell_mode = state.isShellMode();
 
     // Calculate stats for title
     const stats = StateHelpers.calculateTotalDiffStats(app, app.state.files);
 
     // Format title with stats
     var title_buf: [256]u8 = undefined;
-    const title = if (is_command_mode)
+    const title = if (is_shell_mode)
+        "Run Command"
+    else if (is_command_mode)
         try std.fmt.bufPrint(&title_buf, "Command Palette ({d} files, +{d}, -{d})", .{ stats.files, stats.additions, stats.deletions })
     else
         try std.fmt.bufPrint(&title_buf, "Go to File ({d} files, +{d}, -{d})", .{ stats.files, stats.additions, stats.deletions });
 
     const title_style = vaxis.Style{
-        .fg = Color.cyan,
+        .fg = if (is_shell_mode) Color.green else Color.cyan,
         .bg = Color.dialog_bg,
         .bold = true,
     };
@@ -479,19 +569,28 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     };
     _ = palette_win.print(&title_segments, .{ .row_offset = DIALOG_PADDING, .col_offset = DIALOG_PADDING });
 
-    // Line 1: Input field
+    // Line 1: Input field - in shell mode show "$ " prompt and command without the $ prefix
     const input_style = vaxis.Style{
         .fg = Color.white,
         .bg = Color.dialog_bg,
     };
+    const prompt_char = if (is_shell_mode) "$ " else "> ";
+    const prompt_color = if (is_shell_mode) Color.green else Color.cyan;
+    const display_text = if (is_shell_mode) state.getShellCommand() else query;
     var input_segments = [_]vaxis.Cell.Segment{
-        .{ .text = "> ", .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
-        .{ .text = query, .style = input_style },
+        .{ .text = prompt_char, .style = .{ .fg = prompt_color, .bg = Color.dialog_bg, .bold = is_shell_mode } },
+        .{ .text = display_text, .style = input_style },
     };
     _ = palette_win.print(&input_segments, .{ .row_offset = DIALOG_PADDING + 1, .col_offset = DIALOG_PADDING });
 
-    // Show cursor after the query text
-    palette_win.showCursor(@intCast(DIALOG_PADDING + 2 + query.len), @intCast(DIALOG_PADDING + 1));
+    // Show cursor after the displayed text
+    // In shell mode with empty command, use query_len to show cursor advancing as user types
+    // (the $ and optional space are absorbed into the prompt, but cursor should still move)
+    const cursor_col = if (is_shell_mode and display_text.len == 0)
+        DIALOG_PADDING + 1 + state.query_len // +1 since prompt "$ " is 2 chars but $ is 1 typed char
+    else
+        DIALOG_PADDING + 2 + display_text.len;
+    palette_win.showCursor(@intCast(cursor_col), @intCast(DIALOG_PADDING + 1));
 
     // Line 2: Separator (account for padding on both sides)
     const sep_style = vaxis.Style{
@@ -508,8 +607,25 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
         _ = palette_win.print(&sep_segments, .{ .row_offset = DIALOG_PADDING + 2, .col_offset = DIALOG_PADDING });
     }
 
-    // Lines 3+: Command list (with vertical padding offset)
-    if (state.filtered_commands.items.len == 0) {
+    // Lines 3+: Content area
+    // In shell mode with output, show the output
+    if (is_shell_mode and state.shell_output != null) {
+        try renderShellOutput(app, palette_win, state);
+    } else if (is_shell_mode) {
+        // Shell mode but no output yet - show hint
+        const hint = if (state.getShellCommand().len == 0)
+            "Type a command and press Enter to execute"
+        else
+            "Press Enter to execute";
+        const hint_style = vaxis.Style{
+            .fg = Color.dim_gray,
+            .bg = Color.dialog_bg,
+        };
+        var hint_segments = [_]vaxis.Cell.Segment{
+            .{ .text = hint, .style = hint_style },
+        };
+        _ = palette_win.print(&hint_segments, .{ .row_offset = DIALOG_PADDING + 3, .col_offset = DIALOG_PADDING });
+    } else if (state.filtered_commands.items.len == 0) {
         const no_results = "No matching commands";
         const no_results_style = vaxis.Style{
             .fg = Color.dim_gray,
@@ -616,6 +732,67 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
             const last_row = DIALOG_PADDING + 3 + CommandPaletteState.max_visible_items;
             _ = palette_win.print(&more_segments, .{ .row_offset = @intCast(last_row), .col_offset = DIALOG_PADDING });
         }
+    }
+}
+
+fn renderShellOutput(app: *App, palette_win: vaxis.Window, state: *const CommandPaletteState) !void {
+    const output = state.shell_output orelse return;
+
+    // Show exit code on first line
+    const exit_code = state.shell_exit_code orelse 0;
+    var exit_buf: [32]u8 = undefined;
+    const exit_text = try std.fmt.bufPrint(&exit_buf, "Exit: {d}", .{exit_code});
+    const exit_style = vaxis.Style{
+        .fg = if (exit_code == 0) Color.green else Color.red,
+        .bg = Color.dialog_bg,
+        .bold = true,
+    };
+    var exit_segments = [_]vaxis.Cell.Segment{
+        .{ .text = exit_text, .style = exit_style },
+    };
+    _ = palette_win.print(&exit_segments, .{ .row_offset = DIALOG_PADDING + 3, .col_offset = DIALOG_PADDING });
+
+    // Show output lines
+    const content_width = if (palette_win.width > DIALOG_PADDING * 2) palette_win.width - (DIALOG_PADDING * 2) else palette_win.width;
+    const output_style = vaxis.Style{
+        .fg = Color.white,
+        .bg = Color.dialog_bg,
+    };
+
+    // Split output into lines and display (limited to max_visible_items - 1 for exit code line)
+    var line_iter = std.mem.splitScalar(u8, output, '\n');
+    var row: usize = DIALOG_PADDING + 4;
+    var lines_shown: usize = 0;
+    const max_lines = CommandPaletteState.max_visible_items - 1;
+
+    while (line_iter.next()) |line| {
+        if (lines_shown >= max_lines) break;
+
+        // Truncate line if too long
+        const display_line = if (line.len > content_width)
+            try RenderUtils.copyFrameText(app, line[0..content_width])
+        else
+            line;
+
+        var line_segments = [_]vaxis.Cell.Segment{
+            .{ .text = display_line, .style = output_style },
+        };
+        _ = palette_win.print(&line_segments, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
+
+        row += 1;
+        lines_shown += 1;
+    }
+
+    // Show "..." if output was truncated
+    if (line_iter.next() != null) {
+        const more_style = vaxis.Style{
+            .fg = Color.dim_gray,
+            .bg = Color.dialog_bg,
+        };
+        var more_segments = [_]vaxis.Cell.Segment{
+            .{ .text = "...", .style = more_style },
+        };
+        _ = palette_win.print(&more_segments, .{ .row_offset = @intCast(row), .col_offset = DIALOG_PADDING });
     }
 }
 
