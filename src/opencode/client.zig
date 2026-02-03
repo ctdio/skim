@@ -199,6 +199,33 @@ pub const Client = struct {
         }
     }
 
+    /// POST /session/{id}/abort - Abort the current generation
+    /// Stops the agent without disconnecting the session
+    pub fn abortSession(self: *Client, session_id: []const u8) !void {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session/{s}/abort", .{ self.base_url, session_id });
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var req = self.http_client.request(.POST, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
+
+        req.sendBodiless() catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        const response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok and response.head.status != .no_content) {
+            if (response.head.status == .not_found) {
+                return error.SessionNotFound;
+            }
+            log.err("Abort session failed with status: {}", .{response.head.status});
+            return error.ServerError;
+        }
+
+        log.info("Session aborted successfully", .{});
+    }
+
     /// POST /session/{id}/message - Send a message synchronously
     /// Returns the response message (blocking call)
     pub fn sendMessageSync(self: *Client, session_id: []const u8, prompt_request: protocol.PromptAsyncRequest) ![]const u8 {

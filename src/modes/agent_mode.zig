@@ -374,21 +374,37 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     if (key.codepoint == 27 and agent_state.input.vim.vim_mode == .normal) {
         if (agent_state.recordEscPress()) {
             // Double-ESC detected - try to cancel the prompt
+            var cancelled = false;
+
+            // Try ACP manager first
             if (app.getActiveAcpManager()) |mgr| {
                 if (mgr.cancelPrompt()) {
-                    std.log.info("Agent: Interrupted agent via double-ESC", .{});
-                    try agent_state.addMessage(.system, "Interrupted");
-
-                    // Auto-execute staged shell commands after interrupt
-                    if (agent_state.hasStagedPrompt() and agent_state.isStagedShellCommand()) {
-                        const staged = agent_state.getStagedPrompt();
-                        try handleShellCommand(app, agent_state, staged);
-                        agent_state.clearStagedPrompt();
-                    }
-
-                    app.needs_render = true;
-                    return;
+                    cancelled = true;
                 }
+            }
+
+            // Try OpenCode manager if ACP didn't cancel
+            if (!cancelled) {
+                if (app.getActiveOpencodeManager()) |mgr| {
+                    if (mgr.cancelPrompt()) {
+                        cancelled = true;
+                    }
+                }
+            }
+
+            if (cancelled) {
+                std.log.info("Agent: Interrupted agent via double-ESC", .{});
+                try agent_state.addMessage(.system, "Interrupted");
+
+                // Auto-execute staged shell commands after interrupt
+                if (agent_state.hasStagedPrompt() and agent_state.isStagedShellCommand()) {
+                    const staged = agent_state.getStagedPrompt();
+                    try handleShellCommand(app, agent_state, staged);
+                    agent_state.clearStagedPrompt();
+                }
+
+                app.needs_render = true;
+                return;
             }
             // No active prompt to cancel, just ignore
         } else {
@@ -956,11 +972,22 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                         const staged = agent_state.getStagedPrompt();
 
                         // Interrupt agent and send staged message
+                        var interrupted = false;
                         if (app.getActiveAcpManager()) |mgr| {
                             if (mgr.cancelPrompt()) {
-                                std.log.info("Agent: Interrupted via staged message immediate send", .{});
-                                try agent_state.addMessage(.system, "Interrupted");
+                                interrupted = true;
                             }
+                        }
+                        if (!interrupted) {
+                            if (app.getActiveOpencodeManager()) |mgr| {
+                                if (mgr.cancelPrompt()) {
+                                    interrupted = true;
+                                }
+                            }
+                        }
+                        if (interrupted) {
+                            std.log.info("Agent: Interrupted via staged message immediate send", .{});
+                            try agent_state.addMessage(.system, "Interrupted");
                         }
 
                         try agent_state.addMessage(.user, staged);

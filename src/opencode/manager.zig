@@ -386,6 +386,28 @@ pub const OpencodeManager = struct {
         log.info("Sent prompt", .{});
     }
 
+    /// Cancel the current prompt (abort generation)
+    /// Returns true if abort was sent, false if no active prompt
+    pub fn cancelPrompt(self: *OpencodeManager) bool {
+        const c = self.client orelse return false;
+        const sid = self.session_id orelse return false;
+
+        // Only cancel if we're currently prompting
+        if (self.status != .prompting) {
+            return false;
+        }
+
+        c.abortSession(sid) catch |err| {
+            log.err("Failed to abort session: {}", .{err});
+            return false;
+        };
+
+        // Reset status back to session_active
+        self.status = .session_active;
+        log.info("Prompt cancelled", .{});
+        return true;
+    }
+
     /// Poll for events from the SSE stream
     /// Returns the next event or null if none available
     pub fn poll(self: *OpencodeManager) ?Event {
