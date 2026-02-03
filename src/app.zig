@@ -978,6 +978,36 @@ pub const App = struct {
         return null;
     }
 
+    /// Check if the active tab's agent is thinking (ACP or Opencode)
+    pub fn isAgentThinking(self: *App) bool {
+        if (self.tab_manager) |*tm| {
+            if (tm.activeTab()) |tab| {
+                return tab.isThinkingAny();
+            }
+        }
+        return false;
+    }
+
+    /// Check if the active tab's session is ready (can accept prompts)
+    pub fn isSessionReady(self: *App) bool {
+        if (self.tab_manager) |*tm| {
+            if (tm.activeTab()) |tab| {
+                return tab.isSessionReady();
+            }
+        }
+        return false;
+    }
+
+    /// Check if the active tab's session is initializing
+    pub fn isSessionInitializing(self: *App) bool {
+        if (self.tab_manager) |*tm| {
+            if (tm.activeTab()) |tab| {
+                return tab.isSessionInitializing();
+            }
+        }
+        return false;
+    }
+
     /// Check if any tab has a running shell command
     pub fn hasAnyRunningShellCommand(self: *const App) bool {
         if (self.tab_manager) |tm| {
@@ -1339,6 +1369,14 @@ pub const App = struct {
 
             if (self.opencode_connect_thread != null or has_tab_opencode) {
                 self.pollOpencodeUpdates();
+
+                // Force re-render when agent is prompting (for thinking indicator animation)
+                // or when there are pending events to process
+                if (self.getActiveOpencodeManager()) |mgr| {
+                    if (mgr.status == .prompting or mgr.hasPendingEvents()) {
+                        self.needs_render = true;
+                    }
+                }
             }
 
             // Poll running shell command for streaming output
@@ -4873,6 +4911,12 @@ pub const App = struct {
             self.showStatusMessage("Failed to connect to Opencode");
             return;
         };
+
+        // Success - update UI
+        try target_tab.agent_state.addMessage(.system, "Connected to Opencode. Type your message and press Enter.");
+        self.showStatusMessage("Connected to Opencode");
+        std.log.info("Opencode: Successfully connected for tab {d}", .{target_tab.id});
+        self.needs_render = true;
     }
 
     /// Connect to the currently selected agent in the selection menu
@@ -5354,8 +5398,16 @@ pub const App = struct {
         // Track status before polling
         const status_before = mgr.status;
 
-        // Process events from the message queue
+        // Process events from the message queue (limit per frame to prevent lockups)
+        var events_processed: usize = 0;
+        const max_events_per_frame: usize = 50;
         while (mgr.poll()) |ev| {
+            events_processed += 1;
+            if (events_processed > max_events_per_frame) {
+                // More events pending, will process next frame
+                self.needs_render = true;
+                break;
+            }
             var event = ev;
             defer event.deinit(self.allocator);
 

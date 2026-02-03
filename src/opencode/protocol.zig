@@ -108,6 +108,9 @@ pub fn createTextPrompt(allocator: std.mem.Allocator, text: []const u8) !PromptA
 
 /// All event types from Opencode SSE stream
 pub const EventType = enum {
+    // Server events
+    server_connected,
+
     // Session events
     session_created,
     session_updated,
@@ -131,6 +134,7 @@ pub const EventType = enum {
     unknown,
 
     pub fn fromString(s: []const u8) EventType {
+        if (std.mem.eql(u8, s, "server.connected")) return .server_connected;
         if (std.mem.eql(u8, s, "session.created")) return .session_created;
         if (std.mem.eql(u8, s, "session.updated")) return .session_updated;
         if (std.mem.eql(u8, s, "session.deleted")) return .session_deleted;

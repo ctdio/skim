@@ -955,11 +955,8 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 
     // Calculate status area height (shown between messages and plan when agent is thinking or session initializing with queued message)
     // Layout: empty row + "Generating..."/"Waiting..." (with inline hint) + empty row + optional queued message + empty row
-    const is_thinking = if (app.getActiveAcpManager()) |mgr| mgr.status == .prompting else false;
-    const session_initializing = if (app.getActiveAcpManager()) |mgr|
-        mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected
-    else
-        false;
+    const is_thinking = app.isAgentThinking();
+    const session_initializing = app.isSessionInitializing();
     const show_status_area = is_thinking or (session_initializing and agent_state.hasStagedPrompt());
     // Show interrupt hint inline when agent is thinking and vim is in normal mode
     const show_interrupt_hint = is_thinking and agent_state.input.vim.vim_mode == .normal;
@@ -1289,10 +1286,9 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     // Clear the message area to remove any overlay artifacts
     win.clear();
 
-    // Check agent connection status
-    const is_thinking = if (app.getActiveAcpManager()) |mgr| mgr.status == .prompting else false;
-    // Note: .connected is included because createSession() still runs after connect() sets .connected
-    const is_loading = if (app.getActiveAcpManager()) |mgr| mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected else false;
+    // Check agent connection status (unified across ACP and Opencode)
+    const is_thinking = app.isAgentThinking();
+    const is_loading = app.isSessionInitializing();
 
     // If no messages, show status-aware placeholder
     if (agent_state.messages.items.len == 0) {
@@ -2334,7 +2330,7 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     const is_shell_mode = agent_state.isShellMode();
 
     // Dim prompt when session is not ready
-    const session_ready = if (app.getActiveAcpManager()) |mgr| mgr.status == .session_active or mgr.status == .prompting else false;
+    const session_ready = app.isSessionReady();
     const prompt_style = if (is_shell_mode)
         vaxis.Style{ .fg = Color.yellow, .bold = true }
     else if (session_ready)

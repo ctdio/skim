@@ -174,6 +174,31 @@ pub const AgentTab = struct {
         }
         return false;
     }
+
+    /// Check if session is ready (can accept prompts)
+    pub fn isSessionReady(self: *const AgentTab) bool {
+        if (self.acp_manager) |mgr| {
+            if (mgr.status == .session_active or mgr.status == .prompting) return true;
+        }
+        if (self.opencode_manager) |mgr| {
+            if (mgr.status == .session_active or mgr.status == .prompting) return true;
+        }
+        return false;
+    }
+
+    /// Check if session is initializing (discovering, connecting, etc.)
+    pub fn isSessionInitializing(self: *const AgentTab) bool {
+        if (self.acp_manager) |mgr| {
+            if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected) return true;
+        }
+        // Opencode doesn't have these intermediate states - it connects synchronously
+        return false;
+    }
+
+    /// Check if any manager is connected (has a manager attached)
+    pub fn hasManager(self: *const AgentTab) bool {
+        return self.acp_manager != null or self.opencode_manager != null;
+    }
 };
 
 /// Manages a collection of agent tabs

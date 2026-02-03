@@ -938,11 +938,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             .send => {
                 const raw_text = agent_state.input.getText();
                 const text = std.mem.trim(u8, raw_text, &std.ascii.whitespace);
-                const is_thinking = if (app.getActiveAcpManager()) |mgr| mgr.status == .prompting else false;
-                const session_not_ready = if (app.getActiveAcpManager()) |mgr|
-                    mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected
-                else
-                    false;
+                const is_thinking = app.isAgentThinking();
+                const session_not_ready = app.isSessionInitializing();
 
                 // Handle staged shell commands first - they can execute anytime with empty input
                 if (text.len == 0 and agent_state.hasStagedPrompt() and agent_state.isStagedShellCommand()) {

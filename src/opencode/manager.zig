@@ -268,7 +268,13 @@ pub const OpencodeManager = struct {
         // Signal SSE thread to stop
         self.should_stop.store(true, .release);
 
-        // Join SSE thread
+        // Terminate server FIRST - this will close the SSE connection and unblock the reader thread
+        if (self.server_process) |*proc| {
+            server.terminateServer(proc);
+            self.server_process = null;
+        }
+
+        // Now join SSE thread (should exit quickly since connection is closed)
         if (self.sse_thread) |thread| {
             thread.join();
             self.sse_thread = null;
@@ -288,12 +294,6 @@ pub const OpencodeManager = struct {
             c.deinit();
             self.allocator.destroy(c);
             self.client = null;
-        }
-
-        // Terminate server if we spawned it
-        if (self.server_process) |*proc| {
-            server.terminateServer(proc);
-            self.server_process = null;
         }
 
         // Clean up URL
@@ -346,7 +346,7 @@ pub const OpencodeManager = struct {
             return;
         };
 
-        var conn = c.connectEventStream() catch {
+        const conn = c.connectEventStream() catch {
             manager.message_queue.push(.{ .err = .{ .code = .connection_failed } });
             return;
         };
@@ -379,10 +379,31 @@ pub const OpencodeManager = struct {
 
     /// Process SSE event data JSON
     fn processEventData(self: *OpencodeManager, data: []const u8) void {
-        // Parse JSON to get event type
+        // Quick check for events we care about before full JSON parse
+        // This avoids expensive parsing for the many session/message update events
+        const dominated_events = [_][]const u8{
+            "message.part.updated",
+            "session.idle",
+            "session.error",
+        };
+        var dominated = false;
+        for (dominated_events) |evt| {
+            if (std.mem.indexOf(u8, data, evt) != null) {
+                dominated = true;
+                break;
+            }
+        }
+        if (!dominated) {
+            // Skip parsing events we don't handle
+            return;
+        }
+
+        // Parse JSON - opencode wraps events in a "payload" object
         const parsed = std.json.parseFromSlice(struct {
-            type: []const u8,
-            properties: ?std.json.Value = null,
+            payload: struct {
+                type: []const u8,
+                properties: ?std.json.Value = null,
+            },
         }, self.allocator, data, .{
             .ignore_unknown_fields = true,
         }) catch {
@@ -391,12 +412,13 @@ pub const OpencodeManager = struct {
         };
         defer parsed.deinit();
 
-        const event_type = protocol.EventType.fromString(parsed.value.type);
+        const event_type = protocol.EventType.fromString(parsed.value.payload.type);
+        log.debug("SSE event received: {s} -> {}", .{ parsed.value.payload.type, event_type });
 
         switch (event_type) {
             .message_part_updated => {
                 // Extract delta from properties
-                if (parsed.value.properties) |props| {
+                if (parsed.value.payload.properties) |props| {
                     if (props == .object) {
                         if (props.object.get("delta")) |delta_val| {
                             if (delta_val == .string) {
@@ -410,6 +432,7 @@ pub const OpencodeManager = struct {
                 }
             },
             .session_idle => {
+                log.info("Session idle received, resetting status to session_active", .{});
                 self.message_queue.push(.{ .message_complete = {} });
                 // Update status back to session_active
                 self.status = .session_active;

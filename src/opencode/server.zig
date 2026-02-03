@@ -36,10 +36,13 @@ pub const ServerError = error{
 
 /// Spawn the opencode serve process
 pub fn spawnServer(allocator: Allocator, config: ServerConfig) ServerError!std.process.Child {
-    // Validate executable exists
-    std.fs.accessAbsolute(config.opencode_path, .{}) catch {
-        return error.ExecutableNotFound;
-    };
+    // Validate executable exists (only for absolute paths)
+    // For relative paths (e.g., "opencode"), rely on PATH resolution during spawn
+    if (std.fs.path.isAbsolute(config.opencode_path)) {
+        std.fs.accessAbsolute(config.opencode_path, .{}) catch {
+            return error.ExecutableNotFound;
+        };
+    }
 
     // Format port as string
     var port_buf: [8]u8 = undefined;

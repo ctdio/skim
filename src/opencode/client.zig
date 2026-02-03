@@ -244,7 +244,7 @@ pub const Client = struct {
     // SSE Event Stream
     // =========================================================================
 
-    /// Connection to SSE event stream
+    /// Connection to SSE event stream (heap-allocated to keep buffer addresses stable)
     pub const EventStreamConnection = struct {
         allocator: Allocator,
         request: std.http.Client.Request,
@@ -252,10 +252,14 @@ pub const Client = struct {
         parser: sse.SseParser,
         buffer: [4096]u8 = undefined,
         body_buffer: [8192]u8 = undefined,
+        redirect_buffer: [4096]u8 = undefined,
+        body_reader: ?*std.Io.Reader = null,
 
         pub fn deinit(self: *EventStreamConnection) void {
             self.parser.deinit();
             self.request.deinit();
+            // Free the heap-allocated struct itself
+            self.allocator.destroy(self);
         }
 
         /// Read the next SSE event from the stream
@@ -266,8 +270,12 @@ pub const Client = struct {
                 return event;
             }
 
-            // Read more data from the stream
-            var reader = self.response.reader(&self.body_buffer);
+            // Get or initialize body reader (must only call response.reader() once)
+            const reader = self.body_reader orelse blk: {
+                self.body_reader = self.response.reader(&self.body_buffer);
+                break :blk self.body_reader.?;
+            };
+
             const n = reader.readSliceShort(&self.buffer) catch |err| {
                 log.err("Error reading from SSE stream: {}", .{err});
                 return error.ConnectionFailed;
@@ -284,8 +292,8 @@ pub const Client = struct {
     };
 
     /// GET /global/event - Connect to SSE event stream
-    /// Returns a connection that can be used to read events
-    pub fn connectEventStream(self: *Client) !EventStreamConnection {
+    /// Returns a heap-allocated connection (caller owns, call deinit to free)
+    pub fn connectEventStream(self: *Client) !*EventStreamConnection {
         const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/global/event", .{self.base_url});
         defer self.allocator.free(uri_str);
 
@@ -301,20 +309,26 @@ pub const Client = struct {
 
         req.sendBodiless() catch return error.ConnectionFailed;
 
-        var redirect_buffer: [4096]u8 = undefined;
-        const response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+        // Heap-allocate to keep buffer addresses stable after return
+        const conn = try self.allocator.create(EventStreamConnection);
+        errdefer self.allocator.destroy(conn);
 
-        if (response.head.status != .ok) {
-            log.err("Connect event stream failed with status: {}", .{response.head.status});
+        conn.* = .{
+            .allocator = self.allocator,
+            .request = req,
+            .response = undefined,
+            .parser = sse.SseParser.init(self.allocator),
+        };
+
+        // Use conn.request (not req) since req was moved into the struct
+        conn.response = conn.request.receiveHead(&conn.redirect_buffer) catch return error.ConnectionFailed;
+
+        if (conn.response.head.status != .ok) {
+            log.err("Connect event stream failed with status: {}", .{conn.response.head.status});
             return error.ServerError;
         }
 
-        return .{
-            .allocator = self.allocator,
-            .request = req,
-            .response = response,
-            .parser = sse.SseParser.init(self.allocator),
-        };
+        return conn;
     }
 };
 
