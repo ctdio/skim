@@ -201,13 +201,19 @@ pub const Client = struct {
 
     /// POST /session/{id}/abort - Abort the current generation
     /// Stops the agent without disconnecting the session
+    /// Note: Uses a separate HTTP client to avoid thread safety issues with SSE connection
     pub fn abortSession(self: *Client, session_id: []const u8) !void {
         const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session/{s}/abort", .{ self.base_url, session_id });
         defer self.allocator.free(uri_str);
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
 
-        var req = self.http_client.request(.POST, uri, .{}) catch return error.ConnectionFailed;
+        // Create a temporary HTTP client to avoid thread safety issues
+        // The main http_client may be in use by the SSE reader thread
+        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        defer temp_client.deinit();
+
+        var req = temp_client.request(.POST, uri, .{}) catch return error.ConnectionFailed;
         defer req.deinit();
 
         req.sendBodiless() catch return error.ConnectionFailed;
