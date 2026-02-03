@@ -1,0 +1,248 @@
+const std = @import("std");
+
+// =============================================================================
+// Opencode REST API Protocol Types
+// Based on OpenAPI spec from opencode serve
+// =============================================================================
+
+/// Protocol version constant
+pub const PROTOCOL_VERSION = "0.0.3";
+
+// =============================================================================
+// Health Check
+// =============================================================================
+
+/// Response from GET /global/health
+pub const HealthResponse = struct {
+    healthy: bool,
+    version: []const u8,
+};
+
+// =============================================================================
+// Session Management
+// =============================================================================
+
+/// Session time information with numeric timestamps
+pub const SessionTime = struct {
+    created: i64,
+    updated: i64,
+};
+
+/// Session information returned from API
+pub const Session = struct {
+    id: []const u8,
+    time: SessionTime,
+};
+
+/// Request body for POST /session
+pub const CreateSessionRequest = struct {
+    // Empty object - no required fields
+};
+
+// =============================================================================
+// Message Parts
+// =============================================================================
+
+/// Text part input for messages
+pub const TextPartInput = struct {
+    type: []const u8 = "text",
+    text: []const u8,
+};
+
+/// Part union - currently only text is supported
+pub const Part = union(enum) {
+    text: TextPartInput,
+
+    pub fn jsonStringify(self: Part, options: std.json.StringifyOptions, writer: anytype) !void {
+        switch (self) {
+            .text => |t| {
+                try writer.writeAll("{\"type\":\"text\",\"text\":");
+                try std.json.stringify(t.text, options, writer);
+                try writer.writeByte('}');
+            },
+        }
+    }
+};
+
+// =============================================================================
+// Prompt Async (Main messaging endpoint)
+// =============================================================================
+
+/// Request body for POST /session/{id}/prompt_async
+pub const PromptAsyncRequest = struct {
+    parts: []const Part,
+
+    /// Serialize to JSON for HTTP request body
+    pub fn toJson(self: PromptAsyncRequest, allocator: std.mem.Allocator) ![]u8 {
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(allocator);
+        const writer = output.writer(allocator);
+
+        try writer.writeAll("{\"parts\":[");
+        for (self.parts, 0..) |part, i| {
+            if (i > 0) try writer.writeByte(',');
+            switch (part) {
+                .text => |t| {
+                    try writer.writeAll("{\"type\":\"text\",\"text\":");
+                    try writer.print("{f}", .{std.json.fmt(t.text, .{})});
+                    try writer.writeByte('}');
+                },
+            }
+        }
+        try writer.writeAll("]}");
+
+        return output.toOwnedSlice(allocator);
+    }
+};
+
+/// Helper to create a simple text prompt request
+pub fn createTextPrompt(allocator: std.mem.Allocator, text: []const u8) !PromptAsyncRequest {
+    const parts = try allocator.alloc(Part, 1);
+    parts[0] = .{ .text = .{ .text = text } };
+    return .{ .parts = parts };
+}
+
+// =============================================================================
+// SSE Event Types
+// =============================================================================
+
+/// All event types from Opencode SSE stream
+pub const EventType = enum {
+    // Session events
+    session_created,
+    session_updated,
+    session_deleted,
+    session_idle,
+    session_error,
+
+    // Message events
+    message_created,
+    message_updated,
+    message_deleted,
+    message_part_updated,
+
+    // Permission and question events
+    permission_asked,
+    permission_resolved,
+    question_asked,
+    question_resolved,
+
+    // Unknown/unsupported
+    unknown,
+
+    pub fn fromString(s: []const u8) EventType {
+        if (std.mem.eql(u8, s, "session.created")) return .session_created;
+        if (std.mem.eql(u8, s, "session.updated")) return .session_updated;
+        if (std.mem.eql(u8, s, "session.deleted")) return .session_deleted;
+        if (std.mem.eql(u8, s, "session.idle")) return .session_idle;
+        if (std.mem.eql(u8, s, "session.error")) return .session_error;
+        if (std.mem.eql(u8, s, "message.created")) return .message_created;
+        if (std.mem.eql(u8, s, "message.updated")) return .message_updated;
+        if (std.mem.eql(u8, s, "message.deleted")) return .message_deleted;
+        if (std.mem.eql(u8, s, "message.part.updated")) return .message_part_updated;
+        if (std.mem.eql(u8, s, "permission.asked")) return .permission_asked;
+        if (std.mem.eql(u8, s, "permission.resolved")) return .permission_resolved;
+        if (std.mem.eql(u8, s, "question.asked")) return .question_asked;
+        if (std.mem.eql(u8, s, "question.resolved")) return .question_resolved;
+        return .unknown;
+    }
+};
+
+/// Properties from message.part.updated event
+pub const MessagePartUpdatedProperties = struct {
+    /// The part object containing current text
+    part: ?struct {
+        type: []const u8,
+        text: []const u8,
+    } = null,
+    /// Delta text chunk for streaming
+    delta: ?[]const u8 = null,
+};
+
+/// Properties from session.idle event
+pub const SessionIdleProperties = struct {
+    sessionID: []const u8,
+};
+
+/// Generic SSE event with parsed JSON type and properties
+pub const SseEventData = struct {
+    type: EventType,
+    type_string: []const u8,
+    /// Raw properties JSON for further parsing
+    properties_json: ?[]const u8 = null,
+};
+
+// =============================================================================
+// Error Types
+// =============================================================================
+
+/// API error response structure
+pub const ApiError = struct {
+    code: []const u8,
+    message: []const u8,
+};
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test "EventType fromString" {
+    try std.testing.expectEqual(EventType.message_part_updated, EventType.fromString("message.part.updated"));
+    try std.testing.expectEqual(EventType.session_idle, EventType.fromString("session.idle"));
+    try std.testing.expectEqual(EventType.session_error, EventType.fromString("session.error"));
+    try std.testing.expectEqual(EventType.unknown, EventType.fromString("invalid.event"));
+}
+
+test "PromptAsyncRequest toJson" {
+    const allocator = std.testing.allocator;
+
+    var parts: [1]Part = .{.{ .text = .{ .text = "Hello world" } }};
+    const request = PromptAsyncRequest{ .parts = &parts };
+
+    const json = try request.toJson(allocator);
+    defer allocator.free(json);
+
+    // Verify JSON structure
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"parts\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"text\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "Hello world") != null);
+}
+
+test "createTextPrompt helper" {
+    const allocator = std.testing.allocator;
+
+    const prompt = try createTextPrompt(allocator, "Test message");
+    defer allocator.free(prompt.parts);
+
+    try std.testing.expectEqual(@as(usize, 1), prompt.parts.len);
+    switch (prompt.parts[0]) {
+        .text => |t| try std.testing.expectEqualStrings("Test message", t.text),
+    }
+}
+
+test "HealthResponse structure" {
+    const allocator = std.testing.allocator;
+
+    const json = "{\"healthy\":true,\"version\":\"0.0.3\"}";
+    const parsed = try std.json.parseFromSlice(HealthResponse, allocator, json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.value.healthy);
+    try std.testing.expectEqualStrings("0.0.3", parsed.value.version);
+}
+
+test "Session structure" {
+    const allocator = std.testing.allocator;
+
+    const json = "{\"id\":\"ses_123\",\"time\":{\"created\":1706900000,\"updated\":1706900100}}";
+    const parsed = try std.json.parseFromSlice(Session, allocator, json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("ses_123", parsed.value.id);
+    try std.testing.expectEqual(@as(i64, 1706900000), parsed.value.time.created);
+    try std.testing.expectEqual(@as(i64, 1706900100), parsed.value.time.updated);
+}

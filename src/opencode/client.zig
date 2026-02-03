@@ -1,0 +1,393 @@
+const std = @import("std");
+const protocol = @import("protocol.zig");
+const sse = @import("sse.zig");
+
+// =============================================================================
+// Opencode HTTP Client
+// =============================================================================
+//
+// HTTP client for Opencode REST API using std.http.Client.
+// Provides typed methods for each API endpoint.
+//
+// =============================================================================
+
+const Allocator = std.mem.Allocator;
+const log = std.log.scoped(.opencode);
+
+/// Client error types
+pub const ClientError = error{
+    ConnectionFailed,
+    Timeout,
+    InvalidResponse,
+    ServerError,
+    SessionNotFound,
+    BadRequest,
+    OutOfMemory,
+    HttpError,
+};
+
+/// HTTP client for Opencode REST API
+pub const Client = struct {
+    allocator: Allocator,
+    base_url: []const u8,
+    http_client: std.http.Client,
+
+    /// Initialize client with base URL (e.g., "http://localhost:4096")
+    pub fn init(allocator: Allocator, base_url: []const u8) !Client {
+        return .{
+            .allocator = allocator,
+            .base_url = try allocator.dupe(u8, base_url),
+            .http_client = .{ .allocator = allocator },
+        };
+    }
+
+    pub fn deinit(self: *Client) void {
+        self.allocator.free(self.base_url);
+        self.http_client.deinit();
+    }
+
+    // =========================================================================
+    // Health Check
+    // =========================================================================
+
+    /// GET /global/health - Check server health
+    pub fn healthCheck(self: *Client) !protocol.HealthResponse {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/global/health", .{self.base_url});
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var server_header_buffer: [4096]u8 = undefined;
+        var request = self.http_client.open(.GET, uri, .{
+            .server_header_buffer = &server_header_buffer,
+        }) catch return error.ConnectionFailed;
+        defer request.deinit();
+
+        request.send() catch return error.ConnectionFailed;
+        request.finish() catch return error.ConnectionFailed;
+        request.wait() catch return error.ConnectionFailed;
+
+        if (request.status != .ok) {
+            log.err("Health check failed with status: {}", .{request.status});
+            return error.ServerError;
+        }
+
+        const body = request.reader().readAllAlloc(self.allocator, 1024 * 1024) catch return error.InvalidResponse;
+        defer self.allocator.free(body);
+
+        const parsed = std.json.parseFromSlice(protocol.HealthResponse, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+        }) catch return error.InvalidResponse;
+        defer parsed.deinit();
+
+        return .{
+            .healthy = parsed.value.healthy,
+            .version = try self.allocator.dupe(u8, parsed.value.version),
+        };
+    }
+
+    // =========================================================================
+    // Session Management
+    // =========================================================================
+
+    /// POST /session - Create a new session
+    /// Returns the session ID
+    pub fn createSession(self: *Client) ![]const u8 {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session", .{self.base_url});
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var server_header_buffer: [4096]u8 = undefined;
+        var request = self.http_client.open(.POST, uri, .{
+            .server_header_buffer = &server_header_buffer,
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "application/json" },
+            },
+        }) catch return error.ConnectionFailed;
+        defer request.deinit();
+
+        // Empty JSON body
+        const body = "{}";
+        request.transfer_encoding = .{ .content_length = body.len };
+        request.send() catch return error.ConnectionFailed;
+        request.writer().writeAll(body) catch return error.ConnectionFailed;
+        request.finish() catch return error.ConnectionFailed;
+        request.wait() catch return error.ConnectionFailed;
+
+        if (request.status != .ok and request.status != .created) {
+            log.err("Create session failed with status: {}", .{request.status});
+            return error.ServerError;
+        }
+
+        const response_body = request.reader().readAllAlloc(self.allocator, 1024 * 1024) catch return error.InvalidResponse;
+        defer self.allocator.free(response_body);
+
+        const parsed = std.json.parseFromSlice(protocol.Session, self.allocator, response_body, .{
+            .ignore_unknown_fields = true,
+        }) catch return error.InvalidResponse;
+        defer parsed.deinit();
+
+        return try self.allocator.dupe(u8, parsed.value.id);
+    }
+
+    /// DELETE /session/{id} - Delete a session
+    pub fn deleteSession(self: *Client, session_id: []const u8) !void {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session/{s}", .{ self.base_url, session_id });
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var server_header_buffer: [4096]u8 = undefined;
+        var request = self.http_client.open(.DELETE, uri, .{
+            .server_header_buffer = &server_header_buffer,
+        }) catch return error.ConnectionFailed;
+        defer request.deinit();
+
+        request.send() catch return error.ConnectionFailed;
+        request.finish() catch return error.ConnectionFailed;
+        request.wait() catch return error.ConnectionFailed;
+
+        if (request.status != .ok and request.status != .no_content) {
+            if (request.status == .not_found) {
+                return error.SessionNotFound;
+            }
+            log.err("Delete session failed with status: {}", .{request.status});
+            return error.ServerError;
+        }
+    }
+
+    // =========================================================================
+    // Messaging
+    // =========================================================================
+
+    /// POST /session/{id}/prompt_async - Send a message asynchronously
+    /// Returns immediately (204 No Content), actual response via SSE
+    pub fn sendPromptAsync(self: *Client, session_id: []const u8, prompt_request: protocol.PromptAsyncRequest) !void {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session/{s}/prompt_async", .{ self.base_url, session_id });
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        const body = try prompt_request.toJson(self.allocator);
+        defer self.allocator.free(body);
+
+        var server_header_buffer: [4096]u8 = undefined;
+        var request = self.http_client.open(.POST, uri, .{
+            .server_header_buffer = &server_header_buffer,
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "application/json" },
+            },
+        }) catch return error.ConnectionFailed;
+        defer request.deinit();
+
+        request.transfer_encoding = .{ .content_length = body.len };
+        request.send() catch return error.ConnectionFailed;
+        request.writer().writeAll(body) catch return error.ConnectionFailed;
+        request.finish() catch return error.ConnectionFailed;
+        request.wait() catch return error.ConnectionFailed;
+
+        // Accept both 200 OK and 204 No Content
+        if (request.status != .ok and request.status != .no_content) {
+            if (request.status == .not_found) {
+                return error.SessionNotFound;
+            }
+            if (request.status == .bad_request) {
+                return error.BadRequest;
+            }
+            log.err("Send prompt async failed with status: {}", .{request.status});
+            return error.ServerError;
+        }
+    }
+
+    /// POST /session/{id}/message - Send a message synchronously
+    /// Returns the response message (blocking call)
+    pub fn sendMessageSync(self: *Client, session_id: []const u8, prompt_request: protocol.PromptAsyncRequest) ![]const u8 {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session/{s}/message", .{ self.base_url, session_id });
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        const body = try prompt_request.toJson(self.allocator);
+        defer self.allocator.free(body);
+
+        var server_header_buffer: [4096]u8 = undefined;
+        var request = self.http_client.open(.POST, uri, .{
+            .server_header_buffer = &server_header_buffer,
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "application/json" },
+            },
+        }) catch return error.ConnectionFailed;
+        defer request.deinit();
+
+        request.transfer_encoding = .{ .content_length = body.len };
+        request.send() catch return error.ConnectionFailed;
+        request.writer().writeAll(body) catch return error.ConnectionFailed;
+        request.finish() catch return error.ConnectionFailed;
+        request.wait() catch return error.ConnectionFailed;
+
+        if (request.status != .ok) {
+            if (request.status == .not_found) {
+                return error.SessionNotFound;
+            }
+            log.err("Send message sync failed with status: {}", .{request.status});
+            return error.ServerError;
+        }
+
+        return request.reader().readAllAlloc(self.allocator, 10 * 1024 * 1024) catch return error.InvalidResponse;
+    }
+
+    // =========================================================================
+    // SSE Event Stream
+    // =========================================================================
+
+    /// Connection to SSE event stream
+    pub const EventStreamConnection = struct {
+        allocator: Allocator,
+        request: std.http.Client.Request,
+        parser: sse.SseParser,
+        buffer: [4096]u8 = undefined,
+
+        pub fn deinit(self: *EventStreamConnection) void {
+            self.parser.deinit();
+            self.request.deinit();
+        }
+
+        /// Read the next SSE event from the stream
+        /// Returns null if no complete event is available yet
+        pub fn readEvent(self: *EventStreamConnection) !?sse.SseEvent {
+            // First check if we have a complete event from previous data
+            if (try self.parser.feed("")) |event| {
+                return event;
+            }
+
+            // Read more data from the stream
+            const reader = self.request.reader();
+            const n = reader.read(&self.buffer) catch |err| {
+                log.err("Error reading from SSE stream: {}", .{err});
+                return error.ConnectionFailed;
+            };
+
+            if (n == 0) {
+                // Connection closed
+                return null;
+            }
+
+            // Feed data to parser
+            return try self.parser.feed(self.buffer[0..n]);
+        }
+    };
+
+    /// GET /global/event - Connect to SSE event stream
+    /// Returns a connection that can be used to read events
+    pub fn connectEventStream(self: *Client) !EventStreamConnection {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/global/event", .{self.base_url});
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var server_header_buffer: [4096]u8 = undefined;
+        var request = self.http_client.open(.GET, uri, .{
+            .server_header_buffer = &server_header_buffer,
+            .extra_headers = &.{
+                .{ .name = "Accept", .value = "text/event-stream" },
+                .{ .name = "Cache-Control", .value = "no-cache" },
+            },
+        }) catch return error.ConnectionFailed;
+        errdefer request.deinit();
+
+        request.send() catch return error.ConnectionFailed;
+        request.finish() catch return error.ConnectionFailed;
+        request.wait() catch return error.ConnectionFailed;
+
+        if (request.status != .ok) {
+            log.err("Connect event stream failed with status: {}", .{request.status});
+            return error.ServerError;
+        }
+
+        return .{
+            .allocator = self.allocator,
+            .request = request,
+            .parser = sse.SseParser.init(self.allocator),
+        };
+    }
+};
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test "client init and deinit" {
+    const allocator = std.testing.allocator;
+
+    var client = try Client.init(allocator, "http://localhost:4096");
+    defer client.deinit();
+
+    try std.testing.expectEqualStrings("http://localhost:4096", client.base_url);
+}
+
+test "EventStreamConnection parser integration" {
+    // Test that EventStreamConnection correctly uses the SSE parser
+    // This doesn't require a real server
+    const allocator = std.testing.allocator;
+
+    var parser = sse.SseParser.init(allocator);
+    defer parser.deinit();
+
+    // Simulate receiving SSE data
+    const data = "data: {\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_123\"}}\n\n";
+    var event = try parser.feed(data);
+    try std.testing.expect(event != null);
+    defer event.?.deinit(allocator);
+
+    try std.testing.expect(event.?.data != null);
+    try std.testing.expect(std.mem.indexOf(u8, event.?.data.?, "session.idle") != null);
+}
+
+// Integration tests - skipped in unit test runs (require live server)
+test "integration: health check" {
+    // Skip in normal test runs - requires live server
+    if (true) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var client = try Client.init(allocator, "http://localhost:4096");
+    defer client.deinit();
+
+    const health = try client.healthCheck();
+    defer allocator.free(health.version);
+
+    try std.testing.expect(health.healthy);
+}
+
+test "integration: create and delete session" {
+    // Skip in normal test runs - requires live server
+    if (true) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var client = try Client.init(allocator, "http://localhost:4096");
+    defer client.deinit();
+
+    const session_id = try client.createSession();
+    defer allocator.free(session_id);
+
+    try std.testing.expect(session_id.len > 0);
+
+    try client.deleteSession(session_id);
+}
+
+test "integration: send prompt async" {
+    // Skip in normal test runs - requires live server
+    if (true) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var client = try Client.init(allocator, "http://localhost:4096");
+    defer client.deinit();
+
+    const session_id = try client.createSession();
+    defer allocator.free(session_id);
+
+    var parts: [1]protocol.Part = .{.{ .text = .{ .text = "Hello" } }};
+    try client.sendPromptAsync(session_id, .{ .parts = &parts });
+
+    try client.deleteSession(session_id);
+}

@@ -160,6 +160,17 @@ pub fn build(b: *std.Build) void {
     const run_acp_tests = b.addRunArtifact(acp_tests);
     test_step.dependOn(&run_acp_tests.step);
 
+    // Opencode module tests
+    const opencode_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/opencode/opencode.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_opencode_tests = b.addRunArtifact(opencode_tests);
+    test_step.dependOn(&run_opencode_tests.step);
+
     // Markdown module tests
     const markdown_tests = b.addTest(.{
         .root_module = b.createModule(.{
