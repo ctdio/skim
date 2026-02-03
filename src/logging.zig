@@ -12,6 +12,7 @@ pub const Component = enum {
     daemon,
     mcp,
     acp, // ACP protocol debug logging (opt-in)
+    opencode, // Opencode agent integration logging
 };
 
 /// Global state for logging
@@ -108,6 +109,7 @@ pub fn init(component: Component) void {
         .daemon => "daemon.log",
         .mcp => "mcp.log",
         .acp => "acp.log",
+        .opencode => "opencode.log",
     };
 
     const log_path = std.fmt.allocPrint(std.heap.page_allocator, "{s}/.skim/{s}", .{ home, log_name }) catch return;
@@ -209,6 +211,8 @@ pub fn getLogPath(allocator: std.mem.Allocator, component: Component) ![]u8 {
         .tui => "tui.log",
         .daemon => "daemon.log",
         .mcp => "mcp.log",
+        .acp => "acp.log",
+        .opencode => "opencode.log",
     };
 
     return std.fmt.allocPrint(allocator, "{s}/.skim/{s}", .{ home, log_name });
