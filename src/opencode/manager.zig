@@ -151,6 +151,11 @@ pub const OpencodeManager = struct {
     // SSE reader thread
     sse_thread: ?std.Thread,
     should_stop: std.atomic.Value(bool),
+    thread_exited: std.atomic.Value(bool),
+
+    // SSE connection (stored so we can close it to unblock the reader thread)
+    sse_connection: ?*client_mod.Client.EventStreamConnection,
+    sse_conn_mutex: std.Thread.Mutex,
 
     // Connection config (stored for reconnection)
     connect_config: ?ConnectConfig,
@@ -166,6 +171,9 @@ pub const OpencodeManager = struct {
             .message_queue = MessageQueue.init(allocator),
             .sse_thread = null,
             .should_stop = std.atomic.Value(bool).init(false),
+            .thread_exited = std.atomic.Value(bool).init(true), // No thread running initially
+            .sse_connection = null,
+            .sse_conn_mutex = .{},
             .connect_config = null,
             .base_url = null,
         };
@@ -251,9 +259,11 @@ pub const OpencodeManager = struct {
 
         // Start SSE reader thread
         self.should_stop.store(false, .release);
+        self.thread_exited.store(false, .release);
         self.sse_thread = std.Thread.spawn(.{}, sseReaderThread, .{self}) catch |err| {
             log.err("Failed to spawn SSE reader thread: {}", .{err});
             self.status = .failed;
+            self.thread_exited.store(true, .release);
             return error.ThreadSpawnFailed;
         };
 
@@ -268,16 +278,51 @@ pub const OpencodeManager = struct {
         // Signal SSE thread to stop
         self.should_stop.store(true, .release);
 
-        // Terminate server FIRST - this will close the SSE connection and unblock the reader thread
-        if (self.server_process) |*proc| {
-            server.terminateServer(proc);
-            self.server_process = null;
+        // Close the SSE connection to unblock the reader thread.
+        // We must do this BEFORE joining to avoid deadlock.
+        // Set sse_connection to null first so thread's defer knows not to double-free.
+        {
+            self.sse_conn_mutex.lock();
+            const conn = self.sse_connection;
+            self.sse_connection = null;
+            self.sse_conn_mutex.unlock();
+
+            if (conn) |c| {
+                log.info("Closing SSE connection to unblock reader...", .{});
+                c.deinit();
+            }
         }
 
-        // Now join SSE thread (should exit quickly since connection is closed)
+        // Wait for SSE thread with timeout
         if (self.sse_thread) |thread| {
-            thread.join();
-            self.sse_thread = null;
+            log.info("Waiting for SSE thread to exit...", .{});
+
+            // Poll for thread exit with timeout (500ms total)
+            var waited: u32 = 0;
+            while (waited < 500) : (waited += 10) {
+                if (self.thread_exited.load(.acquire)) {
+                    // Thread has exited, safe to join
+                    thread.join();
+                    self.sse_thread = null;
+                    log.info("SSE thread joined", .{});
+                    break;
+                }
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+            }
+
+            // If thread didn't exit in time, detach it
+            if (self.sse_thread != null) {
+                log.warn("SSE thread did not exit in time, detaching...", .{});
+                thread.detach();
+                self.sse_thread = null;
+            }
+        }
+
+        // Terminate server if we spawned it
+        if (self.server_process) |*proc| {
+            log.info("Terminating server...", .{});
+            server.terminateServer(proc);
+            self.server_process = null;
         }
 
         // Clean up session
@@ -341,6 +386,9 @@ pub const OpencodeManager = struct {
     fn sseReaderThread(manager: *OpencodeManager) void {
         log.info("SSE reader thread started", .{});
 
+        // Signal thread exit on all return paths
+        defer manager.thread_exited.store(true, .release);
+
         const c = manager.client orelse {
             manager.message_queue.push(.{ .err = .{ .code = .connection_failed } });
             return;
@@ -350,11 +398,36 @@ pub const OpencodeManager = struct {
             manager.message_queue.push(.{ .err = .{ .code = .connection_failed } });
             return;
         };
-        defer conn.deinit();
+
+        // Store connection so disconnect() can close it to unblock us
+        {
+            manager.sse_conn_mutex.lock();
+            defer manager.sse_conn_mutex.unlock();
+            manager.sse_connection = conn;
+        }
+
+        // Clean up connection on exit (unless disconnect() already did)
+        defer {
+            manager.sse_conn_mutex.lock();
+            defer manager.sse_conn_mutex.unlock();
+            if (manager.sse_connection) |stored_conn| {
+                // We still own the connection, clean it up
+                if (stored_conn == conn) {
+                    stored_conn.deinit();
+                    manager.sse_connection = null;
+                }
+            }
+            // If sse_connection is null, disconnect() already closed it
+        }
 
         while (!manager.should_stop.load(.acquire)) {
             // Try to read an event
             const event_opt = conn.readEvent() catch |err| {
+                // Check if we were signaled to stop (connection closed by disconnect)
+                if (manager.should_stop.load(.acquire)) {
+                    log.info("SSE read interrupted by disconnect", .{});
+                    break;
+                }
                 log.err("SSE read error: {}", .{err});
                 manager.message_queue.push(.{ .err = .{ .code = .connection_failed } });
                 break;
@@ -369,7 +442,12 @@ pub const OpencodeManager = struct {
                     manager.processEventData(data);
                 }
             } else {
-                // No event yet, brief sleep to avoid busy loop
+                // Connection closed (EOF) - check if intentional
+                if (manager.should_stop.load(.acquire)) {
+                    log.info("SSE connection closed by disconnect", .{});
+                    break;
+                }
+                // Brief sleep to avoid busy loop on spurious null returns
                 std.Thread.sleep(10 * std.time.ns_per_ms);
             }
         }
@@ -383,8 +461,8 @@ pub const OpencodeManager = struct {
         // This avoids expensive parsing for the many session/message update events
         const dominated_events = [_][]const u8{
             "message.part.updated",
-            "session.idle",
-            "session.error",
+            "\"type\":\"session.idle\"",
+            "\"type\":\"session.error\"",
         };
         var dominated = false;
         for (dominated_events) |evt| {
@@ -417,6 +495,7 @@ pub const OpencodeManager = struct {
 
         switch (event_type) {
             .message_part_updated => {
+                log.debug("Processing message.part.updated", .{});
                 // Extract delta from properties
                 if (parsed.value.payload.properties) |props| {
                     if (props == .object) {
