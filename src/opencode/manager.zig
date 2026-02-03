@@ -152,6 +152,7 @@ pub const OpencodeManager = struct {
     sse_thread: ?std.Thread,
     should_stop: std.atomic.Value(bool),
     thread_exited: std.atomic.Value(bool),
+    thread_was_detached: bool, // If true, don't destroy manager - thread may still access it
 
     // SSE connection (stored so we can close it to unblock the reader thread)
     sse_connection: ?*client_mod.Client.EventStreamConnection,
@@ -172,6 +173,7 @@ pub const OpencodeManager = struct {
             .sse_thread = null,
             .should_stop = std.atomic.Value(bool).init(false),
             .thread_exited = std.atomic.Value(bool).init(true), // No thread running initially
+            .thread_was_detached = false,
             .sse_connection = null,
             .sse_conn_mutex = .{},
             .connect_config = null,
@@ -181,7 +183,17 @@ pub const OpencodeManager = struct {
 
     pub fn deinit(self: *OpencodeManager) void {
         self.disconnect();
-        self.message_queue.deinit();
+        // Only clean up message queue if thread was joined cleanly
+        // If thread was detached, it may still be accessing the queue
+        if (!self.thread_was_detached) {
+            self.message_queue.deinit();
+        }
+    }
+
+    /// Check if manager can be safely destroyed.
+    /// Returns false if thread was detached (thread may still access manager).
+    pub fn canSafelyDestroy(self: *const OpencodeManager) bool {
+        return !self.thread_was_detached;
     }
 
     /// Connect to an opencode server (spawning if configured)
@@ -315,6 +327,9 @@ pub const OpencodeManager = struct {
                 log.warn("SSE thread did not exit in time, detaching...", .{});
                 thread.detach();
                 self.sse_thread = null;
+                // Mark that we detached - manager must not be destroyed
+                // because the thread may still be accessing it
+                self.thread_was_detached = true;
             }
         }
 

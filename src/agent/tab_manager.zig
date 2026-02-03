@@ -54,7 +54,11 @@ pub const AgentTab = struct {
         }
         if (self.opencode_manager) |mgr| {
             mgr.deinit();
-            self.allocator.destroy(mgr);
+            // Only destroy if thread was cleanly joined
+            // If detached, thread may still access manager - leak it to avoid crash
+            if (mgr.canSafelyDestroy()) {
+                self.allocator.destroy(mgr);
+            }
         }
     }
 
@@ -159,7 +163,10 @@ pub const AgentTab = struct {
         }
         if (self.opencode_manager) |mgr| {
             mgr.deinit();
-            self.allocator.destroy(mgr);
+            // Only destroy if thread was cleanly joined
+            if (mgr.canSafelyDestroy()) {
+                self.allocator.destroy(mgr);
+            }
             self.opencode_manager = null;
         }
     }
