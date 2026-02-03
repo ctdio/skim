@@ -203,7 +203,6 @@ pub const StdioTransport = struct {
                 self.processLinesFromBuffer(&line_buffer);
             }
         }
-
     }
 
     /// Process complete lines from the line buffer (called from reader thread)

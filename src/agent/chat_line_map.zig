@@ -1017,7 +1017,7 @@ pub const ChatLineMap = struct {
             if (is_last_visible and has_more) {
                 var text_buf: [1024]u8 = undefined;
                 const truncated_text = if (line_text.len > wrap_width -| 4)
-                    line_text[0 .. wrap_width -| 4]
+                    line_text[0..wrap_width -| 4]
                 else
                     line_text;
                 const display = std.fmt.bufPrint(&text_buf, "{s} …", .{truncated_text}) catch line_text;

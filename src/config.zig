@@ -18,6 +18,12 @@ pub const EnvVar = struct {
     value: []const u8, // May contain ${VAR} for expansion
 };
 
+/// Agent protocol type
+pub const Protocol = enum {
+    acp, // Agent Client Protocol (default, used by Claude Code, Codex)
+    opencode, // HTTP + SSE based protocol
+};
+
 /// Standard ACP agent server config with skim extensions
 /// Matches the standard agent_servers format used by JetBrains, Zed, etc.
 pub const AgentServerConfig = struct {
@@ -26,6 +32,7 @@ pub const AgentServerConfig = struct {
     args: ?[]const []const u8 = null,
     env: ?[]const EnvVar = null, // Environment variables
     skim: ?SkimAgentExtensions = null, // Namespaced skim extensions
+    protocol: Protocol = .acp, // Protocol to use for communication
 };
 
 pub const Config = struct {
@@ -189,6 +196,16 @@ fn parseAgentServer(allocator: Allocator, name: []const u8, obj: std.json.Object
             }
 
             agent.skim = skim_ext;
+        }
+    }
+
+    // Parse protocol (optional, defaults to .acp)
+    if (obj.get("protocol")) |proto_val| {
+        if (proto_val == .string) {
+            if (std.mem.eql(u8, proto_val.string, "opencode")) {
+                agent.protocol = .opencode;
+            }
+            // "acp" or unknown values default to .acp (already set)
         }
     }
 
@@ -434,4 +451,46 @@ test "expandEnvValue expands variable" {
     const home = try expandEnvValue(allocator, "${HOME}");
     defer allocator.free(home);
     try std.testing.expect(home.len > 0);
+}
+
+test "parse protocol field from agent config" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{
+        \\  "agent_servers": {
+        \\    "Opencode Agent": {
+        \\      "command": "opencode",
+        \\      "args": ["serve"],
+        \\      "protocol": "opencode"
+        \\    },
+        \\    "Claude Code": {
+        \\      "command": "claude",
+        \\      "args": ["acp"]
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const config = try parseConfig(allocator, json);
+    defer freeConfig(allocator, config);
+
+    const agents = config.agent_servers orelse unreachable;
+    try std.testing.expectEqual(@as(usize, 2), agents.len);
+
+    // Find agents by name
+    var opencode_idx: ?usize = null;
+    var claude_idx: ?usize = null;
+    for (agents, 0..) |agent, i| {
+        if (std.mem.eql(u8, agent.name, "Opencode Agent")) opencode_idx = i;
+        if (std.mem.eql(u8, agent.name, "Claude Code")) claude_idx = i;
+    }
+
+    // Opencode agent should have opencode protocol
+    const opencode_agent = agents[opencode_idx.?];
+    try std.testing.expectEqual(Protocol.opencode, opencode_agent.protocol);
+
+    // Claude Code agent should default to acp protocol
+    const claude_agent = agents[claude_idx.?];
+    try std.testing.expectEqual(Protocol.acp, claude_agent.protocol);
 }

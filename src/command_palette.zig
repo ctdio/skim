@@ -278,7 +278,7 @@ pub const CommandPaletteState = struct {
 
                 if (category_matches and
                     (containsIgnoreCase(cmd.name, search_query) or
-                    containsIgnoreCase(cmd.description, search_query)))
+                        containsIgnoreCase(cmd.description, search_query)))
                 {
                     try self.filtered_commands.append(self.allocator, idx);
                 }
@@ -330,7 +330,6 @@ pub const CommandPaletteState = struct {
         const cmd_idx = self.filtered_commands.items[self.selected_idx];
         return &self.commands.items[cmd_idx];
     }
-
 };
 
 // Truncate path for display using middle-ellipsis strategy

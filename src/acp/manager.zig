@@ -27,7 +27,7 @@ const TerminalEntry = struct {
     exited: std.atomic.Value(bool), // Process has exited (atomic for thread-safe checks)
     exit_code: ?u32,
     signal: ?u32,
-    
+
     // Thread management (will be added in Phase 2)
     worker_thread: ?std.Thread = null,
     output_mutex: std.Thread.Mutex = .{},
@@ -245,6 +245,12 @@ pub const AcpManager = struct {
         value: []const u8, // Expanded value (${VAR} already resolved)
     };
 
+    /// Protocol type for agent communication
+    pub const Protocol = enum {
+        acp, // Agent Client Protocol (default, used by Claude Code, Codex)
+        opencode, // HTTP + SSE based protocol
+    };
+
     pub const AgentInfo = struct {
         name: []const u8,
         command: []const u8,
@@ -254,6 +260,7 @@ pub const AcpManager = struct {
         mode: ?[]const u8 = null, // Agent session mode (e.g., "plan", "code")
         from_config: bool = false, // true if loaded from config
         is_default: bool = false, // true if marked as default in config
+        protocol: Protocol = .acp, // Protocol for communication
     };
 
     pub fn init(allocator: Allocator) AcpManager {
@@ -1291,13 +1298,13 @@ pub const AcpManager = struct {
 
         // Kill the child process
         _ = entry.child.kill() catch {};
-        
+
         // Join worker thread (exits quickly after kill)
         if (entry.worker_thread) |thread| {
             thread.join();
             entry.worker_thread = null;
         }
-        
+
         entry.exited.store(true, .release);
 
         try acp.transport.sendResponse(id, "{}");
@@ -1434,7 +1441,7 @@ pub const AcpManager = struct {
             const exit_code_str = after_marker[0..exit_code_end];
 
             entry.exit_code = std.fmt.parseInt(u32, exit_code_str, 10) catch 0;
-            
+
             // Remove marker line from output buffer
             // Find the start of the marker line (previous newline or start)
             var line_start = marker_start;
@@ -1446,9 +1453,6 @@ pub const AcpManager = struct {
             std.log.info("ACP Manager: command completed, exit_code={?d}, output_len={d}", .{ entry.exit_code, entry.output_buffer.items.len });
         }
     }
-
-
-
 
     /// Clear processed messages
     pub fn clearMessages(self: *AcpManager) void {
@@ -2391,6 +2395,7 @@ pub const ConfigAgent = struct {
     args: ?[]const []const u8 = null,
     env: ?[]const ConfigEnvVar = null,
     skim: ?SkimAgentExtensions = null,
+    protocol: AcpManager.Protocol = .acp, // Protocol for communication
 };
 
 /// Load agent list from config agents.
@@ -2427,6 +2432,7 @@ pub fn loadAgentList(allocator: Allocator, config_agents: ?[]const ConfigAgent) 
             .mode = if (skim.mode) |m| try allocator.dupe(u8, m) else null,
             .from_config = true,
             .is_default = skim.default,
+            .protocol = cfg.protocol,
         };
     }
     return result;

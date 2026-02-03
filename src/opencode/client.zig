@@ -57,22 +57,22 @@ pub const Client = struct {
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
 
-        var server_header_buffer: [4096]u8 = undefined;
-        var request = self.http_client.open(.GET, uri, .{
-            .server_header_buffer = &server_header_buffer,
-        }) catch return error.ConnectionFailed;
-        defer request.deinit();
+        var req = self.http_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
 
-        request.send() catch return error.ConnectionFailed;
-        request.finish() catch return error.ConnectionFailed;
-        request.wait() catch return error.ConnectionFailed;
+        req.sendBodiless() catch return error.ConnectionFailed;
 
-        if (request.status != .ok) {
-            log.err("Health check failed with status: {}", .{request.status});
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok) {
+            log.err("Health check failed with status: {}", .{response.head.status});
             return error.ServerError;
         }
 
-        const body = request.reader().readAllAlloc(self.allocator, 1024 * 1024) catch return error.InvalidResponse;
+        var body_buffer: [8192]u8 = undefined;
+        var body_reader = response.reader(&body_buffer);
+        const body = body_reader.allocRemaining(self.allocator, std.Io.Limit.limited(1024 * 1024)) catch return error.InvalidResponse;
         defer self.allocator.free(body);
 
         const parsed = std.json.parseFromSlice(protocol.HealthResponse, self.allocator, body, .{
@@ -98,29 +98,28 @@ pub const Client = struct {
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
 
-        var server_header_buffer: [4096]u8 = undefined;
-        var request = self.http_client.open(.POST, uri, .{
-            .server_header_buffer = &server_header_buffer,
+        var req = self.http_client.request(.POST, uri, .{
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "application/json" },
             },
         }) catch return error.ConnectionFailed;
-        defer request.deinit();
+        defer req.deinit();
 
         // Empty JSON body
-        const body = "{}";
-        request.transfer_encoding = .{ .content_length = body.len };
-        request.send() catch return error.ConnectionFailed;
-        request.writer().writeAll(body) catch return error.ConnectionFailed;
-        request.finish() catch return error.ConnectionFailed;
-        request.wait() catch return error.ConnectionFailed;
+        var body_data = "{}".*;
+        req.sendBodyComplete(&body_data) catch return error.ConnectionFailed;
 
-        if (request.status != .ok and request.status != .created) {
-            log.err("Create session failed with status: {}", .{request.status});
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok and response.head.status != .created) {
+            log.err("Create session failed with status: {}", .{response.head.status});
             return error.ServerError;
         }
 
-        const response_body = request.reader().readAllAlloc(self.allocator, 1024 * 1024) catch return error.InvalidResponse;
+        var body_buffer: [8192]u8 = undefined;
+        var body_reader = response.reader(&body_buffer);
+        const response_body = body_reader.allocRemaining(self.allocator, std.Io.Limit.limited(1024 * 1024)) catch return error.InvalidResponse;
         defer self.allocator.free(response_body);
 
         const parsed = std.json.parseFromSlice(protocol.Session, self.allocator, response_body, .{
@@ -138,21 +137,19 @@ pub const Client = struct {
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
 
-        var server_header_buffer: [4096]u8 = undefined;
-        var request = self.http_client.open(.DELETE, uri, .{
-            .server_header_buffer = &server_header_buffer,
-        }) catch return error.ConnectionFailed;
-        defer request.deinit();
+        var req = self.http_client.request(.DELETE, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
 
-        request.send() catch return error.ConnectionFailed;
-        request.finish() catch return error.ConnectionFailed;
-        request.wait() catch return error.ConnectionFailed;
+        req.sendBodiless() catch return error.ConnectionFailed;
 
-        if (request.status != .ok and request.status != .no_content) {
-            if (request.status == .not_found) {
+        var redirect_buffer: [4096]u8 = undefined;
+        const response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok and response.head.status != .no_content) {
+            if (response.head.status == .not_found) {
                 return error.SessionNotFound;
             }
-            log.err("Delete session failed with status: {}", .{request.status});
+            log.err("Delete session failed with status: {}", .{response.head.status});
             return error.ServerError;
         }
     }
@@ -172,30 +169,32 @@ pub const Client = struct {
         const body = try prompt_request.toJson(self.allocator);
         defer self.allocator.free(body);
 
-        var server_header_buffer: [4096]u8 = undefined;
-        var request = self.http_client.open(.POST, uri, .{
-            .server_header_buffer = &server_header_buffer,
+        // Need to copy body to a mutable buffer for sendBodyComplete
+        const body_buf = try self.allocator.alloc(u8, body.len);
+        defer self.allocator.free(body_buf);
+        @memcpy(body_buf, body);
+
+        var req = self.http_client.request(.POST, uri, .{
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "application/json" },
             },
         }) catch return error.ConnectionFailed;
-        defer request.deinit();
+        defer req.deinit();
 
-        request.transfer_encoding = .{ .content_length = body.len };
-        request.send() catch return error.ConnectionFailed;
-        request.writer().writeAll(body) catch return error.ConnectionFailed;
-        request.finish() catch return error.ConnectionFailed;
-        request.wait() catch return error.ConnectionFailed;
+        req.sendBodyComplete(body_buf) catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        const response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
 
         // Accept both 200 OK and 204 No Content
-        if (request.status != .ok and request.status != .no_content) {
-            if (request.status == .not_found) {
+        if (response.head.status != .ok and response.head.status != .no_content) {
+            if (response.head.status == .not_found) {
                 return error.SessionNotFound;
             }
-            if (request.status == .bad_request) {
+            if (response.head.status == .bad_request) {
                 return error.BadRequest;
             }
-            log.err("Send prompt async failed with status: {}", .{request.status});
+            log.err("Send prompt async failed with status: {}", .{response.head.status});
             return error.ServerError;
         }
     }
@@ -211,30 +210,34 @@ pub const Client = struct {
         const body = try prompt_request.toJson(self.allocator);
         defer self.allocator.free(body);
 
-        var server_header_buffer: [4096]u8 = undefined;
-        var request = self.http_client.open(.POST, uri, .{
-            .server_header_buffer = &server_header_buffer,
+        // Need to copy body to a mutable buffer for sendBodyComplete
+        const body_buf = try self.allocator.alloc(u8, body.len);
+        defer self.allocator.free(body_buf);
+        @memcpy(body_buf, body);
+
+        var req = self.http_client.request(.POST, uri, .{
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "application/json" },
             },
         }) catch return error.ConnectionFailed;
-        defer request.deinit();
+        defer req.deinit();
 
-        request.transfer_encoding = .{ .content_length = body.len };
-        request.send() catch return error.ConnectionFailed;
-        request.writer().writeAll(body) catch return error.ConnectionFailed;
-        request.finish() catch return error.ConnectionFailed;
-        request.wait() catch return error.ConnectionFailed;
+        req.sendBodyComplete(body_buf) catch return error.ConnectionFailed;
 
-        if (request.status != .ok) {
-            if (request.status == .not_found) {
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok) {
+            if (response.head.status == .not_found) {
                 return error.SessionNotFound;
             }
-            log.err("Send message sync failed with status: {}", .{request.status});
+            log.err("Send message sync failed with status: {}", .{response.head.status});
             return error.ServerError;
         }
 
-        return request.reader().readAllAlloc(self.allocator, 10 * 1024 * 1024) catch return error.InvalidResponse;
+        var body_buffer: [8192]u8 = undefined;
+        var body_reader = response.reader(&body_buffer);
+        return body_reader.allocRemaining(self.allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch return error.InvalidResponse;
     }
 
     // =========================================================================
@@ -245,8 +248,10 @@ pub const Client = struct {
     pub const EventStreamConnection = struct {
         allocator: Allocator,
         request: std.http.Client.Request,
+        response: std.http.Client.Response,
         parser: sse.SseParser,
         buffer: [4096]u8 = undefined,
+        body_buffer: [8192]u8 = undefined,
 
         pub fn deinit(self: *EventStreamConnection) void {
             self.parser.deinit();
@@ -262,8 +267,8 @@ pub const Client = struct {
             }
 
             // Read more data from the stream
-            const reader = self.request.reader();
-            const n = reader.read(&self.buffer) catch |err| {
+            var reader = self.response.reader(&self.body_buffer);
+            const n = reader.readSliceShort(&self.buffer) catch |err| {
                 log.err("Error reading from SSE stream: {}", .{err});
                 return error.ConnectionFailed;
             };
@@ -286,28 +291,28 @@ pub const Client = struct {
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
 
-        var server_header_buffer: [4096]u8 = undefined;
-        var request = self.http_client.open(.GET, uri, .{
-            .server_header_buffer = &server_header_buffer,
+        var req = self.http_client.request(.GET, uri, .{
             .extra_headers = &.{
                 .{ .name = "Accept", .value = "text/event-stream" },
                 .{ .name = "Cache-Control", .value = "no-cache" },
             },
         }) catch return error.ConnectionFailed;
-        errdefer request.deinit();
+        errdefer req.deinit();
 
-        request.send() catch return error.ConnectionFailed;
-        request.finish() catch return error.ConnectionFailed;
-        request.wait() catch return error.ConnectionFailed;
+        req.sendBodiless() catch return error.ConnectionFailed;
 
-        if (request.status != .ok) {
-            log.err("Connect event stream failed with status: {}", .{request.status});
+        var redirect_buffer: [4096]u8 = undefined;
+        const response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok) {
+            log.err("Connect event stream failed with status: {}", .{response.head.status});
             return error.ServerError;
         }
 
         return .{
             .allocator = self.allocator,
-            .request = request,
+            .request = req,
+            .response = response,
             .parser = sse.SseParser.init(self.allocator),
         };
     }

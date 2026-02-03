@@ -41,6 +41,7 @@ const sessions = @import("acp/sessions.zig");
 const app_config = @import("config.zig");
 const graphite = @import("git/graphite.zig");
 const acp = @import("acp/acp.zig");
+const opencode = @import("opencode/opencode.zig");
 
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
@@ -152,6 +153,8 @@ pub const App = struct {
     acp_connect_thread: ?std.Thread, // Background thread for ACP connection
     acp_connect_ctx: ?*AcpConnectContext, // Context for ACP connection thread (freed after join)
     connecting_tab_id: ?u32, // Tab ID receiving connection (null when not connecting)
+    opencode_connect_thread: ?std.Thread, // Background thread for Opencode connection
+    connecting_opencode_tab_id: ?u32, // Tab ID receiving Opencode connection (null when not connecting)
     in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
     agent_only: bool, // Start in agent-only mode (no diff view)
     tab_manager: ?agent.TabManager, // Multi-tab agent manager
@@ -541,6 +544,8 @@ pub const App = struct {
             .acp_connect_thread = null,
             .acp_connect_ctx = null,
             .connecting_tab_id = null,
+            .opencode_connect_thread = null,
+            .connecting_opencode_tab_id = null,
             .in_bracketed_paste = false,
             .agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false,
             .tab_manager = null, // Lazy initialization on first agent panel open
@@ -709,6 +714,8 @@ pub const App = struct {
             .acp_connect_thread = null,
             .acp_connect_ctx = null,
             .connecting_tab_id = null,
+            .opencode_connect_thread = null,
+            .connecting_opencode_tab_id = null,
             .in_bracketed_paste = false,
             .agent_only = false,
             .tab_manager = null,
@@ -798,7 +805,12 @@ pub const App = struct {
             self.allocator.destroy(ctx);
             self.acp_connect_ctx = null;
         }
-        // Clean up tab manager (handles per-tab ACP managers)
+        // Clean up Opencode connection thread
+        if (self.opencode_connect_thread) |thread| {
+            thread.join();
+            self.opencode_connect_thread = null;
+        }
+        // Clean up tab manager (handles per-tab ACP and Opencode managers)
         if (self.tab_manager) |*tm| {
             tm.deinit();
         }
@@ -946,6 +958,24 @@ pub const App = struct {
             }
         }
         return false;
+    }
+
+    /// Check if any Opencode manager (across all tabs) has activity
+    pub fn hasAnyOpencodeActivity(self: *const App) bool {
+        if (self.tab_manager) |tm| {
+            return tm.hasAnyOpencodeActivity();
+        }
+        return false;
+    }
+
+    /// Get the active Opencode manager from the current tab
+    pub fn getActiveOpencodeManager(self: *App) ?*opencode.OpencodeManager {
+        if (self.tab_manager) |*tm| {
+            if (tm.activeTab()) |tab| {
+                return tab.opencode_manager;
+            }
+        }
+        return null;
     }
 
     /// Check if any tab has a running shell command
@@ -1178,11 +1208,15 @@ pub const App = struct {
             // This allows blocking pollEvent() when agent is idle/connected but not producing data
             // Check all tabs for activity (multi-tab support)
             const acp_active = self.hasAnyAcpActivity();
+            // Check if any Opencode manager has activity (prompting or pending events)
+            const opencode_active = self.hasAnyOpencodeActivity();
             // Check if a shell command is running (needs streaming output) - check all tabs
             const shell_cmd_running = self.hasAnyRunningShellCommand();
             // Check if ACP connection thread is running (need to poll for completion)
             const acp_connecting = self.acp_connect_thread != null;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !acp_active and !shell_cmd_running and !acp_connecting;
+            // Check if Opencode connection thread is running
+            const opencode_connecting = self.opencode_connect_thread != null;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !acp_active and !opencode_active and !shell_cmd_running and !acp_connecting and !opencode_connecting;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -1190,8 +1224,8 @@ pub const App = struct {
                 // - High activity (prompting): 5ms for smooth streaming (~200 FPS)
                 // - Medium activity (connecting, shell running): 8ms (~125 FPS)
                 // - Low activity (just rendering): 16ms (~60 FPS)
-                const is_high_activity = acp_active or shell_cmd_running;
-                const is_medium_activity = acp_connecting or server_active;
+                const is_high_activity = acp_active or opencode_active or shell_cmd_running;
+                const is_medium_activity = acp_connecting or opencode_connecting or server_active;
                 const sleep_ms: u64 = if (is_high_activity) 5 else if (is_medium_activity) 8 else 16;
                 std.Thread.sleep(sleep_ms * std.time.ns_per_ms);
             }
@@ -1293,6 +1327,18 @@ pub const App = struct {
                         self.needs_render = true;
                     }
                 }
+            }
+
+            // Poll Opencode agent for updates (only when there's an active connection or connecting thread)
+            const has_tab_opencode = if (self.tab_manager) |tm| blk: {
+                for (tm.tabs.items) |*tab| {
+                    if (tab.opencode_manager != null) break :blk true;
+                }
+                break :blk false;
+            } else false;
+
+            if (self.opencode_connect_thread != null or has_tab_opencode) {
+                self.pollOpencodeUpdates();
             }
 
             // Poll running shell command for streaming output
@@ -3804,7 +3850,6 @@ pub const App = struct {
                 });
                 try self.renderContent(content_win);
             }
-
         }
 
         // Render unified status bar (handles both diff mode and agent mode content)
@@ -4725,6 +4770,15 @@ pub const App = struct {
             };
         };
 
+        // Check protocol for Opencode routing
+        if (agent_info) |info| {
+            if (info.protocol == .opencode) {
+                // Route to Opencode
+                try self.connectToOpencodeAgent(target_tab, info);
+                return;
+            }
+        }
+
         // Clean up any existing manager on target tab
         if (target_tab.acp_manager) |old_mgr| {
             old_mgr.deinit();
@@ -4783,6 +4837,44 @@ pub const App = struct {
         self.acp_connect_ctx = ctx;
     }
 
+    /// Connect to an Opencode agent for the given tab
+    fn connectToOpencodeAgent(self: *App, target_tab: *agent.AgentTab, agent_info: *const acp.AgentInfo) !void {
+        // Clean up any existing managers on target tab
+        target_tab.disconnectAll();
+
+        // Clear pending tab selection
+        self.state.pending_tab_for_selection = null;
+
+        // Create Opencode manager
+        const mgr = try target_tab.createOpencodeManager();
+
+        // Get opencode executable path (from config command)
+        const opencode_path = agent_info.command;
+
+        // Get current working directory
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch "/tmp";
+
+        // Add system message
+        try target_tab.agent_state.addMessage(.system, "Connecting to Opencode...");
+        self.showStatusMessage("Connecting to Opencode...");
+        std.log.info("Opencode: Connecting to {s} for tab {d}", .{ agent_info.name, target_tab.id });
+        self.needs_render = true;
+
+        // Connect with config
+        mgr.connect(.{
+            .opencode_path = opencode_path,
+            .port = 4096, // Default port
+            .cwd = cwd,
+            .spawn_server = true,
+        }) catch |err| {
+            std.log.err("Opencode: Failed to connect: {any}", .{err});
+            try target_tab.agent_state.addMessage(.system, "Failed to connect to Opencode");
+            self.showStatusMessage("Failed to connect to Opencode");
+            return;
+        };
+    }
+
     /// Connect to the currently selected agent in the selection menu
     pub fn connectToSelectedAgent(self: *App) !void {
         const agents = self.state.configured_agents orelse return;
@@ -4824,12 +4916,19 @@ pub const App = struct {
                     else
                         null;
 
+                    // Convert protocol enum
+                    const protocol: acp.AcpManager.Protocol = switch (cfg.protocol) {
+                        .acp => .acp,
+                        .opencode => .opencode,
+                    };
+
                     acp_agents[i] = .{
                         .name = cfg.name,
                         .command = cfg.command,
                         .args = cfg.args,
                         .env = env_slice,
                         .skim = skim_ext,
+                        .protocol = protocol,
                     };
                 }
 
@@ -5152,6 +5251,142 @@ pub const App = struct {
                 @intFromEnum(mgr.status),
                 mgr.pending_prompt_id,
             });
+        }
+    }
+
+    /// Poll Opencode agent for updates
+    /// Processes SSE events from the background thread via MessageQueue
+    pub fn pollOpencodeUpdates(self: *App) void {
+        // Check if connection thread completed
+        if (self.opencode_connect_thread != null and self.connecting_opencode_tab_id != null) {
+            const connecting_mgr = self.getConnectingOpencodeManager();
+            if (connecting_mgr) |mgr| {
+                // Check if connection finished (not still starting/connecting)
+                const thread_still_working = mgr.status == .starting_server or
+                    mgr.status == .connecting or mgr.status == .idle;
+                if (!thread_still_working) {
+                    // Thread is done, clean it up
+                    if (self.opencode_connect_thread) |thread| {
+                        thread.join();
+                        self.opencode_connect_thread = null;
+                    }
+
+                    // Update UI based on result
+                    if (mgr.status == .session_active) {
+                        self.showStatusMessage("Connected to Opencode");
+                        // Add welcome message to agent state
+                        if (self.getConnectingOpencodeAgentState()) |agent_state| {
+                            agent_state.addMessage(.system, "Connected to Opencode. You can start chatting!") catch {};
+                        }
+                        std.log.info("Opencode: Connection complete for tab {?d}", .{self.connecting_opencode_tab_id});
+                    } else if (mgr.status == .failed or mgr.status == .disconnected) {
+                        self.showStatusMessage("Failed to connect to Opencode");
+                        if (self.getConnectingOpencodeAgentState()) |agent_state| {
+                            agent_state.addMessage(.system, "Connection failed. Check if opencode is installed.") catch {};
+                        }
+                        // Clean up failed manager from the tab
+                        if (self.getConnectingOpencodeTab()) |tab| {
+                            if (tab.opencode_manager) |m| {
+                                m.deinit();
+                                self.allocator.destroy(m);
+                                tab.opencode_manager = null;
+                            }
+                        }
+                    }
+
+                    // Clear the connecting state
+                    self.connecting_opencode_tab_id = null;
+                    self.needs_render = true;
+                }
+            }
+        }
+
+        // Don't poll while connection thread is active
+        if (self.opencode_connect_thread != null) {
+            return;
+        }
+
+        // Poll all tabs for Opencode updates
+        if (self.tab_manager) |*tm| {
+            for (tm.tabs.items, 0..) |*tab, tab_idx| {
+                const tab_mgr = tab.opencode_manager orelse continue;
+                self.pollTabOpencodeManager(tab_mgr, &tab.agent_state, tab_idx == tm.active_idx);
+            }
+        }
+    }
+
+    /// Get the Opencode manager being connected (via connecting_opencode_tab_id)
+    fn getConnectingOpencodeManager(self: *App) ?*opencode.OpencodeManager {
+        const tab_id = self.connecting_opencode_tab_id orelse return null;
+        if (self.tab_manager) |*tm| {
+            if (tm.findTabById(tab_id)) |idx| {
+                if (tm.getTab(idx)) |tab| {
+                    return tab.opencode_manager;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Get the tab being connected to Opencode (via connecting_opencode_tab_id)
+    fn getConnectingOpencodeTab(self: *App) ?*agent.AgentTab {
+        const tab_id = self.connecting_opencode_tab_id orelse return null;
+        if (self.tab_manager) |*tm| {
+            if (tm.findTabById(tab_id)) |idx| {
+                return tm.getTab(idx);
+            }
+        }
+        return null;
+    }
+
+    /// Get the agent state for the tab being connected to Opencode
+    fn getConnectingOpencodeAgentState(self: *App) ?*agent.AgentState {
+        if (self.getConnectingOpencodeTab()) |tab| {
+            return &tab.agent_state;
+        }
+        return null;
+    }
+
+    /// Poll a single Opencode manager and route events to its agent state
+    fn pollTabOpencodeManager(self: *App, mgr: *opencode.OpencodeManager, agent_state: *agent.AgentState, is_active_tab: bool) void {
+        _ = is_active_tab;
+
+        // Track status before polling
+        const status_before = mgr.status;
+
+        // Process events from the message queue
+        while (mgr.poll()) |ev| {
+            var event = ev;
+            defer event.deinit(self.allocator);
+
+            switch (event) {
+                .message_chunk => |chunk| {
+                    // Append delta text to the current agent message
+                    agent_state.appendToLastAgentMessage(chunk.delta) catch {};
+                    self.needs_render = true;
+                },
+                .message_complete => {
+                    // Message finished streaming
+                    self.needs_render = true;
+                },
+                .status_change => |new_status| {
+                    _ = new_status;
+                    // Status change handled via mgr.status comparison below
+                },
+                .err => |err_info| {
+                    const err_msg = std.fmt.allocPrint(self.allocator, "[Opencode Error: {s}]", .{
+                        err_info.message orelse @tagName(err_info.code),
+                    }) catch "[Opencode Error]";
+                    defer self.allocator.free(err_msg);
+                    agent_state.addMessage(.system, err_msg) catch {};
+                    self.needs_render = true;
+                },
+            }
+        }
+
+        // Trigger redraw if status changed
+        if (mgr.status != status_before) {
+            self.needs_render = true;
         }
     }
 

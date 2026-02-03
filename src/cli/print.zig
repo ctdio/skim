@@ -178,7 +178,7 @@ fn renderAndOutput(allocator: Allocator, app: *App, max_diff_lines: ?usize, widt
             .{ shown_diff_lines, total_diff_lines },
         );
     }
-    
+
     file_writer.interface.flush() catch {};
 }
 
@@ -187,7 +187,7 @@ fn renderAndOutput(allocator: Allocator, app: *App, max_diff_lines: ?usize, widt
 fn applySyntaxHighlighting(allocator: Allocator, files: []parser.FileDiff, highlighter: *syntax.SyntaxHighlighter) void {
     for (files) |*file| {
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-        
+
         // Skip unknown languages
         const lang = syntax.Language.fromFilePath(file_path);
         if (lang == .unknown) continue;

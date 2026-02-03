@@ -227,7 +227,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-
     // Handle Ctrl+key combinations first (before regular key handling)
     if (key.mods.ctrl) {
         switch (key.codepoint) {
@@ -285,7 +284,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
     }
-
 
     switch (key.codepoint) {
         'j' => {

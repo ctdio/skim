@@ -7,6 +7,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const AgentState = @import("state.zig").AgentState;
 const AcpManager = @import("../acp/manager.zig").AcpManager;
+const opencode = @import("../opencode/opencode.zig");
 
 /// Maximum number of tabs allowed
 pub const MAX_TABS: usize = 10;
@@ -17,12 +18,13 @@ const DEFAULT_TAB_NAME = "New Tab";
 /// Maximum length for auto-generated tab names
 const MAX_TAB_NAME_LEN: usize = 24;
 
-/// A single agent tab containing its own state and ACP connection
+/// A single agent tab containing its own state and ACP/Opencode connection
 pub const AgentTab = struct {
     id: u32,
     name: []const u8, // Owned
     agent_state: AgentState,
     acp_manager: ?*AcpManager, // Owned, nullable until agent spawned
+    opencode_manager: ?*opencode.OpencodeManager, // Owned, nullable - mutual exclusive with acp_manager
     allocator: Allocator,
     auto_named: bool, // True if name was auto-generated from first prompt
 
@@ -36,6 +38,7 @@ pub const AgentTab = struct {
             .name = owned_name,
             .agent_state = AgentState.init(allocator, panel_side),
             .acp_manager = null,
+            .opencode_manager = null,
             .allocator = allocator,
             .auto_named = false,
         };
@@ -46,6 +49,10 @@ pub const AgentTab = struct {
         self.allocator.free(self.name);
         self.agent_state.deinit();
         if (self.acp_manager) |mgr| {
+            mgr.deinit();
+            self.allocator.destroy(mgr);
+        }
+        if (self.opencode_manager) |mgr| {
             mgr.deinit();
             self.allocator.destroy(mgr);
         }
@@ -122,6 +129,48 @@ pub const AgentTab = struct {
     pub fn hasPendingPermission(self: *const AgentTab) bool {
         if (self.acp_manager) |mgr| {
             return mgr.getPendingPermission() != null;
+        }
+        return false;
+    }
+
+    /// Get the active Opencode manager for this tab
+    pub fn getActiveOpencodeManager(self: *AgentTab) ?*opencode.OpencodeManager {
+        return self.opencode_manager;
+    }
+
+    /// Create and attach an Opencode manager for this tab
+    pub fn createOpencodeManager(self: *AgentTab) !*opencode.OpencodeManager {
+        if (self.opencode_manager != null) {
+            return self.opencode_manager.?;
+        }
+
+        const mgr = try self.allocator.create(opencode.OpencodeManager);
+        mgr.* = opencode.OpencodeManager.init(self.allocator);
+        self.opencode_manager = mgr;
+        return mgr;
+    }
+
+    /// Disconnect all managers (ACP and Opencode)
+    pub fn disconnectAll(self: *AgentTab) void {
+        if (self.acp_manager) |mgr| {
+            mgr.deinit();
+            self.allocator.destroy(mgr);
+            self.acp_manager = null;
+        }
+        if (self.opencode_manager) |mgr| {
+            mgr.deinit();
+            self.allocator.destroy(mgr);
+            self.opencode_manager = null;
+        }
+    }
+
+    /// Check if this tab's agent is currently thinking (ACP or Opencode)
+    pub fn isThinkingAny(self: *const AgentTab) bool {
+        if (self.acp_manager) |mgr| {
+            if (mgr.isPrompting()) return true;
+        }
+        if (self.opencode_manager) |mgr| {
+            if (mgr.status == .prompting) return true;
         }
         return false;
     }
@@ -328,6 +377,19 @@ pub const TabManager = struct {
             }
         }
         return had_activity;
+    }
+
+    /// Check if any tab has Opencode activity (has manager or pending events)
+    pub fn hasAnyOpencodeActivity(self: *const TabManager) bool {
+        for (self.tabs.items) |*tab| {
+            if (tab.opencode_manager) |mgr| {
+                // Manager exists - check if actively prompting or has pending events
+                if (mgr.status == .prompting or mgr.hasPendingEvents()) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /// Get tab by index

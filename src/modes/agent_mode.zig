@@ -7,6 +7,7 @@ const protocol = @import("../acp/protocol.zig");
 const sessions = @import("../acp/sessions.zig");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const command_palette = @import("../agent/command_palette.zig");
+const opencode = @import("../opencode/opencode.zig");
 
 /// Handle keyboard input when in agent mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -461,19 +462,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 // Auto-name the tab from the first user prompt
                 app.autoNameActiveTab(text);
 
-                // Send to ACP agent
-                if (app.getActiveAcpManager()) |mgr| {
-                    if (mgr.status == .disconnected) {
-                        try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
-                    } else if (mgr.status == .failed) {
-                        try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
-                    } else {
-                        // Parse prompt for @file references and send as content blocks
-                        try sendPromptWithFiles(app, mgr, text);
-                    }
-                } else {
-                    try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
-                }
+                // Send to active agent (Opencode or ACP)
+                try sendPromptToActiveManager(app, text);
 
                 // Clear input and hide menu
                 agent_state.input.clear();
@@ -814,7 +804,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-
     // Ctrl+D - page down (only in history mode, otherwise pass to input editor)
     if (key.mods.ctrl and key.codepoint == 'd') {
         if (agent_state.isInHistoryMode()) {
@@ -982,15 +971,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                         // Auto-name the tab from the first user prompt
                         app.autoNameActiveTab(staged);
 
-                        if (app.getActiveAcpManager()) |mgr| {
-                            if (mgr.status == .disconnected) {
-                                try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
-                            } else if (mgr.status == .failed) {
-                                try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
-                            } else {
-                                try sendPromptWithFiles(app, mgr, staged);
-                            }
-                        }
+                        // Send to active agent (Opencode or ACP)
+                        try sendPromptToActiveManager(app, staged);
 
                         agent_state.clearStagedPrompt();
                     } else if (text.len == 0) {
@@ -1035,19 +1017,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                             // Auto-name the tab from the first user prompt
                             app.autoNameActiveTab(text);
 
-                            // Send to ACP agent (manager will queue if still connecting)
-                            if (app.getActiveAcpManager()) |mgr| {
-                                if (mgr.status == .disconnected) {
-                                    try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
-                                } else if (mgr.status == .failed) {
-                                    try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
-                                } else {
-                                    // Parse and send prompt with file references
-                                    try sendPromptWithFiles(app, mgr, text);
-                                }
-                            } else {
-                                try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
-                            }
+                            // Send to active agent (Opencode or ACP)
+                            try sendPromptToActiveManager(app, text);
 
                             // Clear input for next prompt
                             agent_state.input.clear();
@@ -1548,6 +1519,68 @@ fn updateFilePickerVisibility(_: *App, agent_state: *agent.AgentState) void {
         const filter = state.FilePickerState.getFileFilter(input_text, cursor_pos);
         agent_state.file_picker.updateFilter(filter) catch {};
     }
+}
+
+/// Route a prompt to the active manager (Opencode or ACP).
+/// Tries Opencode manager first if available, then falls back to ACP.
+/// MVP Limitation for Opencode: @file references and shell outputs are NOT supported
+/// (sent as literal text or discarded).
+pub fn sendPromptToActiveManager(app: *App, text: []const u8) !void {
+    const tab = (if (app.tab_manager) |*tm| tm.activeTab() else null) orelse {
+        if (app.getActiveAgentState()) |agent_state| {
+            try agent_state.addMessage(.system, "No agent tab available");
+        }
+        return error.NoAgentTab;
+    };
+    const agent_state = &tab.agent_state;
+
+    // Try Opencode manager first
+    if (tab.opencode_manager) |mgr| {
+        switch (mgr.status) {
+            .disconnected, .failed => {
+                try agent_state.addMessage(.system, "Opencode disconnected or failed. Close and reopen panel to reconnect.");
+            },
+            .idle, .starting_server, .connecting => {
+                // Connection in progress - queue the message (MVP: just show message)
+                try agent_state.addMessage(.system, "Opencode connecting... please wait.");
+            },
+            .session_active, .prompting => {
+                // MVP limitation: simple text only (no @file, no shell outputs)
+                // Log if we're discarding unsupported features
+                if (std.mem.indexOf(u8, text, "@") != null) {
+                    std.log.info("Opencode MVP: @file references not supported, sending as literal text", .{});
+                }
+                // Discard queued shell outputs for Opencode (MVP limitation)
+                if (agent_state.hasQueuedShellOutputs()) {
+                    std.log.info("Opencode MVP: Shell outputs not supported, discarding", .{});
+                    _ = agent_state.takeQueuedShellOutputs();
+                }
+
+                // Send simple text prompt
+                mgr.sendPrompt(text) catch |err| {
+                    std.log.err("Opencode: Failed to send prompt: {any}", .{err});
+                    try agent_state.addMessage(.system, "Failed to send prompt to Opencode");
+                };
+            },
+        }
+        return;
+    }
+
+    // Fallback to ACP manager
+    if (tab.acp_manager) |mgr| {
+        if (mgr.status == .disconnected) {
+            try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
+        } else if (mgr.status == .failed) {
+            try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
+        } else {
+            // ACP supports full features - parse @file references and send
+            try sendPromptWithFiles(app, mgr, text);
+        }
+        return;
+    }
+
+    // No manager available
+    try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
 }
 
 /// Send a prompt, parsing @file references and embedding file content.

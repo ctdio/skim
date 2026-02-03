@@ -985,10 +985,10 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             // Encode the codepoint as UTF-8
             var utf8_buf: [4]u8 = undefined;
             const utf8_len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch return;
-            
+
             // Check if we have enough space
             if (state.text_len + utf8_len > state.text_buffer.len) return;
-            
+
             // Make room for the new bytes
             const remaining = state.text_len - state.cursor_pos;
             if (remaining > 0) {
@@ -998,7 +998,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                     state.text_buffer[state.cursor_pos..state.text_len],
                 );
             }
-            
+
             // Insert the UTF-8 bytes
             @memcpy(state.text_buffer[state.cursor_pos .. state.cursor_pos + utf8_len], utf8_buf[0..utf8_len]);
             state.text_len += utf8_len;
