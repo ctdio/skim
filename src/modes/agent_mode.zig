@@ -393,7 +393,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             }
 
             if (cancelled) {
-                std.log.info("Agent: Interrupted agent via double-ESC", .{});
                 try agent_state.addMessage(.system, "Interrupted");
 
                 // Auto-execute staged shell commands after interrupt

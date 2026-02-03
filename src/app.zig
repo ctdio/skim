@@ -5409,7 +5409,8 @@ pub const App = struct {
                 break;
             }
             var event = ev;
-            defer event.deinit(self.allocator);
+            // Use manager's allocator since events are allocated by SSE thread
+            defer event.deinit(mgr.allocator);
 
             switch (event) {
                 .message_chunk => |chunk| {
