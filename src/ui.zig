@@ -1491,6 +1491,21 @@ pub const UI = struct {
                             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
                         }
                     }
+                } else if (app.getActiveOpencodeManager()) |mgr| {
+                    const model_name = mgr.getCurrentModelName();
+                    if (model_name.len > 0) {
+                        const variant = mgr.getVariant();
+
+                        var model_buf: [128]u8 = undefined;
+                        const model_str = if (variant) |v|
+                            std.fmt.bufPrint(&model_buf, " {s} [{s}]", .{ model_name, v }) catch ""
+                        else
+                            std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch "";
+
+                        if (model_str.len > 0) {
+                            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
+                        }
+                    }
                 }
 
                 // Keybindings on the right

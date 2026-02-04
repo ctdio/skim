@@ -14,6 +14,8 @@
 │                                                                      │
 │ NORMAL MODE                                                          │
 │  i/a/I/A        │ Enter insert                                       │
+│  Space s        │ Toggle diff view                                   │
+│  Space t        │ Cycle model variant                                │
 │  ?              │ This help                                          │
 │                                                                      │
 │                                                                      │

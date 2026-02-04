@@ -145,11 +145,16 @@ pub const OwnedModelInfo = struct {
     model_id: []const u8, // "provider/model" format for API
     name: ?[]const u8, // Display name (optional, falls back to model_id)
     description: ?[]const u8 = null, // Optional description
+    variants: ?[]const []const u8 = null, // Optional variant list
 
     pub fn deinit(self: *OwnedModelInfo, allocator: Allocator) void {
         allocator.free(self.model_id);
         if (self.name) |n| allocator.free(n);
         if (self.description) |d| allocator.free(d);
+        if (self.variants) |variants| {
+            for (variants) |v| allocator.free(v);
+            allocator.free(variants);
+        }
     }
 };
 
@@ -174,11 +179,14 @@ pub const OpencodeManager = struct {
 
     // Connection config (stored for reconnection)
     connect_config: ?ConnectConfig,
+    connect_cwd_owned: ?[]const u8,
     base_url: ?[]const u8,
 
     // Agent and model selection
     current_agent: ?[]const u8, // "build", "plan", or custom agent name
     current_model: ?protocol.ModelSpec, // { providerID, modelID }
+    current_variant: ?[]const u8, // Model variant (e.g. "high")
+    default_model_id: ?[]const u8, // Default model from server config
 
     // Available models (fetched from server)
     available_models: std.ArrayListUnmanaged(OwnedModelInfo),
@@ -199,9 +207,12 @@ pub const OpencodeManager = struct {
             .sse_connection = null,
             .sse_conn_mutex = .{},
             .connect_config = null,
+            .connect_cwd_owned = null,
             .base_url = null,
             .current_agent = null,
             .current_model = null,
+            .current_variant = null,
+            .default_model_id = null,
             .available_models = .{},
             .current_model_id = null,
         };
@@ -224,6 +235,18 @@ pub const OpencodeManager = struct {
             self.allocator.free(model.providerID);
             self.allocator.free(model.modelID);
             self.current_model = null;
+        }
+        if (self.current_variant) |variant| {
+            self.allocator.free(variant);
+            self.current_variant = null;
+        }
+        if (self.default_model_id) |id| {
+            self.allocator.free(id);
+            self.default_model_id = null;
+        }
+        if (self.connect_cwd_owned) |cwd| {
+            self.allocator.free(cwd);
+            self.connect_cwd_owned = null;
         }
 
         // Free available models
@@ -257,8 +280,19 @@ pub const OpencodeManager = struct {
             return error.AlreadyConnected;
         }
 
+        // Clear any previous owned cwd
+        if (self.connect_cwd_owned) |cwd| {
+            self.allocator.free(cwd);
+            self.connect_cwd_owned = null;
+        }
+
         // Store config for potential reconnection
-        self.connect_config = config;
+        var config_copy = config;
+        if (config.cwd) |cwd| {
+            self.connect_cwd_owned = try self.allocator.dupe(u8, cwd);
+            config_copy.cwd = self.connect_cwd_owned;
+        }
+        self.connect_config = config_copy;
 
         // Build base URL
         const base_url = try std.fmt.allocPrint(self.allocator, "http://localhost:{d}", .{config.port});
@@ -337,6 +371,11 @@ pub const OpencodeManager = struct {
         self.status = .session_active;
         log.info("Connected successfully", .{});
 
+        // Fetch default model config in background (don't fail connect if this fails)
+        self.fetchDefaultModelConfig() catch |err| {
+            log.warn("Failed to fetch default model config: {}", .{err});
+        };
+
         // Fetch available models in background (don't fail connect if this fails)
         self.fetchAvailableModels() catch |err| {
             log.warn("Failed to fetch available models: {}", .{err});
@@ -409,6 +448,8 @@ pub const OpencodeManager = struct {
             self.session_id = null;
         }
 
+        self.clearDefaultModelId();
+
         // Clean up client
         if (self.client) |c| {
             c.deinit();
@@ -445,6 +486,7 @@ pub const OpencodeManager = struct {
             .parts = parts,
             .agent = self.current_agent,
             .model = self.current_model,
+            .variant = self.current_variant,
         };
 
         // Send async
@@ -507,6 +549,9 @@ pub const OpencodeManager = struct {
             self.current_model = null;
             log.info("Model cleared (using default)", .{});
         }
+
+        // Clear variant when model changes (variants are model-specific)
+        self.clearVariant();
     }
 
     /// Set model from a combined "provider/model" string (e.g., "anthropic/claude-sonnet-4")
@@ -538,6 +583,48 @@ pub const OpencodeManager = struct {
         return try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ model.providerID, model.modelID });
     }
 
+    /// Set the current variant for future prompts
+    /// Pass null to clear/use default
+    pub fn setVariant(self: *OpencodeManager, variant: ?[]const u8) !void {
+        if (self.current_variant) |old| {
+            self.allocator.free(old);
+        }
+
+        if (variant) |v| {
+            self.current_variant = try self.allocator.dupe(u8, v);
+            log.info("Variant set to: {s}", .{v});
+        } else {
+            self.current_variant = null;
+            log.info("Variant cleared (using default)", .{});
+        }
+    }
+
+    /// Get the current variant name
+    pub fn getVariant(self: *const OpencodeManager) ?[]const u8 {
+        return self.current_variant;
+    }
+
+    /// Cycle to the next available variant for the current model
+    /// Returns the new variant, or null if no variants available
+    pub fn cycleVariant(self: *OpencodeManager) ?[]const u8 {
+        const model_id = self.getEffectiveModelId() orelse return null;
+        const variants = self.getVariantsForModelId(model_id) orelse return null;
+        if (variants.len == 0) return null;
+
+        var next_idx: usize = 0;
+        if (self.current_variant) |current| {
+            for (variants, 0..) |variant, idx| {
+                if (std.mem.eql(u8, variant, current)) {
+                    next_idx = (idx + 1) % variants.len;
+                    break;
+                }
+            }
+        }
+
+        self.setVariant(variants[next_idx]) catch return null;
+        return self.current_variant;
+    }
+
     // =========================================================================
     // Available Models (for model picker UI)
     // =========================================================================
@@ -546,9 +633,10 @@ pub const OpencodeManager = struct {
     /// Call this after connect() to populate the model list
     pub fn fetchAvailableModels(self: *OpencodeManager) !void {
         const c = self.client orelse return error.NotConnected;
+        const directory = if (self.connect_config) |cfg| cfg.cwd else null;
 
         // Fetch providers from server
-        var parsed = c.getProviders() catch |err| {
+        var parsed = c.getProviders(directory) catch |err| {
             log.err("Failed to fetch providers: {}", .{err});
             return error.FetchFailed;
         };
@@ -556,6 +644,9 @@ pub const OpencodeManager = struct {
 
         // Clear existing models
         self.clearAvailableModels();
+
+        // Capture default model mapping if provided (provider -> model)
+        const default_map = parsed.value.default;
 
         // Build flat list of models from all providers
         // The API returns models as a JSON object map (keyed by model ID), not an array
@@ -576,6 +667,42 @@ pub const OpencodeManager = struct {
                     (if (name_val == .string) name_val.string else null)
                 else
                     null;
+
+                // Extract model variants (optional)
+                var variants_slice: ?[]const []const u8 = null;
+                if (model_val.object.get("variants")) |variants_val| {
+                    if (variants_val == .object) {
+                        var variants: std.ArrayListUnmanaged([]const u8) = .{};
+
+                        var variant_iter = variants_val.object.iterator();
+                        while (variant_iter.next()) |variant_entry| {
+                            const variant_name = variant_entry.key_ptr.*;
+
+                            if (variant_entry.value_ptr.* == .object) {
+                                if (variant_entry.value_ptr.*.object.get("disabled")) |disabled_val| {
+                                    if (disabled_val == .bool and disabled_val.bool) continue;
+                                }
+                            }
+
+                            const variant_copy = self.allocator.dupe(u8, variant_name) catch continue;
+                            variants.append(self.allocator, variant_copy) catch |err| {
+                                self.allocator.free(variant_copy);
+                                if (err == error.OutOfMemory) break;
+                                continue;
+                            };
+                        }
+
+                        if (variants.items.len > 0) {
+                            variants_slice = variants.toOwnedSlice(self.allocator) catch blk: {
+                                for (variants.items) |v| self.allocator.free(v);
+                                variants.deinit(self.allocator);
+                                break :blk null;
+                            };
+                        } else {
+                            variants.deinit(self.allocator);
+                        }
+                    }
+                }
 
                 // Create "provider/model" ID
                 const model_id = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{
@@ -605,11 +732,132 @@ pub const OpencodeManager = struct {
                 self.available_models.append(self.allocator, .{
                     .model_id = model_id,
                     .name = name,
+                    .variants = variants_slice,
                 }) catch continue;
             }
         }
 
         log.info("Fetched {d} available models", .{self.available_models.items.len});
+
+        // Fallback: infer default model from providers default map when config didn't specify one
+        if (self.default_model_id == null) {
+            if (default_map) |map_val| {
+                if (map_val == .object and map_val.object.count() > 0) {
+                    var chosen_provider: ?[]const u8 = null;
+
+                    if (parsed.value.providers.len == 1) {
+                        chosen_provider = parsed.value.providers[0].id;
+                    } else if (map_val.object.count() == 1) {
+                        var iter = map_val.object.iterator();
+                        if (iter.next()) |entry| {
+                            chosen_provider = entry.key_ptr.*;
+                        }
+                    }
+
+                    if (chosen_provider) |provider_id| {
+                        if (map_val.object.get(provider_id)) |model_val| {
+                            if (model_val == .string) {
+                                const model_id = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ provider_id, model_val.string }) catch null;
+                                if (model_id) |mid| {
+                                    defer self.allocator.free(mid);
+                                    self.setDefaultModelId(mid) catch |err| {
+                                        log.warn("Failed to set default model from providers: {}", .{err});
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.clearVariantIfInvalid();
+    }
+
+    /// Fetch default model from server config
+    fn fetchDefaultModelConfig(self: *OpencodeManager) !void {
+        const c = self.client orelse return error.NotConnected;
+        const directory = if (self.connect_config) |cfg| cfg.cwd else null;
+
+        var parsed = c.getConfig(directory) catch |err| {
+            log.err("Failed to fetch config: {}", .{err});
+            return error.FetchFailed;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value.model) |model| {
+            self.setDefaultModelId(model) catch |err| {
+                log.warn("Failed to set default model id: {}", .{err});
+            };
+            return;
+        }
+
+        // Fallback to global config if local config doesn't include a model
+        var global_parsed = c.getGlobalConfig() catch |err| {
+            log.warn("Failed to fetch global config: {}", .{err});
+            self.clearDefaultModelId();
+            return;
+        };
+        defer global_parsed.deinit();
+
+        if (global_parsed.value.model) |model| {
+            self.setDefaultModelId(model) catch |err| {
+                log.warn("Failed to set default model id: {}", .{err});
+            };
+        } else {
+            self.clearDefaultModelId();
+        }
+    }
+
+    fn getVariantsForModelId(self: *const OpencodeManager, model_id: []const u8) ?[]const []const u8 {
+        for (self.available_models.items) |model| {
+            if (std.mem.eql(u8, model.model_id, model_id)) {
+                return model.variants;
+            }
+        }
+        return null;
+    }
+
+    fn getEffectiveModelId(self: *const OpencodeManager) ?[]const u8 {
+        return self.current_model_id orelse self.default_model_id;
+    }
+
+    fn setDefaultModelId(self: *OpencodeManager, model_id: []const u8) !void {
+        if (self.default_model_id) |old| {
+            self.allocator.free(old);
+        }
+        self.default_model_id = try self.allocator.dupe(u8, model_id);
+        log.info("Default model set to: {s}", .{model_id});
+    }
+
+    fn clearDefaultModelId(self: *OpencodeManager) void {
+        if (self.default_model_id) |id| {
+            self.allocator.free(id);
+            self.default_model_id = null;
+        }
+    }
+
+    fn clearVariant(self: *OpencodeManager) void {
+        if (self.current_variant) |variant| {
+            self.allocator.free(variant);
+            self.current_variant = null;
+        }
+    }
+
+    fn clearVariantIfInvalid(self: *OpencodeManager) void {
+        const current = self.current_variant orelse return;
+        const model_id = self.getEffectiveModelId() orelse {
+            self.clearVariant();
+            return;
+        };
+        const variants = self.getVariantsForModelId(model_id) orelse {
+            self.clearVariant();
+            return;
+        };
+        for (variants) |variant| {
+            if (std.mem.eql(u8, variant, current)) return;
+        }
+        self.clearVariant();
     }
 
     /// Get available models for UI display
@@ -620,12 +868,12 @@ pub const OpencodeManager = struct {
 
     /// Get current model ID (for highlighting in picker)
     pub fn getCurrentModelId(self: *const OpencodeManager) ?[]const u8 {
-        return self.current_model_id;
+        return self.getEffectiveModelId();
     }
 
     /// Get current model display name
     pub fn getCurrentModelName(self: *const OpencodeManager) []const u8 {
-        if (self.current_model_id) |id| {
+        if (self.getEffectiveModelId()) |id| {
             // Find in available models
             for (self.available_models.items) |model| {
                 if (std.mem.eql(u8, model.model_id, id)) {
@@ -648,6 +896,8 @@ pub const OpencodeManager = struct {
             self.allocator.free(old);
         }
         self.current_model_id = try self.allocator.dupe(u8, model_id);
+
+        self.clearVariantIfInvalid();
     }
 
     /// Cancel the current prompt (abort generation)

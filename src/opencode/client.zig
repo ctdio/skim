@@ -55,7 +55,10 @@ pub const Client = struct {
         const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/global/health", .{self.base_url});
         defer self.allocator.free(uri_str);
 
-        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+        const uri = std.Uri.parse(uri_str) catch |err| {
+            log.err("Invalid health URI: {s} ({})", .{ uri_str, err });
+            return error.InvalidResponse;
+        };
 
         var req = self.http_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
         defer req.deinit();
@@ -90,10 +93,87 @@ pub const Client = struct {
     // Configuration
     // =========================================================================
 
+    /// GET /config - Get server configuration (includes default model)
+    /// Returns parsed config response (caller must deinit)
+    pub fn getConfig(self: *Client, directory: ?[]const u8) !std.json.Parsed(protocol.ConfigResponse) {
+        const uri_str = if (directory) |dir|
+            try std.fmt.allocPrint(self.allocator, "{s}/config?directory={s}", .{ self.base_url, dir })
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}/config", .{self.base_url});
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var req = self.http_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
+
+        req.sendBodiless() catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok) {
+            log.err("Get config failed with status: {}", .{response.head.status});
+            return error.ServerError;
+        }
+
+        var body_buffer: [8192]u8 = undefined;
+        var body_reader = response.reader(&body_buffer);
+        const body = body_reader.allocRemaining(self.allocator, std.Io.Limit.limited(1024 * 1024)) catch |err| {
+            log.err("Failed to read config body: {}", .{err});
+            return error.InvalidResponse;
+        };
+        defer self.allocator.free(body);
+
+        return std.json.parseFromSlice(protocol.ConfigResponse, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| {
+            const preview = if (body.len > 200) body[0..200] else body;
+            log.err("Failed to parse config JSON: {} body={s}", .{ err, preview });
+            return error.InvalidResponse;
+        };
+    }
+
+    /// GET /global/config - Get global server configuration
+    /// Returns parsed config response (caller must deinit)
+    pub fn getGlobalConfig(self: *Client) !std.json.Parsed(protocol.ConfigResponse) {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/global/config", .{self.base_url});
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var req = self.http_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
+
+        req.sendBodiless() catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok) {
+            log.err("Get global config failed with status: {}", .{response.head.status});
+            return error.ServerError;
+        }
+
+        var body_buffer: [8192]u8 = undefined;
+        var body_reader = response.reader(&body_buffer);
+        const body = body_reader.allocRemaining(self.allocator, std.Io.Limit.limited(1024 * 1024)) catch return error.InvalidResponse;
+        defer self.allocator.free(body);
+
+        return std.json.parseFromSlice(protocol.ConfigResponse, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch return error.InvalidResponse;
+    }
+
     /// GET /config/providers - Get available providers and models
     /// Returns parsed providers response (caller must deinit)
-    pub fn getProviders(self: *Client) !std.json.Parsed(protocol.ProvidersResponse) {
-        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/config/providers", .{self.base_url});
+    pub fn getProviders(self: *Client, directory: ?[]const u8) !std.json.Parsed(protocol.ProvidersResponse) {
+        const uri_str = if (directory) |dir|
+            try std.fmt.allocPrint(self.allocator, "{s}/config/providers?directory={s}", .{ self.base_url, dir })
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}/config/providers", .{self.base_url});
         defer self.allocator.free(uri_str);
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;

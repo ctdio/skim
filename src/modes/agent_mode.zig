@@ -720,6 +720,24 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.needs_render = true;
                 return;
             }
+            if (key.codepoint == 't') {
+                // Space+t - cycle model variant (Opencode only)
+                if (app.getActiveOpencodeManager()) |mgr| {
+                    if (mgr.getCurrentModelId() == null) {
+                        try agent_state.addMessage(.system, "Select a model to use variants");
+                    } else if (mgr.cycleVariant()) |variant| {
+                        const msg = std.fmt.allocPrint(app.allocator, "Variant: {s}", .{variant}) catch "Variant updated";
+                        defer if (!std.mem.eql(u8, msg, "Variant updated")) app.allocator.free(msg);
+                        try agent_state.addMessage(.system, msg);
+                    } else {
+                        try agent_state.addMessage(.system, "No variants available for current model");
+                    }
+                } else {
+                    try agent_state.addMessage(.system, "Variant toggle is only available for Opencode agents");
+                }
+                app.needs_render = true;
+                return;
+            }
             // Unknown space-sequence, ignore
             return;
         } else if (key.codepoint == ' ' and !key.mods.ctrl and !key.mods.alt) {

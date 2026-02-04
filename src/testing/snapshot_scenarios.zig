@@ -1681,6 +1681,8 @@ test "snapshot: help_agent_popup" {
         help_helpers.blank(),
         help_helpers.section("NORMAL MODE"),
         help_helpers.binding("i/a/I/A", "Enter insert"),
+        help_helpers.binding("Space s", "Toggle diff view"),
+        help_helpers.binding("Space t", "Cycle model variant"),
         help_helpers.binding("?", "This help"),
     };
 

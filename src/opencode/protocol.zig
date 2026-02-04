@@ -55,6 +55,12 @@ pub const Provider = struct {
 /// Response from GET /config/providers
 pub const ProvidersResponse = struct {
     providers: []const Provider = &.{},
+    default: ?std.json.Value = null,
+};
+
+/// Response from GET /config
+pub const ConfigResponse = struct {
+    model: ?[]const u8 = null,
 };
 
 // =============================================================================
@@ -97,6 +103,7 @@ pub const PromptAsyncRequest = struct {
     parts: []const Part,
     agent: ?[]const u8 = null, // Agent name: "build", "plan", or custom
     model: ?ModelSpec = null, // Model override: { providerID, modelID }
+    variant: ?[]const u8 = null, // Model variant (provider-specific, e.g. "high")
 
     /// Serialize to JSON for HTTP request body
     pub fn toJson(self: PromptAsyncRequest, allocator: std.mem.Allocator) ![]u8 {
@@ -133,6 +140,12 @@ pub const PromptAsyncRequest = struct {
             try writer.writeAll(",\"modelID\":");
             try writer.print("{f}", .{std.json.fmt(model.modelID, .{})});
             try writer.writeByte('}');
+        }
+
+        // Variant (optional)
+        if (self.variant) |variant| {
+            try writer.writeAll(",\"variant\":");
+            try writer.print("{f}", .{std.json.fmt(variant, .{})});
         }
 
         try writer.writeByte('}');

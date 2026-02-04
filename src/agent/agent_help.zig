@@ -100,7 +100,8 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "gt / gT", .desc = "Next / prev tab" },
         .{ .key = "Space b", .desc = "History mode" },
         .{ .key = "Space f", .desc = "Follow mode (scroll bottom)" },
-        .{ .key = "V", .desc = "Toggle diff view" },
+        .{ .key = "Space s", .desc = "Toggle diff view" },
+        .{ .key = "Space t", .desc = "Cycle model variant" },
         .{ .key = "Tab", .desc = "Cycle session modes" },
         .{ .key = "Esc Esc", .desc = "Interrupt agent" },
     };
