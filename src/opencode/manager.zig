@@ -139,6 +139,20 @@ pub const ConnectConfig = struct {
     health_timeout_ms: u64 = 30000,
 };
 
+/// Model info for display in picker (owned strings)
+/// Compatible with ACP's OwnedModelInfo for unified UI handling
+pub const OwnedModelInfo = struct {
+    model_id: []const u8, // "provider/model" format for API
+    name: ?[]const u8, // Display name (optional, falls back to model_id)
+    description: ?[]const u8 = null, // Optional description
+
+    pub fn deinit(self: *OwnedModelInfo, allocator: Allocator) void {
+        allocator.free(self.model_id);
+        if (self.name) |n| allocator.free(n);
+        if (self.description) |d| allocator.free(d);
+    }
+};
+
 /// Manages Opencode agent sessions
 pub const OpencodeManager = struct {
     allocator: Allocator,
@@ -162,6 +176,14 @@ pub const OpencodeManager = struct {
     connect_config: ?ConnectConfig,
     base_url: ?[]const u8,
 
+    // Agent and model selection
+    current_agent: ?[]const u8, // "build", "plan", or custom agent name
+    current_model: ?protocol.ModelSpec, // { providerID, modelID }
+
+    // Available models (fetched from server)
+    available_models: std.ArrayListUnmanaged(OwnedModelInfo),
+    current_model_id: ?[]const u8, // Current model as "provider/model" string
+
     pub fn init(allocator: Allocator) OpencodeManager {
         return .{
             .allocator = allocator,
@@ -178,6 +200,10 @@ pub const OpencodeManager = struct {
             .sse_conn_mutex = .{},
             .connect_config = null,
             .base_url = null,
+            .current_agent = null,
+            .current_model = null,
+            .available_models = .{},
+            .current_model_id = null,
         };
     }
 
@@ -188,6 +214,35 @@ pub const OpencodeManager = struct {
         if (!self.thread_was_detached) {
             self.message_queue.deinit();
         }
+
+        // Free agent and model strings
+        if (self.current_agent) |agent| {
+            self.allocator.free(agent);
+            self.current_agent = null;
+        }
+        if (self.current_model) |model| {
+            self.allocator.free(model.providerID);
+            self.allocator.free(model.modelID);
+            self.current_model = null;
+        }
+
+        // Free available models
+        self.clearAvailableModels();
+
+        // Free current model ID
+        if (self.current_model_id) |id| {
+            self.allocator.free(id);
+            self.current_model_id = null;
+        }
+    }
+
+    /// Clear available models list
+    fn clearAvailableModels(self: *OpencodeManager) void {
+        for (self.available_models.items) |*model| {
+            model.deinit(self.allocator);
+        }
+        self.available_models.deinit(self.allocator);
+        self.available_models = .{};
     }
 
     /// Check if manager can be safely destroyed.
@@ -281,6 +336,11 @@ pub const OpencodeManager = struct {
 
         self.status = .session_active;
         log.info("Connected successfully", .{});
+
+        // Fetch available models in background (don't fail connect if this fails)
+        self.fetchAvailableModels() catch |err| {
+            log.warn("Failed to fetch available models: {}", .{err});
+        };
     }
 
     /// Disconnect from the server
@@ -367,6 +427,7 @@ pub const OpencodeManager = struct {
     }
 
     /// Send a prompt to the agent
+    /// Uses current agent and model settings if set
     pub fn sendPrompt(self: *OpencodeManager, text: []const u8) !void {
         const c = self.client orelse return error.NotConnected;
         const sid = self.session_id orelse return error.NoSession;
@@ -375,15 +436,218 @@ pub const OpencodeManager = struct {
             return error.InvalidState;
         }
 
-        // Create prompt request
-        const prompt = try protocol.createTextPrompt(self.allocator, text);
-        defer self.allocator.free(prompt.parts);
+        // Create prompt request with current agent and model
+        const parts = try self.allocator.alloc(protocol.Part, 1);
+        defer self.allocator.free(parts);
+        parts[0] = .{ .text = .{ .text = text } };
+
+        const prompt = protocol.PromptAsyncRequest{
+            .parts = parts,
+            .agent = self.current_agent,
+            .model = self.current_model,
+        };
 
         // Send async
         try c.sendPromptAsync(sid, prompt);
 
         self.status = .prompting;
-        log.info("Sent prompt", .{});
+        if (self.current_agent) |agent| {
+            if (self.current_model) |model| {
+                log.info("Sent prompt with agent={s}, model={s}/{s}", .{ agent, model.providerID, model.modelID });
+            } else {
+                log.info("Sent prompt with agent={s}", .{agent});
+            }
+        } else if (self.current_model) |model| {
+            log.info("Sent prompt with model={s}/{s}", .{ model.providerID, model.modelID });
+        } else {
+            log.info("Sent prompt", .{});
+        }
+    }
+
+    /// Set the current agent (mode) for future prompts
+    /// Pass null to clear/use default
+    pub fn setAgent(self: *OpencodeManager, agent: ?[]const u8) !void {
+        // Free existing
+        if (self.current_agent) |old| {
+            self.allocator.free(old);
+        }
+
+        // Set new (dupe if provided)
+        if (agent) |a| {
+            self.current_agent = try self.allocator.dupe(u8, a);
+            log.info("Agent set to: {s}", .{a});
+        } else {
+            self.current_agent = null;
+            log.info("Agent cleared (using default)", .{});
+        }
+    }
+
+    /// Get the current agent name
+    pub fn getAgent(self: *const OpencodeManager) ?[]const u8 {
+        return self.current_agent;
+    }
+
+    /// Set the current model for future prompts
+    /// Pass null to clear/use default
+    pub fn setModel(self: *OpencodeManager, provider_id: ?[]const u8, model_id: ?[]const u8) !void {
+        // Free existing
+        if (self.current_model) |old| {
+            self.allocator.free(old.providerID);
+            self.allocator.free(old.modelID);
+        }
+
+        // Set new (dupe if provided)
+        if (provider_id != null and model_id != null) {
+            self.current_model = .{
+                .providerID = try self.allocator.dupe(u8, provider_id.?),
+                .modelID = try self.allocator.dupe(u8, model_id.?),
+            };
+            log.info("Model set to: {s}/{s}", .{ provider_id.?, model_id.? });
+        } else {
+            self.current_model = null;
+            log.info("Model cleared (using default)", .{});
+        }
+    }
+
+    /// Set model from a combined "provider/model" string (e.g., "anthropic/claude-sonnet-4")
+    pub fn setModelFromString(self: *OpencodeManager, model_string: []const u8) !void {
+        // Find the slash separator
+        const slash_idx = std.mem.indexOf(u8, model_string, "/") orelse {
+            return error.InvalidModelFormat;
+        };
+
+        const provider = model_string[0..slash_idx];
+        const model = model_string[slash_idx + 1 ..];
+
+        if (provider.len == 0 or model.len == 0) {
+            return error.InvalidModelFormat;
+        }
+
+        try self.setModel(provider, model);
+    }
+
+    /// Get the current model
+    pub fn getModel(self: *const OpencodeManager) ?protocol.ModelSpec {
+        return self.current_model;
+    }
+
+    /// Get current model as a "provider/model" string
+    /// Caller must free the returned string
+    pub fn getModelString(self: *const OpencodeManager) !?[]const u8 {
+        const model = self.current_model orelse return null;
+        return try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ model.providerID, model.modelID });
+    }
+
+    // =========================================================================
+    // Available Models (for model picker UI)
+    // =========================================================================
+
+    /// Fetch available models from the server
+    /// Call this after connect() to populate the model list
+    pub fn fetchAvailableModels(self: *OpencodeManager) !void {
+        const c = self.client orelse return error.NotConnected;
+
+        // Fetch providers from server
+        var parsed = c.getProviders() catch |err| {
+            log.err("Failed to fetch providers: {}", .{err});
+            return error.FetchFailed;
+        };
+        defer parsed.deinit();
+
+        // Clear existing models
+        self.clearAvailableModels();
+
+        // Build flat list of models from all providers
+        // The API returns models as a JSON object map (keyed by model ID), not an array
+        for (parsed.value.providers) |provider| {
+            if (provider.models != .object) continue;
+            var model_iter = provider.models.object.iterator();
+            while (model_iter.next()) |entry| {
+                const model_val = entry.value_ptr.*;
+                if (model_val != .object) continue;
+
+                // Extract model id from the model object
+                const id_val = model_val.object.get("id") orelse continue;
+                if (id_val != .string) continue;
+                const model_id_raw = id_val.string;
+
+                // Extract optional model name
+                const model_name_raw: ?[]const u8 = if (model_val.object.get("name")) |name_val|
+                    (if (name_val == .string) name_val.string else null)
+                else
+                    null;
+
+                // Create "provider/model" ID
+                const model_id = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{
+                    provider.id,
+                    model_id_raw,
+                }) catch continue;
+                errdefer self.allocator.free(model_id);
+
+                // Create display name: "ModelName (Provider)" or just model name/id
+                const provider_display_name: ?[]const u8 = blk: {
+                    if (provider.name) |n| {
+                        if (n.len > 0) break :blk n;
+                    }
+                    if (provider.id.len > 0) break :blk provider.id;
+                    break :blk null;
+                };
+                const name = if (model_name_raw) |n| name_blk: {
+                    if (provider_display_name) |pdn| {
+                        break :name_blk std.fmt.allocPrint(self.allocator, "{s} ({s})", .{ n, pdn }) catch
+                            self.allocator.dupe(u8, n) catch continue;
+                    } else {
+                        break :name_blk self.allocator.dupe(u8, n) catch continue;
+                    }
+                } else self.allocator.dupe(u8, model_id) catch continue;
+                errdefer self.allocator.free(name);
+
+                self.available_models.append(self.allocator, .{
+                    .model_id = model_id,
+                    .name = name,
+                }) catch continue;
+            }
+        }
+
+        log.info("Fetched {d} available models", .{self.available_models.items.len});
+    }
+
+    /// Get available models for UI display
+    /// Returns slice of OwnedModelInfo (do not free - owned by manager)
+    pub fn getAvailableModels(self: *const OpencodeManager) []const OwnedModelInfo {
+        return self.available_models.items;
+    }
+
+    /// Get current model ID (for highlighting in picker)
+    pub fn getCurrentModelId(self: *const OpencodeManager) ?[]const u8 {
+        return self.current_model_id;
+    }
+
+    /// Get current model display name
+    pub fn getCurrentModelName(self: *const OpencodeManager) []const u8 {
+        if (self.current_model_id) |id| {
+            // Find in available models
+            for (self.available_models.items) |model| {
+                if (std.mem.eql(u8, model.model_id, id)) {
+                    return model.name orelse model.model_id;
+                }
+            }
+            return id; // Fallback to ID
+        }
+        return "Default";
+    }
+
+    /// Set model by ID (from picker selection)
+    /// This updates both current_model and current_model_id
+    pub fn setModelById(self: *OpencodeManager, model_id: []const u8) !void {
+        // Parse the "provider/model" format
+        try self.setModelFromString(model_id);
+
+        // Update current_model_id
+        if (self.current_model_id) |old| {
+            self.allocator.free(old);
+        }
+        self.current_model_id = try self.allocator.dupe(u8, model_id);
     }
 
     /// Cancel the current prompt (abort generation)
@@ -572,6 +836,8 @@ pub const OpencodeManager = struct {
         HealthCheckFailed,
         SessionFailed,
         ThreadSpawnFailed,
+        InvalidModelFormat,
+        FetchFailed,
     } || Allocator.Error;
 };
 
@@ -683,6 +949,89 @@ test "Event deinit" {
     // Test message_complete deinit (no-op)
     var event3 = Event{ .message_complete = {} };
     event3.deinit(allocator);
+}
+
+test "setAgent and getAgent" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    // Initially null
+    try std.testing.expect(manager.getAgent() == null);
+
+    // Set agent
+    try manager.setAgent("plan");
+    try std.testing.expectEqualStrings("plan", manager.getAgent().?);
+
+    // Change agent
+    try manager.setAgent("build");
+    try std.testing.expectEqualStrings("build", manager.getAgent().?);
+
+    // Clear agent
+    try manager.setAgent(null);
+    try std.testing.expect(manager.getAgent() == null);
+}
+
+test "setModel and getModel" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    // Initially null
+    try std.testing.expect(manager.getModel() == null);
+
+    // Set model
+    try manager.setModel("anthropic", "claude-sonnet-4");
+    const model = manager.getModel().?;
+    try std.testing.expectEqualStrings("anthropic", model.providerID);
+    try std.testing.expectEqualStrings("claude-sonnet-4", model.modelID);
+
+    // Change model
+    try manager.setModel("openai", "gpt-4o");
+    const model2 = manager.getModel().?;
+    try std.testing.expectEqualStrings("openai", model2.providerID);
+    try std.testing.expectEqualStrings("gpt-4o", model2.modelID);
+
+    // Clear model
+    try manager.setModel(null, null);
+    try std.testing.expect(manager.getModel() == null);
+}
+
+test "setModelFromString" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    // Valid format
+    try manager.setModelFromString("anthropic/claude-sonnet-4-20250514");
+    const model = manager.getModel().?;
+    try std.testing.expectEqualStrings("anthropic", model.providerID);
+    try std.testing.expectEqualStrings("claude-sonnet-4-20250514", model.modelID);
+
+    // Invalid format - no slash
+    try std.testing.expectError(error.InvalidModelFormat, manager.setModelFromString("invalid"));
+
+    // Invalid format - empty provider
+    try std.testing.expectError(error.InvalidModelFormat, manager.setModelFromString("/model"));
+
+    // Invalid format - empty model
+    try std.testing.expectError(error.InvalidModelFormat, manager.setModelFromString("provider/"));
+}
+
+test "getModelString" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    // Null when no model set
+    const null_str = try manager.getModelString();
+    try std.testing.expect(null_str == null);
+
+    // Returns formatted string
+    try manager.setModel("anthropic", "claude-sonnet-4");
+    const str = (try manager.getModelString()).?;
+    defer allocator.free(str);
+    try std.testing.expectEqualStrings("anthropic/claude-sonnet-4", str);
 }
 
 // Integration tests - skipped in unit test runs (require live server)

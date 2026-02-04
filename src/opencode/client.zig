@@ -87,6 +87,42 @@ pub const Client = struct {
     }
 
     // =========================================================================
+    // Configuration
+    // =========================================================================
+
+    /// GET /config/providers - Get available providers and models
+    /// Returns parsed providers response (caller must deinit)
+    pub fn getProviders(self: *Client) !std.json.Parsed(protocol.ProvidersResponse) {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/config/providers", .{self.base_url});
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var req = self.http_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
+
+        req.sendBodiless() catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok) {
+            log.err("Get providers failed with status: {}", .{response.head.status});
+            return error.ServerError;
+        }
+
+        var body_buffer: [8192]u8 = undefined;
+        var body_reader = response.reader(&body_buffer);
+        const body = body_reader.allocRemaining(self.allocator, std.Io.Limit.limited(1024 * 1024)) catch return error.InvalidResponse;
+        defer self.allocator.free(body);
+
+        return std.json.parseFromSlice(protocol.ProvidersResponse, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch return error.InvalidResponse;
+    }
+
+    // =========================================================================
     // Session Management
     // =========================================================================
 

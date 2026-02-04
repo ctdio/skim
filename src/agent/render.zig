@@ -2578,37 +2578,84 @@ fn clipText(text: []const u8, max_len: usize) []const u8 {
 // =============================================================================
 
 /// Maximum visible models in the model selection dialog
-const MAX_MODEL_PICKER_VISIBLE: usize = 8;
+const MAX_MODEL_PICKER_VISIBLE: usize = 10;
+const MODEL_PICKER_WIDTH: usize = 80;
+const MODEL_PICKER_PADDING: usize = 1;
 
-/// Render model selection as a centered dialog (like command palette)
+/// Common model entry for rendering - avoids generics by normalizing both ACP and OpenCode models
+const ModelEntry = struct {
+    model_id: []const u8,
+    name: []const u8,
+    description: []const u8,
+};
+
+/// Render model selection as a centered dialog (matching file picker style)
+/// Works with both ACP and OpenCode managers
 fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
-    const mgr = app.getActiveAcpManager() orelse return;
-    const models = mgr.getAvailableModels();
-    if (models.len == 0) return;
+    // Build normalized model entries from whichever manager is active
+    var entries_buf: [256]ModelEntry = undefined;
+    var entry_count: usize = 0;
+    var current_model_id: ?[]const u8 = null;
 
-    const current_model_id = mgr.getCurrentModelId();
+    if (app.getActiveAcpManager()) |mgr| {
+        const models = mgr.getAvailableModels();
+        current_model_id = mgr.getCurrentModelId();
+        for (models) |m| {
+            if (entry_count >= entries_buf.len) break;
+            entries_buf[entry_count] = .{
+                .model_id = m.model_id,
+                .name = m.name orelse m.model_id,
+                .description = m.description orelse "",
+            };
+            entry_count += 1;
+        }
+    } else if (app.getActiveOpencodeManager()) |mgr| {
+        const models = mgr.getAvailableModels();
+        current_model_id = mgr.getCurrentModelId();
+        for (models) |m| {
+            if (entry_count >= entries_buf.len) break;
+            entries_buf[entry_count] = .{
+                .model_id = m.model_id,
+                .name = m.name orelse m.model_id,
+                .description = m.description orelse "",
+            };
+            entry_count += 1;
+        }
+    }
+
+    if (entry_count == 0) return;
+
+    const entries = entries_buf[0..entry_count];
 
     // Use filtered indices for search support
     const filtered = app.state.model_filtered_indices.items;
     const filtered_count = filtered.len;
 
-    // Fixed dialog dimensions (like command palette) - use fixed height to avoid shrinking/garbling
-    const dialog_width: usize = 70;
-    // Height: title(1) + search(1) + separator(1) + models(MAX_VISIBLE) + footer(1) + border(2)
-    const dialog_height = @min(MAX_MODEL_PICKER_VISIBLE + 6, win.height -| 4);
+    // Fixed width, capped to window size (matches file picker pattern)
+    const dialog_width = @min(MODEL_PICKER_WIDTH, win.width -| 4);
 
+    // Dynamic height: header(3) + visible items + padding
+    const header_rows: usize = 3; // title, input, separator
+    const visible_items = @max(1, @min(filtered_count, MAX_MODEL_PICKER_VISIBLE));
+    const content_height = header_rows + visible_items + (MODEL_PICKER_PADDING * 2);
+    const dialog_height = @min(content_height, win.height -| 4);
+
+    // Center horizontally
     const x_offset = if (win.width > dialog_width) (win.width - dialog_width) / 2 else 0;
-    const y_offset = if (win.height > dialog_height) (win.height - dialog_height) / 2 else 0;
+
+    // Anchor top at where max-height dialog would be centered (stable anchor, expands downward)
+    const max_height = header_rows + MAX_MODEL_PICKER_VISIBLE + (MODEL_PICKER_PADDING * 2);
+    const y_offset = if (win.height > max_height) (win.height - max_height) / 2 else 0;
 
     // Create dialog window
     const dialog_win = win.child(.{
         .x_off = @intCast(x_offset),
         .y_off = @intCast(y_offset),
-        .width = @intCast(@min(dialog_width, win.width)),
-        .height = @intCast(@min(dialog_height, win.height)),
+        .width = @intCast(dialog_width),
+        .height = @intCast(dialog_height),
     });
 
-    // Clear and fill with dark gray background to differentiate from main content
+    // Clear and fill with dark gray background
     dialog_win.clear();
     const bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
@@ -2616,49 +2663,40 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
     };
     dialog_win.fill(bg_cell);
 
-    // With border, dialog_win.width is the inner width (border is drawn outside content area)
-    const content_width = dialog_win.width;
+    const P = MODEL_PICKER_PADDING;
 
     // Row 0: Title
-    const title_style = vaxis.Style{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
     var title_seg = [_]vaxis.Cell.Segment{
-        .{ .text = "Switch Model", .style = title_style },
+        .{ .text = "Switch Model", .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true } },
     };
-    _ = dialog_win.print(&title_seg, .{ .row_offset = 0 });
+    _ = dialog_win.print(&title_seg, .{ .row_offset = P, .col_offset = P });
 
-    // Row 1: Search input - print prompt first, then query text separately
-    var prompt_seg = [_]vaxis.Cell.Segment{
-        .{ .text = "> ", .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
-    };
-    _ = dialog_win.print(&prompt_seg, .{ .row_offset = 1 });
-
-    // Print query text (use the slice directly from app state)
+    // Row 1: Search input
     const query_len = app.state.model_filter_len;
-    if (query_len > 0) {
-        const query = app.state.model_filter_query[0..query_len];
-        var query_seg = [_]vaxis.Cell.Segment{
-            .{ .text = query, .style = .{ .fg = Color.white, .bg = Color.dialog_bg } },
-        };
-        _ = dialog_win.print(&query_seg, .{ .row_offset = 1, .col_offset = 2 });
-    }
+    const query = app.state.model_filter_query[0..query_len];
+    var input_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "/ ", .style = .{ .fg = Color.yellow, .bg = Color.dialog_bg } },
+        .{ .text = query, .style = .{ .fg = Color.white, .bg = Color.dialog_bg } },
+    };
+    _ = dialog_win.print(&input_seg, .{ .row_offset = P + 1, .col_offset = P });
 
-    // Show cursor after search text
-    const cursor_x = 2 + query_len;
-    dialog_win.showCursor(@intCast(cursor_x), 1);
+    // Cursor after input text
+    dialog_win.showCursor(@intCast(P + 2 + query_len), @intCast(P + 1));
 
-    // Row 2: Separator line across full width
-    if (content_width > 0) {
-        for (0..content_width) |col| {
-            dialog_win.writeCell(@intCast(col), 2, .{
-                .char = .{ .grapheme = "─", .width = 1 },
+    // Row 2: Separator (dashes like file picker)
+    if (dialog_win.width > P * 2) {
+        const sep_width = dialog_win.width - (P * 2);
+        for (0..sep_width) |col| {
+            dialog_win.writeCell(@intCast(P + col), @intCast(P + 2), .{
+                .char = .{ .grapheme = "-", .width = 1 },
                 .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg },
             });
         }
     }
 
-    // Calculate scroll offset to keep selected item visible
+    // Calculate scroll offset
     var scroll_offset: usize = 0;
-    if (MAX_MODEL_PICKER_VISIBLE > 0 and filtered_count > MAX_MODEL_PICKER_VISIBLE) {
+    if (filtered_count > MAX_MODEL_PICKER_VISIBLE) {
         if (app.state.model_selection >= MAX_MODEL_PICKER_VISIBLE) {
             scroll_offset = app.state.model_selection - MAX_MODEL_PICKER_VISIBLE + 1;
         }
@@ -2667,12 +2705,12 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
         }
     }
 
-    // Rows 3+: Model list or "No matches"
+    // Rows 3+: Model list
     if (filtered_count == 0) {
         var no_match_seg = [_]vaxis.Cell.Segment{
             .{ .text = "No matching models", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
-        _ = dialog_win.print(&no_match_seg, .{ .row_offset = 3, .col_offset = 1 });
+        _ = dialog_win.print(&no_match_seg, .{ .row_offset = @intCast(P + 3), .col_offset = P });
     } else {
         const visible_count = @min(filtered_count - scroll_offset, MAX_MODEL_PICKER_VISIBLE);
 
@@ -2681,79 +2719,46 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
             if (selection_idx >= filtered_count) break;
 
             const actual_model_idx = filtered[selection_idx];
-            if (actual_model_idx >= models.len) continue;
+            if (actual_model_idx >= entries.len) continue;
 
-            const model = models[actual_model_idx];
+            const entry = entries[actual_model_idx];
             const is_selected = selection_idx == app.state.model_selection;
-            const is_current = if (current_model_id) |cid| std.mem.eql(u8, model.model_id, cid) else false;
+            const is_current = if (current_model_id) |cid| std.mem.eql(u8, entry.model_id, cid) else false;
 
-            const row = 3 + i;
+            const row = P + 3 + i;
 
             // Selection indicator
             const indicator: []const u8 = if (is_selected) "▶ " else "  ";
-            const indicator_style = vaxis.Style{
-                .fg = if (is_selected) Color.cyan else Color.dim_gray,
-                .bg = Color.dialog_bg,
-            };
 
-            // Model name
-            const model_name = model.name orelse model.model_id;
-            const name_style = vaxis.Style{
-                .fg = Color.white,
-                .bg = Color.dialog_bg,
-                .bold = is_selected,
-            };
-
-            // Current marker
+            // Current marker (right of name)
             const current_marker: []const u8 = if (is_current) " ✓" else "";
-            const current_style = vaxis.Style{ .fg = Color.green, .bg = Color.dialog_bg };
 
             // Description (truncated to fit)
-            const desc = model.description orelse "";
-            const name_and_marker_len = 2 + model_name.len + current_marker.len + 2;
-            const max_desc_len = if (content_width > name_and_marker_len) content_width - name_and_marker_len else 0;
-            const truncated_desc = if (desc.len > max_desc_len) desc[0..max_desc_len] else desc;
-            const desc_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
+            const inner_width = if (dialog_win.width > P * 2) dialog_win.width - (P * 2) else 0;
+            const name_and_marker_len = 2 + entry.name.len + current_marker.len + 2;
+            const max_desc_len = if (inner_width > name_and_marker_len) inner_width - name_and_marker_len else 0;
+            const truncated_desc = if (entry.description.len > max_desc_len) entry.description[0..max_desc_len] else entry.description;
 
             var item_seg = [_]vaxis.Cell.Segment{
-                .{ .text = indicator, .style = indicator_style },
-                .{ .text = model_name, .style = name_style },
-                .{ .text = current_marker, .style = current_style },
+                .{ .text = indicator, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
+                .{ .text = entry.name, .style = .{ .fg = if (is_selected) Color.white else Color.dim_gray, .bg = Color.dialog_bg, .bold = is_selected } },
+                .{ .text = current_marker, .style = .{ .fg = Color.green, .bg = Color.dialog_bg } },
                 .{ .text = "  ", .style = .{ .bg = Color.dialog_bg } },
-                .{ .text = truncated_desc, .style = desc_style },
+                .{ .text = truncated_desc, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
             };
-            _ = dialog_win.print(&item_seg, .{ .row_offset = @intCast(row) });
+            _ = dialog_win.print(&item_seg, .{ .row_offset = @intCast(row), .col_offset = P });
         }
 
-        // Show scroll indicators in the model list area (right edge)
-        if (scroll_offset > 0 and content_width > 1) {
-            var up_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "↑", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
-            };
-            _ = dialog_win.print(&up_seg, .{ .row_offset = 3, .col_offset = @intCast(content_width - 1) });
+        // Scroll indicator ("..." at bottom like file picker)
+        if (scroll_offset + visible_count < filtered_count) {
+            const dots_row = P + 3 + visible_count;
+            if (dots_row < dialog_win.height) {
+                var dots_seg = [_]vaxis.Cell.Segment{
+                    .{ .text = "...", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
+                };
+                _ = dialog_win.print(&dots_seg, .{ .row_offset = @intCast(dots_row), .col_offset = P + 2 });
+            }
         }
-        if (scroll_offset + visible_count < filtered_count and content_width > 1) {
-            const last_row = 3 + visible_count - 1;
-            var down_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "↓", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
-            };
-            _ = dialog_win.print(&down_seg, .{ .row_offset = @intCast(last_row), .col_offset = @intCast(content_width - 1) });
-        }
-    }
-
-    // Footer row with keybindings
-    const footer_row = if (filtered_count > 0)
-        3 + @min(filtered_count, MAX_MODEL_PICKER_VISIBLE)
-    else
-        4;
-
-    if (footer_row < dialog_win.height) {
-        const footer = "↑↓:navigate  Enter:select  ESC:cancel";
-        const footer_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
-        var footer_seg = [_]vaxis.Cell.Segment{
-            .{ .text = footer, .style = footer_style },
-        };
-        _ = dialog_win.print(&footer_seg, .{ .row_offset = @intCast(footer_row) });
     }
 }
 

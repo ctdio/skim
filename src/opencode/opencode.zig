@@ -58,6 +58,7 @@ pub const HealthResponse = protocol.HealthResponse;
 pub const Session = protocol.Session;
 pub const PromptAsyncRequest = protocol.PromptAsyncRequest;
 pub const Part = protocol.Part;
+pub const ModelSpec = protocol.ModelSpec;
 pub const createTextPrompt = protocol.createTextPrompt;
 
 // Re-export manager types
@@ -66,6 +67,7 @@ pub const Status = manager.Status;
 pub const Event = manager.Event;
 pub const MessageQueue = manager.MessageQueue;
 pub const ConnectConfig = manager.ConnectConfig;
+pub const OwnedModelInfo = manager.OwnedModelInfo;
 
 // Re-export server types
 pub const ServerConfig = server.ServerConfig;

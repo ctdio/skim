@@ -43,17 +43,13 @@ pub const CreateSessionRequest = struct {
 // Provider and Model Information
 // =============================================================================
 
-/// Model information within a provider
-pub const ProviderModel = struct {
-    id: []const u8,
-    name: ?[]const u8 = null,
-};
-
 /// Provider information from GET /config/providers
+/// Note: The API returns models as a JSON object map (keyed by model ID),
+/// not an array, so we parse it as std.json.Value and iterate manually.
 pub const Provider = struct {
     id: []const u8,
     name: ?[]const u8 = null,
-    models: []const ProviderModel = &.{},
+    models: std.json.Value = .null,
 };
 
 /// Response from GET /config/providers
