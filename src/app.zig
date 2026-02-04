@@ -39,6 +39,7 @@ const agent_mode = @import("modes/agent_mode.zig");
 const agent = @import("agent/agent.zig");
 const sessions = @import("acp/sessions.zig");
 const app_config = @import("config.zig");
+const build_options = @import("build_options");
 const graphite = @import("git/graphite.zig");
 const acp = @import("acp/acp.zig");
 const opencode = @import("opencode/opencode.zig");
@@ -61,6 +62,7 @@ const Event = vaxis.Event;
 const Color = rendering_common.Color;
 const Layout = rendering_common.Layout;
 const FrameChars = rendering_common.FrameChars;
+const profiling_enabled = build_options.enable_profile;
 
 const HEADER_BUFFER_WIDTH = 4096;
 const FRAME_TEXT_CAPACITY = 262144; // 256 KiB per frame scratch space
@@ -435,9 +437,9 @@ pub const App = struct {
     pub fn init(allocator: Allocator, config: anytype) !App {
         const log = std.log.scoped(.app_init);
 
-        const profile_render = readEnvBool(allocator, "SKIM_PROFILE_RENDER");
-        const profile_every_n = readEnvU32(allocator, "SKIM_PROFILE_RENDER_EVERY", 30);
-        if (profile_render) {
+        const profile_render = if (profiling_enabled) readEnvBool(allocator, "SKIM_PROFILE_RENDER") else false;
+        const profile_every_n = if (profiling_enabled) readEnvU32(allocator, "SKIM_PROFILE_RENDER_EVERY", 30) else 0;
+        if (profiling_enabled and profile_render) {
             log.info("Render profiling enabled (every {d} frames)", .{profile_every_n});
         }
 
@@ -1007,6 +1009,10 @@ pub const App = struct {
     }
 
     fn shouldProfileFrame(self: *App) bool {
+        if (!profiling_enabled) {
+            self.profile_active_frame = false;
+            return false;
+        }
         if (!self.profile_render) {
             self.profile_active_frame = false;
             return false;
@@ -1717,29 +1723,35 @@ pub const App = struct {
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
-                const profile_log = std.log.scoped(.profile_loop);
-                _ = self.shouldProfileFrame();
                 const win = vx.window();
 
-                if (self.profile_active_frame) {
-                    var render_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                    try self.render(win);
-                    const render_ns: u64 = if (render_timer_opt) |*timer| timer.read() else 0;
+                if (profiling_enabled) {
+                    const profile_log = std.log.scoped(.profile_loop);
+                    _ = self.shouldProfileFrame();
 
-                    var vx_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                    try vx.render(tty.writer());
-                    const vx_ns: u64 = if (vx_timer_opt) |*timer| timer.read() else 0;
+                    if (self.profile_active_frame) {
+                        var render_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try self.render(win);
+                        const render_ns: u64 = if (render_timer_opt) |*timer| timer.read() else 0;
 
-                    profile_log.debug(
-                        "frame {d}: render_ns={d} vx_ns={d} events={} needs_render={} pending_jobs={d}",
-                        .{ self.profile_frame_counter, render_ns, vx_ns, had_events, self.needs_render, self.pending_highlight_jobs.count() },
-                    );
+                        var vx_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try vx.render(tty.writer());
+                        const vx_ns: u64 = if (vx_timer_opt) |*timer| timer.read() else 0;
+
+                        profile_log.debug(
+                            "frame {d}: render_ns={d} vx_ns={d} events={} needs_render={} pending_jobs={d}",
+                            .{ self.profile_frame_counter, render_ns, vx_ns, had_events, self.needs_render, self.pending_highlight_jobs.count() },
+                        );
+                    } else {
+                        try self.render(win);
+                        try vx.render(tty.writer());
+                    }
+
+                    self.profile_active_frame = false;
                 } else {
                     try self.render(win);
                     try vx.render(tty.writer());
                 }
-
-                self.profile_active_frame = false;
                 // Don't clear needs_render if we're about to suspend for editor
                 // This prevents blocking on the next pollEvent()
                 if (!self.should_suspend_for_editor) {
@@ -3860,16 +3872,20 @@ pub const App = struct {
     }
 
     pub fn profileSliceByDisplayWidth(self: *App, text: []const u8, max_width: usize) []const u8 {
-        if (!self.profile_active_frame) {
-            return RenderUtils.sliceByDisplayWidth(text, max_width);
+        if (profiling_enabled) {
+            if (!self.profile_active_frame) {
+                return RenderUtils.sliceByDisplayWidth(text, max_width);
+            }
+            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            const slice = RenderUtils.sliceByDisplayWidth(text, max_width);
+            if (timer_opt) |*timer| {
+                self.profile_counters.slice_ns += timer.read();
+            }
+            self.profile_counters.slice_calls += 1;
+            return slice;
         }
-        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-        const slice = RenderUtils.sliceByDisplayWidth(text, max_width);
-        if (timer_opt) |*timer| {
-            self.profile_counters.slice_ns += timer.read();
-        }
-        self.profile_counters.slice_calls += 1;
-        return slice;
+
+        return RenderUtils.sliceByDisplayWidth(text, max_width);
     }
 
     pub fn profilePadSegments(
@@ -3880,16 +3896,20 @@ pub const App = struct {
         style: vaxis.Style,
     ) ![]vaxis.Cell.Segment {
         const allocator = self.frameSegmentAllocator();
-        if (!self.profile_active_frame) {
-            return RenderUtils.padSegments(self, allocator, segments, current_width, available_width, style);
+        if (profiling_enabled) {
+            if (!self.profile_active_frame) {
+                return RenderUtils.padSegments(self, allocator, segments, current_width, available_width, style);
+            }
+            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            const padded = try RenderUtils.padSegments(self, allocator, segments, current_width, available_width, style);
+            if (timer_opt) |*timer| {
+                self.profile_counters.pad_ns += timer.read();
+            }
+            self.profile_counters.pad_calls += 1;
+            return padded;
         }
-        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-        const padded = try RenderUtils.padSegments(self, allocator, segments, current_width, available_width, style);
-        if (timer_opt) |*timer| {
-            self.profile_counters.pad_ns += timer.read();
-        }
-        self.profile_counters.pad_calls += 1;
-        return padded;
+
+        return RenderUtils.padSegments(self, allocator, segments, current_width, available_width, style);
     }
 
     pub fn profileRenderGutterWithBlame(
@@ -3905,15 +3925,20 @@ pub const App = struct {
         file_path: ?[]const u8,
         is_first_line_in_hunk: bool,
     ) !void {
-        if (!self.profile_active_frame) {
-            return RenderUtils.renderGutterWithBlame(self, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
+        if (profiling_enabled) {
+            if (!self.profile_active_frame) {
+                return RenderUtils.renderGutterWithBlame(self, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
+            }
+            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            try RenderUtils.renderGutterWithBlame(self, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
+            if (timer_opt) |*timer| {
+                self.profile_counters.gutter_ns += timer.read();
+            }
+            self.profile_counters.gutter_calls += 1;
+            return;
         }
-        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-        try RenderUtils.renderGutterWithBlame(self, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
-        if (timer_opt) |*timer| {
-            self.profile_counters.gutter_ns += timer.read();
-        }
-        self.profile_counters.gutter_calls += 1;
+
+        return RenderUtils.renderGutterWithBlame(self, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
     }
 
     // Toggle fold at cursor position (file header -> fold file, hunk/code -> fold hunk)
@@ -4187,7 +4212,7 @@ pub const App = struct {
     }
 
     fn render(self: *App, win: vaxis.Window) !void {
-        const profile_frame = self.profile_active_frame;
+        const profile_frame = if (profiling_enabled) self.profile_active_frame else false;
         var total_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
         var header_ns: u64 = 0;
         var content_ns: u64 = 0;

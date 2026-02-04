@@ -3,6 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const enable_profile = b.option(bool, "profile", "Enable render profiling") orelse false;
+
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "enable_profile", enable_profile);
+    const build_options_module = build_options.createModule();
 
     // Get vaxis dependency
     const vaxis_dep = b.dependency("vaxis", .{
@@ -33,6 +38,7 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addImport("vaxis", vaxis);
     exe.root_module.addImport("tree-sitter", tree_sitter);
+    exe.root_module.addImport("build_options", build_options_module);
 
     // Note: tree-sitter core library is linked automatically via the module
 
@@ -61,6 +67,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     debug_exe.root_module.addImport("tree-sitter", tree_sitter);
+    debug_exe.root_module.addImport("build_options", build_options_module);
     for (grammars) |grammar| {
         debug_exe.linkLibrary(grammar);
     }
@@ -79,6 +86,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     bench_exe.root_module.addImport("tree-sitter", tree_sitter);
+    bench_exe.root_module.addImport("build_options", build_options_module);
     for (grammars) |grammar| {
         bench_exe.linkLibrary(grammar);
     }
@@ -97,6 +105,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     first_render_exe.root_module.addImport("tree-sitter", tree_sitter);
+    first_render_exe.root_module.addImport("build_options", build_options_module);
     for (grammars) |grammar| {
         first_render_exe.linkLibrary(grammar);
     }
@@ -116,6 +125,7 @@ pub fn build(b: *std.Build) void {
     });
     render_content_exe.root_module.addImport("vaxis", vaxis);
     render_content_exe.root_module.addImport("tree-sitter", tree_sitter);
+    render_content_exe.root_module.addImport("build_options", build_options_module);
     for (grammars) |grammar| {
         render_content_exe.linkLibrary(grammar);
     }
@@ -133,6 +143,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    async_exe.root_module.addImport("build_options", build_options_module);
     const async_run = b.addRunArtifact(async_exe);
     const async_step = b.step("bench-async", "Run async startup benchmark");
     async_step.dependOn(&async_run.step);
@@ -159,6 +170,7 @@ pub fn build(b: *std.Build) void {
 
     unit_tests.root_module.addImport("vaxis", vaxis);
     unit_tests.root_module.addImport("tree-sitter", tree_sitter);
+    unit_tests.root_module.addImport("build_options", build_options_module);
     for (grammars) |grammar| {
         unit_tests.linkLibrary(grammar);
     }
@@ -176,6 +188,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    acp_tests.root_module.addImport("build_options", build_options_module);
     const run_acp_tests = b.addRunArtifact(acp_tests);
     test_step.dependOn(&run_acp_tests.step);
 
@@ -187,6 +200,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    opencode_tests.root_module.addImport("build_options", build_options_module);
     const run_opencode_tests = b.addRunArtifact(opencode_tests);
     test_step.dependOn(&run_opencode_tests.step);
 
@@ -200,6 +214,7 @@ pub fn build(b: *std.Build) void {
     });
     markdown_tests.root_module.addImport("vaxis", vaxis);
     markdown_tests.root_module.addImport("tree-sitter", tree_sitter);
+    markdown_tests.root_module.addImport("build_options", build_options_module);
     for (grammars) |grammar| {
         markdown_tests.linkLibrary(grammar);
     }
@@ -216,6 +231,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     testing_harness_tests.root_module.addImport("vaxis", vaxis);
+    testing_harness_tests.root_module.addImport("build_options", build_options_module);
     const run_testing_harness_tests = b.addRunArtifact(testing_harness_tests);
     test_step.dependOn(&run_testing_harness_tests.step);
 
@@ -227,6 +243,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    testing_snapshot_tests.root_module.addImport("build_options", build_options_module);
     const run_testing_snapshot_tests = b.addRunArtifact(testing_snapshot_tests);
     test_step.dependOn(&run_testing_snapshot_tests.step);
 
@@ -239,6 +256,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     diff_helpers_tests.root_module.addImport("vaxis", vaxis);
+    diff_helpers_tests.root_module.addImport("build_options", build_options_module);
     const run_diff_helpers_tests = b.addRunArtifact(diff_helpers_tests);
     test_step.dependOn(&run_diff_helpers_tests.step);
 
@@ -251,6 +269,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     agent_helpers_tests.root_module.addImport("vaxis", vaxis);
+    agent_helpers_tests.root_module.addImport("build_options", build_options_module);
     const run_agent_helpers_tests = b.addRunArtifact(agent_helpers_tests);
     test_step.dependOn(&run_agent_helpers_tests.step);
 
@@ -263,6 +282,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     acp_replay_tests.root_module.addImport("vaxis", vaxis);
+    acp_replay_tests.root_module.addImport("build_options", build_options_module);
     const run_acp_replay_tests = b.addRunArtifact(acp_replay_tests);
     test_step.dependOn(&run_acp_replay_tests.step);
 
@@ -275,6 +295,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "vaxis", .module = vaxis },
             .{ .name = "tree-sitter", .module = tree_sitter },
+            .{ .name = "build_options", .module = build_options_module },
         },
     });
 
@@ -288,6 +309,7 @@ pub fn build(b: *std.Build) void {
     snapshot_scenarios_tests.root_module.addImport("vaxis", vaxis);
     snapshot_scenarios_tests.root_module.addImport("tree-sitter", tree_sitter);
     snapshot_scenarios_tests.root_module.addImport("markdown", markdown_module);
+    snapshot_scenarios_tests.root_module.addImport("build_options", build_options_module);
     for (grammars) |grammar| {
         snapshot_scenarios_tests.linkLibrary(grammar);
     }

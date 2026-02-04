@@ -4,10 +4,10 @@ This guide documents a repeatable workflow for profiling Skim's TUI rendering, c
 
 ## Quick Start
 
-1) Build in debug mode (recommended for profiling logs):
+1) Build in debug mode with profiling enabled:
 
 ```bash
-zig build
+zig build -Dprofile=true
 ```
 
 2) Start the TUI with render profiling enabled:
