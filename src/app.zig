@@ -2659,8 +2659,8 @@ pub const App = struct {
         self.state.visual_anchor = null;
     }
 
-    pub fn saveCurrentComment(self: *App) !void {
-        if (self.state.active_comment_input == null) return;
+    pub fn saveCurrentComment(self: *App) !bool {
+        if (self.state.active_comment_input == null) return false;
 
         const input = self.state.active_comment_input.?;
         if (input.vim.text_len == 0) {
@@ -2668,14 +2668,26 @@ pub const App = struct {
             if (input.editing_comment_idx) |idx| {
                 try self.state.comment_store.deleteComment(idx);
             }
-            return;
+            return true;
         }
 
         const comment_text = input.vim.text_buffer[0..input.vim.text_len];
 
         // Get line context for the comment
-        const file = &self.state.files[self.state.current_file_idx];
+        const file_idx = self.findFileIndexByPath(input.target_file_path) orelse {
+            self.showStatusMessage("Comment target file not found");
+            return false;
+        };
+        const file = &self.state.files[file_idx];
+        if (input.target_hunk_idx >= file.hunks.len) {
+            self.showStatusMessage("Comment target hunk not found");
+            return false;
+        }
         const hunk = &file.hunks[input.target_hunk_idx];
+        if (input.target_line_idx >= hunk.lines.len) {
+            self.showStatusMessage("Comment target line not found");
+            return false;
+        }
         const line = &hunk.lines[input.target_line_idx];
 
         // Track the comment index for cursor positioning after save
@@ -2688,13 +2700,24 @@ pub const App = struct {
         } else {
             // Check if this is a range comment
             if (input.target_end_hunk_idx != null and input.target_end_line_idx != null) {
+                const end_hunk_idx = input.target_end_hunk_idx.?;
+                const end_line_idx = input.target_end_line_idx.?;
+                if (end_hunk_idx >= file.hunks.len) {
+                    self.showStatusMessage("Comment range hunk not found");
+                    return false;
+                }
+                const end_hunk = &file.hunks[end_hunk_idx];
+                if (end_line_idx >= end_hunk.lines.len) {
+                    self.showStatusMessage("Comment range line not found");
+                    return false;
+                }
                 // Add range comment
                 try self.state.comment_store.addRangeComment(
                     input.target_file_path,
                     input.target_hunk_idx,
                     input.target_line_idx,
-                    input.target_end_hunk_idx.?,
-                    input.target_end_line_idx.?,
+                    end_hunk_idx,
+                    end_line_idx,
                     comment_text,
                     line.line_type,
                     line.content,
@@ -2726,6 +2749,17 @@ pub const App = struct {
         if (self.state.line_map.findLineByCommentIdx(saved_comment_idx)) |comment_line| {
             self.state.global_cursor_line = comment_line;
         }
+        return true;
+    }
+
+    fn findFileIndexByPath(self: *App, target_path: []const u8) ?usize {
+        if (target_path.len == 0) return null;
+        for (self.state.files, 0..) |file, idx| {
+            if (std.mem.eql(u8, file.new_path, target_path) or std.mem.eql(u8, file.old_path, target_path)) {
+                return idx;
+            }
+        }
+        return null;
     }
 
     pub fn yankCurrentCommentToClipboard(self: *App) !void {

@@ -22,9 +22,11 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     if (action) |act| {
         switch (act) {
             .save => {
-                try app.saveCurrentComment();
-                app.mode = .normal;
-                app.state.active_comment_input = null;
+                const saved = try app.saveCurrentComment();
+                if (saved) {
+                    app.mode = .normal;
+                    app.state.active_comment_input = null;
+                }
                 app.needs_render = true; // Force full redraw after saving comment
             },
             .cancel => {
