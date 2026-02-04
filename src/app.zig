@@ -1783,6 +1783,12 @@ pub const App = struct {
                                 mutable_hunk.old_highlights = old_highlights;
                             }
 
+                            if (result.highlights != null or result.old_highlights != null) {
+                                StateHelpers.rebuildHunkHighlightCaches(self.allocator, mutable_hunk) catch |err| {
+                                    std.log.warn("Failed to rebuild highlight cache: {any}", .{err});
+                                };
+                            }
+
                             // Only trigger re-render if this is the CURRENT file
                             if (file_idx == self.state.current_file_idx) {
                                 self.needs_render = true;
@@ -4683,6 +4689,7 @@ pub const App = struct {
         text_offset: usize,
         line_byte_offset: usize,
         highlights: ?[]syntax.Highlight,
+        line_spans: ?[]const parser.LineHighlightSpan,
         base_style: vaxis.Style,
         global_line: usize,
     ) ![]vaxis.Cell.Segment {
@@ -4695,9 +4702,11 @@ pub const App = struct {
             self.profile_counters.highlight_calls += 1;
         };
 
+        const allocator = self.frameSegmentAllocator();
+
         // Check for merge conflict markers and apply special styling
         if (getConflictMarkerStyle(full_line_text, base_style)) |conflict_style| {
-            var segments = try self.allocator.alloc(vaxis.Cell.Segment, 1);
+            var segments = try allocator.alloc(vaxis.Cell.Segment, 1);
             segments[0] = .{
                 .text = text,
                 .style = conflict_style,
@@ -4705,9 +4714,87 @@ pub const App = struct {
             return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
         }
 
-        if (highlights == null or text.len == 0) {
+        if (text.len == 0) {
+            var segments = try allocator.alloc(vaxis.Cell.Segment, 1);
+            segments[0] = .{
+                .text = text,
+                .style = base_style,
+            };
+            return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
+        }
+
+        if (line_spans) |spans| {
+            if (spans.len == 0) {
+                var segments = try allocator.alloc(vaxis.Cell.Segment, 1);
+                segments[0] = .{ .text = text, .style = base_style };
+                return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
+            }
+
+            var build_timer_opt: ?std.time.Timer = null;
+            if (self.profile_active_frame) {
+                build_timer_opt = std.time.Timer.start() catch null;
+            }
+
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            errdefer segments.deinit(allocator);
+
+            var pos: usize = 0;
+            var span_idx: usize = 0;
+            const chunk_start = text_offset;
+            const chunk_end = text_offset + text.len;
+
+            while (pos < text.len) {
+                const absolute_pos = chunk_start + pos;
+                while (span_idx < spans.len and spans[span_idx].end <= absolute_pos) {
+                    span_idx += 1;
+                }
+
+                if (span_idx >= spans.len or spans[span_idx].start >= chunk_end) {
+                    const chunk = text[pos..];
+                    try segments.append(allocator, .{ .text = chunk, .style = base_style });
+                    break;
+                }
+
+                const span = spans[span_idx];
+                if (span.start > absolute_pos) {
+                    const end = @min(span.start, chunk_end);
+                    const chunk = text[pos .. end - chunk_start];
+                    try segments.append(allocator, .{ .text = chunk, .style = base_style });
+                    pos = end - chunk_start;
+                    continue;
+                }
+
+                const end = @min(span.end, chunk_end);
+                const chunk = text[pos .. end - chunk_start];
+                var style = base_style;
+                switch (span.category) {
+                    .keyword => style.fg = Color.syntax_keyword,
+                    .function => style.fg = Color.syntax_function,
+                    .type => style.fg = Color.syntax_type,
+                    .string => style.fg = Color.syntax_string,
+                    .number, .constant => style.fg = Color.syntax_number,
+                    .comment => style.fg = Color.syntax_comment,
+                    .operator => style.fg = Color.syntax_operator,
+                    .default => {},
+                }
+
+                try segments.append(allocator, .{ .text = chunk, .style = style });
+                pos = end - chunk_start;
+                span_idx += 1;
+            }
+
+            if (build_timer_opt) |*timer| {
+                self.profile_counters.highlight_build_ns += timer.read();
+                self.profile_counters.highlight_build_calls += 1;
+            }
+
+            const owned_segments = try segments.toOwnedSlice(allocator);
+            return try self.applySearchHighlighting(owned_segments, text, full_line_text, text_offset, global_line);
+        }
+
+        if (highlights == null) {
             // No highlights - return single segment
-            var segments = try self.allocator.alloc(vaxis.Cell.Segment, 1);
+            var segments = try allocator.alloc(vaxis.Cell.Segment, 1);
             segments[0] = .{
                 .text = text,
                 .style = base_style,
@@ -4730,8 +4817,6 @@ pub const App = struct {
             self.profile_counters.highlight_overlap_ns += timer.read();
             self.profile_counters.highlight_overlap_calls += 1;
         }
-
-        const allocator = self.frameSegmentAllocator();
 
         // Build segments by walking highlights in order
         var build_timer_opt: ?std.time.Timer = null;

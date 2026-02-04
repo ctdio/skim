@@ -24,6 +24,12 @@ pub const Hunk = struct {
     lines: []Line,
     highlights: ?[]syntax.Highlight, // Cached syntax highlights for new file (add/context lines)
     old_highlights: ?[]syntax.Highlight, // Cached syntax highlights for old file (delete/context lines)
+    new_line_offsets: ?[]usize = null, // Byte offsets for new file line mapping
+    old_line_offsets: ?[]usize = null, // Byte offsets for old file line mapping
+    new_line_highlight_spans: ?[]LineHighlightSpan = null,
+    new_line_highlight_indices: ?[]LineHighlightIndex = null,
+    old_line_highlight_spans: ?[]LineHighlightSpan = null,
+    old_line_highlight_indices: ?[]LineHighlightIndex = null,
 
     pub fn deinit(self: *const Hunk, allocator: Allocator) void {
         allocator.free(self.header.context);
@@ -31,6 +37,24 @@ pub const Hunk = struct {
             line.deinit(allocator);
         }
         allocator.free(self.lines);
+        if (self.new_line_offsets) |offsets| {
+            allocator.free(offsets);
+        }
+        if (self.old_line_offsets) |offsets| {
+            allocator.free(offsets);
+        }
+        if (self.new_line_highlight_spans) |spans| {
+            allocator.free(spans);
+        }
+        if (self.new_line_highlight_indices) |indices| {
+            allocator.free(indices);
+        }
+        if (self.old_line_highlight_spans) |spans| {
+            allocator.free(spans);
+        }
+        if (self.old_line_highlight_indices) |indices| {
+            allocator.free(indices);
+        }
         if (self.highlights) |highlights| {
             for (highlights) |h| {
                 allocator.free(h.category);
@@ -52,6 +76,17 @@ pub const HunkHeader = struct {
     new_start: u32,
     new_count: u32,
     context: []const u8,
+};
+
+pub const LineHighlightSpan = struct {
+    start: usize,
+    end: usize,
+    category: syntax.Highlight.ColorCategory,
+};
+
+pub const LineHighlightIndex = struct {
+    start: usize,
+    len: usize,
 };
 
 pub const Line = struct {
@@ -216,14 +251,53 @@ const PartialHunk = struct {
     new_lineno: u32,
 
     fn finalize(self: *PartialHunk, allocator: Allocator) !Hunk {
+        const lines = try self.lines.toOwnedSlice(allocator);
+        errdefer allocator.free(lines);
+
+        const new_offsets = try buildLineOffsets(allocator, lines, .new);
+        errdefer allocator.free(new_offsets);
+
+        const old_offsets = try buildLineOffsets(allocator, lines, .old);
+        errdefer allocator.free(old_offsets);
+
         return Hunk{
             .header = self.header,
-            .lines = try self.lines.toOwnedSlice(allocator),
+            .lines = lines,
             .highlights = null, // Will be populated by async highlighting
             .old_highlights = null, // Will be populated by async highlighting
+            .new_line_offsets = new_offsets,
+            .old_line_offsets = old_offsets,
+            .new_line_highlight_spans = null,
+            .new_line_highlight_indices = null,
+            .old_line_highlight_spans = null,
+            .old_line_highlight_indices = null,
         };
     }
 };
+
+const LineOffsetMode = enum { new, old };
+
+fn buildLineOffsets(allocator: Allocator, lines: []const Line, mode: LineOffsetMode) ![]usize {
+    const offsets = try allocator.alloc(usize, lines.len);
+    var offset: usize = 0;
+
+    for (lines, 0..) |line, idx| {
+        offsets[idx] = offset;
+        switch (line.line_type) {
+            .add => {
+                if (mode == .new) offset += line.content.len + 1;
+            },
+            .delete => {
+                if (mode == .old) offset += line.content.len + 1;
+            },
+            .context => {
+                offset += line.content.len + 1;
+            },
+        }
+    }
+
+    return offsets;
+}
 
 fn parsePath(path_with_prefix: []const u8) []const u8 {
     var path = path_with_prefix;

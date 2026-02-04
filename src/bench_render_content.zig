@@ -243,6 +243,7 @@ fn addHunkHighlights(allocator: std.mem.Allocator, app: *App) !void {
             const old_highlights = highlighter.highlightFile(file_path, old_content) catch null;
             hunk.highlights = highlights;
             hunk.old_highlights = old_highlights;
+            StateHelpers.rebuildHunkHighlightCaches(allocator, hunk) catch {};
         }
     }
 }

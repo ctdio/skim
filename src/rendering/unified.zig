@@ -407,6 +407,11 @@ pub const UnifiedRenderer = struct {
         else
             hunk.highlights;
 
+        const line_spans = if (line.line_type == .delete)
+            StateHelpers.getLineHighlightSpans(hunk, .old, line_idx_in_hunk)
+        else
+            StateHelpers.getLineHighlightSpans(hunk, .new, line_idx_in_hunk);
+
         // Get file path for blame lookup
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
@@ -419,6 +424,7 @@ pub const UnifiedRenderer = struct {
             line.content,
             byte_offset,
             highlights,
+            line_spans,
             row,
             content_width,
             is_cursor,
@@ -439,6 +445,7 @@ pub const UnifiedRenderer = struct {
         text: []const u8,
         byte_offset: usize,
         highlights: ?[]syntax.Highlight,
+        line_spans: ?[]const parser.LineHighlightSpan,
         start_row: usize,
         content_width: usize,
         is_cursor: bool,
@@ -493,7 +500,7 @@ pub const UnifiedRenderer = struct {
 
             // Generate syntax-highlighted segments for this chunk
             const chunk_byte_offset = byte_offset + byte_offset_in_text;
-            const segments = try app.createHighlightedSegments(chunk, text, byte_offset_in_text, chunk_byte_offset, highlights, style, global_line);
+            const segments = try app.createHighlightedSegments(chunk, text, byte_offset_in_text, chunk_byte_offset, highlights, line_spans, style, global_line);
             defer app.frameSegmentAllocator().free(segments);
 
             // Pad segments to full width for cursor, visual selection, or diff lines (add/delete)

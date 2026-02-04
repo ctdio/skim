@@ -887,7 +887,9 @@ These are the core techniques currently used to keep rendering responsive:
 - **LineMap start index:** renderers jump directly to `global_scroll_offset` instead of scanning from line 0.
 - **Cached file stats/gutter width:** per-file diff stats and base gutter width are precomputed to avoid per-frame scans.
 - **ASCII fast path for wrapping:** `sliceByDisplayWidth` avoids Unicode width calls for common ASCII lines.
+- **Per-hunk line offsets:** byte offsets for new/old views are precomputed per hunk to avoid per-line scans.
 - **Ordered highlight walk:** highlight segments are built by walking sorted ranges with a binary search start, avoiding full overlap scans.
+- **Per-line highlight spans:** line-local highlight spans are cached with precomputed color categories, reducing per-frame mapping overhead.
 - **Frame segment arena:** per-frame segment allocations use a bump arena that resets each render, reducing allocator churn (largest observed speedup in render-content benchmarks).
 - **Search match binary search:** search highlighting checks line membership via binary search instead of linear scans.
 

@@ -507,6 +507,9 @@ pub const SideBySideRenderer = struct {
         else
             hunk.highlights;
 
+        const old_line_spans = StateHelpers.getLineHighlightSpans(hunk, .old, line_idx_in_hunk);
+        const new_line_spans = StateHelpers.getLineHighlightSpans(hunk, .new, line_idx_in_hunk);
+
         switch (line.line_type) {
             .context => {
                 // Show on both sides - calculate rows based on display width
@@ -536,7 +539,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for left chunk
                     const left_chunk_byte_offset = byte_offset + left_byte_offset_in_content;
-                    const left_segments = try app.createHighlightedSegments(left_chunk, line.content, left_byte_offset_in_content, left_chunk_byte_offset, highlights, style, global_line);
+                    const left_segments = try app.createHighlightedSegments(left_chunk, line.content, left_byte_offset_in_content, left_chunk_byte_offset, highlights, old_line_spans, style, global_line);
                     defer app.frameSegmentAllocator().free(left_segments);
 
                     // Pad context lines only when cursor is on them
@@ -567,7 +570,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for right chunk
                     const right_chunk_byte_offset = byte_offset + right_byte_offset_in_content;
-                    const right_segments = try app.createHighlightedSegments(right_chunk, line.content, right_byte_offset_in_content, right_chunk_byte_offset, highlights, style, global_line);
+                    const right_segments = try app.createHighlightedSegments(right_chunk, line.content, right_byte_offset_in_content, right_chunk_byte_offset, highlights, new_line_spans, style, global_line);
                     defer app.frameSegmentAllocator().free(right_segments);
 
                     // Pad context lines only when cursor is on them
@@ -622,7 +625,7 @@ pub const SideBySideRenderer = struct {
                     // Generate syntax-highlighted segments for chunk
                     // (will fall back to plain text for delete lines since highlights is null)
                     const chunk_byte_offset = byte_offset + byte_offset_in_content;
-                    const segments = try app.createHighlightedSegments(chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, style, global_line);
+                    const segments = try app.createHighlightedSegments(chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, old_line_spans, style, global_line);
                     defer app.frameSegmentAllocator().free(segments);
 
                     // Always pad delete lines to show full-width background
@@ -687,7 +690,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for chunk
                     const chunk_byte_offset = byte_offset + byte_offset_in_content;
-                    const segments = try app.createHighlightedSegments(chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, style, global_line);
+                    const segments = try app.createHighlightedSegments(chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, new_line_spans, style, global_line);
                     defer app.frameSegmentAllocator().free(segments);
 
                     // Always pad add lines to show full-width background

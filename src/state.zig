@@ -1,9 +1,11 @@
 const std = @import("std");
 const parser = @import("git/parser.zig");
 const rendering_common = @import("rendering/common.zig");
+const syntax = @import("highlighting/core.zig");
 const highlighting = @import("highlighting/async.zig");
 
 const App = @import("app.zig").App;
+const Allocator = std.mem.Allocator;
 const Layout = rendering_common.Layout;
 
 // Re-export async highlighting types for backward compatibility
@@ -16,6 +18,13 @@ pub const StateHelpers = struct {
     pub const FileDiffStats = struct {
         additions: usize,
         deletions: usize,
+    };
+
+    pub const HighlightMode = enum { new, old };
+
+    pub const LineHighlightCache = struct {
+        spans: []parser.LineHighlightSpan,
+        indices: []parser.LineHighlightIndex,
     };
     // Calculate the maximum line number in a file (for gutter width calculation)
     pub fn getMaxLineNumber(file: *const parser.FileDiff) u32 {
@@ -364,6 +373,9 @@ pub const StateHelpers = struct {
 
     /// Byte offset within a single hunk (new file: add/context lines)
     pub fn getLineByteOffsetInHunk(hunk: *const parser.Hunk, target_line_idx: usize) usize {
+        if (hunk.new_line_offsets) |offsets| {
+            if (target_line_idx < offsets.len) return offsets[target_line_idx];
+        }
         var offset: usize = 0;
 
         for (hunk.lines, 0..) |line, line_idx| {
@@ -384,6 +396,9 @@ pub const StateHelpers = struct {
 
     /// Byte offset within a single hunk (old file: delete/context lines)
     pub fn getOldLineByteOffsetInHunk(hunk: *const parser.Hunk, target_line_idx: usize) usize {
+        if (hunk.old_line_offsets) |offsets| {
+            if (target_line_idx < offsets.len) return offsets[target_line_idx];
+        }
         var offset: usize = 0;
 
         for (hunk.lines, 0..) |line, line_idx| {
@@ -400,6 +415,120 @@ pub const StateHelpers = struct {
         }
 
         return offset;
+    }
+
+    pub fn getLineHighlightSpans(
+        hunk: *const parser.Hunk,
+        mode: HighlightMode,
+        line_idx: usize,
+    ) ?[]const parser.LineHighlightSpan {
+        const indices = switch (mode) {
+            .new => hunk.new_line_highlight_indices,
+            .old => hunk.old_line_highlight_indices,
+        } orelse return null;
+
+        const spans = switch (mode) {
+            .new => hunk.new_line_highlight_spans,
+            .old => hunk.old_line_highlight_spans,
+        } orelse return null;
+
+        if (line_idx >= indices.len) return null;
+        const idx = indices[line_idx];
+        if (idx.len == 0) return &[_]parser.LineHighlightSpan{};
+        return spans[idx.start .. idx.start + idx.len];
+    }
+
+    pub fn rebuildHunkHighlightCaches(allocator: Allocator, hunk: *parser.Hunk) !void {
+        clearHunkHighlightCaches(allocator, hunk);
+
+        if (hunk.highlights) |highlights| {
+            const cache = try buildLineHighlightCache(allocator, hunk, highlights, .new);
+            hunk.new_line_highlight_spans = cache.spans;
+            hunk.new_line_highlight_indices = cache.indices;
+        }
+
+        if (hunk.old_highlights) |highlights| {
+            const cache = try buildLineHighlightCache(allocator, hunk, highlights, .old);
+            hunk.old_line_highlight_spans = cache.spans;
+            hunk.old_line_highlight_indices = cache.indices;
+        }
+    }
+
+    pub fn clearHunkHighlightCaches(allocator: Allocator, hunk: *parser.Hunk) void {
+        if (hunk.new_line_highlight_spans) |spans| allocator.free(spans);
+        if (hunk.new_line_highlight_indices) |indices| allocator.free(indices);
+        if (hunk.old_line_highlight_spans) |spans| allocator.free(spans);
+        if (hunk.old_line_highlight_indices) |indices| allocator.free(indices);
+
+        hunk.new_line_highlight_spans = null;
+        hunk.new_line_highlight_indices = null;
+        hunk.old_line_highlight_spans = null;
+        hunk.old_line_highlight_indices = null;
+    }
+
+    fn buildLineHighlightCache(
+        allocator: Allocator,
+        hunk: *const parser.Hunk,
+        highlights: []const syntax.Highlight,
+        mode: HighlightMode,
+    ) !LineHighlightCache {
+        const offsets = switch (mode) {
+            .new => hunk.new_line_offsets,
+            .old => hunk.old_line_offsets,
+        } orelse return error.MissingLineOffsets;
+
+        var spans: std.ArrayList(parser.LineHighlightSpan) = .{};
+        errdefer spans.deinit(allocator);
+
+        const indices = try allocator.alloc(parser.LineHighlightIndex, hunk.lines.len);
+        errdefer allocator.free(indices);
+
+        var highlight_idx: usize = 0;
+
+        for (hunk.lines, 0..) |line, line_idx| {
+            const include = switch (mode) {
+                .new => line.line_type != .delete,
+                .old => line.line_type != .add,
+            };
+
+            if (!include) {
+                indices[line_idx] = .{ .start = spans.items.len, .len = 0 };
+                continue;
+            }
+
+            const line_start = offsets[line_idx];
+            const line_end = line_start + line.content.len;
+
+            while (highlight_idx < highlights.len and highlights[highlight_idx].end_byte <= line_start) {
+                highlight_idx += 1;
+            }
+
+            const line_span_start = spans.items.len;
+            var local_idx = highlight_idx;
+            while (local_idx < highlights.len and highlights[local_idx].start_byte < line_end) {
+                const h = highlights[local_idx];
+                if (h.end_byte > line_start and h.start_byte < line_end) {
+                    const local_start = if (h.start_byte > line_start) h.start_byte - line_start else 0;
+                    const local_end = if (h.end_byte < line_end) h.end_byte - line_start else line.content.len;
+
+                    if (local_start < local_end) {
+                        try spans.append(allocator, .{
+                            .start = local_start,
+                            .end = local_end,
+                            .category = h.getColorCategory(),
+                        });
+                    }
+                }
+                local_idx += 1;
+            }
+
+            indices[line_idx] = .{ .start = line_span_start, .len = spans.items.len - line_span_start };
+        }
+
+        return .{
+            .spans = try spans.toOwnedSlice(allocator),
+            .indices = indices,
+        };
     }
 
     // Spawn a background thread to highlight a file (truly async)
