@@ -161,8 +161,10 @@ pub const OwnedModelInfo = struct {
 /// Manages Opencode agent sessions
 pub const OpencodeManager = struct {
     allocator: Allocator,
+    event_allocator: Allocator,
     status: Status,
     client: ?*client_mod.Client,
+    event_client: ?*client_mod.Client,
     server_process: ?std.process.Child,
     session_id: ?[]const u8,
     message_queue: MessageQueue,
@@ -195,11 +197,13 @@ pub const OpencodeManager = struct {
     pub fn init(allocator: Allocator) OpencodeManager {
         return .{
             .allocator = allocator,
+            .event_allocator = std.heap.c_allocator,
             .status = .idle,
             .client = null,
+            .event_client = null,
             .server_process = null,
             .session_id = null,
-            .message_queue = MessageQueue.init(allocator),
+            .message_queue = MessageQueue.init(std.heap.c_allocator),
             .sse_thread = null,
             .should_stop = std.atomic.Value(bool).init(false),
             .thread_exited = std.atomic.Value(bool).init(true), // No thread running initially
@@ -339,6 +343,11 @@ pub const OpencodeManager = struct {
         client_ptr.* = try client_mod.Client.init(self.allocator, base_url);
         self.client = client_ptr;
 
+        const event_client_ptr = try self.allocator.create(client_mod.Client);
+        errdefer self.allocator.destroy(event_client_ptr);
+        event_client_ptr.* = try client_mod.Client.init(self.event_allocator, base_url);
+        self.event_client = event_client_ptr;
+
         // Wait for health
         server.waitForHealth(client_ptr, config.health_timeout_ms) catch |err| {
             log.err("Health check failed: {}", .{err});
@@ -449,6 +458,13 @@ pub const OpencodeManager = struct {
         }
 
         self.clearDefaultModelId();
+
+        // Clean up event client
+        if (self.event_client) |c| {
+            c.deinit();
+            self.allocator.destroy(c);
+            self.event_client = null;
+        }
 
         // Clean up client
         if (self.client) |c| {
@@ -940,7 +956,7 @@ pub const OpencodeManager = struct {
         // Signal thread exit on all return paths
         defer manager.thread_exited.store(true, .release);
 
-        const c = manager.client orelse {
+        const c = manager.event_client orelse {
             manager.message_queue.push(.{ .err = .{ .code = .connection_failed } });
             return;
         };
@@ -986,7 +1002,7 @@ pub const OpencodeManager = struct {
 
             if (event_opt) |sse_event| {
                 var e = sse_event;
-                defer e.deinit(manager.allocator);
+                defer e.deinit(manager.event_allocator);
 
                 // Parse the SSE event data
                 if (e.data) |data| {
@@ -1033,7 +1049,7 @@ pub const OpencodeManager = struct {
                 type: []const u8,
                 properties: ?std.json.Value = null,
             },
-        }, self.allocator, data, .{
+        }, self.event_allocator, data, .{
             .ignore_unknown_fields = true,
         }) catch {
             log.warn("Failed to parse SSE event JSON", .{});
@@ -1052,7 +1068,7 @@ pub const OpencodeManager = struct {
                     if (props == .object) {
                         if (props.object.get("delta")) |delta_val| {
                             if (delta_val == .string) {
-                                const delta = self.allocator.dupe(u8, delta_val.string) catch return;
+                                const delta = self.event_allocator.dupe(u8, delta_val.string) catch return;
                                 self.message_queue.push(.{
                                     .message_chunk = .{ .delta = delta },
                                 });

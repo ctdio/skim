@@ -73,28 +73,28 @@ pub const FilePickerState = struct {
     pending_files_mutex: std.Thread.Mutex, // Protects pending_files
     load_requested: bool, // True if load has been requested (prevents multiple loads)
 
-    pub fn init(allocator: Allocator) FilePickerState {
+    pub fn init(_: Allocator) FilePickerState {
+        var state: FilePickerState = undefined;
+        state.allocator = std.heap.c_allocator;
         // Use native fzf-like scoring by default (faster, no subprocess)
         // fzf subprocess can be enabled with use_fzf = true
-        return .{
-            .allocator = allocator,
-            .visible = false,
-            .files = .{},
-            .filtered_indices = .{},
-            .filtered_paths = .{},
-            .selection = 0,
-            .scroll_offset = 0,
-            .last_filter_update = 0,
-            .last_filter = undefined,
-            .last_filter_len = 0,
-            .fzf_available = false, // Checked lazily if needed
-            .use_fzf = false, // Native scoring by default (faster)
-            .loading_thread = null,
-            .loading_complete = std.atomic.Value(bool).init(false),
-            .pending_files = .{},
-            .pending_files_mutex = .{},
-            .load_requested = false,
-        };
+        state.visible = false;
+        state.files = .{};
+        state.filtered_indices = .{};
+        state.filtered_paths = .{};
+        state.selection = 0;
+        state.scroll_offset = 0;
+        state.last_filter_update = 0;
+        state.last_filter = undefined;
+        state.last_filter_len = 0;
+        state.fzf_available = false; // Checked lazily if needed
+        state.use_fzf = false; // Native scoring by default (faster)
+        state.loading_thread = null;
+        state.loading_complete = std.atomic.Value(bool).init(false);
+        state.pending_files = .{};
+        state.pending_files_mutex = .{};
+        state.load_requested = false;
+        return state;
     }
 
     /// Check if fzf binary is available (called lazily)

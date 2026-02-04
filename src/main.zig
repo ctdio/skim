@@ -21,7 +21,8 @@ pub fn main() !void {
             std.log.err("Memory leak detected!", .{});
         }
     }
-    const allocator = gpa.allocator();
+    var ts_allocator = std.heap.ThreadSafeAllocator{ .child_allocator = gpa.allocator() };
+    const allocator = ts_allocator.allocator();
 
     // Parse command line arguments
     const args = try std.process.argsAlloc(allocator);

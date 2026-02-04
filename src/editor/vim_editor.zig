@@ -239,7 +239,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 } else if (digit != 0) {
                     state.count_prefix = digit;
                 } else {
-                    state.cursor_pos = findLineStart(state.*);
+                    state.cursor_pos = findLineStart(state);
                 }
                 return null;
             }
@@ -257,8 +257,8 @@ pub fn VimEditor(comptime buffer_size: usize) type {
 
                 if (is_line_operation) {
                     pushUndo(state);
-                    const line_start = findLineStart(state.*);
-                    var line_end = findLineEnd(state.*);
+                    const line_start = findLineStart(state);
+                    var line_end = findLineEnd(state);
 
                     var lines: usize = 1;
                     while (lines < count and line_end < state.text_len) : (lines += 1) {
@@ -281,8 +281,8 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 // Line-wise motions (j/k)
                 if (key.codepoint == 'j' or key.codepoint == 'k') {
                     pushUndo(state);
-                    const line_start = findLineStart(state.*);
-                    var line_end = findLineEnd(state.*);
+                    const line_start = findLineStart(state);
+                    var line_end = findLineEnd(state);
 
                     var lines: usize = 0;
                     while (lines < count) : (lines += 1) {
@@ -314,19 +314,19 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 var i: usize = 0;
                 while (i < count) : (i += 1) {
                     end_pos = switch (key.codepoint) {
-                        'w' => findNextWordStart(state.*),
-                        'e' => findWordEnd(state.*),
-                        'b' => findPrevWordStart(state.*),
-                        '$' => findLineEnd(state.*),
+                        'w' => findNextWordStart(state),
+                        'e' => findWordEnd(state),
+                        'b' => findPrevWordStart(state),
+                        '$' => findLineEnd(state),
                         '^' => blk: {
-                            var pos = findLineStart(state.*);
+                            var pos = findLineStart(state);
                             while (pos < state.text_len and (state.text_buffer[pos] == ' ' or state.text_buffer[pos] == '\t')) {
                                 pos += 1;
                             }
                             break :blk pos;
                         },
-                        '{' => findPrevParagraph(state.*),
-                        '}' => findNextParagraph(state.*),
+                        '{' => findPrevParagraph(state),
+                        '}' => findNextParagraph(state),
                         else => {
                             state.pending_operator = null;
                             state.count_prefix = null;
@@ -361,26 +361,26 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 },
                 'I' => {
                     pushUndo(state);
-                    state.cursor_pos = findLineStart(state.*);
+                    state.cursor_pos = findLineStart(state);
                     state.vim_mode = .insert;
                     state.count_prefix = null;
                 },
                 'A' => {
                     pushUndo(state);
-                    state.cursor_pos = findLineEnd(state.*);
+                    state.cursor_pos = findLineEnd(state);
                     state.vim_mode = .insert;
                     state.count_prefix = null;
                 },
                 'o' => {
                     pushUndo(state);
-                    state.cursor_pos = findLineEnd(state.*);
+                    state.cursor_pos = findLineEnd(state);
                     try insertChar(state, '\n');
                     state.vim_mode = .insert;
                     state.count_prefix = null;
                 },
                 'O' => {
                     pushUndo(state);
-                    const line_start = findLineStart(state.*);
+                    const line_start = findLineStart(state);
                     state.cursor_pos = line_start;
                     try insertChar(state, '\n');
                     state.cursor_pos = line_start;
@@ -426,30 +426,30 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 'w' => {
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        state.cursor_pos = findNextWordStart(state.*);
+                        state.cursor_pos = findNextWordStart(state);
                     }
                     state.count_prefix = null;
                 },
                 'e' => {
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        state.cursor_pos = findWordEnd(state.*);
+                        state.cursor_pos = findWordEnd(state);
                     }
                     state.count_prefix = null;
                 },
                 'b' => {
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        state.cursor_pos = findPrevWordStart(state.*);
+                        state.cursor_pos = findPrevWordStart(state);
                     }
                     state.count_prefix = null;
                 },
                 '$' => {
-                    state.cursor_pos = findLineEnd(state.*);
+                    state.cursor_pos = findLineEnd(state);
                     state.count_prefix = null;
                 },
                 '^' => {
-                    var pos = findLineStart(state.*);
+                    var pos = findLineStart(state);
                     while (pos < state.text_len and (state.text_buffer[pos] == ' ' or state.text_buffer[pos] == '\t')) {
                         pos += 1;
                     }
@@ -471,14 +471,14 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 '{' => {
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        state.cursor_pos = findPrevParagraph(state.*);
+                        state.cursor_pos = findPrevParagraph(state);
                     }
                     state.count_prefix = null;
                 },
                 '}' => {
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        state.cursor_pos = findNextParagraph(state.*);
+                        state.cursor_pos = findNextParagraph(state);
                     }
                     state.count_prefix = null;
                 },
@@ -537,7 +537,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 'c' => state.pending_operator = .c,
                 'C' => {
                     pushUndo(state);
-                    const line_end = findLineEnd(state.*);
+                    const line_end = findLineEnd(state);
                     while (state.cursor_pos < line_end) {
                         try deleteChar(state, state.cursor_pos);
                     }
@@ -546,15 +546,15 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 },
                 'D' => {
                     pushUndo(state);
-                    const line_end = findLineEnd(state.*);
+                    const line_end = findLineEnd(state);
                     while (state.cursor_pos < line_end) {
                         try deleteChar(state, state.cursor_pos);
                     }
                     state.count_prefix = null;
                 },
                 'Y' => {
-                    const line_start = findLineStart(state.*);
-                    var line_end = findLineEnd(state.*);
+                    const line_start = findLineStart(state);
+                    var line_end = findLineEnd(state);
                     if (line_end < state.text_len and state.text_buffer[line_end] == '\n') {
                         line_end += 1;
                     }
@@ -590,7 +590,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                     pushUndo(state);
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        const line_end = findLineEnd(state.*);
+                        const line_end = findLineEnd(state);
                         if (line_end < state.text_len and state.text_buffer[line_end] == '\n') {
                             state.text_buffer[line_end] = ' ';
                         }
@@ -643,7 +643,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                     // Alt+Backspace / Option+Backspace - delete word backward
                     if (key.mods.alt) {
                         pushUndo(state);
-                        const word_start = findDeleteWordStart(state.*);
+                        const word_start = findDeleteWordStart(state);
                         while (state.cursor_pos > word_start) {
                             state.cursor_pos -= 1;
                             try deleteChar(state, state.cursor_pos);
@@ -705,7 +705,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 } else if (digit != 0) {
                     state.count_prefix = digit;
                 } else {
-                    state.cursor_pos = findLineStart(state.*);
+                    state.cursor_pos = findLineStart(state);
                 }
                 return null;
             }
@@ -732,7 +732,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                     state.count_prefix = null;
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        state.cursor_pos = findNextWordStart(state.*);
+                        state.cursor_pos = findNextWordStart(state);
                     }
                 },
                 'e' => {
@@ -740,7 +740,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                     state.count_prefix = null;
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        state.cursor_pos = findWordEnd(state.*);
+                        state.cursor_pos = findWordEnd(state);
                     }
                 },
                 'b' => {
@@ -748,16 +748,16 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                     state.count_prefix = null;
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        state.cursor_pos = findPrevWordStart(state.*);
+                        state.cursor_pos = findPrevWordStart(state);
                     }
                 },
                 '0' => {
                     state.count_prefix = null;
-                    state.cursor_pos = findLineStart(state.*);
+                    state.cursor_pos = findLineStart(state);
                 },
                 '$' => {
                     state.count_prefix = null;
-                    state.cursor_pos = findLineEnd(state.*);
+                    state.cursor_pos = findLineEnd(state);
                 },
                 'G' => {
                     state.count_prefix = null;
@@ -795,7 +795,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 },
                 'y' => {
                     state.count_prefix = null;
-                    const selection = getVisualSelection(state.*) orelse return null;
+                    const selection = getVisualSelection(state) orelse return null;
                     const start = selection.start;
                     const end = selection.end;
 
@@ -814,7 +814,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                 },
                 'd' => {
                     state.count_prefix = null;
-                    const selection = getVisualSelection(state.*) orelse return null;
+                    const selection = getVisualSelection(state) orelse return null;
                     const start = selection.start;
                     const end = selection.end;
 
@@ -879,8 +879,8 @@ pub fn VimEditor(comptime buffer_size: usize) type {
         // =====================================================================
 
         fn executeFind(state: *State, cmd: State.PendingFind, target_char: u8) !void {
-            const line_start = findLineStart(state.*);
-            const line_end = findLineEnd(state.*);
+            const line_start = findLineStart(state);
+            const line_end = findLineEnd(state);
             const count = state.count_prefix orelse 1;
             state.count_prefix = null;
 
@@ -946,7 +946,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             }
         }
 
-        fn getVisualSelection(state: State) ?struct { start: usize, end: usize } {
+        fn getVisualSelection(state: *const State) ?struct { start: usize, end: usize } {
             const anchor = state.visual_anchor orelse return null;
             const cursor = state.cursor_pos;
 
@@ -1028,7 +1028,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             state.text_len -= 1;
         }
 
-        fn findLineStart(state: State) usize {
+        fn findLineStart(state: *const State) usize {
             var pos = state.cursor_pos;
             while (pos > 0 and state.text_buffer[pos - 1] != '\n') {
                 pos -= 1;
@@ -1036,7 +1036,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             return pos;
         }
 
-        fn findLineEnd(state: State) usize {
+        fn findLineEnd(state: *const State) usize {
             var pos = state.cursor_pos;
             while (pos < state.text_len and state.text_buffer[pos] != '\n') {
                 pos += 1;
@@ -1045,8 +1045,8 @@ pub fn VimEditor(comptime buffer_size: usize) type {
         }
 
         fn moveCursorDown(state: *State) void {
-            const current_line_start = findLineStart(state.*);
-            const current_line_end = findLineEnd(state.*);
+            const current_line_start = findLineStart(state);
+            const current_line_end = findLineEnd(state);
             const col_offset = state.cursor_pos - current_line_start;
 
             if (current_line_end < state.text_len) {
@@ -1062,7 +1062,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
         }
 
         fn moveCursorUp(state: *State) void {
-            const current_line_start = findLineStart(state.*);
+            const current_line_start = findLineStart(state);
             const col_offset = state.cursor_pos - current_line_start;
 
             if (current_line_start > 0) {
@@ -1102,7 +1102,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             state.cursor_pos = pos;
         }
 
-        pub fn findNextWordStart(state: State) usize {
+        pub fn findNextWordStart(state: *const State) usize {
             var pos = state.cursor_pos;
 
             while (pos < state.text_len and !isWordBoundary(state.text_buffer[pos])) {
@@ -1116,7 +1116,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             return pos;
         }
 
-        pub fn findPrevWordStart(state: State) usize {
+        pub fn findPrevWordStart(state: *const State) usize {
             if (state.cursor_pos == 0) return 0;
 
             var pos = state.cursor_pos - 1;
@@ -1132,7 +1132,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             return pos;
         }
 
-        fn findDeleteWordStart(state: State) usize {
+        fn findDeleteWordStart(state: *const State) usize {
             if (state.cursor_pos == 0) return 0;
 
             var pos = state.cursor_pos;
@@ -1153,7 +1153,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             return pos;
         }
 
-        pub fn findWordEnd(state: State) usize {
+        pub fn findWordEnd(state: *const State) usize {
             if (state.text_len == 0) return 0;
 
             var pos = state.cursor_pos;
@@ -1361,7 +1361,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             state.undo_index += 1;
         }
 
-        fn findNextParagraph(state: State) usize {
+        fn findNextParagraph(state: *const State) usize {
             var pos = state.cursor_pos;
             var found_content = false;
 
@@ -1392,7 +1392,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             return state.text_len;
         }
 
-        fn findPrevParagraph(state: State) usize {
+        fn findPrevParagraph(state: *const State) usize {
             if (state.cursor_pos == 0) return 0;
 
             var pos = state.cursor_pos;
@@ -1513,7 +1513,7 @@ test "findNextWordStart (w) moves to next word" {
     state.cursor_pos = 0; // on 'h'
 
     // w from 'h' should go to 'w'
-    const pos = TestEditor.findNextWordStart(state);
+    const pos = TestEditor.findNextWordStart(&state);
     try std.testing.expectEqual(@as(usize, 6), pos);
 }
 
@@ -1523,7 +1523,7 @@ test "findNextWordStart (w) from middle of word" {
     state.cursor_pos = 2; // on 'l'
 
     // w from middle of 'hello' should go to 'w'
-    const pos = TestEditor.findNextWordStart(state);
+    const pos = TestEditor.findNextWordStart(&state);
     try std.testing.expectEqual(@as(usize, 6), pos);
 }
 
@@ -1533,7 +1533,7 @@ test "findNextWordStart (w) from end of word" {
     state.cursor_pos = 4; // on 'o' (end of hello)
 
     // w from 'o' should go to 'w'
-    const pos = TestEditor.findNextWordStart(state);
+    const pos = TestEditor.findNextWordStart(&state);
     try std.testing.expectEqual(@as(usize, 6), pos);
 }
 
@@ -1543,7 +1543,7 @@ test "findNextWordStart (w) from space" {
     state.cursor_pos = 5; // on ' '
 
     // w from space should go to 'w'
-    const pos = TestEditor.findNextWordStart(state);
+    const pos = TestEditor.findNextWordStart(&state);
     try std.testing.expectEqual(@as(usize, 6), pos);
 }
 
@@ -1553,7 +1553,7 @@ test "findPrevWordStart (b) moves to previous word" {
     state.cursor_pos = 6; // on 'w'
 
     // b from 'w' should go to 'h'
-    const pos = TestEditor.findPrevWordStart(state);
+    const pos = TestEditor.findPrevWordStart(&state);
     try std.testing.expectEqual(@as(usize, 0), pos);
 }
 
@@ -1563,7 +1563,7 @@ test "findPrevWordStart (b) from middle of word" {
     state.cursor_pos = 8; // on 'r'
 
     // b from middle of 'world' should go to 'w'
-    const pos = TestEditor.findPrevWordStart(state);
+    const pos = TestEditor.findPrevWordStart(&state);
     try std.testing.expectEqual(@as(usize, 6), pos);
 }
 
@@ -1573,7 +1573,7 @@ test "findPrevWordStart (b) from space" {
     state.cursor_pos = 5; // on ' '
 
     // b from space should go to 'h'
-    const pos = TestEditor.findPrevWordStart(state);
+    const pos = TestEditor.findPrevWordStart(&state);
     try std.testing.expectEqual(@as(usize, 0), pos);
 }
 
@@ -1583,7 +1583,7 @@ test "findWordEnd (e) moves to end of word" {
     state.cursor_pos = 0; // on 'h'
 
     // e from 'h' should go to 'o' (end of hello)
-    const pos = TestEditor.findWordEnd(state);
+    const pos = TestEditor.findWordEnd(&state);
     try std.testing.expectEqual(@as(usize, 4), pos);
 }
 
@@ -1593,7 +1593,7 @@ test "findWordEnd (e) from end of word moves to next word end" {
     state.cursor_pos = 4; // on 'o' (end of hello)
 
     // e from 'o' should go to 'd' (end of world)
-    const pos = TestEditor.findWordEnd(state);
+    const pos = TestEditor.findWordEnd(&state);
     try std.testing.expectEqual(@as(usize, 10), pos);
 }
 
@@ -1603,7 +1603,7 @@ test "findWordEnd (e) from space" {
     state.cursor_pos = 5; // on ' '
 
     // e from space should go to 'd' (end of world)
-    const pos = TestEditor.findWordEnd(state);
+    const pos = TestEditor.findWordEnd(&state);
     try std.testing.expectEqual(@as(usize, 10), pos);
 }
 
@@ -1613,6 +1613,6 @@ test "findWordEnd (e) at last word stays at end" {
     state.cursor_pos = 4; // on 'o' (last char)
 
     // e from last char should stay there
-    const pos = TestEditor.findWordEnd(state);
+    const pos = TestEditor.findWordEnd(&state);
     try std.testing.expectEqual(@as(usize, 4), pos);
 }
