@@ -63,13 +63,6 @@ pub const AgentProcess = struct {
             }
         }
 
-        // Log if the CLAUDE_CODE_OAUTH_TOKEN is available (for debugging)
-        if (std.posix.getenv("CLAUDE_CODE_OAUTH_TOKEN")) |_| {
-            std.log.info("ACP: CLAUDE_CODE_OAUTH_TOKEN is present in environment", .{});
-        } else {
-            std.log.warn("ACP: CLAUDE_CODE_OAUTH_TOKEN NOT found in environment!", .{});
-        }
-
         // Log file descriptors for debugging
         std.log.info("ACP: Spawning with stdin_behavior=Pipe, stdout_behavior=Pipe", .{});
 
