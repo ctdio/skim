@@ -5,6 +5,8 @@ const diff_helpers = @import("diff_test_helpers.zig");
 const agent_helpers = @import("agent_test_helpers.zig");
 const md_helpers = @import("markdown_test_helpers.zig");
 const help_helpers = @import("help_test_helpers.zig");
+const model_helpers = @import("model_selection_test_helpers.zig");
+const palette_helpers = @import("command_palette_test_helpers.zig");
 
 // =============================================================================
 // Diff Rendering Snapshot Tests
@@ -1926,4 +1928,356 @@ test "snapshot: ansi_md_header_h1" {
     defer allocator.free(ansi);
 
     try snapshot.expectSnapshot(allocator, "ansi_md_header_h1", ansi);
+}
+
+// =============================================================================
+// Model Selection Dialog Snapshot Tests
+// =============================================================================
+
+test "snapshot: model_selection_basic" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 18);
+    defer ctx.deinit();
+
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "anthropic/claude-sonnet-4", .name = "Claude Sonnet 4 (Anthropic)" },
+        .{ .model_id = "anthropic/claude-opus-4", .name = "Claude Opus 4 (Anthropic)" },
+        .{ .model_id = "openai/gpt-4o", .name = "GPT-4o (OpenAI)" },
+        .{ .model_id = "openai/o3", .name = "o3 (OpenAI)" },
+    };
+    const indices = [_]usize{ 0, 1, 2, 3 };
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .selected_index = 0,
+        .current_model_id = "anthropic/claude-sonnet-4",
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, "model_selection_basic", text);
+}
+
+test "snapshot: model_selection_no_provider_name" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 18);
+    defer ctx.deinit();
+
+    // Simulates OpenCode models where provider name is missing - names should NOT have ()
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "gpt-5.2-codex", .name = "GPT-5.2 Codex" },
+        .{ .model_id = "gpt-5.1-codex", .name = "GPT-5.1 Codex" },
+        .{ .model_id = "gpt-5.1-codex-mini", .name = "GPT-5.1 Codex mini" },
+        .{ .model_id = "trinity-large", .name = "Trinity Large Preview" },
+        .{ .model_id = "glm-4.7-free", .name = "GLM-4.7 Free" },
+    };
+    const indices = [_]usize{ 0, 1, 2, 3, 4 };
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .selected_index = 2,
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, "model_selection_no_provider", text);
+}
+
+test "snapshot: model_selection_with_descriptions" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 20);
+    defer ctx.deinit();
+
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "anthropic/claude-sonnet-4", .name = "Claude Sonnet 4", .description = "Fast and capable" },
+        .{ .model_id = "anthropic/claude-opus-4", .name = "Claude Opus 4", .description = "Most powerful model" },
+        .{ .model_id = "openai/gpt-4o", .name = "GPT-4o", .description = "Multimodal reasoning" },
+    };
+    const indices = [_]usize{ 0, 1, 2 };
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .selected_index = 1,
+        .current_model_id = "anthropic/claude-opus-4",
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, "model_selection_descriptions", text);
+}
+
+test "snapshot: model_selection_no_matches" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 10);
+    defer ctx.deinit();
+
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "anthropic/claude-sonnet-4", .name = "Claude Sonnet 4" },
+    };
+    const indices = [_]usize{};
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .search_query = "xyz",
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, "model_selection_no_matches", text);
+}
+
+test "snapshot: model_selection_scroll_indicators" {
+    const allocator = std.testing.allocator;
+    // Small window to force scrolling with many models
+    var ctx = try harness.createTestContext(allocator, 80, 10);
+    defer ctx.deinit();
+
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "m1", .name = "Model One" },
+        .{ .model_id = "m2", .name = "Model Two" },
+        .{ .model_id = "m3", .name = "Model Three" },
+        .{ .model_id = "m4", .name = "Model Four" },
+        .{ .model_id = "m5", .name = "Model Five" },
+        .{ .model_id = "m6", .name = "Model Six" },
+        .{ .model_id = "m7", .name = "Model Seven" },
+        .{ .model_id = "m8", .name = "Model Eight" },
+    };
+    const indices = [_]usize{ 0, 1, 2, 3, 4, 5, 6, 7 };
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .selected_index = 0,
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, "model_selection_scroll", text);
+}
+
+// =============================================================================
+// Model Selection ANSI Snapshot Tests
+// =============================================================================
+// These tests capture ANSI escape codes to verify:
+// - Background color (dialog_bg) fills the entire dialog area
+// - Foreground colors for selected vs unselected items
+// - Bold attribute on selected model name
+// - Current model checkmark uses green color
+// - No style leaks between elements
+
+test "snapshot: ansi_model_selection_basic" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 18);
+    defer ctx.deinit();
+
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "anthropic/claude-sonnet-4", .name = "Claude Sonnet 4 (Anthropic)" },
+        .{ .model_id = "anthropic/claude-opus-4", .name = "Claude Opus 4 (Anthropic)" },
+        .{ .model_id = "openai/gpt-4o", .name = "GPT-4o (OpenAI)" },
+        .{ .model_id = "openai/o3", .name = "o3 (OpenAI)" },
+    };
+    const indices = [_]usize{ 0, 1, 2, 3 };
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .selected_index = 0,
+        .current_model_id = "anthropic/claude-sonnet-4",
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+    try snapshot.expectSnapshot(allocator, "ansi_model_selection_basic", ansi);
+}
+
+test "snapshot: ansi_model_selection_no_provider" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 18);
+    defer ctx.deinit();
+
+    // Models without provider names - verifies no "()" artifacts
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "gpt-5.2-codex", .name = "GPT-5.2 Codex" },
+        .{ .model_id = "gpt-5.1-codex", .name = "GPT-5.1 Codex" },
+        .{ .model_id = "gpt-5.1-codex-mini", .name = "GPT-5.1 Codex mini" },
+        .{ .model_id = "trinity-large", .name = "Trinity Large Preview" },
+        .{ .model_id = "glm-4.7-free", .name = "GLM-4.7 Free" },
+    };
+    const indices = [_]usize{ 0, 1, 2, 3, 4 };
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .selected_index = 2,
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+    try snapshot.expectSnapshot(allocator, "ansi_model_selection_no_provider", ansi);
+}
+
+test "snapshot: ansi_model_selection_descriptions" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 20);
+    defer ctx.deinit();
+
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "anthropic/claude-sonnet-4", .name = "Claude Sonnet 4", .description = "Fast and capable" },
+        .{ .model_id = "anthropic/claude-opus-4", .name = "Claude Opus 4", .description = "Most powerful model" },
+        .{ .model_id = "openai/gpt-4o", .name = "GPT-4o", .description = "Multimodal reasoning" },
+    };
+    const indices = [_]usize{ 0, 1, 2 };
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .selected_index = 1,
+        .current_model_id = "anthropic/claude-opus-4",
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+    try snapshot.expectSnapshot(allocator, "ansi_model_selection_descriptions", ansi);
+}
+
+test "snapshot: ansi_model_selection_no_matches" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 10);
+    defer ctx.deinit();
+
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "anthropic/claude-sonnet-4", .name = "Claude Sonnet 4" },
+    };
+    const indices = [_]usize{};
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .search_query = "xyz",
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+    try snapshot.expectSnapshot(allocator, "ansi_model_selection_no_matches", ansi);
+}
+
+test "snapshot: ansi_model_selection_scroll" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 10);
+    defer ctx.deinit();
+
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "m1", .name = "Model One" },
+        .{ .model_id = "m2", .name = "Model Two" },
+        .{ .model_id = "m3", .name = "Model Three" },
+        .{ .model_id = "m4", .name = "Model Four" },
+        .{ .model_id = "m5", .name = "Model Five" },
+        .{ .model_id = "m6", .name = "Model Six" },
+        .{ .model_id = "m7", .name = "Model Seven" },
+        .{ .model_id = "m8", .name = "Model Eight" },
+    };
+    const indices = [_]usize{ 0, 1, 2, 3, 4, 5, 6, 7 };
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .selected_index = 0,
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+    try snapshot.expectSnapshot(allocator, "ansi_model_selection_scroll", ansi);
+}
+
+test "snapshot: model_selection_with_provider_suffix" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 14);
+    defer ctx.deinit();
+
+    // Model names with provider suffix (the normal case after the alloc_always fix)
+    const models = [_]model_helpers.ModelEntry{
+        .{ .model_id = "openrouter/gpt-5.2-codex", .name = "GPT-5.2 Codex (openrouter)" },
+        .{ .model_id = "openrouter/gpt-5.1-codex", .name = "GPT-5.1 Codex (openrouter)" },
+        .{ .model_id = "anthropic/claude-opus-4", .name = "Claude Opus 4 (anthropic)" },
+    };
+    const indices = [_]usize{ 0, 1, 2 };
+
+    const win = ctx.window();
+    model_helpers.renderModelSelectionDialog(win, .{
+        .models = &models,
+        .selected_index = 0,
+        .filtered_indices = &indices,
+    }, ctx.frameAllocator());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, "model_selection_with_provider", text);
+}
+
+// =============================================================================
+// Command Palette (File Dialog) Snapshot Tests
+// =============================================================================
+
+test "snapshot: file_dialog_basic" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 100, 12);
+    defer ctx.deinit();
+
+    const files = [_]palette_helpers.FileEntry{
+        .{ .display_name = "src/main.zig", .description = "Entry point", .additions = 5, .deletions = 2 },
+        .{ .display_name = "src/ui.zig", .description = "UI rendering", .additions = 42, .deletions = 10 },
+        .{ .display_name = "src/command_palette.zig", .description = "Command palette", .additions = 0, .deletions = 3 },
+    };
+
+    const win = ctx.window();
+    palette_helpers.renderFilePalette(win, .{
+        .files = &files,
+        .selected_index = 0,
+        .total_files = 3,
+        .total_additions = 47,
+        .total_deletions = 15,
+    }, ctx.frameAllocator());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, "file_dialog_basic", text);
+}
+
+test "snapshot: ansi_file_dialog_basic" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 100, 12);
+    defer ctx.deinit();
+
+    const files = [_]palette_helpers.FileEntry{
+        .{ .display_name = "src/main.zig", .description = "Entry point", .additions = 5, .deletions = 2 },
+        .{ .display_name = "src/ui.zig", .description = "UI rendering", .additions = 42, .deletions = 10 },
+        .{ .display_name = "src/command_palette.zig", .description = "Command palette", .additions = 0, .deletions = 3 },
+    };
+
+    const win = ctx.window();
+    palette_helpers.renderFilePalette(win, .{
+        .files = &files,
+        .selected_index = 0,
+        .total_files = 3,
+        .total_additions = 47,
+        .total_deletions = 15,
+    }, ctx.frameAllocator());
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+    try snapshot.expectSnapshot(allocator, "ansi_file_dialog_basic", ansi);
 }

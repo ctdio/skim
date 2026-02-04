@@ -1,0 +1,7 @@
+
+ Go to File (3 files, +47, -15)
+ /
+ --------------------------------------------------------------------------------------------------
+ ▶ src/main.zig  Entry point
+   src/ui.zig  UI rendering
+   src/command_palette.zig  Command palette

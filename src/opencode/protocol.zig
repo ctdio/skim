@@ -40,6 +40,28 @@ pub const CreateSessionRequest = struct {
 };
 
 // =============================================================================
+// Provider and Model Information
+// =============================================================================
+
+/// Model information within a provider
+pub const ProviderModel = struct {
+    id: []const u8,
+    name: ?[]const u8 = null,
+};
+
+/// Provider information from GET /config/providers
+pub const Provider = struct {
+    id: []const u8,
+    name: ?[]const u8 = null,
+    models: []const ProviderModel = &.{},
+};
+
+/// Response from GET /config/providers
+pub const ProvidersResponse = struct {
+    providers: []const Provider = &.{},
+};
+
+// =============================================================================
 // Message Parts
 // =============================================================================
 
@@ -68,9 +90,17 @@ pub const Part = union(enum) {
 // Prompt Async (Main messaging endpoint)
 // =============================================================================
 
+/// Model specification for prompt requests
+pub const ModelSpec = struct {
+    providerID: []const u8,
+    modelID: []const u8,
+};
+
 /// Request body for POST /session/{id}/prompt_async
 pub const PromptAsyncRequest = struct {
     parts: []const Part,
+    agent: ?[]const u8 = null, // Agent name: "build", "plan", or custom
+    model: ?ModelSpec = null, // Model override: { providerID, modelID }
 
     /// Serialize to JSON for HTTP request body
     pub fn toJson(self: PromptAsyncRequest, allocator: std.mem.Allocator) ![]u8 {
@@ -78,7 +108,10 @@ pub const PromptAsyncRequest = struct {
         errdefer output.deinit(allocator);
         const writer = output.writer(allocator);
 
-        try writer.writeAll("{\"parts\":[");
+        try writer.writeByte('{');
+
+        // Parts array (required)
+        try writer.writeAll("\"parts\":[");
         for (self.parts, 0..) |part, i| {
             if (i > 0) try writer.writeByte(',');
             switch (part) {
@@ -89,7 +122,24 @@ pub const PromptAsyncRequest = struct {
                 },
             }
         }
-        try writer.writeAll("]}");
+        try writer.writeByte(']');
+
+        // Agent (optional)
+        if (self.agent) |agent| {
+            try writer.writeAll(",\"agent\":");
+            try writer.print("{f}", .{std.json.fmt(agent, .{})});
+        }
+
+        // Model (optional)
+        if (self.model) |model| {
+            try writer.writeAll(",\"model\":{\"providerID\":");
+            try writer.print("{f}", .{std.json.fmt(model.providerID, .{})});
+            try writer.writeAll(",\"modelID\":");
+            try writer.print("{f}", .{std.json.fmt(model.modelID, .{})});
+            try writer.writeByte('}');
+        }
+
+        try writer.writeByte('}');
 
         return output.toOwnedSlice(allocator);
     }
@@ -210,6 +260,67 @@ test "PromptAsyncRequest toJson" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"parts\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"text\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "Hello world") != null);
+}
+
+test "PromptAsyncRequest toJson with agent" {
+    const allocator = std.testing.allocator;
+
+    var parts: [1]Part = .{.{ .text = .{ .text = "Plan this feature" } }};
+    const request = PromptAsyncRequest{
+        .parts = &parts,
+        .agent = "plan",
+    };
+
+    const json = try request.toJson(allocator);
+    defer allocator.free(json);
+
+    // Verify agent is included
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"agent\":\"plan\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"parts\":") != null);
+}
+
+test "PromptAsyncRequest toJson with model" {
+    const allocator = std.testing.allocator;
+
+    var parts: [1]Part = .{.{ .text = .{ .text = "Hello" } }};
+    const request = PromptAsyncRequest{
+        .parts = &parts,
+        .model = .{
+            .providerID = "anthropic",
+            .modelID = "claude-sonnet-4-20250514",
+        },
+    };
+
+    const json = try request.toJson(allocator);
+    defer allocator.free(json);
+
+    // Verify model object is included
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"model\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"providerID\":\"anthropic\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"modelID\":\"claude-sonnet-4-20250514\"") != null);
+}
+
+test "PromptAsyncRequest toJson with agent and model" {
+    const allocator = std.testing.allocator;
+
+    var parts: [1]Part = .{.{ .text = .{ .text = "Build this" } }};
+    const request = PromptAsyncRequest{
+        .parts = &parts,
+        .agent = "build",
+        .model = .{
+            .providerID = "openai",
+            .modelID = "gpt-4o",
+        },
+    };
+
+    const json = try request.toJson(allocator);
+    defer allocator.free(json);
+
+    // Verify all fields are included
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"parts\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"agent\":\"build\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"model\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"providerID\":\"openai\"") != null);
 }
 
 test "createTextPrompt helper" {

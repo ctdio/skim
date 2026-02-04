@@ -728,12 +728,37 @@ pub const UI = struct {
     }
 
     pub fn renderModelSelectionDialog(app: *App, win: vaxis.Window) !void {
-        // Get models from ACP manager
-        const mgr = app.getActiveAcpManager() orelse return;
-        const models = mgr.getAvailableModels();
-        if (models.len == 0) return;
+        // Normalize models from whichever manager is active (ACP or OpenCode)
+        const ModelInfo = struct {
+            model_id: []const u8,
+            name: ?[]const u8,
+            description: ?[]const u8,
+        };
 
-        const current_model_id = mgr.getCurrentModelId();
+        var entries_buf: [256]ModelInfo = undefined;
+        var entry_count: usize = 0;
+        var current_model_id: ?[]const u8 = null;
+
+        if (app.getActiveAcpManager()) |mgr| {
+            const acp_models = mgr.getAvailableModels();
+            current_model_id = mgr.getCurrentModelId();
+            for (acp_models) |m| {
+                if (entry_count >= entries_buf.len) break;
+                entries_buf[entry_count] = .{ .model_id = m.model_id, .name = m.name, .description = m.description };
+                entry_count += 1;
+            }
+        } else if (app.getActiveOpencodeManager()) |mgr| {
+            const oc_models = mgr.getAvailableModels();
+            current_model_id = mgr.getCurrentModelId();
+            for (oc_models) |m| {
+                if (entry_count >= entries_buf.len) break;
+                entries_buf[entry_count] = .{ .model_id = m.model_id, .name = m.name, .description = m.description };
+                entry_count += 1;
+            }
+        }
+
+        const models = entries_buf[0..entry_count];
+        if (models.len == 0) return;
 
         // Use filtered indices
         const filtered = app.state.model_filtered_indices.items;
@@ -753,70 +778,111 @@ pub const UI = struct {
             if (desc_len > max_desc_len) max_desc_len = desc_len;
         }
 
-        const content_width = @max(@max(max_name_len + 8, max_desc_len + 6), instructions.len);
-        const dialog_width = @max(content_width + 4, title.len + 4);
-        // Height: title(1) + search(1) + empty(1) + models(2 each) + empty(1) + instructions(1) + border(2)
-        const display_count = if (filtered_count > 0) filtered_count else 1; // At least 1 row for "No matches"
-        const ideal_height = 4 + (display_count * 2) + 2;
-        const max_height = win.height - 4;
+        // Check if any models have descriptions (affects row height)
+        var has_descriptions = false;
+        for (models) |model| {
+            if (model.description) |d| {
+                if (d.len > 0) {
+                    has_descriptions = true;
+                    break;
+                }
+            }
+        }
+        const rows_per_model: usize = if (has_descriptions) 2 else 1;
 
-        const popup_width = @min(dialog_width, win.width - 4);
+        const min_dialog_width: usize = 80;
+        const content_width = @max(@max(max_name_len + 8, max_desc_len + 6), instructions.len);
+        const dialog_width = @max(@max(content_width + 4, title.len + 4), min_dialog_width);
+        // Height: PADDING + header(3: title, input, separator) + models + instructions + PADDING
+        const header_rows: usize = 3; // title, input, separator
+        const display_count = if (filtered_count > 0) filtered_count else 1; // At least 1 row for "No matches"
+        const ideal_height = (DIALOG_PADDING * 2) + header_rows + (display_count * rows_per_model) + 1; // +1 for instructions
+        const max_height = win.height -| 4;
+
+        const popup_width = @min(dialog_width, win.width -| 4);
         const popup_height = @min(ideal_height, max_height);
         const x_offset = if (win.width > popup_width) (win.width - popup_width) / 2 else 0;
-        const y_offset = if (win.height > popup_height) (win.height - popup_height) / 2 else 0;
+        // Stable top anchor: calculate based on max possible dialog height
+        const max_model_count = if (models.len > 0) models.len else 1;
+        const max_dialog_height = (DIALOG_PADDING * 2) + header_rows + (max_model_count * rows_per_model) + 1;
+        const y_offset = if (win.height > max_dialog_height) (win.height - max_dialog_height) / 2 else 0;
 
         const popup_win = win.child(.{
-            .x_off = x_offset,
-            .y_off = y_offset,
+            .x_off = @intCast(x_offset),
+            .y_off = @intCast(y_offset),
             .width = @intCast(popup_width),
             .height = @intCast(popup_height),
         });
 
         popup_win.clear();
 
-        // Fill with dark gray background to differentiate from main content
+        // Fill with dark gray background
         const bg_cell = vaxis.Cell{
             .char = .{ .grapheme = " ", .width = 1 },
             .style = .{ .bg = Color.dialog_bg },
         };
         popup_win.fill(bg_cell);
 
-        // Title
+        // Row PADDING: Title
         const title_copy = try RenderUtils.copyFrameText(app, title);
         var title_seg = [_]vaxis.Cell.Segment{.{
             .text = title_copy,
             .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true },
         }};
-        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(0) });
+        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(DIALOG_PADDING) });
 
-        // Search query line (row 1)
+        // Row PADDING+1: Search input with "> " prompt
         const query = app.state.model_filter_query[0..app.state.model_filter_len];
-        var search_buf: [280]u8 = undefined;
-        const search_line = if (query.len > 0)
-            std.fmt.bufPrint(&search_buf, "Search: {s}_", .{query}) catch "Search: ..."
-        else
-            "Type to search...";
+        if (query.len > 0) {
+            var search_buf: [280]u8 = undefined;
+            const query_with_cursor = std.fmt.bufPrint(&search_buf, "{s}_", .{query}) catch query;
+            const query_copy = try RenderUtils.copyFrameText(app, query_with_cursor);
+            const prompt_copy = try RenderUtils.copyFrameText(app, "> ");
+            var search_seg = [_]vaxis.Cell.Segment{
+                .{ .text = prompt_copy, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } },
+                .{ .text = query_copy, .style = .{ .fg = Color.white, .bg = Color.dialog_bg } },
+            };
+            _ = popup_win.print(&search_seg, .{ .row_offset = @intCast(DIALOG_PADDING + 1), .col_offset = @intCast(DIALOG_PADDING) });
+        } else {
+            const placeholder_copy = try RenderUtils.copyFrameText(app, "Type to search...");
+            var search_seg = [_]vaxis.Cell.Segment{.{
+                .text = placeholder_copy,
+                .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
+            }};
+            _ = popup_win.print(&search_seg, .{ .row_offset = @intCast(DIALOG_PADDING + 1), .col_offset = @intCast(DIALOG_PADDING) });
+        }
 
-        const search_copy = try RenderUtils.copyFrameText(app, search_line);
-        var search_seg = [_]vaxis.Cell.Segment{.{
-            .text = search_copy,
-            .style = .{ .fg = if (query.len > 0) Color.cyan else Color.dim, .bg = Color.dialog_bg },
-        }};
-        _ = popup_win.print(&search_seg, .{ .row_offset = @intCast(1), .col_offset = 1 });
+        // Row PADDING+2: Separator line
+        if (popup_width > DIALOG_PADDING * 2) {
+            const sep_width = popup_width - (DIALOG_PADDING * 2);
+            const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
+            @memset(sep_text, '-');
+            var sep_seg = [_]vaxis.Cell.Segment{.{
+                .text = sep_text,
+                .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg },
+            }};
+            _ = popup_win.print(&sep_seg, .{ .row_offset = @intCast(DIALOG_PADDING + 2), .col_offset = @intCast(DIALOG_PADDING) });
+        }
+
+        // Content starts at row PADDING+3
+        const content_start_row = DIALOG_PADDING + 3;
 
         // Show "No matches" if filtered list is empty
         if (filtered_count == 0) {
-            const no_matches = "No matching models";
-            const no_matches_copy = try RenderUtils.copyFrameText(app, no_matches);
+            const no_matches_copy = try RenderUtils.copyFrameText(app, "No matching models");
             var no_matches_seg = [_]vaxis.Cell.Segment{.{
                 .text = no_matches_copy,
                 .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
             }};
-            _ = popup_win.print(&no_matches_seg, .{ .row_offset = @intCast(3), .col_offset = 1 });
+            _ = popup_win.print(&no_matches_seg, .{ .row_offset = @intCast(content_start_row), .col_offset = @intCast(DIALOG_PADDING) });
         } else {
             // Calculate scroll offset for many models
-            const rows_for_models = if (popup_height > 6) popup_height - 6 else 2;
-            const max_visible = rows_for_models / 2;
+            const instr_rows: usize = 2 + DIALOG_PADDING; // spacer + instructions + bottom padding
+            const available_rows = if (popup_height > content_start_row + instr_rows)
+                popup_height - content_start_row - instr_rows
+            else
+                rows_per_model;
+            const max_visible = available_rows / rows_per_model;
             var scroll_offset: usize = 0;
             if (max_visible > 0 and filtered_count > max_visible) {
                 if (app.state.model_selection >= max_visible) {
@@ -827,13 +893,13 @@ pub const UI = struct {
                 }
             }
 
-            // Render model options (2 lines each: name + description)
+            // Render model options
             const visible_count = @min(filtered_count - scroll_offset, max_visible);
-            var row: usize = 3; // Start after title + search + empty
+            var row: usize = content_start_row;
             for (0..visible_count) |i| {
                 const selection_idx = scroll_offset + i;
                 if (selection_idx >= filtered_count) break;
-                if (row + 1 >= popup_height - 1) break;
+                if (row >= popup_height - 1 - DIALOG_PADDING) break;
 
                 const actual_model_idx = filtered[selection_idx];
                 if (actual_model_idx >= models.len) continue;
@@ -859,35 +925,37 @@ pub const UI = struct {
                     try name_segments.append(app.allocator, .{ .text = check_copy, .style = .{ .fg = Color.green, .bg = Color.dialog_bg } });
                 }
 
-                _ = popup_win.print(name_segments.items, .{ .row_offset = @intCast(row) });
+                _ = popup_win.print(name_segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(DIALOG_PADDING) });
                 row += 1;
 
-                // Line 2: Description (indented)
-                if (model.description) |desc| {
-                    if (desc.len > 0 and row < popup_height - 1) {
-                        const max_len = if (popup_width > 6) popup_width - 6 else 1;
-                        const truncated = if (desc.len > max_len) desc[0..max_len] else desc;
-                        const desc_copy = try RenderUtils.copyFrameText(app, truncated);
-                        var desc_seg = [_]vaxis.Cell.Segment{.{
-                            .text = desc_copy,
-                            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
-                        }};
-                        _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
+                // Line 2: Description (indented, only if models have descriptions)
+                if (has_descriptions) {
+                    if (model.description) |desc| {
+                        if (desc.len > 0 and row < popup_height - 1 - DIALOG_PADDING) {
+                            const max_len = if (popup_width > 6) popup_width - 6 else 1;
+                            const truncated = if (desc.len > max_len) desc[0..max_len] else desc;
+                            const desc_copy = try RenderUtils.copyFrameText(app, truncated);
+                            var desc_seg = [_]vaxis.Cell.Segment{.{
+                                .text = desc_copy,
+                                .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
+                            }};
+                            _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(DIALOG_PADDING + 3) });
+                        }
                     }
+                    row += 1;
                 }
-                row += 1;
             }
 
             // Scroll indicators
             if (scroll_offset > 0) {
                 const up_copy = try RenderUtils.copyFrameText(app, "↑");
                 var up_seg = [_]vaxis.Cell.Segment{.{ .text = up_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } }};
-                _ = popup_win.print(&up_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 4) });
+                _ = popup_win.print(&up_seg, .{ .row_offset = @intCast(popup_height - 1 - DIALOG_PADDING), .col_offset = @intCast(popup_width - 4) });
             }
             if (scroll_offset + visible_count < filtered_count) {
                 const down_copy = try RenderUtils.copyFrameText(app, "↓");
                 var down_seg = [_]vaxis.Cell.Segment{.{ .text = down_copy, .style = .{ .fg = Color.dim, .bg = Color.dialog_bg } }};
-                _ = popup_win.print(&down_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(popup_width - 2) });
+                _ = popup_win.print(&down_seg, .{ .row_offset = @intCast(popup_height - 1 - DIALOG_PADDING), .col_offset = @intCast(popup_width - 2) });
             }
         }
 
@@ -897,7 +965,7 @@ pub const UI = struct {
             .text = instr_copy,
             .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
-        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
+        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 1 - DIALOG_PADDING), .col_offset = @intCast(DIALOG_PADDING) });
     }
 
     pub fn renderAgentSelectionDialog(app: *App, win: vaxis.Window) !void {
