@@ -40,8 +40,21 @@ pub const RenderUtils = struct {
     pub fn sliceByDisplayWidth(text: []const u8, max_width: usize) []const u8 {
         if (max_width == 0) return text[0..0];
 
+        const limit = @min(text.len, max_width);
+        var ascii_end: usize = 0;
+        while (ascii_end < limit) : (ascii_end += 1) {
+            const byte = text[ascii_end];
+            if (byte < 0x20 or byte >= 0x7f) break;
+        }
+        if (ascii_end == limit) return text[0..limit];
+
         var width: usize = 0;
         var byte_pos: usize = 0;
+
+        if (ascii_end > 0) {
+            width = ascii_end;
+            byte_pos = ascii_end;
+        }
 
         while (byte_pos < text.len) {
             const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;

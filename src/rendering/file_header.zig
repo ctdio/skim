@@ -25,7 +25,7 @@ pub const FileHeader = struct {
     ) !usize {
         if (row >= win.height) return 0;
 
-        const stats = StateHelpers.calculateDiffStats(app, file);
+        const stats = app.getFileDiffStats(file_idx);
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
         const is_folded = app.isFileFolded(file_idx);
 

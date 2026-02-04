@@ -1236,7 +1236,7 @@ pub const UI = struct {
         if (app.state.current_file_idx >= app.state.files.len) return;
 
         const current_file = &app.state.files[app.state.current_file_idx];
-        const stats = StateHelpers.calculateDiffStats(app, current_file);
+        const stats = app.getFileDiffStats(app.state.current_file_idx);
 
         const file_path = if (current_file.new_path.len > 0) current_file.new_path else current_file.old_path;
 

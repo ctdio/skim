@@ -127,6 +127,99 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
+fn parseEnvBool(value: []const u8) bool {
+    if (value.len == 0) return true;
+    if (std.mem.eql(u8, value, "1")) return true;
+    if (std.ascii.eqlIgnoreCase(value, "true")) return true;
+    if (std.ascii.eqlIgnoreCase(value, "yes")) return true;
+    if (std.ascii.eqlIgnoreCase(value, "on")) return true;
+    return false;
+}
+
+fn readEnvBool(allocator: Allocator, name: []const u8) bool {
+    const env_value = std.process.getEnvVarOwned(allocator, name) catch return false;
+    defer allocator.free(env_value);
+    return parseEnvBool(env_value);
+}
+
+fn readEnvU32(allocator: Allocator, name: []const u8, default_value: u32) u32 {
+    const env_value = std.process.getEnvVarOwned(allocator, name) catch return default_value;
+    defer allocator.free(env_value);
+    if (env_value.len == 0) return default_value;
+    return std.fmt.parseInt(u32, env_value, 10) catch default_value;
+}
+
+const FileCaches = struct {
+    stats: []StateHelpers.FileDiffStats,
+    line_counts: []usize,
+    gutter_width: usize,
+};
+
+const RenderProfileCounters = struct {
+    slice_ns: u64 = 0,
+    slice_calls: u64 = 0,
+    pad_ns: u64 = 0,
+    pad_calls: u64 = 0,
+    gutter_ns: u64 = 0,
+    gutter_calls: u64 = 0,
+    highlight_total_ns: u64 = 0,
+    highlight_calls: u64 = 0,
+    highlight_overlap_ns: u64 = 0,
+    highlight_overlap_calls: u64 = 0,
+    highlight_build_ns: u64 = 0,
+    highlight_build_calls: u64 = 0,
+    search_ns: u64 = 0,
+    search_calls: u64 = 0,
+};
+
+fn buildFileCaches(allocator: Allocator, files: []const parser.FileDiff) !FileCaches {
+    const stats = try allocator.alloc(StateHelpers.FileDiffStats, files.len);
+    errdefer allocator.free(stats);
+
+    const line_counts = try allocator.alloc(usize, files.len);
+    errdefer allocator.free(line_counts);
+
+    var global_max_lineno: u32 = 0;
+
+    for (files, 0..) |*file, idx| {
+        var additions: usize = 0;
+        var deletions: usize = 0;
+        var line_count: usize = 0;
+        var file_max_lineno: u32 = 0;
+
+        for (file.hunks) |hunk| {
+            line_count += hunk.lines.len;
+            for (hunk.lines) |line| {
+                switch (line.line_type) {
+                    .add => additions += 1,
+                    .delete => deletions += 1,
+                    .context => {},
+                }
+                if (line.old_lineno) |old| {
+                    file_max_lineno = @max(file_max_lineno, old);
+                }
+                if (line.new_lineno) |new| {
+                    file_max_lineno = @max(file_max_lineno, new);
+                }
+            }
+        }
+
+        stats[idx] = .{ .additions = additions, .deletions = deletions };
+        line_counts[idx] = line_count;
+        global_max_lineno = @max(global_max_lineno, file_max_lineno);
+    }
+
+    const digits = StateHelpers.countDigits(global_max_lineno);
+    const calculated = digits + 1;
+    const base_width = @max(calculated, Layout.min_gutter_width);
+
+    return .{
+        .stats = stats,
+        .line_counts = line_counts,
+        .gutter_width = base_width,
+    };
+}
+
 pub const App = struct {
     allocator: Allocator,
     vx: ?Vaxis, // null in headless mode (print command)
@@ -142,6 +235,7 @@ pub const App = struct {
     header_line_buffers: [Layout.header_height][HEADER_BUFFER_WIDTH]u8,
     frame_text_buffer: []u8,
     frame_text_used: usize,
+    frame_segment_arena: std.heap.ArenaAllocator,
     syntax_highlighter: syntax.SyntaxHighlighter,
     highlight_worker: ?*state_helpers.HighlightWorker, // Long-lived worker thread with cached parsers
     pending_highlight_jobs: std.AutoHashMap(HunkKey, PendingJob), // {file_idx, hunk_idx} -> owned content strings
@@ -158,6 +252,11 @@ pub const App = struct {
     in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
     agent_only: bool, // Start in agent-only mode (no diff view)
     tab_manager: ?agent.TabManager, // Multi-tab agent manager
+    profile_render: bool, // Enable render timing logs
+    profile_every_n: u32, // Log every N frames when profiling
+    profile_frame_counter: u64, // Incremented on each rendered frame
+    profile_active_frame: bool, // True when current render should be profiled
+    profile_counters: RenderProfileCounters,
 
     const Mode = enum {
         normal, // Normal navigation and viewing
@@ -195,6 +294,9 @@ pub const App = struct {
         pager_mode: bool, // True when reading diff from stdin (disables git-dependent features)
         git_repo_root: []const u8, // Absolute path to git repository root
         files: []parser.FileDiff,
+        file_diff_stats: []StateHelpers.FileDiffStats,
+        file_line_counts: []usize,
+        global_gutter_width: usize,
         line_map: line_map.LineMap, // Complete map of all lines
         current_file_idx: usize, // Tracks which file is visible in sticky header
         global_scroll_offset: usize, // Scroll position across all files
@@ -333,6 +435,12 @@ pub const App = struct {
     pub fn init(allocator: Allocator, config: anytype) !App {
         const log = std.log.scoped(.app_init);
 
+        const profile_render = readEnvBool(allocator, "SKIM_PROFILE_RENDER");
+        const profile_every_n = readEnvU32(allocator, "SKIM_PROFILE_RENDER_EVERY", 30);
+        if (profile_render) {
+            log.info("Render profiling enabled (every {d} frames)", .{profile_every_n});
+        }
+
         // Determine if we're in pager mode (reading diff from stdin)
         const is_pager_mode = config.diff_source == .stdin;
 
@@ -415,6 +523,15 @@ pub const App = struct {
         var comment_store = comments.CommentStore.init(allocator);
         errdefer comment_store.deinit();
 
+        var frame_segment_arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer frame_segment_arena.deinit();
+
+        const caches = try buildFileCaches(allocator, files);
+        errdefer {
+            allocator.free(caches.stats);
+            allocator.free(caches.line_counts);
+        }
+
         // Build the line map (default to showing all lines, filtering enabled for unified view)
         // Note: collapsed_folds is null during init as it hasn't been initialized yet
         var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null);
@@ -459,6 +576,9 @@ pub const App = struct {
                 .pager_mode = is_pager_mode,
                 .git_repo_root = git_repo_root,
                 .files = files,
+                .file_diff_stats = caches.stats,
+                .file_line_counts = caches.line_counts,
+                .global_gutter_width = caches.gutter_width,
                 .line_map = built_line_map,
                 .current_file_idx = 0,
                 .global_scroll_offset = 0,
@@ -533,6 +653,7 @@ pub const App = struct {
             .header_line_buffers = header_buffers,
             .frame_text_buffer = frame_buffer,
             .frame_text_used = 0,
+            .frame_segment_arena = frame_segment_arena,
             .syntax_highlighter = syntax_highlighter,
             .highlight_worker = null, // Will be created on first use
             .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
@@ -549,6 +670,11 @@ pub const App = struct {
             .in_bracketed_paste = false,
             .agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false,
             .tab_manager = null, // Lazy initialization on first agent panel open
+            .profile_render = profile_render,
+            .profile_every_n = profile_every_n,
+            .profile_frame_counter = 0,
+            .profile_active_frame = false,
+            .profile_counters = .{},
         };
 
         // Graphite detection is lazy - happens on first access to avoid blocking startup
@@ -587,6 +713,15 @@ pub const App = struct {
 
         var comment_store = comments.CommentStore.init(allocator);
         errdefer comment_store.deinit();
+
+        var frame_segment_arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer frame_segment_arena.deinit();
+
+        const caches = try buildFileCaches(allocator, files);
+        errdefer {
+            allocator.free(caches.stats);
+            allocator.free(caches.line_counts);
+        }
 
         var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null);
         errdefer built_line_map.deinit();
@@ -629,6 +764,9 @@ pub const App = struct {
                 .pager_mode = false,
                 .git_repo_root = git_repo_root,
                 .files = files,
+                .file_diff_stats = caches.stats,
+                .file_line_counts = caches.line_counts,
+                .global_gutter_width = caches.gutter_width,
                 .line_map = built_line_map,
                 .current_file_idx = 0,
                 .global_scroll_offset = 0,
@@ -703,6 +841,7 @@ pub const App = struct {
             .header_line_buffers = header_buffers,
             .frame_text_buffer = frame_buffer,
             .frame_text_used = 0,
+            .frame_segment_arena = frame_segment_arena,
             .syntax_highlighter = syntax_highlighter,
             .highlight_worker = null,
             .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
@@ -719,7 +858,164 @@ pub const App = struct {
             .in_bracketed_paste = false,
             .agent_only = false,
             .tab_manager = null,
+            .profile_render = false,
+            .profile_every_n = 0,
+            .profile_frame_counter = 0,
+            .profile_active_frame = false,
+            .profile_counters = .{},
         };
+    }
+
+    pub fn initForRenderBench(allocator: Allocator, files: []parser.FileDiff) !App {
+        const git_repo_root = try allocator.dupe(u8, ".");
+        errdefer allocator.free(git_repo_root);
+
+        const header_buffers = std.mem.zeroes([Layout.header_height][HEADER_BUFFER_WIDTH]u8);
+
+        const frame_buffer = try allocator.alloc(u8, FRAME_TEXT_CAPACITY);
+        errdefer allocator.free(frame_buffer);
+        @memset(frame_buffer, 0);
+
+        var syntax_highlighter = try syntax.SyntaxHighlighter.init(allocator);
+        errdefer syntax_highlighter.deinit();
+
+        var comment_store = comments.CommentStore.init(allocator);
+        errdefer comment_store.deinit();
+
+        var frame_segment_arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer frame_segment_arena.deinit();
+
+        const caches = try buildFileCaches(allocator, files);
+        errdefer {
+            allocator.free(caches.stats);
+            allocator.free(caches.line_counts);
+        }
+
+        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null);
+        errdefer built_line_map.deinit();
+
+        return App{
+            .allocator = allocator,
+            .vx = null,
+            .tty = null,
+            .mode = .normal,
+            .state = State{
+                .diff_source = .stdin,
+                .pager_mode = true,
+                .git_repo_root = git_repo_root,
+                .files = files,
+                .file_diff_stats = caches.stats,
+                .file_line_counts = caches.line_counts,
+                .global_gutter_width = caches.gutter_width,
+                .line_map = built_line_map,
+                .current_file_idx = 0,
+                .global_scroll_offset = 0,
+                .global_cursor_line = 0,
+                .cursor_column = 0,
+                .view_mode = .unified,
+                .hunk_view_mode = .all,
+                .viewport_height = 0,
+                .count_prefix = null,
+                .comment_store = comment_store,
+                .active_comment_input = null,
+                .search_state = SearchState.init(allocator),
+                .command_palette_state = command_palette.CommandPaletteState.init(allocator),
+                .visual_anchor = null,
+                .pending_find = null,
+                .last_find = null,
+                .pending_z = false,
+                .pending_g = false,
+                .pending_space = false,
+                .pending_bracket = false,
+                .pending_close_bracket = false,
+                .empty_menu_selection = 0,
+                .branch_list = &[_][]const u8{},
+                .branch_selection = 0,
+                .branch_search_query = undefined,
+                .branch_search_len = 0,
+                .filtered_branches = .{},
+                .help_scroll_offset = 0,
+                .commit_list = .{},
+                .commit_selection = 0,
+                .commit_search_query = undefined,
+                .commit_search_len = 0,
+                .filtered_commits = .{},
+                .commits_loaded_count = 0,
+                .commits_loading = false,
+                .selected_commit_for_diff = null,
+                .commit_diff_mode_selection = 0,
+                .session_list = &[_]sessions.SessionInfo{},
+                .session_selection = 0,
+                .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
+                .collapsed_folds = std.AutoHashMap(u64, void).init(allocator),
+                .pending_ctrl_w = false,
+                .status_message = null,
+                .status_message_owned = null,
+                .status_message_time = 0,
+                .show_blame = false,
+                .menu_stats_cached = false,
+                .menu_stats_loading = false,
+                .working_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
+                .staged_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
+                .main_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
+                .default_branch_name = null,
+                .branch_stats_cache = std.AutoHashMap(usize, git.DiffStats).init(allocator),
+                .graphite_detected = false,
+                .graphite_available = false,
+                .graphite_stack = null,
+                .graphite_stack_selection = 0,
+                .model_selection = 0,
+                .model_filter_query = [_]u8{0} ** 256,
+                .model_filter_len = 0,
+                .model_filtered_indices = .{},
+                .configured_agents = null,
+                .agent_selection_idx = 0,
+                .pending_tab_for_selection = null,
+            },
+            .should_quit = false,
+            .should_suspend_for_editor = false,
+            .editor_file_path = null,
+            .editor_line_number = null,
+            .editor_is_prompt_edit = false,
+            .last_ctrl_c = 0,
+            .header_line_buffers = header_buffers,
+            .frame_text_buffer = frame_buffer,
+            .frame_text_used = 0,
+            .frame_segment_arena = frame_segment_arena,
+            .syntax_highlighter = syntax_highlighter,
+            .highlight_worker = null,
+            .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
+            .needs_render = false,
+            .needs_async_highlight = false,
+            .tui_server = null,
+            .session_manager = null,
+            .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+            .acp_connect_thread = null,
+            .acp_connect_ctx = null,
+            .connecting_tab_id = null,
+            .opencode_connect_thread = null,
+            .connecting_opencode_tab_id = null,
+            .in_bracketed_paste = false,
+            .agent_only = false,
+            .tab_manager = null,
+            .profile_render = false,
+            .profile_every_n = 0,
+            .profile_frame_counter = 0,
+            .profile_active_frame = false,
+            .profile_counters = .{},
+        };
+    }
+
+    fn shouldProfileFrame(self: *App) bool {
+        if (!self.profile_render) {
+            self.profile_active_frame = false;
+            return false;
+        }
+        self.profile_frame_counter += 1;
+        const every = if (self.profile_every_n == 0) 1 else self.profile_every_n;
+        const active = (self.profile_frame_counter % every) == 0;
+        self.profile_active_frame = active;
+        return active;
     }
 
     pub fn deinit(self: *App) void {
@@ -753,7 +1049,9 @@ pub const App = struct {
             file.deinit(self.allocator);
         }
         self.allocator.free(self.state.files);
+        self.freeFileCaches();
         self.allocator.free(self.frame_text_buffer);
+        self.frame_segment_arena.deinit();
         self.state.line_map.deinit();
         self.state.comment_store.deinit();
         self.state.search_state.deinit();
@@ -879,26 +1177,40 @@ pub const App = struct {
     }
 
     /// Update the filtered model indices based on the current filter query
+    /// Works with both ACP and OpenCode managers
     pub fn updateModelFilter(self: *App) void {
-        const mgr = self.getActiveAcpManager() orelse return;
-        const models = mgr.getAvailableModels();
-
         // Clear existing filtered indices
         self.state.model_filtered_indices.clearRetainingCapacity();
 
         const query = self.state.model_filter_query[0..self.state.model_filter_len];
 
-        // If no query, show all models
-        if (query.len == 0) {
-            for (0..models.len) |i| {
-                self.state.model_filtered_indices.append(self.allocator, i) catch {};
-            }
-        } else {
-            // Filter models by name or id (case-insensitive substring match)
-            for (models, 0..) |model, i| {
-                const name = model.name orelse model.model_id;
-                if (containsIgnoreCase(name, query) or containsIgnoreCase(model.model_id, query)) {
+        // Try ACP manager first, then OpenCode
+        if (self.getActiveAcpManager()) |mgr| {
+            const models = mgr.getAvailableModels();
+            if (query.len == 0) {
+                for (0..models.len) |i| {
                     self.state.model_filtered_indices.append(self.allocator, i) catch {};
+                }
+            } else {
+                for (models, 0..) |model, i| {
+                    const name = model.name orelse model.model_id;
+                    if (containsIgnoreCase(name, query) or containsIgnoreCase(model.model_id, query)) {
+                        self.state.model_filtered_indices.append(self.allocator, i) catch {};
+                    }
+                }
+            }
+        } else if (self.getActiveOpencodeManager()) |mgr| {
+            const models = mgr.getAvailableModels();
+            if (query.len == 0) {
+                for (0..models.len) |i| {
+                    self.state.model_filtered_indices.append(self.allocator, i) catch {};
+                }
+            } else {
+                for (models, 0..) |model, i| {
+                    const name = model.name orelse model.model_id;
+                    if (containsIgnoreCase(name, query) or containsIgnoreCase(model.model_id, query)) {
+                        self.state.model_filtered_indices.append(self.allocator, i) catch {};
+                    }
                 }
             }
         }
@@ -1046,6 +1358,12 @@ pub const App = struct {
         // Mark untracked files
         parser.markUntrackedFiles(new_files, diff_result.untracked_paths);
 
+        const caches = try buildFileCaches(self.allocator, new_files);
+        errdefer {
+            self.allocator.free(caches.stats);
+            self.allocator.free(caches.line_counts);
+        }
+
         // Try to preserve current file if it still exists
         var new_file_idx: usize = 0;
         if (self.state.current_file_idx < self.state.files.len) {
@@ -1075,6 +1393,7 @@ pub const App = struct {
         }
         self.allocator.free(self.state.files);
         self.state.line_map.deinit();
+        self.freeFileCaches();
 
         // Rebuild line map with new files (preserve hunk view mode and fold state)
         const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
@@ -1088,6 +1407,9 @@ pub const App = struct {
 
         // Update state with new files and line map
         self.state.files = new_files;
+        self.state.file_diff_stats = caches.stats;
+        self.state.file_line_counts = caches.line_counts;
+        self.state.global_gutter_width = caches.gutter_width;
         self.state.line_map = new_line_map;
         self.state.current_file_idx = new_file_idx;
 
@@ -1395,9 +1717,29 @@ pub const App = struct {
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
+                const profile_log = std.log.scoped(.profile_loop);
+                _ = self.shouldProfileFrame();
                 const win = vx.window();
-                try self.render(win);
-                try vx.render(tty.writer());
+
+                if (self.profile_active_frame) {
+                    var render_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    try self.render(win);
+                    const render_ns: u64 = if (render_timer_opt) |*timer| timer.read() else 0;
+
+                    var vx_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    try vx.render(tty.writer());
+                    const vx_ns: u64 = if (vx_timer_opt) |*timer| timer.read() else 0;
+
+                    profile_log.debug(
+                        "frame {d}: render_ns={d} vx_ns={d} events={} needs_render={} pending_jobs={d}",
+                        .{ self.profile_frame_counter, render_ns, vx_ns, had_events, self.needs_render, self.pending_highlight_jobs.count() },
+                    );
+                } else {
+                    try self.render(win);
+                    try vx.render(tty.writer());
+                }
+
+                self.profile_active_frame = false;
                 // Don't clear needs_render if we're about to suspend for editor
                 // This prevents blocking on the next pollEvent()
                 if (!self.should_suspend_for_editor) {
@@ -1860,9 +2202,17 @@ pub const App = struct {
                 std.log.err("Failed to add local slash commands: {any}", .{err});
             };
 
-            // Auto-connect to ACP agent if not connected
-            const current_mgr = self.getActiveAcpManager();
-            if (current_mgr == null or current_mgr.?.status == .disconnected) {
+            // Auto-connect to agent if not connected (check both ACP and Opencode managers)
+            const has_active_agent = blk: {
+                if (self.getActiveAcpManager()) |mgr| {
+                    if (mgr.status != .disconnected) break :blk true;
+                }
+                if (self.getActiveOpencodeManager()) |mgr| {
+                    if (mgr.status != .disconnected) break :blk true;
+                }
+                break :blk false;
+            };
+            if (!has_active_agent) {
                 try self.startAcpSession();
             }
         }
@@ -3436,13 +3786,94 @@ pub const App = struct {
 
     // Count total lines in a file (for fold indicator)
     pub fn getFileLineCount(self: *App, file_idx: usize) usize {
-        if (file_idx >= self.state.files.len) return 0;
-        const file = &self.state.files[file_idx];
-        var count: usize = 0;
-        for (file.hunks) |hunk| {
-            count += hunk.lines.len;
+        if (file_idx >= self.state.file_line_counts.len) return 0;
+        return self.state.file_line_counts[file_idx];
+    }
+
+    pub fn getFileDiffStats(self: *App, file_idx: usize) StateHelpers.FileDiffStats {
+        if (file_idx >= self.state.file_diff_stats.len) {
+            return .{ .additions = 0, .deletions = 0 };
         }
-        return count;
+        return self.state.file_diff_stats[file_idx];
+    }
+
+    pub fn getGlobalGutterWidth(self: *App, show_blame: bool) usize {
+        const base_width = self.state.global_gutter_width;
+        if (show_blame) {
+            return base_width + StateHelpers.BLAME_GUTTER_WIDTH + StateHelpers.BLAME_SEPARATOR_WIDTH;
+        }
+        return base_width;
+    }
+
+    pub fn frameSegmentAllocator(self: *App) std.mem.Allocator {
+        return self.frame_segment_arena.allocator();
+    }
+
+    pub fn resetFrameAllocators(self: *App) void {
+        RenderUtils.resetFrameTextBuffer(self);
+        _ = self.frame_segment_arena.reset(.retain_capacity);
+    }
+
+    fn freeFileCaches(self: *App) void {
+        self.allocator.free(self.state.file_diff_stats);
+        self.allocator.free(self.state.file_line_counts);
+    }
+
+    pub fn profileSliceByDisplayWidth(self: *App, text: []const u8, max_width: usize) []const u8 {
+        if (!self.profile_active_frame) {
+            return RenderUtils.sliceByDisplayWidth(text, max_width);
+        }
+        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+        const slice = RenderUtils.sliceByDisplayWidth(text, max_width);
+        if (timer_opt) |*timer| {
+            self.profile_counters.slice_ns += timer.read();
+        }
+        self.profile_counters.slice_calls += 1;
+        return slice;
+    }
+
+    pub fn profilePadSegments(
+        self: *App,
+        segments: []vaxis.Cell.Segment,
+        current_width: usize,
+        available_width: usize,
+        style: vaxis.Style,
+    ) ![]vaxis.Cell.Segment {
+        const allocator = self.frameSegmentAllocator();
+        if (!self.profile_active_frame) {
+            return RenderUtils.padSegments(self, allocator, segments, current_width, available_width, style);
+        }
+        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+        const padded = try RenderUtils.padSegments(self, allocator, segments, current_width, available_width, style);
+        if (timer_opt) |*timer| {
+            self.profile_counters.pad_ns += timer.read();
+        }
+        self.profile_counters.pad_calls += 1;
+        return padded;
+    }
+
+    pub fn profileRenderGutterWithBlame(
+        self: *App,
+        win: vaxis.Window,
+        line_idx: usize,
+        row: usize,
+        is_cursor_or_visual: bool,
+        show_number: bool,
+        file_lineno: ?u32,
+        line_type: ?parser.Line.LineType,
+        gutter_width: usize,
+        file_path: ?[]const u8,
+        is_first_line_in_hunk: bool,
+    ) !void {
+        if (!self.profile_active_frame) {
+            return RenderUtils.renderGutterWithBlame(self, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
+        }
+        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+        try RenderUtils.renderGutterWithBlame(self, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
+        if (timer_opt) |*timer| {
+            self.profile_counters.gutter_ns += timer.read();
+        }
+        self.profile_counters.gutter_calls += 1;
     }
 
     // Toggle fold at cursor position (file header -> fold file, hunk/code -> fold hunk)
@@ -3716,8 +4147,19 @@ pub const App = struct {
     }
 
     fn render(self: *App, win: vaxis.Window) !void {
+        const profile_frame = self.profile_active_frame;
+        var total_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
+        var header_ns: u64 = 0;
+        var content_ns: u64 = 0;
+        var status_ns: u64 = 0;
+        var agent_ns: u64 = 0;
+        var overlay_ns: u64 = 0;
+        if (profile_frame) {
+            self.profile_counters = .{};
+        }
+
         win.clear();
-        RenderUtils.resetFrameTextBuffer(self);
+        self.resetFrameAllocators();
 
         // Hide cursor by default - comment input will show it when needed
         win.hideCursor();
@@ -3746,7 +4188,13 @@ pub const App = struct {
                         .width = @intCast(panel_width),
                         .height = @intCast(content_height),
                     });
-                    try agent.renderAgentPanel(self, agent_win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try agent.renderAgentPanel(self, agent_win);
+                        if (timer_opt) |*timer| agent_ns += timer.read();
+                    } else {
+                        try agent.renderAgentPanel(self, agent_win);
+                    }
 
                     // Empty menu on right
                     const content_win = win.child(.{
@@ -3756,14 +4204,41 @@ pub const App = struct {
                         .height = @intCast(win.height),
                     });
                     if (self.mode == .branch_selection) {
-                        try UI.renderBranchSelectionMenu(self, content_win);
+                        if (profile_frame) {
+                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                            try UI.renderBranchSelectionMenu(self, content_win);
+                            if (timer_opt) |*timer| overlay_ns += timer.read();
+                        } else {
+                            try UI.renderBranchSelectionMenu(self, content_win);
+                        }
                     } else if (self.mode == .commit_selection) {
-                        try UI.renderCommitSelectionMenu(self, content_win);
+                        if (profile_frame) {
+                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                            try UI.renderCommitSelectionMenu(self, content_win);
+                            if (timer_opt) |*timer| overlay_ns += timer.read();
+                        } else {
+                            try UI.renderCommitSelectionMenu(self, content_win);
+                        }
                     } else if (self.mode == .commit_diff_mode) {
-                        try UI.renderCommitSelectionMenu(self, content_win);
-                        try UI.renderCommitDiffModeMenu(self, content_win);
+                        if (profile_frame) {
+                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                            try UI.renderCommitSelectionMenu(self, content_win);
+                            if (timer_opt) |*timer| overlay_ns += timer.read();
+                            timer_opt = std.time.Timer.start() catch null;
+                            try UI.renderCommitDiffModeMenu(self, content_win);
+                            if (timer_opt) |*timer| overlay_ns += timer.read();
+                        } else {
+                            try UI.renderCommitSelectionMenu(self, content_win);
+                            try UI.renderCommitDiffModeMenu(self, content_win);
+                        }
                     } else {
-                        try UI.renderEmptyMenu(self, content_win);
+                        if (profile_frame) {
+                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                            try UI.renderEmptyMenu(self, content_win);
+                            if (timer_opt) |*timer| overlay_ns += timer.read();
+                        } else {
+                            try UI.renderEmptyMenu(self, content_win);
+                        }
                     }
                 } else {
                     // Empty menu on left
@@ -3774,14 +4249,41 @@ pub const App = struct {
                         .height = @intCast(win.height),
                     });
                     if (self.mode == .branch_selection) {
-                        try UI.renderBranchSelectionMenu(self, content_win);
+                        if (profile_frame) {
+                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                            try UI.renderBranchSelectionMenu(self, content_win);
+                            if (timer_opt) |*timer| overlay_ns += timer.read();
+                        } else {
+                            try UI.renderBranchSelectionMenu(self, content_win);
+                        }
                     } else if (self.mode == .commit_selection) {
-                        try UI.renderCommitSelectionMenu(self, content_win);
+                        if (profile_frame) {
+                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                            try UI.renderCommitSelectionMenu(self, content_win);
+                            if (timer_opt) |*timer| overlay_ns += timer.read();
+                        } else {
+                            try UI.renderCommitSelectionMenu(self, content_win);
+                        }
                     } else if (self.mode == .commit_diff_mode) {
-                        try UI.renderCommitSelectionMenu(self, content_win);
-                        try UI.renderCommitDiffModeMenu(self, content_win);
+                        if (profile_frame) {
+                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                            try UI.renderCommitSelectionMenu(self, content_win);
+                            if (timer_opt) |*timer| overlay_ns += timer.read();
+                            timer_opt = std.time.Timer.start() catch null;
+                            try UI.renderCommitDiffModeMenu(self, content_win);
+                            if (timer_opt) |*timer| overlay_ns += timer.read();
+                        } else {
+                            try UI.renderCommitSelectionMenu(self, content_win);
+                            try UI.renderCommitDiffModeMenu(self, content_win);
+                        }
                     } else {
-                        try UI.renderEmptyMenu(self, content_win);
+                        if (profile_frame) {
+                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                            try UI.renderEmptyMenu(self, content_win);
+                            if (timer_opt) |*timer| overlay_ns += timer.read();
+                        } else {
+                            try UI.renderEmptyMenu(self, content_win);
+                        }
                     }
 
                     // Agent panel on right
@@ -3791,19 +4293,52 @@ pub const App = struct {
                         .width = @intCast(panel_width),
                         .height = @intCast(content_height),
                     });
-                    try agent.renderAgentPanel(self, agent_win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try agent.renderAgentPanel(self, agent_win);
+                        if (timer_opt) |*timer| agent_ns += timer.read();
+                    } else {
+                        try agent.renderAgentPanel(self, agent_win);
+                    }
                 }
             } else {
                 // No agent panel - full screen empty menu
                 if (self.mode == .branch_selection) {
-                    try UI.renderBranchSelectionMenu(self, win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try UI.renderBranchSelectionMenu(self, win);
+                        if (timer_opt) |*timer| overlay_ns += timer.read();
+                    } else {
+                        try UI.renderBranchSelectionMenu(self, win);
+                    }
                 } else if (self.mode == .commit_selection) {
-                    try UI.renderCommitSelectionMenu(self, win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try UI.renderCommitSelectionMenu(self, win);
+                        if (timer_opt) |*timer| overlay_ns += timer.read();
+                    } else {
+                        try UI.renderCommitSelectionMenu(self, win);
+                    }
                 } else if (self.mode == .commit_diff_mode) {
-                    try UI.renderCommitSelectionMenu(self, win);
-                    try UI.renderCommitDiffModeMenu(self, win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try UI.renderCommitSelectionMenu(self, win);
+                        if (timer_opt) |*timer| overlay_ns += timer.read();
+                        timer_opt = std.time.Timer.start() catch null;
+                        try UI.renderCommitDiffModeMenu(self, win);
+                        if (timer_opt) |*timer| overlay_ns += timer.read();
+                    } else {
+                        try UI.renderCommitSelectionMenu(self, win);
+                        try UI.renderCommitDiffModeMenu(self, win);
+                    }
                 } else {
-                    try UI.renderEmptyMenu(self, win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try UI.renderEmptyMenu(self, win);
+                        if (timer_opt) |*timer| overlay_ns += timer.read();
+                    } else {
+                        try UI.renderEmptyMenu(self, win);
+                    }
                 }
             }
         } else {
@@ -3822,7 +4357,13 @@ pub const App = struct {
                         .width = @intCast(panel_width),
                         .height = @intCast(content_height + Layout.header_height),
                     });
-                    try agent.renderAgentPanel(self, agent_win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try agent.renderAgentPanel(self, agent_win);
+                        if (timer_opt) |*timer| agent_ns += timer.read();
+                    } else {
+                        try agent.renderAgentPanel(self, agent_win);
+                    }
 
                     // Header above diff content (on right side)
                     const header_win = win.child(.{
@@ -3831,7 +4372,13 @@ pub const App = struct {
                         .width = @intCast(diff_width),
                         .height = @intCast(Layout.header_height),
                     });
-                    try UI.renderHeader(self, header_win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try UI.renderHeader(self, header_win);
+                        if (timer_opt) |*timer| header_ns += timer.read();
+                    } else {
+                        try UI.renderHeader(self, header_win);
+                    }
 
                     // Diff content on right (below header)
                     const content_win = win.child(.{
@@ -3840,7 +4387,13 @@ pub const App = struct {
                         .width = @intCast(diff_width),
                         .height = @intCast(content_height),
                     });
-                    try self.renderContent(content_win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try self.renderContent(content_win);
+                        if (timer_opt) |*timer| content_ns += timer.read();
+                    } else {
+                        try self.renderContent(content_win);
+                    }
                 } else {
                     // Agent panel on right (default)
                     // Header above diff content (on left side)
@@ -3850,7 +4403,13 @@ pub const App = struct {
                         .width = @intCast(diff_width),
                         .height = @intCast(Layout.header_height),
                     });
-                    try UI.renderHeader(self, header_win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try UI.renderHeader(self, header_win);
+                        if (timer_opt) |*timer| header_ns += timer.read();
+                    } else {
+                        try UI.renderHeader(self, header_win);
+                    }
 
                     // Diff content on left (below header)
                     const content_win = win.child(.{
@@ -3859,7 +4418,13 @@ pub const App = struct {
                         .width = @intCast(diff_width),
                         .height = @intCast(content_height),
                     });
-                    try self.renderContent(content_win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try self.renderContent(content_win);
+                        if (timer_opt) |*timer| content_ns += timer.read();
+                    } else {
+                        try self.renderContent(content_win);
+                    }
 
                     // Agent panel on right (starts at y=0, full height including header area)
                     const agent_win = win.child(.{
@@ -3868,7 +4433,13 @@ pub const App = struct {
                         .width = @intCast(panel_width),
                         .height = @intCast(content_height + Layout.header_height),
                     });
-                    try agent.renderAgentPanel(self, agent_win);
+                    if (profile_frame) {
+                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        try agent.renderAgentPanel(self, agent_win);
+                        if (timer_opt) |*timer| agent_ns += timer.read();
+                    } else {
+                        try agent.renderAgentPanel(self, agent_win);
+                    }
                 }
             } else {
                 // Full width - header spans full width
@@ -3878,7 +4449,13 @@ pub const App = struct {
                     .width = @intCast(win.width),
                     .height = @intCast(Layout.header_height),
                 });
-                try UI.renderHeader(self, header_win);
+                if (profile_frame) {
+                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    try UI.renderHeader(self, header_win);
+                    if (timer_opt) |*timer| header_ns += timer.read();
+                } else {
+                    try UI.renderHeader(self, header_win);
+                }
                 // Full width content
                 const content_win = win.child(.{
                     .x_off = 0,
@@ -3886,7 +4463,13 @@ pub const App = struct {
                     .width = @intCast(win.width),
                     .height = @intCast(content_height),
                 });
-                try self.renderContent(content_win);
+                if (profile_frame) {
+                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    try self.renderContent(content_win);
+                    if (timer_opt) |*timer| content_ns += timer.read();
+                } else {
+                    try self.renderContent(content_win);
+                }
             }
         }
 
@@ -3898,45 +4481,102 @@ pub const App = struct {
             .width = @intCast(win.width),
             .height = @intCast(Layout.status_height),
         });
-        try UI.renderStatus(self, status_win);
+        if (profile_frame) {
+            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            try UI.renderStatus(self, status_win);
+            if (timer_opt) |*timer| status_ns += timer.read();
+        } else {
+            try UI.renderStatus(self, status_win);
+        }
 
         // Render command palette overlay if in command palette mode
         if (self.mode == .command_palette) {
-            try command_palette.renderCommandPalette(self, win);
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try command_palette.renderCommandPalette(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+            } else {
+                try command_palette.renderCommandPalette(self, win);
+            }
         }
 
         // Render help overlay if in help mode
         if (self.mode == .help) {
-            try help.renderHelpPopup(self, win);
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try help.renderHelpPopup(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+            } else {
+                try help.renderHelpPopup(self, win);
+            }
         }
 
         // Render graphite stack dialog if in graphite_stack mode
         if (self.mode == .graphite_stack) {
-            try UI.renderGraphiteStackDialog(self, win);
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try UI.renderGraphiteStackDialog(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+            } else {
+                try UI.renderGraphiteStackDialog(self, win);
+            }
         }
 
         // Render model selection dialog if in model_selection mode
         if (self.mode == .model_selection) {
-            try UI.renderModelSelectionDialog(self, win);
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try UI.renderModelSelectionDialog(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+            } else {
+                try UI.renderModelSelectionDialog(self, win);
+            }
         }
 
         // Render agent selection dialog if in agent_selection mode
         if (self.mode == .agent_selection) {
-            try UI.renderAgentSelectionDialog(self, win);
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try UI.renderAgentSelectionDialog(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+            } else {
+                try UI.renderAgentSelectionDialog(self, win);
+            }
         }
 
         // Render session picker dialog if in session_picker mode
         if (self.mode == .session_picker) {
-            try UI.renderSessionPickerDialog(self, win);
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try UI.renderSessionPickerDialog(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+            } else {
+                try UI.renderSessionPickerDialog(self, win);
+            }
         }
 
         // Render commit selection overlay if in commit_selection or commit_diff_mode
         if (self.mode == .commit_selection) {
-            try UI.renderCommitSelectionMenu(self, win);
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try UI.renderCommitSelectionMenu(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+            } else {
+                try UI.renderCommitSelectionMenu(self, win);
+            }
         }
         if (self.mode == .commit_diff_mode) {
-            try UI.renderCommitSelectionMenu(self, win);
-            try UI.renderCommitDiffModeMenu(self, win);
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try UI.renderCommitSelectionMenu(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+                timer_opt = std.time.Timer.start() catch null;
+                try UI.renderCommitDiffModeMenu(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+            } else {
+                try UI.renderCommitSelectionMenu(self, win);
+                try UI.renderCommitDiffModeMenu(self, win);
+            }
         }
 
         // Render agent panel full-screen if in full-screen mode AND in agent mode
@@ -3949,7 +4589,41 @@ pub const App = struct {
                 .width = win.width,
                 .height = if (win.height > Layout.status_height) win.height - Layout.status_height else win.height,
             });
-            try agent.renderAgentPanel(self, agent_win);
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try agent.renderAgentPanel(self, agent_win);
+                if (timer_opt) |*timer| agent_ns += timer.read();
+            } else {
+                try agent.renderAgentPanel(self, agent_win);
+            }
+        }
+
+        if (profile_frame) {
+            const profile_log = std.log.scoped(.profile_render);
+            const total_ns: u64 = if (total_timer_opt) |*timer| timer.read() else 0;
+            profile_log.debug(
+                "render frame {d}: total_ns={d} header_ns={d} content_ns={d} status_ns={d} agent_ns={d} overlay_ns={d} mode={s} view={s} files={d} lines={d}",
+                .{ self.profile_frame_counter, total_ns, header_ns, content_ns, status_ns, agent_ns, overlay_ns, @tagName(self.mode), @tagName(self.state.view_mode), self.state.files.len, self.state.line_map.records.len },
+            );
+            profile_log.debug(
+                "render micro: slice_ns={d} slice_calls={d} pad_ns={d} pad_calls={d} gutter_ns={d} gutter_calls={d} highlight_ns={d} highlight_calls={d} overlap_ns={d} overlap_calls={d} build_ns={d} build_calls={d} search_ns={d} search_calls={d}",
+                .{
+                    self.profile_counters.slice_ns,
+                    self.profile_counters.slice_calls,
+                    self.profile_counters.pad_ns,
+                    self.profile_counters.pad_calls,
+                    self.profile_counters.gutter_ns,
+                    self.profile_counters.gutter_calls,
+                    self.profile_counters.highlight_total_ns,
+                    self.profile_counters.highlight_calls,
+                    self.profile_counters.highlight_overlap_ns,
+                    self.profile_counters.highlight_overlap_calls,
+                    self.profile_counters.highlight_build_ns,
+                    self.profile_counters.highlight_build_calls,
+                    self.profile_counters.search_ns,
+                    self.profile_counters.search_calls,
+                },
+            );
         }
     }
 
@@ -4012,6 +4686,15 @@ pub const App = struct {
         base_style: vaxis.Style,
         global_line: usize,
     ) ![]vaxis.Cell.Segment {
+        var total_timer_opt: ?std.time.Timer = null;
+        if (self.profile_active_frame) {
+            total_timer_opt = std.time.Timer.start() catch null;
+        }
+        defer if (total_timer_opt) |*timer| {
+            self.profile_counters.highlight_total_ns += timer.read();
+            self.profile_counters.highlight_calls += 1;
+        };
+
         // Check for merge conflict markers and apply special styling
         if (getConflictMarkerStyle(full_line_text, base_style)) |conflict_style| {
             var segments = try self.allocator.alloc(vaxis.Cell.Segment, 1);
@@ -4035,138 +4718,106 @@ pub const App = struct {
 
         const file_highlights = highlights.?;
 
-        // Find highlights that overlap with this line
-        var relevant_highlights: std.ArrayList(syntax.Highlight) = .{};
-        defer relevant_highlights.deinit(self.allocator);
-
         const line_start = line_byte_offset;
         const line_end = line_byte_offset + text.len;
 
-        for (file_highlights) |h| {
-            // Check if highlight overlaps with this line
-            if (h.end_byte > line_start and h.start_byte < line_end) {
-                // Adjust highlight bounds to line-local coordinates
-                const local_start = if (h.start_byte > line_start) h.start_byte - line_start else 0;
-                const local_end = if (h.end_byte < line_end) h.end_byte - line_start else text.len;
-
-                // Safety: ensure bounds are valid and within text length
-                const safe_start = @min(local_start, text.len);
-                const safe_end = @min(@max(local_end, safe_start), text.len);
-
-                // Skip empty or invalid highlights
-                if (safe_start >= safe_end) continue;
-
-                try relevant_highlights.append(self.allocator, .{
-                    .start_byte = safe_start,
-                    .end_byte = safe_end,
-                    .category = h.category,
-                });
-            }
+        var overlap_timer_opt: ?std.time.Timer = null;
+        if (self.profile_active_frame) {
+            overlap_timer_opt = std.time.Timer.start() catch null;
+        }
+        const start_index = findHighlightStartIndex(file_highlights, line_start);
+        if (overlap_timer_opt) |*timer| {
+            self.profile_counters.highlight_overlap_ns += timer.read();
+            self.profile_counters.highlight_overlap_calls += 1;
         }
 
-        if (relevant_highlights.items.len == 0) {
-            // No relevant highlights - return single segment
-            var segments = try self.allocator.alloc(vaxis.Cell.Segment, 1);
-            segments[0] = .{
-                .text = text,
-                .style = base_style,
-            };
-            // Still apply search highlighting even without syntax highlights
-            return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
+        const allocator = self.frameSegmentAllocator();
+
+        // Build segments by walking highlights in order
+        var build_timer_opt: ?std.time.Timer = null;
+        if (self.profile_active_frame) {
+            build_timer_opt = std.time.Timer.start() catch null;
         }
 
-        // Build segments by splitting text at highlight boundaries
         var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
-        errdefer segments.deinit(self.allocator);
+        errdefer segments.deinit(allocator);
 
         var pos: usize = 0;
+        var idx = start_index;
         while (pos < text.len) {
-            // Find the next highlight that starts at or after pos
-            var next_highlight: ?syntax.Highlight = null;
-            var next_start: usize = text.len;
-
-            for (relevant_highlights.items) |h| {
-                if (h.start_byte <= pos and h.end_byte > pos) {
-                    // We're inside this highlight
-                    next_highlight = h;
-                    next_start = pos;
-                    break;
-                } else if (h.start_byte > pos and h.start_byte < next_start) {
-                    // Clamp to text length to prevent out of bounds
-                    next_start = @min(h.start_byte, text.len);
-                }
+            const absolute_pos = line_start + pos;
+            while (idx < file_highlights.len and file_highlights[idx].end_byte <= absolute_pos) {
+                idx += 1;
             }
 
-            if (next_highlight) |h| {
-                // Render highlighted segment
-                const end = @min(h.end_byte, text.len);
-                // Safety check: ensure we don't go beyond text bounds
-                if (pos >= text.len) break;
-                const chunk = text[pos..end];
+            if (idx >= file_highlights.len or file_highlights[idx].start_byte >= line_end) {
+                const chunk = text[pos..];
+                try segments.append(allocator, .{ .text = chunk, .style = base_style });
+                break;
+            }
 
-                // Apply GitHub-inspired syntax colors with improved harmony and contrast
-                const color_category = h.getColorCategory();
-                var style = base_style;
+            const h = file_highlights[idx];
+            const local_start = if (h.start_byte > line_start) h.start_byte - line_start else 0;
+            const local_end = if (h.end_byte < line_end) h.end_byte - line_start else text.len;
 
-                // Map semantic categories to our optimized color palette
-                // These colors work well on both plain and diff backgrounds
-                switch (color_category) {
-                    .keyword => {
-                        // Soft coral/salmon - less harsh than bold red
-                        style.fg = Color.syntax_keyword;
-                    },
-                    .function => {
-                        // Light purple - stands out well
-                        style.fg = Color.syntax_function;
-                    },
-                    .type => {
-                        // Warm yellow - good contrast on all backgrounds
-                        style.fg = Color.syntax_type;
-                    },
-                    .string => {
-                        // Light blue - easy to read
-                        style.fg = Color.syntax_string;
-                    },
-                    .number, .constant => {
-                        // Bright blue - distinct from strings
-                        style.fg = Color.syntax_number;
-                    },
-                    .comment => {
-                        // Medium gray - finally visible!
-                        style.fg = Color.syntax_comment;
-                    },
-                    .operator => {
-                        // Same as keywords for consistency
-                        style.fg = Color.syntax_operator;
-                    },
-                    .default => {
-                        // Keep base style (diff colors for add/delete, white otherwise)
-                    },
-                }
+            if (local_start > pos) {
+                const chunk = text[pos..@min(local_start, text.len)];
+                try segments.append(allocator, .{ .text = chunk, .style = base_style });
+                pos = @min(local_start, text.len);
+                continue;
+            }
 
-                try segments.append(self.allocator, .{
-                    .text = chunk,
-                    .style = style,
-                });
+            if (local_end <= pos) {
+                idx += 1;
+                continue;
+            }
 
-                pos = end;
+            const end = @min(local_end, text.len);
+            const chunk = text[pos..end];
+
+            const color_category = h.getColorCategory();
+            var style = base_style;
+            switch (color_category) {
+                .keyword => style.fg = Color.syntax_keyword,
+                .function => style.fg = Color.syntax_function,
+                .type => style.fg = Color.syntax_type,
+                .string => style.fg = Color.syntax_string,
+                .number, .constant => style.fg = Color.syntax_number,
+                .comment => style.fg = Color.syntax_comment,
+                .operator => style.fg = Color.syntax_operator,
+                .default => {},
+            }
+
+            try segments.append(allocator, .{ .text = chunk, .style = style });
+            pos = end;
+            idx += 1;
+        }
+
+        if (build_timer_opt) |*timer| {
+            self.profile_counters.highlight_build_ns += timer.read();
+            self.profile_counters.highlight_build_calls += 1;
+        }
+
+        const owned_segments = try segments.toOwnedSlice(allocator);
+        return try self.applySearchHighlighting(owned_segments, text, full_line_text, text_offset, global_line);
+    }
+
+    fn findHighlightStartIndex(highlights: []syntax.Highlight, line_start: usize) usize {
+        var lo: usize = 0;
+        var hi: usize = highlights.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (highlights[mid].start_byte < line_start) {
+                lo = mid + 1;
             } else {
-                // Render unhighlighted segment until next highlight
-                // Safety check: ensure next_start doesn't exceed text bounds
-                if (pos >= text.len) break;
-                const safe_next_start = @min(next_start, text.len);
-                const chunk = text[pos..safe_next_start];
-                try segments.append(self.allocator, .{
-                    .text = chunk,
-                    .style = base_style,
-                });
-
-                pos = safe_next_start;
+                hi = mid;
             }
         }
 
-        const owned_segments = try segments.toOwnedSlice(self.allocator);
-        return try self.applySearchHighlighting(owned_segments, text, full_line_text, text_offset, global_line);
+        if (lo > 0 and highlights[lo - 1].end_byte > line_start) {
+            return lo - 1;
+        }
+        return lo;
     }
 
     // Apply search highlighting on top of existing segments
@@ -4179,40 +4830,38 @@ pub const App = struct {
         chunk_offset: usize,
         global_line: usize,
     ) ![]vaxis.Cell.Segment {
+        var search_timer_opt: ?std.time.Timer = null;
+        if (self.profile_active_frame) {
+            search_timer_opt = std.time.Timer.start() catch null;
+        }
+        defer if (search_timer_opt) |*timer| {
+            self.profile_counters.search_ns += timer.read();
+            self.profile_counters.search_calls += 1;
+        };
         _ = full_line_text;
         _ = chunk_offset;
-        defer self.allocator.free(segments);
+
+        const allocator = self.frameSegmentAllocator();
 
         // Check if search is active
         const search_state = &self.state.search_state;
         if (search_state.query_len == 0) {
-            const new_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len);
-            @memcpy(new_segments, segments);
-            return new_segments;
+            return segments;
         }
 
         // KEY OPTIMIZATION: Check if this line is in the matches list
         // If not, no need to search or highlight - just return segments as-is
-        const is_match_line = blk: {
-            for (search_state.matches.items) |match_line| {
-                if (match_line == global_line) break :blk true;
-            }
-            break :blk false;
-        };
+        const is_match_line = isMatchLine(search_state.matches.items, global_line);
 
         if (!is_match_line) {
             // This line doesn't match - return segments unchanged
-            const new_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len);
-            @memcpy(new_segments, segments);
-            return new_segments;
+            return segments;
         }
 
         const query = search_state.query_buffer[0..search_state.query_len];
 
         if (query.len > chunk_text.len) {
-            const new_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len);
-            @memcpy(new_segments, segments);
-            return new_segments;
+            return segments;
         }
 
         // Determine case sensitivity (smart case)
@@ -4220,7 +4869,7 @@ pub const App = struct {
 
         // Find all matches in the chunk_text (this is the actual text to render)
         var chunk_matches: std.ArrayList(struct { start: usize, end: usize }) = .{};
-        defer chunk_matches.deinit(self.allocator);
+        defer chunk_matches.deinit(allocator);
 
         var search_pos: usize = 0;
         while (search_pos <= chunk_text.len - query.len) {
@@ -4231,7 +4880,7 @@ pub const App = struct {
                 std.ascii.eqlIgnoreCase(slice, query);
 
             if (is_match) {
-                try chunk_matches.append(self.allocator, .{ .start = search_pos, .end = search_pos + query.len });
+                try chunk_matches.append(allocator, .{ .start = search_pos, .end = search_pos + query.len });
                 search_pos += query.len;
             } else {
                 search_pos += 1;
@@ -4239,14 +4888,12 @@ pub const App = struct {
         }
 
         if (chunk_matches.items.len == 0) {
-            const new_segments = try self.allocator.alloc(vaxis.Cell.Segment, segments.len);
-            @memcpy(new_segments, segments);
-            return new_segments;
+            return segments;
         }
 
         // Now map the matches from chunk_text coordinates to segment coordinates
         var result_segments: std.ArrayList(vaxis.Cell.Segment) = .{};
-        errdefer result_segments.deinit(self.allocator);
+        errdefer result_segments.deinit(allocator);
 
         var text_pos: usize = 0; // Current position in chunk_text
         for (segments) |seg| {
@@ -4255,20 +4902,20 @@ pub const App = struct {
 
             // Find matches that overlap with this segment
             var seg_matches: std.ArrayList(struct { start: usize, end: usize }) = .{};
-            defer seg_matches.deinit(self.allocator);
+            defer seg_matches.deinit(allocator);
 
             for (chunk_matches.items) |match| {
                 if (match.end > seg_start and match.start < seg_end) {
                     // Match overlaps this segment - convert to segment-local coordinates
                     const local_start = if (match.start > seg_start) match.start - seg_start else 0;
                     const local_end = @min(match.end, seg_end) - seg_start;
-                    try seg_matches.append(self.allocator, .{ .start = local_start, .end = local_end });
+                    try seg_matches.append(allocator, .{ .start = local_start, .end = local_end });
                 }
             }
 
             if (seg_matches.items.len == 0) {
                 // No matches in this segment - add as-is
-                try result_segments.append(self.allocator, seg);
+                try result_segments.append(allocator, seg);
             } else {
                 // Split segment at match boundaries
                 var pos: usize = 0;
@@ -4276,7 +4923,7 @@ pub const App = struct {
                     // Add text before match (if any)
                     if (match.start > pos) {
                         const before_text = seg.text[pos..match.start];
-                        try result_segments.append(self.allocator, .{
+                        try result_segments.append(allocator, .{
                             .text = before_text,
                             .style = seg.style,
                         });
@@ -4288,7 +4935,7 @@ pub const App = struct {
                     match_style.bg = rendering_common.Color.search_match_bg;
                     match_style.fg = rendering_common.Color.search_match_fg;
                     match_style.bold = true;
-                    try result_segments.append(self.allocator, .{
+                    try result_segments.append(allocator, .{
                         .text = match_text,
                         .style = match_style,
                     });
@@ -4299,7 +4946,7 @@ pub const App = struct {
                 // Add text after last match (if any)
                 if (pos < seg.text.len) {
                     const after_text = seg.text[pos..];
-                    try result_segments.append(self.allocator, .{
+                    try result_segments.append(allocator, .{
                         .text = after_text,
                         .style = seg.style,
                     });
@@ -4309,8 +4956,25 @@ pub const App = struct {
             text_pos += seg.text.len;
         }
 
-        const result = try result_segments.toOwnedSlice(self.allocator);
+        const result = try result_segments.toOwnedSlice(allocator);
+        allocator.free(segments);
         return result;
+    }
+
+    fn isMatchLine(matches: []const usize, line: usize) bool {
+        if (matches.len == 0) return false;
+        var lo: usize = 0;
+        var hi: usize = matches.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const value = matches[mid];
+            if (value < line) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo < matches.len and matches[lo] == line;
     }
 
     // ===== TUI Server Integration =====

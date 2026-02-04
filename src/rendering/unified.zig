@@ -21,11 +21,21 @@ pub const UnifiedRenderer = struct {
     pub fn renderContent(app: *App, win: vaxis.Window) !void {
         if (app.state.files.len == 0) return;
 
+        const profile_frame = app.profile_active_frame;
+        var total_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
+        var gutter_ns: u64 = 0;
+        var records_scanned: usize = 0;
+        var rows_rendered: usize = 0;
+
         app.state.viewport_height = win.height;
         Navigation.clampScrollOffset(app);
 
         // Calculate global gutter width (consistent across all files)
-        const gutter_width = StateHelpers.getGlobalGutterWidthWithBlame(app.state.files, app.state.show_blame);
+        var gutter_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
+        const gutter_width = app.getGlobalGutterWidth(app.state.show_blame);
+        if (gutter_timer_opt) |*timer| {
+            gutter_ns = timer.read();
+        }
         const content_width = win.width -| (Layout.sidebar_width + gutter_width + Layout.gutter_spacing);
         const sidebar_style: vaxis.Cell.Style = .{ .fg = Color.dim };
 
@@ -33,12 +43,12 @@ pub const UnifiedRenderer = struct {
         var last_highlighted_file_idx: ?usize = null;
 
         // Iterate through LineMap records (single source of truth for line positions)
-        for (app.state.line_map.records) |*record| {
+        const start_index = @min(app.state.global_scroll_offset, app.state.line_map.records.len);
+        for (app.state.line_map.records[start_index..]) |*record| {
+            if (profile_frame) records_scanned += 1;
             const global_line = record.global_line;
             const file_idx = record.file_idx;
 
-            // Skip lines before scroll offset
-            if (global_line < app.state.global_scroll_offset) continue;
             if (row >= win.height) break;
 
             const file = &app.state.files[file_idx];
@@ -175,6 +185,8 @@ pub const UnifiedRenderer = struct {
             }
         }
 
+        rows_rendered = row;
+
         // Clear any remaining rows at the bottom of the screen
         // This ensures old content doesn't linger when we scroll/jump
         // IMPORTANT: Must fill the entire row, not just the sidebar, because vaxis
@@ -207,6 +219,15 @@ pub const UnifiedRenderer = struct {
         // Update current_file_idx based on what's at the top of viewport (for sticky header)
         // Use scroll offset instead of cursor position for more accurate header display
         app.state.current_file_idx = app.state.line_map.getFileIndexForLine(app.state.global_scroll_offset) orelse 0;
+
+        if (profile_frame) {
+            const profile_log = std.log.scoped(.profile_render);
+            const total_ns: u64 = if (total_timer_opt) |*timer| timer.read() else 0;
+            profile_log.debug(
+                "unified content: total_ns={d} gutter_ns={d} scanned={d} rows={d} line_map={d} scroll={d} viewport={d} content_width={d} gutter_width={d} blame={}",
+                .{ total_ns, gutter_ns, records_scanned, rows_rendered, app.state.line_map.records.len, app.state.global_scroll_offset, win.height, content_width, gutter_width, app.state.show_blame },
+            );
+        }
     }
 
     fn renderHunkHeader(
@@ -295,7 +316,7 @@ pub const UnifiedRenderer = struct {
             const display_start = wrap_idx * content_width;
             const byte_start = RenderUtils.skipCodepoints(header_text, display_start);
             const remaining_text = if (byte_start < header_text.len) header_text[byte_start..] else "";
-            const chunk = RenderUtils.sliceByDisplayWidth(remaining_text, content_width);
+            const chunk = app.profileSliceByDisplayWidth(remaining_text, content_width);
 
             // Calculate display position of range boundary
             const range_display_len = RenderUtils.displayWidth(header_text[0..range_len]);
@@ -316,7 +337,7 @@ pub const UnifiedRenderer = struct {
                     } else {
                         // Mixed: range + context - split at the boundary
                         const range_codepoints = range_display_len - display_start;
-                        const range_chunk = RenderUtils.sliceByDisplayWidth(chunk, range_codepoints);
+                        const range_chunk = app.profileSliceByDisplayWidth(chunk, range_codepoints);
                         const context_byte_start = range_chunk.len;
                         const context_chunk = chunk[context_byte_start..];
 
@@ -434,7 +455,7 @@ pub const UnifiedRenderer = struct {
 
         // Handle empty lines explicitly
         if (text.len == 0) {
-            try RenderUtils.renderGutterWithBlame(app, win, 0, start_row, is_cursor or is_in_visual, true, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
+            try app.profileRenderGutterWithBlame(win, 0, start_row, is_cursor or is_in_visual, true, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
             // Pad empty lines for cursor, visual selection, or diff lines (add/delete)
             const should_pad = is_cursor or is_in_visual or (line_type != null and line_type.? != .context);
             const display_text = try RenderUtils.padTextForCursor(app, "", content_width, should_pad);
@@ -464,16 +485,16 @@ pub const UnifiedRenderer = struct {
             // Only pass is_first_line_in_hunk for the first rendered row
             const show_line_number = rows_rendered == 0;
             const first_line_flag = is_first_line_in_hunk and rows_rendered == 0;
-            try RenderUtils.renderGutterWithBlame(app, win, 0, current_row, is_cursor or is_in_visual, show_line_number, file_lineno, line_type, gutter_width, file_path, first_line_flag);
+            try app.profileRenderGutterWithBlame(win, 0, current_row, is_cursor or is_in_visual, show_line_number, file_lineno, line_type, gutter_width, file_path, first_line_flag);
 
             // Get the chunk of text for this row (slice by display width, not bytes)
             const remaining_text = text[byte_offset_in_text..];
-            const chunk = RenderUtils.sliceByDisplayWidth(remaining_text, content_width);
+            const chunk = app.profileSliceByDisplayWidth(remaining_text, content_width);
 
             // Generate syntax-highlighted segments for this chunk
             const chunk_byte_offset = byte_offset + byte_offset_in_text;
             const segments = try app.createHighlightedSegments(chunk, text, byte_offset_in_text, chunk_byte_offset, highlights, style, global_line);
-            defer app.allocator.free(segments);
+            defer app.frameSegmentAllocator().free(segments);
 
             // Pad segments to full width for cursor, visual selection, or diff lines (add/delete)
             const should_pad = is_cursor or is_in_visual or (line_type != null and line_type.? != .context);
@@ -485,8 +506,8 @@ pub const UnifiedRenderer = struct {
                 const current_width = RenderUtils.calculateSegmentsWidth(segments);
 
                 if (current_width < available_width) {
-                    const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, current_width, available_width, style);
-                    defer app.allocator.free(padded_segments);
+                    const padded_segments = try app.profilePadSegments(segments, current_width, available_width, style);
+                    defer app.frameSegmentAllocator().free(padded_segments);
                     _ = win.print(padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });
                 } else {
                     _ = win.print(segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });

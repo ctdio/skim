@@ -11,6 +11,7 @@ This document provides a comprehensive overview of Skim's codebase architecture,
 6. [Code Organization Principles](#code-organization-principles)
 7. [AI Integration Architecture](#ai-integration-architecture)
 8. [Logging System](#logging-system)
+9. [Performance Benchmarks](#performance-benchmarks)
 
 ---
 
@@ -836,6 +837,69 @@ defer logging.deinit();
 - stderr also captured by terminal handling
 - File logs persist for debugging
 - Can `tail -f` for real-time viewing
+
+---
+
+## Performance Benchmarks
+
+Skim includes a synthetic render benchmark that exercises the hot render paths (wrapping, syntax segments, padding, gutter). Use it for baseline comparisons and regression checks.
+
+Run (ReleaseFast is recommended for perf numbers):
+
+```bash
+zig build bench-render-content -Doptimize=ReleaseFast
+```
+
+Common environment knobs:
+
+- `SKIM_BENCH_VIEW=unified|side_by_side|both`
+- `SKIM_BENCH_FILES=10`
+- `SKIM_BENCH_HUNKS=6`
+- `SKIM_BENCH_LINES=60`
+- `SKIM_BENCH_ITERS=300`
+- `SKIM_BENCH_WARMUP=50`
+- `SKIM_BENCH_WIDTH=190`
+- `SKIM_BENCH_HEIGHT=60`
+- `SKIM_BENCH_SCROLL=0`
+- `SKIM_BENCH_SEARCH="return"` (enable search highlight work)
+- `SKIM_BENCH_DIFF_PATH=path/to/diff.patch` (use a real diff file instead of synthetic)
+
+Example runs:
+
+```bash
+SKIM_BENCH_VIEW=both \
+SKIM_BENCH_ITERS=300 \
+SKIM_BENCH_WARMUP=50 \
+zig build bench-render-content -Doptimize=ReleaseFast
+```
+
+```bash
+SKIM_BENCH_DIFF_PATH=fixtures/large.diff \
+SKIM_BENCH_VIEW=unified \
+SKIM_BENCH_SEARCH="return" \
+zig build bench-render-content -Doptimize=ReleaseFast
+```
+
+### Performance Techniques
+
+These are the core techniques currently used to keep rendering responsive:
+
+- **LineMap start index:** renderers jump directly to `global_scroll_offset` instead of scanning from line 0.
+- **Cached file stats/gutter width:** per-file diff stats and base gutter width are precomputed to avoid per-frame scans.
+- **ASCII fast path for wrapping:** `sliceByDisplayWidth` avoids Unicode width calls for common ASCII lines.
+- **Ordered highlight walk:** highlight segments are built by walking sorted ranges with a binary search start, avoiding full overlap scans.
+- **Frame segment arena:** per-frame segment allocations use a bump arena that resets each render, reducing allocator churn (largest observed speedup in render-content benchmarks).
+- **Search match binary search:** search highlighting checks line membership via binary search instead of linear scans.
+
+### Render Profiling
+
+Enable per-frame render timing logs via environment variables:
+
+```bash
+SKIM_PROFILE_RENDER=1 SKIM_PROFILE_RENDER_EVERY=30 ./zig-out/bin/skim
+```
+
+Logs are written to `~/.skim/tui.log` with `profile_render` and `profile_loop` scopes.
 
 ---
 

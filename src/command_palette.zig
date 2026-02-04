@@ -121,7 +121,7 @@ pub const CommandPaletteState = struct {
             const path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
             // Calculate stats for this file
-            const stats = StateHelpers.calculateDiffStats(app, file);
+            const stats = app.getFileDiffStats(idx);
 
             // Apply smart path truncation for display
             // Leave room for: indicator (2) + spacing (2) + description (12) + stats (~15) + padding (4) = ~35 chars

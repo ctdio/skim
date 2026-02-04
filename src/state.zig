@@ -13,6 +13,10 @@ pub const HighlightWorker = highlighting.HighlightWorker;
 pub const AsyncHighlightJob = highlighting.AsyncHighlightJob;
 
 pub const StateHelpers = struct {
+    pub const FileDiffStats = struct {
+        additions: usize,
+        deletions: usize,
+    };
     // Calculate the maximum line number in a file (for gutter width calculation)
     pub fn getMaxLineNumber(file: *const parser.FileDiff) u32 {
         var max: u32 = 0;
@@ -79,7 +83,7 @@ pub const StateHelpers = struct {
     }
 
     // Calculate additions and deletions in a file
-    pub fn calculateDiffStats(_: *App, file: *const parser.FileDiff) struct { additions: usize, deletions: usize } {
+    pub fn calculateDiffStats(_: *App, file: *const parser.FileDiff) FileDiffStats {
         var additions: usize = 0;
         var deletions: usize = 0;
 

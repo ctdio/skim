@@ -22,12 +22,22 @@ pub const SideBySideRenderer = struct {
     pub fn renderContent(app: *App, win: vaxis.Window) !void {
         if (app.state.files.len == 0) return;
 
+        const profile_frame = app.profile_active_frame;
+        var total_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
+        var gutter_ns: u64 = 0;
+        var records_scanned: usize = 0;
+        var rows_rendered: usize = 0;
+
         app.state.viewport_height = win.height;
         Navigation.clampScrollOffset(app);
 
         // Calculate global gutter width (consistent across all files)
         // Note: Blame is not shown in side-by-side view (too wide)
-        const gutter_width = StateHelpers.getGlobalGutterWidth(app.state.files);
+        var gutter_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
+        const gutter_width = app.getGlobalGutterWidth(false);
+        if (gutter_timer_opt) |*timer| {
+            gutter_ns = timer.read();
+        }
 
         // Calculate layout: [sidebar][gutter][spacing][left_content][divider][gutter][spacing][right_content]
         // Total width = sidebar + 2 * gutter_width + 2 * spacing + 1 (middle divider) + left_content + right_content
@@ -45,12 +55,12 @@ pub const SideBySideRenderer = struct {
         var last_highlighted_file_idx: ?usize = null;
 
         // Iterate through LineMap records (single source of truth for line positions)
-        for (app.state.line_map.records) |*record| {
+        const start_index = @min(app.state.global_scroll_offset, app.state.line_map.records.len);
+        for (app.state.line_map.records[start_index..]) |*record| {
+            if (profile_frame) records_scanned += 1;
             const global_line = record.global_line;
             const file_idx = record.file_idx;
 
-            // Skip lines before scroll offset
-            if (global_line < app.state.global_scroll_offset) continue;
             if (row >= win.height) break;
 
             const file = &app.state.files[file_idx];
@@ -196,6 +206,8 @@ pub const SideBySideRenderer = struct {
             }
         }
 
+        rows_rendered = row;
+
         // Clear any remaining rows at the bottom of the screen
         // IMPORTANT: Must fill the entire row, not just the dividers, because vaxis
         // uses differential rendering and won't clear cells that haven't changed
@@ -232,6 +244,15 @@ pub const SideBySideRenderer = struct {
         // Update current_file_idx based on what's at the top of viewport (for sticky header)
         // Use scroll offset instead of cursor position for more accurate header display
         app.state.current_file_idx = app.state.line_map.getFileIndexForLine(app.state.global_scroll_offset) orelse 0;
+
+        if (profile_frame) {
+            const profile_log = std.log.scoped(.profile_render);
+            const total_ns: u64 = if (total_timer_opt) |*timer| timer.read() else 0;
+            profile_log.debug(
+                "side-by-side content: total_ns={d} gutter_ns={d} scanned={d} rows={d} line_map={d} scroll={d} viewport={d} left_width={d} right_width={d} gutter_width={d}",
+                .{ total_ns, gutter_ns, records_scanned, rows_rendered, app.state.line_map.records.len, app.state.global_scroll_offset, win.height, left_content_width, right_content_width, gutter_width },
+            );
+        }
     }
 
     fn renderFileHeader(
@@ -340,7 +361,7 @@ pub const SideBySideRenderer = struct {
             const display_start = wrap_idx * left_width;
             const byte_start = RenderUtils.skipCodepoints(header_text, display_start);
             const remaining_text = if (byte_start < header_text.len) header_text[byte_start..] else "";
-            const chunk = RenderUtils.sliceByDisplayWidth(remaining_text, left_width);
+            const chunk = app.profileSliceByDisplayWidth(remaining_text, left_width);
 
             // Calculate display position of range boundary
             const range_display_len = RenderUtils.displayWidth(header_text[0..range_len]);
@@ -362,7 +383,7 @@ pub const SideBySideRenderer = struct {
                     } else {
                         // Mixed: range + context - split at the boundary
                         const range_codepoints = range_display_len - display_start;
-                        const range_chunk = RenderUtils.sliceByDisplayWidth(chunk, range_codepoints);
+                        const range_chunk = app.profileSliceByDisplayWidth(chunk, range_codepoints);
                         const context_byte_start = range_chunk.len;
                         const context_chunk = chunk[context_byte_start..];
 
@@ -419,7 +440,7 @@ pub const SideBySideRenderer = struct {
                     } else {
                         // Mixed: range + context
                         const range_codepoints = range_display_len - display_start;
-                        const range_chunk = RenderUtils.sliceByDisplayWidth(chunk, range_codepoints);
+                        const range_chunk = app.profileSliceByDisplayWidth(chunk, range_codepoints);
                         const context_byte_start = range_chunk.len;
                         const context_chunk = chunk[context_byte_start..];
 
@@ -511,12 +532,12 @@ pub const SideBySideRenderer = struct {
 
                     // Slice by display width for left side
                     const left_remaining = line.content[left_byte_offset_in_content..];
-                    const left_chunk = RenderUtils.sliceByDisplayWidth(left_remaining, left_width);
+                    const left_chunk = app.profileSliceByDisplayWidth(left_remaining, left_width);
 
                     // Generate syntax-highlighted segments for left chunk
                     const left_chunk_byte_offset = byte_offset + left_byte_offset_in_content;
                     const left_segments = try app.createHighlightedSegments(left_chunk, line.content, left_byte_offset_in_content, left_chunk_byte_offset, highlights, style, global_line);
-                    defer app.allocator.free(left_segments);
+                    defer app.frameSegmentAllocator().free(left_segments);
 
                     // Pad context lines only when cursor is on them
                     if (is_cursor) {
@@ -525,8 +546,8 @@ pub const SideBySideRenderer = struct {
                         const left_current_width = RenderUtils.calculateSegmentsWidth(left_segments);
 
                         if (left_current_width < available_to_divider) {
-                            const padded_segments = try RenderUtils.padSegments(app, app.allocator, left_segments, left_current_width, available_to_divider, style);
-                            defer app.allocator.free(padded_segments);
+                            const padded_segments = try app.profilePadSegments(left_segments, left_current_width, available_to_divider, style);
+                            defer app.frameSegmentAllocator().free(padded_segments);
                             _ = win.print(padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_start_col) });
                         } else {
                             _ = win.print(left_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_start_col) });
@@ -542,12 +563,12 @@ pub const SideBySideRenderer = struct {
 
                     // Slice by display width for right side
                     const right_remaining = line.content[right_byte_offset_in_content..];
-                    const right_chunk = RenderUtils.sliceByDisplayWidth(right_remaining, right_width);
+                    const right_chunk = app.profileSliceByDisplayWidth(right_remaining, right_width);
 
                     // Generate syntax-highlighted segments for right chunk
                     const right_chunk_byte_offset = byte_offset + right_byte_offset_in_content;
                     const right_segments = try app.createHighlightedSegments(right_chunk, line.content, right_byte_offset_in_content, right_chunk_byte_offset, highlights, style, global_line);
-                    defer app.allocator.free(right_segments);
+                    defer app.frameSegmentAllocator().free(right_segments);
 
                     // Pad context lines only when cursor is on them
                     if (is_cursor) {
@@ -556,8 +577,8 @@ pub const SideBySideRenderer = struct {
                         const right_current_width = RenderUtils.calculateSegmentsWidth(right_segments);
 
                         if (right_current_width < available_to_edge) {
-                            const padded_segments = try RenderUtils.padSegments(app, app.allocator, right_segments, right_current_width, available_to_edge, style);
-                            defer app.allocator.free(padded_segments);
+                            const padded_segments = try app.profilePadSegments(right_segments, right_current_width, available_to_edge, style);
+                            defer app.frameSegmentAllocator().free(padded_segments);
                             _ = win.print(padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_start_col) });
                         } else {
                             _ = win.print(right_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_start_col) });
@@ -596,13 +617,13 @@ pub const SideBySideRenderer = struct {
 
                     // Slice by display width
                     const remaining_text = line.content[byte_offset_in_content..];
-                    const chunk = RenderUtils.sliceByDisplayWidth(remaining_text, left_width);
+                    const chunk = app.profileSliceByDisplayWidth(remaining_text, left_width);
 
                     // Generate syntax-highlighted segments for chunk
                     // (will fall back to plain text for delete lines since highlights is null)
                     const chunk_byte_offset = byte_offset + byte_offset_in_content;
                     const segments = try app.createHighlightedSegments(chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, style, global_line);
-                    defer app.allocator.free(segments);
+                    defer app.frameSegmentAllocator().free(segments);
 
                     // Always pad delete lines to show full-width background
                     const left_start_col = 1 + gutter_width + Layout.gutter_spacing;
@@ -610,8 +631,8 @@ pub const SideBySideRenderer = struct {
                     const current_width = RenderUtils.calculateSegmentsWidth(segments);
 
                     if (current_width < available_to_divider) {
-                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, current_width, available_to_divider, style);
-                        defer app.allocator.free(padded_segments);
+                        const padded_segments = try app.profilePadSegments(segments, current_width, available_to_divider, style);
+                        defer app.frameSegmentAllocator().free(padded_segments);
                         _ = win.print(padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_start_col) });
                     } else {
                         _ = win.print(segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(left_start_col) });
@@ -662,12 +683,12 @@ pub const SideBySideRenderer = struct {
 
                     // Slice by display width
                     const remaining_text = line.content[byte_offset_in_content..];
-                    const chunk = RenderUtils.sliceByDisplayWidth(remaining_text, right_width);
+                    const chunk = app.profileSliceByDisplayWidth(remaining_text, right_width);
 
                     // Generate syntax-highlighted segments for chunk
                     const chunk_byte_offset = byte_offset + byte_offset_in_content;
                     const segments = try app.createHighlightedSegments(chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, style, global_line);
-                    defer app.allocator.free(segments);
+                    defer app.frameSegmentAllocator().free(segments);
 
                     // Always pad add lines to show full-width background
                     const right_start_col = right_col + gutter_width + Layout.gutter_spacing;
@@ -675,8 +696,8 @@ pub const SideBySideRenderer = struct {
                     const current_width = RenderUtils.calculateSegmentsWidth(segments);
 
                     if (current_width < available_to_edge) {
-                        const padded_segments = try RenderUtils.padSegments(app, app.allocator, segments, current_width, available_to_edge, style);
-                        defer app.allocator.free(padded_segments);
+                        const padded_segments = try app.profilePadSegments(segments, current_width, available_to_edge, style);
+                        defer app.frameSegmentAllocator().free(padded_segments);
                         _ = win.print(padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_start_col) });
                     } else {
                         _ = win.print(segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(right_start_col) });
