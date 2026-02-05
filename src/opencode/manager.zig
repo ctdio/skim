@@ -264,6 +264,7 @@ pub const OpencodeManager = struct {
     pending_abort_since_ms: i64,
     last_event_ms: i64,
     abort_error_grace_until_ms: i64,
+    last_diff_tool_call_id: ?[]const u8,
 
     // Question/permission tracking
     pending_question: bool,
@@ -303,6 +304,7 @@ pub const OpencodeManager = struct {
             .pending_abort_since_ms = 0,
             .last_event_ms = 0,
             .abort_error_grace_until_ms = 0,
+            .last_diff_tool_call_id = null,
             .pending_question = false,
             .pending_permission = false,
             .available_models = .{},
@@ -348,6 +350,10 @@ pub const OpencodeManager = struct {
         if (self.current_model_id) |id| {
             self.allocator.free(id);
             self.current_model_id = null;
+        }
+        if (self.last_diff_tool_call_id) |id| {
+            self.allocator.free(id);
+            self.last_diff_tool_call_id = null;
         }
     }
 
@@ -1711,7 +1717,7 @@ pub const OpencodeManager = struct {
         switch (val) {
             .string => |s| return s,
             .object => |obj| {
-                const keys = [_][]const u8{ "patch", "diff", "text", "content" };
+                const keys = [_][]const u8{ "patch", "diff", "text", "content", "patchText", "patch_text" };
                 if (extractStringField(obj, &keys)) |s| return s;
             },
             else => {},
@@ -1802,12 +1808,17 @@ pub const OpencodeManager = struct {
         const title_val = if (state_obj) |obj| extractToolTitleFromObject(obj) else null;
         const patch_text = if (args_val) |val| extractPatchTextFromValue(val) else null;
 
+        var status = if (state_obj) |obj| extractToolStatusFromObject(obj) else null;
+        if (status == null) status = extractToolStatusFromObject(part_obj) orelse extractToolStatusFromObject(props_obj);
+
         const is_result = isToolResultPartType(part_type);
 
         if (patch_text) |patch_value| {
             if (isApplyPatchTool(tool_name, patch_value)) {
-                if (self.emitApplyPatchDiff(tool_id, patch_value)) {
-                    return true;
+                if (status == null or status.? == .running or status.? == .completed) {
+                    if (self.emitApplyPatchDiff(tool_id, patch_value)) {
+                        return true;
+                    }
                 }
             }
         }
@@ -1845,9 +1856,6 @@ pub const OpencodeManager = struct {
                 });
             }
 
-            var status = if (state_obj) |obj| extractToolStatusFromObject(obj) else null;
-            if (status == null) status = extractToolStatusFromObject(part_obj) orelse extractToolStatusFromObject(props_obj);
-
             const stdout = if (state_obj) |obj|
                 extractToolOutputFromObject(obj)
             else
@@ -1878,6 +1886,14 @@ pub const OpencodeManager = struct {
     }
 
     fn emitApplyPatchDiff(self: *OpencodeManager, tool_call_id: ?[]const u8, patch_text: []const u8) bool {
+        if (tool_call_id) |id| {
+            if (self.last_diff_tool_call_id) |last| {
+                if (std.mem.eql(u8, last, id)) {
+                    return true;
+                }
+            }
+        }
+
         const files = patch.parseApplyPatch(self.event_allocator, patch_text) catch |err| {
             log.warn("Failed to parse apply_patch text: {any}", .{err});
             return false;
@@ -1888,12 +1904,10 @@ pub const OpencodeManager = struct {
         }
 
         var any_diff = false;
-        const cwd = if (self.connect_config) |cfg| cfg.cwd else null;
-
         for (files) |file| {
             const display_path = file.new_path orelse file.path;
-            const applied = patch.applyFilePatch(self.event_allocator, cwd, file) catch |err| {
-                log.warn("apply_patch failed for {s}: {any}", .{ display_path, err });
+            const applied = patch.buildOldNewFromHunks(self.event_allocator, file.hunks) catch |err| {
+                log.warn("apply_patch diff build failed for {s}: {any}", .{ display_path, err });
                 continue;
             };
 
@@ -1926,6 +1940,16 @@ pub const OpencodeManager = struct {
             } });
 
             any_diff = true;
+        }
+
+        if (any_diff) {
+            if (tool_call_id) |id| {
+                if (self.last_diff_tool_call_id) |last| {
+                    self.allocator.free(last);
+                    self.last_diff_tool_call_id = null;
+                }
+                self.last_diff_tool_call_id = self.allocator.dupe(u8, id) catch null;
+            }
         }
 
         return any_diff;

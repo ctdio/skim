@@ -49,6 +49,33 @@ pub const AppliedPatch = struct {
     new_text: []const u8,
 };
 
+pub fn buildOldNewFromHunks(allocator: Allocator, hunks: []const Hunk) !AppliedPatch {
+    var old_lines: std.ArrayList([]const u8) = .{};
+    errdefer old_lines.deinit(allocator);
+    var new_lines: std.ArrayList([]const u8) = .{};
+    errdefer new_lines.deinit(allocator);
+
+    for (hunks) |hunk| {
+        for (hunk.lines) |line| {
+            switch (line.kind) {
+                .context => {
+                    try old_lines.append(allocator, line.text);
+                    try new_lines.append(allocator, line.text);
+                },
+                .delete => try old_lines.append(allocator, line.text),
+                .add => try new_lines.append(allocator, line.text),
+            }
+        }
+    }
+
+    const old_text = try joinLines(allocator, old_lines.items);
+    const new_text = try joinLines(allocator, new_lines.items);
+    old_lines.deinit(allocator);
+    new_lines.deinit(allocator);
+
+    return .{ .old_text = old_text, .new_text = new_text };
+}
+
 pub fn parseApplyPatch(allocator: Allocator, patch_text: []const u8) ![]FilePatch {
     var files: std.ArrayList(FilePatch) = .{};
     errdefer {
