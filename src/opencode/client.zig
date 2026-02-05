@@ -332,7 +332,9 @@ pub const Client = struct {
         var req = temp_client.request(.POST, uri, .{}) catch return error.ConnectionFailed;
         defer req.deinit();
 
-        req.sendBodiless() catch return error.ConnectionFailed;
+        // POST requires a body in Zig std.http.Client; send minimal JSON body
+        var body_data = "{}".*;
+        req.sendBodyComplete(&body_data) catch return error.ConnectionFailed;
 
         var redirect_buffer: [4096]u8 = undefined;
         const response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
@@ -431,8 +433,8 @@ pub const Client = struct {
             };
 
             if (n == 0) {
-                // Connection closed
-                return null;
+                // Connection closed (treat as failure so caller can react)
+                return error.ConnectionFailed;
             }
 
             // Feed data to parser

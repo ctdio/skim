@@ -188,7 +188,7 @@ pub const AgentTab = struct {
             if (mgr.status == .session_active or mgr.status == .prompting) return true;
         }
         if (self.opencode_manager) |mgr| {
-            if (mgr.status == .session_active or mgr.status == .prompting) return true;
+            if (!mgr.pending_abort and (mgr.status == .session_active or mgr.status == .prompting)) return true;
         }
         return false;
     }
@@ -197,6 +197,9 @@ pub const AgentTab = struct {
     pub fn isSessionInitializing(self: *const AgentTab) bool {
         if (self.acp_manager) |mgr| {
             if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected) return true;
+        }
+        if (self.opencode_manager) |mgr| {
+            if (mgr.pending_abort) return true;
         }
         // Opencode doesn't have these intermediate states - it connects synchronously
         return false;
@@ -416,7 +419,7 @@ pub const TabManager = struct {
         for (self.tabs.items) |*tab| {
             if (tab.opencode_manager) |mgr| {
                 // Manager exists - check if actively prompting or has pending events
-                if (mgr.status == .prompting or mgr.hasPendingEvents()) {
+                if (mgr.status == .prompting or mgr.hasPendingEvents() or mgr.pending_abort) {
                     return true;
                 }
             }

@@ -190,6 +190,12 @@ pub const OpencodeManager = struct {
     current_variant: ?[]const u8, // Model variant (e.g. "high")
     default_model_id: ?[]const u8, // Default model from server config
 
+    // Abort tracking (used to avoid treating abort as session error)
+    pending_abort: bool,
+    pending_abort_since_ms: i64,
+    last_event_ms: i64,
+    abort_error_grace_until_ms: i64,
+
     // Available models (fetched from server)
     available_models: std.ArrayListUnmanaged(OwnedModelInfo),
     current_model_id: ?[]const u8, // Current model as "provider/model" string
@@ -217,6 +223,10 @@ pub const OpencodeManager = struct {
             .current_model = null,
             .current_variant = null,
             .default_model_id = null,
+            .pending_abort = false,
+            .pending_abort_since_ms = 0,
+            .last_event_ms = 0,
+            .abort_error_grace_until_ms = 0,
             .available_models = .{},
             .current_model_id = null,
         };
@@ -395,6 +405,10 @@ pub const OpencodeManager = struct {
     pub fn disconnect(self: *OpencodeManager) void {
         log.info("Disconnecting...", .{});
 
+        self.pending_abort = false;
+        self.pending_abort_since_ms = 0;
+        self.abort_error_grace_until_ms = 0;
+
         // Signal SSE thread to stop
         self.should_stop.store(true, .release);
 
@@ -504,6 +518,10 @@ pub const OpencodeManager = struct {
             .model = self.current_model,
             .variant = self.current_variant,
         };
+
+        // Clear any pending abort from a previous cancel
+        self.pending_abort = false;
+        self.pending_abort_since_ms = 0;
 
         // Send async
         try c.sendPromptAsync(sid, prompt);
@@ -927,12 +945,20 @@ pub const OpencodeManager = struct {
             return false;
         }
 
+        self.pending_abort = true;
+        self.pending_abort_since_ms = std.time.milliTimestamp();
+        self.abort_error_grace_until_ms = self.pending_abort_since_ms + 3000;
+        if (self.last_event_ms == 0) {
+            self.last_event_ms = self.pending_abort_since_ms;
+        }
+
         c.abortSession(sid) catch |err| {
             log.err("Failed to abort session: {}", .{err});
+            self.pending_abort = false;
             return false;
         };
 
-        // Reset status back to session_active
+        // Stop "Generating..." immediately; queued messages will wait for idle
         self.status = .session_active;
         log.info("Prompt cancelled", .{});
         return true;
@@ -1028,8 +1054,9 @@ pub const OpencodeManager = struct {
         // This avoids expensive parsing for the many session/message update events
         const dominated_events = [_][]const u8{
             "message.part.updated",
-            "\"type\":\"session.idle\"",
-            "\"type\":\"session.error\"",
+            "session.updated",
+            "session.idle",
+            "session.error",
         };
         var dominated = false;
         for (dominated_events) |evt| {
@@ -1077,15 +1104,52 @@ pub const OpencodeManager = struct {
                     }
                 }
             },
+            .session_updated => {
+                // Some servers emit session.updated with state/status=idle instead of session.idle
+                if (parsed.value.payload.properties) |props| {
+                    if (props == .object) {
+                        var status_val = props.object.get("status") orelse props.object.get("state");
+                        if (status_val == null) {
+                            if (props.object.get("session")) |session_val| {
+                                if (session_val == .object) {
+                                    status_val = session_val.object.get("status") orelse session_val.object.get("state");
+                                }
+                            }
+                        }
+                        if (status_val) |val| {
+                            if (val == .string and std.mem.eql(u8, val.string, "idle")) {
+                                log.info("Session updated to idle", .{});
+                                self.pending_abort = false;
+                                self.pending_abort_since_ms = 0;
+                                self.abort_error_grace_until_ms = 0;
+                                self.message_queue.push(.{ .message_complete = {} });
+                                self.message_queue.push(.{ .status_change = .session_active });
+                            }
+                        }
+                    }
+                }
+            },
             .session_idle => {
                 log.info("Session idle received, resetting status to session_active", .{});
+                self.pending_abort = false;
+                self.pending_abort_since_ms = 0;
+                self.abort_error_grace_until_ms = 0;
                 self.message_queue.push(.{ .message_complete = {} });
-                // Update status back to session_active
-                self.status = .session_active;
+                self.message_queue.push(.{ .status_change = .session_active });
             },
             .session_error => {
-                self.message_queue.push(.{ .err = .{ .code = .session_error } });
-                self.status = .failed;
+                const now_ms = std.time.milliTimestamp();
+                if (self.pending_abort or (self.abort_error_grace_until_ms != 0 and now_ms <= self.abort_error_grace_until_ms)) {
+                    log.info("Session error after abort; treating as cancelled", .{});
+                    self.pending_abort = false;
+                    self.pending_abort_since_ms = 0;
+                    self.abort_error_grace_until_ms = 0;
+                    self.message_queue.push(.{ .message_complete = {} });
+                    self.message_queue.push(.{ .status_change = .session_active });
+                } else {
+                    self.message_queue.push(.{ .err = .{ .code = .session_error } });
+                    self.message_queue.push(.{ .status_change = .failed });
+                }
             },
             else => {
                 // Ignore other event types for now
@@ -1298,6 +1362,99 @@ test "getModelString" {
     const str = (try manager.getModelString()).?;
     defer allocator.free(str);
     try std.testing.expectEqualStrings("anthropic/claude-sonnet-4", str);
+}
+
+test "opencode event: session_error after abort treated as cancelled" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.pending_abort = true;
+    manager.pending_abort_since_ms = std.time.milliTimestamp();
+    manager.abort_error_grace_until_ms = manager.pending_abort_since_ms + 3000;
+
+    const data = "{\"payload\":{\"type\":\"session.error\",\"properties\":{}}}";
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+    switch (ev2) {
+        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
+        else => try std.testing.expect(false),
+    }
+
+    try std.testing.expect(!manager.pending_abort);
+}
+
+test "opencode event: session_error without abort yields error" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    const data = "{\"payload\":{\"type\":\"session.error\",\"properties\":{}}}";
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .err => |err_info| try std.testing.expectEqual(Event.EventError.ErrorCode.session_error, err_info.code),
+        else => try std.testing.expect(false),
+    }
+
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+    switch (ev2) {
+        .status_change => |status| try std.testing.expectEqual(Status.failed, status),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: session.updated idle clears abort" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.pending_abort = true;
+    manager.pending_abort_since_ms = std.time.milliTimestamp();
+    manager.abort_error_grace_until_ms = manager.pending_abort_since_ms + 3000;
+
+    const data = "{\"payload\":{\"type\":\"session.updated\",\"properties\":{\"session\":{\"status\":\"idle\"}}}}";
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+    switch (ev2) {
+        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
+        else => try std.testing.expect(false),
+    }
+
+    try std.testing.expect(!manager.pending_abort);
 }
 
 // Integration tests - skipped in unit test runs (require live server)

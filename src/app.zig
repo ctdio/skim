@@ -6201,8 +6201,6 @@ pub const App = struct {
 
     /// Poll a single Opencode manager and route events to its agent state
     fn pollTabOpencodeManager(self: *App, mgr: *opencode.OpencodeManager, agent_state: *agent.AgentState, is_active_tab: bool) void {
-        _ = is_active_tab;
-
         // Track status before polling
         const status_before = mgr.status;
 
@@ -6220,6 +6218,8 @@ pub const App = struct {
             // Use manager's allocator since events are allocated by SSE thread
             defer event.deinit(mgr.event_allocator);
 
+            mgr.last_event_ms = std.time.milliTimestamp();
+
             switch (event) {
                 .message_chunk => |chunk| {
                     // Append delta text to the current agent message
@@ -6231,8 +6231,8 @@ pub const App = struct {
                     self.needs_render = true;
                 },
                 .status_change => |new_status| {
-                    _ = new_status;
-                    // Status change handled via mgr.status comparison below
+                    mgr.status = new_status;
+                    self.needs_render = true;
                 },
                 .err => |err_info| {
                     const err_msg = std.fmt.allocPrint(self.allocator, "[Opencode Error: {s}]", .{
@@ -6240,14 +6240,60 @@ pub const App = struct {
                     }) catch "[Opencode Error]";
                     defer self.allocator.free(err_msg);
                     agent_state.addMessage(.system, err_msg) catch {};
+                    // Ensure UI leaves "Generating..." on errors
+                    mgr.status = .failed;
                     self.needs_render = true;
                 },
+            }
+        }
+
+        // If we're waiting on an abort, clear it after a short idle timeout
+        if (mgr.pending_abort) {
+            const now_ms = std.time.milliTimestamp();
+            const last_event_ms = if (mgr.last_event_ms == 0) mgr.pending_abort_since_ms else mgr.last_event_ms;
+            const idle_ms = now_ms - last_event_ms;
+            const pending_ms = now_ms - mgr.pending_abort_since_ms;
+            if (!mgr.hasPendingEvents() and pending_ms > 2000 and idle_ms > 500) {
+                std.log.info("Opencode: abort timeout elapsed; clearing pending_abort", .{});
+                mgr.pending_abort = false;
+                mgr.pending_abort_since_ms = 0;
+                if (mgr.status == .prompting) {
+                    mgr.status = .session_active;
+                }
+                self.needs_render = true;
             }
         }
 
         // Trigger redraw if status changed
         if (mgr.status != status_before) {
             self.needs_render = true;
+        }
+
+        // Auto-send staged message when Opencode returns to idle
+        if (mgr.status == .session_active and agent_state.hasStagedPrompt() and !mgr.pending_abort) {
+            if (agent_state.isStagedShellCommand()) {
+                const staged = agent_state.getStagedPrompt();
+                agent_mode.handleShellCommand(self, agent_state, staged) catch |err| {
+                    std.log.err("Failed to run staged shell command after Opencode idle: {any}", .{err});
+                };
+                agent_state.clearStagedPrompt();
+            } else if (agent_state.takeStagedPrompt()) |staged| {
+                if (is_active_tab) {
+                    std.log.info("Opencode: Auto-sending staged message ({d} bytes)", .{staged.len});
+                }
+
+                agent_state.addMessage(.user, staged) catch {};
+
+                const prompt_copy = self.allocator.dupe(u8, staged) catch return;
+                defer self.allocator.free(prompt_copy);
+
+                mgr.sendPrompt(prompt_copy) catch |err| {
+                    std.log.err("Opencode: Failed to send staged prompt: {any}", .{err});
+                    agent_state.addMessage(.system, "Failed to send staged message") catch {};
+                };
+
+                self.needs_render = true;
+            }
         }
     }
 

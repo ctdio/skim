@@ -393,12 +393,16 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             }
 
             if (cancelled) {
-                try agent_state.addMessage(.system, "Interrupted");
+                agent_state.addMessage(.system, "Interrupted") catch |err| {
+                    std.log.err("Failed to add interrupt message: {any}", .{err});
+                };
 
                 // Auto-execute staged shell commands after interrupt
                 if (agent_state.hasStagedPrompt() and agent_state.isStagedShellCommand()) {
                     const staged = agent_state.getStagedPrompt();
-                    try handleShellCommand(app, agent_state, staged);
+                    handleShellCommand(app, agent_state, staged) catch |err| {
+                        std.log.err("Failed to run staged shell command after interrupt: {any}", .{err});
+                    };
                     agent_state.clearStagedPrompt();
                 }
 
@@ -990,6 +994,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
                         // Interrupt agent and send staged message
                         var interrupted = false;
+                        var interrupted_opencode = false;
                         if (app.getActiveAcpManager()) |mgr| {
                             if (mgr.cancelPrompt()) {
                                 interrupted = true;
@@ -999,12 +1004,18 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                             if (app.getActiveOpencodeManager()) |mgr| {
                                 if (mgr.cancelPrompt()) {
                                     interrupted = true;
+                                    interrupted_opencode = true;
                                 }
                             }
                         }
                         if (interrupted) {
                             std.log.info("Agent: Interrupted via staged message immediate send", .{});
                             try agent_state.addMessage(.system, "Interrupted");
+                        }
+
+                        if (interrupted and interrupted_opencode) {
+                            // For Opencode, wait for session to return to idle before sending
+                            return;
                         }
 
                         try agent_state.addMessage(.user, staged);
