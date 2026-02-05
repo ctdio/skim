@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const client_mod = @import("client.zig");
 const protocol = @import("protocol.zig");
+const patch = @import("patch.zig");
 const sse = @import("sse.zig");
 const server = @import("server.zig");
 
@@ -32,12 +33,29 @@ pub const Status = enum {
     failed,
 };
 
+pub const ToolStatus = enum {
+    pending,
+    running,
+    completed,
+    failed,
+};
+
 /// Event types from the SSE stream
 pub const Event = union(enum) {
     /// Delta text chunk from message.part.updated
     message_chunk: MessageChunk,
+    /// Delta thinking chunk from message.part.updated
+    thinking_chunk: MessageChunk,
     /// Message complete (session.idle)
     message_complete: void,
+    /// System message to display in chat
+    system_message: []const u8,
+    /// Tool call started
+    tool_call: ToolCall,
+    /// Tool call update (status/output)
+    tool_update: ToolUpdate,
+    /// Tool diff content (apply_patch)
+    tool_diff: ToolDiff,
     /// Status changed
     status_change: Status,
     /// Error occurred
@@ -48,6 +66,49 @@ pub const Event = union(enum) {
 
         pub fn deinit(self: *MessageChunk, allocator: Allocator) void {
             allocator.free(self.delta);
+        }
+    };
+
+    pub const ToolCall = struct {
+        tool_call_id: []const u8,
+        tool_name: ?[]const u8 = null,
+        title: []const u8,
+        command: ?[]const u8 = null,
+
+        pub fn deinit(self: *ToolCall, allocator: Allocator) void {
+            allocator.free(self.tool_call_id);
+            allocator.free(self.title);
+            if (self.tool_name) |name| allocator.free(name);
+            if (self.command) |cmd| allocator.free(cmd);
+        }
+    };
+
+    pub const ToolUpdate = struct {
+        tool_call_id: []const u8,
+        status: ToolStatus,
+        stdout: ?[]const u8 = null,
+        stderr: ?[]const u8 = null,
+
+        pub fn deinit(self: *ToolUpdate, allocator: Allocator) void {
+            allocator.free(self.tool_call_id);
+            if (self.stdout) |out| allocator.free(out);
+            if (self.stderr) |err| allocator.free(err);
+        }
+    };
+
+    pub const ToolDiff = struct {
+        tool_call_id: ?[]const u8 = null,
+        title: []const u8,
+        path: []const u8,
+        old_text: []const u8,
+        new_text: []const u8,
+
+        pub fn deinit(self: *ToolDiff, allocator: Allocator) void {
+            if (self.tool_call_id) |id| allocator.free(id);
+            allocator.free(self.title);
+            allocator.free(self.path);
+            allocator.free(self.old_text);
+            allocator.free(self.new_text);
         }
     };
 
@@ -70,6 +131,11 @@ pub const Event = union(enum) {
     pub fn deinit(self: *Event, allocator: Allocator) void {
         switch (self.*) {
             .message_chunk => |*chunk| chunk.deinit(allocator),
+            .thinking_chunk => |*chunk| chunk.deinit(allocator),
+            .system_message => |msg| allocator.free(msg),
+            .tool_call => |*tc| tc.deinit(allocator),
+            .tool_update => |*tu| tu.deinit(allocator),
+            .tool_diff => |*diff| diff.deinit(allocator),
             .err => |*e| e.deinit(allocator),
             .message_complete, .status_change => {},
         }
@@ -168,12 +234,15 @@ pub const OpencodeManager = struct {
     server_process: ?std.process.Child,
     session_id: ?[]const u8,
     message_queue: MessageQueue,
+    event_log_file: ?std.fs.File,
+    event_log_mutex: std.Thread.Mutex,
 
     // SSE reader thread
     sse_thread: ?std.Thread,
     should_stop: std.atomic.Value(bool),
     thread_exited: std.atomic.Value(bool),
     thread_was_detached: bool, // If true, don't destroy manager - thread may still access it
+    stream_complete: std.atomic.Value(bool),
 
     // SSE connection (stored so we can close it to unblock the reader thread)
     sse_connection: ?*client_mod.Client.EventStreamConnection,
@@ -196,6 +265,10 @@ pub const OpencodeManager = struct {
     last_event_ms: i64,
     abort_error_grace_until_ms: i64,
 
+    // Question/permission tracking
+    pending_question: bool,
+    pending_permission: bool,
+
     // Available models (fetched from server)
     available_models: std.ArrayListUnmanaged(OwnedModelInfo),
     current_model_id: ?[]const u8, // Current model as "provider/model" string
@@ -210,10 +283,13 @@ pub const OpencodeManager = struct {
             .server_process = null,
             .session_id = null,
             .message_queue = MessageQueue.init(std.heap.c_allocator),
+            .event_log_file = null,
+            .event_log_mutex = .{},
             .sse_thread = null,
             .should_stop = std.atomic.Value(bool).init(false),
             .thread_exited = std.atomic.Value(bool).init(true), // No thread running initially
             .thread_was_detached = false,
+            .stream_complete = std.atomic.Value(bool).init(false),
             .sse_connection = null,
             .sse_conn_mutex = .{},
             .connect_config = null,
@@ -227,6 +303,8 @@ pub const OpencodeManager = struct {
             .pending_abort_since_ms = 0,
             .last_event_ms = 0,
             .abort_error_grace_until_ms = 0,
+            .pending_question = false,
+            .pending_permission = false,
             .available_models = .{},
             .current_model_id = null,
         };
@@ -376,6 +454,7 @@ pub const OpencodeManager = struct {
         self.allocator.free(session_id);
 
         log.info("Session created: {s}", .{self.session_id.?});
+        self.ensureEventLog();
 
         // Start SSE reader thread
         self.should_stop.store(false, .release);
@@ -455,6 +534,10 @@ pub const OpencodeManager = struct {
             }
         }
 
+        if (!self.thread_was_detached) {
+            self.closeEventLog();
+        }
+
         // Terminate server if we spawned it
         if (self.server_process) |*proc| {
             log.info("Terminating server...", .{});
@@ -503,8 +586,14 @@ pub const OpencodeManager = struct {
         const c = self.client orelse return error.NotConnected;
         const sid = self.session_id orelse return error.NoSession;
 
-        if (self.status != .session_active) {
+        if (!self.isReadyForPrompt()) {
             return error.InvalidState;
+        }
+
+        if (self.pending_question or self.pending_permission) {
+            log.info("Clearing pending question/permission due to user prompt", .{});
+            self.pending_question = false;
+            self.pending_permission = false;
         }
 
         // Create prompt request with current agent and model
@@ -523,6 +612,8 @@ pub const OpencodeManager = struct {
         self.pending_abort = false;
         self.pending_abort_since_ms = 0;
 
+        self.stream_complete.store(false, .release);
+
         // Send async
         try c.sendPromptAsync(sid, prompt);
 
@@ -538,6 +629,19 @@ pub const OpencodeManager = struct {
         } else {
             log.info("Sent prompt", .{});
         }
+    }
+
+    pub fn isThinking(self: *const OpencodeManager) bool {
+        return self.status == .prompting and !self.stream_complete.load(.acquire);
+    }
+
+    pub fn isReadyForPrompt(self: *const OpencodeManager) bool {
+        return self.status == .session_active or
+            (self.status == .prompting and self.stream_complete.load(.acquire));
+    }
+
+    pub fn isReadyForAutoSend(self: *const OpencodeManager) bool {
+        return self.isReadyForPrompt();
     }
 
     /// Set the current agent (mode) for future prompts
@@ -1032,6 +1136,7 @@ pub const OpencodeManager = struct {
 
                 // Parse the SSE event data
                 if (e.data) |data| {
+                    log.debug("SSE raw event: {s}", .{data});
                     manager.processEventData(data);
                 }
             } else {
@@ -1048,14 +1153,97 @@ pub const OpencodeManager = struct {
         log.info("SSE reader thread exiting", .{});
     }
 
+    fn ensureEventLog(self: *OpencodeManager) void {
+        if (self.event_log_file != null) return;
+        const sid = self.session_id orelse return;
+        const home = std.posix.getenv("HOME") orelse return;
+
+        var path_buf: [512]u8 = undefined;
+        const skim_dir = std.fmt.bufPrint(&path_buf, "{s}/.skim", .{home}) catch return;
+        std.fs.makeDirAbsolute(skim_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return,
+        };
+
+        var opencode_buf: [512]u8 = undefined;
+        const opencode_dir = std.fmt.bufPrint(&opencode_buf, "{s}/.skim/opencode", .{home}) catch return;
+        std.fs.makeDirAbsolute(opencode_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return,
+        };
+
+        var events_buf: [512]u8 = undefined;
+        const events_dir = std.fmt.bufPrint(&events_buf, "{s}/.skim/opencode/events", .{home}) catch return;
+        std.fs.makeDirAbsolute(events_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return,
+        };
+
+        var log_buf: [512]u8 = undefined;
+        const log_path = std.fmt.bufPrint(&log_buf, "{s}/.skim/opencode/events/ses_{s}.log", .{ home, sid }) catch return;
+
+        const file = std.fs.createFileAbsolute(log_path, .{ .truncate = false }) catch return;
+        file.seekFromEnd(0) catch {};
+        self.event_log_file = file;
+        log.info("Opencode SSE log: {s}", .{log_path});
+    }
+
+    fn logSseEvent(self: *OpencodeManager, data: []const u8) void {
+        self.event_log_mutex.lock();
+        defer self.event_log_mutex.unlock();
+
+        self.ensureEventLog();
+        const file = self.event_log_file orelse return;
+
+        const timestamp_ms = std.time.milliTimestamp();
+        const seconds = @divFloor(timestamp_ms, 1000);
+        const millis = @mod(timestamp_ms, 1000);
+        const hours = @mod(@divFloor(seconds, 3600), 24);
+        const minutes = @mod(@divFloor(seconds, 60), 60);
+        const secs = @mod(seconds, 60);
+
+        var header_buf: [64]u8 = undefined;
+        const header = std.fmt.bufPrint(&header_buf, "[{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}] ", .{
+            @as(u64, @intCast(hours)),
+            @as(u64, @intCast(minutes)),
+            @as(u64, @intCast(secs)),
+            @as(u64, @intCast(millis)),
+        }) catch return;
+
+        _ = file.write(header) catch return;
+        _ = file.write(data) catch return;
+        _ = file.write("\n") catch return;
+    }
+
+    fn closeEventLog(self: *OpencodeManager) void {
+        self.event_log_mutex.lock();
+        defer self.event_log_mutex.unlock();
+
+        if (self.event_log_file) |file| {
+            file.close();
+            self.event_log_file = null;
+        }
+    }
+
     /// Process SSE event data JSON
     fn processEventData(self: *OpencodeManager, data: []const u8) void {
+        self.logSseEvent(data);
         // Quick check for events we care about before full JSON parse
         // This avoids expensive parsing for the many session/message update events
         const dominated_events = [_][]const u8{
+            "message.created",
+            "message.updated",
+            "message.deleted",
             "message.part.updated",
+            "tool.",
+            "tool_call",
+            "permission.asked",
+            "permission.resolved",
+            "question.asked",
+            "question.resolved",
             "session.updated",
             "session.idle",
+            "session.status",
             "session.error",
         };
         var dominated = false;
@@ -1070,13 +1258,17 @@ pub const OpencodeManager = struct {
             return;
         }
 
-        // Parse JSON - opencode wraps events in a "payload" object
-        const parsed = std.json.parseFromSlice(struct {
-            payload: struct {
+        // Parse JSON - accept both wrapped (payload) and top-level event shapes
+        const ParsedEvent = struct {
+            payload: ?struct {
                 type: []const u8,
                 properties: ?std.json.Value = null,
-            },
-        }, self.event_allocator, data, .{
+            } = null,
+            type: ?[]const u8 = null,
+            properties: ?std.json.Value = null,
+        };
+
+        const parsed = std.json.parseFromSlice(ParsedEvent, self.event_allocator, data, .{
             .ignore_unknown_fields = true,
         }) catch {
             log.warn("Failed to parse SSE event JSON", .{});
@@ -1084,29 +1276,139 @@ pub const OpencodeManager = struct {
         };
         defer parsed.deinit();
 
-        const event_type = protocol.EventType.fromString(parsed.value.payload.type);
-        log.debug("SSE event received: {s} -> {}", .{ parsed.value.payload.type, event_type });
+        const type_str: []const u8 = if (parsed.value.payload) |payload|
+            payload.type
+        else if (parsed.value.type) |t|
+            t
+        else {
+            log.warn("SSE event missing type", .{});
+            return;
+        };
+
+        const properties = if (parsed.value.payload) |payload| payload.properties else parsed.value.properties;
+
+        const event_type = protocol.EventType.fromString(type_str);
+        log.debug("SSE event received: {s} -> {}", .{ type_str, event_type });
 
         switch (event_type) {
-            .message_part_updated => {
-                log.debug("Processing message.part.updated", .{});
-                // Extract delta from properties
-                if (parsed.value.payload.properties) |props| {
+            .message_created => {
+                if (properties) |props| {
                     if (props == .object) {
-                        if (props.object.get("delta")) |delta_val| {
-                            if (delta_val == .string) {
-                                const delta = self.event_allocator.dupe(u8, delta_val.string) catch return;
-                                self.message_queue.push(.{
-                                    .message_chunk = .{ .delta = delta },
-                                });
+                        if (extractMessageStatus(props)) |status| {
+                            if (!self.handleMessageStatus(status)) {
+                                if (isMessageInProgressStatus(status)) {
+                                    self.message_queue.push(.{ .status_change = .prompting });
+                                }
                             }
                         }
                     }
                 }
             },
+            .message_part_updated => {
+                log.debug("Processing message.part.updated", .{});
+                // Extract delta from properties
+                if (properties) |props| {
+                    if (props == .object) {
+                        var part_obj: ?std.json.ObjectMap = null;
+                        var part_type: ?[]const u8 = null;
+
+                        if (props.object.get("part")) |part_val| {
+                            if (part_val == .object) {
+                                part_obj = part_val.object;
+                                if (part_val.object.get("type")) |type_val| {
+                                    if (type_val == .string) {
+                                        part_type = type_val.string;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (part_obj) |obj| {
+                            if (part_type) |ptype| {
+                                if (isStepFinishType(ptype)) {
+                                    const reason = if (obj.get("reason")) |reason_val| blk: {
+                                        if (reason_val == .string) break :blk reason_val.string;
+                                        break :blk null;
+                                    } else null;
+
+                                    if (reason == null or isStepFinishReason(reason.?)) {
+                                        log.info("Step finished ({s}); clearing status", .{reason orelse "unknown"});
+                                        self.clearPromptingState();
+                                    }
+                                } else if (isTextPartType(ptype) and partHasEndTime(obj)) {
+                                    log.info("Text part finished; clearing status", .{});
+                                    self.clearPromptingState();
+                                }
+                            }
+                        }
+
+                        var handled_delta = false;
+                        if (part_obj) |obj| {
+                            if (part_type) |ptype| {
+                                if (isThinkingPartType(ptype)) {
+                                    handled_delta = self.handleThinkingPart(obj, props.object);
+                                } else if (isToolCallPartType(ptype) or isToolResultPartType(ptype)) {
+                                    handled_delta = self.handleToolPart(obj, props.object, ptype);
+                                }
+                            }
+                        }
+
+                        if (!handled_delta) {
+                            if (props.object.get("delta")) |delta_val| {
+                                if (delta_val == .string) {
+                                    const delta = self.event_allocator.dupe(u8, delta_val.string) catch return;
+                                    self.message_queue.push(.{
+                                        .message_chunk = .{ .delta = delta },
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            .message_updated => {
+                if (properties) |props| {
+                    if (props == .object) {
+                        if (extractMessageStatus(props)) |status| {
+                            _ = self.handleMessageStatus(status);
+                        } else if (isAssistantMessageComplete(props)) {
+                            log.info("Message finished via update metadata", .{});
+                            self.clearPromptingState();
+                        }
+                    }
+                }
+            },
+            .message_deleted => {
+                log.info("Message deleted; clearing prompting state", .{});
+                self.clearPromptingState();
+            },
+            .permission_asked => {
+                self.pending_permission = true;
+                const detail = if (properties) |props| extractDetailFromProperties(props) else null;
+                self.pushSystemMessage(tryBuildSystemMessage(self, "Permission requested", detail));
+                self.clearPromptingState();
+            },
+            .permission_resolved => {
+                self.pending_permission = false;
+                const detail = if (properties) |props| extractDetailFromProperties(props) else null;
+                self.pushSystemMessage(tryBuildSystemMessage(self, "Permission resolved", detail));
+                self.clearPromptingState();
+            },
+            .question_asked => {
+                self.pending_question = true;
+                const detail = if (properties) |props| extractDetailFromProperties(props) else null;
+                self.pushSystemMessage(tryBuildSystemMessage(self, "Question", detail));
+                self.clearPromptingState();
+            },
+            .question_resolved => {
+                self.pending_question = false;
+                const detail = if (properties) |props| extractDetailFromProperties(props) else null;
+                self.pushSystemMessage(tryBuildSystemMessage(self, "Question resolved", detail));
+                self.clearPromptingState();
+            },
             .session_updated => {
                 // Some servers emit session.updated with state/status=idle instead of session.idle
-                if (parsed.value.payload.properties) |props| {
+                if (properties) |props| {
                     if (props == .object) {
                         var status_val = props.object.get("status") orelse props.object.get("state");
                         if (status_val == null) {
@@ -1124,6 +1426,18 @@ pub const OpencodeManager = struct {
                                 self.abort_error_grace_until_ms = 0;
                                 self.message_queue.push(.{ .message_complete = {} });
                                 self.message_queue.push(.{ .status_change = .session_active });
+                            }
+                        }
+                    }
+                }
+            },
+            .session_status => {
+                if (properties) |props| {
+                    if (props == .object) {
+                        if (extractSessionStatus(props)) |status| {
+                            if (isSessionIdleStatus(status)) {
+                                log.info("Session status idle", .{});
+                                self.clearPromptingState();
                             }
                         }
                     }
@@ -1155,6 +1469,544 @@ pub const OpencodeManager = struct {
                 // Ignore other event types for now
             },
         }
+    }
+
+    fn clearPromptingState(self: *OpencodeManager) void {
+        self.pending_abort = false;
+        self.pending_abort_since_ms = 0;
+        self.abort_error_grace_until_ms = 0;
+        self.stream_complete.store(true, .release);
+        self.message_queue.push(.{ .message_complete = {} });
+        self.message_queue.push(.{ .status_change = .session_active });
+    }
+
+    fn handleMessageStatus(self: *OpencodeManager, status: []const u8) bool {
+        if (isMessageCompletionStatus(status)) {
+            log.info("Message status complete: {s}", .{status});
+            self.clearPromptingState();
+            return true;
+        }
+        if (isMessageErrorStatus(status)) {
+            log.warn("Message status error: {s}", .{status});
+            self.message_queue.push(.{ .err = .{ .code = .session_error } });
+            self.message_queue.push(.{ .status_change = .failed });
+            return true;
+        }
+        return false;
+    }
+
+    fn extractMessageStatus(props: std.json.Value) ?[]const u8 {
+        if (props != .object) return null;
+        var status_val = props.object.get("status") orelse props.object.get("state");
+        if (status_val == null) {
+            if (props.object.get("message")) |message_val| {
+                if (message_val == .object) {
+                    status_val = message_val.object.get("status") orelse message_val.object.get("state");
+                }
+            }
+        }
+        if (status_val) |val| {
+            if (val == .string) return val.string;
+        }
+        return null;
+    }
+
+    fn isAssistantMessageComplete(props: std.json.Value) bool {
+        const info = extractMessageInfo(props) orelse return false;
+
+        const role = if (info.get("role")) |role_val| blk: {
+            if (role_val == .string) break :blk role_val.string;
+            break :blk null;
+        } else null;
+
+        if (role == null or !std.mem.eql(u8, role.?, "assistant")) return false;
+
+        if (info.get("finish")) |finish_val| {
+            if (finish_val == .string) return true;
+        }
+
+        if (info.get("time")) |time_val| {
+            if (time_val == .object) {
+                if (time_val.object.get("completed")) |completed_val| {
+                    return switch (completed_val) {
+                        .integer, .float, .string => true,
+                        else => false,
+                    };
+                }
+            }
+        }
+
+        return false;
+    }
+
+    fn extractMessageInfo(props: std.json.Value) ?std.json.ObjectMap {
+        if (props != .object) return null;
+        if (props.object.get("info")) |info_val| {
+            if (info_val == .object) return info_val.object;
+        }
+        if (props.object.get("message")) |message_val| {
+            if (message_val == .object) return message_val.object;
+        }
+        return null;
+    }
+
+    fn extractSessionStatus(props: std.json.Value) ?[]const u8 {
+        if (props != .object) return null;
+
+        if (props.object.get("status")) |status_val| {
+            switch (status_val) {
+                .string => |s| return s,
+                .object => |obj| {
+                    if (obj.get("type")) |type_val| {
+                        if (type_val == .string) return type_val.string;
+                    }
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    fn extractDetailFromProperties(props: std.json.Value) ?[]const u8 {
+        if (props != .object) return null;
+
+        const detail_keys = [_][]const u8{
+            "prompt",
+            "question",
+            "text",
+            "title",
+            "description",
+            "reason",
+            "message",
+        };
+
+        if (findDetailInObject(props.object, &detail_keys)) |detail| return detail;
+
+        const nested_keys = [_][]const u8{
+            "permission",
+            "question",
+            "message",
+        };
+        for (nested_keys) |key| {
+            if (props.object.get(key)) |val| {
+                if (extractStringFromValue(val, &detail_keys)) |detail| return detail;
+            }
+        }
+
+        return null;
+    }
+
+    fn extractStringFromValue(val: std.json.Value, keys: []const []const u8) ?[]const u8 {
+        switch (val) {
+            .string => |s| return s,
+            .object => |obj| return findDetailInObject(obj, keys),
+            else => return null,
+        }
+    }
+
+    fn findDetailInObject(obj: std.json.ObjectMap, keys: []const []const u8) ?[]const u8 {
+        for (keys) |key| {
+            if (obj.get(key)) |val| {
+                if (extractStringFromValue(val, keys)) |detail| return detail;
+            }
+        }
+        return null;
+    }
+
+    fn isThinkingPartType(part_type: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(part_type, "thinking") or
+            std.ascii.eqlIgnoreCase(part_type, "thought") or
+            std.ascii.eqlIgnoreCase(part_type, "reasoning") or
+            std.ascii.eqlIgnoreCase(part_type, "analysis");
+    }
+
+    fn isToolCallPartType(part_type: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(part_type, "tool_call") or
+            std.ascii.eqlIgnoreCase(part_type, "tool-call") or
+            std.ascii.eqlIgnoreCase(part_type, "tool_call_delta") or
+            std.ascii.eqlIgnoreCase(part_type, "tool-call-delta") or
+            std.ascii.eqlIgnoreCase(part_type, "tool") or
+            std.ascii.eqlIgnoreCase(part_type, "tool_use") or
+            std.ascii.eqlIgnoreCase(part_type, "tool-use");
+    }
+
+    fn isToolResultPartType(part_type: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(part_type, "tool_result") or
+            std.ascii.eqlIgnoreCase(part_type, "tool-result") or
+            std.ascii.eqlIgnoreCase(part_type, "tool_result_delta") or
+            std.ascii.eqlIgnoreCase(part_type, "tool-result-delta") or
+            std.ascii.eqlIgnoreCase(part_type, "tool_output") or
+            std.ascii.eqlIgnoreCase(part_type, "tool-output") or
+            std.ascii.eqlIgnoreCase(part_type, "tool_response") or
+            std.ascii.eqlIgnoreCase(part_type, "tool-response");
+    }
+
+    fn extractStringField(obj: std.json.ObjectMap, keys: []const []const u8) ?[]const u8 {
+        for (keys) |key| {
+            if (obj.get(key)) |val| {
+                if (val == .string) return val.string;
+            }
+        }
+        return null;
+    }
+
+    fn extractObjectField(obj: std.json.ObjectMap, keys: []const []const u8) ?std.json.ObjectMap {
+        for (keys) |key| {
+            if (obj.get(key)) |val| {
+                if (val == .object) return val.object;
+            }
+        }
+        return null;
+    }
+
+    fn extractValueField(obj: std.json.ObjectMap, keys: []const []const u8) ?std.json.Value {
+        for (keys) |key| {
+            if (obj.get(key)) |val| return val;
+        }
+        return null;
+    }
+
+    fn extractToolCallIdFromObject(obj: std.json.ObjectMap) ?[]const u8 {
+        const keys = [_][]const u8{ "tool_call_id", "toolCallId", "id", "call_id", "callId", "callID" };
+        return extractStringField(obj, &keys);
+    }
+
+    fn extractToolNameFromObject(obj: std.json.ObjectMap) ?[]const u8 {
+        const keys = [_][]const u8{ "tool_name", "toolName", "name" };
+        if (extractStringField(obj, &keys)) |name| return name;
+
+        if (obj.get("tool")) |tool_val| {
+            switch (tool_val) {
+                .string => |s| return s,
+                .object => |tool_obj| {
+                    if (extractStringField(tool_obj, &keys)) |name| return name;
+                },
+                else => {},
+            }
+        }
+
+        if (obj.get("function")) |func_val| {
+            if (func_val == .object) {
+                if (extractStringField(func_val.object, &[_][]const u8{"name"})) |name| return name;
+            }
+        }
+
+        return null;
+    }
+
+    fn extractToolArgsValue(obj: std.json.ObjectMap) ?std.json.Value {
+        const keys = [_][]const u8{ "arguments", "args", "input", "params" };
+        if (extractValueField(obj, &keys)) |val| return val;
+
+        if (obj.get("function")) |func_val| {
+            if (func_val == .object) {
+                if (extractValueField(func_val.object, &[_][]const u8{"arguments"})) |val| return val;
+            }
+        }
+
+        return null;
+    }
+
+    fn extractPatchTextFromValue(val: std.json.Value) ?[]const u8 {
+        switch (val) {
+            .string => |s| return s,
+            .object => |obj| {
+                const keys = [_][]const u8{ "patch", "diff", "text", "content" };
+                if (extractStringField(obj, &keys)) |s| return s;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn extractToolCommandFromArgs(tool_name: ?[]const u8, val: ?std.json.Value) ?[]const u8 {
+        if (val == null) return null;
+
+        switch (val.?) {
+            .string => |s| {
+                if (tool_name) |name| {
+                    if (std.ascii.eqlIgnoreCase(name, "bash") or std.ascii.eqlIgnoreCase(name, "shell")) return s;
+                }
+                return null;
+            },
+            .object => |obj| {
+                const keys = [_][]const u8{ "command", "cmd", "shell" };
+                return extractStringField(obj, &keys);
+            },
+            else => return null,
+        }
+    }
+
+    fn parseToolStatus(status: []const u8) ?ToolStatus {
+        if (std.ascii.eqlIgnoreCase(status, "pending") or std.ascii.eqlIgnoreCase(status, "queued")) return .pending;
+        if (std.ascii.eqlIgnoreCase(status, "running") or std.ascii.eqlIgnoreCase(status, "in_progress") or std.ascii.eqlIgnoreCase(status, "started")) return .running;
+        if (std.ascii.eqlIgnoreCase(status, "completed") or std.ascii.eqlIgnoreCase(status, "success") or std.ascii.eqlIgnoreCase(status, "succeeded") or std.ascii.eqlIgnoreCase(status, "done")) return .completed;
+        if (std.ascii.eqlIgnoreCase(status, "failed") or std.ascii.eqlIgnoreCase(status, "error") or std.ascii.eqlIgnoreCase(status, "cancelled") or std.ascii.eqlIgnoreCase(status, "canceled")) return .failed;
+        return null;
+    }
+
+    fn extractToolStatusFromObject(obj: std.json.ObjectMap) ?ToolStatus {
+        const keys = [_][]const u8{ "status", "state" };
+        if (extractStringField(obj, &keys)) |s| {
+            return parseToolStatus(s);
+        }
+        return null;
+    }
+
+    fn extractToolOutputFromObject(obj: std.json.ObjectMap) ?[]const u8 {
+        const keys = [_][]const u8{ "stdout", "output", "content", "text", "result" };
+        return extractStringField(obj, &keys);
+    }
+
+    fn extractToolErrorFromObject(obj: std.json.ObjectMap) ?[]const u8 {
+        const keys = [_][]const u8{ "stderr", "error", "message" };
+        return extractStringField(obj, &keys);
+    }
+
+    fn extractToolTitleFromObject(obj: std.json.ObjectMap) ?[]const u8 {
+        const keys = [_][]const u8{ "title", "summary" };
+        return extractStringField(obj, &keys);
+    }
+
+    fn isApplyPatchTool(tool_name: ?[]const u8, patch_text: []const u8) bool {
+        if (tool_name) |name| {
+            if (std.ascii.eqlIgnoreCase(name, "apply_patch") or std.ascii.eqlIgnoreCase(name, "applyPatch")) return true;
+        }
+        return std.mem.indexOf(u8, patch_text, "*** Begin Patch") != null;
+    }
+
+    fn handleThinkingPart(self: *OpencodeManager, part_obj: std.json.ObjectMap, props_obj: std.json.ObjectMap) bool {
+        const delta = if (props_obj.get("delta")) |delta_val| blk: {
+            if (delta_val == .string) break :blk delta_val.string;
+            break :blk null;
+        } else null;
+
+        const text_val = delta orelse extractStringField(part_obj, &[_][]const u8{ "text", "content" });
+        if (text_val) |text| {
+            if (text.len > 0) {
+                const chunk = self.event_allocator.dupe(u8, text) catch return true;
+                self.message_queue.push(.{ .thinking_chunk = .{ .delta = chunk } });
+            }
+        }
+        return true;
+    }
+
+    fn handleToolPart(self: *OpencodeManager, part_obj: std.json.ObjectMap, props_obj: std.json.ObjectMap, part_type: []const u8) bool {
+        const state_obj = extractObjectField(part_obj, &[_][]const u8{"state"}) orelse extractObjectField(props_obj, &[_][]const u8{"state"});
+        const tool_id = extractToolCallIdFromObject(part_obj) orelse extractToolCallIdFromObject(props_obj) orelse if (state_obj) |obj| extractToolCallIdFromObject(obj) else null;
+        const tool_name = extractToolNameFromObject(part_obj) orelse extractToolNameFromObject(props_obj);
+        const args_val = if (state_obj) |obj|
+            extractToolArgsValue(obj)
+        else
+            extractToolArgsValue(part_obj) orelse extractToolArgsValue(props_obj);
+        const title_val = if (state_obj) |obj| extractToolTitleFromObject(obj) else null;
+        const patch_text = if (args_val) |val| extractPatchTextFromValue(val) else null;
+
+        const is_result = isToolResultPartType(part_type);
+
+        if (patch_text) |patch_value| {
+            if (isApplyPatchTool(tool_name, patch_value)) {
+                if (self.emitApplyPatchDiff(tool_id, patch_value)) {
+                    return true;
+                }
+            }
+        }
+
+        if (tool_id) |id| {
+            if (!is_result) {
+                const title = if (title_val) |raw| blk: {
+                    if (tool_name) |name| {
+                        break :blk std.fmt.allocPrint(self.event_allocator, "{s} {s}", .{ name, raw }) catch self.event_allocator.dupe(u8, raw) catch return true;
+                    }
+                    break :blk self.event_allocator.dupe(u8, raw) catch return true;
+                } else if (tool_name) |name| blk: {
+                    break :blk self.event_allocator.dupe(u8, name) catch return true;
+                } else blk: {
+                    break :blk self.event_allocator.dupe(u8, "Tool") catch return true;
+                };
+                const id_copy = self.event_allocator.dupe(u8, id) catch {
+                    self.event_allocator.free(title);
+                    return true;
+                };
+                const name_copy: ?[]const u8 = if (tool_name) |name|
+                    self.event_allocator.dupe(u8, name) catch null
+                else
+                    null;
+                const cmd = extractToolCommandFromArgs(tool_name, args_val);
+                const cmd_copy: ?[]const u8 = if (cmd) |c| self.event_allocator.dupe(u8, c) catch null else null;
+
+                self.message_queue.push(.{
+                    .tool_call = .{
+                        .tool_call_id = id_copy,
+                        .tool_name = name_copy,
+                        .title = title,
+                        .command = cmd_copy,
+                    },
+                });
+            }
+
+            var status = if (state_obj) |obj| extractToolStatusFromObject(obj) else null;
+            if (status == null) status = extractToolStatusFromObject(part_obj) orelse extractToolStatusFromObject(props_obj);
+
+            const stdout = if (state_obj) |obj|
+                extractToolOutputFromObject(obj)
+            else
+                extractToolOutputFromObject(part_obj) orelse extractToolOutputFromObject(props_obj);
+            const stderr = if (state_obj) |obj|
+                extractToolErrorFromObject(obj)
+            else
+                extractToolErrorFromObject(part_obj) orelse extractToolErrorFromObject(props_obj);
+
+            if (status == null and (stdout != null or stderr != null or is_result)) {
+                status = .completed;
+            }
+
+            if (status) |s| {
+                const id_copy = self.event_allocator.dupe(u8, id) catch return true;
+                const stdout_copy: ?[]const u8 = if (stdout) |out| self.event_allocator.dupe(u8, out) catch null else null;
+                const stderr_copy: ?[]const u8 = if (stderr) |err| self.event_allocator.dupe(u8, err) catch null else null;
+                self.message_queue.push(.{ .tool_update = .{
+                    .tool_call_id = id_copy,
+                    .status = s,
+                    .stdout = stdout_copy,
+                    .stderr = stderr_copy,
+                } });
+            }
+        }
+
+        return true;
+    }
+
+    fn emitApplyPatchDiff(self: *OpencodeManager, tool_call_id: ?[]const u8, patch_text: []const u8) bool {
+        const files = patch.parseApplyPatch(self.event_allocator, patch_text) catch |err| {
+            log.warn("Failed to parse apply_patch text: {any}", .{err});
+            return false;
+        };
+        defer {
+            for (files) |*file| file.deinit(self.event_allocator);
+            self.event_allocator.free(files);
+        }
+
+        var any_diff = false;
+        const cwd = if (self.connect_config) |cfg| cfg.cwd else null;
+
+        for (files) |file| {
+            const display_path = file.new_path orelse file.path;
+            const applied = patch.applyFilePatch(self.event_allocator, cwd, file) catch |err| {
+                log.warn("apply_patch failed for {s}: {any}", .{ display_path, err });
+                continue;
+            };
+
+            const title = std.fmt.allocPrint(self.event_allocator, "Edit {s}", .{display_path}) catch blk: {
+                break :blk self.event_allocator.dupe(u8, "Edit") catch {
+                    self.event_allocator.free(applied.old_text);
+                    self.event_allocator.free(applied.new_text);
+                    continue;
+                };
+            };
+
+            const path_copy = self.event_allocator.dupe(u8, display_path) catch {
+                self.event_allocator.free(title);
+                self.event_allocator.free(applied.old_text);
+                self.event_allocator.free(applied.new_text);
+                continue;
+            };
+
+            const id_copy: ?[]const u8 = if (tool_call_id) |id|
+                self.event_allocator.dupe(u8, id) catch null
+            else
+                null;
+
+            self.message_queue.push(.{ .tool_diff = .{
+                .tool_call_id = id_copy,
+                .title = title,
+                .path = path_copy,
+                .old_text = applied.old_text,
+                .new_text = applied.new_text,
+            } });
+
+            any_diff = true;
+        }
+
+        return any_diff;
+    }
+
+    fn tryBuildSystemMessage(self: *OpencodeManager, prefix: []const u8, detail: ?[]const u8) ?[]const u8 {
+        if (detail) |d| {
+            return std.fmt.allocPrint(self.event_allocator, "{s}: {s}", .{ prefix, d }) catch null;
+        }
+        return std.fmt.allocPrint(self.event_allocator, "{s}.", .{prefix}) catch null;
+    }
+
+    fn pushSystemMessage(self: *OpencodeManager, message: ?[]const u8) void {
+        if (message) |msg| {
+            self.message_queue.push(.{ .system_message = msg });
+        }
+    }
+
+    fn isMessageCompletionStatus(status: []const u8) bool {
+        return std.mem.eql(u8, status, "completed") or
+            std.mem.eql(u8, status, "complete") or
+            std.mem.eql(u8, status, "done") or
+            std.mem.eql(u8, status, "finished") or
+            std.mem.eql(u8, status, "cancelled") or
+            std.mem.eql(u8, status, "canceled") or
+            std.mem.eql(u8, status, "interrupted");
+    }
+
+    fn isMessageInProgressStatus(status: []const u8) bool {
+        return std.mem.eql(u8, status, "in_progress") or
+            std.mem.eql(u8, status, "running") or
+            std.mem.eql(u8, status, "started") or
+            std.mem.eql(u8, status, "streaming");
+    }
+
+    fn isSessionIdleStatus(status: []const u8) bool {
+        return std.mem.eql(u8, status, "idle") or
+            std.mem.eql(u8, status, "ready");
+    }
+
+    fn isSessionBusyStatus(status: []const u8) bool {
+        return std.mem.eql(u8, status, "busy") or
+            std.mem.eql(u8, status, "working");
+    }
+
+    fn isStepFinishType(step_type: []const u8) bool {
+        return std.mem.eql(u8, step_type, "step-finish") or
+            std.mem.eql(u8, step_type, "step_finish");
+    }
+
+    fn isStepFinishReason(reason: []const u8) bool {
+        return std.mem.eql(u8, reason, "stop") or
+            std.mem.eql(u8, reason, "complete") or
+            std.mem.eql(u8, reason, "completed") or
+            std.mem.eql(u8, reason, "end_turn") or
+            std.mem.eql(u8, reason, "cancelled") or
+            std.mem.eql(u8, reason, "canceled") or
+            std.mem.eql(u8, reason, "interrupted");
+    }
+
+    fn isTextPartType(part_type: []const u8) bool {
+        return std.mem.eql(u8, part_type, "text");
+    }
+
+    fn partHasEndTime(part_obj: std.json.ObjectMap) bool {
+        if (part_obj.get("time")) |time_val| {
+            if (time_val == .object) {
+                if (time_val.object.get("end")) |end_val| {
+                    return switch (end_val) {
+                        .integer, .float, .string => true,
+                        else => false,
+                    };
+                }
+            }
+        }
+        return false;
+    }
+
+    fn isMessageErrorStatus(status: []const u8) bool {
+        return std.mem.eql(u8, status, "error") or
+            std.mem.eql(u8, status, "failed");
     }
 
     pub const Error = error{
@@ -1279,6 +2131,11 @@ test "Event deinit" {
     // Test message_complete deinit (no-op)
     var event3 = Event{ .message_complete = {} };
     event3.deinit(allocator);
+
+    // Test system_message deinit
+    const sys = try allocator.dupe(u8, "system");
+    var event4 = Event{ .system_message = sys };
+    event4.deinit(allocator);
 }
 
 test "setAgent and getAgent" {
@@ -1455,6 +2312,220 @@ test "opencode event: session.updated idle clears abort" {
     }
 
     try std.testing.expect(!manager.pending_abort);
+}
+
+test "opencode event: top-level session.idle clears status" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.status = .prompting;
+
+    const data = "{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_123\"}}";
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+    switch (ev2) {
+        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: message.updated completion clears status" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.status = .prompting;
+
+    const data = "{\"payload\":{\"type\":\"message.updated\",\"properties\":{\"message\":{\"status\":\"completed\"}}}}";
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+    switch (ev2) {
+        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: permission.asked emits system message and clears status" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.status = .prompting;
+
+    const data = "{\"payload\":{\"type\":\"permission.asked\",\"properties\":{\"prompt\":\"Allow access?\"}}}";
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .system_message => |msg| {
+            try std.testing.expect(std.mem.indexOf(u8, msg, "Permission requested") != null);
+        },
+        else => try std.testing.expect(false),
+    }
+
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+    switch (ev2) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+
+    const ev3_opt = manager.poll();
+    try std.testing.expect(ev3_opt != null);
+    var ev3 = ev3_opt.?;
+    defer ev3.deinit(manager.event_allocator);
+    switch (ev3) {
+        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: session.status idle clears status" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.status = .prompting;
+
+    const data = "{\"payload\":{\"type\":\"session.status\",\"properties\":{\"status\":{\"type\":\"idle\"}}}}";
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+    switch (ev2) {
+        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: step-finish clears status" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.status = .prompting;
+
+    const data = "{\"payload\":{\"type\":\"message.part.updated\",\"properties\":{\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}}}";
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+    switch (ev2) {
+        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: text part end clears status" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.status = .prompting;
+
+    const data = "{\"payload\":{\"type\":\"message.part.updated\",\"properties\":{\"part\":{\"type\":\"text\",\"time\":{\"start\":123,\"end\":456}}}}}";
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+    switch (ev2) {
+        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: message.updated finish clears status" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.status = .prompting;
+
+    const data = "{\"payload\":{\"type\":\"message.updated\",\"properties\":{\"info\":{\"role\":\"assistant\",\"finish\":\"stop\"}}}}";
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+    switch (ev2) {
+        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
+        else => try std.testing.expect(false),
+    }
 }
 
 // Integration tests - skipped in unit test runs (require live server)

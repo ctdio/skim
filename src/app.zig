@@ -6223,11 +6223,64 @@ pub const App = struct {
             switch (event) {
                 .message_chunk => |chunk| {
                     // Append delta text to the current agent message
+                    if (mgr.status != .prompting and !mgr.pending_abort and !mgr.stream_complete.load(.acquire)) {
+                        mgr.status = .prompting;
+                    }
                     agent_state.appendToLastAgentMessage(chunk.delta) catch {};
+                    self.needs_render = true;
+                },
+                .thinking_chunk => |chunk| {
+                    if (mgr.status != .prompting and !mgr.pending_abort and !mgr.stream_complete.load(.acquire)) {
+                        mgr.status = .prompting;
+                    }
+                    agent_state.appendToLastThinkingMessage(chunk.delta) catch {};
                     self.needs_render = true;
                 },
                 .message_complete => {
                     // Message finished streaming
+                    if (mgr.status == .prompting) {
+                        mgr.status = .session_active;
+                    }
+                    self.needs_render = true;
+                },
+                .system_message => |msg| {
+                    agent_state.addMessage(.system, msg) catch {};
+                    self.needs_render = true;
+                },
+                .tool_call => |tc| {
+                    agent_state.addToolMessage(
+                        tc.tool_call_id,
+                        tc.tool_name,
+                        tc.title,
+                        tc.command,
+                    ) catch {};
+                    self.needs_render = true;
+                },
+                .tool_update => |tu| {
+                    const status: agent.Message.ToolStatus = switch (tu.status) {
+                        .pending => .pending,
+                        .running => .running,
+                        .completed => .completed,
+                        .failed => .failed,
+                    };
+                    agent_state.updateToolMessage(
+                        tu.tool_call_id,
+                        status,
+                        tu.stdout,
+                        tu.stderr,
+                    ) catch {};
+                    self.needs_render = true;
+                },
+                .tool_diff => |diff| {
+                    agent_state.addDiffMessage(
+                        diff.tool_call_id,
+                        diff.title,
+                        diff.path,
+                        diff.old_text,
+                        diff.new_text,
+                    ) catch |err| {
+                        std.log.err("Failed to add diff message: {any}", .{err});
+                    };
                     self.needs_render = true;
                 },
                 .status_change => |new_status| {
@@ -6270,7 +6323,7 @@ pub const App = struct {
         }
 
         // Auto-send staged message when Opencode returns to idle
-        if (mgr.status == .session_active and agent_state.hasStagedPrompt() and !mgr.pending_abort) {
+        if (mgr.isReadyForAutoSend() and agent_state.hasStagedPrompt() and !mgr.pending_abort) {
             if (agent_state.isStagedShellCommand()) {
                 const staged = agent_state.getStagedPrompt();
                 agent_mode.handleShellCommand(self, agent_state, staged) catch |err| {
