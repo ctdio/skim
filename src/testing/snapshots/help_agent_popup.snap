@@ -16,7 +16,5 @@
 │  i/a/I/A        │ Enter insert                                       │
 │  Space s        │ Toggle diff view                                   │
 │  Space t        │ Cycle model variant                                │
-│  ?              │ This help                                          │
-│                                                                      │
 │                                                                      │
 ╰───────────────────────── ? or Esc to close ──────────────────────────╯

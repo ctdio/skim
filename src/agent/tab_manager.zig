@@ -177,7 +177,7 @@ pub const AgentTab = struct {
             if (mgr.isPrompting()) return true;
         }
         if (self.opencode_manager) |mgr| {
-            if (mgr.status == .prompting) return true;
+            if (mgr.isThinking()) return true;
         }
         return false;
     }
@@ -188,7 +188,7 @@ pub const AgentTab = struct {
             if (mgr.status == .session_active or mgr.status == .prompting) return true;
         }
         if (self.opencode_manager) |mgr| {
-            if (!mgr.pending_abort and (mgr.status == .session_active or mgr.status == .prompting)) return true;
+            if (!mgr.pending_abort and mgr.isReadyForPrompt()) return true;
         }
         return false;
     }

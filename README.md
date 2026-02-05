@@ -4,7 +4,7 @@ A keyboard-driven TUI for code reviews built in Zig.
 
 ## Features
 
-- Vim-style modal interface (hjkl, Ctrl-n/p)
+- Vim-style modal interface (hjkl, Ctrl-n/p navigation)
 - File-by-file diff navigation
 - Unified and side-by-side views
 - Hunk view modes: show all lines, only additions, or only deletions

@@ -175,6 +175,7 @@ pub const EventType = enum {
     session_updated,
     session_deleted,
     session_idle,
+    session_status,
     session_error,
 
     // Message events
@@ -198,6 +199,7 @@ pub const EventType = enum {
         if (std.mem.eql(u8, s, "session.updated")) return .session_updated;
         if (std.mem.eql(u8, s, "session.deleted")) return .session_deleted;
         if (std.mem.eql(u8, s, "session.idle")) return .session_idle;
+        if (std.mem.eql(u8, s, "session.status")) return .session_status;
         if (std.mem.eql(u8, s, "session.error")) return .session_error;
         if (std.mem.eql(u8, s, "message.created")) return .message_created;
         if (std.mem.eql(u8, s, "message.updated")) return .message_updated;
