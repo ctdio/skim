@@ -21,6 +21,13 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
+    // Check for pending question prompt
+    if (agent_state.getPendingQuestion()) |question| {
+        if (try handleQuestionPrompt(app, agent_state, question, key)) {
+            return;
+        }
+    }
+
     // Check for pending permission prompt
     if (app.getActiveAcpManager()) |mgr| {
         if (mgr.getPendingPermission()) |perm| {
@@ -374,23 +381,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     if (key.codepoint == 27 and agent_state.input.vim.vim_mode == .normal) {
         if (agent_state.recordEscPress()) {
             // Double-ESC detected - try to cancel the prompt
-            var cancelled = false;
-
-            // Try ACP manager first
-            if (app.getActiveAcpManager()) |mgr| {
-                if (mgr.cancelPrompt()) {
-                    cancelled = true;
-                }
-            }
-
-            // Try OpenCode manager if ACP didn't cancel
-            if (!cancelled) {
-                if (app.getActiveOpencodeManager()) |mgr| {
-                    if (mgr.cancelPrompt()) {
-                        cancelled = true;
-                    }
-                }
-            }
+            const tab = if (app.tab_manager) |*tm| tm.activeTab() else null;
+            const cancelled = if (tab) |t| (if (t.manager) |m| m.cancelPrompt() else false) else false;
 
             if (cancelled) {
                 agent_state.addMessage(.system, "Interrupted") catch |err| {
@@ -993,21 +985,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                         const staged = agent_state.getStagedPrompt();
 
                         // Interrupt agent and send staged message
-                        var interrupted = false;
-                        var interrupted_opencode = false;
-                        if (app.getActiveAcpManager()) |mgr| {
-                            if (mgr.cancelPrompt()) {
-                                interrupted = true;
-                            }
-                        }
-                        if (!interrupted) {
-                            if (app.getActiveOpencodeManager()) |mgr| {
-                                if (mgr.cancelPrompt()) {
-                                    interrupted = true;
-                                    interrupted_opencode = true;
-                                }
-                            }
-                        }
+                        const active_tab = if (app.tab_manager) |*tm| tm.activeTab() else null;
+                        const interrupted = if (active_tab) |t| (if (t.manager) |m| m.cancelPrompt() else false) else false;
+                        const interrupted_opencode = if (active_tab) |t| (if (t.manager) |m| switch (m) {
+                            .opencode => interrupted,
+                            .acp => false,
+                        } else false) else false;
                         if (interrupted) {
                             std.log.info("Agent: Interrupted via staged message immediate send", .{});
                             try agent_state.addMessage(.system, "Interrupted");
@@ -1586,53 +1569,192 @@ pub fn sendPromptToActiveManager(app: *App, text: []const u8) !void {
     };
     const agent_state = &tab.agent_state;
 
-    // Try Opencode manager first
-    if (tab.opencode_manager) |mgr| {
-        switch (mgr.status) {
-            .disconnected, .failed => {
-                try agent_state.addMessage(.system, "Opencode disconnected or failed. Close and reopen panel to reconnect.");
-            },
-            .idle, .starting_server, .connecting => {
-                // Connection in progress - queue the message (MVP: just show message)
-                try agent_state.addMessage(.system, "Opencode connecting... please wait.");
-            },
-            .session_active, .prompting => {
-                // MVP limitation: simple text only (no @file, no shell outputs)
-                // Log if we're discarding unsupported features
-                if (std.mem.indexOf(u8, text, "@") != null) {
-                    std.log.info("Opencode MVP: @file references not supported, sending as literal text", .{});
-                }
-                // Discard queued shell outputs for Opencode (MVP limitation)
-                if (agent_state.hasQueuedShellOutputs()) {
-                    std.log.info("Opencode MVP: Shell outputs not supported, discarding", .{});
-                    _ = agent_state.takeQueuedShellOutputs();
-                }
-
-                // Send simple text prompt
-                mgr.sendPrompt(text) catch |err| {
-                    std.log.err("Opencode: Failed to send prompt: {any}", .{err});
-                    try agent_state.addMessage(.system, "Failed to send prompt to Opencode");
-                };
-            },
-        }
+    const m = tab.manager orelse {
+        try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
         return;
+    };
+
+    switch (m) {
+        .opencode => |mgr| {
+            switch (mgr.status) {
+                .disconnected, .failed => {
+                    try agent_state.addMessage(.system, "Opencode disconnected or failed. Close and reopen panel to reconnect.");
+                },
+                .idle, .starting_server, .connecting => {
+                    try agent_state.addMessage(.system, "Opencode connecting... please wait.");
+                },
+                .session_active, .prompting => {
+                    if (std.mem.indexOf(u8, text, "@") != null) {
+                        std.log.info("Opencode MVP: @file references not supported, sending as literal text", .{});
+                    }
+                    if (agent_state.hasQueuedShellOutputs()) {
+                        std.log.info("Opencode MVP: Shell outputs not supported, discarding", .{});
+                        _ = agent_state.takeQueuedShellOutputs();
+                    }
+                    mgr.sendPrompt(text) catch |err| {
+                        std.log.err("Opencode: Failed to send prompt: {any}", .{err});
+                        try agent_state.addMessage(.system, "Failed to send prompt to Opencode");
+                    };
+                },
+            }
+        },
+        .acp => |mgr| {
+            if (mgr.status == .disconnected) {
+                try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
+            } else if (mgr.status == .failed) {
+                try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
+            } else {
+                try sendPromptWithFiles(app, mgr, text);
+            }
+        },
+    }
+}
+
+fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *state.PendingQuestion, key: vaxis.Key) !bool {
+    if (pending.questions.len == 0) return false;
+
+    const question = &pending.questions[pending.active_index];
+    const q_state = &pending.states[pending.active_index];
+    const options_len = question.options.len;
+
+    const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.down or
+        (key.codepoint == 'j' and !key.mods.ctrl);
+    const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.up or
+        (key.codepoint == 'k' and !key.mods.ctrl);
+
+    if (q_state.custom_active) {
+        if (key.codepoint == vaxis.Key.enter) {
+            try submitPendingQuestion(app, agent_state, pending);
+            return true;
+        }
+        if (key.codepoint == 27) {
+            q_state.custom_active = false;
+            app.needs_render = true;
+            return true;
+        }
+        _ = try agent.InputEditor.handleKey(&q_state.custom_input, key, app.allocator);
+        app.needs_render = true;
+        return true;
     }
 
-    // Fallback to ACP manager
-    if (tab.acp_manager) |mgr| {
-        if (mgr.status == .disconnected) {
-            try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
-        } else if (mgr.status == .failed) {
-            try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
-        } else {
-            // ACP supports full features - parse @file references and send
-            try sendPromptWithFiles(app, mgr, text);
+    if (key.codepoint == vaxis.Key.tab) {
+        if (pending.questions.len > 1) {
+            q_state.custom_active = false;
+            pending.active_index = (pending.active_index + 1) % pending.questions.len;
+            app.needs_render = true;
+            return true;
         }
-        return;
     }
 
-    // No manager available
-    try agent_state.addMessage(.system, "No agent configured. Close and reopen panel.");
+    if (is_down and options_len > 0) {
+        q_state.cursor_index = (q_state.cursor_index + 1) % options_len;
+        app.needs_render = true;
+        return true;
+    }
+    if (is_up and options_len > 0) {
+        q_state.cursor_index = if (q_state.cursor_index == 0) options_len - 1 else q_state.cursor_index - 1;
+        app.needs_render = true;
+        return true;
+    }
+
+    if (key.codepoint >= '1' and key.codepoint <= '9' and options_len > 0) {
+        const idx = @as(usize, @intCast(key.codepoint - '1'));
+        if (idx < options_len) {
+            q_state.cursor_index = idx;
+            if (question.multiple) {
+                q_state.selected[idx] = !q_state.selected[idx];
+                if (question.options[idx].is_custom and q_state.selected[idx]) {
+                    q_state.custom_active = true;
+                }
+            } else {
+                @memset(q_state.selected, false);
+                q_state.selected[idx] = true;
+                if (question.options[idx].is_custom) {
+                    q_state.custom_active = true;
+                }
+            }
+            app.needs_render = true;
+            return true;
+        }
+    }
+
+    if (question.multiple and key.codepoint == ' ' and options_len > 0) {
+        const idx = q_state.cursor_index;
+        q_state.selected[idx] = !q_state.selected[idx];
+        if (question.options[idx].is_custom and q_state.selected[idx]) {
+            q_state.custom_active = true;
+        }
+        app.needs_render = true;
+        return true;
+    }
+
+    if (key.codepoint == vaxis.Key.enter) {
+        if (question.multiple) {
+            try advanceQuestionOrSubmit(app, agent_state, pending);
+            return true;
+        }
+
+        if (options_len > 0) {
+            const idx = q_state.cursor_index;
+            @memset(q_state.selected, false);
+            q_state.selected[idx] = true;
+            if (question.options[idx].is_custom and q_state.custom_input.getText().len == 0) {
+                q_state.custom_active = true;
+                app.needs_render = true;
+                return true;
+            }
+        }
+
+        try advanceQuestionOrSubmit(app, agent_state, pending);
+        return true;
+    }
+
+    if (key.codepoint == 27) {
+        agent_state.clearPendingQuestion();
+        app.needs_render = true;
+        return true;
+    }
+
+    // Allow scrolling during question prompts
+    if (key.mods.ctrl and key.codepoint == 'd') {
+        agent_state.follow_bottom = false;
+        const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
+        agent_state.scrollDown(scroll_amount);
+        app.needs_render = true;
+        return true;
+    }
+
+    if (key.mods.ctrl and key.codepoint == 'u') {
+        agent_state.follow_bottom = false;
+        const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
+        agent_state.scrollUp(scroll_amount);
+        app.needs_render = true;
+        return true;
+    }
+
+    return true;
+}
+
+fn advanceQuestionOrSubmit(app: *App, agent_state: *state.AgentState, pending: *state.PendingQuestion) !void {
+    if (pending.active_index + 1 < pending.questions.len) {
+        pending.active_index += 1;
+        return;
+    }
+    try submitPendingQuestion(app, agent_state, pending);
+}
+
+fn submitPendingQuestion(app: *App, agent_state: *state.AgentState, pending: *state.PendingQuestion) !void {
+    _ = pending;
+    const answer_opt = try agent_state.buildPendingQuestionAnswer(app.allocator);
+    const answer = answer_opt orelse return;
+    defer app.allocator.free(answer);
+
+    try agent_state.addMessage(.user, answer);
+    try sendPromptToActiveManager(app, answer);
+    agent_state.clearPendingQuestion();
+    app.needs_render = true;
 }
 
 /// Send a prompt, parsing @file references and embedding file content.

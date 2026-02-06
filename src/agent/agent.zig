@@ -17,10 +17,16 @@ pub const render = @import("render.zig");
 pub const command_palette = @import("command_palette.zig");
 pub const agent_help = @import("agent_help.zig");
 pub const markdown = @import("markdown/markdown.zig");
+pub const events = @import("events.zig");
+pub const manager_handle = @import("manager_handle.zig");
 
 // Re-export main types for convenience
 pub const AgentState = state.AgentState;
 pub const Message = state.Message;
+pub const PendingQuestion = state.PendingQuestion;
+pub const QuestionData = state.QuestionData;
+pub const QuestionOptionData = state.QuestionOptionData;
+pub const QuestionPromptData = state.QuestionPromptData;
 pub const InputEditor = input_editor.InputEditor;
 pub const TabManager = tab_manager.TabManager;
 pub const AgentTab = tab_manager.AgentTab;

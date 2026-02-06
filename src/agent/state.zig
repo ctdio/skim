@@ -589,6 +589,84 @@ fn compareScoredMatches(_: void, a: ScoredMatch, b: ScoredMatch) bool {
 }
 
 // =============================================================================
+// Question Prompt Types
+// =============================================================================
+
+pub const QuestionOptionData = struct {
+    label: []const u8,
+    description: ?[]const u8 = null,
+};
+
+pub const QuestionData = struct {
+    header: ?[]const u8 = null,
+    question: []const u8,
+    options: []const QuestionOptionData = &.{},
+    multiple: bool = false,
+};
+
+pub const QuestionPromptData = struct {
+    id: ?[]const u8 = null,
+    tool_call_id: ?[]const u8 = null,
+    questions: []const QuestionData = &.{},
+};
+
+pub const QuestionOption = struct {
+    label: []const u8,
+    description: ?[]const u8 = null,
+    is_custom: bool = false,
+};
+
+pub const Question = struct {
+    header: ?[]const u8 = null,
+    prompt: []const u8,
+    options: []QuestionOption,
+    multiple: bool,
+    custom_index: ?usize = null,
+
+    fn deinit(self: *Question, allocator: Allocator) void {
+        if (self.header) |h| allocator.free(h);
+        allocator.free(self.prompt);
+        for (self.options) |opt| {
+            allocator.free(opt.label);
+            if (opt.description) |desc| allocator.free(desc);
+        }
+        allocator.free(self.options);
+    }
+};
+
+pub const QuestionState = struct {
+    cursor_index: usize,
+    selected: []bool,
+    custom_active: bool,
+    custom_input: InputEditor.State,
+
+    fn deinit(self: *QuestionState, allocator: Allocator) void {
+        allocator.free(self.selected);
+    }
+};
+
+pub const PendingQuestion = struct {
+    id: ?[]const u8 = null,
+    tool_call_id: ?[]const u8 = null,
+    questions: []Question,
+    states: []QuestionState,
+    active_index: usize,
+
+    fn deinit(self: *PendingQuestion, allocator: Allocator) void {
+        if (self.id) |id| allocator.free(id);
+        if (self.tool_call_id) |id| allocator.free(id);
+        for (self.questions) |*question| {
+            question.deinit(allocator);
+        }
+        for (self.states) |*state| {
+            state.deinit(allocator);
+        }
+        allocator.free(self.questions);
+        allocator.free(self.states);
+    }
+};
+
+// =============================================================================
 // Agent State
 // =============================================================================
 
@@ -640,6 +718,8 @@ pub const AgentState = struct {
     history: HistoryState,
     // Expanded user messages (collapsed by default, toggle with 'o' in history mode)
     expanded_user_messages: std.AutoHashMap(usize, void),
+    // Pending question prompt (Opencode question tool)
+    pending_question: ?PendingQuestion,
 
     pub const PanelSide = enum {
         left,
@@ -691,6 +771,7 @@ pub const AgentState = struct {
             .help_scroll_offset = 0,
             .history = HistoryState.init(),
             .expanded_user_messages = std.AutoHashMap(usize, void).init(allocator),
+            .pending_question = null,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -705,6 +786,9 @@ pub const AgentState = struct {
             msg.deinit(self.allocator);
         }
         self.messages.deinit(self.allocator);
+        if (self.pending_question) |*question| {
+            question.deinit(self.allocator);
+        }
         self.line_map.deinit();
         self.plan.deinit();
         for (self.available_commands.items) |*cmd| {
@@ -715,6 +799,185 @@ pub const AgentState = struct {
         self.shell.deinit();
         self.cmd_palette.deinit();
         self.expanded_user_messages.deinit();
+    }
+
+    pub fn hasPendingQuestion(self: *const AgentState) bool {
+        return self.pending_question != null;
+    }
+
+    pub fn getPendingQuestion(self: *AgentState) ?*PendingQuestion {
+        if (self.pending_question) |*question| return question;
+        return null;
+    }
+
+    pub fn clearPendingQuestion(self: *AgentState) void {
+        if (self.pending_question) |*question| {
+            question.deinit(self.allocator);
+            self.pending_question = null;
+        }
+    }
+
+    pub fn setPendingQuestion(self: *AgentState, prompt: QuestionPromptData) !void {
+        self.clearPendingQuestion();
+        if (prompt.questions.len == 0) return;
+
+        const id_copy: ?[]const u8 = if (prompt.id) |id|
+            try self.allocator.dupe(u8, id)
+        else
+            null;
+        errdefer if (id_copy) |id| self.allocator.free(id);
+
+        const tool_call_id_copy: ?[]const u8 = if (prompt.tool_call_id) |id|
+            try self.allocator.dupe(u8, id)
+        else
+            null;
+        errdefer if (tool_call_id_copy) |id| self.allocator.free(id);
+
+        var questions = try self.allocator.alloc(Question, prompt.questions.len);
+        errdefer self.allocator.free(questions);
+        var states = try self.allocator.alloc(QuestionState, prompt.questions.len);
+        errdefer self.allocator.free(states);
+
+        const custom_label = "Type your own answer";
+        const custom_desc = "Something else";
+
+        for (prompt.questions, 0..) |q, idx| {
+            const header_copy: ?[]const u8 = if (q.header) |h|
+                try self.allocator.dupe(u8, h)
+            else
+                null;
+            errdefer if (header_copy) |h| self.allocator.free(h);
+
+            const prompt_copy = try self.allocator.dupe(u8, q.question);
+            errdefer self.allocator.free(prompt_copy);
+
+            var custom_index: ?usize = null;
+            for (q.options, 0..) |opt, opt_idx| {
+                if (std.ascii.eqlIgnoreCase(opt.label, custom_label) or std.ascii.eqlIgnoreCase(opt.label, "Other")) {
+                    custom_index = opt_idx;
+                    break;
+                }
+            }
+
+            const add_custom = custom_index == null;
+            const options_len = q.options.len + (if (add_custom) @as(usize, 1) else 0);
+            var options = try self.allocator.alloc(QuestionOption, options_len);
+            errdefer self.allocator.free(options);
+
+            for (q.options, 0..) |opt, opt_idx| {
+                const label_copy = try self.allocator.dupe(u8, opt.label);
+                errdefer self.allocator.free(label_copy);
+                const desc_copy: ?[]const u8 = if (opt.description) |d|
+                    try self.allocator.dupe(u8, d)
+                else
+                    null;
+                errdefer if (desc_copy) |d| self.allocator.free(d);
+
+                options[opt_idx] = .{
+                    .label = label_copy,
+                    .description = desc_copy,
+                    .is_custom = false,
+                };
+            }
+
+            if (add_custom) {
+                const label_copy = try self.allocator.dupe(u8, custom_label);
+                errdefer self.allocator.free(label_copy);
+                const desc_copy = try self.allocator.dupe(u8, custom_desc);
+                errdefer self.allocator.free(desc_copy);
+                options[options_len - 1] = .{
+                    .label = label_copy,
+                    .description = desc_copy,
+                    .is_custom = true,
+                };
+                custom_index = options_len - 1;
+            } else if (custom_index) |custom_idx| {
+                options[custom_idx].is_custom = true;
+            }
+
+            const selected = try self.allocator.alloc(bool, options_len);
+            @memset(selected, false);
+
+            questions[idx] = .{
+                .header = header_copy,
+                .prompt = prompt_copy,
+                .options = options,
+                .multiple = q.multiple,
+                .custom_index = custom_index,
+            };
+
+            states[idx] = .{
+                .cursor_index = 0,
+                .selected = selected,
+                .custom_active = false,
+                .custom_input = InputEditor.State.init(),
+            };
+        }
+
+        self.pending_question = .{
+            .id = id_copy,
+            .tool_call_id = tool_call_id_copy,
+            .questions = questions,
+            .states = states,
+            .active_index = 0,
+        };
+    }
+
+    pub fn buildPendingQuestionAnswer(self: *AgentState, allocator: Allocator) !?[]const u8 {
+        const pending = self.pending_question orelse return null;
+
+        var output: std.ArrayList(u8) = .{};
+        errdefer output.deinit(allocator);
+
+        const multi = pending.questions.len > 1;
+
+        for (pending.questions, 0..) |question, idx| {
+            const state = pending.states[idx];
+
+            var parts: std.ArrayList([]const u8) = .{};
+            defer parts.deinit(allocator);
+
+            for (question.options, 0..) |opt, opt_idx| {
+                if (!state.selected[opt_idx]) continue;
+
+                if (opt.is_custom) {
+                    const custom_text = std.mem.trim(u8, state.custom_input.getText(), &std.ascii.whitespace);
+                    if (custom_text.len > 0) {
+                        try parts.append(allocator, custom_text);
+                        continue;
+                    }
+                }
+
+                try parts.append(allocator, opt.label);
+            }
+
+            const include_header = multi or (question.header != null and question.header.?.len > 0);
+            if (include_header) {
+                const header = question.header orelse blk: {
+                    var buf: [24]u8 = undefined;
+                    const fallback = std.fmt.bufPrint(&buf, "Question {d}", .{idx + 1}) catch "Question";
+                    break :blk fallback;
+                };
+                try output.writer(allocator).print("{s}: ", .{header});
+            }
+
+            if (parts.items.len == 0) {
+                try output.writer(allocator).writeAll("No answer");
+            } else {
+                for (parts.items, 0..) |part, part_idx| {
+                    if (part_idx > 0) try output.append(allocator, ',');
+                    if (part_idx > 0) try output.append(allocator, ' ');
+                    try output.appendSlice(allocator, part);
+                }
+            }
+
+            if (idx + 1 < pending.questions.len) {
+                try output.append(allocator, '\n');
+            }
+        }
+
+        const owned = try output.toOwnedSlice(allocator);
+        return @as(?[]const u8, owned);
     }
 
     /// Add a message to the conversation history

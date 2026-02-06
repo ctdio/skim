@@ -117,14 +117,13 @@ pub fn terminateServer(process: *std.process.Child) void {
     // Wait up to 2 seconds for graceful exit
     const start = std.time.milliTimestamp();
     while (std.time.milliTimestamp() - start < 2000) {
-        // Try to collect exit status without blocking
-        _ = process.wait() catch {
-            // Process still running, wait a bit
-            std.Thread.sleep(100 * std.time.ns_per_ms);
-            continue;
-        };
-        log.info("Server terminated gracefully", .{});
-        return;
+        // Non-blocking check for exit
+        const wait_result = std.posix.waitpid(process.id, std.c.W.NOHANG);
+        if (wait_result.pid != 0) {
+            log.info("Server terminated gracefully", .{});
+            return;
+        }
+        std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 
     // Force kill if still running
@@ -133,7 +132,7 @@ pub fn terminateServer(process: *std.process.Child) void {
     };
 
     // Collect the zombie
-    _ = process.wait() catch {};
+    _ = std.posix.waitpid(process.id, 0);
     log.info("Server terminated forcefully", .{});
 }
 

@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const state = @import("state.zig");
 const AgentState = state.AgentState;
+const question_prompt = @import("question_prompt.zig");
 const agent_help = @import("agent_help.zig");
 const OwnedPlanEntry = state.OwnedPlanEntry;
 const Message = state.Message;
@@ -917,10 +918,13 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 
     // Check if there's a pending permission
     const pending_permission = if (app.getActiveAcpManager()) |mgr| mgr.getPendingPermission() else null;
+    const pending_question = agent_state.getPendingQuestion();
 
     // Calculate height based on mode or pending permission
     // Note: model_selection mode renders as a centered dialog overlay, not in the input area
-    const visible_lines = if (pending_permission) |perm| blk: {
+    const visible_lines = if (pending_question) |question| blk: {
+        break :blk question_prompt.countQuestionPromptLines(app.allocator, win.width, question);
+    } else if (pending_permission) |perm| blk: {
         // Separator (1) + title (1) + description (0 or 1) + options + footer (1)
         const desc_rows: usize = if (perm.description != null) 1 else 0;
         break :blk 3 + desc_rows + perm.options.len;
@@ -1048,7 +1052,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         .width = win.width,
         .height = @intCast(input_height),
     });
-    try renderInputArea(app, input_win, agent_state, is_focused, pending_permission);
+    try renderInputArea(app, input_win, agent_state, is_focused, pending_permission, pending_question);
 
     // Render slash command menu as overlay (if visible)
     if (agent_state.slash_menu.visible) {
@@ -2224,7 +2228,14 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
     }
 }
 
-fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_focused: bool, pending_permission: ?*AcpManager.PendingPermission) !void {
+fn renderInputArea(
+    app: *App,
+    win: vaxis.Window,
+    agent_state: *AgentState,
+    is_focused: bool,
+    pending_permission: ?*AcpManager.PendingPermission,
+    pending_question: ?*state.PendingQuestion,
+) !void {
     if (win.height == 0) return;
 
     // Fill the entire input area with spaces to prevent artifacts from previous renders
@@ -2237,6 +2248,12 @@ fn renderInputArea(app: *App, win: vaxis.Window, agent_state: *AgentState, is_fo
     win.fill(blank_cell);
 
     // Note: model_selection mode is now rendered as a centered dialog overlay in renderAgentPanel
+
+    // Check if there's a pending question - render inline question prompt instead
+    if (pending_question) |question| {
+        try question_prompt.renderInlineQuestionPrompt(app.allocator, win, question);
+        return;
+    }
 
     // Check if there's a pending permission - render inline permission prompt instead
     if (pending_permission) |perm| {

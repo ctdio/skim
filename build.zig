@@ -201,6 +201,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     opencode_tests.root_module.addImport("build_options", build_options_module);
+    opencode_tests.linkLibC();
     const run_opencode_tests = b.addRunArtifact(opencode_tests);
     test_step.dependOn(&run_opencode_tests.step);
 
@@ -306,6 +307,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    const question_prompt_root_module = b.createModule(.{
+        .root_source_file = b.path("src/question_prompt_test_root.zig"),
+    });
+    question_prompt_root_module.addImport("vaxis", vaxis);
+    question_prompt_root_module.addImport("tree-sitter", tree_sitter);
+    question_prompt_root_module.addImport("build_options", build_options_module);
     snapshot_scenarios_tests.root_module.addImport("vaxis", vaxis);
     snapshot_scenarios_tests.root_module.addImport("tree-sitter", tree_sitter);
     snapshot_scenarios_tests.root_module.addImport("markdown", markdown_module);
@@ -316,6 +323,24 @@ pub fn build(b: *std.Build) void {
     snapshot_scenarios_tests.linkLibC();
     const run_snapshot_scenarios_tests = b.addRunArtifact(snapshot_scenarios_tests);
     test_step.dependOn(&run_snapshot_scenarios_tests.step);
+
+    const question_prompt_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/question_prompt_scenarios.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    question_prompt_tests.root_module.addImport("vaxis", vaxis);
+    question_prompt_tests.root_module.addImport("tree-sitter", tree_sitter);
+    question_prompt_tests.root_module.addImport("build_options", build_options_module);
+    question_prompt_tests.root_module.addImport("question_prompt_root", question_prompt_root_module);
+    for (grammars) |grammar| {
+        question_prompt_tests.linkLibrary(grammar);
+    }
+    question_prompt_tests.linkLibC();
+    const run_question_prompt_tests = b.addRunArtifact(question_prompt_tests);
+    test_step.dependOn(&run_question_prompt_tests.step);
 }
 
 // Grammar metadata for building

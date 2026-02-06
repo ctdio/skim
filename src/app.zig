@@ -1163,7 +1163,7 @@ pub const App = struct {
     pub fn getActiveAcpManager(self: *App) ?*acp.AcpManager {
         if (self.tab_manager) |*tm| {
             if (tm.activeTab()) |tab| {
-                return tab.acp_manager;
+                return tab.getActiveAcpManager();
             }
         }
         return null;
@@ -1270,7 +1270,7 @@ pub const App = struct {
         // Check tab managers first
         if (self.tab_manager) |tm| {
             for (tm.tabs.items) |*tab| {
-                if (tab.acp_manager) |mgr| {
+                if (tab.getActiveAcpManager()) |mgr| {
                     if (mgr.hasPendingOutput()) return true;
                 }
             }
@@ -1290,7 +1290,7 @@ pub const App = struct {
     pub fn getActiveOpencodeManager(self: *App) ?*opencode.OpencodeManager {
         if (self.tab_manager) |*tm| {
             if (tm.activeTab()) |tab| {
-                return tab.opencode_manager;
+                return tab.getActiveOpencodeManager();
             }
         }
         return null;
@@ -1665,7 +1665,7 @@ pub const App = struct {
             // Poll ACP agent for updates (only when there's an active connection or connecting thread)
             const has_tab_acp = if (self.tab_manager) |tm| blk: {
                 for (tm.tabs.items) |*tab| {
-                    if (tab.acp_manager != null) break :blk true;
+                    if (tab.getActiveAcpManager() != null) break :blk true;
                 }
                 break :blk false;
             } else false;
@@ -1690,7 +1690,7 @@ pub const App = struct {
             // Poll Opencode agent for updates (only when there's an active connection or connecting thread)
             const has_tab_opencode = if (self.tab_manager) |tm| blk: {
                 for (tm.tabs.items) |*tab| {
-                    if (tab.opencode_manager != null) break :blk true;
+                    if (tab.getActiveOpencodeManager() != null) break :blk true;
                 }
                 break :blk false;
             } else false;
@@ -3178,11 +3178,7 @@ pub const App = struct {
                 }
                 if (self.tab_manager) |*tm| {
                     if (tm.activeTab()) |tab| {
-                        if (tab.acp_manager) |mgr| {
-                            mgr.deinit();
-                            self.allocator.destroy(mgr);
-                            tab.acp_manager = null;
-                        }
+                        tab.disconnectAll();
                     }
                 }
                 // Reload agents and show selection
@@ -5478,7 +5474,7 @@ pub const App = struct {
             if (ctx.app.tab_manager) |*tm| {
                 if (tm.findTabById(ctx.tab_id)) |idx| {
                     if (tm.getTab(idx)) |tab| {
-                        if (tab.acp_manager) |m| {
+                        if (tab.getActiveAcpManager()) |m| {
                             break :blk m;
                         }
                     }
@@ -5626,11 +5622,7 @@ pub const App = struct {
         }
 
         // Clean up any existing manager on target tab
-        if (target_tab.acp_manager) |old_mgr| {
-            old_mgr.deinit();
-            self.allocator.destroy(old_mgr);
-            target_tab.acp_manager = null;
-        }
+        target_tab.disconnectAll();
 
         // Create and initialize the manager with discovering status
         const mgr = try self.allocator.create(acp.AcpManager);
@@ -5643,7 +5635,7 @@ pub const App = struct {
         }
 
         // Store directly in target tab
-        target_tab.acp_manager = mgr;
+        target_tab.manager = .{ .acp = mgr };
         self.connecting_tab_id = target_tab.id;
 
         // Clear pending tab selection
@@ -5672,7 +5664,7 @@ pub const App = struct {
             self.showStatusMessage("Failed to start connection");
             self.allocator.destroy(ctx);
             // Clean up the manager we stored in the tab
-            target_tab.acp_manager = null;
+            target_tab.manager = null;
             mgr.deinit();
             self.allocator.destroy(mgr);
             self.connecting_tab_id = null;
@@ -5813,10 +5805,8 @@ pub const App = struct {
     pub fn stopAcpSession(self: *App) void {
         if (self.tab_manager) |*tm| {
             if (tm.activeTab()) |tab| {
-                if (tab.acp_manager) |mgr| {
-                    mgr.deinit();
-                    self.allocator.destroy(mgr);
-                    tab.acp_manager = null;
+                if (tab.manager != null) {
+                    tab.disconnectAll();
                     self.showStatusMessage("Disconnected from agent");
                     self.needs_render = true;
                 }
@@ -5893,7 +5883,7 @@ pub const App = struct {
                         }
                         // Clean up failed manager from the tab
                         if (self.getConnectingTab()) |tab| {
-                            tab.acp_manager = null;
+                            tab.manager = null;
                         }
                         mgr.deinit();
                         self.allocator.destroy(mgr);
@@ -5916,7 +5906,7 @@ pub const App = struct {
         // Poll all tabs for ACP updates
         if (self.tab_manager) |*tm| {
             for (tm.tabs.items, 0..) |*tab, tab_idx| {
-                const tab_mgr = tab.acp_manager orelse continue;
+                const tab_mgr = tab.getActiveAcpManager() orelse continue;
                 self.pollTabAcpManager(tab_mgr, &tab.agent_state, tab_idx == tm.active_idx);
             }
         }
@@ -5928,7 +5918,7 @@ pub const App = struct {
         if (self.tab_manager) |*tm| {
             if (tm.findTabById(tab_id)) |idx| {
                 if (tm.getTab(idx)) |tab| {
-                    return tab.acp_manager;
+                    return tab.getActiveAcpManager();
                 }
             }
         }
@@ -5983,83 +5973,11 @@ pub const App = struct {
         // Process messages with a limit to prevent UI freezes during high-volume streaming
         const to_process = @min(messages.len, MAX_MESSAGES_PER_FRAME);
 
-        // Process each message (up to limit)
+        // Process each message (up to limit) via unified event conversion
         for (messages[0..to_process]) |msg| {
-            switch (msg.kind) {
-                .agent_text => {
-                    agent_state.appendToLastAgentMessage(msg.text) catch {};
-                    self.needs_render = true;
-                },
-                .agent_thinking => {
-                    agent_state.appendToLastThinkingMessage(msg.text) catch {};
-                    self.needs_render = true;
-                },
-                .tool_call => {
-                    agent_state.addToolMessage(
-                        msg.tool_call_id orelse "",
-                        msg.tool_name,
-                        msg.text,
-                        msg.tool_command,
-                    ) catch {};
-                    self.needs_render = true;
-                },
-                .tool_update => {
-                    if (is_active_tab) {
-                        std.log.info("APP: tool_update id={?s} status={s} stdout_len={?d}", .{
-                            msg.tool_call_id,
-                            @tagName(msg.tool_status),
-                            if (msg.tool_stdout) |s| s.len else null,
-                        });
-                    }
-                    const status: agent.Message.ToolStatus = switch (msg.tool_status) {
-                        .pending => .pending,
-                        .in_progress => .running,
-                        .completed => .completed,
-                        .failed => .failed,
-                    };
-                    agent_state.updateToolMessage(
-                        msg.tool_call_id orelse "",
-                        status,
-                        msg.tool_stdout,
-                        msg.tool_stderr,
-                    ) catch {};
-                    self.needs_render = true;
-                },
-                .tool_diff => {
-                    agent_state.addDiffMessage(
-                        msg.tool_call_id,
-                        msg.text,
-                        msg.diff_path orelse "",
-                        msg.diff_old orelse "",
-                        msg.diff_new orelse "",
-                    ) catch |err| {
-                        std.log.err("Failed to add diff message: {any}", .{err});
-                    };
-                    self.needs_render = true;
-                },
-                .error_msg => {
-                    const err_msg = std.fmt.allocPrint(self.allocator, "[Error: {s}]", .{msg.text}) catch "[Error]";
-                    defer self.allocator.free(err_msg);
-                    agent_state.addMessage(.system, err_msg) catch {};
-                    self.needs_render = true;
-                },
-                .plan_update => {
-                    if (msg.plan_entries) |entries| {
-                        if (is_active_tab) {
-                            std.log.debug("plan_update: received {d} entries", .{entries.len});
-                        }
-                        agent_state.updatePlan(entries) catch |err| {
-                            std.log.err("plan_update: updatePlan failed: {}", .{err});
-                        };
-                    }
-                    self.needs_render = true;
-                },
-                .commands_update => {
-                    if (msg.available_commands) |commands| {
-                        agent_state.updateAvailableCommands(commands) catch {};
-                    }
-                    self.needs_render = true;
-                },
+            if (agent.events.acpMessageToAgentEvent(msg)) |event| {
+                agent.events.processAgentEvent(agent_state, event);
+                self.needs_render = true;
             }
         }
 
@@ -6138,10 +6056,10 @@ pub const App = struct {
                         }
                         // Clean up failed manager from the tab
                         if (self.getConnectingOpencodeTab()) |tab| {
-                            if (tab.opencode_manager) |m| {
+                            if (tab.getActiveOpencodeManager()) |m| {
                                 m.deinit();
                                 self.allocator.destroy(m);
-                                tab.opencode_manager = null;
+                                tab.manager = null;
                             }
                         }
                     }
@@ -6161,7 +6079,7 @@ pub const App = struct {
         // Poll all tabs for Opencode updates
         if (self.tab_manager) |*tm| {
             for (tm.tabs.items, 0..) |*tab, tab_idx| {
-                const tab_mgr = tab.opencode_manager orelse continue;
+                const tab_mgr = tab.getActiveOpencodeManager() orelse continue;
                 self.pollTabOpencodeManager(tab_mgr, &tab.agent_state, tab_idx == tm.active_idx);
             }
         }
@@ -6173,7 +6091,7 @@ pub const App = struct {
         if (self.tab_manager) |*tm| {
             if (tm.findTabById(tab_id)) |idx| {
                 if (tm.getTab(idx)) |tab| {
-                    return tab.opencode_manager;
+                    return tab.getActiveOpencodeManager();
                 }
             }
         }
@@ -6220,83 +6138,36 @@ pub const App = struct {
 
             mgr.last_event_ms = std.time.milliTimestamp();
 
+            // Protocol-specific status management (must happen before unified processing)
             switch (event) {
-                .message_chunk => |chunk| {
-                    // Append delta text to the current agent message
+                .message_chunk, .thinking_chunk => {
                     if (mgr.status != .prompting and !mgr.pending_abort and !mgr.stream_complete.load(.acquire)) {
                         mgr.status = .prompting;
                     }
-                    agent_state.appendToLastAgentMessage(chunk.delta) catch {};
-                    self.needs_render = true;
-                },
-                .thinking_chunk => |chunk| {
-                    if (mgr.status != .prompting and !mgr.pending_abort and !mgr.stream_complete.load(.acquire)) {
-                        mgr.status = .prompting;
-                    }
-                    agent_state.appendToLastThinkingMessage(chunk.delta) catch {};
-                    self.needs_render = true;
                 },
                 .message_complete => {
-                    // Message finished streaming
                     if (mgr.status == .prompting) {
                         mgr.status = .session_active;
                     }
-                    self.needs_render = true;
-                },
-                .system_message => |msg| {
-                    agent_state.addMessage(.system, msg) catch {};
-                    self.needs_render = true;
-                },
-                .tool_call => |tc| {
-                    agent_state.addToolMessage(
-                        tc.tool_call_id,
-                        tc.tool_name,
-                        tc.title,
-                        tc.command,
-                    ) catch {};
-                    self.needs_render = true;
-                },
-                .tool_update => |tu| {
-                    const status: agent.Message.ToolStatus = switch (tu.status) {
-                        .pending => .pending,
-                        .running => .running,
-                        .completed => .completed,
-                        .failed => .failed,
-                    };
-                    agent_state.updateToolMessage(
-                        tu.tool_call_id,
-                        status,
-                        tu.stdout,
-                        tu.stderr,
-                    ) catch {};
-                    self.needs_render = true;
-                },
-                .tool_diff => |diff| {
-                    agent_state.addDiffMessage(
-                        diff.tool_call_id,
-                        diff.title,
-                        diff.path,
-                        diff.old_text,
-                        diff.new_text,
-                    ) catch |err| {
-                        std.log.err("Failed to add diff message: {any}", .{err});
-                    };
-                    self.needs_render = true;
                 },
                 .status_change => |new_status| {
                     mgr.status = new_status;
                     self.needs_render = true;
                 },
-                .err => |err_info| {
-                    const err_msg = std.fmt.allocPrint(self.allocator, "[Opencode Error: {s}]", .{
-                        err_info.message orelse @tagName(err_info.code),
-                    }) catch "[Opencode Error]";
-                    defer self.allocator.free(err_msg);
-                    agent_state.addMessage(.system, err_msg) catch {};
-                    // Ensure UI leaves "Generating..." on errors
+                .err => {
                     mgr.status = .failed;
-                    self.needs_render = true;
                 },
+                .question_prompt => |prompt| {
+                    // Question prompt needs allocator for conversion - handle inline
+                    self.processOpencodeQuestionPrompt(agent_state, prompt);
+                },
+                else => {},
+            }
+
+            // Unified event processing for common events
+            if (agent.events.opencodeEventToAgentEvent(event)) |agent_event| {
+                agent.events.processAgentEvent(agent_state, agent_event);
+                self.needs_render = true;
             }
         }
 
@@ -6348,6 +6219,56 @@ pub const App = struct {
                 self.needs_render = true;
             }
         }
+    }
+
+    /// Process an Opencode question prompt event (needs allocator for conversion)
+    fn processOpencodeQuestionPrompt(self: *App, agent_state: *agent.AgentState, prompt: opencode.Event.QuestionPrompt) void {
+        const question_count = prompt.questions.len;
+        if (question_count > 0) {
+            const questions = self.allocator.alloc(agent.QuestionData, question_count) catch null;
+            if (questions) |question_items| {
+                defer {
+                    for (question_items) |item| {
+                        if (item.options.len > 0) self.allocator.free(item.options);
+                    }
+                    self.allocator.free(question_items);
+                }
+
+                for (prompt.questions, 0..) |question, q_idx| {
+                    const option_count = question.options.len;
+                    const option_items = self.allocator.alloc(agent.QuestionOptionData, option_count) catch {
+                        question_items[q_idx] = .{
+                            .header = question.header,
+                            .question = question.question,
+                            .options = &[_]agent.QuestionOptionData{},
+                            .multiple = question.multiple,
+                        };
+                        continue;
+                    };
+                    for (question.options, 0..) |opt, opt_idx| {
+                        option_items[opt_idx] = .{
+                            .label = opt.label,
+                            .description = opt.description,
+                        };
+                    }
+                    question_items[q_idx] = .{
+                        .header = question.header,
+                        .question = question.question,
+                        .options = option_items,
+                        .multiple = question.multiple,
+                    };
+                }
+
+                agent_state.setPendingQuestion(.{
+                    .id = prompt.id,
+                    .tool_call_id = prompt.tool_call_id,
+                    .questions = question_items,
+                }) catch |err| {
+                    std.log.err("Failed to set pending question: {any}", .{err});
+                };
+            }
+        }
+        self.needs_render = true;
     }
 
     /// Get the diff reference string for display

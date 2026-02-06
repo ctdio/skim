@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 const AgentState = @import("state.zig").AgentState;
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const opencode = @import("../opencode/opencode.zig");
+pub const ManagerHandle = @import("manager_handle.zig").ManagerHandle;
 
 /// Maximum number of tabs allowed
 pub const MAX_TABS: usize = 10;
@@ -18,13 +19,14 @@ const DEFAULT_TAB_NAME = "New Tab";
 /// Maximum length for auto-generated tab names
 const MAX_TAB_NAME_LEN: usize = 24;
 
-/// A single agent tab containing its own state and ACP/Opencode connection
+/// A single agent tab containing its own state and manager connection.
+/// The manager field uses a tagged union enforcing mutual exclusivity
+/// between ACP and Opencode protocols at the type level.
 pub const AgentTab = struct {
     id: u32,
     name: []const u8, // Owned
     agent_state: AgentState,
-    acp_manager: ?*AcpManager, // Owned, nullable until agent spawned
-    opencode_manager: ?*opencode.OpencodeManager, // Owned, nullable - mutual exclusive with acp_manager
+    manager: ?ManagerHandle, // Unified handle - nullable until agent spawned
     allocator: Allocator,
     auto_named: bool, // True if name was auto-generated from first prompt
 
@@ -37,8 +39,7 @@ pub const AgentTab = struct {
             .id = id,
             .name = owned_name,
             .agent_state = AgentState.init(allocator, panel_side),
-            .acp_manager = null,
-            .opencode_manager = null,
+            .manager = null,
             .allocator = allocator,
             .auto_named = false,
         };
@@ -48,29 +49,33 @@ pub const AgentTab = struct {
     pub fn deinit(self: *AgentTab) void {
         self.allocator.free(self.name);
         self.agent_state.deinit();
-        if (self.acp_manager) |mgr| {
-            mgr.deinit();
-            self.allocator.destroy(mgr);
-        }
-        if (self.opencode_manager) |mgr| {
-            mgr.deinit();
-            // Only destroy if thread was cleanly joined
-            // If detached, thread may still access manager - leak it to avoid crash
-            if (mgr.canSafelyDestroy()) {
-                self.allocator.destroy(mgr);
+        if (self.manager) |m| {
+            m.deinit();
+            switch (m) {
+                .acp => |mgr| self.allocator.destroy(mgr),
+                .opencode => |mgr| {
+                    // Only destroy if thread was cleanly joined
+                    // If detached, thread may still access manager - leak it to avoid crash
+                    if (mgr.canSafelyDestroy()) {
+                        self.allocator.destroy(mgr);
+                    }
+                },
             }
         }
     }
 
     /// Create and attach an ACP manager for this tab
     pub fn createAcpManager(self: *AgentTab) !*AcpManager {
-        if (self.acp_manager != null) {
-            return self.acp_manager.?;
+        if (self.manager) |m| {
+            switch (m) {
+                .acp => |mgr| return mgr,
+                .opencode => return error.AlreadyConnected,
+            }
         }
 
         const mgr = try self.allocator.create(AcpManager);
         mgr.* = AcpManager.init(self.allocator);
-        self.acp_manager = mgr;
+        self.manager = .{ .acp = mgr };
         return mgr;
     }
 
@@ -123,91 +128,107 @@ pub const AgentTab = struct {
 
     /// Check if this tab's agent is currently thinking
     pub fn isThinking(self: *const AgentTab) bool {
-        if (self.acp_manager) |mgr| {
-            return mgr.isPrompting();
+        if (self.manager) |m| {
+            return switch (m) {
+                .acp => |mgr| mgr.isPrompting(),
+                .opencode => false,
+            };
         }
         return false;
     }
 
     /// Check if this tab has a pending permission request
     pub fn hasPendingPermission(self: *const AgentTab) bool {
-        if (self.acp_manager) |mgr| {
-            return mgr.getPendingPermission() != null;
+        if (self.manager) |m| {
+            return switch (m) {
+                .acp => |mgr| mgr.getPendingPermission() != null,
+                .opencode => false,
+            };
         }
         return false;
     }
 
     /// Get the active Opencode manager for this tab
     pub fn getActiveOpencodeManager(self: *AgentTab) ?*opencode.OpencodeManager {
-        return self.opencode_manager;
+        if (self.manager) |m| {
+            return switch (m) {
+                .opencode => |mgr| mgr,
+                .acp => null,
+            };
+        }
+        return null;
+    }
+
+    /// Get the active ACP manager for this tab
+    pub fn getActiveAcpManager(self: *AgentTab) ?*AcpManager {
+        if (self.manager) |m| {
+            return switch (m) {
+                .acp => |mgr| mgr,
+                .opencode => null,
+            };
+        }
+        return null;
     }
 
     /// Create and attach an Opencode manager for this tab
     pub fn createOpencodeManager(self: *AgentTab) !*opencode.OpencodeManager {
-        if (self.opencode_manager != null) {
-            return self.opencode_manager.?;
+        if (self.manager) |m| {
+            switch (m) {
+                .opencode => |mgr| return mgr,
+                .acp => return error.AlreadyConnected,
+            }
         }
 
         const mgr = try self.allocator.create(opencode.OpencodeManager);
         mgr.* = opencode.OpencodeManager.init(self.allocator);
-        self.opencode_manager = mgr;
+        self.manager = .{ .opencode = mgr };
         return mgr;
     }
 
-    /// Disconnect all managers (ACP and Opencode)
+    /// Disconnect all managers
     pub fn disconnectAll(self: *AgentTab) void {
-        if (self.acp_manager) |mgr| {
-            mgr.deinit();
-            self.allocator.destroy(mgr);
-            self.acp_manager = null;
-        }
-        if (self.opencode_manager) |mgr| {
-            mgr.deinit();
-            // Only destroy if thread was cleanly joined
-            if (mgr.canSafelyDestroy()) {
-                self.allocator.destroy(mgr);
+        if (self.manager) |m| {
+            m.deinit();
+            switch (m) {
+                .acp => |mgr| self.allocator.destroy(mgr),
+                .opencode => |mgr| {
+                    // Only destroy if thread was cleanly joined
+                    if (mgr.canSafelyDestroy()) {
+                        self.allocator.destroy(mgr);
+                    }
+                },
             }
-            self.opencode_manager = null;
+            self.manager = null;
         }
     }
 
     /// Check if this tab's agent is currently thinking (ACP or Opencode)
     pub fn isThinkingAny(self: *const AgentTab) bool {
-        if (self.acp_manager) |mgr| {
-            if (mgr.isPrompting()) return true;
-        }
-        if (self.opencode_manager) |mgr| {
-            if (mgr.isThinking()) return true;
+        if (self.manager) |m| {
+            return m.isPrompting();
         }
         return false;
     }
 
     /// Check if session is ready (can accept prompts)
     pub fn isSessionReady(self: *const AgentTab) bool {
-        if (self.acp_manager) |mgr| {
-            if (mgr.status == .session_active or mgr.status == .prompting) return true;
-        }
-        if (self.opencode_manager) |mgr| {
-            if (!mgr.pending_abort and mgr.isReadyForPrompt()) return true;
+        if (self.manager) |m| {
+            return m.isReady();
         }
         return false;
     }
 
     /// Check if session is initializing (discovering, connecting, etc.)
     pub fn isSessionInitializing(self: *const AgentTab) bool {
-        if (self.acp_manager) |mgr| {
-            if (mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected) return true;
+        if (self.manager) |m| {
+            return m.isInitializing();
         }
-        if (self.opencode_manager) |mgr| {
-            if (mgr.pending_abort) return true;
-        }
-        // Opencode doesn't have these intermediate states - it connects synchronously
         return false;
     }
 
     /// Check if any manager is connected (has a manager attached)
     pub fn hasManager(self: *const AgentTab) bool {
-        return self.acp_manager != null or self.opencode_manager != null;
+        return self.manager != null;
     }
 };
 
@@ -404,10 +425,15 @@ pub const TabManager = struct {
     pub fn pollAllTabs(self: *TabManager) bool {
         var had_activity = false;
         for (self.tabs.items) |*tab| {
-            if (tab.acp_manager) |mgr| {
-                const messages = mgr.poll() catch continue;
-                if (messages.len > 0) {
-                    had_activity = true;
+            if (tab.manager) |m| {
+                switch (m) {
+                    .acp => |mgr| {
+                        const messages = mgr.poll() catch continue;
+                        if (messages.len > 0) {
+                            had_activity = true;
+                        }
+                    },
+                    .opencode => {},
                 }
             }
         }
@@ -417,10 +443,14 @@ pub const TabManager = struct {
     /// Check if any tab has Opencode activity (has manager or pending events)
     pub fn hasAnyOpencodeActivity(self: *const TabManager) bool {
         for (self.tabs.items) |*tab| {
-            if (tab.opencode_manager) |mgr| {
-                // Manager exists - check if actively prompting or has pending events
-                if (mgr.status == .prompting or mgr.hasPendingEvents() or mgr.pending_abort) {
-                    return true;
+            if (tab.manager) |m| {
+                switch (m) {
+                    .opencode => |mgr| {
+                        if (mgr.status == .prompting or mgr.hasPendingEvents() or mgr.pending_abort) {
+                            return true;
+                        }
+                    },
+                    .acp => {},
                 }
             }
         }
