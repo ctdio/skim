@@ -77,24 +77,11 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.needs_render = true;
         },
         '\r' => { // Enter - select model
-            // Try ACP manager first
-            if (app.getActiveAcpManager()) |mgr| {
-                const models = mgr.getAvailableModels();
-                // Get the actual model index from filtered indices
+            if (app.getActiveManager()) |mgr| {
                 if (app.state.model_selection < app.state.model_filtered_indices.items.len) {
                     const actual_idx = app.state.model_filtered_indices.items[app.state.model_selection];
-                    if (actual_idx < models.len) {
-                        const selected_model = models[actual_idx];
-                        mgr.setModel(selected_model.model_id) catch {};
-                    }
-                }
-            } else if (app.getActiveOpencodeManager()) |mgr| {
-                // Try OpenCode manager
-                const models = mgr.getAvailableModels();
-                if (app.state.model_selection < app.state.model_filtered_indices.items.len) {
-                    const actual_idx = app.state.model_filtered_indices.items[app.state.model_selection];
-                    if (actual_idx < models.len) {
-                        const selected_model = models[actual_idx];
+                    if (actual_idx < mgr.getModelCount()) {
+                        const selected_model = mgr.getModelInfo(actual_idx);
                         mgr.setModelById(selected_model.model_id) catch {};
                     }
                 }

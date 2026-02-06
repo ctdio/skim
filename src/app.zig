@@ -1159,6 +1159,14 @@ pub const App = struct {
         return null;
     }
 
+    /// Get the active manager (ACP or OpenCode) from the current tab
+    pub fn getActiveManager(self: *App) ?agent.tab_manager.ManagerHandle {
+        if (self.tab_manager) |*tm| {
+            if (tm.activeTab()) |tab| return tab.manager;
+        }
+        return null;
+    }
+
     /// Get the active ACP manager from the current tab
     pub fn getActiveAcpManager(self: *App) ?*acp.AcpManager {
         if (self.tab_manager) |*tm| {
@@ -1190,31 +1198,16 @@ pub const App = struct {
 
         const query = self.state.model_filter_query[0..self.state.model_filter_len];
 
-        // Try ACP manager first, then OpenCode
-        if (self.getActiveAcpManager()) |mgr| {
-            const models = mgr.getAvailableModels();
+        if (self.getActiveManager()) |mgr| {
+            const count = mgr.getModelCount();
             if (query.len == 0) {
-                for (0..models.len) |i| {
+                for (0..count) |i| {
                     self.state.model_filtered_indices.append(self.allocator, i) catch {};
                 }
             } else {
-                for (models, 0..) |model, i| {
-                    const name = model.name orelse model.model_id;
-                    if (containsIgnoreCase(name, query) or containsIgnoreCase(model.model_id, query)) {
-                        self.state.model_filtered_indices.append(self.allocator, i) catch {};
-                    }
-                }
-            }
-        } else if (self.getActiveOpencodeManager()) |mgr| {
-            const models = mgr.getAvailableModels();
-            if (query.len == 0) {
-                for (0..models.len) |i| {
-                    self.state.model_filtered_indices.append(self.allocator, i) catch {};
-                }
-            } else {
-                for (models, 0..) |model, i| {
-                    const name = model.name orelse model.model_id;
-                    if (containsIgnoreCase(name, query) or containsIgnoreCase(model.model_id, query)) {
+                for (0..count) |i| {
+                    const model = mgr.getModelInfo(i);
+                    if (containsIgnoreCase(model.name, query) or containsIgnoreCase(model.model_id, query)) {
                         self.state.model_filtered_indices.append(self.allocator, i) catch {};
                     }
                 }
@@ -1300,7 +1293,7 @@ pub const App = struct {
     pub fn isAgentThinking(self: *App) bool {
         if (self.tab_manager) |*tm| {
             if (tm.activeTab()) |tab| {
-                return tab.isThinkingAny();
+                return tab.isThinking();
             }
         }
         return false;
@@ -2220,16 +2213,11 @@ pub const App = struct {
                 std.log.err("Failed to add local slash commands: {any}", .{err});
             };
 
-            // Auto-connect to agent if not connected (check both ACP and Opencode managers)
-            const has_active_agent = blk: {
-                if (self.getActiveAcpManager()) |mgr| {
-                    if (mgr.status != .disconnected) break :blk true;
-                }
-                if (self.getActiveOpencodeManager()) |mgr| {
-                    if (mgr.status != .disconnected) break :blk true;
-                }
-                break :blk false;
-            };
+            // Auto-connect to agent if not connected
+            const has_active_agent = if (self.getActiveManager()) |mgr|
+                !mgr.isDisconnected()
+            else
+                false;
             if (!has_active_agent) {
                 try self.startAcpSession();
             }

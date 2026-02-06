@@ -126,13 +126,10 @@ pub const AgentTab = struct {
         self.auto_named = true;
     }
 
-    /// Check if this tab's agent is currently thinking
+    /// Check if this tab's agent is currently thinking (ACP or Opencode)
     pub fn isThinking(self: *const AgentTab) bool {
         if (self.manager) |m| {
-            return switch (m) {
-                .acp => |mgr| mgr.isPrompting(),
-                .opencode => false,
-            };
+            return m.isPrompting();
         }
         return false;
     }
@@ -200,14 +197,6 @@ pub const AgentTab = struct {
             }
             self.manager = null;
         }
-    }
-
-    /// Check if this tab's agent is currently thinking (ACP or Opencode)
-    pub fn isThinkingAny(self: *const AgentTab) bool {
-        if (self.manager) |m| {
-            return m.isPrompting();
-        }
-        return false;
     }
 
     /// Check if session is ready (can accept prompts)

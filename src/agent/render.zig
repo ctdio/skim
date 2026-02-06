@@ -917,7 +917,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     const text = agent_state.input.getText();
 
     // Check if there's a pending permission
-    const pending_permission = if (app.getActiveAcpManager()) |mgr| mgr.getPendingPermission() else null;
+    const pending_permission = if (app.getActiveManager()) |mgr| mgr.getPendingPermission() else null;
     const pending_question = agent_state.getPendingQuestion();
 
     // Calculate height based on mode or pending permission
@@ -2614,27 +2614,16 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
     var entry_count: usize = 0;
     var current_model_id: ?[]const u8 = null;
 
-    if (app.getActiveAcpManager()) |mgr| {
-        const models = mgr.getAvailableModels();
+    if (app.getActiveManager()) |mgr| {
         current_model_id = mgr.getCurrentModelId();
-        for (models) |m| {
+        const count = mgr.getModelCount();
+        for (0..count) |i| {
             if (entry_count >= entries_buf.len) break;
+            const model = mgr.getModelInfo(i);
             entries_buf[entry_count] = .{
-                .model_id = m.model_id,
-                .name = m.name orelse m.model_id,
-                .description = m.description orelse "",
-            };
-            entry_count += 1;
-        }
-    } else if (app.getActiveOpencodeManager()) |mgr| {
-        const models = mgr.getAvailableModels();
-        current_model_id = mgr.getCurrentModelId();
-        for (models) |m| {
-            if (entry_count >= entries_buf.len) break;
-            entries_buf[entry_count] = .{
-                .model_id = m.model_id,
-                .name = m.name orelse m.model_id,
-                .description = m.description orelse "",
+                .model_id = model.model_id,
+                .name = model.name,
+                .description = model.description,
             };
             entry_count += 1;
         }

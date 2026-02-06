@@ -731,28 +731,21 @@ pub const UI = struct {
         // Normalize models from whichever manager is active (ACP or OpenCode)
         const ModelInfo = struct {
             model_id: []const u8,
-            name: ?[]const u8,
-            description: ?[]const u8,
+            name: []const u8,
+            description: []const u8,
         };
 
         var entries_buf: [256]ModelInfo = undefined;
         var entry_count: usize = 0;
         var current_model_id: ?[]const u8 = null;
 
-        if (app.getActiveAcpManager()) |mgr| {
-            const acp_models = mgr.getAvailableModels();
+        if (app.getActiveManager()) |mgr| {
             current_model_id = mgr.getCurrentModelId();
-            for (acp_models) |m| {
+            const count = mgr.getModelCount();
+            for (0..count) |i| {
                 if (entry_count >= entries_buf.len) break;
-                entries_buf[entry_count] = .{ .model_id = m.model_id, .name = m.name, .description = m.description };
-                entry_count += 1;
-            }
-        } else if (app.getActiveOpencodeManager()) |mgr| {
-            const oc_models = mgr.getAvailableModels();
-            current_model_id = mgr.getCurrentModelId();
-            for (oc_models) |m| {
-                if (entry_count >= entries_buf.len) break;
-                entries_buf[entry_count] = .{ .model_id = m.model_id, .name = m.name, .description = m.description };
+                const model = mgr.getModelInfo(i);
+                entries_buf[entry_count] = .{ .model_id = model.model_id, .name = model.name, .description = model.description };
                 entry_count += 1;
             }
         }
@@ -772,20 +765,18 @@ pub const UI = struct {
         var max_name_len: usize = 0;
         var max_desc_len: usize = 0;
         for (models) |model| {
-            const name_len = if (model.name) |n| n.len else model.model_id.len;
+            const name_len = model.name.len;
             if (name_len > max_name_len) max_name_len = name_len;
-            const desc_len = if (model.description) |d| d.len else 0;
+            const desc_len = model.description.len;
             if (desc_len > max_desc_len) max_desc_len = desc_len;
         }
 
         // Check if any models have descriptions (affects row height)
         var has_descriptions = false;
         for (models) |model| {
-            if (model.description) |d| {
-                if (d.len > 0) {
-                    has_descriptions = true;
-                    break;
-                }
+            if (model.description.len > 0) {
+                has_descriptions = true;
+                break;
             }
         }
         const rows_per_model: usize = if (has_descriptions) 2 else 1;
@@ -916,7 +907,7 @@ pub const UI = struct {
                 const caret_copy = try RenderUtils.copyFrameText(app, caret);
                 try name_segments.append(app.allocator, .{ .text = caret_copy, .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg } });
 
-                const model_name = model.name orelse model.model_id;
+                const model_name = model.name;
                 const name_copy = try RenderUtils.copyFrameText(app, model_name);
                 try name_segments.append(app.allocator, .{ .text = name_copy, .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bg = Color.dialog_bg, .bold = is_selected } });
 
@@ -930,17 +921,16 @@ pub const UI = struct {
 
                 // Line 2: Description (indented, only if models have descriptions)
                 if (has_descriptions) {
-                    if (model.description) |desc| {
-                        if (desc.len > 0 and row < popup_height - 1 - DIALOG_PADDING) {
-                            const max_len = if (popup_width > 6) popup_width - 6 else 1;
-                            const truncated = if (desc.len > max_len) desc[0..max_len] else desc;
-                            const desc_copy = try RenderUtils.copyFrameText(app, truncated);
-                            var desc_seg = [_]vaxis.Cell.Segment{.{
-                                .text = desc_copy,
-                                .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
-                            }};
-                            _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(DIALOG_PADDING + 3) });
-                        }
+                    const desc = model.description;
+                    if (desc.len > 0 and row < popup_height - 1 - DIALOG_PADDING) {
+                        const max_len = if (popup_width > 6) popup_width - 6 else 1;
+                        const truncated = if (desc.len > max_len) desc[0..max_len] else desc;
+                        const desc_copy = try RenderUtils.copyFrameText(app, truncated);
+                        var desc_seg = [_]vaxis.Cell.Segment{.{
+                            .text = desc_copy,
+                            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
+                        }};
+                        _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(DIALOG_PADDING + 3) });
                     }
                     row += 1;
                 }

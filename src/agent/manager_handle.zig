@@ -4,8 +4,6 @@
 const std = @import("std");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const OpencodeManager = @import("../opencode/opencode.zig").OpencodeManager;
-const OwnedModelInfo = @import("../acp/manager.zig").AcpManager.OwnedModelInfo;
-
 pub const ManagerHandle = union(enum) {
     acp: *AcpManager,
     opencode: *OpencodeManager,
@@ -38,6 +36,14 @@ pub const ManagerHandle = union(enum) {
         };
     }
 
+    /// Check if the manager is disconnected.
+    pub fn isDisconnected(self: ManagerHandle) bool {
+        return switch (self) {
+            .acp => |m| m.status == .disconnected,
+            .opencode => |m| m.status == .disconnected,
+        };
+    }
+
     /// Check if the session is initializing (discovering, connecting, etc.).
     pub fn isInitializing(self: ManagerHandle) bool {
         return switch (self) {
@@ -62,13 +68,40 @@ pub const ManagerHandle = union(enum) {
         };
     }
 
-    /// Get available models for the model picker.
-    /// Note: ACP and OpenCode use different OwnedModelInfo types with the same layout.
-    /// Returns as a generic slice for the model picker UI.
-    pub fn getAvailableModelsAcp(self: ManagerHandle) ?[]const OwnedModelInfo {
+    /// Resolved model view for the UI — protocol-independent.
+    pub const ModelView = struct {
+        model_id: []const u8,
+        name: []const u8,
+        description: []const u8,
+    };
+
+    /// Get the number of available models.
+    pub fn getModelCount(self: ManagerHandle) usize {
         return switch (self) {
-            .acp => |m| m.getAvailableModels(),
-            .opencode => null,
+            .acp => |m| m.getAvailableModels().len,
+            .opencode => |m| m.getAvailableModels().len,
+        };
+    }
+
+    /// Get a resolved model view at the given index.
+    pub fn getModelInfo(self: ManagerHandle, idx: usize) ModelView {
+        return switch (self) {
+            .acp => |m| {
+                const model = m.getAvailableModels()[idx];
+                return .{
+                    .model_id = model.model_id,
+                    .name = model.name orelse model.model_id,
+                    .description = model.description orelse "",
+                };
+            },
+            .opencode => |m| {
+                const model = m.getAvailableModels()[idx];
+                return .{
+                    .model_id = model.model_id,
+                    .name = model.name orelse model.model_id,
+                    .description = model.description orelse "",
+                };
+            },
         };
     }
 
@@ -78,6 +111,14 @@ pub const ManagerHandle = union(enum) {
             .acp => |m| try m.setModel(id),
             .opencode => |m| try m.setModelById(id),
         }
+    }
+
+    /// Get the pending permission request, if any (ACP only).
+    pub fn getPendingPermission(self: ManagerHandle) ?*AcpManager.PendingPermission {
+        return switch (self) {
+            .acp => |m| m.getPendingPermission(),
+            .opencode => null,
+        };
     }
 
     /// Get a display name for the agent/server.

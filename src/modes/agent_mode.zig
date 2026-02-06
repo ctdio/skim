@@ -28,7 +28,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
-    // Check for pending permission prompt
+    // Check for pending permission prompt (ACP-only feature)
     if (app.getActiveAcpManager()) |mgr| {
         if (mgr.getPendingPermission()) |perm| {
             const num_options = perm.options.len;
