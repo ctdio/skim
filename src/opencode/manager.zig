@@ -56,6 +56,10 @@ pub const Event = union(enum) {
     tool_update: ToolUpdate,
     /// Tool diff content (apply_patch)
     tool_diff: ToolDiff,
+    /// Question prompt (question.asked)
+    question_prompt: QuestionPrompt,
+    /// Question resolved (question.resolved)
+    question_resolved: void,
     /// Status changed
     status_change: Status,
     /// Error occurred
@@ -112,6 +116,43 @@ pub const Event = union(enum) {
         }
     };
 
+    pub const QuestionOption = struct {
+        label: []const u8,
+        description: ?[]const u8 = null,
+
+        fn deinit(self: *QuestionOption, allocator: Allocator) void {
+            allocator.free(self.label);
+            if (self.description) |desc| allocator.free(desc);
+        }
+    };
+
+    pub const QuestionItem = struct {
+        header: ?[]const u8 = null,
+        question: []const u8,
+        options: []QuestionOption,
+        multiple: bool = false,
+
+        fn deinit(self: *QuestionItem, allocator: Allocator) void {
+            if (self.header) |h| allocator.free(h);
+            allocator.free(self.question);
+            for (self.options) |*opt| opt.deinit(allocator);
+            allocator.free(self.options);
+        }
+    };
+
+    pub const QuestionPrompt = struct {
+        id: ?[]const u8 = null,
+        tool_call_id: ?[]const u8 = null,
+        questions: []QuestionItem,
+
+        fn deinit(self: *QuestionPrompt, allocator: Allocator) void {
+            if (self.id) |id| allocator.free(id);
+            if (self.tool_call_id) |id| allocator.free(id);
+            for (self.questions) |*question| question.deinit(allocator);
+            allocator.free(self.questions);
+        }
+    };
+
     pub const EventError = struct {
         code: ErrorCode,
         message: ?[]const u8 = null,
@@ -136,8 +177,9 @@ pub const Event = union(enum) {
             .tool_call => |*tc| tc.deinit(allocator),
             .tool_update => |*tu| tu.deinit(allocator),
             .tool_diff => |*diff| diff.deinit(allocator),
+            .question_prompt => |*prompt| prompt.deinit(allocator),
             .err => |*e| e.deinit(allocator),
-            .message_complete, .status_change => {},
+            .message_complete, .status_change, .question_resolved => {},
         }
     }
 };
@@ -265,6 +307,7 @@ pub const OpencodeManager = struct {
     last_event_ms: i64,
     abort_error_grace_until_ms: i64,
     last_diff_tool_call_id: ?[]const u8,
+    last_question_call_id: ?[]const u8,
 
     // Question/permission tracking
     pending_question: bool,
@@ -305,6 +348,7 @@ pub const OpencodeManager = struct {
             .last_event_ms = 0,
             .abort_error_grace_until_ms = 0,
             .last_diff_tool_call_id = null,
+            .last_question_call_id = null,
             .pending_question = false,
             .pending_permission = false,
             .available_models = .{},
@@ -354,6 +398,10 @@ pub const OpencodeManager = struct {
         if (self.last_diff_tool_call_id) |id| {
             self.allocator.free(id);
             self.last_diff_tool_call_id = null;
+        }
+        if (self.last_question_call_id) |id| {
+            self.allocator.free(id);
+            self.last_question_call_id = null;
         }
     }
 
@@ -1329,21 +1377,21 @@ pub const OpencodeManager = struct {
                             }
                         }
 
-                        if (part_obj) |obj| {
+                        if (part_obj) |_| {
                             if (part_type) |ptype| {
+                                // Note: step-finish and text-part-end are intermediate events
+                                // in multi-step responses. Do NOT call clearPromptingState() here
+                                // as the agent may continue with tool calls and more text.
+                                // The definitive completion signals are session.idle,
+                                // message_updated with completion status, etc.
                                 if (isStepFinishType(ptype)) {
-                                    const reason = if (obj.get("reason")) |reason_val| blk: {
+                                    const reason = if (part_obj.?.get("reason")) |reason_val| blk: {
                                         if (reason_val == .string) break :blk reason_val.string;
                                         break :blk null;
                                     } else null;
-
-                                    if (reason == null or isStepFinishReason(reason.?)) {
-                                        log.info("Step finished ({s}); clearing status", .{reason orelse "unknown"});
-                                        self.clearPromptingState();
-                                    }
-                                } else if (isTextPartType(ptype) and partHasEndTime(obj)) {
-                                    log.info("Text part finished; clearing status", .{});
-                                    self.clearPromptingState();
+                                    log.info("Step finished ({s}); awaiting session idle", .{reason orelse "unknown"});
+                                } else if (isTextPartType(ptype) and partHasEndTime(part_obj.?)) {
+                                    log.info("Text part finished; awaiting session idle", .{});
                                 }
                             }
                         }
@@ -1402,14 +1450,31 @@ pub const OpencodeManager = struct {
             },
             .question_asked => {
                 self.pending_question = true;
-                const detail = if (properties) |props| extractDetailFromProperties(props) else null;
-                self.pushSystemMessage(tryBuildSystemMessage(self, "Question", detail));
+                if (properties) |props| {
+                    if (props == .object) {
+                        if (self.parseQuestionPrompt(props.object)) |prompt| {
+                            if (prompt.tool_call_id) |id| {
+                                if (self.last_question_call_id) |last| {
+                                    if (!std.mem.eql(u8, last, id)) {
+                                        self.allocator.free(last);
+                                        self.last_question_call_id = self.allocator.dupe(u8, id) catch self.last_question_call_id;
+                                    }
+                                } else {
+                                    self.last_question_call_id = self.allocator.dupe(u8, id) catch self.last_question_call_id;
+                                }
+                            }
+                            self.message_queue.push(.{ .question_prompt = prompt });
+                        } else {
+                            const detail = extractDetailFromProperties(props);
+                            self.pushSystemMessage(tryBuildSystemMessage(self, "Question", detail));
+                        }
+                    }
+                }
                 self.clearPromptingState();
             },
             .question_resolved => {
                 self.pending_question = false;
-                const detail = if (properties) |props| extractDetailFromProperties(props) else null;
-                self.pushSystemMessage(tryBuildSystemMessage(self, "Question resolved", detail));
+                self.message_queue.push(.{ .question_resolved = {} });
                 self.clearPromptingState();
             },
             .session_updated => {
@@ -1774,6 +1839,138 @@ pub const OpencodeManager = struct {
         return extractStringField(obj, &keys);
     }
 
+    fn parseQuestionItems(self: *OpencodeManager, questions_val: std.json.Value) ?[]Event.QuestionItem {
+        if (questions_val != .array) return null;
+
+        var questions_list: std.ArrayList(Event.QuestionItem) = .{};
+        errdefer {
+            for (questions_list.items) |*item| item.deinit(self.event_allocator);
+            questions_list.deinit(self.event_allocator);
+        }
+
+        for (questions_val.array.items) |question_val| {
+            if (question_val != .object) continue;
+            const question_obj = question_val.object;
+
+            const question_text = extractStringField(question_obj, &[_][]const u8{ "question", "prompt", "text" }) orelse continue;
+            const header_text = extractStringField(question_obj, &[_][]const u8{ "header", "title", "topic" });
+
+            const multiple: bool = if (question_obj.get("multiple")) |multi_val| blk: {
+                if (multi_val == .bool) break :blk multi_val.bool;
+                break :blk false;
+            } else false;
+
+            var options_list: std.ArrayList(Event.QuestionOption) = .{};
+            errdefer {
+                for (options_list.items) |*opt| opt.deinit(self.event_allocator);
+                options_list.deinit(self.event_allocator);
+            }
+
+            if (question_obj.get("options")) |options_val| {
+                if (options_val == .array) {
+                    for (options_val.array.items) |opt_val| {
+                        if (opt_val != .object) continue;
+                        const opt_obj = opt_val.object;
+                        const label = extractStringField(opt_obj, &[_][]const u8{ "label", "name", "value", "text" }) orelse continue;
+                        const desc = extractStringField(opt_obj, &[_][]const u8{ "description", "detail", "hint" });
+
+                        const label_copy = self.event_allocator.dupe(u8, label) catch continue;
+                        const desc_copy: ?[]const u8 = if (desc) |d|
+                            self.event_allocator.dupe(u8, d) catch null
+                        else
+                            null;
+
+                        options_list.append(self.event_allocator, .{
+                            .label = label_copy,
+                            .description = desc_copy,
+                        }) catch {
+                            self.event_allocator.free(label_copy);
+                            if (desc_copy) |d| self.event_allocator.free(d);
+                        };
+                    }
+                }
+            }
+
+            const question_copy = self.event_allocator.dupe(u8, question_text) catch continue;
+            const header_copy: ?[]const u8 = if (header_text) |h|
+                self.event_allocator.dupe(u8, h) catch null
+            else
+                null;
+
+            const options_slice = options_list.toOwnedSlice(self.event_allocator) catch {
+                if (header_copy) |h| self.event_allocator.free(h);
+                self.event_allocator.free(question_copy);
+                continue;
+            };
+
+            questions_list.append(self.event_allocator, .{
+                .header = header_copy,
+                .question = question_copy,
+                .options = options_slice,
+                .multiple = multiple,
+            }) catch {
+                if (header_copy) |h| self.event_allocator.free(h);
+                self.event_allocator.free(question_copy);
+                for (options_slice) |*opt| opt.deinit(self.event_allocator);
+                self.event_allocator.free(options_slice);
+            };
+        }
+
+        if (questions_list.items.len == 0) {
+            return null;
+        }
+
+        return questions_list.toOwnedSlice(self.event_allocator) catch null;
+    }
+
+    fn parseQuestionPrompt(self: *OpencodeManager, props: std.json.ObjectMap) ?Event.QuestionPrompt {
+        const questions_val = props.get("questions") orelse return null;
+        const questions_slice = self.parseQuestionItems(questions_val) orelse return null;
+
+        const id = extractStringField(props, &[_][]const u8{ "id", "questionID", "question_id" });
+        const tool_call_id = if (props.get("tool")) |tool_val| blk: {
+            if (tool_val == .object) {
+                break :blk extractStringField(tool_val.object, &[_][]const u8{ "callID", "callId", "call_id", "tool_call_id" });
+            }
+            break :blk null;
+        } else null;
+
+        const id_copy: ?[]const u8 = if (id) |value|
+            self.event_allocator.dupe(u8, value) catch null
+        else
+            null;
+        const tool_call_id_copy: ?[]const u8 = if (tool_call_id) |value|
+            self.event_allocator.dupe(u8, value) catch null
+        else
+            null;
+
+        return .{
+            .id = id_copy,
+            .tool_call_id = tool_call_id_copy,
+            .questions = questions_slice,
+        };
+    }
+
+    fn parseQuestionPromptFromTool(self: *OpencodeManager, tool_call_id: ?[]const u8, state_obj: std.json.ObjectMap) ?Event.QuestionPrompt {
+        const input_val = state_obj.get("input") orelse return null;
+        if (input_val != .object) return null;
+
+        const input_obj = input_val.object;
+        const questions_val = input_obj.get("questions") orelse return null;
+        const questions_slice = self.parseQuestionItems(questions_val) orelse return null;
+
+        const tool_call_id_copy: ?[]const u8 = if (tool_call_id) |value|
+            self.event_allocator.dupe(u8, value) catch null
+        else
+            null;
+
+        return .{
+            .id = null,
+            .tool_call_id = tool_call_id_copy,
+            .questions = questions_slice,
+        };
+    }
+
     fn isApplyPatchTool(tool_name: ?[]const u8, patch_text: []const u8) bool {
         if (tool_name) |name| {
             if (std.ascii.eqlIgnoreCase(name, "apply_patch") or std.ascii.eqlIgnoreCase(name, "applyPatch")) return true;
@@ -1812,6 +2009,24 @@ pub const OpencodeManager = struct {
         if (status == null) status = extractToolStatusFromObject(part_obj) orelse extractToolStatusFromObject(props_obj);
 
         const is_result = isToolResultPartType(part_type);
+
+        if (tool_name != null and std.ascii.eqlIgnoreCase(tool_name.?, "question")) {
+            if (state_obj) |obj| {
+                if (tool_id) |id| {
+                    if (self.last_question_call_id) |last| {
+                        if (std.mem.eql(u8, last, id)) return true;
+                    }
+                }
+                if (self.parseQuestionPromptFromTool(tool_id, obj)) |prompt| {
+                    if (prompt.tool_call_id) |id| {
+                        if (self.last_question_call_id) |last| self.allocator.free(last);
+                        self.last_question_call_id = self.allocator.dupe(u8, id) catch self.last_question_call_id;
+                    }
+                    self.message_queue.push(.{ .question_prompt = prompt });
+                    return true;
+                }
+            }
+        }
 
         if (patch_text) |patch_value| {
             if (isApplyPatchTool(tool_name, patch_value)) {
@@ -2465,7 +2680,7 @@ test "opencode event: session.status idle clears status" {
     }
 }
 
-test "opencode event: step-finish clears status" {
+test "opencode event: step-finish does not clear status (intermediate event)" {
     const allocator = std.testing.allocator;
     var manager = OpencodeManager.init(allocator);
     defer manager.deinit();
@@ -2475,26 +2690,15 @@ test "opencode event: step-finish clears status" {
     const data = "{\"payload\":{\"type\":\"message.part.updated\",\"properties\":{\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}}}";
     manager.processEventData(data);
 
-    const ev1_opt = manager.poll();
-    try std.testing.expect(ev1_opt != null);
-    var ev1 = ev1_opt.?;
-    defer ev1.deinit(manager.event_allocator);
-    switch (ev1) {
-        .message_complete => {},
-        else => try std.testing.expect(false),
-    }
-
-    const ev2_opt = manager.poll();
-    try std.testing.expect(ev2_opt != null);
-    var ev2 = ev2_opt.?;
-    defer ev2.deinit(manager.event_allocator);
-    switch (ev2) {
-        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
-        else => try std.testing.expect(false),
-    }
+    // step-finish is an intermediate event in multi-step responses;
+    // it should NOT produce message_complete or status_change events.
+    // Only session.idle or message completion status should clear state.
+    const ev_opt = manager.poll();
+    try std.testing.expect(ev_opt == null);
+    try std.testing.expectEqual(Status.prompting, manager.status);
 }
 
-test "opencode event: text part end clears status" {
+test "opencode event: text part end does not clear status (intermediate event)" {
     const allocator = std.testing.allocator;
     var manager = OpencodeManager.init(allocator);
     defer manager.deinit();
@@ -2504,23 +2708,11 @@ test "opencode event: text part end clears status" {
     const data = "{\"payload\":{\"type\":\"message.part.updated\",\"properties\":{\"part\":{\"type\":\"text\",\"time\":{\"start\":123,\"end\":456}}}}}";
     manager.processEventData(data);
 
-    const ev1_opt = manager.poll();
-    try std.testing.expect(ev1_opt != null);
-    var ev1 = ev1_opt.?;
-    defer ev1.deinit(manager.event_allocator);
-    switch (ev1) {
-        .message_complete => {},
-        else => try std.testing.expect(false),
-    }
-
-    const ev2_opt = manager.poll();
-    try std.testing.expect(ev2_opt != null);
-    var ev2 = ev2_opt.?;
-    defer ev2.deinit(manager.event_allocator);
-    switch (ev2) {
-        .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
-        else => try std.testing.expect(false),
-    }
+    // text part end is an intermediate event; the response may continue
+    // with tool calls and more text. Only session.idle should clear state.
+    const ev_opt = manager.poll();
+    try std.testing.expect(ev_opt == null);
+    try std.testing.expectEqual(Status.prompting, manager.status);
 }
 
 test "opencode event: message.updated finish clears status" {
