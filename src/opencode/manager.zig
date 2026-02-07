@@ -73,17 +73,48 @@ pub const Event = union(enum) {
         }
     };
 
+    pub const SubagentToolSummary = struct {
+        tool_name: []const u8,
+        title: ?[]const u8 = null,
+        status: ToolStatus = .completed,
+
+        pub fn deinit(self: *SubagentToolSummary, allocator: Allocator) void {
+            allocator.free(self.tool_name);
+            if (self.title) |t| allocator.free(t);
+        }
+    };
+
+    pub const SubagentEventInfo = struct {
+        description: ?[]const u8 = null,
+        agent_type: ?[]const u8 = null,
+        session_id: ?[]const u8 = null,
+        title: ?[]const u8 = null,
+        tool_count: usize = 0,
+        summary: []SubagentToolSummary = &.{},
+
+        pub fn deinit(self: *SubagentEventInfo, allocator: Allocator) void {
+            if (self.description) |d| allocator.free(d);
+            if (self.agent_type) |a| allocator.free(a);
+            if (self.session_id) |s| allocator.free(s);
+            if (self.title) |t| allocator.free(t);
+            for (self.summary) |*entry| entry.deinit(allocator);
+            if (self.summary.len > 0) allocator.free(self.summary);
+        }
+    };
+
     pub const ToolCall = struct {
         tool_call_id: []const u8,
         tool_name: ?[]const u8 = null,
         title: []const u8,
         command: ?[]const u8 = null,
+        subagent_info: ?SubagentEventInfo = null,
 
         pub fn deinit(self: *ToolCall, allocator: Allocator) void {
             allocator.free(self.tool_call_id);
             allocator.free(self.title);
             if (self.tool_name) |name| allocator.free(name);
             if (self.command) |cmd| allocator.free(cmd);
+            if (self.subagent_info) |*info| info.deinit(allocator);
         }
     };
 
@@ -92,11 +123,13 @@ pub const Event = union(enum) {
         status: ToolStatus,
         stdout: ?[]const u8 = null,
         stderr: ?[]const u8 = null,
+        subagent_info: ?SubagentEventInfo = null,
 
         pub fn deinit(self: *ToolUpdate, allocator: Allocator) void {
             allocator.free(self.tool_call_id);
             if (self.stdout) |out| allocator.free(out);
             if (self.stderr) |err| allocator.free(err);
+            if (self.subagent_info) |*info| info.deinit(allocator);
         }
     };
 
@@ -1918,6 +1951,76 @@ pub const OpencodeManager = struct {
         return extractStringField(obj, &keys);
     }
 
+    fn parseSubagentEventInfo(self: *OpencodeManager, state_obj: std.json.ObjectMap) ?Event.SubagentEventInfo {
+        var info: Event.SubagentEventInfo = .{};
+        var has_any = false;
+
+        // Extract state.input.description and state.input.subagent_type
+        if (extractObjectField(state_obj, &[_][]const u8{"input"})) |input_obj| {
+            if (extractStringField(input_obj, &[_][]const u8{"description"})) |desc| {
+                info.description = self.event_allocator.dupe(u8, desc) catch null;
+                if (info.description != null) has_any = true;
+            }
+            if (extractStringField(input_obj, &[_][]const u8{ "subagent_type", "subagentType" })) |at| {
+                info.agent_type = self.event_allocator.dupe(u8, at) catch null;
+                if (info.agent_type != null) has_any = true;
+            }
+        }
+
+        // Extract state.title
+        if (extractStringField(state_obj, &[_][]const u8{"title"})) |t| {
+            info.title = self.event_allocator.dupe(u8, t) catch null;
+            if (info.title != null) has_any = true;
+        }
+
+        // Extract state.metadata.sessionId and state.metadata.summary
+        if (extractObjectField(state_obj, &[_][]const u8{"metadata"})) |metadata_obj| {
+            if (extractStringField(metadata_obj, &[_][]const u8{ "sessionId", "session_id" })) |sid| {
+                info.session_id = self.event_allocator.dupe(u8, sid) catch null;
+                if (info.session_id != null) has_any = true;
+            }
+
+            if (extractValueField(metadata_obj, &[_][]const u8{"summary"})) |summary_val| {
+                if (summary_val == .array) {
+                    info.tool_count = summary_val.array.items.len;
+                    has_any = true;
+                    var summaries: std.ArrayList(Event.SubagentToolSummary) = .{};
+                    for (summary_val.array.items) |entry_val| {
+                        if (entry_val != .object) continue;
+                        const entry_obj = entry_val.object;
+
+                        const tool_name_str = extractStringField(entry_obj, &[_][]const u8{"tool"}) orelse continue;
+                        const owned_tool_name = self.event_allocator.dupe(u8, tool_name_str) catch continue;
+
+                        var summary_entry: Event.SubagentToolSummary = .{ .tool_name = owned_tool_name };
+
+                        // Extract state.title and state.status from entry
+                        if (extractObjectField(entry_obj, &[_][]const u8{"state"})) |entry_state| {
+                            if (extractStringField(entry_state, &[_][]const u8{"title"})) |st| {
+                                summary_entry.title = self.event_allocator.dupe(u8, st) catch null;
+                            }
+                            if (extractToolStatusFromObject(entry_state)) |s| {
+                                summary_entry.status = s;
+                            }
+                        }
+
+                        summaries.append(self.event_allocator, summary_entry) catch {
+                            self.event_allocator.free(owned_tool_name);
+                            if (summary_entry.title) |t| self.event_allocator.free(t);
+                            continue;
+                        };
+                    }
+                    if (summaries.items.len > 0) {
+                        info.summary = summaries.toOwnedSlice(self.event_allocator) catch &.{};
+                    }
+                }
+            }
+        }
+
+        if (!has_any) return null;
+        return info;
+    }
+
     fn parseQuestionItems(self: *OpencodeManager, questions_val: std.json.Value) ?[]Event.QuestionItem {
         if (questions_val != .array) return null;
 
@@ -2124,6 +2227,9 @@ pub const OpencodeManager = struct {
         }
 
         if (tool_id) |id| {
+            // Detect task tools for subagent info parsing
+            const is_task_tool = tool_name != null and std.ascii.eqlIgnoreCase(tool_name.?, "task");
+
             if (!is_result) {
                 const title = if (title_val) |raw| blk: {
                     if (tool_name) |name| {
@@ -2146,12 +2252,19 @@ pub const OpencodeManager = struct {
                 const cmd = extractToolCommandFromArgs(tool_name, args_val);
                 const cmd_copy: ?[]const u8 = if (cmd) |c| self.event_allocator.dupe(u8, c) catch null else null;
 
+                // Parse subagent info for task tool calls (each parse allocates its own copies)
+                const tc_subagent: ?Event.SubagentEventInfo = if (is_task_tool and state_obj != null)
+                    self.parseSubagentEventInfo(state_obj.?)
+                else
+                    null;
+
                 self.message_queue.push(.{
                     .tool_call = .{
                         .tool_call_id = id_copy,
                         .tool_name = name_copy,
                         .title = title,
                         .command = cmd_copy,
+                        .subagent_info = tc_subagent,
                     },
                 });
             }
@@ -2173,11 +2286,19 @@ pub const OpencodeManager = struct {
                 const id_copy = self.event_allocator.dupe(u8, id) catch return true;
                 const stdout_copy: ?[]const u8 = if (stdout) |out| self.event_allocator.dupe(u8, out) catch null else null;
                 const stderr_copy: ?[]const u8 = if (stderr) |err| self.event_allocator.dupe(u8, err) catch null else null;
+
+                // Parse subagent info for task tool updates (separate allocation from tool_call)
+                const tu_subagent: ?Event.SubagentEventInfo = if (is_task_tool and state_obj != null)
+                    self.parseSubagentEventInfo(state_obj.?)
+                else
+                    null;
+
                 self.message_queue.push(.{ .tool_update = .{
                     .tool_call_id = id_copy,
                     .status = s,
                     .stdout = stdout_copy,
                     .stderr = stderr_copy,
+                    .subagent_info = tu_subagent,
                 } });
             }
             return true;
@@ -2855,6 +2976,235 @@ test "opencode event: message.updated finish clears status" {
         .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
         else => try std.testing.expect(false),
     }
+}
+
+test "opencode event: task tool part populates subagent info on tool_call" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"type":"tool","callID":"task:0","tool":"task",
+        \\"state":{"status":"running",
+        \\"input":{"description":"Explore architecture","subagent_type":"explore"},
+        \\"title":"Explore architecture",
+        \\"metadata":{"sessionId":"ses_abc123","summary":[
+        \\{"id":"prt_1","tool":"read","state":{"status":"completed","title":"build.zig"}},
+        \\{"id":"prt_2","tool":"bash","state":{"status":"completed","title":"List files"}}
+        \\]}}}}}}
+    ;
+    manager.processEventData(data);
+
+    // Should get a tool_call event with subagent info
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+
+    switch (ev1) {
+        .tool_call => |tc| {
+            try std.testing.expect(tc.subagent_info != null);
+            const info = tc.subagent_info.?;
+            try std.testing.expectEqualStrings("Explore architecture", info.description.?);
+            try std.testing.expectEqualStrings("explore", info.agent_type.?);
+            try std.testing.expectEqualStrings("ses_abc123", info.session_id.?);
+            try std.testing.expectEqualStrings("Explore architecture", info.title.?);
+            try std.testing.expectEqual(@as(usize, 2), info.tool_count);
+            try std.testing.expectEqual(@as(usize, 2), info.summary.len);
+            try std.testing.expectEqualStrings("read", info.summary[0].tool_name);
+            try std.testing.expectEqualStrings("build.zig", info.summary[0].title.?);
+            try std.testing.expectEqualStrings("bash", info.summary[1].tool_name);
+            try std.testing.expectEqualStrings("List files", info.summary[1].title.?);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: task tool part populates subagent info on tool_update" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"type":"tool","callID":"task:0","tool":"task",
+        \\"state":{"status":"running",
+        \\"input":{"description":"Run tests","subagent_type":"general-purpose"},
+        \\"title":"Run tests",
+        \\"metadata":{"sessionId":"ses_xyz"}}}}}}
+    ;
+    manager.processEventData(data);
+
+    // Drain tool_call first
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+
+    // tool_update should also have subagent info
+    const ev2_opt = manager.poll();
+    try std.testing.expect(ev2_opt != null);
+    var ev2 = ev2_opt.?;
+    defer ev2.deinit(manager.event_allocator);
+
+    switch (ev2) {
+        .tool_update => |tu| {
+            try std.testing.expect(tu.subagent_info != null);
+            const info = tu.subagent_info.?;
+            try std.testing.expectEqualStrings("Run tests", info.description.?);
+            try std.testing.expectEqualStrings("general-purpose", info.agent_type.?);
+            try std.testing.expectEqualStrings("ses_xyz", info.session_id.?);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: non-task tool has no subagent info" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"type":"tool","callID":"bash:0","tool":"bash",
+        \\"state":{"status":"running","title":"echo hello"}}}}}
+    ;
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+
+    switch (ev1) {
+        .tool_call => |tc| {
+            try std.testing.expect(tc.subagent_info == null);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: task tool with missing metadata has partial subagent info" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    // Task tool with no metadata section
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"type":"tool","callID":"task:0","tool":"task",
+        \\"state":{"status":"running",
+        \\"input":{"description":"Explore"},
+        \\"title":"Explore"}}}}}
+    ;
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+
+    switch (ev1) {
+        .tool_call => |tc| {
+            try std.testing.expect(tc.subagent_info != null);
+            const info = tc.subagent_info.?;
+            try std.testing.expectEqualStrings("Explore", info.description.?);
+            try std.testing.expectEqualStrings("Explore", info.title.?);
+            try std.testing.expect(info.session_id == null);
+            try std.testing.expectEqual(@as(usize, 0), info.tool_count);
+            try std.testing.expectEqual(@as(usize, 0), info.summary.len);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: task tool with empty summary array" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"type":"tool","callID":"task:0","tool":"task",
+        \\"state":{"status":"running",
+        \\"input":{"description":"Build"},
+        \\"title":"Build",
+        \\"metadata":{"sessionId":"ses_empty","summary":[]}}}}}}
+    ;
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+
+    switch (ev1) {
+        .tool_call => |tc| {
+            try std.testing.expect(tc.subagent_info != null);
+            const info = tc.subagent_info.?;
+            try std.testing.expectEqualStrings("Build", info.description.?);
+            try std.testing.expectEqual(@as(usize, 0), info.tool_count);
+            try std.testing.expectEqual(@as(usize, 0), info.summary.len);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: task tool with missing input" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    // Task tool with no input section at all
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"type":"tool","callID":"task:0","tool":"task",
+        \\"state":{"status":"running","title":"Some task"}}}}}
+    ;
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+
+    switch (ev1) {
+        .tool_call => |tc| {
+            try std.testing.expect(tc.subagent_info != null);
+            const info = tc.subagent_info.?;
+            try std.testing.expect(info.description == null);
+            try std.testing.expect(info.agent_type == null);
+            try std.testing.expectEqualStrings("Some task", info.title.?);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "SubagentEventInfo deinit frees all fields" {
+    const allocator = std.testing.allocator;
+
+    var summaries = try allocator.alloc(Event.SubagentToolSummary, 1);
+    summaries[0] = .{
+        .tool_name = try allocator.dupe(u8, "read"),
+        .title = try allocator.dupe(u8, "file.zig"),
+    };
+
+    var info: Event.SubagentEventInfo = .{
+        .description = try allocator.dupe(u8, "test"),
+        .agent_type = try allocator.dupe(u8, "explore"),
+        .session_id = try allocator.dupe(u8, "ses_123"),
+        .title = try allocator.dupe(u8, "test title"),
+        .tool_count = 1,
+        .summary = summaries,
+    };
+    info.deinit(allocator);
+}
+
+test "SubagentEventInfo deinit with null fields" {
+    const allocator = std.testing.allocator;
+    var info: Event.SubagentEventInfo = .{};
+    info.deinit(allocator);
 }
 
 // Integration tests - skipped in unit test runs (require live server)

@@ -1,8 +1,11 @@
 /// Unified event type for both ACP and OpenCode protocol events.
 /// Provides a single dispatch point for routing protocol events to AgentState.
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const AgentState = @import("state.zig").AgentState;
 const Message = @import("state.zig").Message;
+const SubagentInfo = @import("state.zig").SubagentInfo;
+const SubagentToolSummary = @import("state.zig").SubagentToolSummary;
 const protocol = @import("../acp/protocol.zig");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const opencode_manager = @import("../opencode/manager.zig");
@@ -39,6 +42,7 @@ pub const AgentEvent = union(enum) {
         tool_name: ?[]const u8,
         title: []const u8,
         command: ?[]const u8,
+        subagent_info: ?OpencodeEvent.SubagentEventInfo = null,
     };
 
     pub const ToolUpdateEvent = struct {
@@ -46,6 +50,7 @@ pub const AgentEvent = union(enum) {
         status: Message.ToolStatus,
         stdout: ?[]const u8,
         stderr: ?[]const u8,
+        subagent_info: ?OpencodeEvent.SubagentEventInfo = null,
     };
 
     pub const ToolDiffEvent = struct {
@@ -75,6 +80,11 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
                 tc.title,
                 tc.command,
             ) catch {};
+            if (tc.subagent_info) |info| {
+                if (convertSubagentInfo(agent_state.allocator, info)) |owned| {
+                    agent_state.setSubagentInfoOnTool(tc.tool_call_id, owned);
+                }
+            }
         },
         .tool_update => |tu| {
             agent_state.updateToolMessage(
@@ -83,6 +93,11 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
                 tu.stdout,
                 tu.stderr,
             ) catch {};
+            if (tu.subagent_info) |info| {
+                if (convertSubagentInfo(agent_state.allocator, info)) |owned| {
+                    agent_state.setSubagentInfoOnTool(tu.tool_call_id, owned);
+                }
+            }
         },
         .tool_diff => |diff| {
             agent_state.addDiffMessage(
@@ -176,6 +191,7 @@ pub fn opencodeEventToAgentEvent(event: OpencodeEvent) ?AgentEvent {
             .tool_name = tc.tool_name,
             .title = tc.title,
             .command = tc.command,
+            .subagent_info = tc.subagent_info,
         } },
         .tool_update => |tu| .{ .tool_update = .{
             .tool_call_id = tu.tool_call_id,
@@ -187,6 +203,7 @@ pub fn opencodeEventToAgentEvent(event: OpencodeEvent) ?AgentEvent {
             },
             .stdout = tu.stdout,
             .stderr = tu.stderr,
+            .subagent_info = tu.subagent_info,
         } },
         .tool_diff => |d| .{ .tool_diff = .{
             .tool_call_id = d.tool_call_id,
@@ -199,5 +216,52 @@ pub fn opencodeEventToAgentEvent(event: OpencodeEvent) ?AgentEvent {
         .question_resolved => .{ .question_resolved = {} },
         .err => |e| .{ .error_message = e.message orelse @tagName(e.code) },
         .status_change => null, // Handled separately by caller
+    };
+}
+
+// =============================================================================
+// Subagent info conversion (OpenCode Event → Agent state types)
+// =============================================================================
+
+/// Convert borrowed OpencodeEvent.SubagentEventInfo into owned SubagentInfo.
+/// All strings are duped into the provided allocator.
+fn convertSubagentInfo(allocator: Allocator, src: OpencodeEvent.SubagentEventInfo) ?SubagentInfo {
+    var info: SubagentInfo = .{
+        .tool_count = src.tool_count,
+    };
+
+    info.description = if (src.description) |d| allocator.dupe(u8, d) catch null else null;
+    info.agent_type = if (src.agent_type) |a| allocator.dupe(u8, a) catch null else null;
+    info.session_id = if (src.session_id) |s| allocator.dupe(u8, s) catch null else null;
+    info.title = if (src.title) |t| allocator.dupe(u8, t) catch null else null;
+
+    if (src.summary.len > 0) {
+        var summaries: std.ArrayList(SubagentToolSummary) = .{};
+        summaries.ensureTotalCapacity(allocator, src.summary.len) catch return info;
+        for (src.summary) |entry| {
+            const owned_name = allocator.dupe(u8, entry.tool_name) catch continue;
+            const owned_title: ?[]const u8 = if (entry.title) |t| allocator.dupe(u8, t) catch null else null;
+            summaries.append(allocator, .{
+                .tool_name = owned_name,
+                .title = owned_title,
+                .status = convertToolStatus(entry.status),
+            }) catch {
+                allocator.free(owned_name);
+                if (owned_title) |t| allocator.free(t);
+                continue;
+            };
+        }
+        info.summary = summaries.toOwnedSlice(allocator) catch &.{};
+    }
+
+    return info;
+}
+
+fn convertToolStatus(s: opencode_manager.ToolStatus) Message.ToolStatus {
+    return switch (s) {
+        .pending => .pending,
+        .running => .running,
+        .completed => .completed,
+        .failed => .failed,
     };
 }

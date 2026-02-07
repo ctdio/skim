@@ -1339,6 +1339,31 @@ pub const AgentState = struct {
         }
     }
 
+    /// Set subagent info on a tool message identified by tool_call_id.
+    /// Frees any previously set subagent_info before replacing.
+    pub fn setSubagentInfoOnTool(self: *AgentState, tool_call_id: []const u8, info: SubagentInfo) void {
+        // Search backwards since the most recent message is most likely the target
+        var i = self.messages.items.len;
+        while (i > 0) {
+            i -= 1;
+            const msg = &self.messages.items[i];
+            if (msg.role == .tool) {
+                if (msg.tool_call_id) |id| {
+                    if (std.mem.eql(u8, id, tool_call_id)) {
+                        // Free old subagent info if present
+                        if (msg.subagent_info) |*old| old.deinit(self.allocator);
+                        msg.subagent_info = info;
+                        self.line_map_dirty = true;
+                        return;
+                    }
+                }
+            }
+        }
+        // No matching message found — free the orphaned info to prevent leak
+        var orphaned = info;
+        orphaned.deinit(self.allocator);
+    }
+
     /// Clear all messages
     pub fn clearMessages(self: *AgentState) void {
         for (self.messages.items) |*msg| {
@@ -2369,6 +2394,35 @@ pub const AgentState = struct {
 // Message
 // =============================================================================
 
+pub const SubagentToolSummary = struct {
+    tool_name: []const u8,
+    title: ?[]const u8 = null,
+    status: Message.ToolStatus = .completed,
+
+    pub fn deinit(self: *SubagentToolSummary, allocator: Allocator) void {
+        allocator.free(self.tool_name);
+        if (self.title) |t| allocator.free(t);
+    }
+};
+
+pub const SubagentInfo = struct {
+    description: ?[]const u8 = null,
+    agent_type: ?[]const u8 = null,
+    session_id: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    tool_count: usize = 0,
+    summary: []SubagentToolSummary = &.{},
+
+    pub fn deinit(self: *SubagentInfo, allocator: Allocator) void {
+        if (self.description) |d| allocator.free(d);
+        if (self.agent_type) |a| allocator.free(a);
+        if (self.session_id) |s| allocator.free(s);
+        if (self.title) |t| allocator.free(t);
+        for (self.summary) |*entry| entry.deinit(allocator);
+        if (self.summary.len > 0) allocator.free(self.summary);
+    }
+};
+
 pub const Message = struct {
     role: Role,
     content: []const u8, // Owned by AgentState (or points to content_buffer.items if streaming)
@@ -2392,6 +2446,8 @@ pub const Message = struct {
     md_parser: ?MarkdownParser = null,
     md_tree_valid: bool = false,
     md_parsed_len: usize = 0, // Length when tree was last parsed (for incremental updates)
+    // For subagent (task) tool messages
+    subagent_info: ?SubagentInfo = null,
     // Track if this message has successfully rendered a formatted table.
     // Once true, we should never downgrade to dimmed/plain text rendering.
     had_formatted_table: bool = false,
@@ -2438,6 +2494,7 @@ pub const Message = struct {
         if (self.tool_command) |c| allocator.free(c);
         if (self.tool_stdout) |s| allocator.free(s);
         if (self.tool_stderr) |s| allocator.free(s);
+        if (self.subagent_info) |*info| info.deinit(allocator);
         if (self.plan_snapshot_entries) |entries| {
             for (entries) |*entry| {
                 // Each entry owns its content
@@ -3077,4 +3134,116 @@ test "getTextForMessage returns empty for invalid index" {
     defer allocator.free(text);
 
     try std.testing.expectEqualStrings("", text);
+}
+
+test "SubagentInfo deinit frees all fields" {
+    const allocator = std.testing.allocator;
+
+    var summary_items = try allocator.alloc(SubagentToolSummary, 2);
+    summary_items[0] = .{
+        .tool_name = try allocator.dupe(u8, "read"),
+        .title = try allocator.dupe(u8, "build.zig"),
+        .status = .completed,
+    };
+    summary_items[1] = .{
+        .tool_name = try allocator.dupe(u8, "bash"),
+        .title = try allocator.dupe(u8, "List files"),
+        .status = .running,
+    };
+
+    var info: SubagentInfo = .{
+        .description = try allocator.dupe(u8, "Explore architecture"),
+        .agent_type = try allocator.dupe(u8, "explore"),
+        .session_id = try allocator.dupe(u8, "ses_123"),
+        .title = try allocator.dupe(u8, "Explore architecture"),
+        .tool_count = 2,
+        .summary = summary_items,
+    };
+    info.deinit(allocator);
+}
+
+test "SubagentInfo deinit with null fields" {
+    const allocator = std.testing.allocator;
+
+    var info: SubagentInfo = .{};
+    info.deinit(allocator);
+}
+
+test "Message deinit with SubagentInfo" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    try agent_state.addToolMessage("task:0", "task", "task Explore", null);
+
+    var summary_items = try allocator.alloc(SubagentToolSummary, 1);
+    summary_items[0] = .{
+        .tool_name = try allocator.dupe(u8, "read"),
+        .title = try allocator.dupe(u8, "src/main.zig"),
+    };
+
+    agent_state.setSubagentInfoOnTool("task:0", .{
+        .description = try allocator.dupe(u8, "Explore"),
+        .agent_type = try allocator.dupe(u8, "explore"),
+        .tool_count = 1,
+        .summary = summary_items,
+    });
+
+    // Verify subagent_info was set
+    const msg = &agent_state.messages.items[0];
+    try std.testing.expect(msg.subagent_info != null);
+    try std.testing.expectEqualStrings("Explore", msg.subagent_info.?.description.?);
+    try std.testing.expectEqualStrings("explore", msg.subagent_info.?.agent_type.?);
+    try std.testing.expectEqual(@as(usize, 1), msg.subagent_info.?.tool_count);
+    try std.testing.expectEqual(@as(usize, 1), msg.subagent_info.?.summary.len);
+    try std.testing.expectEqualStrings("read", msg.subagent_info.?.summary[0].tool_name);
+}
+
+test "setSubagentInfoOnTool replaces existing info" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    try agent_state.addToolMessage("task:0", "task", "task Explore", null);
+
+    // Set first info
+    agent_state.setSubagentInfoOnTool("task:0", .{
+        .description = try allocator.dupe(u8, "First"),
+        .tool_count = 1,
+    });
+
+    // Replace with updated info
+    agent_state.setSubagentInfoOnTool("task:0", .{
+        .description = try allocator.dupe(u8, "Second"),
+        .tool_count = 5,
+    });
+
+    const msg = &agent_state.messages.items[0];
+    try std.testing.expect(msg.subagent_info != null);
+    try std.testing.expectEqualStrings("Second", msg.subagent_info.?.description.?);
+    try std.testing.expectEqual(@as(usize, 5), msg.subagent_info.?.tool_count);
+}
+
+test "setSubagentInfoOnTool frees info when no matching message" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    // No messages — setSubagentInfoOnTool must free the orphaned info
+    var summary_items = try allocator.alloc(SubagentToolSummary, 1);
+    summary_items[0] = .{
+        .tool_name = try allocator.dupe(u8, "read"),
+        .title = try allocator.dupe(u8, "file.zig"),
+    };
+
+    agent_state.setSubagentInfoOnTool("nonexistent:0", .{
+        .description = try allocator.dupe(u8, "Orphaned"),
+        .agent_type = try allocator.dupe(u8, "explore"),
+        .tool_count = 1,
+        .summary = summary_items,
+    });
+    // If this test passes with testing allocator, no memory was leaked
 }
