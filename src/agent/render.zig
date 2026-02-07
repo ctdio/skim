@@ -1303,6 +1303,10 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 .connecting => "Connecting to agent...",
                 .connected => "Creating session...",
                 else => "Initializing...",
+            } else if (app.getActiveOpencodeManager()) |mgr| switch (mgr.status) {
+                .idle, .starting_server => "Starting server...",
+                .connecting => "Connecting to Opencode...",
+                else => "Initializing...",
             } else "Initializing...";
             const loading_style = vaxis.Style{
                 .fg = Color.dim_gray,

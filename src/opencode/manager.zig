@@ -684,6 +684,9 @@ pub const OpencodeManager = struct {
         self.message_queue.drain(self.event_allocator);
 
         self.stream_complete.store(false, .release);
+        // Reset last_event_ms so the idle safety net doesn't fire immediately
+        // using the stale timestamp from the previous turn.
+        self.last_event_ms = 0;
 
         // Send async
         try c.sendPromptAsync(sid, prompt);
@@ -728,6 +731,13 @@ pub const OpencodeManager = struct {
         try c.replyToQuestion(request_id, json.items);
 
         self.pending_question = false;
+
+        // Reset prompting state so isThinking() returns true while the agent
+        // continues generating after receiving the answer. This mirrors the
+        // drain + reset in sendPrompt().
+        self.message_queue.drain(self.event_allocator);
+        self.stream_complete.store(false, .release);
+        self.last_event_ms = 0;
     }
 
     /// Reject/dismiss a pending question.
@@ -1473,6 +1483,10 @@ pub const OpencodeManager = struct {
                             if (props.object.get("delta")) |delta_val| {
                                 if (delta_val == .string) {
                                     const delta = self.event_allocator.dupe(u8, delta_val.string) catch return;
+                                    // Content arriving means the agent is actively generating.
+                                    // Reset stream_complete to recover from stale completion
+                                    // events (e.g. late session.idle from a previous turn).
+                                    self.stream_complete.store(false, .release);
                                     self.message_queue.push(.{
                                         .message_chunk = .{ .delta = delta },
                                     });
@@ -2057,6 +2071,7 @@ pub const OpencodeManager = struct {
         if (delta) |text| {
             if (text.len > 0) {
                 const chunk = self.event_allocator.dupe(u8, text) catch return true;
+                self.stream_complete.store(false, .release);
                 self.message_queue.push(.{ .thinking_chunk = .{ .delta = chunk } });
             }
             return true;

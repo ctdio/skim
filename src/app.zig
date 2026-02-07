@@ -112,6 +112,14 @@ pub const AcpConnectContext = struct {
     tab_id: u32, // Target tab ID for the connection
 };
 
+/// Context for Opencode connection thread
+pub const OpencodeConnectContext = struct {
+    mgr: *opencode.OpencodeManager,
+    opencode_path: []const u8,
+    port: u16,
+    cwd: ?[]const u8,
+};
+
 /// Case-insensitive substring search
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
@@ -250,6 +258,7 @@ pub const App = struct {
     acp_connect_ctx: ?*AcpConnectContext, // Context for ACP connection thread (freed after join)
     connecting_tab_id: ?u32, // Tab ID receiving connection (null when not connecting)
     opencode_connect_thread: ?std.Thread, // Background thread for Opencode connection
+    opencode_connect_ctx: ?*OpencodeConnectContext, // Context for Opencode connection thread
     connecting_opencode_tab_id: ?u32, // Tab ID receiving Opencode connection (null when not connecting)
     in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
     agent_only: bool, // Start in agent-only mode (no diff view)
@@ -668,6 +677,7 @@ pub const App = struct {
             .acp_connect_ctx = null,
             .connecting_tab_id = null,
             .opencode_connect_thread = null,
+            .opencode_connect_ctx = null,
             .connecting_opencode_tab_id = null,
             .in_bracketed_paste = false,
             .agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false,
@@ -856,6 +866,7 @@ pub const App = struct {
             .acp_connect_ctx = null,
             .connecting_tab_id = null,
             .opencode_connect_thread = null,
+            .opencode_connect_ctx = null,
             .connecting_opencode_tab_id = null,
             .in_bracketed_paste = false,
             .agent_only = false,
@@ -996,6 +1007,7 @@ pub const App = struct {
             .acp_connect_ctx = null,
             .connecting_tab_id = null,
             .opencode_connect_thread = null,
+            .opencode_connect_ctx = null,
             .connecting_opencode_tab_id = null,
             .in_bracketed_paste = false,
             .agent_only = false,
@@ -1113,6 +1125,10 @@ pub const App = struct {
         if (self.opencode_connect_thread) |thread| {
             thread.join();
             self.opencode_connect_thread = null;
+        }
+        if (self.opencode_connect_ctx) |ctx| {
+            self.allocator.destroy(ctx);
+            self.opencode_connect_ctx = null;
         }
         // Clean up tab manager (handles per-tab ACP and Opencode managers)
         if (self.tab_manager) |*tm| {
@@ -5663,7 +5679,7 @@ pub const App = struct {
         self.acp_connect_ctx = ctx;
     }
 
-    /// Connect to an Opencode agent for the given tab
+    /// Connect to an Opencode agent for the given tab (non-blocking)
     fn connectToOpencodeAgent(self: *App, target_tab: *agent.AgentTab, agent_info: *const acp.AgentInfo) !void {
         // Clean up any existing managers on target tab
         target_tab.disconnectAll();
@@ -5671,40 +5687,53 @@ pub const App = struct {
         // Clear pending tab selection
         self.state.pending_tab_for_selection = null;
 
-        // Create Opencode manager
+        // Create Opencode manager and store it in the tab immediately (enables rendering)
         const mgr = try target_tab.createOpencodeManager();
+        self.connecting_opencode_tab_id = target_tab.id;
 
-        // Get opencode executable path (from config command)
-        const opencode_path = agent_info.command;
-
-        // Get current working directory
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = std.fs.cwd().realpath(".", &cwd_buf) catch "/tmp";
-
-        // Add system message
-        try target_tab.agent_state.addMessage(.system, "Connecting to Opencode...");
         self.showStatusMessage("Connecting to Opencode...");
         std.log.info("Opencode: Connecting to {s} for tab {d}", .{ agent_info.name, target_tab.id });
         self.needs_render = true;
 
-        // Connect with config
-        mgr.connect(.{
-            .opencode_path = opencode_path,
-            .port = 4096, // Default port
-            .cwd = cwd,
-            .spawn_server = true,
-        }) catch |err| {
-            std.log.err("Opencode: Failed to connect: {any}", .{err});
-            try target_tab.agent_state.addMessage(.system, "Failed to connect to Opencode");
-            self.showStatusMessage("Failed to connect to Opencode");
+        // Store connection context (static lifetime for thread)
+        const ctx = try self.allocator.create(OpencodeConnectContext);
+        ctx.* = .{
+            .mgr = mgr,
+            .opencode_path = agent_info.command,
+            .port = 4096,
+            .cwd = self.state.git_repo_root,
+        };
+
+        // Spawn background thread for connection
+        self.opencode_connect_thread = std.Thread.spawn(.{}, opcConnectThreadFn, .{ctx}) catch |err| {
+            std.log.err("Failed to spawn Opencode connect thread: {any}", .{err});
+            self.showStatusMessage("Failed to start connection");
+            self.allocator.destroy(ctx);
+            target_tab.manager = null;
+            mgr.deinit();
+            self.allocator.destroy(mgr);
+            self.connecting_opencode_tab_id = null;
             return;
         };
 
-        // Success - update UI
-        try target_tab.agent_state.addMessage(.system, "Connected to Opencode. Type your message and press Enter.");
-        self.showStatusMessage("Connected to Opencode");
-        std.log.info("Opencode: Successfully connected for tab {d}", .{target_tab.id});
-        self.needs_render = true;
+        // Store context so it can be freed after thread joins
+        self.opencode_connect_ctx = ctx;
+    }
+
+    fn opcConnectThreadFn(ctx: *OpencodeConnectContext) void {
+        std.log.info("Opencode: Background connection thread started", .{});
+
+        ctx.mgr.connect(.{
+            .opencode_path = ctx.opencode_path,
+            .port = ctx.port,
+            .cwd = ctx.cwd,
+            .spawn_server = true,
+        }) catch |err| {
+            std.log.err("Opencode: Connect failed: {}", .{err});
+            return;
+        };
+
+        std.log.info("Opencode: Connected successfully", .{});
     }
 
     /// Connect to the currently selected agent in the selection menu
@@ -6054,6 +6083,10 @@ pub const App = struct {
 
                     // Clear the connecting state
                     self.connecting_opencode_tab_id = null;
+                    if (self.opencode_connect_ctx) |ctx| {
+                        self.allocator.destroy(ctx);
+                        self.opencode_connect_ctx = null;
+                    }
                     self.needs_render = true;
                 }
             }
@@ -6129,7 +6162,12 @@ pub const App = struct {
             // Protocol-specific status management (must happen before unified processing)
             switch (event) {
                 .message_chunk, .thinking_chunk => {
-                    if (mgr.status != .prompting and !mgr.pending_abort and !mgr.stream_complete.load(.acquire)) {
+                    // Content chunks are authoritative: if we're receiving them,
+                    // the agent is generating. Reset stream_complete and status
+                    // unconditionally to recover from stale completion events
+                    // (e.g. late session.idle from a previous turn).
+                    mgr.stream_complete.store(false, .release);
+                    if (mgr.status != .prompting and !mgr.pending_abort) {
                         mgr.status = .prompting;
                     }
                 },

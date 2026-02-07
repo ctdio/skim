@@ -48,7 +48,7 @@ pub const ManagerHandle = union(enum) {
     pub fn isInitializing(self: ManagerHandle) bool {
         return switch (self) {
             .acp => |m| m.status == .discovering or m.status == .connecting or m.status == .connected,
-            .opencode => |m| m.pending_abort,
+            .opencode => |m| m.status == .idle or m.status == .starting_server or m.status == .connecting,
         };
     }
 
