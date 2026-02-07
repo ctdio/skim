@@ -1595,6 +1595,7 @@ pub fn sendPromptToActiveManager(app: *App, text: []const u8) !void {
                         std.log.err("Opencode: Failed to send prompt: {any}", .{err});
                         try agent_state.addMessage(.system, "Failed to send prompt to Opencode");
                     };
+                    app.needs_render = true;
                 },
             }
         },
@@ -1608,6 +1609,7 @@ pub fn sendPromptToActiveManager(app: *App, text: []const u8) !void {
             }
         },
     }
+    app.needs_render = true;
 }
 
 fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *state.PendingQuestion, key: vaxis.Key) !bool {
