@@ -12,39 +12,25 @@ const Color = rendering_common.Color;
 const rendering_utils = @import("../rendering/utils.zig");
 const RenderUtils = rendering_utils.RenderUtils;
 
-fn renderWrappedText(
-    allocator: std.mem.Allocator,
-    win: vaxis.Window,
-    text: []const u8,
-    start_row: usize,
-    col_offset: usize,
-    max_width: usize,
-    style: vaxis.Style,
-) usize {
-    if (text.len == 0) return 0;
-
-    var wrapped = RenderUtils.wrapText(allocator, text, max_width) catch return 0;
-    defer wrapped.deinit(allocator);
-
-    var row = start_row;
-    for (wrapped.items) |line| {
-        if (row >= win.height) break;
-        var seg = [_]vaxis.Cell.Segment{.{ .text = line, .style = style }};
-        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
-        row += 1;
-    }
-
-    return row - start_row;
-}
-
-fn countWrappedRows(allocator: std.mem.Allocator, text: []const u8, max_width: usize) usize {
-    if (text.len == 0) return 1;
-    var wrapped = RenderUtils.wrapText(allocator, text, max_width) catch return 1;
-    defer wrapped.deinit(allocator);
-    return @max(@as(usize, 1), wrapped.items.len);
-}
-
 pub fn countQuestionPromptLines(allocator: std.mem.Allocator, width: usize, pending: *PendingQuestion) usize {
+    if (pending.confirming) {
+        return countConfirmationLines(allocator, width, pending);
+    }
+    return countQuestionLines(allocator, width, pending);
+}
+
+pub fn renderInlineQuestionPrompt(allocator: std.mem.Allocator, win: vaxis.Window, pending: *PendingQuestion) !void {
+    if (pending.confirming) {
+        return renderConfirmationView(allocator, win, pending);
+    }
+    return renderQuestionView(allocator, win, pending);
+}
+
+// =============================================================================
+// Question selection view
+// =============================================================================
+
+fn countQuestionLines(allocator: std.mem.Allocator, width: usize, pending: *PendingQuestion) usize {
     const max_text_width = if (width > 4) width - 4 else 1;
     const question = pending.questions[pending.active_index];
     const question_state = pending.states[pending.active_index];
@@ -77,37 +63,18 @@ pub fn countQuestionPromptLines(allocator: std.mem.Allocator, width: usize, pend
     return @max(@as(usize, 3), lines);
 }
 
-pub fn renderInlineQuestionPrompt(allocator: std.mem.Allocator, win: vaxis.Window, pending: *PendingQuestion) !void {
+fn renderQuestionView(allocator: std.mem.Allocator, win: vaxis.Window, pending: *PendingQuestion) !void {
     var row: usize = 0;
 
     // Row 0: Separator line
-    const separator_style = vaxis.Style{ .fg = Color.dim_gray };
-    for (0..win.width) |col| {
-        win.writeCell(@intCast(col), @intCast(row), .{
-            .char = .{ .grapheme = "─", .width = 1 },
-            .style = separator_style,
-        });
-    }
+    renderSeparator(win, row);
     row += 1;
 
     const max_text_width = if (win.width > 4) win.width - 4 else 1;
 
     // Tabs header (if multiple questions)
     if (pending.questions.len > 1 and row < win.height) {
-        const tab_style = vaxis.Style{ .fg = Color.white };
-        const active_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
-        var col: usize = 1;
-
-        for (pending.questions, 0..) |question, idx| {
-            const label = question.header orelse "Question";
-            const style = if (idx == pending.active_index) active_style else tab_style;
-            const label_len = label.len;
-
-            if (col + label_len >= win.width) break;
-            var seg = [_]vaxis.Cell.Segment{.{ .text = label, .style = style }};
-            _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
-            col += label_len + 2;
-        }
+        renderTabsHeader(win, pending, row);
         row += 1;
     }
 
@@ -132,9 +99,7 @@ pub fn renderInlineQuestionPrompt(allocator: std.mem.Allocator, win: vaxis.Windo
     // temporary formatting buffers needed.
     const normal_style = vaxis.Style{ .fg = Color.white };
     const selected_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
-    const desc_style = vaxis.Style{ .fg = Color.dim_gray, .italic = true };
-
-    const digits = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32" };
+    const desc_style = vaxis.Style{ .fg = Color.dim_gray };
 
     for (question.options, 0..) |opt, idx| {
         if (row >= win.height) break;
@@ -179,12 +144,196 @@ pub fn renderInlineQuestionPrompt(allocator: std.mem.Allocator, win: vaxis.Windo
 
     // Footer
     if (row < win.height) {
-        const footer = if (question.multiple)
-            "tab: next  up/down: select  space: toggle  enter: confirm  esc: dismiss"
+        const footer = if (pending.questions.len > 1)
+            (if (question.multiple)
+                "h/l: prev/next  j/k: select  space: toggle  enter: confirm  esc: dismiss"
+            else
+                "h/l: prev/next  j/k: select  enter: confirm  esc: dismiss")
+        else if (question.multiple)
+            "j/k: select  space: toggle  enter: confirm  esc: dismiss"
         else
-            "tab: next  up/down: select  enter: confirm  esc: dismiss";
+            "j/k: select  enter: confirm  esc: dismiss";
         const footer_style = vaxis.Style{ .fg = Color.dim_gray };
         var footer_seg = [_]vaxis.Cell.Segment{.{ .text = footer, .style = footer_style }};
         _ = win.print(&footer_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
     }
+}
+
+// =============================================================================
+// Confirmation view
+// =============================================================================
+
+fn countConfirmationLines(allocator: std.mem.Allocator, width: usize, pending: *PendingQuestion) usize {
+    const max_text_width = if (width > 4) width - 4 else 1;
+    var lines: usize = 0;
+
+    lines += 1; // Spacer
+    lines += 1; // Header
+
+    for (pending.questions, 0..) |question, qi| {
+        lines += 1; // Question label
+        const q_state = pending.states[qi];
+        for (question.options, 0..) |opt, oi| {
+            if (q_state.selected[oi]) {
+                if (opt.is_custom) {
+                    const text = std.mem.trim(u8, q_state.custom_input.getText(), &std.ascii.whitespace);
+                    if (text.len > 0) {
+                        lines += countWrappedRows(allocator, text, max_text_width);
+                        continue;
+                    }
+                }
+                lines += countWrappedRows(allocator, opt.label, max_text_width);
+            }
+        }
+        // At least one line for "No answer" case
+        var has_selection = false;
+        for (q_state.selected) |sel| {
+            if (sel) {
+                has_selection = true;
+                break;
+            }
+        }
+        if (!has_selection) lines += 1;
+    }
+
+    lines += 1; // Spacer before footer
+    lines += 1; // Footer
+
+    return @max(@as(usize, 3), lines);
+}
+
+fn renderConfirmationView(allocator: std.mem.Allocator, win: vaxis.Window, pending: *PendingQuestion) !void {
+    var row: usize = 0;
+
+    renderSeparator(win, row);
+    row += 1;
+
+    const max_text_width = if (win.width > 4) win.width - 4 else 1;
+
+    // Spacer
+    if (row < win.height) row += 1;
+
+    // Header
+    const header_style = vaxis.Style{ .fg = Color.white, .bold = true };
+    if (row < win.height) {
+        var seg = [_]vaxis.Cell.Segment{.{ .text = "Confirm your answers:", .style = header_style }};
+        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+        row += 1;
+    }
+
+    const label_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
+    const answer_style = vaxis.Style{ .fg = Color.white };
+    const no_answer_style = vaxis.Style{ .fg = Color.dim_gray, .italic = true };
+
+    for (pending.questions, 0..) |question, qi| {
+        if (row >= win.height) break;
+
+        // Question header
+        const header = question.header orelse question.prompt;
+        var header_seg = [_]vaxis.Cell.Segment{.{ .text = header, .style = label_style }};
+        _ = win.print(&header_seg, .{ .row_offset = @intCast(row), .col_offset = 2 });
+        row += 1;
+
+        // Selected answers
+        const q_state = pending.states[qi];
+        var has_selection = false;
+
+        for (question.options, 0..) |opt, oi| {
+            if (!q_state.selected[oi]) continue;
+            has_selection = true;
+            if (row >= win.height) break;
+
+            if (opt.is_custom) {
+                const text = std.mem.trim(u8, q_state.custom_input.getText(), &std.ascii.whitespace);
+                if (text.len > 0) {
+                    const used = renderWrappedText(allocator, win, text, row, 4, max_text_width, answer_style);
+                    row += used;
+                    continue;
+                }
+            }
+            const used = renderWrappedText(allocator, win, opt.label, row, 4, max_text_width, answer_style);
+            row += used;
+        }
+
+        if (!has_selection and row < win.height) {
+            var seg = [_]vaxis.Cell.Segment{.{ .text = "No answer", .style = no_answer_style }};
+            _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = 4 });
+            row += 1;
+        }
+    }
+
+    // Spacer
+    if (row < win.height) row += 1;
+
+    // Footer
+    if (row < win.height) {
+        const footer_style = vaxis.Style{ .fg = Color.dim_gray };
+        var footer_seg = [_]vaxis.Cell.Segment{.{ .text = "enter: submit  esc/h: go back", .style = footer_style }};
+        _ = win.print(&footer_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+    }
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+const digits = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32" };
+
+fn renderSeparator(win: vaxis.Window, row: usize) void {
+    const separator_style = vaxis.Style{ .fg = Color.dim_gray };
+    for (0..win.width) |col| {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = "─", .width = 1 },
+            .style = separator_style,
+        });
+    }
+}
+
+fn renderTabsHeader(win: vaxis.Window, pending: *PendingQuestion, row: usize) void {
+    const tab_style = vaxis.Style{ .fg = Color.white };
+    const active_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
+    var col: usize = 1;
+
+    for (pending.questions, 0..) |question, idx| {
+        const label = question.header orelse "Question";
+        const style = if (idx == pending.active_index) active_style else tab_style;
+        const label_len = label.len;
+
+        if (col + label_len >= win.width) break;
+        var seg = [_]vaxis.Cell.Segment{.{ .text = label, .style = style }};
+        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
+        col += label_len + 2;
+    }
+}
+
+fn renderWrappedText(
+    allocator: std.mem.Allocator,
+    win: vaxis.Window,
+    text: []const u8,
+    start_row: usize,
+    col_offset: usize,
+    max_width: usize,
+    style: vaxis.Style,
+) usize {
+    if (text.len == 0) return 0;
+
+    var wrapped = RenderUtils.wrapText(allocator, text, max_width) catch return 0;
+    defer wrapped.deinit(allocator);
+
+    var row = start_row;
+    for (wrapped.items) |line| {
+        if (row >= win.height) break;
+        var seg = [_]vaxis.Cell.Segment{.{ .text = line, .style = style }};
+        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+        row += 1;
+    }
+
+    return row - start_row;
+}
+
+fn countWrappedRows(allocator: std.mem.Allocator, text: []const u8, max_width: usize) usize {
+    if (text.len == 0) return 1;
+    var wrapped = RenderUtils.wrapText(allocator, text, max_width) catch return 1;
+    defer wrapped.deinit(allocator);
+    return @max(@as(usize, 1), wrapped.items.len);
 }

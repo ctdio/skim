@@ -392,6 +392,82 @@ pub const Client = struct {
     }
 
     // =========================================================================
+    // Question / Permission Responses
+    // =========================================================================
+
+    /// POST /question/{requestID}/reply - Reply to a question from the agent
+    /// `body` is pre-serialized JSON: {"answers": [["label1"], ["label2", "label3"]]}
+    /// Uses a separate HTTP client to avoid thread safety issues with SSE connection
+    pub fn replyToQuestion(self: *Client, request_id: []const u8, body: []const u8) !void {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/question/{s}/reply", .{ self.base_url, request_id });
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        defer temp_client.deinit();
+
+        var req = temp_client.request(.POST, uri, .{
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "application/json" },
+            },
+        }) catch return error.ConnectionFailed;
+        defer req.deinit();
+
+        const body_buf = try self.allocator.alloc(u8, body.len);
+        defer self.allocator.free(body_buf);
+        @memcpy(body_buf, body);
+
+        req.sendBodyComplete(body_buf) catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        const response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok) {
+            if (response.head.status == .not_found) {
+                log.err("Question {s} not found (may have already been answered)", .{request_id});
+                return error.SessionNotFound;
+            }
+            log.err("Reply to question failed with status: {}", .{response.head.status});
+            return error.ServerError;
+        }
+
+        log.info("Replied to question {s}", .{request_id});
+    }
+
+    /// POST /question/{requestID}/reject - Reject/dismiss a question
+    /// Uses a separate HTTP client to avoid thread safety issues with SSE connection
+    pub fn rejectQuestion(self: *Client, request_id: []const u8) !void {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/question/{s}/reject", .{ self.base_url, request_id });
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        defer temp_client.deinit();
+
+        var req = temp_client.request(.POST, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
+
+        var body_data = "{}".*;
+        req.sendBodyComplete(&body_data) catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        const response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok) {
+            if (response.head.status == .not_found) {
+                log.err("Question {s} not found for rejection", .{request_id});
+                return error.SessionNotFound;
+            }
+            log.err("Reject question failed with status: {}", .{response.head.status});
+            return error.ServerError;
+        }
+
+        log.info("Rejected question {s}", .{request_id});
+    }
+
+    // =========================================================================
     // SSE Event Stream
     // =========================================================================
 

@@ -651,6 +651,7 @@ pub const PendingQuestion = struct {
     questions: []Question,
     states: []QuestionState,
     active_index: usize,
+    confirming: bool = false,
 
     fn deinit(self: *PendingQuestion, allocator: Allocator) void {
         if (self.id) |id| allocator.free(id);

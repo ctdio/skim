@@ -702,6 +702,41 @@ pub const OpencodeManager = struct {
         }
     }
 
+    /// Reply to a pending question via the dedicated question reply endpoint.
+    /// `answers` is a 2D slice: one inner slice per question, each containing
+    /// the selected option labels (or custom text) for that question.
+    pub fn respondToQuestion(self: *OpencodeManager, request_id: []const u8, answers: []const []const []const u8) !void {
+        const c = self.client orelse return error.NotConnected;
+
+        // Build JSON: {"answers": [["label1"], ["label2", "label3"]]}
+        var json: std.ArrayList(u8) = .{};
+        defer json.deinit(self.allocator);
+        const w = json.writer(self.allocator);
+
+        try w.writeAll("{\"answers\":[");
+        for (answers, 0..) |question_answers, qi| {
+            if (qi > 0) try w.writeByte(',');
+            try w.writeByte('[');
+            for (question_answers, 0..) |label, li| {
+                if (li > 0) try w.writeByte(',');
+                try w.print("{f}", .{std.json.fmt(label, .{})});
+            }
+            try w.writeByte(']');
+        }
+        try w.writeAll("]}");
+
+        try c.replyToQuestion(request_id, json.items);
+
+        self.pending_question = false;
+    }
+
+    /// Reject/dismiss a pending question.
+    pub fn rejectQuestion(self: *OpencodeManager, request_id: []const u8) !void {
+        const c = self.client orelse return error.NotConnected;
+        try c.rejectQuestion(request_id);
+        self.pending_question = false;
+    }
+
     pub fn isThinking(self: *const OpencodeManager) bool {
         return self.status == .prompting and !self.stream_complete.load(.acquire);
     }
@@ -1765,7 +1800,10 @@ pub const OpencodeManager = struct {
     }
 
     fn extractToolCallIdFromObject(obj: std.json.ObjectMap) ?[]const u8 {
-        const keys = [_][]const u8{ "tool_call_id", "toolCallId", "id", "call_id", "callId", "callID" };
+        // callID/callId must come before "id" — tool parts have both a part
+        // "id" (e.g. "prt_...") and a "callID" (e.g. "question:0"), and we
+        // need the call ID, not the part ID.
+        const keys = [_][]const u8{ "tool_call_id", "toolCallId", "callID", "callId", "call_id", "id" };
         return extractStringField(obj, &keys);
     }
 

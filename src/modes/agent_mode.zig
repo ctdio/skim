@@ -1613,6 +1613,22 @@ pub fn sendPromptToActiveManager(app: *App, text: []const u8) !void {
 fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *state.PendingQuestion, key: vaxis.Key) !bool {
     if (pending.questions.len == 0) return false;
 
+    // Confirmation view: only accept enter (submit) or esc/backspace (go back)
+    if (pending.confirming) {
+        if (key.codepoint == vaxis.Key.enter) {
+            try submitPendingQuestion(app, agent_state, pending);
+            return true;
+        }
+        if (key.codepoint == 27 or key.codepoint == vaxis.Key.backspace or
+            (key.codepoint == 'h' and !key.mods.ctrl))
+        {
+            pending.confirming = false;
+            app.needs_render = true;
+            return true;
+        }
+        return true;
+    }
+
     const question = &pending.questions[pending.active_index];
     const q_state = &pending.states[pending.active_index];
     const options_len = question.options.len;
@@ -1623,10 +1639,16 @@ fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *sta
     const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
         key.codepoint == vaxis.Key.up or
         (key.codepoint == 'k' and !key.mods.ctrl);
+    const is_next = key.codepoint == vaxis.Key.tab or
+        key.codepoint == vaxis.Key.right or
+        (key.codepoint == 'l' and !key.mods.ctrl);
+    const is_prev = (key.mods.shift and key.codepoint == vaxis.Key.tab) or
+        key.codepoint == vaxis.Key.left or
+        (key.codepoint == 'h' and !key.mods.ctrl);
 
     if (q_state.custom_active) {
         if (key.codepoint == vaxis.Key.enter) {
-            try submitPendingQuestion(app, agent_state, pending);
+            try advanceQuestionOrSubmit(app, agent_state, pending);
             return true;
         }
         if (key.codepoint == 27) {
@@ -1639,13 +1661,18 @@ fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *sta
         return true;
     }
 
-    if (key.codepoint == vaxis.Key.tab) {
-        if (pending.questions.len > 1) {
-            q_state.custom_active = false;
-            pending.active_index = (pending.active_index + 1) % pending.questions.len;
-            app.needs_render = true;
-            return true;
-        }
+    if (is_next and pending.questions.len > 1) {
+        q_state.custom_active = false;
+        pending.active_index = (pending.active_index + 1) % pending.questions.len;
+        app.needs_render = true;
+        return true;
+    }
+
+    if (is_prev and pending.questions.len > 1) {
+        q_state.custom_active = false;
+        pending.active_index = if (pending.active_index == 0) pending.questions.len - 1 else pending.active_index - 1;
+        app.needs_render = true;
+        return true;
     }
 
     if (is_down and options_len > 0) {
@@ -1712,6 +1739,19 @@ fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *sta
     }
 
     if (key.codepoint == 27) {
+        // For OpenCode: reject the question via the dedicated endpoint
+        if (pending.id) |request_id| {
+            const tab = if (app.tab_manager) |*tm| tm.activeTab() else null;
+            if (tab) |t| {
+                if (t.manager) |m| {
+                    if (m == .opencode) {
+                        m.opencode.rejectQuestion(request_id) catch |err| {
+                            std.log.err("Failed to reject question: {}", .{err});
+                        };
+                    }
+                }
+            }
+        }
         agent_state.clearPendingQuestion();
         app.needs_render = true;
         return true;
@@ -1738,15 +1778,54 @@ fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *sta
 }
 
 fn advanceQuestionOrSubmit(app: *App, agent_state: *state.AgentState, pending: *state.PendingQuestion) !void {
+    _ = agent_state;
     if (pending.active_index + 1 < pending.questions.len) {
         pending.active_index += 1;
+        app.needs_render = true;
         return;
     }
-    try submitPendingQuestion(app, agent_state, pending);
+    // Show confirmation view before submitting
+    pending.confirming = true;
+    app.needs_render = true;
 }
 
 fn submitPendingQuestion(app: *App, agent_state: *state.AgentState, pending: *state.PendingQuestion) !void {
-    _ = pending;
+    const tab = (if (app.tab_manager) |*tm| tm.activeTab() else null) orelse return;
+    const m = tab.manager orelse return;
+
+    // For OpenCode: use the dedicated question reply endpoint with structured answers
+    if (m == .opencode) {
+        if (pending.id) |request_id| {
+            const answers = buildQuestionAnswers(app.allocator, pending) catch null;
+            defer {
+                if (answers) |a| {
+                    for (a) |inner| app.allocator.free(inner);
+                    app.allocator.free(a);
+                }
+            }
+
+            if (answers) |a| {
+                // Show the answer in the chat as a user message
+                const display = agent_state.buildPendingQuestionAnswer(app.allocator) catch null;
+                if (display) |text| {
+                    defer app.allocator.free(text);
+                    agent_state.addMessage(.user, text) catch {};
+                }
+
+                m.opencode.respondToQuestion(request_id, a) catch |err| {
+                    std.log.err("Failed to reply to question: {}", .{err});
+                    try agent_state.addMessage(.system, "Failed to send question reply");
+                };
+                agent_state.clearPendingQuestion();
+                app.needs_render = true;
+                return;
+            }
+        }
+        // Fallback: no request ID or answer building failed — send as text prompt
+        std.log.warn("Question has no request ID, falling back to text prompt", .{});
+    }
+
+    // ACP / fallback: send answer as a regular text prompt
     const answer_opt = try agent_state.buildPendingQuestionAnswer(app.allocator);
     const answer = answer_opt orelse return;
     defer app.allocator.free(answer);
@@ -1755,6 +1834,38 @@ fn submitPendingQuestion(app: *App, agent_state: *state.AgentState, pending: *st
     try sendPromptToActiveManager(app, answer);
     agent_state.clearPendingQuestion();
     app.needs_render = true;
+}
+
+/// Build 2D answers array for the OpenCode question reply endpoint.
+/// Returns `[]const []const []const u8` — caller owns all allocations.
+fn buildQuestionAnswers(allocator: std.mem.Allocator, pending: *state.PendingQuestion) ![]const []const []const u8 {
+    var outer: std.ArrayList([]const []const u8) = .{};
+    errdefer {
+        for (outer.items) |inner| allocator.free(inner);
+        outer.deinit(allocator);
+    }
+
+    for (pending.questions, 0..) |question, qi| {
+        const q_state = pending.states[qi];
+        var inner: std.ArrayList([]const u8) = .{};
+        errdefer inner.deinit(allocator);
+
+        for (question.options, 0..) |opt, oi| {
+            if (!q_state.selected[oi]) continue;
+            if (opt.is_custom) {
+                const custom_text = std.mem.trim(u8, q_state.custom_input.getText(), &std.ascii.whitespace);
+                if (custom_text.len > 0) {
+                    try inner.append(allocator, custom_text);
+                    continue;
+                }
+            }
+            try inner.append(allocator, opt.label);
+        }
+
+        try outer.append(allocator, try inner.toOwnedSlice(allocator));
+    }
+
+    return try outer.toOwnedSlice(allocator);
 }
 
 /// Send a prompt, parsing @file references and embedding file content.
