@@ -88,6 +88,26 @@ pub const ChatLineType = union(enum) {
         entry_idx: usize,
     },
 
+    /// Subagent block: empty bordered line (┃)
+    subagent_border: struct {
+        msg_idx: usize,
+    },
+
+    /// Subagent block: header line (spinner/icon + "AgentType Task")
+    subagent_header: struct {
+        msg_idx: usize,
+    },
+
+    /// Subagent block: description + tool count line
+    subagent_description: struct {
+        msg_idx: usize,
+    },
+
+    /// Subagent block: "└ ToolName" tree line
+    subagent_last_tool: struct {
+        msg_idx: usize,
+    },
+
     /// Blank spacer between messages
     spacer,
 };
@@ -254,12 +274,16 @@ pub const ChatLineMap = struct {
                     // Skip pending Edit/Write tools if a diff exists for that tool_call_id
                     if (shouldSkipToolForDiff(msg, messages)) continue;
 
-                    // Tool header: ⏺ ToolName(args)
-                    try self.addToolHeader(&global_line, msg_idx, msg);
+                    if (msg.subagent_info != null) {
+                        try self.addSubagentBlock(&global_line, msg_idx, msg);
+                    } else {
+                        // Tool header: ⏺ ToolName(args)
+                        try self.addToolHeader(&global_line, msg_idx, msg);
 
-                    // Tool result if completed/failed
-                    if (msg.tool_status == .completed or msg.tool_status == .failed) {
-                        try self.addToolResult(&global_line, msg_idx, msg);
+                        // Tool result if completed/failed
+                        if (msg.tool_status == .completed or msg.tool_status == .failed) {
+                            try self.addToolResult(&global_line, msg_idx, msg);
+                        }
                     }
                 },
                 .diff => {
@@ -349,9 +373,13 @@ pub const ChatLineMap = struct {
                         // Skip pending Edit/Write tools if a diff exists for that tool_call_id
                         if (shouldSkipToolForDiff(msg.*, messages)) continue;
 
-                        try self.addToolHeader(&global_line, msg_idx, msg.*);
-                        if (msg.tool_status == .completed or msg.tool_status == .failed) {
-                            try self.addToolResult(&global_line, msg_idx, msg.*);
+                        if (msg.subagent_info != null) {
+                            try self.addSubagentBlock(&global_line, msg_idx, msg.*);
+                        } else {
+                            try self.addToolHeader(&global_line, msg_idx, msg.*);
+                            if (msg.tool_status == .completed or msg.tool_status == .failed) {
+                                try self.addToolResult(&global_line, msg_idx, msg.*);
+                            }
                         }
                     },
                     .diff => {
@@ -463,9 +491,13 @@ pub const ChatLineMap = struct {
                 .tool => {
                     // Skip pending Edit/Write tools if a diff exists for that tool_call_id
                     if (!shouldSkipToolForDiff(msg.*, messages)) {
-                        try self.addToolHeader(&global_line, last_msg_idx, msg.*);
-                        if (msg.tool_status == .completed or msg.tool_status == .failed) {
-                            try self.addToolResult(&global_line, last_msg_idx, msg.*);
+                        if (msg.subagent_info != null) {
+                            try self.addSubagentBlock(&global_line, last_msg_idx, msg.*);
+                        } else {
+                            try self.addToolHeader(&global_line, last_msg_idx, msg.*);
+                            if (msg.tool_status == .completed or msg.tool_status == .failed) {
+                                try self.addToolResult(&global_line, last_msg_idx, msg.*);
+                            }
                         }
                     }
                 },
@@ -893,6 +925,105 @@ pub const ChatLineMap = struct {
             .line_type = .{ .tool_result = .{ .msg_idx = msg_idx } },
             .text = result_text,
             .style = .{ .fg = Color.dim_gray },
+            .indent = 1,
+        });
+        global_line.* += 1;
+    }
+
+    /// Braille spinner characters for subagent running animation
+    const spinner_chars = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+
+    /// Build a bordered subagent block for a task tool message.
+    /// Layout:
+    ///   ┃
+    ///   ┃  {icon} {AgentType} Task
+    ///   ┃
+    ///   ┃  {description} ({N} toolcalls)
+    ///   ┃  └ {LastToolName}
+    ///   ┃
+    fn addSubagentBlock(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message) !void {
+        const info = msg.subagent_info orelse return;
+
+        // --- Top border (empty bordered line) ---
+        try self.records.append(self.allocator, .{
+            .global_line = global_line.*,
+            .line_type = .{ .subagent_border = .{ .msg_idx = msg_idx } },
+            .text = "",
+            .style = .{},
+            .indent = 1,
+        });
+        global_line.* += 1;
+
+        // --- Header line: "{icon} {AgentType} Task" ---
+        const agent_type_str = info.agent_type orelse "Task";
+        const status_icon: []const u8 = switch (msg.tool_status) {
+            .pending => "○",
+            .running => blk: {
+                const frame = @as(usize, @intCast(@divTrunc(std.time.milliTimestamp(), 100)));
+                break :blk spinner_chars[frame % spinner_chars.len];
+            },
+            .completed => "✓",
+            .failed => "✗",
+        };
+
+        const header_text = try std.fmt.allocPrint(self.allocator, "{s} {s} Task", .{ status_icon, agent_type_str });
+        try self.strings.append(self.allocator, header_text);
+
+        try self.records.append(self.allocator, .{
+            .global_line = global_line.*,
+            .line_type = .{ .subagent_header = .{ .msg_idx = msg_idx } },
+            .text = header_text,
+            .style = .{},
+            .indent = 1,
+        });
+        global_line.* += 1;
+
+        // --- Middle border (empty bordered line) ---
+        try self.records.append(self.allocator, .{
+            .global_line = global_line.*,
+            .line_type = .{ .subagent_border = .{ .msg_idx = msg_idx } },
+            .text = "",
+            .style = .{},
+            .indent = 1,
+        });
+        global_line.* += 1;
+
+        // --- Description line: "{description} ({N} toolcalls)" ---
+        const desc = info.description orelse "";
+        const desc_text = try std.fmt.allocPrint(self.allocator, "{s} ({d} toolcalls)", .{ desc, info.tool_count });
+        try self.strings.append(self.allocator, desc_text);
+
+        try self.records.append(self.allocator, .{
+            .global_line = global_line.*,
+            .line_type = .{ .subagent_description = .{ .msg_idx = msg_idx } },
+            .text = desc_text,
+            .style = .{ .fg = Color.dim },
+            .indent = 1,
+        });
+        global_line.* += 1;
+
+        // --- Last tool line: "└ {ToolName}" (only if summary has entries) ---
+        if (info.summary.len > 0) {
+            const last_tool = info.summary[info.summary.len - 1];
+            const tool_text = try std.fmt.allocPrint(self.allocator, "└ {s}", .{last_tool.tool_name});
+            try self.strings.append(self.allocator, tool_text);
+
+            try self.records.append(self.allocator, .{
+                .global_line = global_line.*,
+                .line_type = .{ .subagent_last_tool = .{ .msg_idx = msg_idx } },
+                .text = tool_text,
+                .style = .{ .fg = Color.dim },
+                .indent = 1,
+            });
+            global_line.* += 1;
+        }
+
+        // --- Bottom border (empty bordered line) ---
+        try self.records.append(self.allocator, .{
+            .global_line = global_line.*,
+            .line_type = .{ .subagent_border = .{ .msg_idx = msg_idx } },
+            .text = "",
+            .style = .{},
             .indent = 1,
         });
         global_line.* += 1;
@@ -2044,4 +2175,127 @@ test "ChatLineMap build with empty messages" {
     try line_map.build(messages, 80, .unified, null, null);
 
     try std.testing.expectEqual(@as(usize, 0), line_map.getTotalLines());
+}
+
+test "subagent block produces correct record sequence with summary" {
+    const allocator = std.testing.allocator;
+    var line_map = ChatLineMap.init(allocator);
+    defer line_map.deinit();
+
+    var summary_items = try allocator.alloc(state.SubagentToolSummary, 1);
+    summary_items[0] = .{
+        .tool_name = try allocator.dupe(u8, "Read"),
+        .title = try allocator.dupe(u8, "src/main.zig"),
+    };
+
+    // Construct a tool message with subagent_info
+    var messages = [_]Message{.{
+        .role = .tool,
+        .content = "task Explore",
+        .timestamp = 0,
+        .tool_name = "task",
+        .tool_status = .completed,
+        .subagent_info = .{
+            .description = "Explore architecture",
+            .agent_type = "Explore",
+            .tool_count = 6,
+            .summary = summary_items,
+        },
+    }};
+    defer {
+        // Free the summary items since they were heap-allocated
+        for (summary_items) |*item| item.deinit(allocator);
+        allocator.free(summary_items);
+    }
+
+    try line_map.build(&messages, 80, .unified, null, null);
+
+    // Expected sequence: border, header, border, description, last_tool, border
+    // = 6 lines
+    try std.testing.expectEqual(@as(usize, 6), line_map.getTotalLines());
+
+    const records = line_map.records.items;
+
+    // Line 0: subagent_border
+    try std.testing.expect(records[0].line_type == .subagent_border);
+
+    // Line 1: subagent_header (contains "✓ Explore Task" since completed)
+    try std.testing.expect(records[1].line_type == .subagent_header);
+    try std.testing.expect(std.mem.indexOf(u8, records[1].text, "Explore Task") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records[1].text, "✓") != null);
+
+    // Line 2: subagent_border
+    try std.testing.expect(records[2].line_type == .subagent_border);
+
+    // Line 3: subagent_description (contains "Explore architecture (6 toolcalls)")
+    try std.testing.expect(records[3].line_type == .subagent_description);
+    try std.testing.expect(std.mem.indexOf(u8, records[3].text, "Explore architecture") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records[3].text, "6 toolcalls") != null);
+
+    // Line 4: subagent_last_tool (contains "└ Read")
+    try std.testing.expect(records[4].line_type == .subagent_last_tool);
+    try std.testing.expect(std.mem.indexOf(u8, records[4].text, "Read") != null);
+
+    // Line 5: subagent_border
+    try std.testing.expect(records[5].line_type == .subagent_border);
+}
+
+test "subagent block with no summary omits last_tool line" {
+    const allocator = std.testing.allocator;
+    var line_map = ChatLineMap.init(allocator);
+    defer line_map.deinit();
+
+    // Tool message with subagent_info but empty summary
+    var messages = [_]Message{.{
+        .role = .tool,
+        .content = "task Explore",
+        .timestamp = 0,
+        .tool_name = "task",
+        .tool_status = .running,
+        .subagent_info = .{
+            .description = "Explore code",
+            .agent_type = "Explore",
+            .tool_count = 0,
+        },
+    }};
+
+    try line_map.build(&messages, 80, .unified, null, null);
+
+    // Expected sequence: border, header, border, description, border
+    // = 5 lines (no last_tool)
+    try std.testing.expectEqual(@as(usize, 5), line_map.getTotalLines());
+
+    const records = line_map.records.items;
+    try std.testing.expect(records[0].line_type == .subagent_border);
+    try std.testing.expect(records[1].line_type == .subagent_header);
+    try std.testing.expect(records[2].line_type == .subagent_border);
+    try std.testing.expect(records[3].line_type == .subagent_description);
+    // Description should show "0 toolcalls"
+    try std.testing.expect(std.mem.indexOf(u8, records[3].text, "0 toolcalls") != null);
+    try std.testing.expect(records[4].line_type == .subagent_border);
+}
+
+test "non-task tool message produces tool_header not subagent block" {
+    const allocator = std.testing.allocator;
+    var line_map = ChatLineMap.init(allocator);
+    defer line_map.deinit();
+
+    // Regular tool message (no subagent_info)
+    var messages = [_]Message{.{
+        .role = .tool,
+        .content = "Bash",
+        .timestamp = 0,
+        .tool_name = "Bash",
+        .tool_command = "ls -la",
+        .tool_status = .completed,
+        .tool_stdout = "file.txt",
+    }};
+
+    try line_map.build(&messages, 80, .unified, null, null);
+
+    // Should have tool_header and tool_result (NOT subagent lines)
+    const records = line_map.records.items;
+    try std.testing.expect(records.len >= 2);
+    try std.testing.expect(records[0].line_type == .tool_header);
+    try std.testing.expect(records[1].line_type == .tool_result);
 }

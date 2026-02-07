@@ -504,6 +504,96 @@ test "snapshot: agent_tool_no_command" {
 }
 
 // =============================================================================
+// Subagent Block Rendering Snapshot Tests
+// =============================================================================
+
+test "snapshot: subagent_block_completed" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 8);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    _ = agent_helpers.renderSubagentBlock(win, "Explore", "Explore architecture", 12, "Read", .completed, 0, frame);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "subagent_block_completed", text);
+}
+
+test "snapshot: subagent_block_running" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 8);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    _ = agent_helpers.renderSubagentBlock(win, "Explore", "Explore architecture", 6, "Read", .running, 0, frame);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "subagent_block_running", text);
+}
+
+test "snapshot: subagent_block_failed" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 8);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    _ = agent_helpers.renderSubagentBlock(win, "Explore", "Explore architecture", 3, "Bash", .failed, 0, frame);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "subagent_block_failed", text);
+}
+
+test "snapshot: subagent_block_no_summary" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 7);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    _ = agent_helpers.renderSubagentBlock(win, "Explore", "Explore code", 0, null, .running, 0, frame);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "subagent_block_no_summary", text);
+}
+
+test "snapshot: subagent_conversation_mixed" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 70, 16);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const frame = ctx.frameAllocator();
+    var row: usize = 0;
+
+    // Regular tool call
+    row = agent_helpers.renderToolCallAlloc(win, "Read", "src/main.zig", .completed, "// main entry", row, frame);
+    row += 1;
+
+    // Subagent block
+    row = agent_helpers.renderSubagentBlock(win, "Explore", "Explore architecture", 8, "Read", .completed, row, frame);
+    row += 1;
+
+    // Another regular tool call
+    row = agent_helpers.renderToolCallAlloc(win, "Bash", "zig build", .completed, "Build OK", row, frame);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "subagent_conversation_mixed", text);
+}
+
+// =============================================================================
 // Edge Cases
 // =============================================================================
 

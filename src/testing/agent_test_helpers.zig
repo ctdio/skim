@@ -481,6 +481,110 @@ pub fn renderToolCallAlloc(
     return current_row;
 }
 
+/// Render a subagent block with allocator for persistent strings (for snapshot testing).
+/// Renders the bordered block layout matching the production addSubagentBlock + render.zig.
+///
+/// Layout:
+///   ┃
+///   ┃  {icon} {AgentType} Task
+///   ┃
+///   ┃  {description} ({N} toolcalls)
+///   ┃  └ {LastToolName}    (only if last_tool != null)
+///   ┃
+pub fn renderSubagentBlock(
+    win: vaxis.Window,
+    agent_type: []const u8,
+    description: []const u8,
+    tool_count: usize,
+    last_tool: ?[]const u8,
+    status: ToolStatus,
+    row: usize,
+    alloc: std.mem.Allocator,
+) usize {
+    if (row >= win.height) return row;
+
+    var current_row = row;
+    const border_style: vaxis.Style = .{ .fg = Color.dim };
+    const bold_style: vaxis.Style = .{ .bold = true };
+    const dim_style: vaxis.Style = .{ .fg = Color.dim };
+
+    const icon: []const u8 = switch (status) {
+        .pending => "○",
+        .running => "⠹",
+        .completed => "✓",
+        .failed => "✗",
+    };
+    const icon_color: vaxis.Cell.Color = switch (status) {
+        .pending => Color.dim,
+        .running => Color.tool_pending, // yellow
+        .completed => Color.tool_completed, // green
+        .failed => Color.tool_failed, // red
+    };
+
+    // Top border
+    if (current_row < win.height) {
+        var seg = [_]vaxis.Cell.Segment{.{ .text = "┃", .style = border_style }};
+        _ = win.print(&seg, .{ .row_offset = @intCast(current_row) });
+        current_row += 1;
+    }
+
+    // Header: "┃  {icon} {AgentType} Task"
+    if (current_row < win.height) {
+        const type_task = std.fmt.allocPrint(alloc, "{s} Task", .{agent_type}) catch "Task";
+        var seg = [_]vaxis.Cell.Segment{
+            .{ .text = "┃", .style = border_style },
+            .{ .text = "  ", .style = .{} },
+            .{ .text = icon, .style = .{ .fg = icon_color } },
+            .{ .text = " ", .style = .{} },
+            .{ .text = type_task, .style = bold_style },
+        };
+        _ = win.print(&seg, .{ .row_offset = @intCast(current_row) });
+        current_row += 1;
+    }
+
+    // Middle border
+    if (current_row < win.height) {
+        var seg = [_]vaxis.Cell.Segment{.{ .text = "┃", .style = border_style }};
+        _ = win.print(&seg, .{ .row_offset = @intCast(current_row) });
+        current_row += 1;
+    }
+
+    // Description: "┃  {description} ({N} toolcalls)"
+    if (current_row < win.height) {
+        const desc_text = std.fmt.allocPrint(alloc, "{s} ({d} toolcalls)", .{ description, tool_count }) catch description;
+        var seg = [_]vaxis.Cell.Segment{
+            .{ .text = "┃", .style = border_style },
+            .{ .text = "  ", .style = .{} },
+            .{ .text = desc_text, .style = dim_style },
+        };
+        _ = win.print(&seg, .{ .row_offset = @intCast(current_row) });
+        current_row += 1;
+    }
+
+    // Last tool: "┃  └ {ToolName}" (only if present)
+    if (last_tool) |tool_name| {
+        if (current_row < win.height) {
+            const tool_text = std.fmt.allocPrint(alloc, "└ {s}", .{tool_name}) catch tool_name;
+            var seg = [_]vaxis.Cell.Segment{
+                .{ .text = "┃", .style = border_style },
+                .{ .text = "  ", .style = .{} },
+                .{ .text = tool_text, .style = dim_style },
+            };
+            _ = win.print(&seg, .{ .row_offset = @intCast(current_row) });
+            current_row += 1;
+        }
+    }
+
+    // Bottom border
+    if (current_row < win.height) {
+        var seg = [_]vaxis.Cell.Segment{.{ .text = "┃", .style = border_style }};
+        _ = win.print(&seg, .{ .row_offset = @intCast(current_row) });
+        current_row += 1;
+    }
+
+    return current_row;
+}
+
 // =============================================================================
 // Tests - Builder
 // =============================================================================

@@ -1693,6 +1693,10 @@ pub const AgentState = struct {
             .diff_hunk_header => |h| h.msg_idx,
             .diff_line => |d| d.msg_idx,
             .plan_entry => |p| p.msg_idx,
+            .subagent_border => |s| s.msg_idx,
+            .subagent_header => |s| s.msg_idx,
+            .subagent_description => |s| s.msg_idx,
+            .subagent_last_tool => |s| s.msg_idx,
             .spacer => null,
         };
     }

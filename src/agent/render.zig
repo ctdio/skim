@@ -1650,6 +1650,14 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 };
                 _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
             },
+            .subagent_border, .subagent_header, .subagent_description, .subagent_last_tool => {
+                // Draw "┃" left border for all subagent block lines
+                const border_style = withHighlightBg(.{ .fg = Color.dim }, is_cursor_line, is_in_visual);
+                var bar_seg = [_]vaxis.Cell.Segment{
+                    .{ .text = "┃", .style = border_style },
+                };
+                _ = win.print(&bar_seg, .{ .row_offset = @intCast(row), .col_offset = 0 });
+            },
             // No bar for tools - they use minimal icon-based design
             else => {},
         }
@@ -1723,6 +1731,51 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                     // No space found, print normally (with UTF-8 validation)
                     _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
                 }
+            },
+            .subagent_border => {
+                // Empty bordered line — border already drawn in left-bar switch
+            },
+            .subagent_header => |sh| {
+                // Render: "  {icon} {AgentType} Task"
+                // Icon color depends on tool status
+                const messages = agent_state.messages.items;
+                const icon_color: vaxis.Color = if (sh.msg_idx < messages.len) blk: {
+                    const msg = messages[sh.msg_idx];
+                    break :blk switch (msg.tool_status) {
+                        .pending => Color.dim,
+                        .running => Color.yellow,
+                        .completed => Color.green,
+                        .failed => Color.red,
+                    };
+                } else Color.white;
+
+                // Split icon from rest (same pattern as tool_header)
+                if (std.mem.indexOf(u8, record.text, " ")) |space_idx| {
+                    const icon = record.text[0..space_idx];
+                    const rest = if (space_idx + 1 < record.text.len) record.text[space_idx + 1 ..] else "";
+
+                    // col_offset already accounts for indent; border "┃" is at col 0
+                    // Print "  " spacing after border
+                    _ = safePrint(win, "  ", withHighlightBg(.{}, is_cursor_line, is_in_visual), row, col_offset);
+                    // Print icon with status color
+                    _ = safePrint(win, icon, withHighlightBg(.{ .fg = icon_color }, is_cursor_line, is_in_visual), row, col_offset + 2);
+                    // Print space + rest with bold
+                    _ = safePrint(win, " ", withHighlightBg(.{}, is_cursor_line, is_in_visual), row, col_offset + 3);
+                    _ = safePrint(win, rest, withHighlightBg(.{ .bold = true }, is_cursor_line, is_in_visual), row, col_offset + 4);
+                } else {
+                    _ = safePrint(win, "  ", withHighlightBg(.{}, is_cursor_line, is_in_visual), row, col_offset);
+                    _ = safePrint(win, record.text, withHighlightBg(.{ .bold = true }, is_cursor_line, is_in_visual), row, col_offset + 2);
+                }
+            },
+            .subagent_description => {
+                // Render: "  {description} ({N} toolcalls)" in dimmed style
+                _ = safePrint(win, "  ", withHighlightBg(.{}, is_cursor_line, is_in_visual), row, col_offset);
+                _ = safePrint(win, record.text, withHighlightBg(.{ .fg = Color.dim }, is_cursor_line, is_in_visual), row, col_offset + 2);
+            },
+            .subagent_last_tool => {
+                // Render: "  └ {ToolName}" in dimmed style
+                _ = safePrint(win, "  ", withHighlightBg(.{}, is_cursor_line, is_in_visual), row, col_offset);
+                _ = safePrint(win, record.text, withHighlightBg(.{ .fg = Color.dim }, is_cursor_line, is_in_visual), row, col_offset + 2);
             },
             else => {
                 // Print with UTF-8 validation to prevent grapheme iterator crash
