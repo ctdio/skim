@@ -16,6 +16,13 @@ const Color = struct {
     const plan_completed: vaxis.Cell.Color = .{ .rgb = [3]u8{ 100, 255, 100 } }; // Green
     const plan_pending: vaxis.Cell.Color = .{ .rgb = [3]u8{ 200, 200, 200 } }; // Gray
     const plan_in_progress: vaxis.Cell.Color = .{ .rgb = [3]u8{ 100, 200, 255 } }; // Light blue
+
+    // Modal colors (subset from rendering/common.zig)
+    const dialog_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 22, 22, 22 } }; // Deep dark gray
+    const dim_gray: vaxis.Cell.Color = .{ .index = 8 }; // ANSI bright black
+    const cyan: vaxis.Cell.Color = .{ .index = 6 };
+    const yellow: vaxis.Cell.Color = .{ .index = 3 };
+    const red: vaxis.Cell.Color = .{ .index = 1 };
 };
 
 // =============================================================================
@@ -583,6 +590,300 @@ pub fn renderSubagentBlock(
     }
 
     return current_row;
+}
+
+// =============================================================================
+// Subagent Modal Rendering (mirrors src/agent/render.zig renderSubagentModal)
+// =============================================================================
+
+/// Modal message role for test rendering
+pub const ModalMessageRole = enum {
+    user,
+    assistant,
+    tool,
+};
+
+/// Modal message for test rendering
+pub const ModalMessage = struct {
+    role: ModalMessageRole,
+    content: ?[]const u8 = null,
+    tool_name: ?[]const u8 = null,
+    tool_title: ?[]const u8 = null,
+};
+
+/// Modal state for test rendering
+pub const ModalState = enum {
+    loading,
+    error_state,
+    empty,
+    with_messages,
+};
+
+/// Render a subagent drill-in modal overlay centered on the window.
+/// Mirrors the rendering logic in src/agent/render.zig renderSubagentModal.
+pub fn renderSubagentModal(
+    win: vaxis.Window,
+    title: []const u8,
+    modal_state: ModalState,
+    error_message: ?[]const u8,
+    messages: []const ModalMessage,
+    scroll_offset: usize,
+) void {
+    const total_width = win.width;
+    const total_height = win.height;
+
+    // Modal dimensions: ~80% of screen
+    const modal_width = @max(total_width * 4 / 5, 20);
+    const modal_height = @max(total_height * 4 / 5, 6);
+    const modal_x = (total_width -| modal_width) / 2;
+    const modal_y = (total_height -| modal_height) / 2;
+
+    const modal_win = win.child(.{
+        .x_off = @intCast(modal_x),
+        .y_off = @intCast(modal_y),
+        .width = @intCast(modal_width),
+        .height = @intCast(modal_height),
+    });
+
+    // Fill background
+    const bg_cell = vaxis.Cell{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{ .bg = Color.dialog_bg },
+    };
+    modal_win.fill(bg_cell);
+
+    const border_style: vaxis.Style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
+    const title_style: vaxis.Style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
+    const text_style: vaxis.Style = .{ .fg = Color.white, .bg = Color.dialog_bg };
+    const dim_style: vaxis.Style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
+    const role_style: vaxis.Style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true };
+    const tool_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.dialog_bg };
+
+    // Draw border
+    drawModalBorder(modal_win, modal_width, modal_height, title, border_style, title_style);
+
+    // Content area
+    const content_x: usize = 2;
+    const content_width = if (modal_width > 4) modal_width - 4 else 1;
+    var row: usize = 1;
+    const max_row = modal_height -| 1;
+
+    switch (modal_state) {
+        .loading => {
+            if (row < max_row) {
+                var seg = [_]vaxis.Cell.Segment{
+                    .{ .text = "Loading messages...", .style = dim_style },
+                };
+                _ = modal_win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(content_x) });
+                row += 1;
+            }
+        },
+        .error_state => {
+            if (row < max_row) {
+                const err_msg = error_message orelse "Unknown error";
+                var seg = [_]vaxis.Cell.Segment{
+                    .{ .text = "Error: ", .style = .{ .fg = Color.red, .bg = Color.dialog_bg, .bold = true } },
+                    .{ .text = err_msg, .style = .{ .fg = Color.red, .bg = Color.dialog_bg } },
+                };
+                _ = modal_win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(content_x) });
+                row += 1;
+            }
+        },
+        .empty => {
+            if (row < max_row) {
+                var seg = [_]vaxis.Cell.Segment{
+                    .{ .text = "No messages in this session.", .style = dim_style },
+                };
+                _ = modal_win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(content_x) });
+                row += 1;
+            }
+        },
+        .with_messages => {
+            var current_line: usize = 0;
+            for (messages) |msg| {
+                if (row >= max_row) break;
+
+                switch (msg.role) {
+                    .user => {
+                        if (current_line >= scroll_offset and row < max_row) {
+                            row += 1; // blank line
+                            if (row < max_row) {
+                                var seg = [_]vaxis.Cell.Segment{
+                                    .{ .text = "You", .style = role_style },
+                                };
+                                _ = modal_win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(content_x) });
+                                row += 1;
+                            }
+                        }
+                        current_line += 2;
+
+                        if (msg.content) |content| {
+                            renderModalText(modal_win, content, &row, max_row, content_x, content_width, text_style, &current_line, scroll_offset);
+                        }
+                    },
+                    .assistant => {
+                        if (msg.content) |content| {
+                            if (current_line >= scroll_offset and row < max_row) {
+                                row += 1; // blank separator
+                            }
+                            current_line += 1;
+
+                            renderModalText(modal_win, content, &row, max_row, content_x, content_width, text_style, &current_line, scroll_offset);
+                        }
+                    },
+                    .tool => {
+                        if (current_line >= scroll_offset and row < max_row) {
+                            const display = msg.tool_title orelse msg.tool_name orelse "Tool";
+                            var seg = [_]vaxis.Cell.Segment{
+                                .{ .text = "  \xe2\x8f\xba ", .style = tool_style },
+                                .{ .text = display, .style = dim_style },
+                            };
+                            _ = modal_win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(content_x) });
+                            row += 1;
+                        }
+                        current_line += 1;
+                    },
+                }
+            }
+        },
+    }
+
+    // Footer
+    if (modal_height > 2) {
+        const footer = "j/k:scroll  ESC/q:close";
+        const footer_col: usize = if (modal_width > footer.len + 2) 2 else 0;
+        var seg = [_]vaxis.Cell.Segment{
+            .{ .text = footer, .style = dim_style },
+        };
+        _ = modal_win.print(&seg, .{ .row_offset = @intCast(modal_height - 1), .col_offset = @intCast(footer_col) });
+    }
+}
+
+/// Draw modal border with title (mirrors drawModalBorder in render.zig)
+fn drawModalBorder(win: vaxis.Window, width: usize, height: usize, title: []const u8, border_style: vaxis.Style, title_style: vaxis.Style) void {
+    // Top border: ┌── Title ──────┐
+    win.writeCell(0, 0, .{
+        .char = .{ .grapheme = "\xe2\x94\x8c", .width = 1 },
+        .style = border_style,
+    });
+
+    var col: usize = 1;
+    if (col < width -| 1) {
+        win.writeCell(@intCast(col), 0, .{
+            .char = .{ .grapheme = "\xe2\x94\x80", .width = 1 },
+            .style = border_style,
+        });
+        col += 1;
+    }
+    if (col < width -| 1) {
+        win.writeCell(@intCast(col), 0, .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = border_style,
+        });
+        col += 1;
+    }
+
+    // Title
+    const title_max = @min(title.len, width -| 6);
+    const title_slice = title[0..title_max];
+    var title_seg = [_]vaxis.Cell.Segment{
+        .{ .text = title_slice, .style = title_style },
+    };
+    _ = win.print(&title_seg, .{ .row_offset = 0, .col_offset = @intCast(col) });
+    col += title_max;
+
+    if (col < width -| 1) {
+        win.writeCell(@intCast(col), 0, .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = border_style,
+        });
+        col += 1;
+    }
+    while (col < width -| 1) {
+        win.writeCell(@intCast(col), 0, .{
+            .char = .{ .grapheme = "\xe2\x94\x80", .width = 1 },
+            .style = border_style,
+        });
+        col += 1;
+    }
+    if (width > 0) {
+        win.writeCell(@intCast(width - 1), 0, .{
+            .char = .{ .grapheme = "\xe2\x94\x90", .width = 1 },
+            .style = border_style,
+        });
+    }
+
+    // Side borders
+    for (1..height -| 1) |r| {
+        win.writeCell(0, @intCast(r), .{
+            .char = .{ .grapheme = "\xe2\x94\x82", .width = 1 },
+            .style = border_style,
+        });
+        if (width > 0) {
+            win.writeCell(@intCast(width - 1), @intCast(r), .{
+                .char = .{ .grapheme = "\xe2\x94\x82", .width = 1 },
+                .style = border_style,
+            });
+        }
+    }
+
+    // Bottom border: └───────────────┘
+    if (height > 0) {
+        win.writeCell(0, @intCast(height - 1), .{
+            .char = .{ .grapheme = "\xe2\x94\x94", .width = 1 },
+            .style = border_style,
+        });
+        for (1..width -| 1) |c| {
+            win.writeCell(@intCast(c), @intCast(height - 1), .{
+                .char = .{ .grapheme = "\xe2\x94\x80", .width = 1 },
+                .style = border_style,
+            });
+        }
+        if (width > 0) {
+            win.writeCell(@intCast(width - 1), @intCast(height - 1), .{
+                .char = .{ .grapheme = "\xe2\x94\x98", .width = 1 },
+                .style = border_style,
+            });
+        }
+    }
+}
+
+/// Render wrapped text in modal (mirrors renderWrappedTextInModal in render.zig)
+fn renderModalText(
+    win: vaxis.Window,
+    text: []const u8,
+    row: *usize,
+    max_row: usize,
+    content_x: usize,
+    content_width: usize,
+    style: vaxis.Style,
+    current_line: *usize,
+    scroll_offset: usize,
+) void {
+    var iter = std.mem.splitScalar(u8, text, '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) {
+            if (current_line.* >= scroll_offset and row.* < max_row) {
+                row.* += 1;
+            }
+            current_line.* += 1;
+        } else {
+            var pos: usize = 0;
+            while (pos < line.len) {
+                const end = @min(pos + content_width, line.len);
+                const chunk = line[pos..end];
+                if (current_line.* >= scroll_offset and row.* < max_row) {
+                    var seg = [_]vaxis.Cell.Segment{
+                        .{ .text = chunk, .style = style },
+                    };
+                    _ = win.print(&seg, .{ .row_offset = @intCast(row.*), .col_offset = @intCast(content_x) });
+                    row.* += 1;
+                }
+                current_line.* += 1;
+                pos = end;
+            }
+        }
+    }
 }
 
 // =============================================================================

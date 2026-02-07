@@ -28,6 +28,31 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
+    // Handle subagent drill-in modal when active (captures all keys)
+    if (agent_state.hasSubagentModal()) {
+        if (key.codepoint == 27 or key.codepoint == 'q') { // ESC or q
+            agent_state.closeSubagentModal();
+            app.needs_render = true;
+            return;
+        }
+        if (key.codepoint == 'j' or key.codepoint == vaxis.Key.down) {
+            if (agent_state.getSubagentModal()) |modal| {
+                modal.scrollDown(modal.messages.items.len);
+            }
+            app.needs_render = true;
+            return;
+        }
+        if (key.codepoint == 'k' or key.codepoint == vaxis.Key.up) {
+            if (agent_state.getSubagentModal()) |modal| {
+                modal.scrollUp();
+            }
+            app.needs_render = true;
+            return;
+        }
+        // Consume all other keys when modal is active
+        return;
+    }
+
     // Check for pending permission prompt (ACP-only feature)
     if (app.getActiveAcpManager()) |mgr| {
         if (mgr.getPendingPermission()) |perm| {
@@ -365,6 +390,24 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 return;
             }
             // Unknown Ctrl+w sequence - ignore
+            return;
+        }
+
+        // Enter - drill into subagent message (if cursor is on a subagent tool message with session_id)
+        if (key.codepoint == vaxis.Key.enter) {
+            if (agent_state.getMessageIdxAtCursorLine()) |msg_idx| {
+                if (msg_idx < agent_state.messages.items.len) {
+                    const msg = &agent_state.messages.items[msg_idx];
+                    if (msg.subagent_info) |info| {
+                        if (info.session_id) |session_id| {
+                            const title = info.description orelse info.agent_type orelse "Subagent";
+                            app.startSubagentModalFetch(session_id, title);
+                            app.needs_render = true;
+                            return;
+                        }
+                    }
+                }
+            }
             return;
         }
 

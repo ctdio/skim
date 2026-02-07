@@ -37,6 +37,7 @@ const agent_selection_mode = @import("modes/agent_selection_mode.zig");
 const session_picker_mode = @import("modes/session_picker_mode.zig");
 const agent_mode = @import("modes/agent_mode.zig");
 const agent = @import("agent/agent.zig");
+const agent_state_mod = @import("agent/state.zig");
 const sessions = @import("acp/sessions.zig");
 const app_config = @import("config.zig");
 const build_options = @import("build_options");
@@ -118,6 +119,18 @@ pub const OpencodeConnectContext = struct {
     opencode_path: []const u8,
     port: u16,
     cwd: ?[]const u8,
+};
+
+/// Context for subagent modal fetch thread
+pub const SubagentFetchContext = struct {
+    app: *App,
+    base_url: []const u8, // Owned copy
+    session_id: []const u8, // Owned copy
+
+    pub fn deinit(self: *SubagentFetchContext, allocator: std.mem.Allocator) void {
+        allocator.free(self.base_url);
+        allocator.free(self.session_id);
+    }
 };
 
 /// Case-insensitive substring search
@@ -3523,6 +3536,136 @@ pub const App = struct {
         }
 
         self.state.menu_stats_cached = true;
+    }
+
+    // Subagent modal fetch
+
+    /// Start async fetch of subagent session messages for the drill-in modal.
+    /// Opens the modal in loading state and spawns a background thread.
+    pub fn startSubagentModalFetch(self: *App, session_id: []const u8, title: []const u8) void {
+        const agent_state = self.getActiveAgentState() orelse return;
+
+        // Get base_url from the active opencode manager
+        const mgr = self.getActiveOpencodeManager() orelse return;
+        const base_url = mgr.base_url orelse return;
+
+        // Open modal in loading state
+        agent_state.openSubagentModal(session_id, title) catch |err| {
+            std.log.err("Failed to open subagent modal: {}", .{err});
+            return;
+        };
+
+        // Create context for the fetch thread
+        const ctx = self.allocator.create(SubagentFetchContext) catch return;
+        ctx.* = .{
+            .app = self,
+            .base_url = self.allocator.dupe(u8, base_url) catch {
+                self.allocator.destroy(ctx);
+                return;
+            },
+            .session_id = self.allocator.dupe(u8, session_id) catch {
+                self.allocator.free(ctx.base_url);
+                self.allocator.destroy(ctx);
+                return;
+            },
+        };
+
+        const thread = std.Thread.spawn(.{}, subagentFetchWorker, .{ctx}) catch {
+            // On thread spawn failure, show error in modal
+            if (agent_state.getSubagentModal()) |modal| {
+                modal.loading = false;
+                modal.error_message = self.allocator.dupe(u8, "Failed to start fetch thread") catch null;
+            }
+            ctx.deinit(self.allocator);
+            self.allocator.destroy(ctx);
+            return;
+        };
+        thread.detach();
+
+        self.needs_render = true;
+    }
+
+    /// Worker thread that fetches subagent session messages
+    fn subagentFetchWorker(ctx: *SubagentFetchContext) void {
+        const app = ctx.app;
+
+        // Create a temporary client for the fetch
+        var client = opencode.Client.init(std.heap.c_allocator, ctx.base_url) catch {
+            completeSubagentFetch(app, null, "Failed to connect to server");
+            ctx.deinit(std.heap.c_allocator);
+            std.heap.c_allocator.destroy(ctx);
+            return;
+        };
+        defer client.deinit();
+
+        const modal_messages = client.fetchSessionMessages(ctx.session_id) catch |err| {
+            const err_msg = switch (err) {
+                error.SessionNotFound => "Session not found",
+                error.ConnectionFailed => "Connection failed",
+                error.ServerError => "Server error",
+                else => "Failed to fetch messages",
+            };
+            completeSubagentFetch(app, null, err_msg);
+            ctx.deinit(std.heap.c_allocator);
+            std.heap.c_allocator.destroy(ctx);
+            return;
+        };
+
+        completeSubagentFetch(app, modal_messages, null);
+        ctx.deinit(std.heap.c_allocator);
+        std.heap.c_allocator.destroy(ctx);
+    }
+
+    /// Called from fetch worker to populate the modal with results
+    fn completeSubagentFetch(app: *App, modal_messages: ?[]opencode.Client.ModalMessage, err_msg: ?[]const u8) void {
+        const agent_state = app.getActiveAgentState() orelse {
+            // Modal was closed while fetch was in progress — free the messages
+            if (modal_messages) |msgs| {
+                for (msgs) |*m| m.deinit(std.heap.c_allocator);
+                std.heap.c_allocator.free(msgs);
+            }
+            return;
+        };
+
+        const modal = agent_state.getSubagentModal() orelse {
+            if (modal_messages) |msgs| {
+                for (msgs) |*m| m.deinit(std.heap.c_allocator);
+                std.heap.c_allocator.free(msgs);
+            }
+            return;
+        };
+
+        modal.loading = false;
+
+        if (err_msg) |msg| {
+            modal.error_message = agent_state.allocator.dupe(u8, msg) catch null;
+        } else if (modal_messages) |msgs| {
+            // Convert ModalMessages to SubagentModalMessages and transfer ownership
+            for (msgs) |*m| {
+                const role: agent_state_mod.SubagentModalMessage.Role = switch (m.role) {
+                    .user => .user,
+                    .assistant => .assistant,
+                    .tool => .tool,
+                };
+                // Dupe strings from c_allocator to agent_state.allocator
+                const content = if (m.content) |c| (agent_state.allocator.dupe(u8, c) catch null) else null;
+                const tool_name = if (m.tool_name) |n| (agent_state.allocator.dupe(u8, n) catch null) else null;
+                const tool_title = if (m.tool_title) |t| (agent_state.allocator.dupe(u8, t) catch null) else null;
+
+                modal.messages.append(agent_state.allocator, .{
+                    .role = role,
+                    .content = content,
+                    .tool_name = tool_name,
+                    .tool_title = tool_title,
+                }) catch {};
+
+                // Free the originals (owned by c_allocator)
+                m.deinit(std.heap.c_allocator);
+            }
+            std.heap.c_allocator.free(msgs);
+        }
+
+        app.needs_render = true;
     }
 
     // Graphite stack functions

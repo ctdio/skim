@@ -594,6 +594,72 @@ test "snapshot: subagent_conversation_mixed" {
 }
 
 // =============================================================================
+// Subagent Modal Snapshot Tests
+// =============================================================================
+
+test "snapshot: subagent_modal_loading" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 20);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    agent_helpers.renderSubagentModal(win, "Explore Task", .loading, null, &.{}, 0);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "subagent_modal_loading", text);
+}
+
+test "snapshot: subagent_modal_error" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 20);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    agent_helpers.renderSubagentModal(win, "Explore Task", .error_state, "Connection refused", &.{}, 0);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "subagent_modal_error", text);
+}
+
+test "snapshot: subagent_modal_empty" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 20);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    agent_helpers.renderSubagentModal(win, "Explore Task", .empty, null, &.{}, 0);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "subagent_modal_empty", text);
+}
+
+test "snapshot: subagent_modal_with_messages" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 20);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    const messages = [_]agent_helpers.ModalMessage{
+        .{ .role = .user, .content = "What files handle routing?" },
+        .{ .role = .assistant, .content = "Let me search for routing files." },
+        .{ .role = .tool, .tool_name = "Glob", .tool_title = "**/*router*" },
+        .{ .role = .assistant, .content = "Found src/router.zig" },
+    };
+    agent_helpers.renderSubagentModal(win, "Explore Task", .with_messages, null, &messages, 0);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "subagent_modal_with_messages", text);
+}
+
+// =============================================================================
 // Edge Cases
 // =============================================================================
 

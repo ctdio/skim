@@ -561,7 +561,151 @@ pub const Client = struct {
 
         return conn;
     }
+
+    // =========================================================================
+    // Session Messages (for Subagent Drill-In Modal)
+    // =========================================================================
+
+    /// Message part from session messages endpoint
+    pub const SessionMessagePart = struct {
+        type: []const u8,
+        text: ?[]const u8 = null,
+        toolName: ?[]const u8 = null,
+        state: ?ToolState = null,
+
+        pub const ToolState = struct {
+            title: ?[]const u8 = null,
+            status: ?[]const u8 = null,
+        };
+    };
+
+    /// Single message from session messages endpoint
+    pub const SessionMessage = struct {
+        id: ?[]const u8 = null,
+        role: ?[]const u8 = null,
+        parts: ?[]const SessionMessagePart = null,
+    };
+
+    /// Response from session messages endpoint
+    pub const SessionMessagesResponse = struct {
+        messages: []const SessionMessage = &.{},
+    };
+
+    /// Parsed modal message suitable for display
+    pub const ModalMessage = struct {
+        role: ModalRole,
+        content: ?[]const u8 = null,
+        tool_name: ?[]const u8 = null,
+        tool_title: ?[]const u8 = null,
+
+        pub const ModalRole = enum {
+            user,
+            assistant,
+            tool,
+        };
+
+        pub fn deinit(self: *ModalMessage, alloc: Allocator) void {
+            if (self.content) |c| alloc.free(c);
+            if (self.tool_name) |n| alloc.free(n);
+            if (self.tool_title) |t| alloc.free(t);
+        }
+    };
+
+    /// GET /session/{id}/messages - Fetch messages for a session
+    /// Uses a separate HTTP client to avoid thread safety issues with SSE connection.
+    /// Returns owned array of ModalMessages (caller must free each and the slice).
+    pub fn fetchSessionMessages(self: *Client, session_id: []const u8) ![]ModalMessage {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session/{s}/messages", .{ self.base_url, session_id });
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        defer temp_client.deinit();
+
+        var req = temp_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
+
+        req.sendBodiless() catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status == .not_found) {
+            return error.SessionNotFound;
+        }
+
+        if (response.head.status != .ok) {
+            log.err("Fetch session messages failed with status: {}", .{response.head.status});
+            return error.ServerError;
+        }
+
+        var body_buffer: [8192]u8 = undefined;
+        var body_reader = response.reader(&body_buffer);
+        const body = body_reader.allocRemaining(self.allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch return error.InvalidResponse;
+        defer self.allocator.free(body);
+
+        return parseSessionMessages(self.allocator, body);
+    }
 };
+
+/// Parse session messages JSON body into ModalMessage array.
+/// Tries the structured { "messages": [...] } format first, then falls back to raw array [...].
+fn parseSessionMessages(allocator: Allocator, body: []const u8) ![]Client.ModalMessage {
+    // Try structured response { "messages": [...] }
+    if (std.json.parseFromSlice(Client.SessionMessagesResponse, allocator, body, .{
+        .ignore_unknown_fields = true,
+    })) |parsed| {
+        defer parsed.deinit();
+        return convertMessages(allocator, parsed.value.messages);
+    } else |_| {}
+
+    // Fallback: try parsing as raw array of messages
+    if (std.json.parseFromSlice([]const Client.SessionMessage, allocator, body, .{
+        .ignore_unknown_fields = true,
+    })) |parsed| {
+        defer parsed.deinit();
+        return convertMessages(allocator, parsed.value);
+    } else |_| {}
+
+    log.warn("Failed to parse session messages response", .{});
+    return error.InvalidResponse;
+}
+
+fn convertMessages(allocator: Allocator, messages: []const Client.SessionMessage) ![]Client.ModalMessage {
+    var result: std.ArrayList(Client.ModalMessage) = .{};
+    errdefer {
+        for (result.items) |*m| m.deinit(allocator);
+        result.deinit(allocator);
+    }
+
+    for (messages) |msg| {
+        const role_str = msg.role orelse "assistant";
+        const parts = msg.parts orelse continue;
+
+        for (parts) |part| {
+            if (std.mem.eql(u8, part.type, "tool-invocation") or std.mem.eql(u8, part.type, "tool-result")) {
+                try result.append(allocator, .{
+                    .role = .tool,
+                    .tool_name = if (part.toolName) |n| try allocator.dupe(u8, n) else null,
+                    .tool_title = if (part.state) |s| (if (s.title) |t| try allocator.dupe(u8, t) else null) else null,
+                });
+            } else if (std.mem.eql(u8, part.type, "text")) {
+                if (part.text) |text| {
+                    if (text.len > 0) {
+                        const role: Client.ModalMessage.ModalRole = if (std.mem.eql(u8, role_str, "user")) .user else .assistant;
+                        try result.append(allocator, .{
+                            .role = role,
+                            .content = try allocator.dupe(u8, text),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    return result.toOwnedSlice(allocator);
+}
 
 // =============================================================================
 // Tests
@@ -640,4 +784,102 @@ test "integration: send prompt async" {
     try client.sendPromptAsync(session_id, .{ .parts = &parts });
 
     try client.deleteSession(session_id);
+}
+
+test "parseSessionMessages with structured response" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{"messages":[
+        \\  {"id":"msg_1","role":"user","parts":[{"type":"text","text":"Explore this codebase"}]},
+        \\  {"id":"msg_2","role":"assistant","parts":[
+        \\    {"type":"tool-invocation","toolName":"Read","state":{"title":"Read(build.zig)","status":"completed"}},
+        \\    {"type":"text","text":"This is a Zig project."}
+        \\  ]}
+        \\]}
+    ;
+
+    const messages = try parseSessionMessages(allocator, json);
+    defer {
+        for (messages) |*m| m.deinit(allocator);
+        allocator.free(messages);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), messages.len);
+
+    // First message: user text
+    try std.testing.expectEqual(Client.ModalMessage.ModalRole.user, messages[0].role);
+    try std.testing.expectEqualStrings("Explore this codebase", messages[0].content.?);
+    try std.testing.expect(messages[0].tool_name == null);
+
+    // Second message: tool invocation
+    try std.testing.expectEqual(Client.ModalMessage.ModalRole.tool, messages[1].role);
+    try std.testing.expectEqualStrings("Read", messages[1].tool_name.?);
+    try std.testing.expectEqualStrings("Read(build.zig)", messages[1].tool_title.?);
+
+    // Third message: assistant text
+    try std.testing.expectEqual(Client.ModalMessage.ModalRole.assistant, messages[2].role);
+    try std.testing.expectEqualStrings("This is a Zig project.", messages[2].content.?);
+}
+
+test "parseSessionMessages with empty session" {
+    const allocator = std.testing.allocator;
+
+    const json = \\{"messages":[]}
+    ;
+
+    const messages = try parseSessionMessages(allocator, json);
+    defer allocator.free(messages);
+
+    try std.testing.expectEqual(@as(usize, 0), messages.len);
+}
+
+test "parseSessionMessages with raw array format" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\[{"id":"msg_1","role":"user","parts":[{"type":"text","text":"Hello"}]}]
+    ;
+
+    const messages = try parseSessionMessages(allocator, json);
+    defer {
+        for (messages) |*m| m.deinit(allocator);
+        allocator.free(messages);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), messages.len);
+    try std.testing.expectEqual(Client.ModalMessage.ModalRole.user, messages[0].role);
+    try std.testing.expectEqualStrings("Hello", messages[0].content.?);
+}
+
+test "parseSessionMessages with malformed response" {
+    const allocator = std.testing.allocator;
+
+    const json = \\not valid json at all
+    ;
+
+    const result = parseSessionMessages(allocator, json);
+    try std.testing.expectError(error.InvalidResponse, result);
+}
+
+test "parseSessionMessages skips empty text parts" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{"messages":[
+        \\  {"id":"msg_1","role":"assistant","parts":[
+        \\    {"type":"text","text":""},
+        \\    {"type":"text","text":"Actual content"}
+        \\  ]}
+        \\]}
+    ;
+
+    const messages = try parseSessionMessages(allocator, json);
+    defer {
+        for (messages) |*m| m.deinit(allocator);
+        allocator.free(messages);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), messages.len);
+    try std.testing.expectEqualStrings("Actual content", messages[0].content.?);
 }

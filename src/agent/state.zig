@@ -721,6 +721,8 @@ pub const AgentState = struct {
     expanded_user_messages: std.AutoHashMap(usize, void),
     // Pending question prompt (Opencode question tool)
     pending_question: ?PendingQuestion,
+    // Subagent drill-in modal (opened from history mode Enter on subagent messages)
+    subagent_modal: ?SubagentModalState,
 
     pub const PanelSide = enum {
         left,
@@ -773,6 +775,7 @@ pub const AgentState = struct {
             .history = HistoryState.init(),
             .expanded_user_messages = std.AutoHashMap(usize, void).init(allocator),
             .pending_question = null,
+            .subagent_modal = null,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -789,6 +792,9 @@ pub const AgentState = struct {
         self.messages.deinit(self.allocator);
         if (self.pending_question) |*question| {
             question.deinit(self.allocator);
+        }
+        if (self.subagent_modal) |*modal| {
+            modal.deinit();
         }
         self.line_map.deinit();
         self.plan.deinit();
@@ -816,6 +822,27 @@ pub const AgentState = struct {
             question.deinit(self.allocator);
             self.pending_question = null;
         }
+    }
+
+    pub fn hasSubagentModal(self: *const AgentState) bool {
+        return self.subagent_modal != null;
+    }
+
+    pub fn getSubagentModal(self: *AgentState) ?*SubagentModalState {
+        if (self.subagent_modal) |*modal| return modal;
+        return null;
+    }
+
+    pub fn closeSubagentModal(self: *AgentState) void {
+        if (self.subagent_modal) |*modal| {
+            modal.deinit();
+            self.subagent_modal = null;
+        }
+    }
+
+    pub fn openSubagentModal(self: *AgentState, session_id: []const u8, title: []const u8) !void {
+        self.closeSubagentModal();
+        self.subagent_modal = try SubagentModalState.init(self.allocator, session_id, title);
     }
 
     pub fn setPendingQuestion(self: *AgentState, prompt: QuestionPromptData) !void {
@@ -1681,6 +1708,11 @@ pub const AgentState = struct {
         self.follow_bottom = false;
     }
 
+    /// Get the message index for the cursor line in history mode.
+    pub fn getMessageIdxAtCursorLine(self: *const AgentState) ?usize {
+        return self.getMessageIdxAtLine(self.history.cursor_line);
+    }
+
     /// Get the message index for a given line from the line map.
     fn getMessageIdxAtLine(self: *const AgentState, line: usize) ?usize {
         const record = self.line_map.getLineRecord(line) orelse return null;
@@ -2424,6 +2456,73 @@ pub const SubagentInfo = struct {
         if (self.title) |t| allocator.free(t);
         for (self.summary) |*entry| entry.deinit(allocator);
         if (self.summary.len > 0) allocator.free(self.summary);
+    }
+};
+
+// =============================================================================
+// Subagent Drill-In Modal
+// =============================================================================
+
+pub const SubagentModalMessage = struct {
+    role: Role,
+    content: ?[]const u8 = null,
+    tool_name: ?[]const u8 = null,
+    tool_title: ?[]const u8 = null,
+
+    pub const Role = enum {
+        user,
+        assistant,
+        tool,
+    };
+
+    pub fn deinit(self: *SubagentModalMessage, allocator: Allocator) void {
+        if (self.content) |c| allocator.free(c);
+        if (self.tool_name) |n| allocator.free(n);
+        if (self.tool_title) |t| allocator.free(t);
+    }
+};
+
+pub const SubagentModalState = struct {
+    allocator: Allocator,
+    session_id: []const u8,
+    title: []const u8,
+    messages: std.ArrayList(SubagentModalMessage),
+    scroll_offset: usize,
+    loading: bool,
+    error_message: ?[]const u8,
+
+    pub fn init(allocator: Allocator, session_id: []const u8, title: []const u8) !SubagentModalState {
+        return .{
+            .allocator = allocator,
+            .session_id = try allocator.dupe(u8, session_id),
+            .title = try allocator.dupe(u8, title),
+            .messages = .{},
+            .scroll_offset = 0,
+            .loading = true,
+            .error_message = null,
+        };
+    }
+
+    pub fn deinit(self: *SubagentModalState) void {
+        self.allocator.free(self.session_id);
+        self.allocator.free(self.title);
+        for (self.messages.items) |*msg| {
+            msg.deinit(self.allocator);
+        }
+        self.messages.deinit(self.allocator);
+        if (self.error_message) |e| self.allocator.free(e);
+    }
+
+    pub fn scrollUp(self: *SubagentModalState) void {
+        if (self.scroll_offset > 0) {
+            self.scroll_offset -= 1;
+        }
+    }
+
+    pub fn scrollDown(self: *SubagentModalState, max_lines: usize) void {
+        if (self.scroll_offset < max_lines) {
+            self.scroll_offset += 1;
+        }
     }
 };
 
@@ -3250,4 +3349,106 @@ test "setSubagentInfoOnTool frees info when no matching message" {
         .summary = summary_items,
     });
     // If this test passes with testing allocator, no memory was leaked
+}
+
+test "SubagentModalState init and deinit" {
+    const allocator = std.testing.allocator;
+
+    var modal = try SubagentModalState.init(allocator, "session-123", "Explore Task");
+    defer modal.deinit();
+
+    try std.testing.expectEqualStrings("session-123", modal.session_id);
+    try std.testing.expectEqualStrings("Explore Task", modal.title);
+    try std.testing.expect(modal.loading);
+    try std.testing.expectEqual(@as(usize, 0), modal.messages.items.len);
+    try std.testing.expectEqual(@as(usize, 0), modal.scroll_offset);
+    try std.testing.expect(modal.error_message == null);
+}
+
+test "SubagentModalState deinit frees messages" {
+    const allocator = std.testing.allocator;
+
+    var modal = try SubagentModalState.init(allocator, "session-456", "Build Task");
+
+    // Add some messages
+    try modal.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "Build the project"),
+    });
+    try modal.messages.append(allocator, .{
+        .role = .tool,
+        .tool_name = try allocator.dupe(u8, "Bash"),
+        .tool_title = try allocator.dupe(u8, "Bash(zig build)"),
+    });
+    try modal.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "Build succeeded"),
+    });
+
+    modal.deinit();
+    // If this test passes with testing allocator, no memory was leaked
+}
+
+test "SubagentModalMessage deinit with null optionals" {
+    const allocator = std.testing.allocator;
+
+    var msg: SubagentModalMessage = .{ .role = .user };
+    msg.deinit(allocator);
+    // No crash with all-null optionals
+}
+
+test "SubagentModalState scroll operations" {
+    const allocator = std.testing.allocator;
+
+    var modal = try SubagentModalState.init(allocator, "s1", "Test");
+    defer modal.deinit();
+
+    // Scroll down
+    modal.scrollDown(10);
+    try std.testing.expectEqual(@as(usize, 1), modal.scroll_offset);
+
+    modal.scrollDown(10);
+    try std.testing.expectEqual(@as(usize, 2), modal.scroll_offset);
+
+    // Scroll up
+    modal.scrollUp();
+    try std.testing.expectEqual(@as(usize, 1), modal.scroll_offset);
+
+    // Scroll up at 0 stays at 0
+    modal.scrollUp();
+    modal.scrollUp();
+    try std.testing.expectEqual(@as(usize, 0), modal.scroll_offset);
+}
+
+test "AgentState openSubagentModal and closeSubagentModal" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    try std.testing.expect(!agent_state.hasSubagentModal());
+
+    try agent_state.openSubagentModal("session-789", "Explore Architecture");
+    try std.testing.expect(agent_state.hasSubagentModal());
+
+    const modal = agent_state.getSubagentModal().?;
+    try std.testing.expectEqualStrings("session-789", modal.session_id);
+    try std.testing.expectEqualStrings("Explore Architecture", modal.title);
+
+    agent_state.closeSubagentModal();
+    try std.testing.expect(!agent_state.hasSubagentModal());
+}
+
+test "AgentState openSubagentModal replaces existing modal" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    try agent_state.openSubagentModal("first", "First Modal");
+    try agent_state.openSubagentModal("second", "Second Modal");
+
+    const modal = agent_state.getSubagentModal().?;
+    try std.testing.expectEqualStrings("second", modal.session_id);
+    try std.testing.expectEqualStrings("Second Modal", modal.title);
 }
