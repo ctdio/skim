@@ -231,6 +231,17 @@ pub const MessageQueue = struct {
         defer self.mutex.unlock();
         return self.events.items.len;
     }
+
+    /// Drain all pending events, freeing their resources (thread-safe).
+    /// Use event_allocator since events are allocated by the SSE thread.
+    pub fn drain(self: *MessageQueue, event_allocator: Allocator) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.events.items) |*event| {
+            event.deinit(event_allocator);
+        }
+        self.events.clearRetainingCapacity();
+    }
 };
 
 /// Configuration for connecting to opencode
@@ -665,6 +676,12 @@ pub const OpencodeManager = struct {
         // Clear any pending abort from a previous cancel
         self.pending_abort = false;
         self.pending_abort_since_ms = 0;
+
+        // Drain stale events from the previous turn. Step-finish pushes
+        // message_complete eagerly, and session.idle can arrive much later.
+        // Without draining, these stale events would prematurely clear the
+        // prompting state for the new prompt.
+        self.message_queue.drain(self.event_allocator);
 
         self.stream_complete.store(false, .release);
 
@@ -1389,7 +1406,17 @@ pub const OpencodeManager = struct {
                                         if (reason_val == .string) break :blk reason_val.string;
                                         break :blk null;
                                     } else null;
-                                    log.info("Step finished ({s}); awaiting session idle", .{reason orelse "unknown"});
+                                    log.info("Step finished ({s})", .{reason orelse "unknown"});
+
+                                    // Terminal step-finish reasons mean the agent is done with
+                                    // this turn. Push message_complete immediately so the UI
+                                    // stops showing "Generating..." without waiting for session.idle
+                                    // (which can arrive 10-20+ seconds later). If the agent
+                                    // continues (multi-step), new content events will re-set
+                                    // status to prompting.
+                                    if (reason != null and isStepFinishReason(reason.?)) {
+                                        self.message_queue.push(.{ .message_complete = {} });
+                                    }
                                 } else if (isTextPartType(ptype) and partHasEndTime(part_obj.?)) {
                                     log.info("Text part finished; awaiting session idle", .{});
                                 }
@@ -1979,19 +2006,24 @@ pub const OpencodeManager = struct {
     }
 
     fn handleThinkingPart(self: *OpencodeManager, part_obj: std.json.ObjectMap, props_obj: std.json.ObjectMap) bool {
+        _ = part_obj;
         const delta = if (props_obj.get("delta")) |delta_val| blk: {
             if (delta_val == .string) break :blk delta_val.string;
             break :blk null;
         } else null;
 
-        const text_val = delta orelse extractStringField(part_obj, &[_][]const u8{ "text", "content" });
-        if (text_val) |text| {
+        // Only emit thinking content from the delta field. Finalization events
+        // carry the full accumulated text in part.text but no delta — emitting
+        // that would duplicate all previously-streamed thinking content.
+        // Return false when no delta exists so the fallback text handler can try.
+        if (delta) |text| {
             if (text.len > 0) {
                 const chunk = self.event_allocator.dupe(u8, text) catch return true;
                 self.message_queue.push(.{ .thinking_chunk = .{ .delta = chunk } });
             }
+            return true;
         }
-        return true;
+        return false;
     }
 
     fn handleToolPart(self: *OpencodeManager, part_obj: std.json.ObjectMap, props_obj: std.json.ObjectMap, part_type: []const u8) bool {
@@ -2095,9 +2127,12 @@ pub const OpencodeManager = struct {
                     .stderr = stderr_copy,
                 } });
             }
+            return true;
         }
 
-        return true;
+        // No tool_id found and no question/patch was handled — return false so
+        // the fallback text delta handler gets a chance to extract content.
+        return false;
     }
 
     fn emitApplyPatchDiff(self: *OpencodeManager, tool_call_id: ?[]const u8, patch_text: []const u8) bool {
@@ -2680,7 +2715,7 @@ test "opencode event: session.status idle clears status" {
     }
 }
 
-test "opencode event: step-finish does not clear status (intermediate event)" {
+test "opencode event: step-finish with terminal reason pushes message_complete" {
     const allocator = std.testing.allocator;
     var manager = OpencodeManager.init(allocator);
     defer manager.deinit();
@@ -2690,9 +2725,34 @@ test "opencode event: step-finish does not clear status (intermediate event)" {
     const data = "{\"payload\":{\"type\":\"message.part.updated\",\"properties\":{\"part\":{\"type\":\"step-finish\",\"reason\":\"stop\"}}}}";
     manager.processEventData(data);
 
-    // step-finish is an intermediate event in multi-step responses;
-    // it should NOT produce message_complete or status_change events.
-    // Only session.idle or message completion status should clear state.
+    // step-finish with a terminal reason ("stop", "end_turn", etc.) pushes
+    // message_complete so the UI stops showing "Generating..." immediately
+    // rather than waiting 10-20s for session.idle.
+    const ev_opt = manager.poll();
+    try std.testing.expect(ev_opt != null);
+    switch (ev_opt.?) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+    // status is NOT changed by processEventData (main thread handles that)
+    try std.testing.expectEqual(Status.prompting, manager.status);
+
+    // No further events
+    try std.testing.expect(manager.poll() == null);
+}
+
+test "opencode event: step-finish without terminal reason does not push events" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.status = .prompting;
+
+    // step-finish with a non-terminal reason (e.g., tool_use) should NOT
+    // push message_complete — the agent will continue with tool calls.
+    const data = "{\"payload\":{\"type\":\"message.part.updated\",\"properties\":{\"part\":{\"type\":\"step-finish\",\"reason\":\"tool_use\"}}}}";
+    manager.processEventData(data);
+
     const ev_opt = manager.poll();
     try std.testing.expect(ev_opt == null);
     try std.testing.expectEqual(Status.prompting, manager.status);

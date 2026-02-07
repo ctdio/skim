@@ -401,7 +401,10 @@ pub const Client = struct {
         request: std.http.Client.Request,
         response: std.http.Client.Response,
         parser: sse.SseParser,
-        buffer: [4096]u8 = undefined,
+        // read_buf is intentionally small: readSliceShort loops until the
+        // buffer is full, so a large buffer delays event delivery. At 256
+        // bytes, we return after ~1 SSE event instead of batching ~20.
+        read_buf: [256]u8 = undefined,
         body_buffer: [8192]u8 = undefined,
         redirect_buffer: [4096]u8 = undefined,
         body_reader: ?*std.Io.Reader = null,
@@ -427,25 +430,26 @@ pub const Client = struct {
                 break :blk self.body_reader.?;
             };
 
-            const n = reader.readSliceShort(&self.buffer) catch |err| {
+            // readSliceShort loops until the output buffer is full. With a
+            // small 256-byte read_buf, it returns after ~1 SSE event instead
+            // of batching many events into a large buffer.
+            const n = reader.readSliceShort(&self.read_buf) catch |err| {
                 log.err("Error reading from SSE stream: {}", .{err});
                 return error.ConnectionFailed;
             };
 
             if (n == 0) {
-                // Connection closed (treat as failure so caller can react)
                 return error.ConnectionFailed;
             }
 
-            // Feed data to parser
-            return try self.parser.feed(self.buffer[0..n]);
+            return try self.parser.feed(self.read_buf[0..n]);
         }
     };
 
-    /// GET /global/event - Connect to SSE event stream
+    /// GET /event - Connect to SSE event stream (project-scoped bus events)
     /// Returns a heap-allocated connection (caller owns, call deinit to free)
     pub fn connectEventStream(self: *Client) !*EventStreamConnection {
-        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/global/event", .{self.base_url});
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/event", .{self.base_url});
         defer self.allocator.free(uri_str);
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;

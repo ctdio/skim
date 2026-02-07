@@ -125,9 +125,16 @@ pub fn renderInlineQuestionPrompt(allocator: std.mem.Allocator, win: vaxis.Windo
     }
 
     // Options
+    // NOTE: vaxis cells store grapheme *references* into the segment text, so
+    // all text passed to win.print must outlive the render frame. We use
+    // multiple segments per option so that each piece is either a compile-time
+    // literal or a heap-allocated string from the PendingQuestion — no
+    // temporary formatting buffers needed.
     const normal_style = vaxis.Style{ .fg = Color.white };
     const selected_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
     const desc_style = vaxis.Style{ .fg = Color.dim_gray, .italic = true };
+
+    const digits = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32" };
 
     for (question.options, 0..) |opt, idx| {
         if (row >= win.height) break;
@@ -138,11 +145,16 @@ pub fn renderInlineQuestionPrompt(allocator: std.mem.Allocator, win: vaxis.Windo
 
         const indicator: []const u8 = if (is_cursor) "▸ " else "  ";
         const checkbox: []const u8 = if (question.multiple) (if (is_selected) "[x] " else "[ ] ") else "";
+        const num_str: []const u8 = if (idx < digits.len) digits[idx] else "?";
 
-        var line_buf: [512]u8 = undefined;
-        const line = std.fmt.bufPrint(&line_buf, "{s}{d}. {s}{s}", .{ indicator, idx + 1, checkbox, opt.label }) catch opt.label;
-        var line_seg = [_]vaxis.Cell.Segment{.{ .text = line, .style = style }};
-        _ = win.print(&line_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+        var segs = [_]vaxis.Cell.Segment{
+            .{ .text = indicator, .style = style },
+            .{ .text = num_str, .style = style },
+            .{ .text = ". ", .style = style },
+            .{ .text = checkbox, .style = style },
+            .{ .text = opt.label, .style = style },
+        };
+        _ = win.print(&segs, .{ .row_offset = @intCast(row), .col_offset = 1 });
         row += 1;
 
         if (opt.description) |desc| {
