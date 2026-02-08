@@ -1138,17 +1138,14 @@ pub fn VimEditor(comptime buffer_size: usize) type {
 
             var pos = state.cursor_pos;
 
-            // If we're at the start of a word, delete backwards including preceding whitespace
-            if (pos > 0 and !isWordBoundary(state.text_buffer[pos - 1])) {
-                // Delete the word
-                while (pos > 0 and !isWordBoundary(state.text_buffer[pos - 1])) {
-                    pos -= 1;
-                }
-            } else {
-                // Delete whitespace
-                while (pos > 0 and isWordBoundary(state.text_buffer[pos - 1])) {
-                    pos -= 1;
-                }
+            // Skip whitespace/boundaries backward
+            while (pos > 0 and isWordBoundary(state.text_buffer[pos - 1])) {
+                pos -= 1;
+            }
+
+            // Skip word characters backward
+            while (pos > 0 and !isWordBoundary(state.text_buffer[pos - 1])) {
+                pos -= 1;
             }
 
             return pos;
