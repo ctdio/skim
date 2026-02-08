@@ -554,7 +554,7 @@ test "snapshot: subagent_block_failed" {
 
 test "snapshot: subagent_block_no_summary" {
     const allocator = std.testing.allocator;
-    var ctx = try harness.createTestContext(allocator, 60, 7);
+    var ctx = try harness.createTestContext(allocator, 60, 8);
     defer ctx.deinit();
 
     const win = ctx.window();

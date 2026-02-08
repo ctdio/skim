@@ -171,6 +171,9 @@ pub const ChatLineMap = struct {
     // Track which message indices have successfully rendered formatted tables.
     // Once a message renders a formatted table, we should never downgrade to dimmed/plain.
     messages_with_formatted_tables: std.AutoHashMap(usize, void),
+    // Monotonic counter incremented on each build/update cycle.
+    // Used to cycle subagent placeholder text without relying on wall-clock time.
+    build_count: usize,
 
     /// Initialize an empty chat line map
     pub fn init(allocator: Allocator) ChatLineMap {
@@ -187,6 +190,7 @@ pub const ChatLineMap = struct {
             .last_msg_highlights_start = 0,
             .expanded_user_messages = null,
             .messages_with_formatted_tables = std.AutoHashMap(usize, void).init(allocator),
+            .build_count = 0,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message
@@ -245,6 +249,7 @@ pub const ChatLineMap = struct {
         self.wrap_width = wrap_width;
         self.message_count = messages.len;
         self.diff_view_mode = diff_view_mode;
+        self.build_count +%= 1;
         self.last_msg_start_idx = 0;
         self.last_msg_strings_start = 0;
         self.last_msg_highlights_start = 0;
@@ -933,6 +938,16 @@ pub const ChatLineMap = struct {
     /// Braille spinner characters for subagent running animation
     const spinner_chars = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
+    /// Cycling messages for subagent placeholder (no tools yet).
+    /// Distinct from parent agent messages — these reflect autonomous task work.
+    const subagent_generating_messages = [_][]const u8{
+        "Analyzing...",
+        "Researching...",
+        "Exploring...",
+        "Working...",
+        "Processing...",
+    };
+
     /// Build a bordered subagent block for a task tool message.
     /// Layout:
     ///   ┃
@@ -988,9 +1003,22 @@ pub const ChatLineMap = struct {
         });
         global_line.* += 1;
 
-        // --- Description line: "{description} ({N} toolcalls)" ---
+        // --- Description line: "{description} ({N} toolcalls · {K} tokens)" ---
         const desc = info.description orelse "";
-        const desc_text = try std.fmt.allocPrint(self.allocator, "{s} ({d} toolcalls)", .{ desc, info.tool_count });
+        const total_tokens = info.input_tokens + info.output_tokens + info.reasoning_tokens;
+        var token_buf: [32]u8 = undefined;
+        var time_buf: [32]u8 = undefined;
+        const elapsed_str = formatElapsed(&time_buf, info.start_time_ms, info.end_time_ms);
+        const has_tokens = total_tokens > 0;
+        const has_time = elapsed_str.len > 0;
+        const desc_text = if (has_tokens and has_time)
+            try std.fmt.allocPrint(self.allocator, "{s} ({d} toolcalls · {s} tokens · {s})", .{ desc, info.tool_count, formatTokenCount(&token_buf, total_tokens), elapsed_str })
+        else if (has_tokens)
+            try std.fmt.allocPrint(self.allocator, "{s} ({d} toolcalls · {s} tokens)", .{ desc, info.tool_count, formatTokenCount(&token_buf, total_tokens) })
+        else if (has_time)
+            try std.fmt.allocPrint(self.allocator, "{s} ({d} toolcalls · {s})", .{ desc, info.tool_count, elapsed_str })
+        else
+            try std.fmt.allocPrint(self.allocator, "{s} ({d} toolcalls)", .{ desc, info.tool_count });
         try self.strings.append(self.allocator, desc_text);
 
         try self.records.append(self.allocator, .{
@@ -1002,21 +1030,30 @@ pub const ChatLineMap = struct {
         });
         global_line.* += 1;
 
-        // --- Last tool line: "└ {ToolName}" (only if summary has entries) ---
-        if (info.summary.len > 0) {
+        // --- Last tool line: always present for stable layout ---
+        const tool_text = if (info.summary.len > 0) blk: {
             const last_tool = info.summary[info.summary.len - 1];
-            const tool_text = try std.fmt.allocPrint(self.allocator, "└ {s}", .{last_tool.tool_name});
-            try self.strings.append(self.allocator, tool_text);
+            const tool_icon: []const u8 = switch (last_tool.status) {
+                .pending => "○",
+                .running => "◐",
+                .completed => "✓",
+                .failed => "✗",
+            };
+            break :blk try std.fmt.allocPrint(self.allocator, "└ {s} {s}", .{ tool_icon, last_tool.tool_name });
+        } else blk: {
+            const generating_text = subagent_generating_messages[(self.build_count +% msg_idx) % subagent_generating_messages.len];
+            break :blk try std.fmt.allocPrint(self.allocator, "└ {s}", .{generating_text});
+        };
+        try self.strings.append(self.allocator, tool_text);
 
-            try self.records.append(self.allocator, .{
-                .global_line = global_line.*,
-                .line_type = .{ .subagent_last_tool = .{ .msg_idx = msg_idx } },
-                .text = tool_text,
-                .style = .{ .fg = Color.dim },
-                .indent = 1,
-            });
-            global_line.* += 1;
-        }
+        try self.records.append(self.allocator, .{
+            .global_line = global_line.*,
+            .line_type = .{ .subagent_last_tool = .{ .msg_idx = msg_idx } },
+            .text = tool_text,
+            .style = .{ .fg = Color.dim },
+            .indent = 1,
+        });
+        global_line.* += 1;
 
         // --- Bottom border (empty bordered line) ---
         try self.records.append(self.allocator, .{
@@ -1027,6 +1064,87 @@ pub const ChatLineMap = struct {
             .indent = 1,
         });
         global_line.* += 1;
+    }
+
+    /// Refresh only the dynamic text of active subagent blocks in-place.
+    /// Avoids a full rebuild — just scans records and updates the 3 text lines
+    /// (header, description, last_tool) for each subagent block.
+    pub fn refreshSubagentBlocks(self: *ChatLineMap, messages: []const Message) !void {
+        for (self.records.items) |*rec| {
+            switch (rec.line_type) {
+                .subagent_header => |hdr| {
+                    const msg = &messages[hdr.msg_idx];
+                    const info = msg.subagent_info orelse continue;
+                    const agent_type_str = info.agent_type orelse "Task";
+                    const status_icon: []const u8 = switch (msg.tool_status) {
+                        .pending => "○",
+                        .running => blk: {
+                            const frame = @as(usize, @intCast(@divTrunc(std.time.milliTimestamp(), 100)));
+                            break :blk spinner_chars[frame % spinner_chars.len];
+                        },
+                        .completed => "✓",
+                        .failed => "✗",
+                    };
+                    const new_text = try std.fmt.allocPrint(self.allocator, "{s} {s} Task", .{ status_icon, agent_type_str });
+                    self.replaceOwnedString(rec.text, new_text);
+                    rec.text = new_text;
+                },
+                .subagent_description => |desc_rec| {
+                    const msg = &messages[desc_rec.msg_idx];
+                    const info = msg.subagent_info orelse continue;
+                    const desc = info.description orelse "";
+                    const total_tokens = info.input_tokens + info.output_tokens + info.reasoning_tokens;
+                    var token_buf: [32]u8 = undefined;
+                    var time_buf: [32]u8 = undefined;
+                    const elapsed_str = formatElapsed(&time_buf, info.start_time_ms, info.end_time_ms);
+                    const has_tokens = total_tokens > 0;
+                    const has_time = elapsed_str.len > 0;
+                    const new_text = if (has_tokens and has_time)
+                        try std.fmt.allocPrint(self.allocator, "{s} ({d} toolcalls · {s} tokens · {s})", .{ desc, info.tool_count, formatTokenCount(&token_buf, total_tokens), elapsed_str })
+                    else if (has_tokens)
+                        try std.fmt.allocPrint(self.allocator, "{s} ({d} toolcalls · {s} tokens)", .{ desc, info.tool_count, formatTokenCount(&token_buf, total_tokens) })
+                    else if (has_time)
+                        try std.fmt.allocPrint(self.allocator, "{s} ({d} toolcalls · {s})", .{ desc, info.tool_count, elapsed_str })
+                    else
+                        try std.fmt.allocPrint(self.allocator, "{s} ({d} toolcalls)", .{ desc, info.tool_count });
+                    self.replaceOwnedString(rec.text, new_text);
+                    rec.text = new_text;
+                },
+                .subagent_last_tool => |tool_rec| {
+                    const msg = &messages[tool_rec.msg_idx];
+                    const info = msg.subagent_info orelse continue;
+                    const new_text = if (info.summary.len > 0) blk: {
+                        const last_tool = info.summary[info.summary.len - 1];
+                        const tool_icon: []const u8 = switch (last_tool.status) {
+                            .pending => "○",
+                            .running => "◐",
+                            .completed => "✓",
+                            .failed => "✗",
+                        };
+                        break :blk try std.fmt.allocPrint(self.allocator, "└ {s} {s}", .{ tool_icon, last_tool.tool_name });
+                    } else blk: {
+                        const generating_text = subagent_generating_messages[(self.build_count +% tool_rec.msg_idx) % subagent_generating_messages.len];
+                        break :blk try std.fmt.allocPrint(self.allocator, "└ {s}", .{generating_text});
+                    };
+                    self.replaceOwnedString(rec.text, new_text);
+                    rec.text = new_text;
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Replace an owned string in the strings list with a new one, freeing the old.
+    fn replaceOwnedString(self: *ChatLineMap, old: []const u8, new: []const u8) void {
+        for (self.strings.items) |*s| {
+            if (s.*.ptr == old.ptr and s.*.len == old.len) {
+                self.allocator.free(s.*);
+                s.* = new;
+                return;
+            }
+        }
+        // Old string not found in list (shouldn't happen) — just append new
+        self.strings.append(self.allocator, new) catch {};
     }
 
     fn addMessageContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize, highlighter: ?*SyntaxHighlighter) !void {
@@ -2154,6 +2272,40 @@ fn highlightCallback(ctx: *anyopaque, path: []const u8, content: []const u8) ?[]
     return @ptrCast(highlights);
 }
 
+/// Format a token count for display: "1234" for small numbers,
+/// "1.2k" for thousands, "1.2M" for millions.
+fn formatTokenCount(buf: *[32]u8, count: usize) []const u8 {
+    if (count >= 1_000_000) {
+        const whole = count / 1_000_000;
+        const frac = (count % 1_000_000) / 100_000;
+        return std.fmt.bufPrint(buf, "{d}.{d}M", .{ whole, frac }) catch "?";
+    } else if (count >= 1_000) {
+        const whole = count / 1_000;
+        const frac = (count % 1_000) / 100;
+        return std.fmt.bufPrint(buf, "{d}.{d}k", .{ whole, frac }) catch "?";
+    } else {
+        return std.fmt.bufPrint(buf, "{d}", .{count}) catch "?";
+    }
+}
+
+/// Format elapsed time from a start timestamp (ms since epoch).
+/// Returns "" if start_time_ms is 0 (no timing data).
+/// Shows "Xs" for < 60s, "Xm Ys" for >= 60s.
+fn formatElapsed(buf: *[32]u8, start_time_ms: i64, end_time_ms: i64) []const u8 {
+    if (start_time_ms == 0) return "";
+    const end = if (end_time_ms != 0) end_time_ms else std.time.milliTimestamp();
+    const elapsed_ms = end - start_time_ms;
+    if (elapsed_ms < 0) return "";
+    const secs: usize = @intCast(@divTrunc(elapsed_ms, 1000));
+    if (secs >= 60) {
+        const mins = secs / 60;
+        const rem = secs % 60;
+        return std.fmt.bufPrint(buf, "{d}m {d}s", .{ mins, rem }) catch "?";
+    } else {
+        return std.fmt.bufPrint(buf, "{d}s", .{secs}) catch "?";
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -2232,15 +2384,16 @@ test "subagent block produces correct record sequence with summary" {
     try std.testing.expect(std.mem.indexOf(u8, records[3].text, "Explore architecture") != null);
     try std.testing.expect(std.mem.indexOf(u8, records[3].text, "6 toolcalls") != null);
 
-    // Line 4: subagent_last_tool (contains "└ Read")
+    // Line 4: subagent_last_tool (contains "└ ✓ Read")
     try std.testing.expect(records[4].line_type == .subagent_last_tool);
     try std.testing.expect(std.mem.indexOf(u8, records[4].text, "Read") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records[4].text, "✓") != null);
 
     // Line 5: subagent_border
     try std.testing.expect(records[5].line_type == .subagent_border);
 }
 
-test "subagent block with no summary omits last_tool line" {
+test "subagent block with no summary shows placeholder last_tool line" {
     const allocator = std.testing.allocator;
     var line_map = ChatLineMap.init(allocator);
     defer line_map.deinit();
@@ -2261,9 +2414,9 @@ test "subagent block with no summary omits last_tool line" {
 
     try line_map.build(&messages, 80, .unified, null, null);
 
-    // Expected sequence: border, header, border, description, border
-    // = 5 lines (no last_tool)
-    try std.testing.expectEqual(@as(usize, 5), line_map.getTotalLines());
+    // Expected sequence: border, header, border, description, last_tool, border
+    // = 6 lines (last_tool always present for stable layout)
+    try std.testing.expectEqual(@as(usize, 6), line_map.getTotalLines());
 
     const records = line_map.records.items;
     try std.testing.expect(records[0].line_type == .subagent_border);
@@ -2272,7 +2425,39 @@ test "subagent block with no summary omits last_tool line" {
     try std.testing.expect(records[3].line_type == .subagent_description);
     // Description should show "0 toolcalls"
     try std.testing.expect(std.mem.indexOf(u8, records[3].text, "0 toolcalls") != null);
-    try std.testing.expect(records[4].line_type == .subagent_border);
+    // Last tool line shows cycling generating placeholder
+    try std.testing.expect(records[4].line_type == .subagent_last_tool);
+    try std.testing.expect(std.mem.indexOf(u8, records[4].text, "...") != null);
+    try std.testing.expect(records[5].line_type == .subagent_border);
+}
+
+test "subagent block shows token count when available" {
+    const allocator = std.testing.allocator;
+    var line_map = ChatLineMap.init(allocator);
+    defer line_map.deinit();
+
+    var messages = [_]Message{.{
+        .role = .tool,
+        .content = "task Explore",
+        .timestamp = 0,
+        .tool_name = "task",
+        .tool_status = .running,
+        .subagent_info = .{
+            .description = "Investigate issue",
+            .agent_type = "Explore",
+            .tool_count = 3,
+            .input_tokens = 12500,
+            .output_tokens = 2300,
+        },
+    }};
+
+    try line_map.build(&messages, 80, .unified, null, null);
+
+    const records = line_map.records.items;
+    // Description line should include token count
+    try std.testing.expect(records[3].line_type == .subagent_description);
+    try std.testing.expect(std.mem.indexOf(u8, records[3].text, "3 toolcalls") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records[3].text, "14.8k tokens") != null);
 }
 
 test "non-task tool message produces tool_header not subagent block" {
@@ -2298,4 +2483,13 @@ test "non-task tool message produces tool_header not subagent block" {
     try std.testing.expect(records.len >= 2);
     try std.testing.expect(records[0].line_type == .tool_header);
     try std.testing.expect(records[1].line_type == .tool_result);
+}
+
+test "formatTokenCount formats small, thousands, millions" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("500", formatTokenCount(&buf, 500));
+    try std.testing.expectEqualStrings("1.2k", formatTokenCount(&buf, 1_200));
+    try std.testing.expectEqualStrings("45.3k", formatTokenCount(&buf, 45_300));
+    try std.testing.expectEqualStrings("1.2M", formatTokenCount(&buf, 1_200_000));
+    try std.testing.expectEqualStrings("0", formatTokenCount(&buf, 0));
 }

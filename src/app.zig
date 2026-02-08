@@ -1720,10 +1720,11 @@ pub const App = struct {
             if (self.opencode_connect_thread != null or has_tab_opencode) {
                 self.pollOpencodeUpdates();
 
-                // Force re-render when agent is prompting (for thinking indicator animation)
-                // or when there are pending events to process
+                // Force re-render when agent is prompting (for thinking indicator animation),
+                // when there are pending events to process, or when subagents are active
+                // (subagent spinner needs continuous redraws for animation)
                 if (self.getActiveOpencodeManager()) |mgr| {
-                    if (mgr.status == .prompting or mgr.hasPendingEvents()) {
+                    if (mgr.status == .prompting or mgr.hasPendingEvents() or mgr.hasActiveChildSessions()) {
                         self.needs_render = true;
                     }
                 }
@@ -6340,6 +6341,13 @@ pub const App = struct {
             }
         }
 
+        // Mark line map dirty when subagents are running so the spinner
+        // animation gets fresh frames on each rebuild (spinner is time-based
+        // and baked into the line map text at build time).
+        if (mgr.hasActiveChildSessions()) {
+            agent_state.line_map_dirty = true;
+        }
+
         // If we're waiting on an abort, clear it after a short idle timeout
         if (mgr.pending_abort) {
             const now_ms = std.time.milliTimestamp();
@@ -6363,7 +6371,9 @@ pub const App = struct {
         // to avoid hanging the "generating" indicator indefinitely.
         // This is a fallback — the primary completion signal comes from step-finish
         // events which push message_complete immediately.
-        if (mgr.status == .prompting and !mgr.pending_abort and !mgr.stream_complete.load(.acquire)) {
+        // Skip when subagents are active — child session events don't flow through
+        // the message queue so last_event_ms goes stale, but the agent is still working.
+        if (mgr.status == .prompting and !mgr.pending_abort and !mgr.stream_complete.load(.acquire) and !mgr.hasActiveChildSessions()) {
             const now_ms = std.time.milliTimestamp();
             if (mgr.last_event_ms != 0) {
                 const idle_ms = now_ms - mgr.last_event_ms;

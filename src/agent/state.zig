@@ -1297,6 +1297,15 @@ pub const AgentState = struct {
                         // Update status
                         msg.tool_status = status;
 
+                        // Stamp end time on subagent when completed/failed
+                        if (status == .completed or status == .failed) {
+                            if (msg.subagent_info) |*info| {
+                                if (info.start_time_ms != 0 and info.end_time_ms == 0) {
+                                    info.end_time_ms = std.time.milliTimestamp();
+                                }
+                            }
+                        }
+
                         // Update stdout if provided
                         if (stdout) |s| {
                             if (msg.tool_stdout) |old| self.allocator.free(old);
@@ -1389,6 +1398,65 @@ pub const AgentState = struct {
         // No matching message found — free the orphaned info to prevent leak
         var orphaned = info;
         orphaned.deinit(self.allocator);
+    }
+
+    /// Merge partial subagent info (tool_count, summary) into an existing tool message,
+    /// preserving fields like description and agent_type from the initial event.
+    pub const TokenUpdate = struct {
+        input_tokens: usize = 0,
+        output_tokens: usize = 0,
+        reasoning_tokens: usize = 0,
+        cache_read_tokens: usize = 0,
+        cache_write_tokens: usize = 0,
+        start_time_ms: i64 = 0,
+    };
+
+    pub fn mergeSubagentToolProgress(self: *AgentState, tool_call_id: []const u8, tool_count: usize, summary: []SubagentToolSummary, tokens: TokenUpdate) void {
+        var i = self.messages.items.len;
+        while (i > 0) {
+            i -= 1;
+            const msg = &self.messages.items[i];
+            if (msg.role == .tool) {
+                if (msg.tool_call_id) |id| {
+                    if (std.mem.eql(u8, id, tool_call_id)) {
+                        if (msg.subagent_info) |*info| {
+                            // Free old summary
+                            for (info.summary) |*entry| entry.deinit(self.allocator);
+                            if (info.summary.len > 0) self.allocator.free(info.summary);
+                            // Update count, summary, and tokens; preserve everything else
+                            info.tool_count = tool_count;
+                            info.summary = summary;
+                            info.input_tokens = tokens.input_tokens;
+                            info.output_tokens = tokens.output_tokens;
+                            info.reasoning_tokens = tokens.reasoning_tokens;
+                            info.cache_read_tokens = tokens.cache_read_tokens;
+                            info.cache_write_tokens = tokens.cache_write_tokens;
+                            if (tokens.start_time_ms != 0) info.start_time_ms = tokens.start_time_ms;
+                        } else {
+                            // No existing info — create minimal one
+                            msg.subagent_info = .{
+                                .tool_count = tool_count,
+                                .summary = summary,
+                                .input_tokens = tokens.input_tokens,
+                                .output_tokens = tokens.output_tokens,
+                                .reasoning_tokens = tokens.reasoning_tokens,
+                                .cache_read_tokens = tokens.cache_read_tokens,
+                                .cache_write_tokens = tokens.cache_write_tokens,
+                                .start_time_ms = tokens.start_time_ms,
+                            };
+                        }
+                        self.line_map_dirty = true;
+                        return;
+                    }
+                }
+            }
+        }
+        // No matching message — free orphaned summary
+        for (summary) |*entry| {
+            var e = entry.*;
+            e.deinit(self.allocator);
+        }
+        if (summary.len > 0) self.allocator.free(summary);
     }
 
     /// Clear all messages
@@ -1956,6 +2024,9 @@ pub const AgentState = struct {
                 } else if (message_count == prev_message_count and message_count > 0) {
                     // Same message count but dirty - last message content changed (streaming)
                     try self.line_map.updateLastMessage(self.messages.items, wrap_width, self.diff_view_mode, highlighter, &self.expanded_user_messages);
+                    // Also refresh any active subagent blocks (they are earlier messages
+                    // that change independently of the last message)
+                    try self.line_map.refreshSubagentBlocks(self.messages.items);
                 }
                 // If message_count < prev_message_count, messages were cleared - rebuild
                 else if (message_count < prev_message_count) {
@@ -2448,6 +2519,13 @@ pub const SubagentInfo = struct {
     title: ?[]const u8 = null,
     tool_count: usize = 0,
     summary: []SubagentToolSummary = &.{},
+    input_tokens: usize = 0,
+    output_tokens: usize = 0,
+    reasoning_tokens: usize = 0,
+    cache_read_tokens: usize = 0,
+    cache_write_tokens: usize = 0,
+    start_time_ms: i64 = 0,
+    end_time_ms: i64 = 0,
 
     pub fn deinit(self: *SubagentInfo, allocator: Allocator) void {
         if (self.description) |d| allocator.free(d);

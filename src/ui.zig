@@ -1496,6 +1496,22 @@ pub const UI = struct {
                             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
                         }
                     }
+
+                    // Show parent agent token usage for current turn
+                    const tok = mgr.getParentTokenCounts();
+                    const total_tokens = tok.input + tok.output + tok.reasoning;
+                    if (total_tokens > 0) {
+                        var tok_buf: [48]u8 = undefined;
+                        const tok_str = if (total_tokens >= 1_000_000)
+                            std.fmt.bufPrint(&tok_buf, " ({d}.{d}M tokens)", .{ total_tokens / 1_000_000, (total_tokens % 1_000_000) / 100_000 }) catch ""
+                        else if (total_tokens >= 1_000)
+                            std.fmt.bufPrint(&tok_buf, " ({d}.{d}k tokens)", .{ total_tokens / 1_000, (total_tokens % 1_000) / 100 }) catch ""
+                        else
+                            std.fmt.bufPrint(&tok_buf, " ({d} tokens)", .{total_tokens}) catch "";
+                        if (tok_str.len > 0) {
+                            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, tok_str), .style = .{ .fg = Color.dim } });
+                        }
+                    }
                 }
 
                 // Keybindings on the right

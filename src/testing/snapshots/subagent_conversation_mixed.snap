@@ -5,7 +5,7 @@
 ┃  ✓ Explore Task
 ┃
 ┃  Explore architecture (8 toolcalls)
-┃  └ Read
+┃  └ ✓ Read
 ┃
 
 [Done] Bash: zig build

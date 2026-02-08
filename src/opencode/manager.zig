@@ -91,6 +91,12 @@ pub const Event = union(enum) {
         title: ?[]const u8 = null,
         tool_count: usize = 0,
         summary: []SubagentToolSummary = &.{},
+        input_tokens: usize = 0,
+        output_tokens: usize = 0,
+        reasoning_tokens: usize = 0,
+        cache_read_tokens: usize = 0,
+        cache_write_tokens: usize = 0,
+        start_time_ms: i64 = 0,
 
         pub fn deinit(self: *SubagentEventInfo, allocator: Allocator) void {
             if (self.description) |d| allocator.free(d);
@@ -310,6 +316,76 @@ pub const OwnedModelInfo = struct {
     }
 };
 
+/// Token usage tracking for a session (child or parent).
+pub const ChildTokens = struct {
+    input: usize = 0,
+    output: usize = 0,
+    reasoning: usize = 0,
+    cache_read: usize = 0,
+    cache_write: usize = 0,
+
+    fn add(self: ChildTokens, other: ChildTokens) ChildTokens {
+        return .{
+            .input = self.input + other.input,
+            .output = self.output + other.output,
+            .reasoning = self.reasoning + other.reasoning,
+            .cache_read = self.cache_read + other.cache_read,
+            .cache_write = self.cache_write + other.cache_write,
+        };
+    }
+};
+
+/// Accumulates token usage across multiple assistant messages within a session.
+/// Deduplicates repeated message.updated events for the same message ID by
+/// tracking the current message separately and folding it into a running base
+/// total when a new message begins.
+const TokenAccumulator = struct {
+    /// Sum of all finalized (previous) messages' tokens.
+    base: ChildTokens = .{},
+    /// The in-progress message's tokens (replaced on each message.updated event).
+    current: ChildTokens = .{},
+    /// Message ID of the current in-progress message (owned, must be freed).
+    current_message_id: ?[]const u8 = null,
+
+    fn total(self: TokenAccumulator) ChildTokens {
+        return self.base.add(self.current);
+    }
+
+    /// Update with new token data for a given message ID.
+    /// If the message ID matches the current one, replaces current tokens (dedup).
+    /// If it's a new message, finalizes current into base and starts fresh.
+    fn update(self: *TokenAccumulator, allocator: Allocator, msg_id: ?[]const u8, tok: ChildTokens) void {
+        if (msg_id) |mid| {
+            if (self.current_message_id) |cur_mid| {
+                if (std.mem.eql(u8, cur_mid, mid)) {
+                    // Same message — replace current (dedup repeated events)
+                    self.current = tok;
+                    return;
+                }
+                // New message — finalize previous into base
+                self.base = self.base.add(self.current);
+                allocator.free(cur_mid);
+            }
+            self.current_message_id = allocator.dupe(u8, mid) catch null;
+        } else {
+            // No message ID — just replace current
+            if (self.current_message_id) |cur_mid| {
+                self.base = self.base.add(self.current);
+                allocator.free(cur_mid);
+                self.current_message_id = null;
+            }
+        }
+        self.current = tok;
+    }
+
+    fn deinitMessageId(self: *TokenAccumulator, allocator: Allocator) void {
+        if (self.current_message_id) |mid| {
+            allocator.free(mid);
+            self.current_message_id = null;
+        }
+    }
+};
+
 /// Manages Opencode agent sessions
 pub const OpencodeManager = struct {
     allocator: Allocator,
@@ -357,6 +433,28 @@ pub const OpencodeManager = struct {
     pending_question: bool,
     pending_permission: bool,
 
+    // Deferred completion: set when a parent completion event (session.idle,
+    // message.updated, etc.) arrives while subagents are active. Checked after
+    // the last child session completes to fire the deferred clearPromptingState().
+    deferred_completion: bool,
+
+    // Child session tracking (for subagent display during execution)
+    // Maps child sessionID -> number of unique tool calls observed
+    child_tool_counts: std.StringHashMapUnmanaged(usize),
+    // Maps child sessionID -> last tool name used (owned strings)
+    child_last_tool: std.StringHashMapUnmanaged([]const u8),
+    // Maps child sessionID -> parent tool_call_id (owned strings)
+    child_to_parent_tool: std.StringHashMapUnmanaged([]const u8),
+    // Maps child sessionID -> accumulated token usage from message.updated events
+    child_tokens: std.StringHashMapUnmanaged(TokenAccumulator),
+    // Maps child sessionID -> start timestamp (ms since epoch)
+    child_start_times: std.StringHashMapUnmanaged(i64),
+    // Atomic count of active child sessions (safe for main thread to read)
+    active_child_count: std.atomic.Value(u32),
+
+    // Parent (main agent) accumulated token usage from message.updated events
+    parent_tokens: TokenAccumulator,
+
     // Available models (fetched from server)
     available_models: std.ArrayListUnmanaged(OwnedModelInfo),
     current_model_id: ?[]const u8, // Current model as "provider/model" string
@@ -395,6 +493,14 @@ pub const OpencodeManager = struct {
             .last_question_call_id = null,
             .pending_question = false,
             .pending_permission = false,
+            .deferred_completion = false,
+            .child_tool_counts = .{},
+            .child_last_tool = .{},
+            .child_to_parent_tool = .{},
+            .child_tokens = .{},
+            .child_start_times = .{},
+            .active_child_count = std.atomic.Value(u32).init(0),
+            .parent_tokens = .{},
             .available_models = .{},
             .current_model_id = null,
         };
@@ -431,6 +537,9 @@ pub const OpencodeManager = struct {
             self.connect_cwd_owned = null;
         }
 
+        // Free child tool counts
+        self.clearChildToolCounts();
+
         // Free available models
         self.clearAvailableModels();
 
@@ -446,6 +555,55 @@ pub const OpencodeManager = struct {
         if (self.last_question_call_id) |id| {
             self.allocator.free(id);
             self.last_question_call_id = null;
+        }
+    }
+
+    /// Clear child session tracking maps, freeing all owned keys and values
+    fn clearChildToolCounts(self: *OpencodeManager) void {
+        self.deferred_completion = false;
+        {
+            var iter = self.child_tool_counts.iterator();
+            while (iter.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+            self.child_tool_counts.deinit(self.allocator);
+            self.child_tool_counts = .{};
+            self.active_child_count.store(0, .release);
+        }
+        {
+            var iter = self.child_last_tool.iterator();
+            while (iter.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.value_ptr.*);
+            }
+            self.child_last_tool.deinit(self.allocator);
+            self.child_last_tool = .{};
+        }
+        {
+            var iter = self.child_to_parent_tool.iterator();
+            while (iter.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.value_ptr.*);
+            }
+            self.child_to_parent_tool.deinit(self.allocator);
+            self.child_to_parent_tool = .{};
+        }
+        {
+            var iter = self.child_tokens.iterator();
+            while (iter.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                entry.value_ptr.deinitMessageId(self.allocator);
+            }
+            self.child_tokens.deinit(self.allocator);
+            self.child_tokens = .{};
+        }
+        {
+            var iter = self.child_start_times.iterator();
+            while (iter.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+            self.child_start_times.deinit(self.allocator);
+            self.child_start_times = .{};
         }
     }
 
@@ -585,6 +743,7 @@ pub const OpencodeManager = struct {
         self.pending_abort = false;
         self.pending_abort_since_ms = 0;
         self.abort_error_grace_until_ms = 0;
+        self.clearChildToolCounts();
 
         // Signal SSE thread to stop
         self.should_stop.store(true, .release);
@@ -706,9 +865,12 @@ pub const OpencodeManager = struct {
             .variant = self.current_variant,
         };
 
-        // Clear any pending abort from a previous cancel
+        // Clear any pending state from a previous turn
         self.pending_abort = false;
         self.pending_abort_since_ms = 0;
+        self.deferred_completion = false;
+        self.parent_tokens.deinitMessageId(self.allocator);
+        self.parent_tokens = .{};
 
         // Drain stale events from the previous turn. Step-finish pushes
         // message_complete eagerly, and session.idle can arrive much later.
@@ -1439,6 +1601,23 @@ pub const OpencodeManager = struct {
         const event_type = protocol.EventType.fromString(type_str);
         log.debug("SSE event received: {s} -> {}", .{ type_str, event_type });
 
+        // Filter out child session events: the SSE stream forwards ALL events
+        // from subagent sessions. We only process events from our own session.
+        if (self.session_id) |our_sid| {
+            if (properties) |props| {
+                if (getEventSessionId(props, event_type)) |event_sid| {
+                    if (!std.mem.eql(u8, event_sid, our_sid)) {
+                        // Child session event — track tool calls and tokens
+                        if (event_type == .message_updated) {
+                            self.trackChildTokenUsage(props, event_sid);
+                        }
+                        self.trackChildToolEvent(props, event_sid);
+                        return;
+                    }
+                }
+            }
+        }
+
         switch (event_type) {
             .message_created => {
                 if (properties) |props| {
@@ -1492,8 +1671,14 @@ pub const OpencodeManager = struct {
                                     // (which can arrive 10-20+ seconds later). If the agent
                                     // continues (multi-step), new content events will re-set
                                     // status to prompting.
+                                    //
+                                    // However, when subagents are active the parent session
+                                    // emits step-finish "stop" prematurely (the parent is idle
+                                    // while waiting for the Task tool). Suppress in that case.
                                     if (reason != null and isStepFinishReason(reason.?)) {
-                                        self.message_queue.push(.{ .message_complete = {} });
+                                        if (!self.hasActiveChildSessions()) {
+                                            self.message_queue.push(.{ .message_complete = {} });
+                                        }
                                     }
                                 } else if (isTextPartType(ptype) and partHasEndTime(part_obj.?)) {
                                     log.info("Text part finished; awaiting session idle", .{});
@@ -1532,11 +1717,19 @@ pub const OpencodeManager = struct {
             .message_updated => {
                 if (properties) |props| {
                     if (props == .object) {
+                        // Track parent session token usage
+                        self.trackParentTokenUsage(props);
+
                         if (extractMessageStatus(props)) |status| {
                             _ = self.handleMessageStatus(status);
                         } else if (isAssistantMessageComplete(props)) {
-                            log.info("Message finished via update metadata", .{});
-                            self.clearPromptingState();
+                            if (self.active_child_count.load(.acquire) > 0) {
+                                log.info("Message complete via metadata, but subagents active — deferring", .{});
+                                self.deferred_completion = true;
+                            } else {
+                                log.info("Message finished via update metadata", .{});
+                                self.clearPromptingState();
+                            }
                         }
                     }
                 }
@@ -1600,12 +1793,17 @@ pub const OpencodeManager = struct {
                         }
                         if (status_val) |val| {
                             if (val == .string and std.mem.eql(u8, val.string, "idle")) {
-                                log.info("Session updated to idle", .{});
-                                self.pending_abort = false;
-                                self.pending_abort_since_ms = 0;
-                                self.abort_error_grace_until_ms = 0;
-                                self.message_queue.push(.{ .message_complete = {} });
-                                self.message_queue.push(.{ .status_change = .session_active });
+                                if (self.hasActiveChildSessions()) {
+                                    log.info("Session updated to idle, but subagents active — deferring", .{});
+                                    self.deferred_completion = true;
+                                } else {
+                                    log.info("Session updated to idle", .{});
+                                    self.pending_abort = false;
+                                    self.pending_abort_since_ms = 0;
+                                    self.abort_error_grace_until_ms = 0;
+                                    self.message_queue.push(.{ .message_complete = {} });
+                                    self.message_queue.push(.{ .status_change = .session_active });
+                                }
                             }
                         }
                     }
@@ -1616,20 +1814,30 @@ pub const OpencodeManager = struct {
                     if (props == .object) {
                         if (extractSessionStatus(props)) |status| {
                             if (isSessionIdleStatus(status)) {
-                                log.info("Session status idle", .{});
-                                self.clearPromptingState();
+                                if (self.hasActiveChildSessions()) {
+                                    log.info("Session status idle, but subagents active — deferring", .{});
+                                    self.deferred_completion = true;
+                                } else {
+                                    log.info("Session status idle", .{});
+                                    self.clearPromptingState();
+                                }
                             }
                         }
                     }
                 }
             },
             .session_idle => {
-                log.info("Session idle received, resetting status to session_active", .{});
-                self.pending_abort = false;
-                self.pending_abort_since_ms = 0;
-                self.abort_error_grace_until_ms = 0;
-                self.message_queue.push(.{ .message_complete = {} });
-                self.message_queue.push(.{ .status_change = .session_active });
+                if (self.hasActiveChildSessions()) {
+                    log.info("Session idle received, but subagents active — deferring", .{});
+                    self.deferred_completion = true;
+                } else {
+                    log.info("Session idle received, resetting status to session_active", .{});
+                    self.pending_abort = false;
+                    self.pending_abort_since_ms = 0;
+                    self.abort_error_grace_until_ms = 0;
+                    self.message_queue.push(.{ .message_complete = {} });
+                    self.message_queue.push(.{ .status_change = .session_active });
+                }
             },
             .session_error => {
                 const now_ms = std.time.milliTimestamp();
@@ -1655,13 +1863,317 @@ pub const OpencodeManager = struct {
         self.pending_abort = false;
         self.pending_abort_since_ms = 0;
         self.abort_error_grace_until_ms = 0;
+        self.deferred_completion = false;
         self.stream_complete.store(true, .release);
         self.message_queue.push(.{ .message_complete = {} });
         self.message_queue.push(.{ .status_change = .session_active });
     }
 
+    /// Check if any child sessions (subagents) are currently active.
+    /// Safe to call from main thread (uses atomic counter).
+    pub fn hasActiveChildSessions(self: *const OpencodeManager) bool {
+        return self.active_child_count.load(.acquire) > 0;
+    }
+
+    /// Extract the sessionID from an SSE event's properties.
+    /// For message.part.updated, the sessionID is in properties.part.sessionID.
+    /// For session.idle/session.updated/session.status, it's in properties.sessionID.
+    fn getEventSessionId(props: std.json.Value, event_type: protocol.EventType) ?[]const u8 {
+        if (props != .object) return null;
+        switch (event_type) {
+            .message_part_updated, .message_created, .message_updated, .message_deleted => {
+                // Check part.sessionID (message.part.updated)
+                if (props.object.get("part")) |part_val| {
+                    if (part_val == .object) {
+                        if (part_val.object.get("sessionID")) |sid_val| {
+                            if (sid_val == .string) return sid_val.string;
+                        }
+                    }
+                }
+                // Check info.sessionID (message.updated — OpenCode puts message data in "info")
+                if (props.object.get("info")) |info_val| {
+                    if (info_val == .object) {
+                        if (info_val.object.get("sessionID")) |sid_val| {
+                            if (sid_val == .string) return sid_val.string;
+                        }
+                    }
+                }
+                // Check message.sessionID (message.updated, message.created)
+                if (props.object.get("message")) |msg_val| {
+                    if (msg_val == .object) {
+                        if (msg_val.object.get("sessionID")) |sid_val| {
+                            if (sid_val == .string) return sid_val.string;
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+        // Universal fallback: check common sessionID locations for all event types.
+        // This catches permission.asked, question.asked, etc. from child sessions
+        // that would otherwise leak through the filter.
+        if (props.object.get("sessionID")) |sid_val| {
+            if (sid_val == .string) return sid_val.string;
+        }
+        if (props.object.get("session")) |session_val| {
+            if (session_val == .object) {
+                if (session_val.object.get("sessionID")) |sid_val| {
+                    if (sid_val == .string) return sid_val.string;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Track tool calls from child sessions for real-time tool count display.
+    /// Only counts events with status "pending" (the initial tool call event).
+    fn trackChildToolEvent(self: *OpencodeManager, props: std.json.Value, child_sid: []const u8) void {
+        if (props != .object) return;
+        const part_val = props.object.get("part") orelse return;
+        if (part_val != .object) return;
+        const part_obj = part_val.object;
+
+        // Only count tool-type parts
+        const part_type = if (part_obj.get("type")) |t| (if (t == .string) t.string else null) else null;
+        if (part_type == null) return;
+        if (!isToolCallPartType(part_type.?) and !isToolResultPartType(part_type.?)) return;
+
+        const state_obj = if (part_obj.get("state")) |state_val| blk: {
+            if (state_val == .object) break :blk state_val.object;
+            break :blk null;
+        } else null;
+
+        // Extract tool name for "last tool" display
+        const tool_name = extractToolNameFromObject(part_obj) orelse
+            if (state_obj) |obj| extractToolNameFromObject(obj) else null;
+
+        // Track last tool name (update on every tool event, not just pending)
+        var name_changed = false;
+        if (tool_name) |name| {
+            const prev = self.child_last_tool.get(child_sid);
+            name_changed = prev == null or !std.mem.eql(u8, prev.?, name);
+            self.updateChildLastTool(child_sid, name);
+        }
+
+        // Count unique tool calls (pending = first appearance)
+        const status = if (state_obj) |obj| blk: {
+            if (obj.get("status")) |s| {
+                if (s == .string) break :blk s.string;
+            }
+            break :blk null;
+        } else null;
+
+        var count_changed = false;
+        if (status) |s| {
+            if (parseToolStatus(s)) |ts| {
+                if (ts == .pending) {
+                    self.incrementChildToolCount(child_sid);
+                    count_changed = true;
+                }
+            }
+        }
+
+        // Push UI update when tool name or count changed
+        if (name_changed or count_changed) {
+            self.pushChildToolUpdate(child_sid);
+        }
+    }
+
+    /// Extract token usage from a child session's message.updated event.
+    /// Accumulates tokens across multiple assistant messages and deduplicates
+    /// repeated events for the same message ID.
+    fn trackChildTokenUsage(self: *OpencodeManager, props: std.json.Value, child_sid: []const u8) void {
+        const info = extractMessageInfo(props) orelse return;
+
+        // Only track assistant messages (they have the token data)
+        if (info.get("role")) |role_val| {
+            if (role_val != .string or !std.mem.eql(u8, role_val.string, "assistant")) return;
+        } else return;
+
+        const tok = extractTokensFromInfo(info) orelse return;
+        const msg_id = extractStringFromObject(info, "id");
+
+        if (self.child_tokens.getPtr(child_sid)) |acc| {
+            acc.update(self.allocator, msg_id, tok);
+        } else {
+            var acc = TokenAccumulator{};
+            acc.update(self.allocator, msg_id, tok);
+            const key = self.allocator.dupe(u8, child_sid) catch return;
+            self.child_tokens.put(self.allocator, key, acc) catch {
+                acc.deinitMessageId(self.allocator);
+                self.allocator.free(key);
+                return;
+            };
+        }
+
+        self.pushChildToolUpdate(child_sid);
+    }
+
+    /// Extract token usage from the parent session's message.updated event.
+    /// Accumulates tokens across multiple assistant messages in the same turn.
+    /// Extract token usage from the parent session's message.updated event.
+    /// Accumulates tokens across multiple assistant messages in the same turn,
+    /// deduplicating repeated events for the same message ID.
+    fn trackParentTokenUsage(self: *OpencodeManager, props: std.json.Value) void {
+        const info = extractMessageInfo(props) orelse return;
+
+        // Only track assistant messages
+        if (info.get("role")) |role_val| {
+            if (role_val != .string or !std.mem.eql(u8, role_val.string, "assistant")) return;
+        } else return;
+
+        const tok = extractTokensFromInfo(info) orelse return;
+        const msg_id = extractStringFromObject(info, "id");
+
+        self.parent_tokens.update(self.allocator, msg_id, tok);
+    }
+
+    /// Get the parent agent's accumulated token usage for the current turn.
+    pub fn getParentTokenCounts(self: *const OpencodeManager) ChildTokens {
+        return self.parent_tokens.total();
+    }
+
+    /// Update the last tool name for a child session.
+    fn updateChildLastTool(self: *OpencodeManager, child_sid: []const u8, tool_name: []const u8) void {
+        if (self.child_last_tool.getPtr(child_sid)) |val_ptr| {
+            // Replace existing value
+            self.allocator.free(val_ptr.*);
+            val_ptr.* = self.allocator.dupe(u8, tool_name) catch return;
+        } else {
+            const key = self.allocator.dupe(u8, child_sid) catch return;
+            const val = self.allocator.dupe(u8, tool_name) catch {
+                self.allocator.free(key);
+                return;
+            };
+            self.child_last_tool.put(self.allocator, key, val) catch {
+                self.allocator.free(key);
+                self.allocator.free(val);
+            };
+        }
+    }
+
+    /// Register the mapping from child session ID to parent tool_call_id.
+    fn registerChildSession(self: *OpencodeManager, child_sid: []const u8, parent_tool_id: []const u8) void {
+        if (self.child_to_parent_tool.get(child_sid) != null) return; // Already registered
+        const key = self.allocator.dupe(u8, child_sid) catch return;
+        const val = self.allocator.dupe(u8, parent_tool_id) catch {
+            self.allocator.free(key);
+            return;
+        };
+        self.child_to_parent_tool.put(self.allocator, key, val) catch {
+            self.allocator.free(key);
+            self.allocator.free(val);
+        };
+    }
+
+    /// Push a tool_update event with current child session info so the UI
+    /// shows the latest tool count and last tool name while the subagent runs.
+    fn pushChildToolUpdate(self: *OpencodeManager, child_sid: []const u8) void {
+        const parent_tool_id = self.child_to_parent_tool.get(child_sid) orelse return;
+        const tool_count = self.child_tool_counts.get(child_sid) orelse 0;
+        const last_tool = self.child_last_tool.get(child_sid);
+
+        const id_copy = self.event_allocator.dupe(u8, parent_tool_id) catch return;
+
+        // Include accumulated token usage if available
+        const tok = if (self.child_tokens.get(child_sid)) |acc| acc.total() else ChildTokens{};
+
+        var info: Event.SubagentEventInfo = .{
+            .tool_count = tool_count,
+            .input_tokens = tok.input,
+            .output_tokens = tok.output,
+            .reasoning_tokens = tok.reasoning,
+            .cache_read_tokens = tok.cache_read,
+            .cache_write_tokens = tok.cache_write,
+            .start_time_ms = self.child_start_times.get(child_sid) orelse 0,
+        };
+
+        // Build a single-entry summary with the last tool name
+        if (last_tool) |name| {
+            var summaries = self.event_allocator.alloc(Event.SubagentToolSummary, 1) catch {
+                self.event_allocator.free(id_copy);
+                return;
+            };
+            summaries[0] = .{
+                .tool_name = self.event_allocator.dupe(u8, name) catch {
+                    self.event_allocator.free(summaries);
+                    self.event_allocator.free(id_copy);
+                    return;
+                },
+                .status = .running,
+            };
+            info.summary = summaries;
+        }
+
+        self.message_queue.push(.{ .tool_update = .{
+            .tool_call_id = id_copy,
+            .status = .running,
+            .subagent_info = info,
+        } });
+    }
+
+    /// Insert or increment the tool count for a child session ID.
+    fn incrementChildToolCount(self: *OpencodeManager, child_sid: []const u8) void {
+        if (self.child_tool_counts.getPtr(child_sid)) |count_ptr| {
+            count_ptr.* += 1;
+        } else {
+            const key = self.allocator.dupe(u8, child_sid) catch return;
+            self.child_tool_counts.put(self.allocator, key, 1) catch {
+                self.allocator.free(key);
+                return;
+            };
+            // Record start time for this child session
+            const time_key = self.allocator.dupe(u8, child_sid) catch return;
+            self.child_start_times.put(self.allocator, time_key, std.time.milliTimestamp()) catch {
+                self.allocator.free(time_key);
+            };
+            // New child session — increment atomic counter
+            _ = self.active_child_count.fetchAdd(1, .release);
+        }
+    }
+
+    /// Remove a child session's entries from all tracking maps.
+    /// If this was the last active child and a parent completion was deferred,
+    /// fires the deferred clearPromptingState().
+    fn removeChildToolCount(self: *OpencodeManager, child_sid: []const u8) void {
+        var was_tracked = false;
+        if (self.child_tool_counts.fetchRemove(child_sid)) |entry| {
+            self.allocator.free(entry.key);
+            _ = self.active_child_count.fetchSub(1, .release);
+            was_tracked = true;
+        }
+        if (self.child_last_tool.fetchRemove(child_sid)) |entry| {
+            self.allocator.free(entry.key);
+            self.allocator.free(entry.value);
+        }
+        if (self.child_to_parent_tool.fetchRemove(child_sid)) |entry| {
+            self.allocator.free(entry.key);
+            self.allocator.free(entry.value);
+        }
+        if (self.child_tokens.fetchRemove(child_sid)) |entry| {
+            self.allocator.free(entry.key);
+            var acc = entry.value;
+            acc.deinitMessageId(self.allocator);
+        }
+        if (self.child_start_times.fetchRemove(child_sid)) |entry| {
+            self.allocator.free(entry.key);
+        }
+
+        // If this was the last child and a completion was deferred, fire it now
+        if (was_tracked and self.active_child_count.load(.acquire) == 0 and self.deferred_completion) {
+            log.info("Last child session completed — firing deferred completion", .{});
+            self.deferred_completion = false;
+            self.clearPromptingState();
+        }
+    }
+
     fn handleMessageStatus(self: *OpencodeManager, status: []const u8) bool {
         if (isMessageCompletionStatus(status)) {
+            if (self.active_child_count.load(.acquire) > 0) {
+                log.info("Message status {s}, but subagents active — deferring", .{status});
+                self.deferred_completion = true;
+                return true;
+            }
             log.info("Message status complete: {s}", .{status});
             self.clearPromptingState();
             return true;
@@ -1726,6 +2238,54 @@ pub const OpencodeManager = struct {
         }
         if (props.object.get("message")) |message_val| {
             if (message_val == .object) return message_val.object;
+        }
+        return null;
+    }
+
+    /// Extract a ChildTokens struct from a message info object's "tokens" field.
+    /// Handles input, output, reasoning, and cache.{read,write}.
+    /// Returns null if no meaningful token data is present.
+    fn extractTokensFromInfo(info: std.json.ObjectMap) ?ChildTokens {
+        const tokens_obj = if (info.get("tokens")) |v| (if (v == .object) v.object else null) else null;
+        const tokens = tokens_obj orelse return null;
+
+        var tok: ChildTokens = .{};
+        inline for (.{ .{ "input", "input" }, .{ "output", "output" }, .{ "reasoning", "reasoning" } }) |pair| {
+            if (tokens.get(pair[0])) |v| {
+                @field(tok, pair[1]) = switch (v) {
+                    .integer => |i| if (i >= 0) @intCast(i) else 0,
+                    .float => |f| if (f >= 0) @intFromFloat(f) else 0,
+                    else => 0,
+                };
+            }
+        }
+        if (tokens.get("cache")) |cache_val| {
+            if (cache_val == .object) {
+                if (cache_val.object.get("read")) |v| {
+                    tok.cache_read = switch (v) {
+                        .integer => |i| if (i >= 0) @intCast(i) else 0,
+                        .float => |f| if (f >= 0) @intFromFloat(f) else 0,
+                        else => 0,
+                    };
+                }
+                if (cache_val.object.get("write")) |v| {
+                    tok.cache_write = switch (v) {
+                        .integer => |i| if (i >= 0) @intCast(i) else 0,
+                        .float => |f| if (f >= 0) @intFromFloat(f) else 0,
+                        else => 0,
+                    };
+                }
+            }
+        }
+
+        if (tok.input == 0 and tok.output == 0) return null;
+        return tok;
+    }
+
+    /// Extract a string value from a JSON object by key name.
+    fn extractStringFromObject(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+        if (obj.get(key)) |val| {
+            if (val == .string) return val.string;
         }
         return null;
     }
@@ -2017,6 +2577,16 @@ pub const OpencodeManager = struct {
             }
         }
 
+        // If we have a session_id but no tool_count from summary, use our tracked count
+        if (info.tool_count == 0) {
+            if (info.session_id) |sid| {
+                if (self.child_tool_counts.get(sid)) |count| {
+                    info.tool_count = count;
+                    has_any = true;
+                }
+            }
+        }
+
         if (!has_any) return null;
         return info;
     }
@@ -2258,6 +2828,13 @@ pub const OpencodeManager = struct {
                 else
                     null;
 
+                // Register child session → parent tool mapping for live updates
+                if (tc_subagent) |info| {
+                    if (info.session_id) |child_sid| {
+                        self.registerChildSession(child_sid, id);
+                    }
+                }
+
                 self.message_queue.push(.{
                     .tool_call = .{
                         .tool_call_id = id_copy,
@@ -2293,6 +2870,13 @@ pub const OpencodeManager = struct {
                 else
                     null;
 
+                // Register child session → parent tool mapping for live updates
+                if (tu_subagent) |info| {
+                    if (info.session_id) |child_sid| {
+                        self.registerChildSession(child_sid, id);
+                    }
+                }
+
                 self.message_queue.push(.{ .tool_update = .{
                     .tool_call_id = id_copy,
                     .status = s,
@@ -2300,6 +2884,17 @@ pub const OpencodeManager = struct {
                     .stderr = stderr_copy,
                     .subagent_info = tu_subagent,
                 } });
+
+                // Clean up child tool count when task completes
+                if (is_task_tool and (s == .completed or s == .failed)) {
+                    if (state_obj) |obj| {
+                        if (extractObjectField(obj, &[_][]const u8{"metadata"})) |metadata_obj| {
+                            if (extractStringField(metadata_obj, &[_][]const u8{ "sessionId", "session_id" })) |child_sid| {
+                                self.removeChildToolCount(child_sid);
+                            }
+                        }
+                    }
+                }
             }
             return true;
         }
@@ -3205,6 +3800,325 @@ test "SubagentEventInfo deinit with null fields" {
     const allocator = std.testing.allocator;
     var info: Event.SubagentEventInfo = .{};
     info.deinit(allocator);
+}
+
+test "opencode event: child session message.part.updated is filtered" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    // Set parent session ID
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+
+    // Send a text event from a child session (different sessionID in part)
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"sessionID":"ses_child_456","messageID":"msg_1","type":"text",
+        \\"text":"Hello from child"}}}}
+    ;
+    manager.processEventData(data);
+
+    // No events should be in the queue — child events are filtered
+    try std.testing.expect(manager.poll() == null);
+}
+
+test "opencode event: child session step-finish is filtered (no premature message_complete)" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+    manager.status = .prompting;
+
+    // step-finish from child session should NOT trigger message_complete
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"sessionID":"ses_child_456","type":"step-finish","reason":"stop"}}}}
+    ;
+    manager.processEventData(data);
+
+    try std.testing.expect(manager.poll() == null);
+    try std.testing.expectEqual(Status.prompting, manager.status);
+}
+
+test "opencode event: child session.idle is filtered" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+    manager.status = .prompting;
+
+    // session.idle from child session should NOT clear prompting state
+    const data =
+        \\{"type":"session.idle","properties":{"sessionID":"ses_child_456"}}
+    ;
+    manager.processEventData(data);
+
+    try std.testing.expect(manager.poll() == null);
+    try std.testing.expectEqual(Status.prompting, manager.status);
+}
+
+test "opencode event: parent session events still processed normally" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+    manager.status = .prompting;
+
+    // session.idle from parent session should still work
+    const data =
+        \\{"type":"session.idle","properties":{"sessionID":"ses_parent_123"}}
+    ;
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: child tool count tracking" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+
+    // Send multiple pending tool events from a child session
+    const data1 =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"sessionID":"ses_child_789","messageID":"msg_1","type":"tool",
+        \\"callID":"call_1","tool":"glob","state":{"status":"pending"}}}}}
+    ;
+    const data2 =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"sessionID":"ses_child_789","messageID":"msg_1","type":"tool",
+        \\"callID":"call_2","tool":"read","state":{"status":"pending"}}}}}
+    ;
+    const data3 =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"sessionID":"ses_child_789","messageID":"msg_1","type":"tool",
+        \\"callID":"call_3","tool":"bash","state":{"status":"pending"}}}}}
+    ;
+
+    manager.processEventData(data1);
+    manager.processEventData(data2);
+    manager.processEventData(data3);
+
+    // No events should be in the queue (child events filtered)
+    try std.testing.expect(manager.poll() == null);
+
+    // But child_tool_counts should have tracked them
+    try std.testing.expectEqual(@as(usize, 3), manager.child_tool_counts.get("ses_child_789").?);
+}
+
+test "opencode event: child running tool status not counted (only pending)" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+
+    // Send a pending tool event
+    const data_pending =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"sessionID":"ses_child_789","messageID":"msg_1","type":"tool",
+        \\"callID":"call_1","tool":"glob","state":{"status":"pending"}}}}}
+    ;
+    // Send a running tool event (same tool call, status update — should not increment)
+    const data_running =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"sessionID":"ses_child_789","messageID":"msg_1","type":"tool",
+        \\"callID":"call_1","tool":"glob","state":{"status":"running"}}}}}
+    ;
+
+    manager.processEventData(data_pending);
+    manager.processEventData(data_running);
+
+    // Only the pending event should have been counted
+    try std.testing.expectEqual(@as(usize, 1), manager.child_tool_counts.get("ses_child_789").?);
+}
+
+test "opencode event: tool_count populated from tracked counts when no summary" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+
+    // Pre-populate child tool counts (as if we tracked 5 tool calls)
+    const key = try allocator.dupe(u8, "ses_child_789");
+    try manager.child_tool_counts.put(allocator, key, 5);
+    _ = manager.active_child_count.fetchAdd(1, .release);
+
+    // Send a task tool event from parent session with metadata.sessionId but no summary
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"sessionID":"ses_parent_123",
+        \\"type":"tool","callID":"task:0","tool":"task",
+        \\"state":{"status":"running",
+        \\"input":{"description":"Explore code"},
+        \\"title":"Explore code",
+        \\"metadata":{"sessionId":"ses_child_789"}}}}}}
+    ;
+    manager.processEventData(data);
+
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+
+    switch (ev1) {
+        .tool_call => |tc| {
+            try std.testing.expect(tc.subagent_info != null);
+            const info = tc.subagent_info.?;
+            try std.testing.expectEqual(@as(usize, 5), info.tool_count);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: child tool count cleanup on task completion" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+
+    // Pre-populate child tool counts
+    const key = try allocator.dupe(u8, "ses_child_789");
+    try manager.child_tool_counts.put(allocator, key, 10);
+    _ = manager.active_child_count.fetchAdd(1, .release);
+
+    // Send a completed task tool event
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"sessionID":"ses_parent_123",
+        \\"type":"tool","callID":"task:0","tool":"task",
+        \\"state":{"status":"completed",
+        \\"input":{"description":"Done"},
+        \\"title":"Done",
+        \\"metadata":{"sessionId":"ses_child_789","summary":[
+        \\{"id":"prt_1","tool":"read","state":{"status":"completed","title":"file.zig"}}
+        \\]}}}}}}
+    ;
+    manager.processEventData(data);
+
+    // Drain events
+    while (manager.poll()) |*ev| {
+        var e = ev.*;
+        e.deinit(manager.event_allocator);
+    }
+
+    // child_tool_counts should have been cleaned up
+    try std.testing.expect(manager.child_tool_counts.get("ses_child_789") == null);
+}
+
+test "opencode event: parent session.idle suppressed while subagents active" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+    manager.status = .prompting;
+
+    // Simulate active child session
+    const key = try allocator.dupe(u8, "ses_child_789");
+    try manager.child_tool_counts.put(allocator, key, 3);
+    _ = manager.active_child_count.fetchAdd(1, .release);
+
+    // Parent session.idle should be suppressed (subagent still running)
+    const data =
+        \\{"type":"session.idle","properties":{"sessionID":"ses_parent_123"}}
+    ;
+    manager.processEventData(data);
+
+    // No events — idle was suppressed
+    try std.testing.expect(manager.poll() == null);
+    try std.testing.expectEqual(Status.prompting, manager.status);
+}
+
+test "opencode event: parent session.status idle suppressed while subagents active" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+    manager.status = .prompting;
+
+    // Simulate active child session
+    const key = try allocator.dupe(u8, "ses_child_789");
+    try manager.child_tool_counts.put(allocator, key, 3);
+    _ = manager.active_child_count.fetchAdd(1, .release);
+
+    // Parent session.status idle should be suppressed
+    const data =
+        \\{"payload":{"type":"session.status","properties":{"sessionID":"ses_parent_123","status":{"type":"idle"}}}}
+    ;
+    manager.processEventData(data);
+
+    // No events
+    try std.testing.expect(manager.poll() == null);
+    try std.testing.expectEqual(Status.prompting, manager.status);
+}
+
+test "opencode event: parent step-finish stop suppressed while subagents active" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+    manager.status = .prompting;
+
+    // Simulate active child session
+    const key = try allocator.dupe(u8, "ses_child_789");
+    try manager.child_tool_counts.put(allocator, key, 3);
+    _ = manager.active_child_count.fetchAdd(1, .release);
+
+    // Parent step-finish with "stop" should NOT push message_complete
+    const data =
+        \\{"payload":{"type":"message.part.updated","properties":{"part":{
+        \\"sessionID":"ses_parent_123","type":"step-finish","reason":"stop"}}}}
+    ;
+    manager.processEventData(data);
+
+    // No message_complete in queue
+    try std.testing.expect(manager.poll() == null);
+    try std.testing.expectEqual(Status.prompting, manager.status);
+}
+
+test "opencode event: message.updated completion still works during subagent (final signal)" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    manager.session_id = try allocator.dupe(u8, "ses_parent_123");
+    manager.status = .prompting;
+
+    // message.updated with finish/completed should NOT be suppressed — it's the
+    // definitive completion signal that fires after all tools (including Task) finish
+    const data =
+        \\{"payload":{"type":"message.updated","properties":{"info":{
+        \\"id":"msg_1","sessionID":"ses_parent_123","role":"assistant",
+        \\"finish":"stop","time":{"created":123,"completed":456}}}}}
+    ;
+    manager.processEventData(data);
+
+    // Should have pushed message_complete
+    const ev1_opt = manager.poll();
+    try std.testing.expect(ev1_opt != null);
+    var ev1 = ev1_opt.?;
+    defer ev1.deinit(manager.event_allocator);
+    switch (ev1) {
+        .message_complete => {},
+        else => try std.testing.expect(false),
+    }
 }
 
 // Integration tests - skipped in unit test runs (require live server)

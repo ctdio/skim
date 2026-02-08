@@ -568,18 +568,31 @@ pub fn renderSubagentBlock(
         current_row += 1;
     }
 
-    // Last tool: "┃  └ {ToolName}" (only if present)
-    if (last_tool) |tool_name| {
-        if (current_row < win.height) {
-            const tool_text = std.fmt.allocPrint(alloc, "└ {s}", .{tool_name}) catch tool_name;
+    // Last tool: always present for stable layout
+    if (current_row < win.height) {
+        if (last_tool) |tool_name| {
+            const tool_icon: []const u8 = switch (status) {
+                .pending => "○",
+                .running => "◐",
+                .completed => "✓",
+                .failed => "✗",
+            };
+            const tool_text = std.fmt.allocPrint(alloc, "└ {s} {s}", .{ tool_icon, tool_name }) catch tool_name;
             var seg = [_]vaxis.Cell.Segment{
                 .{ .text = "┃", .style = border_style },
                 .{ .text = "  ", .style = .{} },
                 .{ .text = tool_text, .style = dim_style },
             };
             _ = win.print(&seg, .{ .row_offset = @intCast(current_row) });
-            current_row += 1;
+        } else {
+            var seg = [_]vaxis.Cell.Segment{
+                .{ .text = "┃", .style = border_style },
+                .{ .text = "  ", .style = .{} },
+                .{ .text = "└ Generating...", .style = dim_style },
+            };
+            _ = win.print(&seg, .{ .row_offset = @intCast(current_row) });
         }
+        current_row += 1;
     }
 
     // Bottom border

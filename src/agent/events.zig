@@ -94,7 +94,20 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
                 tu.stderr,
             ) catch {};
             if (tu.subagent_info) |info| {
-                if (convertSubagentInfo(agent_state.allocator, info)) |owned| {
+                // Partial update (from child session tracking) — only has
+                // tool_count and summary, no description/agent_type. Merge
+                // instead of replace to preserve the initial info.
+                if (info.description == null and info.agent_type == null and info.session_id == null) {
+                    const owned_summary = convertSummaryOnly(agent_state.allocator, info.summary);
+                    agent_state.mergeSubagentToolProgress(tu.tool_call_id, info.tool_count, owned_summary, .{
+                        .input_tokens = info.input_tokens,
+                        .output_tokens = info.output_tokens,
+                        .reasoning_tokens = info.reasoning_tokens,
+                        .cache_read_tokens = info.cache_read_tokens,
+                        .cache_write_tokens = info.cache_write_tokens,
+                        .start_time_ms = info.start_time_ms,
+                    });
+                } else if (convertSubagentInfo(agent_state.allocator, info)) |owned| {
                     agent_state.setSubagentInfoOnTool(tu.tool_call_id, owned);
                 }
             }
@@ -228,6 +241,12 @@ pub fn opencodeEventToAgentEvent(event: OpencodeEvent) ?AgentEvent {
 fn convertSubagentInfo(allocator: Allocator, src: OpencodeEvent.SubagentEventInfo) ?SubagentInfo {
     var info: SubagentInfo = .{
         .tool_count = src.tool_count,
+        .input_tokens = src.input_tokens,
+        .output_tokens = src.output_tokens,
+        .reasoning_tokens = src.reasoning_tokens,
+        .cache_read_tokens = src.cache_read_tokens,
+        .cache_write_tokens = src.cache_write_tokens,
+        .start_time_ms = src.start_time_ms,
     };
 
     info.description = if (src.description) |d| allocator.dupe(u8, d) catch null else null;
@@ -255,6 +274,28 @@ fn convertSubagentInfo(allocator: Allocator, src: OpencodeEvent.SubagentEventInf
     }
 
     return info;
+}
+
+/// Convert only the summary portion of SubagentEventInfo into owned SubagentToolSummary slice.
+/// Used for partial updates (child tool progress) where we merge into existing info.
+fn convertSummaryOnly(allocator: Allocator, src: []opencode_manager.Event.SubagentToolSummary) []SubagentToolSummary {
+    if (src.len == 0) return &.{};
+    var summaries: std.ArrayList(SubagentToolSummary) = .{};
+    summaries.ensureTotalCapacity(allocator, src.len) catch return &.{};
+    for (src) |entry| {
+        const owned_name = allocator.dupe(u8, entry.tool_name) catch continue;
+        const owned_title: ?[]const u8 = if (entry.title) |t| allocator.dupe(u8, t) catch null else null;
+        summaries.append(allocator, .{
+            .tool_name = owned_name,
+            .title = owned_title,
+            .status = convertToolStatus(entry.status),
+        }) catch {
+            allocator.free(owned_name);
+            if (owned_title) |t| allocator.free(t);
+            continue;
+        };
+    }
+    return summaries.toOwnedSlice(allocator) catch &.{};
 }
 
 fn convertToolStatus(s: opencode_manager.ToolStatus) Message.ToolStatus {
