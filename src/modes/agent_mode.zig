@@ -739,8 +739,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // Space prefix commands (Space+b/h for history, Space+f for follow, Space+s for diff style)
         if (app.state.pending_space) {
             app.state.pending_space = false;
-            if (key.codepoint == 'b' or key.codepoint == 'h') {
-                // Space+b or Space+h - enter history mode (if messages exist)
+            if (key.codepoint == 'b' or key.codepoint == 'h' or key.codepoint == 27) {
+                // Space+b, Space+h, or Space+Esc - enter history mode (if messages exist)
                 if (agent_state.messages.items.len > 0) {
                     agent_state.enterHistoryMode();
                     app.needs_render = true;
