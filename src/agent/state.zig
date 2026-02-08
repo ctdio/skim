@@ -1608,11 +1608,11 @@ pub const AgentState = struct {
         return if (total > 0) total - 1 else 0;
     }
 
-    /// Move cursor up one line, clamping at 0.
+    /// Move cursor up, treating blocks (user messages, subagent blocks) as atomic units.
     pub fn historyCursorUp(self: *AgentState) void {
         if (self.history.cursor_line == 0) return;
 
-        // Check if current line is part of a block (user message or subagent)
+        // If on a block, jump directly before it
         if (self.getLineRecordType(self.history.cursor_line)) |line_type| {
             const is_user_msg = self.isUserMessageLine(line_type);
             const is_subagent = isSubagentLine(line_type);
@@ -1620,21 +1620,13 @@ pub const AgentState = struct {
             if (is_user_msg or is_subagent) {
                 const msg_idx = self.getMessageIdxAtLine(self.history.cursor_line).?;
                 const block_start = self.findBlockStartLine(msg_idx, is_subagent);
-
-                if (self.history.cursor_line > block_start) {
-                    // Inside a block, jump to its start
-                    self.history.cursor_line = block_start;
-                    self.ensureHistoryCursorVisible();
-                    return;
-                }
-                // At the start, jump to previous content
                 if (block_start > 0) {
                     self.history.cursor_line = block_start - 1;
                     // Skip spacers
-                    if (self.getMessageIdxAtLine(self.history.cursor_line) == null and self.history.cursor_line > 0) {
+                    while (self.history.cursor_line > 0 and self.getMessageIdxAtLine(self.history.cursor_line) == null) {
                         self.history.cursor_line -= 1;
                     }
-                    // If landed inside another block, jump to its start
+                    // If landed on another block, snap to its start
                     if (self.getLineRecordType(self.history.cursor_line)) |prev_type| {
                         const prev_is_user = self.isUserMessageLine(prev_type);
                         const prev_is_subagent = isSubagentLine(prev_type);
@@ -1643,29 +1635,39 @@ pub const AgentState = struct {
                             self.history.cursor_line = self.findBlockStartLine(prev_idx, prev_is_subagent);
                         }
                     }
-                    self.ensureHistoryCursorVisible();
-                    return;
                 }
+                self.ensureHistoryCursorVisible();
+                return;
             }
         }
-        // Default: move up one line
+        // Default: move up one line, skip spacers, snap to block start
         self.history.cursorUp();
+        while (self.history.cursor_line > 0 and self.getMessageIdxAtLine(self.history.cursor_line) == null) {
+            self.history.cursor_line -= 1;
+        }
+        if (self.getLineRecordType(self.history.cursor_line)) |line_type| {
+            const is_user_msg = self.isUserMessageLine(line_type);
+            const is_subagent = isSubagentLine(line_type);
+            if (is_user_msg or is_subagent) {
+                const msg_idx = self.getMessageIdxAtLine(self.history.cursor_line).?;
+                self.history.cursor_line = self.findBlockStartLine(msg_idx, is_subagent);
+            }
+        }
         self.ensureHistoryCursorVisible();
     }
 
-    /// Move cursor down one line, clamping at max.
+    /// Move cursor down, treating blocks (user messages, subagent blocks) as atomic units.
     pub fn historyCursorDown(self: *AgentState) void {
         const max_line = self.getHistoryMaxLine();
         if (self.history.cursor_line >= max_line) return;
 
-        // Check if current line is part of a block (user message or subagent)
+        // If on a block, jump past it
         if (self.getLineRecordType(self.history.cursor_line)) |line_type| {
             const is_user_msg = self.isUserMessageLine(line_type);
             const is_subagent = isSubagentLine(line_type);
 
             if (is_user_msg or is_subagent) {
                 const msg_idx = self.getMessageIdxAtLine(self.history.cursor_line).?;
-                // Find the end of this block and jump past it
                 var line = self.history.cursor_line;
                 while (line < max_line) {
                     line += 1;
@@ -1677,21 +1679,23 @@ pub const AgentState = struct {
                     if (!still_in_block) {
                         self.history.cursor_line = line;
                         // Skip spacers
-                        if (next_msg_idx == null and line < max_line) {
+                        while (self.history.cursor_line < max_line and self.getMessageIdxAtLine(self.history.cursor_line) == null) {
                             self.history.cursor_line += 1;
                         }
                         self.ensureHistoryCursorVisible();
                         return;
                     }
                 }
-                // Reached end of content
                 self.history.cursor_line = max_line;
                 self.ensureHistoryCursorVisible();
                 return;
             }
         }
-        // Default: move down one line
+        // Default: move down one line, skip spacers
         self.history.cursorDown(max_line);
+        while (self.history.cursor_line < max_line and self.getMessageIdxAtLine(self.history.cursor_line) == null) {
+            self.history.cursor_line += 1;
+        }
         self.ensureHistoryCursorVisible();
     }
 
