@@ -1393,7 +1393,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
         // Check if this is the cursor line in history mode
         // For user messages, highlight the entire message as a single unit
-        const is_cursor_line = in_history_mode and (line_idx == cursor_line or agent_state.isLineInCursorUserMessage(line_idx));
+        const is_cursor_line = in_history_mode and (line_idx == cursor_line or agent_state.isLineInCursorBlock(line_idx));
         // Check if this line is in visual selection
         const is_in_visual = agent_state.isLineInVisualSelection(line_idx);
 

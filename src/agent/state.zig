@@ -1612,28 +1612,35 @@ pub const AgentState = struct {
     pub fn historyCursorUp(self: *AgentState) void {
         if (self.history.cursor_line == 0) return;
 
-        // Check if current line is part of a user message
-        if (self.getMessageIdxAtLine(self.history.cursor_line)) |msg_idx| {
-            if (msg_idx < self.messages.items.len and self.messages.items[msg_idx].role == .user) {
-                // Find the start of this user message
-                const msg_start = self.findMessageStartLine(msg_idx);
-                if (self.history.cursor_line > msg_start) {
-                    // We're inside a user message, jump to its start
-                    self.history.cursor_line = msg_start;
+        // Check if current line is part of a block (user message or subagent)
+        if (self.getLineRecordType(self.history.cursor_line)) |line_type| {
+            const is_user_msg = self.isUserMessageLine(line_type);
+            const is_subagent = isSubagentLine(line_type);
+
+            if (is_user_msg or is_subagent) {
+                const msg_idx = self.getMessageIdxAtLine(self.history.cursor_line).?;
+                const block_start = self.findBlockStartLine(msg_idx, is_subagent);
+
+                if (self.history.cursor_line > block_start) {
+                    // Inside a block, jump to its start
+                    self.history.cursor_line = block_start;
                     self.ensureHistoryCursorVisible();
                     return;
                 }
-                // We're at the start, jump to previous message
-                if (msg_start > 0) {
-                    self.history.cursor_line = msg_start - 1;
-                    // If landed on spacer, go up one more
+                // At the start, jump to previous content
+                if (block_start > 0) {
+                    self.history.cursor_line = block_start - 1;
+                    // Skip spacers
                     if (self.getMessageIdxAtLine(self.history.cursor_line) == null and self.history.cursor_line > 0) {
                         self.history.cursor_line -= 1;
                     }
-                    // If landed inside another user message, jump to its start
-                    if (self.getMessageIdxAtLine(self.history.cursor_line)) |prev_idx| {
-                        if (prev_idx < self.messages.items.len and self.messages.items[prev_idx].role == .user) {
-                            self.history.cursor_line = self.findMessageStartLine(prev_idx);
+                    // If landed inside another block, jump to its start
+                    if (self.getLineRecordType(self.history.cursor_line)) |prev_type| {
+                        const prev_is_user = self.isUserMessageLine(prev_type);
+                        const prev_is_subagent = isSubagentLine(prev_type);
+                        if (prev_is_user or prev_is_subagent) {
+                            const prev_idx = self.getMessageIdxAtLine(self.history.cursor_line).?;
+                            self.history.cursor_line = self.findBlockStartLine(prev_idx, prev_is_subagent);
                         }
                     }
                     self.ensureHistoryCursorVisible();
@@ -1651,18 +1658,25 @@ pub const AgentState = struct {
         const max_line = self.getHistoryMaxLine();
         if (self.history.cursor_line >= max_line) return;
 
-        // Check if current line is part of a user message
-        if (self.getMessageIdxAtLine(self.history.cursor_line)) |msg_idx| {
-            if (msg_idx < self.messages.items.len and self.messages.items[msg_idx].role == .user) {
-                // Find the end of this user message and jump past it
+        // Check if current line is part of a block (user message or subagent)
+        if (self.getLineRecordType(self.history.cursor_line)) |line_type| {
+            const is_user_msg = self.isUserMessageLine(line_type);
+            const is_subagent = isSubagentLine(line_type);
+
+            if (is_user_msg or is_subagent) {
+                const msg_idx = self.getMessageIdxAtLine(self.history.cursor_line).?;
+                // Find the end of this block and jump past it
                 var line = self.history.cursor_line;
                 while (line < max_line) {
                     line += 1;
                     const next_msg_idx = self.getMessageIdxAtLine(line);
-                    if (next_msg_idx == null or next_msg_idx.? != msg_idx) {
-                        // Found end of user message
+                    const still_in_block = if (next_msg_idx) |idx|
+                        idx == msg_idx and self.isMatchingBlockLine(line, is_subagent)
+                    else
+                        false;
+                    if (!still_in_block) {
                         self.history.cursor_line = line;
-                        // If landed on spacer, go down one more
+                        // Skip spacers
                         if (next_msg_idx == null and line < max_line) {
                             self.history.cursor_line += 1;
                         }
@@ -1814,6 +1828,43 @@ pub const AgentState = struct {
         return 0;
     }
 
+    /// Find the first line of a block (user message or subagent) given its msg_idx.
+    /// For subagent blocks, only matches subagent line types with the given msg_idx.
+    /// For user messages, delegates to findMessageStartLine.
+    fn findBlockStartLine(self: *const AgentState, target_msg_idx: usize, is_subagent_block: bool) usize {
+        if (!is_subagent_block) return self.findMessageStartLine(target_msg_idx);
+        const total_lines = self.line_map.getTotalLines();
+        for (0..total_lines) |line| {
+            const record = self.line_map.getLineRecord(line) orelse continue;
+            if (isSubagentLine(record.line_type)) {
+                const line_msg_idx = self.getMessageIdxAtLine(line) orelse continue;
+                if (line_msg_idx == target_msg_idx) return line;
+            }
+        }
+        return 0;
+    }
+
+    /// Get the ChatLineType for a given line.
+    fn getLineRecordType(self: *const AgentState, line: usize) ?chat_line_map.ChatLineType {
+        const record = self.line_map.getLineRecord(line) orelse return null;
+        return record.line_type;
+    }
+
+    /// Check if a line type represents a user message content line.
+    fn isUserMessageLine(self: *const AgentState, line_type: chat_line_map.ChatLineType) bool {
+        return switch (line_type) {
+            .message_content => |mc| mc.msg_idx < self.messages.items.len and self.messages.items[mc.msg_idx].role == .user,
+            else => false,
+        };
+    }
+
+    /// Check if a line at the given index matches the expected block type.
+    fn isMatchingBlockLine(self: *const AgentState, line: usize, expect_subagent: bool) bool {
+        const line_type = self.getLineRecordType(line) orelse return false;
+        if (expect_subagent) return isSubagentLine(line_type);
+        return self.isUserMessageLine(line_type);
+    }
+
     // =========================================================================
     // Visual Selection Mode (within History Mode)
     // =========================================================================
@@ -1845,21 +1896,19 @@ pub const AgentState = struct {
         return self.history.isLineInVisualSelection(line);
     }
 
-    /// Check if a line should be highlighted as part of the same user message unit.
-    /// When the cursor is on any line of a user message, all lines belonging to
-    /// that same message should be highlighted together as a single unit.
-    /// Returns true if `line` belongs to the same user message as the cursor line.
-    pub fn isLineInCursorUserMessage(self: *const AgentState, line: usize) bool {
+    /// Check if a line should be highlighted as part of the same block unit.
+    /// When the cursor is on any line of a user message or subagent block,
+    /// all lines belonging to that same block should be highlighted together.
+    /// Returns true if `line` belongs to the same block as the cursor line.
+    pub fn isLineInCursorBlock(self: *const AgentState, line: usize) bool {
         // Only applies when in history mode and not in visual mode
         if (!self.isInHistoryMode() or self.isInHistoryVisualMode()) return false;
 
         // Get the cursor line's record
         const cursor_record = self.line_map.getLineRecord(self.history.cursor_line) orelse return false;
 
-        // Only applies if cursor is on a user message content line
         const cursor_msg_idx = switch (cursor_record.line_type) {
             .message_content => |mc| blk: {
-                // Check if this message is a user message
                 if (mc.msg_idx < self.messages.items.len) {
                     if (self.messages.items[mc.msg_idx].role == .user) {
                         break :blk mc.msg_idx;
@@ -1867,15 +1916,49 @@ pub const AgentState = struct {
                 }
                 return false;
             },
+            .subagent_border => |s| s.msg_idx,
+            .subagent_header => |s| s.msg_idx,
+            .subagent_description => |s| s.msg_idx,
+            .subagent_last_tool => |s| s.msg_idx,
             else => return false,
         };
 
         // Get the target line's record
         const target_record = self.line_map.getLineRecord(line) orelse return false;
 
-        // Check if target line belongs to the same user message
+        // Check if target line belongs to the same block
         return switch (target_record.line_type) {
-            .message_content => |mc| mc.msg_idx == cursor_msg_idx,
+            .message_content => |mc| blk: {
+                // Only match user messages (not subagent blocks matching message content)
+                if (!isSubagentLine(cursor_record.line_type)) {
+                    break :blk mc.msg_idx == cursor_msg_idx;
+                }
+                break :blk false;
+            },
+            .subagent_border => |s| blk: {
+                if (isSubagentLine(cursor_record.line_type)) {
+                    break :blk s.msg_idx == cursor_msg_idx;
+                }
+                break :blk false;
+            },
+            .subagent_header => |s| blk: {
+                if (isSubagentLine(cursor_record.line_type)) {
+                    break :blk s.msg_idx == cursor_msg_idx;
+                }
+                break :blk false;
+            },
+            .subagent_description => |s| blk: {
+                if (isSubagentLine(cursor_record.line_type)) {
+                    break :blk s.msg_idx == cursor_msg_idx;
+                }
+                break :blk false;
+            },
+            .subagent_last_tool => |s| blk: {
+                if (isSubagentLine(cursor_record.line_type)) {
+                    break :blk s.msg_idx == cursor_msg_idx;
+                }
+                break :blk false;
+            },
             else => false,
         };
     }
@@ -2496,6 +2579,13 @@ pub const AgentState = struct {
         return total;
     }
 };
+
+fn isSubagentLine(line_type: chat_line_map.ChatLineType) bool {
+    return switch (line_type) {
+        .subagent_border, .subagent_header, .subagent_description, .subagent_last_tool => true,
+        else => false,
+    };
+}
 
 // =============================================================================
 // Message
