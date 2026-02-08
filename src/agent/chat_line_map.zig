@@ -1066,15 +1066,30 @@ pub const ChatLineMap = struct {
         global_line.* += 1;
     }
 
-    /// Refresh only the dynamic text of active subagent blocks in-place.
+    /// Refresh only the dynamic text of earlier subagent blocks in-place.
     /// Avoids a full rebuild — just scans records and updates the 3 text lines
     /// (header, description, last_tool) for each subagent block.
-    pub fn refreshSubagentBlocks(self: *ChatLineMap, messages: []const Message) !void {
+    /// Skips the last message (skip_msg_idx) since updateLastMessage already rebuilt it.
+    pub fn refreshSubagentBlocks(self: *ChatLineMap, messages: []const Message, skip_msg_idx: usize) !void {
         for (self.records.items) |*rec| {
+            const msg_idx = switch (rec.line_type) {
+                .subagent_header => |hdr| hdr.msg_idx,
+                .subagent_description => |d| d.msg_idx,
+                .subagent_last_tool => |t| t.msg_idx,
+                else => continue,
+            };
+
+            // Skip out-of-bounds indices (stale records from a previous build)
+            if (msg_idx >= messages.len) continue;
+
+            // Skip the last message — updateLastMessage already rebuilt it
+            if (msg_idx == skip_msg_idx) continue;
+
+            const msg = &messages[msg_idx];
+            const info = msg.subagent_info orelse continue;
+
             switch (rec.line_type) {
-                .subagent_header => |hdr| {
-                    const msg = &messages[hdr.msg_idx];
-                    const info = msg.subagent_info orelse continue;
+                .subagent_header => {
                     const agent_type_str = info.agent_type orelse "Task";
                     const status_icon: []const u8 = switch (msg.tool_status) {
                         .pending => "○",
@@ -1089,9 +1104,7 @@ pub const ChatLineMap = struct {
                     self.replaceOwnedString(rec.text, new_text);
                     rec.text = new_text;
                 },
-                .subagent_description => |desc_rec| {
-                    const msg = &messages[desc_rec.msg_idx];
-                    const info = msg.subagent_info orelse continue;
+                .subagent_description => {
                     const desc = info.description orelse "";
                     const total_tokens = info.input_tokens + info.output_tokens + info.reasoning_tokens;
                     var token_buf: [32]u8 = undefined;
@@ -1110,9 +1123,7 @@ pub const ChatLineMap = struct {
                     self.replaceOwnedString(rec.text, new_text);
                     rec.text = new_text;
                 },
-                .subagent_last_tool => |tool_rec| {
-                    const msg = &messages[tool_rec.msg_idx];
-                    const info = msg.subagent_info orelse continue;
+                .subagent_last_tool => {
                     const new_text = if (info.summary.len > 0) blk: {
                         const last_tool = info.summary[info.summary.len - 1];
                         const tool_icon: []const u8 = switch (last_tool.status) {
@@ -1123,7 +1134,7 @@ pub const ChatLineMap = struct {
                         };
                         break :blk try std.fmt.allocPrint(self.allocator, "└ {s} {s}", .{ tool_icon, last_tool.tool_name });
                     } else blk: {
-                        const generating_text = subagent_generating_messages[(self.build_count +% tool_rec.msg_idx) % subagent_generating_messages.len];
+                        const generating_text = subagent_generating_messages[(self.build_count +% msg_idx) % subagent_generating_messages.len];
                         break :blk try std.fmt.allocPrint(self.allocator, "└ {s}", .{generating_text});
                     };
                     self.replaceOwnedString(rec.text, new_text);
@@ -1135,16 +1146,35 @@ pub const ChatLineMap = struct {
     }
 
     /// Replace an owned string in the strings list with a new one, freeing the old.
+    /// Only searches within the range [0, last_msg_strings_start) to avoid touching
+    /// strings that belong to the last message (managed by updateLastMessage).
     fn replaceOwnedString(self: *ChatLineMap, old: []const u8, new: []const u8) void {
-        for (self.strings.items) |*s| {
+        const search_limit = @min(self.last_msg_strings_start, self.strings.items.len);
+        for (self.strings.items[0..search_limit]) |*s| {
             if (s.*.ptr == old.ptr and s.*.len == old.len) {
                 self.allocator.free(s.*);
                 s.* = new;
                 return;
             }
         }
-        // Old string not found in list (shouldn't happen) — just append new
-        self.strings.append(self.allocator, new) catch {};
+        // Fallback: search the full list (handles edge cases like full rebuilds)
+        for (self.strings.items[search_limit..]) |*s| {
+            if (s.*.ptr == old.ptr and s.*.len == old.len) {
+                self.allocator.free(s.*);
+                s.* = new;
+                return;
+            }
+        }
+        // Old string truly not found — track the new one to prevent leak.
+        // Insert before last_msg_strings_start to keep it in the "earlier" region.
+        if (search_limit < self.strings.items.len) {
+            self.strings.insert(self.allocator, search_limit, new) catch {
+                self.strings.append(self.allocator, new) catch {};
+            };
+            self.last_msg_strings_start += 1;
+        } else {
+            self.strings.append(self.allocator, new) catch {};
+        }
     }
 
     fn addMessageContent(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message, wrap_width: usize, highlighter: ?*SyntaxHighlighter) !void {

@@ -2108,8 +2108,9 @@ pub const AgentState = struct {
                     // Same message count but dirty - last message content changed (streaming)
                     try self.line_map.updateLastMessage(self.messages.items, wrap_width, self.diff_view_mode, highlighter, &self.expanded_user_messages);
                     // Also refresh any active subagent blocks (they are earlier messages
-                    // that change independently of the last message)
-                    try self.line_map.refreshSubagentBlocks(self.messages.items);
+                    // that change independently of the last message).
+                    // Skip the last message since updateLastMessage already rebuilt it.
+                    try self.line_map.refreshSubagentBlocks(self.messages.items, message_count - 1);
                 }
                 // If message_count < prev_message_count, messages were cleared - rebuild
                 else if (message_count < prev_message_count) {
