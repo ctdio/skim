@@ -1,5 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const clipboard = @import("../clipboard.zig");
 const Allocator = std.mem.Allocator;
 
 /// Centralized vim-style text editor with modal interface.
@@ -804,7 +805,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                         @memcpy(state.yank_buffer[0..yank_size], state.text_buffer[start..end]);
                         state.yank_len = yank_size;
 
-                        copyToSystemClipboard(state.text_buffer[start..end], allocator) catch |err| {
+                        clipboard.copyToClipboard(allocator, state.text_buffer[start..end]) catch |err| {
                             std.log.err("Failed to copy to system clipboard: {any}", .{err});
                         };
                     }
@@ -1198,7 +1199,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                         @memcpy(state.yank_buffer[0..yank_size], state.text_buffer[range_start..range_end]);
                         state.yank_len = yank_size;
 
-                        copyToSystemClipboard(state.text_buffer[range_start..range_end], allocator) catch |err| {
+                        clipboard.copyToClipboard(allocator, state.text_buffer[range_start..range_end]) catch |err| {
                             std.log.err("Failed to copy to system clipboard: {any}", .{err});
                         };
                     }
@@ -1209,7 +1210,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                         @memcpy(state.yank_buffer[0..yank_size], state.text_buffer[range_start..range_end]);
                         state.yank_len = yank_size;
 
-                        copyToSystemClipboard(state.text_buffer[range_start..range_end], allocator) catch |err| {
+                        clipboard.copyToClipboard(allocator, state.text_buffer[range_start..range_end]) catch |err| {
                             std.log.err("Failed to copy to system clipboard: {any}", .{err});
                         };
                     }
@@ -1228,7 +1229,7 @@ pub fn VimEditor(comptime buffer_size: usize) type {
                         @memcpy(state.yank_buffer[0..yank_size], state.text_buffer[range_start..range_end]);
                         state.yank_len = yank_size;
 
-                        copyToSystemClipboard(state.text_buffer[range_start..range_end], allocator) catch |err| {
+                        clipboard.copyToClipboard(allocator, state.text_buffer[range_start..range_end]) catch |err| {
                             std.log.err("Failed to copy to system clipboard: {any}", .{err});
                         };
                     }
@@ -1245,42 +1246,8 @@ pub fn VimEditor(comptime buffer_size: usize) type {
             }
         }
 
-        fn copyToSystemClipboard(text: []const u8, allocator: Allocator) !void {
-            const argv = [_][]const u8{"pbcopy"};
-            var child = std.process.Child.init(&argv, allocator);
-            child.stdin_behavior = .Pipe;
-            child.stdout_behavior = .Ignore;
-            child.stderr_behavior = .Ignore;
-
-            try child.spawn();
-
-            if (child.stdin) |stdin| {
-                try stdin.writeAll(text);
-                stdin.close();
-                child.stdin = null;
-            }
-
-            _ = try child.wait();
-        }
-
-        fn readFromSystemClipboard(allocator: Allocator) ![]const u8 {
-            const argv = [_][]const u8{"pbpaste"};
-            var child = std.process.Child.init(&argv, allocator);
-            child.stdout_behavior = .Pipe;
-            child.stderr_behavior = .Ignore;
-
-            try child.spawn();
-
-            const stdout = child.stdout.?;
-            const output = try stdout.readToEndAlloc(allocator, 1024 * 1024);
-
-            _ = try child.wait();
-
-            return output;
-        }
-
         fn pasteAfterCursor(state: *State, allocator: Allocator) !void {
-            const clipboard_text = readFromSystemClipboard(allocator) catch null;
+            const clipboard_text = clipboard.readFromClipboard(allocator);
             defer if (clipboard_text) |text| allocator.free(text);
 
             // Check if there's content to paste before modifying state

@@ -523,6 +523,8 @@ pub const App = struct {
         var tty = try vaxis.Tty.init(&tty_static_buffer);
         errdefer tty.deinit();
 
+        clipboard.setTtyFd(tty.fd);
+
         var vx = try Vaxis.init(allocator, .{
             .kitty_keyboard_flags = .{
                 .disambiguate = true,
