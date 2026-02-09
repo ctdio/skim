@@ -2130,10 +2130,16 @@ pub const App = struct {
                 },
                 .agent => {
                     // In agent mode, respect vim mode state:
+                    // - History mode: single Ctrl+C exits history mode
                     // - Insert mode: first Ctrl+C exits to normal vim mode
                     // - Normal vim mode: double Ctrl+C exits the app
                     if (self.getActiveAgentState()) |agent_state| {
-                        if (agent_state.input.vim.vim_mode == .insert) {
+                        if (agent_state.isInHistoryMode()) {
+                            agent_state.exitHistoryMode();
+                            agent_state.input.vim.vim_mode = .normal;
+                            self.needs_render = true;
+                            return;
+                        } else if (agent_state.input.vim.vim_mode == .insert) {
                             // First Ctrl+C in insert mode - exit to normal vim mode
                             // (handled by vim_editor, will be processed below)
                             // Fall through to agent_mode.handleKey
