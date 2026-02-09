@@ -570,7 +570,7 @@ pub const Client = struct {
     pub const SessionMessagePart = struct {
         type: []const u8,
         text: ?[]const u8 = null,
-        toolName: ?[]const u8 = null,
+        tool: ?[]const u8 = null,
         state: ?ToolState = null,
 
         pub const ToolState = struct {
@@ -611,11 +611,11 @@ pub const Client = struct {
         }
     };
 
-    /// GET /session/{id}/messages - Fetch messages for a session
+    /// GET /session/{id}/message - Fetch messages for a session
     /// Uses a separate HTTP client to avoid thread safety issues with SSE connection.
     /// Returns owned array of ModalMessages (caller must free each and the slice).
     pub fn fetchSessionMessages(self: *Client, session_id: []const u8) ![]ModalMessage {
-        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session/{s}/messages", .{ self.base_url, session_id });
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session/{s}/message", .{ self.base_url, session_id });
         defer self.allocator.free(uri_str);
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
@@ -684,10 +684,10 @@ fn convertMessages(allocator: Allocator, messages: []const Client.SessionMessage
         const parts = msg.parts orelse continue;
 
         for (parts) |part| {
-            if (std.mem.eql(u8, part.type, "tool-invocation") or std.mem.eql(u8, part.type, "tool-result")) {
+            if (std.mem.eql(u8, part.type, "tool")) {
                 try result.append(allocator, .{
                     .role = .tool,
-                    .tool_name = if (part.toolName) |n| try allocator.dupe(u8, n) else null,
+                    .tool_name = if (part.tool) |n| try allocator.dupe(u8, n) else null,
                     .tool_title = if (part.state) |s| (if (s.title) |t| try allocator.dupe(u8, t) else null) else null,
                 });
             } else if (std.mem.eql(u8, part.type, "text")) {
@@ -793,7 +793,7 @@ test "parseSessionMessages with structured response" {
         \\{"messages":[
         \\  {"id":"msg_1","role":"user","parts":[{"type":"text","text":"Explore this codebase"}]},
         \\  {"id":"msg_2","role":"assistant","parts":[
-        \\    {"type":"tool-invocation","toolName":"Read","state":{"title":"Read(build.zig)","status":"completed"}},
+        \\    {"type":"tool","tool":"Read","state":{"title":"Read(build.zig)","status":"completed"}},
         \\    {"type":"text","text":"This is a Zig project."}
         \\  ]}
         \\]}

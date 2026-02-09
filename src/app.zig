@@ -133,6 +133,15 @@ pub const SubagentFetchContext = struct {
     }
 };
 
+/// Thread-safe pending result from subagent fetch worker.
+/// Worker writes under mutex, main loop polls via atomic flag.
+pub const PendingSubagentFetch = struct {
+    mutex: std.Thread.Mutex = .{},
+    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    messages: ?[]opencode.Client.ModalMessage = null,
+    error_message: ?[]const u8 = null, // String literal, not owned
+};
+
 /// Case-insensitive substring search
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
@@ -273,6 +282,7 @@ pub const App = struct {
     opencode_connect_thread: ?std.Thread, // Background thread for Opencode connection
     opencode_connect_ctx: ?*OpencodeConnectContext, // Context for Opencode connection thread
     connecting_opencode_tab_id: ?u32, // Tab ID receiving Opencode connection (null when not connecting)
+    pending_subagent_fetch: PendingSubagentFetch, // Thread-safe result from subagent fetch worker
     in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
     agent_only: bool, // Start in agent-only mode (no diff view)
     tab_manager: ?agent.TabManager, // Multi-tab agent manager
@@ -694,6 +704,7 @@ pub const App = struct {
             .opencode_connect_thread = null,
             .opencode_connect_ctx = null,
             .connecting_opencode_tab_id = null,
+            .pending_subagent_fetch = .{},
             .in_bracketed_paste = false,
             .agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false,
             .tab_manager = null, // Lazy initialization on first agent panel open
@@ -883,6 +894,7 @@ pub const App = struct {
             .opencode_connect_thread = null,
             .opencode_connect_ctx = null,
             .connecting_opencode_tab_id = null,
+            .pending_subagent_fetch = .{},
             .in_bracketed_paste = false,
             .agent_only = false,
             .tab_manager = null,
@@ -1024,6 +1036,7 @@ pub const App = struct {
             .opencode_connect_thread = null,
             .opencode_connect_ctx = null,
             .connecting_opencode_tab_id = null,
+            .pending_subagent_fetch = .{},
             .in_bracketed_paste = false,
             .agent_only = false,
             .tab_manager = null,
@@ -1745,6 +1758,9 @@ pub const App = struct {
                     }
                 }
             }
+
+            // Poll subagent fetch result (worker thread -> main thread)
+            self.pollSubagentFetch();
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
@@ -3559,16 +3575,17 @@ pub const App = struct {
         };
 
         // Create context for the fetch thread
-        const ctx = self.allocator.create(SubagentFetchContext) catch return;
+        // Use c_allocator since the worker thread frees with c_allocator
+        const ctx = std.heap.c_allocator.create(SubagentFetchContext) catch return;
         ctx.* = .{
             .app = self,
-            .base_url = self.allocator.dupe(u8, base_url) catch {
-                self.allocator.destroy(ctx);
+            .base_url = std.heap.c_allocator.dupe(u8, base_url) catch {
+                std.heap.c_allocator.destroy(ctx);
                 return;
             },
-            .session_id = self.allocator.dupe(u8, session_id) catch {
-                self.allocator.free(ctx.base_url);
-                self.allocator.destroy(ctx);
+            .session_id = std.heap.c_allocator.dupe(u8, session_id) catch {
+                std.heap.c_allocator.free(ctx.base_url);
+                std.heap.c_allocator.destroy(ctx);
                 return;
             },
         };
@@ -3579,8 +3596,8 @@ pub const App = struct {
                 modal.loading = false;
                 modal.error_message = self.allocator.dupe(u8, "Failed to start fetch thread") catch null;
             }
-            ctx.deinit(self.allocator);
-            self.allocator.destroy(ctx);
+            ctx.deinit(std.heap.c_allocator);
+            std.heap.c_allocator.destroy(ctx);
             return;
         };
         thread.detach();
@@ -3588,13 +3605,19 @@ pub const App = struct {
         self.needs_render = true;
     }
 
-    /// Worker thread that fetches subagent session messages
+    /// Worker thread that fetches subagent session messages.
+    /// Stores result in pending_subagent_fetch for main-thread processing (avoids data race).
     fn subagentFetchWorker(ctx: *SubagentFetchContext) void {
         const app = ctx.app;
+        const pending = &app.pending_subagent_fetch;
 
         // Create a temporary client for the fetch
         var client = opencode.Client.init(std.heap.c_allocator, ctx.base_url) catch {
-            completeSubagentFetch(app, null, "Failed to connect to server");
+            pending.mutex.lock();
+            pending.error_message = "Failed to connect to server";
+            pending.mutex.unlock();
+            pending.ready.store(true, .release);
+            app.needs_render = true;
             ctx.deinit(std.heap.c_allocator);
             std.heap.c_allocator.destroy(ctx);
             return;
@@ -3602,25 +3625,52 @@ pub const App = struct {
         defer client.deinit();
 
         const modal_messages = client.fetchSessionMessages(ctx.session_id) catch |err| {
-            const err_msg = switch (err) {
+            const err_msg: []const u8 = switch (err) {
                 error.SessionNotFound => "Session not found",
                 error.ConnectionFailed => "Connection failed",
                 error.ServerError => "Server error",
+                error.InvalidResponse => "Invalid response from server",
                 else => "Failed to fetch messages",
             };
-            completeSubagentFetch(app, null, err_msg);
+            std.log.err("Subagent fetch failed: {s} ({})", .{ err_msg, err });
+            pending.mutex.lock();
+            pending.error_message = err_msg;
+            pending.mutex.unlock();
+            pending.ready.store(true, .release);
+            app.needs_render = true;
             ctx.deinit(std.heap.c_allocator);
             std.heap.c_allocator.destroy(ctx);
             return;
         };
 
-        completeSubagentFetch(app, modal_messages, null);
+        pending.mutex.lock();
+        pending.messages = modal_messages;
+        pending.mutex.unlock();
+        pending.ready.store(true, .release);
+        app.needs_render = true;
         ctx.deinit(std.heap.c_allocator);
         std.heap.c_allocator.destroy(ctx);
     }
 
-    /// Called from fetch worker to populate the modal with results
-    fn completeSubagentFetch(app: *App, modal_messages: ?[]opencode.Client.ModalMessage, err_msg: ?[]const u8) void {
+    /// Poll for completed subagent fetch and process on main thread.
+    /// This avoids the data race of modifying modal.messages from the worker thread.
+    fn pollSubagentFetch(self: *App) void {
+        if (!self.pending_subagent_fetch.ready.load(.acquire)) return;
+
+        // Take pending data under mutex
+        self.pending_subagent_fetch.mutex.lock();
+        const messages = self.pending_subagent_fetch.messages;
+        const err_msg = self.pending_subagent_fetch.error_message;
+        self.pending_subagent_fetch.messages = null;
+        self.pending_subagent_fetch.error_message = null;
+        self.pending_subagent_fetch.mutex.unlock();
+        self.pending_subagent_fetch.ready.store(false, .release);
+
+        processSubagentFetchResult(self, messages, err_msg);
+    }
+
+    /// Process fetched subagent messages on the main thread (safe to modify modal state).
+    fn processSubagentFetchResult(app: *App, modal_messages: ?[]opencode.Client.ModalMessage, err_msg: ?[]const u8) void {
         const agent_state = app.getActiveAgentState() orelse {
             // Modal was closed while fetch was in progress — free the messages
             if (modal_messages) |msgs| {
@@ -3643,29 +3693,45 @@ pub const App = struct {
         if (err_msg) |msg| {
             modal.error_message = agent_state.allocator.dupe(u8, msg) catch null;
         } else if (modal_messages) |msgs| {
-            // Convert ModalMessages to SubagentModalMessages and transfer ownership
+            // Convert ModalMessages to Messages for ChatLineMap rendering
             for (msgs) |*m| {
-                const role: agent_state_mod.SubagentModalMessage.Role = switch (m.role) {
-                    .user => .user,
-                    .assistant => .assistant,
-                    .tool => .tool,
-                };
-                // Dupe strings from c_allocator to agent_state.allocator
-                const content = if (m.content) |c| (agent_state.allocator.dupe(u8, c) catch null) else null;
-                const tool_name = if (m.tool_name) |n| (agent_state.allocator.dupe(u8, n) catch null) else null;
-                const tool_title = if (m.tool_title) |t| (agent_state.allocator.dupe(u8, t) catch null) else null;
-
-                modal.messages.append(agent_state.allocator, .{
-                    .role = role,
-                    .content = content,
-                    .tool_name = tool_name,
-                    .tool_title = tool_title,
-                }) catch {};
+                const alloc = agent_state.allocator;
+                switch (m.role) {
+                    .user => {
+                        const content = if (m.content) |c| (alloc.dupe(u8, c) catch "") else "";
+                        modal.messages.append(alloc, .{
+                            .role = .user,
+                            .content = content,
+                            .timestamp = 0,
+                        }) catch {};
+                    },
+                    .assistant => {
+                        const content = if (m.content) |c| (alloc.dupe(u8, c) catch "") else "";
+                        modal.messages.append(alloc, .{
+                            .role = .agent,
+                            .content = content,
+                            .timestamp = 0,
+                        }) catch {};
+                    },
+                    .tool => {
+                        const display = m.tool_title orelse m.tool_name orelse "Tool";
+                        const content = alloc.dupe(u8, display) catch "";
+                        const duped_name = if (m.tool_name) |n| (alloc.dupe(u8, n) catch null) else null;
+                        modal.messages.append(alloc, .{
+                            .role = .tool,
+                            .content = content,
+                            .tool_name = duped_name,
+                            .tool_status = .completed,
+                            .timestamp = 0,
+                        }) catch {};
+                    },
+                }
 
                 // Free the originals (owned by c_allocator)
                 m.deinit(std.heap.c_allocator);
             }
             std.heap.c_allocator.free(msgs);
+            modal.line_map_dirty = true;
         }
 
         app.needs_render = true;

@@ -37,7 +37,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
         if (key.codepoint == 'j' or key.codepoint == vaxis.Key.down) {
             if (agent_state.getSubagentModal()) |modal| {
-                modal.scrollDown(modal.messages.items.len);
+                modal.scrollDown(modal.line_map.getTotalLines());
             }
             app.needs_render = true;
             return;
@@ -45,6 +45,28 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         if (key.codepoint == 'k' or key.codepoint == vaxis.Key.up) {
             if (agent_state.getSubagentModal()) |modal| {
                 modal.scrollUp();
+            }
+            app.needs_render = true;
+            return;
+        }
+        // Ctrl+D - page down
+        if (key.mods.ctrl and key.codepoint == 'd') {
+            if (agent_state.getSubagentModal()) |modal| {
+                const half_page = @max(1, agent_state.last_messages_viewport_height / 2);
+                for (0..half_page) |_| {
+                    modal.scrollDown(modal.line_map.getTotalLines());
+                }
+            }
+            app.needs_render = true;
+            return;
+        }
+        // Ctrl+U - page up
+        if (key.mods.ctrl and key.codepoint == 'u') {
+            if (agent_state.getSubagentModal()) |modal| {
+                const half_page = @max(1, agent_state.last_messages_viewport_height / 2);
+                for (0..half_page) |_| {
+                    modal.scrollUp();
+                }
             }
             app.needs_render = true;
             return;

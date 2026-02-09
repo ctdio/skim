@@ -2636,30 +2636,14 @@ pub const SubagentInfo = struct {
 // Subagent Drill-In Modal
 // =============================================================================
 
-pub const SubagentModalMessage = struct {
-    role: Role,
-    content: ?[]const u8 = null,
-    tool_name: ?[]const u8 = null,
-    tool_title: ?[]const u8 = null,
-
-    pub const Role = enum {
-        user,
-        assistant,
-        tool,
-    };
-
-    pub fn deinit(self: *SubagentModalMessage, allocator: Allocator) void {
-        if (self.content) |c| allocator.free(c);
-        if (self.tool_name) |n| allocator.free(n);
-        if (self.tool_title) |t| allocator.free(t);
-    }
-};
-
 pub const SubagentModalState = struct {
     allocator: Allocator,
     session_id: []const u8,
     title: []const u8,
-    messages: std.ArrayList(SubagentModalMessage),
+    messages: std.ArrayList(Message),
+    line_map: ChatLineMap,
+    line_map_dirty: bool,
+    last_line_map_width: usize,
     scroll_offset: usize,
     loading: bool,
     error_message: ?[]const u8,
@@ -2670,6 +2654,9 @@ pub const SubagentModalState = struct {
             .session_id = try allocator.dupe(u8, session_id),
             .title = try allocator.dupe(u8, title),
             .messages = .{},
+            .line_map = ChatLineMap.init(allocator),
+            .line_map_dirty = false,
+            .last_line_map_width = 0,
             .scroll_offset = 0,
             .loading = true,
             .error_message = null,
@@ -2683,7 +2670,16 @@ pub const SubagentModalState = struct {
             msg.deinit(self.allocator);
         }
         self.messages.deinit(self.allocator);
+        self.line_map.deinit();
         if (self.error_message) |e| self.allocator.free(e);
+    }
+
+    pub fn ensureLineMap(self: *SubagentModalState, wrap_width: usize) !void {
+        if (self.line_map_dirty or self.last_line_map_width != wrap_width) {
+            try self.line_map.build(self.messages.items, wrap_width, .unified, null, null);
+            self.line_map_dirty = false;
+            self.last_line_map_width = wrap_width;
+        }
     }
 
     pub fn scrollUp(self: *SubagentModalState) void {
@@ -3543,31 +3539,27 @@ test "SubagentModalState deinit frees messages" {
 
     var modal = try SubagentModalState.init(allocator, "session-456", "Build Task");
 
-    // Add some messages
+    // Add some messages (using Message type)
     try modal.messages.append(allocator, .{
         .role = .user,
         .content = try allocator.dupe(u8, "Build the project"),
+        .timestamp = 0,
     });
     try modal.messages.append(allocator, .{
         .role = .tool,
+        .content = try allocator.dupe(u8, "Bash(zig build)"),
         .tool_name = try allocator.dupe(u8, "Bash"),
-        .tool_title = try allocator.dupe(u8, "Bash(zig build)"),
+        .tool_status = .completed,
+        .timestamp = 0,
     });
     try modal.messages.append(allocator, .{
-        .role = .assistant,
+        .role = .agent,
         .content = try allocator.dupe(u8, "Build succeeded"),
+        .timestamp = 0,
     });
 
     modal.deinit();
     // If this test passes with testing allocator, no memory was leaked
-}
-
-test "SubagentModalMessage deinit with null optionals" {
-    const allocator = std.testing.allocator;
-
-    var msg: SubagentModalMessage = .{ .role = .user };
-    msg.deinit(allocator);
-    // No crash with all-null optionals
 }
 
 test "SubagentModalState scroll operations" {
