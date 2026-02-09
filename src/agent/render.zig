@@ -3177,18 +3177,8 @@ pub fn renderSubagentModal(win: vaxis.Window, modal: *state.SubagentModalState, 
                             col = result.col;
                         }
                     } else {
-                        // For agent messages, use markdown rendering when available
-                        const mc = record.line_type.message_content;
-                        if (mc.msg_idx < modal.messages.items.len) {
-                            const msg = &modal.messages.items[mc.msg_idx];
-                            if (msg.role == .agent and record.text.len > 0) {
-                                renderTextWithMarkdown(modal_win, record.text, msg, withModalBg(record.style), false, false, row, content_x + record.indent);
-                            } else {
-                                _ = safePrint(modal_win, record.text, withModalBg(record.style), row, content_x + record.indent);
-                            }
-                        } else {
-                            _ = safePrint(modal_win, record.text, withModalBg(record.style), row, content_x + record.indent);
-                        }
+                        // Style already computed by ChatLineMap (markdown renderer or plain text)
+                        _ = safePrint(modal_win, record.text, withModalBg(record.style), row, content_x + record.indent);
                     }
                 },
                 .tool_header => {
