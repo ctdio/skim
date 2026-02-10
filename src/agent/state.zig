@@ -1815,7 +1815,7 @@ pub const AgentState = struct {
             .subagent_header => |s| s.msg_idx,
             .subagent_description => |s| s.msg_idx,
             .subagent_last_tool => |s| s.msg_idx,
-            .spacer => null,
+            .compaction_divider, .spacer => null,
         };
     }
 
@@ -2739,6 +2739,7 @@ pub const Message = struct {
         diff,
         tool, // Tool call (Bash, Read, etc.)
         plan_snapshot, // Todo list snapshot
+        compacted, // Context compaction divider
 
         pub fn label(self: Role) []const u8 {
             return switch (self) {

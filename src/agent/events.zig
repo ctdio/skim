@@ -33,6 +33,9 @@ pub const AgentEvent = union(enum) {
     plan_update: []const protocol.PlanEntry,
     commands_update: []const protocol.AvailableCommand,
 
+    // Session lifecycle
+    session_compacted: void,
+
     // Questions (OpenCode-only, but still part of unified type)
     question_prompt: void, // Handled separately by caller (needs allocator for conversion)
     question_resolved: void,
@@ -137,6 +140,9 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
         .error_message => |msg| {
             agent_state.addMessage(.system, msg) catch {};
         },
+        .session_compacted => {
+            agent_state.addMessage(.compacted, "") catch {};
+        },
         .question_resolved => {
             agent_state.clearPendingQuestion();
         },
@@ -225,6 +231,8 @@ pub fn opencodeEventToAgentEvent(event: OpencodeEvent) ?AgentEvent {
             .old_text = d.old_text,
             .new_text = d.new_text,
         } },
+        .commands_update => |commands| .{ .commands_update = commands },
+        .session_compacted => .{ .session_compacted = {} },
         .question_prompt => .{ .question_prompt = {} },
         .question_resolved => .{ .question_resolved = {} },
         .err => |e| .{ .error_message = e.message orelse @tagName(e.code) },

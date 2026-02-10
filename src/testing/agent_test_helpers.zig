@@ -1108,3 +1108,64 @@ test "renderPlanEntry renders pending entry" {
     try std.testing.expect(cell4 != null);
     try std.testing.expectEqualStrings("T", cell4.?.char.grapheme);
 }
+
+/// Render a compaction divider: ──── label ────
+/// Mirrors the rendering logic in src/agent/render.zig renderCompactionDivider.
+pub fn renderCompactionDivider(
+    win: vaxis.Window,
+    label: []const u8,
+    row: usize,
+) void {
+    if (row >= win.height or win.width < 10) return;
+
+    const rule_style = vaxis.Style{ .fg = .{ .rgb = .{ 80, 80, 80 } } };
+    const label_style = vaxis.Style{ .fg = .{ .rgb = [3]u8{ 100, 100, 100 } }, .italic = true };
+
+    const label_with_padding = 2 + label.len;
+    const available = if (win.width > label_with_padding) win.width - label_with_padding else 0;
+    const left_rule = available / 2;
+    const right_rule = available - left_rule;
+
+    var col: usize = 0;
+
+    for (0..left_rule) |_| {
+        if (col >= win.width) break;
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = "─", .width = 1 },
+            .style = rule_style,
+        });
+        col += 1;
+    }
+
+    if (col < win.width) {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{},
+        });
+        col += 1;
+    }
+    for (label, 0..) |_, idx| {
+        if (col >= win.width) break;
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = label[idx .. idx + 1], .width = 1 },
+            .style = label_style,
+        });
+        col += 1;
+    }
+    if (col < win.width) {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{},
+        });
+        col += 1;
+    }
+
+    for (0..right_rule) |_| {
+        if (col >= win.width) break;
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = "─", .width = 1 },
+            .style = rule_style,
+        });
+        col += 1;
+    }
+}

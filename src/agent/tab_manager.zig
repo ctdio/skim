@@ -134,6 +134,14 @@ pub const AgentTab = struct {
         return false;
     }
 
+    /// Check if this tab's agent is currently compacting context
+    pub fn isCompacting(self: *const AgentTab) bool {
+        if (self.manager) |m| {
+            return m.isCompacting();
+        }
+        return false;
+    }
+
     /// Check if this tab has a pending permission request
     pub fn hasPendingPermission(self: *const AgentTab) bool {
         if (self.manager) |m| {

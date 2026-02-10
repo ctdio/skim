@@ -177,6 +177,7 @@ pub const EventType = enum {
     session_idle,
     session_status,
     session_error,
+    session_compacted,
 
     // Message events
     message_created,
@@ -201,6 +202,7 @@ pub const EventType = enum {
         if (std.mem.eql(u8, s, "session.idle")) return .session_idle;
         if (std.mem.eql(u8, s, "session.status")) return .session_status;
         if (std.mem.eql(u8, s, "session.error")) return .session_error;
+        if (std.mem.eql(u8, s, "session.compacted")) return .session_compacted;
         if (std.mem.eql(u8, s, "message.created")) return .message_created;
         if (std.mem.eql(u8, s, "message.updated")) return .message_updated;
         if (std.mem.eql(u8, s, "message.deleted")) return .message_deleted;
@@ -255,6 +257,7 @@ test "EventType fromString" {
     try std.testing.expectEqual(EventType.message_part_updated, EventType.fromString("message.part.updated"));
     try std.testing.expectEqual(EventType.session_idle, EventType.fromString("session.idle"));
     try std.testing.expectEqual(EventType.session_error, EventType.fromString("session.error"));
+    try std.testing.expectEqual(EventType.session_compacted, EventType.fromString("session.compacted"));
     try std.testing.expectEqual(EventType.unknown, EventType.fromString("invalid.event"));
 }
 

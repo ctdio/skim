@@ -1343,6 +1343,16 @@ pub const App = struct {
         return false;
     }
 
+    /// Check if the active tab's agent is compacting context
+    pub fn isAgentCompacting(self: *App) bool {
+        if (self.tab_manager) |*tm| {
+            if (tm.activeTab()) |tab| {
+                return tab.isCompacting();
+            }
+        }
+        return false;
+    }
+
     /// Check if the active tab's session is ready (can accept prompts)
     pub fn isSessionReady(self: *App) bool {
         if (self.tab_manager) |*tm| {

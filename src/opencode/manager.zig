@@ -5,6 +5,7 @@ const protocol = @import("protocol.zig");
 const patch = @import("patch.zig");
 const sse = @import("sse.zig");
 const server = @import("server.zig");
+const acp_protocol = @import("../acp/protocol.zig");
 
 // =============================================================================
 // Opencode Manager
@@ -21,6 +22,23 @@ const server = @import("server.zig");
 // =============================================================================
 
 const log = std.log.scoped(.opencode);
+
+fn freeAvailableCommand(allocator: Allocator, cmd: acp_protocol.AvailableCommand) void {
+    allocator.free(cmd.name);
+    allocator.free(cmd.description);
+    if (cmd.input) |input| {
+        allocator.free(input.hint);
+    }
+}
+
+fn freeAvailableCommands(allocator: Allocator, commands: []const acp_protocol.AvailableCommand) void {
+    for (commands) |cmd| {
+        freeAvailableCommand(allocator, cmd);
+    }
+    if (commands.len > 0) {
+        allocator.free(commands);
+    }
+}
 
 /// Manager status enum - tracks connection state
 pub const Status = enum {
@@ -60,6 +78,10 @@ pub const Event = union(enum) {
     question_prompt: QuestionPrompt,
     /// Question resolved (question.resolved)
     question_resolved: void,
+    /// Available slash commands update
+    commands_update: []const acp_protocol.AvailableCommand,
+    /// Session context was compacted
+    session_compacted: void,
     /// Status changed
     status_change: Status,
     /// Error occurred
@@ -218,7 +240,8 @@ pub const Event = union(enum) {
             .tool_diff => |*diff| diff.deinit(allocator),
             .question_prompt => |*prompt| prompt.deinit(allocator),
             .err => |*e| e.deinit(allocator),
-            .message_complete, .status_change, .question_resolved => {},
+            .commands_update => |commands| freeAvailableCommands(allocator, commands),
+            .message_complete, .session_compacted, .status_change, .question_resolved => {},
         }
     }
 };
@@ -433,6 +456,9 @@ pub const OpencodeManager = struct {
     pending_question: bool,
     pending_permission: bool,
 
+    // Compaction tracking
+    is_compacting: bool,
+
     // Deferred completion: set when a parent completion event (session.idle,
     // message.updated, etc.) arrives while subagents are active. Checked after
     // the last child session completes to fire the deferred clearPromptingState().
@@ -493,6 +519,7 @@ pub const OpencodeManager = struct {
             .last_question_call_id = null,
             .pending_question = false,
             .pending_permission = false,
+            .is_compacting = false,
             .deferred_completion = false,
             .child_tool_counts = .{},
             .child_last_tool = .{},
@@ -944,6 +971,10 @@ pub const OpencodeManager = struct {
 
     pub fn isThinking(self: *const OpencodeManager) bool {
         return self.status == .prompting and !self.stream_complete.load(.acquire);
+    }
+
+    pub fn isCompacting(self: *const OpencodeManager) bool {
+        return self.is_compacting and self.isThinking();
     }
 
     pub fn isReadyForPrompt(self: *const OpencodeManager) bool {
@@ -1556,6 +1587,11 @@ pub const OpencodeManager = struct {
             "session.idle",
             "session.status",
             "session.error",
+            "availableCommands",
+            "available_commands",
+            "commands.updated",
+            "session.compacted",
+            "session.commands",
         };
         var dominated = false;
         for (dominated_events) |evt| {
@@ -1614,6 +1650,14 @@ pub const OpencodeManager = struct {
                         self.trackChildToolEvent(props, event_sid);
                         return;
                     }
+                }
+            }
+        }
+
+        if (properties) |props| {
+            if (props == .object) {
+                if (self.parseAvailableCommands(props.object)) |commands| {
+                    self.message_queue.push(.{ .commands_update = commands });
                 }
             }
         }
@@ -1804,6 +1848,9 @@ pub const OpencodeManager = struct {
                                     self.message_queue.push(.{ .message_complete = {} });
                                     self.message_queue.push(.{ .status_change = .session_active });
                                 }
+                            } else if (val == .string and std.mem.eql(u8, val.string, "compacting")) {
+                                log.info("Session updated to compacting", .{});
+                                self.is_compacting = true;
                             }
                         }
                     }
@@ -1821,6 +1868,9 @@ pub const OpencodeManager = struct {
                                     log.info("Session status idle", .{});
                                     self.clearPromptingState();
                                 }
+                            } else if (std.mem.eql(u8, status, "compacting")) {
+                                log.info("Session compacting", .{});
+                                self.is_compacting = true;
                             }
                         }
                     }
@@ -1838,6 +1888,11 @@ pub const OpencodeManager = struct {
                     self.message_queue.push(.{ .message_complete = {} });
                     self.message_queue.push(.{ .status_change = .session_active });
                 }
+            },
+            .session_compacted => {
+                log.info("Session compacted", .{});
+                self.is_compacting = false;
+                self.message_queue.push(.{ .session_compacted = {} });
             },
             .session_error => {
                 const now_ms = std.time.milliTimestamp();
@@ -1863,6 +1918,7 @@ pub const OpencodeManager = struct {
         self.pending_abort = false;
         self.pending_abort_since_ms = 0;
         self.abort_error_grace_until_ms = 0;
+        self.is_compacting = false;
         self.deferred_completion = false;
         self.stream_complete.store(true, .release);
         self.message_queue.push(.{ .message_complete = {} });
@@ -2387,6 +2443,91 @@ pub const OpencodeManager = struct {
                 if (val == .string) return val.string;
             }
         }
+        return null;
+    }
+
+    fn parseAvailableCommands(self: *OpencodeManager, props: std.json.ObjectMap) ?[]const acp_protocol.AvailableCommand {
+        if (parseCommandsFromObject(self, props)) |commands| return commands;
+
+        const nested_obj = extractObjectField(props, &[_][]const u8{ "session", "state", "status", "config" }) orelse return null;
+        return parseCommandsFromObject(self, nested_obj);
+    }
+
+    fn parseCommandsFromObject(self: *OpencodeManager, obj: std.json.ObjectMap) ?[]const acp_protocol.AvailableCommand {
+        const keys = [_][]const u8{ "availableCommands", "available_commands", "commands", "commandList", "command_list" };
+        const val = extractValueField(obj, &keys) orelse return null;
+        return parseCommandsArray(self, val);
+    }
+
+    fn parseCommandsArray(self: *OpencodeManager, val: std.json.Value) ?[]const acp_protocol.AvailableCommand {
+        if (val != .array) return null;
+
+        var commands_list: std.ArrayList(acp_protocol.AvailableCommand) = .{};
+        errdefer {
+            for (commands_list.items) |cmd| {
+                freeAvailableCommand(self.event_allocator, cmd);
+            }
+            commands_list.deinit(self.event_allocator);
+        }
+
+        for (val.array.items) |cmd_val| {
+            const cmd = parseCommandEntry(self, cmd_val) orelse continue;
+            commands_list.append(self.event_allocator, cmd) catch {
+                freeAvailableCommand(self.event_allocator, cmd);
+                continue;
+            };
+        }
+
+        if (commands_list.items.len == 0) return null;
+        return commands_list.toOwnedSlice(self.event_allocator) catch null;
+    }
+
+    fn parseCommandEntry(self: *OpencodeManager, val: std.json.Value) ?acp_protocol.AvailableCommand {
+        switch (val) {
+            .string => |s| {
+                const name = self.event_allocator.dupe(u8, s) catch return null;
+                const desc = self.event_allocator.dupe(u8, s) catch {
+                    self.event_allocator.free(name);
+                    return null;
+                };
+                return .{ .name = name, .description = desc, .input = null };
+            },
+            .object => |obj| {
+                const name_raw = extractStringField(obj, &[_][]const u8{ "name", "command", "id" }) orelse return null;
+                const desc_raw = extractStringField(obj, &[_][]const u8{ "description", "summary", "detail", "title" }) orelse name_raw;
+
+                const name = self.event_allocator.dupe(u8, name_raw) catch return null;
+                const desc = self.event_allocator.dupe(u8, desc_raw) catch {
+                    self.event_allocator.free(name);
+                    return null;
+                };
+
+                const hint = parseCommandInputHint(self, obj);
+                const input: ?acp_protocol.AvailableCommandInput = if (hint) |h| .{ .hint = h } else null;
+
+                return .{ .name = name, .description = desc, .input = input };
+            },
+            else => return null,
+        }
+    }
+
+    fn parseCommandInputHint(self: *OpencodeManager, obj: std.json.ObjectMap) ?[]const u8 {
+        if (extractStringField(obj, &[_][]const u8{ "input_hint", "inputHint", "hint" })) |hint| {
+            return self.event_allocator.dupe(u8, hint) catch null;
+        }
+
+        if (obj.get("input")) |input_val| {
+            switch (input_val) {
+                .string => |s| return self.event_allocator.dupe(u8, s) catch null,
+                .object => |input_obj| {
+                    if (extractStringField(input_obj, &[_][]const u8{ "hint", "description", "prompt" })) |h| {
+                        return self.event_allocator.dupe(u8, h) catch null;
+                    }
+                },
+                else => {},
+            }
+        }
+
         return null;
     }
 
@@ -3569,6 +3710,35 @@ test "opencode event: message.updated finish clears status" {
     defer ev2.deinit(manager.event_allocator);
     switch (ev2) {
         .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "opencode event: session.updated with available commands" {
+    const allocator = std.testing.allocator;
+    var manager = OpencodeManager.init(allocator);
+    defer manager.deinit();
+
+    const data =
+        "{\"payload\":{\"type\":\"session.updated\",\"properties\":{\"availableCommands\":[" ++
+        "{\"name\":\"status\",\"description\":\"Show status\",\"input\":{\"hint\":\"since last week\"}}" ++
+        "]}}}";
+
+    manager.processEventData(data);
+
+    const ev_opt = manager.poll();
+    try std.testing.expect(ev_opt != null);
+    var ev = ev_opt.?;
+    defer ev.deinit(manager.event_allocator);
+
+    switch (ev) {
+        .commands_update => |commands| {
+            try std.testing.expectEqual(@as(usize, 1), commands.len);
+            try std.testing.expectEqualStrings("status", commands[0].name);
+            try std.testing.expectEqualStrings("Show status", commands[0].description);
+            try std.testing.expect(commands[0].input != null);
+            try std.testing.expectEqualStrings("since last week", commands[0].input.?.hint);
+        },
         else => try std.testing.expect(false),
     }
 }

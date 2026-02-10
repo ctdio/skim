@@ -28,6 +28,14 @@ pub const ManagerHandle = union(enum) {
         };
     }
 
+    /// Check if the agent is currently compacting context.
+    pub fn isCompacting(self: ManagerHandle) bool {
+        return switch (self) {
+            .acp => false,
+            .opencode => |m| m.isCompacting(),
+        };
+    }
+
     /// Check if the session is ready to accept prompts.
     pub fn isReady(self: ManagerHandle) bool {
         return switch (self) {

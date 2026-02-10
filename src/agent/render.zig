@@ -958,8 +958,9 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     } else 0;
 
     // Calculate status area height (shown between messages and plan when agent is thinking or session initializing with queued message)
-    // Layout: empty row + "Generating..."/"Waiting..." (with inline hint) + empty row + optional queued message + empty row
+    // Layout: empty row + "Generating..."/"Waiting..."/"Compacting..." (with inline hint) + empty row + optional queued message + empty row
     const is_thinking = app.isAgentThinking();
+    const is_compacting = app.isAgentCompacting();
     const session_initializing = app.isSessionInitializing();
     const show_status_area = is_thinking or (session_initializing and agent_state.hasStagedPrompt());
     // Show interrupt hint inline when agent is thinking and vim is in normal mode
@@ -1031,7 +1032,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
             .width = win.width,
             .height = @intCast(status_height),
         });
-        renderStatusArea(status_win, agent_state, is_thinking, show_interrupt_hint);
+        renderStatusArea(status_win, agent_state, is_thinking, is_compacting, show_interrupt_hint);
     }
 
     // Render plan area (if visible and has entries)
@@ -1782,6 +1783,9 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                 _ = safePrint(win, "  ", withHighlightBg(.{}, is_cursor_line, is_in_visual), row, col_offset);
                 _ = safePrint(win, record.text, withHighlightBg(.{ .fg = Color.dim }, is_cursor_line, is_in_visual), row, col_offset + 2);
             },
+            .compaction_divider => {
+                renderCompactionDivider(win, row, record.text);
+            },
             else => {
                 // Print with UTF-8 validation to prevent grapheme iterator crash
                 _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
@@ -1817,7 +1821,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
 /// Render the status area shown between messages and plan when agent is thinking or waiting
 /// Layout: empty row + status message (with inline hint) + empty row + optional queued message
-fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bool, show_interrupt_hint: bool) void {
+fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bool, is_compacting: bool, show_interrupt_hint: bool) void {
     if (win.height == 0) return;
 
     const blank_cell = vaxis.Cell{
@@ -1838,7 +1842,7 @@ fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bo
         for (agent_state.messages.items) |msg| {
             if (msg.role == .user) user_msg_count += 1;
         }
-        renderThinkingIndicator(win, row, is_thinking, user_msg_count);
+        renderThinkingIndicator(win, row, is_thinking, is_compacting, user_msg_count);
 
         // Add inline interrupt hint after the thinking indicator (when in normal mode)
         if (show_interrupt_hint) {
@@ -1989,6 +1993,66 @@ fn renderStagedMessagePreview(win: vaxis.Window, text: []const u8, start_row: us
     }
 }
 
+/// Render a compaction divider: ──── label ────
+fn renderCompactionDivider(win: vaxis.Window, row: usize, label: []const u8) void {
+    if (row >= win.height or win.width < 10) return;
+
+    const rule_style = vaxis.Style{ .fg = .{ .rgb = .{ 80, 80, 80 } } };
+    const label_style = vaxis.Style{ .fg = Color.dim_gray, .italic = true };
+
+    // Layout: "───── label ─────" centered, with rules filling remaining width
+    const label_with_padding = 2 + label.len; // " label "
+    const available = if (win.width > label_with_padding) win.width - label_with_padding else 0;
+    const left_rule = available / 2;
+    const right_rule = available - left_rule;
+
+    var col: usize = 0;
+
+    // Left rule
+    for (0..left_rule) |_| {
+        if (col >= win.width) break;
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = "─", .width = 1 },
+            .style = rule_style,
+        });
+        col += 1;
+    }
+
+    // Space + label + space
+    if (col < win.width) {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{},
+        });
+        col += 1;
+    }
+    for (label, 0..) |_, idx| {
+        if (col >= win.width) break;
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = label[idx .. idx + 1], .width = 1 },
+            .style = label_style,
+        });
+        col += 1;
+    }
+    if (col < win.width) {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{},
+        });
+        col += 1;
+    }
+
+    // Right rule
+    for (0..right_rule) |_| {
+        if (col >= win.width) break;
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = "─", .width = 1 },
+            .style = rule_style,
+        });
+        col += 1;
+    }
+}
+
 /// Messages to show while agent is thinking (one per turn)
 const thinking_messages = [_][]const u8{
     "Thinking...",
@@ -2014,13 +2078,13 @@ const waiting_messages = [_][]const u8{
 };
 
 /// Render a shimmering status indicator (message selected per turn for thinking, time-based for waiting)
-fn renderThinkingIndicator(win: vaxis.Window, row: usize, is_thinking: bool, turn_seed: usize) void {
+fn renderThinkingIndicator(win: vaxis.Window, row: usize, is_thinking: bool, is_compacting: bool, turn_seed: usize) void {
     if (win.width < 20 or row >= win.height) return;
 
     const now = std.time.milliTimestamp();
 
-    // Select message: per-turn for thinking, time-based cycling for waiting
-    const text = if (is_thinking) blk: {
+    // Select message: compacting overrides thinking, time-based cycling for waiting
+    const text = if (is_compacting) "Compacting..." else if (is_thinking) blk: {
         const idx = turn_seed % thinking_messages.len;
         break :blk thinking_messages[idx];
     } else blk: {

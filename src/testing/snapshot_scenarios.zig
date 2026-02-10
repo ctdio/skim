@@ -594,6 +594,48 @@ test "snapshot: subagent_conversation_mixed" {
 }
 
 // =============================================================================
+// Compaction Divider Snapshot Tests
+// =============================================================================
+
+test "snapshot: compaction_divider" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 1);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    agent_helpers.renderCompactionDivider(win, "context compacted", 0);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "compaction_divider", text);
+}
+
+test "snapshot: compaction_divider_in_conversation" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 7);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    var row: usize = 0;
+
+    agent_helpers.renderAgentMessage(win, "I'll fix that bug now.", row);
+    row += 1;
+    row += 1; // spacer
+
+    agent_helpers.renderCompactionDivider(win, "context compacted", row);
+    row += 1;
+    row += 1; // spacer
+
+    agent_helpers.renderAgentMessage(win, "Continuing after compaction.", row);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "compaction_divider_in_conversation", text);
+}
+
+// =============================================================================
 // Subagent Modal Snapshot Tests
 // =============================================================================
 

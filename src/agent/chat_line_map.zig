@@ -108,6 +108,9 @@ pub const ChatLineType = union(enum) {
         msg_idx: usize,
     },
 
+    /// Context compaction divider (centered horizontal rule with label)
+    compaction_divider,
+
     /// Blank spacer between messages
     spacer,
 };
@@ -305,6 +308,16 @@ pub const ChatLineMap = struct {
                     if (msg.plan_snapshot_entries) |entries| {
                         try self.addPlanSnapshotEntries(&global_line, msg_idx, entries);
                     }
+                },
+                .compacted => {
+                    try self.records.append(self.allocator, .{
+                        .global_line = global_line,
+                        .line_type = .compaction_divider,
+                        .text = "context compacted",
+                        .style = .{ .fg = Color.dim_gray },
+                        .indent = 0,
+                    });
+                    global_line += 1;
                 },
                 .user, .agent, .thinking => {
                     // No role header for user/agent/thinking - styling makes it obvious
@@ -518,6 +531,16 @@ pub const ChatLineMap = struct {
                         try self.addPlanSnapshotEntries(&global_line, last_msg_idx, entries);
                     }
                 },
+                .compacted => {
+                    try self.records.append(self.allocator, .{
+                        .global_line = global_line,
+                        .line_type = .compaction_divider,
+                        .text = "context compacted",
+                        .style = .{ .fg = Color.dim_gray },
+                        .indent = 0,
+                    });
+                    global_line += 1;
+                },
                 .user, .agent, .thinking => {
                     // No role header for user/agent/thinking - styling makes it obvious
                     try self.addMessageContent(&global_line, last_msg_idx, msg.*, wrap_width, highlighter);
@@ -643,6 +666,7 @@ pub const ChatLineMap = struct {
             .diff => .{ .fg = Color.white, .bold = true },
             .tool => .{ .fg = Color.chat_tool, .bold = true },
             .plan_snapshot => .{ .fg = Color.dim, .bold = true },
+            .compacted => .{ .fg = Color.dim_gray, .italic = true },
         };
 
         // Thinking uses same indent as user (for left bar) but no background fill
