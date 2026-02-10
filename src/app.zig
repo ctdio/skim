@@ -6449,30 +6449,6 @@ pub const App = struct {
             }
         }
 
-        // Safety net: if we're prompting with no events for a while, the server
-        // may have finished without sending a proper completion signal (session.idle
-        // or message.updated with completion status). Transition out of prompting
-        // to avoid hanging the "generating" indicator indefinitely.
-        // This is a fallback — the primary completion signal comes from step-finish
-        // events which push message_complete immediately.
-        // Use a longer timeout when subagents are active since child session events
-        // don't update last_event_ms as frequently.
-        if (mgr.status == .prompting and !mgr.pending_abort and !mgr.stream_complete.load(.acquire)) {
-            const now_ms = std.time.milliTimestamp();
-            const idle_ms = now_ms - mgr.last_event_ms;
-            const timeout: i64 = if (mgr.hasActiveChildSessions()) 10_000 else 3_000;
-            if (!mgr.hasPendingEvents() and idle_ms > timeout) {
-                std.log.warn("Opencode: no events for {d}ms while prompting; clearing stale prompting state", .{idle_ms});
-                if (mgr.hasActiveChildSessions()) {
-                    mgr.active_child_count.store(0, .release);
-                    mgr.deferred_completion = false;
-                }
-                mgr.stream_complete.store(true, .release);
-                mgr.status = .session_active;
-                self.needs_render = true;
-            }
-        }
-
         // Trigger redraw if status changed
         if (mgr.status != status_before) {
             self.needs_render = true;
