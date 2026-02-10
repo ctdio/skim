@@ -761,6 +761,9 @@ pub const OpencodeManager = struct {
         self.fetchAvailableModels() catch |err| {
             log.warn("Failed to fetch available models: {}", .{err});
         };
+
+        // Fetch available slash commands (don't fail connect if this fails)
+        self.fetchAvailableCommands();
     }
 
     /// Disconnect from the server
@@ -1289,6 +1292,62 @@ pub const OpencodeManager = struct {
         }
     }
 
+    /// Fetch available slash commands from the server's /command endpoint
+    fn fetchAvailableCommands(self: *OpencodeManager) void {
+        const c = self.client orelse return;
+        const directory = if (self.connect_config) |cfg| cfg.cwd else null;
+
+        var parsed = c.listCommands(directory) catch |err| {
+            log.warn("Failed to fetch commands: {}", .{err});
+            return;
+        };
+        defer parsed.deinit();
+
+        // Response is an array of command objects
+        if (parsed.value != .array) {
+            log.warn("Commands response is not an array", .{});
+            return;
+        }
+
+        var commands_list: std.ArrayListUnmanaged(acp_protocol.AvailableCommand) = .{};
+        errdefer {
+            for (commands_list.items) |cmd| freeAvailableCommand(self.event_allocator, cmd);
+            commands_list.deinit(self.event_allocator);
+        }
+
+        for (parsed.value.array.items) |cmd_val| {
+            if (cmd_val != .object) continue;
+            const obj = cmd_val.object;
+
+            const name_raw = if (obj.get("name")) |v| (if (v == .string) v.string else null) else null;
+            if (name_raw == null) continue;
+
+            const desc_raw = if (obj.get("description")) |v| (if (v == .string) v.string else null) else name_raw;
+
+            const name = self.event_allocator.dupe(u8, name_raw.?) catch continue;
+            const desc = self.event_allocator.dupe(u8, desc_raw.?) catch {
+                self.event_allocator.free(name);
+                continue;
+            };
+
+            commands_list.append(self.event_allocator, .{
+                .name = name,
+                .description = desc,
+                .input = null,
+            }) catch {
+                self.event_allocator.free(name);
+                self.event_allocator.free(desc);
+                continue;
+            };
+        }
+
+        if (commands_list.items.len == 0) return;
+
+        const commands = commands_list.toOwnedSlice(self.event_allocator) catch return;
+        log.info("Fetched {d} available commands", .{commands.len});
+        self.message_queue.push(.{ .commands_update = commands });
+    }
+
     fn getVariantsForModelId(self: *const OpencodeManager, model_id: []const u8) ?[]const []const u8 {
         for (self.available_models.items) |model| {
             if (std.mem.eql(u8, model.model_id, model_id)) {
@@ -1587,11 +1646,7 @@ pub const OpencodeManager = struct {
             "session.idle",
             "session.status",
             "session.error",
-            "availableCommands",
-            "available_commands",
-            "commands.updated",
             "session.compacted",
-            "session.commands",
         };
         var dominated = false;
         for (dominated_events) |evt| {
@@ -1650,14 +1705,6 @@ pub const OpencodeManager = struct {
                         self.trackChildToolEvent(props, event_sid);
                         return;
                     }
-                }
-            }
-        }
-
-        if (properties) |props| {
-            if (props == .object) {
-                if (self.parseAvailableCommands(props.object)) |commands| {
-                    self.message_queue.push(.{ .commands_update = commands });
                 }
             }
         }
@@ -2443,91 +2490,6 @@ pub const OpencodeManager = struct {
                 if (val == .string) return val.string;
             }
         }
-        return null;
-    }
-
-    fn parseAvailableCommands(self: *OpencodeManager, props: std.json.ObjectMap) ?[]const acp_protocol.AvailableCommand {
-        if (parseCommandsFromObject(self, props)) |commands| return commands;
-
-        const nested_obj = extractObjectField(props, &[_][]const u8{ "session", "state", "status", "config" }) orelse return null;
-        return parseCommandsFromObject(self, nested_obj);
-    }
-
-    fn parseCommandsFromObject(self: *OpencodeManager, obj: std.json.ObjectMap) ?[]const acp_protocol.AvailableCommand {
-        const keys = [_][]const u8{ "availableCommands", "available_commands", "commands", "commandList", "command_list" };
-        const val = extractValueField(obj, &keys) orelse return null;
-        return parseCommandsArray(self, val);
-    }
-
-    fn parseCommandsArray(self: *OpencodeManager, val: std.json.Value) ?[]const acp_protocol.AvailableCommand {
-        if (val != .array) return null;
-
-        var commands_list: std.ArrayList(acp_protocol.AvailableCommand) = .{};
-        errdefer {
-            for (commands_list.items) |cmd| {
-                freeAvailableCommand(self.event_allocator, cmd);
-            }
-            commands_list.deinit(self.event_allocator);
-        }
-
-        for (val.array.items) |cmd_val| {
-            const cmd = parseCommandEntry(self, cmd_val) orelse continue;
-            commands_list.append(self.event_allocator, cmd) catch {
-                freeAvailableCommand(self.event_allocator, cmd);
-                continue;
-            };
-        }
-
-        if (commands_list.items.len == 0) return null;
-        return commands_list.toOwnedSlice(self.event_allocator) catch null;
-    }
-
-    fn parseCommandEntry(self: *OpencodeManager, val: std.json.Value) ?acp_protocol.AvailableCommand {
-        switch (val) {
-            .string => |s| {
-                const name = self.event_allocator.dupe(u8, s) catch return null;
-                const desc = self.event_allocator.dupe(u8, s) catch {
-                    self.event_allocator.free(name);
-                    return null;
-                };
-                return .{ .name = name, .description = desc, .input = null };
-            },
-            .object => |obj| {
-                const name_raw = extractStringField(obj, &[_][]const u8{ "name", "command", "id" }) orelse return null;
-                const desc_raw = extractStringField(obj, &[_][]const u8{ "description", "summary", "detail", "title" }) orelse name_raw;
-
-                const name = self.event_allocator.dupe(u8, name_raw) catch return null;
-                const desc = self.event_allocator.dupe(u8, desc_raw) catch {
-                    self.event_allocator.free(name);
-                    return null;
-                };
-
-                const hint = parseCommandInputHint(self, obj);
-                const input: ?acp_protocol.AvailableCommandInput = if (hint) |h| .{ .hint = h } else null;
-
-                return .{ .name = name, .description = desc, .input = input };
-            },
-            else => return null,
-        }
-    }
-
-    fn parseCommandInputHint(self: *OpencodeManager, obj: std.json.ObjectMap) ?[]const u8 {
-        if (extractStringField(obj, &[_][]const u8{ "input_hint", "inputHint", "hint" })) |hint| {
-            return self.event_allocator.dupe(u8, hint) catch null;
-        }
-
-        if (obj.get("input")) |input_val| {
-            switch (input_val) {
-                .string => |s| return self.event_allocator.dupe(u8, s) catch null,
-                .object => |input_obj| {
-                    if (extractStringField(input_obj, &[_][]const u8{ "hint", "description", "prompt" })) |h| {
-                        return self.event_allocator.dupe(u8, h) catch null;
-                    }
-                },
-                else => {},
-            }
-        }
-
         return null;
     }
 
@@ -3714,17 +3676,22 @@ test "opencode event: message.updated finish clears status" {
     }
 }
 
-test "opencode event: session.updated with available commands" {
+test "commands_update event round-trips through message queue" {
     const allocator = std.testing.allocator;
     var manager = OpencodeManager.init(allocator);
     defer manager.deinit();
 
-    const data =
-        "{\"payload\":{\"type\":\"session.updated\",\"properties\":{\"availableCommands\":[" ++
-        "{\"name\":\"status\",\"description\":\"Show status\",\"input\":{\"hint\":\"since last week\"}}" ++
-        "]}}}";
+    // Simulate what fetchAvailableCommands does: build commands and push to queue
+    const name = try manager.event_allocator.dupe(u8, "status");
+    errdefer manager.event_allocator.free(name);
+    const desc = try manager.event_allocator.dupe(u8, "Show status");
+    errdefer manager.event_allocator.free(desc);
 
-    manager.processEventData(data);
+    const commands = try manager.event_allocator.alloc(acp_protocol.AvailableCommand, 1);
+    errdefer manager.event_allocator.free(commands);
+    commands[0] = .{ .name = name, .description = desc, .input = null };
+
+    manager.message_queue.push(.{ .commands_update = commands });
 
     const ev_opt = manager.poll();
     try std.testing.expect(ev_opt != null);
@@ -3732,12 +3699,11 @@ test "opencode event: session.updated with available commands" {
     defer ev.deinit(manager.event_allocator);
 
     switch (ev) {
-        .commands_update => |commands| {
-            try std.testing.expectEqual(@as(usize, 1), commands.len);
-            try std.testing.expectEqualStrings("status", commands[0].name);
-            try std.testing.expectEqualStrings("Show status", commands[0].description);
-            try std.testing.expect(commands[0].input != null);
-            try std.testing.expectEqualStrings("since last week", commands[0].input.?.hint);
+        .commands_update => |cmds| {
+            try std.testing.expectEqual(@as(usize, 1), cmds.len);
+            try std.testing.expectEqualStrings("status", cmds[0].name);
+            try std.testing.expectEqualStrings("Show status", cmds[0].description);
+            try std.testing.expect(cmds[0].input == null);
         },
         else => try std.testing.expect(false),
     }

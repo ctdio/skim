@@ -468,6 +468,54 @@ pub const Client = struct {
     }
 
     // =========================================================================
+    // Commands
+    // =========================================================================
+
+    /// GET /command - List available slash commands
+    /// Returns a dynamic JSON value (caller must deinit the Parsed wrapper).
+    /// The response is an array of command objects with name, description, etc.
+    pub fn listCommands(self: *Client, directory: ?[]const u8) !std.json.Parsed(std.json.Value) {
+        const uri_str = if (directory) |dir|
+            try std.fmt.allocPrint(self.allocator, "{s}/command?directory={s}", .{ self.base_url, dir })
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}/command", .{self.base_url});
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        // Use a separate HTTP client to avoid thread safety issues with SSE connection
+        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        defer temp_client.deinit();
+
+        var req = temp_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
+
+        req.sendBodiless() catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok) {
+            log.err("List commands failed with status: {}", .{response.head.status});
+            return error.ServerError;
+        }
+
+        var body_buffer: [8192]u8 = undefined;
+        var body_reader = response.reader(&body_buffer);
+        const body = body_reader.allocRemaining(self.allocator, std.Io.Limit.limited(1024 * 1024)) catch return error.InvalidResponse;
+        defer self.allocator.free(body);
+
+        return std.json.parseFromSlice(std.json.Value, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| {
+            const preview = if (body.len > 200) body[0..200] else body;
+            log.err("Failed to parse commands JSON: {} body={s}", .{ err, preview });
+            return error.InvalidResponse;
+        };
+    }
+
+    // =========================================================================
     // SSE Event Stream
     // =========================================================================
 
