@@ -4,6 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const AgentState = @import("state.zig").AgentState;
 const Message = @import("state.zig").Message;
+const QuestionPromptData = @import("state.zig").QuestionPromptData;
 const SubagentInfo = @import("state.zig").SubagentInfo;
 const SubagentToolSummary = @import("state.zig").SubagentToolSummary;
 const protocol = @import("../acp/protocol.zig");
@@ -12,8 +13,7 @@ const opencode_manager = @import("../opencode/manager.zig");
 const OpencodeEvent = opencode_manager.Event;
 
 /// A unified event representing an update from either ACP or OpenCode.
-/// This replaces the duplicated switch statements in pollTabAcpManager and
-/// pollTabOpencodeManager with a single processAgentEvent function.
+/// Provides a single processAgentEvent function for routing events to AgentState.
 pub const AgentEvent = union(enum) {
     // Streaming content
     text_chunk: []const u8,
@@ -37,7 +37,7 @@ pub const AgentEvent = union(enum) {
     session_compacted: void,
 
     // Questions (OpenCode-only, but still part of unified type)
-    question_prompt: void, // Handled separately by caller (needs allocator for conversion)
+    question_prompt: QuestionPromptData,
     question_resolved: void,
 
     pub const ToolCallEvent = struct {
@@ -146,8 +146,12 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
         .question_resolved => {
             agent_state.clearPendingQuestion();
         },
-        // question_prompt is handled separately in the caller (needs allocator for conversion)
-        .message_complete, .question_prompt => {},
+        .question_prompt => |prompt_data| {
+            agent_state.setPendingQuestion(prompt_data) catch |err| {
+                std.log.err("Failed to set pending question: {any}", .{err});
+            };
+        },
+        .message_complete => {},
     }
 }
 
@@ -233,7 +237,7 @@ pub fn opencodeEventToAgentEvent(event: OpencodeEvent) ?AgentEvent {
         } },
         .commands_update => |commands| .{ .commands_update = commands },
         .session_compacted => .{ .session_compacted = {} },
-        .question_prompt => .{ .question_prompt = {} },
+        .question_prompt => null, // Handled separately by pollEvents (needs allocator for conversion)
         .question_resolved => .{ .question_resolved = {} },
         .err => |e| .{ .error_message = e.message orelse @tagName(e.code) },
         .status_change => null, // Handled separately by caller

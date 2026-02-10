@@ -1569,7 +1569,7 @@ fn updateSlashMenuVisibility(_: *App, agent_state: *agent.AgentState) void {
 
     if (should_show and !agent_state.slash_menu.visible) {
         // Commands from the agent will appear on the next event loop iteration
-        // (main loop calls pollAcpUpdates regularly - no need to block the key handler)
+        // (main loop calls pollAllManagers regularly - no need to block the key handler)
         agent_state.showSlashMenu();
     } else if (!should_show and agent_state.slash_menu.visible) {
         // Hide menu when "/" is deleted or input changes
@@ -1639,39 +1639,30 @@ pub fn sendPromptToActiveManager(app: *App, text: []const u8) !void {
         return;
     };
 
+    // Check if the manager can accept prompts (protocol-agnostic)
+    if (m.getStatusMessage()) |msg| {
+        try agent_state.addMessage(.system, msg);
+        app.needs_render = true;
+        return;
+    }
+
+    // Protocol-specific content building (ACP handles @file references, OpenCode is simpler)
     switch (m) {
         .opencode => |mgr| {
-            switch (mgr.status) {
-                .disconnected, .failed => {
-                    try agent_state.addMessage(.system, "Opencode disconnected or failed. Close and reopen panel to reconnect.");
-                },
-                .idle, .starting_server, .connecting => {
-                    try agent_state.addMessage(.system, "Opencode connecting... please wait.");
-                },
-                .session_active, .prompting => {
-                    if (std.mem.indexOf(u8, text, "@") != null) {
-                        std.log.info("Opencode MVP: @file references not supported, sending as literal text", .{});
-                    }
-                    if (agent_state.hasQueuedShellOutputs()) {
-                        std.log.info("Opencode MVP: Shell outputs not supported, discarding", .{});
-                        _ = agent_state.takeQueuedShellOutputs();
-                    }
-                    mgr.sendPrompt(text) catch |err| {
-                        std.log.err("Opencode: Failed to send prompt: {any}", .{err});
-                        try agent_state.addMessage(.system, "Failed to send prompt to Opencode");
-                    };
-                    app.needs_render = true;
-                },
+            if (std.mem.indexOf(u8, text, "@") != null) {
+                std.log.info("Opencode MVP: @file references not supported, sending as literal text", .{});
             }
+            if (agent_state.hasQueuedShellOutputs()) {
+                std.log.info("Opencode MVP: Shell outputs not supported, discarding", .{});
+                _ = agent_state.takeQueuedShellOutputs();
+            }
+            mgr.sendPrompt(text) catch |err| {
+                std.log.err("Opencode: Failed to send prompt: {any}", .{err});
+                try agent_state.addMessage(.system, "Failed to send prompt to Opencode");
+            };
         },
         .acp => |mgr| {
-            if (mgr.status == .disconnected) {
-                try agent_state.addMessage(.system, "Agent disconnected. Close and reopen panel to reconnect.");
-            } else if (mgr.status == .failed) {
-                try agent_state.addMessage(.system, "Agent connection failed. Close and reopen panel to retry.");
-            } else {
-                try sendPromptWithFiles(app, mgr, text);
-            }
+            try sendPromptWithFiles(app, mgr, text);
         },
     }
     app.needs_render = true;

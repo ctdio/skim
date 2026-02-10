@@ -121,6 +121,18 @@ pub const OpencodeConnectContext = struct {
     cwd: ?[]const u8,
 };
 
+/// Unified pending connection state (replaces separate ACP/Opencode fields)
+pub const PendingConnection = struct {
+    thread: std.Thread,
+    tab_id: u32,
+    ctx: ConnectContext,
+
+    pub const ConnectContext = union(enum) {
+        acp: *AcpConnectContext,
+        opencode: *OpencodeConnectContext,
+    };
+};
+
 /// Context for subagent modal fetch thread
 pub const SubagentFetchContext = struct {
     app: *App,
@@ -276,12 +288,7 @@ pub const App = struct {
     tui_server: ?tui_server.TuiServer, // TCP server for CLI/MCP connections
     session_manager: ?session_mgr.SessionManager, // Session file management
     blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
-    acp_connect_thread: ?std.Thread, // Background thread for ACP connection
-    acp_connect_ctx: ?*AcpConnectContext, // Context for ACP connection thread (freed after join)
-    connecting_tab_id: ?u32, // Tab ID receiving connection (null when not connecting)
-    opencode_connect_thread: ?std.Thread, // Background thread for Opencode connection
-    opencode_connect_ctx: ?*OpencodeConnectContext, // Context for Opencode connection thread
-    connecting_opencode_tab_id: ?u32, // Tab ID receiving Opencode connection (null when not connecting)
+    pending_connection: ?PendingConnection, // Background connection thread (ACP or Opencode)
     pending_subagent_fetch: PendingSubagentFetch, // Thread-safe result from subagent fetch worker
     in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
     agent_only: bool, // Start in agent-only mode (no diff view)
@@ -698,12 +705,7 @@ pub const App = struct {
             .tui_server = null,
             .session_manager = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
-            .acp_connect_thread = null,
-            .acp_connect_ctx = null,
-            .connecting_tab_id = null,
-            .opencode_connect_thread = null,
-            .opencode_connect_ctx = null,
-            .connecting_opencode_tab_id = null,
+            .pending_connection = null,
             .pending_subagent_fetch = .{},
             .in_bracketed_paste = false,
             .agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false,
@@ -888,12 +890,7 @@ pub const App = struct {
             .tui_server = null,
             .session_manager = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
-            .acp_connect_thread = null,
-            .acp_connect_ctx = null,
-            .connecting_tab_id = null,
-            .opencode_connect_thread = null,
-            .opencode_connect_ctx = null,
-            .connecting_opencode_tab_id = null,
+            .pending_connection = null,
             .pending_subagent_fetch = .{},
             .in_bracketed_paste = false,
             .agent_only = false,
@@ -1030,12 +1027,7 @@ pub const App = struct {
             .tui_server = null,
             .session_manager = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
-            .acp_connect_thread = null,
-            .acp_connect_ctx = null,
-            .connecting_tab_id = null,
-            .opencode_connect_thread = null,
-            .opencode_connect_ctx = null,
-            .connecting_opencode_tab_id = null,
+            .pending_connection = null,
             .pending_subagent_fetch = .{},
             .in_bracketed_paste = false,
             .agent_only = false,
@@ -1138,25 +1130,16 @@ pub const App = struct {
         if (self.tui_server) |*server| {
             server.deinit();
         }
-        // Clean up ACP connection thread and context
+        // Clean up pending connection thread and context
         // IMPORTANT: Must join (not detach) to wait for thread to complete
         // before freeing resources it depends on (manager, transport, etc.)
-        if (self.acp_connect_thread) |thread| {
-            thread.join();
-            self.acp_connect_thread = null;
-        }
-        if (self.acp_connect_ctx) |ctx| {
-            self.allocator.destroy(ctx);
-            self.acp_connect_ctx = null;
-        }
-        // Clean up Opencode connection thread
-        if (self.opencode_connect_thread) |thread| {
-            thread.join();
-            self.opencode_connect_thread = null;
-        }
-        if (self.opencode_connect_ctx) |ctx| {
-            self.allocator.destroy(ctx);
-            self.opencode_connect_ctx = null;
+        if (self.pending_connection) |conn| {
+            conn.thread.join();
+            switch (conn.ctx) {
+                .acp => |ctx| self.allocator.destroy(ctx),
+                .opencode => |ctx| self.allocator.destroy(ctx),
+            }
+            self.pending_connection = null;
         }
         // Clean up tab manager (handles per-tab ACP and Opencode managers)
         if (self.tab_manager) |*tm| {
@@ -1302,23 +1285,10 @@ pub const App = struct {
         return &(self.tab_manager.?);
     }
 
-    /// Check if any ACP manager (across all tabs) has pending output
-    pub fn hasAnyAcpActivity(self: *const App) bool {
-        // Check tab managers first
+    /// Check if any manager (across all tabs) has activity requiring responsive polling
+    pub fn hasAnyManagerActivity(self: *const App) bool {
         if (self.tab_manager) |tm| {
-            for (tm.tabs.items) |*tab| {
-                if (tab.getActiveAcpManager()) |mgr| {
-                    if (mgr.hasPendingOutput()) return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /// Check if any Opencode manager (across all tabs) has activity
-    pub fn hasAnyOpencodeActivity(self: *const App) bool {
-        if (self.tab_manager) |tm| {
-            return tm.hasAnyOpencodeActivity();
+            return tm.hasAnyActivity();
         }
         return false;
     }
@@ -1609,19 +1579,13 @@ pub const App = struct {
             // This allows async operations to trigger immediate renders
             const server_active = self.tui_server != null;
             const stats_loading = self.state.menu_stats_loading;
-            // Only consider ACP "active" when agent has pending output to display
-            // This allows blocking pollEvent() when agent is idle/connected but not producing data
-            // Check all tabs for activity (multi-tab support)
-            const acp_active = self.hasAnyAcpActivity();
-            // Check if any Opencode manager has activity (prompting or pending events)
-            const opencode_active = self.hasAnyOpencodeActivity();
+            // Check all tabs for manager activity (ACP or OpenCode)
+            const manager_active = self.hasAnyManagerActivity();
             // Check if a shell command is running (needs streaming output) - check all tabs
             const shell_cmd_running = self.hasAnyRunningShellCommand();
-            // Check if ACP connection thread is running (need to poll for completion)
-            const acp_connecting = self.acp_connect_thread != null;
-            // Check if Opencode connection thread is running
-            const opencode_connecting = self.opencode_connect_thread != null;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !acp_active and !opencode_active and !shell_cmd_running and !acp_connecting and !opencode_connecting;
+            // Check if a connection thread is running (need to poll for completion)
+            const connecting = self.pending_connection != null;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !shell_cmd_running and !connecting;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -1629,8 +1593,8 @@ pub const App = struct {
                 // - High activity (prompting): 5ms for smooth streaming (~200 FPS)
                 // - Medium activity (connecting, shell running): 8ms (~125 FPS)
                 // - Low activity (just rendering): 16ms (~60 FPS)
-                const is_high_activity = acp_active or opencode_active or shell_cmd_running;
-                const is_medium_activity = acp_connecting or opencode_connecting or server_active;
+                const is_high_activity = manager_active or shell_cmd_running;
+                const is_medium_activity = connecting or server_active;
                 const sleep_ms: u64 = if (is_high_activity) 5 else if (is_medium_activity) 8 else 16;
                 std.Thread.sleep(sleep_ms * std.time.ns_per_ms);
             }
@@ -1709,49 +1673,17 @@ pub const App = struct {
             // Clear expired messages
             self.clearExpiredStatusMessage();
 
-            // Poll ACP agent for updates (only when there's an active connection or connecting thread)
-            const has_tab_acp = if (self.tab_manager) |tm| blk: {
-                for (tm.tabs.items) |*tab| {
-                    if (tab.getActiveAcpManager() != null) break :blk true;
-                }
-                break :blk false;
-            } else false;
-
-            if (self.acp_connect_thread != null or has_tab_acp) {
-                self.pollAcpUpdates();
-
-                // Only force re-render when there's actual pending output or status changes
-                // This prevents CPU-burning render loops when agent is idle but connected
-                if (self.getActiveAcpManager()) |mgr| {
-                    // Only render if:
-                    // 1. Agent is actively connecting (status spinner needs updating)
-                    // 2. Agent has pending output to display
-                    const is_connecting = mgr.status == .discovering or mgr.status == .connecting;
-                    const has_pending = mgr.hasPendingOutput();
-                    if (is_connecting or has_pending) {
-                        self.needs_render = true;
+            // Poll all agent managers (connection thread + per-tab polling)
+            {
+                const has_any_manager = if (self.tab_manager) |tm| blk: {
+                    for (tm.tabs.items) |*tab| {
+                        if (tab.manager != null) break :blk true;
                     }
-                }
-            }
+                    break :blk false;
+                } else false;
 
-            // Poll Opencode agent for updates (only when there's an active connection or connecting thread)
-            const has_tab_opencode = if (self.tab_manager) |tm| blk: {
-                for (tm.tabs.items) |*tab| {
-                    if (tab.getActiveOpencodeManager() != null) break :blk true;
-                }
-                break :blk false;
-            } else false;
-
-            if (self.opencode_connect_thread != null or has_tab_opencode) {
-                self.pollOpencodeUpdates();
-
-                // Force re-render when agent is prompting (for thinking indicator animation),
-                // when there are pending events to process, or when subagents are active
-                // (subagent spinner needs continuous redraws for animation)
-                if (self.getActiveOpencodeManager()) |mgr| {
-                    if (mgr.status == .prompting or mgr.hasPendingEvents() or mgr.hasActiveChildSessions()) {
-                        self.needs_render = true;
-                    }
+                if (self.pending_connection != null or has_any_manager) {
+                    self.pollAllManagers();
                 }
             }
 
@@ -5772,7 +5704,7 @@ pub const App = struct {
         std.log.info("ACP: startAcpSession called", .{});
 
         // Check if connection already in progress
-        if (self.acp_connect_thread != null) {
+        if (self.pending_connection != null) {
             std.log.info("ACP: Connection already in progress", .{});
             self.showStatusMessage("Connection already in progress...");
             return;
@@ -5868,7 +5800,6 @@ pub const App = struct {
 
         // Store directly in target tab
         target_tab.manager = .{ .acp = mgr };
-        self.connecting_tab_id = target_tab.id;
 
         // Clear pending tab selection
         self.state.pending_tab_for_selection = null;
@@ -5891,7 +5822,7 @@ pub const App = struct {
         };
 
         // Spawn background thread for connection
-        self.acp_connect_thread = std.Thread.spawn(.{}, acpConnectThreadFn, .{ctx}) catch |err| {
+        const thread = std.Thread.spawn(.{}, acpConnectThreadFn, .{ctx}) catch |err| {
             std.log.err("Failed to spawn ACP connect thread: {any}", .{err});
             self.showStatusMessage("Failed to start connection");
             self.allocator.destroy(ctx);
@@ -5899,12 +5830,14 @@ pub const App = struct {
             target_tab.manager = null;
             mgr.deinit();
             self.allocator.destroy(mgr);
-            self.connecting_tab_id = null;
             return;
         };
 
-        // Store context so it can be freed after thread joins
-        self.acp_connect_ctx = ctx;
+        self.pending_connection = .{
+            .thread = thread,
+            .tab_id = target_tab.id,
+            .ctx = .{ .acp = ctx },
+        };
     }
 
     /// Connect to an Opencode agent for the given tab (non-blocking)
@@ -5917,7 +5850,6 @@ pub const App = struct {
 
         // Create Opencode manager and store it in the tab immediately (enables rendering)
         const mgr = try target_tab.createOpencodeManager();
-        self.connecting_opencode_tab_id = target_tab.id;
 
         self.showStatusMessage("Connecting to Opencode...");
         std.log.info("Opencode: Connecting to {s} for tab {d}", .{ agent_info.name, target_tab.id });
@@ -5933,19 +5865,21 @@ pub const App = struct {
         };
 
         // Spawn background thread for connection
-        self.opencode_connect_thread = std.Thread.spawn(.{}, opcConnectThreadFn, .{ctx}) catch |err| {
+        const thread = std.Thread.spawn(.{}, opcConnectThreadFn, .{ctx}) catch |err| {
             std.log.err("Failed to spawn Opencode connect thread: {any}", .{err});
             self.showStatusMessage("Failed to start connection");
             self.allocator.destroy(ctx);
             target_tab.manager = null;
             mgr.deinit();
             self.allocator.destroy(mgr);
-            self.connecting_opencode_tab_id = null;
             return;
         };
 
-        // Store context so it can be freed after thread joins
-        self.opencode_connect_ctx = ctx;
+        self.pending_connection = .{
+            .thread = thread,
+            .tab_id = target_tab.id,
+            .ctx = .{ .opencode = ctx },
+        };
     }
 
     fn opcConnectThreadFn(ctx: *OpencodeConnectContext) void {
@@ -6067,114 +6001,137 @@ pub const App = struct {
         return null;
     }
 
-    /// Poll ACP agent for updates
-    /// Checks connection status and polls all tabs for messages.
-    pub fn pollAcpUpdates(self: *App) void {
-        // Track if we clear the thread in this call (to avoid double-check)
-        var thread_was_cleared = false;
+    /// Poll all managers: check connection thread, then poll each tab's manager.
+    fn pollAllManagers(self: *App) void {
+        const connection_active = self.pollConnectionThread();
 
-        // Check if connection thread completed (find manager via connecting_tab_id)
-        if (self.acp_connect_thread != null and self.connecting_tab_id != null) {
-            const connecting_mgr = self.getConnectingManager();
-            if (connecting_mgr) |mgr| {
-                // Check if connection finished
-                // NOTE: Thread sets status to .connected BEFORE calling createSession(),
-                // so we also wait for .connected to change to .session_active or .failed
-                const thread_still_working = mgr.status == .discovering or mgr.status == .connecting or mgr.status == .connected;
-                if (!thread_still_working) {
-                    // Thread is done, clean it up
-                    if (self.acp_connect_thread) |thread| {
-                        thread.join();
-                        self.acp_connect_thread = null;
-                        thread_was_cleared = true;
-                    }
-                    // Free the connection context
-                    if (self.acp_connect_ctx) |ctx| {
-                        self.allocator.destroy(ctx);
-                        self.acp_connect_ctx = null;
-                    }
-
-                    // Update UI based on result
-                    if (mgr.status == .session_active) {
-                        // Build connected message with model name if available
-                        const agent_name = mgr.getAgentDisplayName();
-                        const model_name = mgr.getCurrentModelName();
-                        const msg = if (model_name.len > 0)
-                            std.fmt.allocPrint(self.allocator, "Connected to {s} · {s}", .{ agent_name, model_name }) catch "Connected"
-                        else
-                            std.fmt.allocPrint(self.allocator, "Connected to {s}", .{agent_name}) catch "Connected";
-                        defer if (!std.mem.eql(u8, msg, "Connected")) self.allocator.free(msg);
-                        self.showStatusMessage(msg);
-
-                        // Add welcome message to the connecting tab's agent state
-                        if (self.getConnectingAgentState()) |agent_state| {
-                            const welcome_msg = if (model_name.len > 0)
-                                std.fmt.allocPrint(self.allocator, "Connected to {s} · {s}. You can start chatting!", .{ agent_name, model_name }) catch "Connected! You can start chatting."
-                            else
-                                std.fmt.allocPrint(self.allocator, "Connected to {s}. You can start chatting!", .{agent_name}) catch "Connected! You can start chatting.";
-                            defer if (!std.mem.eql(u8, welcome_msg, "Connected! You can start chatting.")) self.allocator.free(welcome_msg);
-                            agent_state.addMessage(.system, welcome_msg) catch {};
-                        }
-
-                        std.log.info("ACP: Connection complete for tab {?d}", .{self.connecting_tab_id});
-
-                        // Send any prompts that were queued while connecting
-                        mgr.sendNextQueuedPrompt();
-                    } else if (mgr.status == .failed) {
-                        self.showStatusMessage("Failed to connect to agent");
-                        // Add error message to chat history so user can see what happened
-                        if (self.getConnectingAgentState()) |agent_state| {
-                            agent_state.addMessage(.system, "Connection failed. Press 'a' to close this panel and try again.") catch {};
-                        }
-                        // Clean up failed manager from the tab
-                        if (self.getConnectingTab()) |tab| {
-                            tab.manager = null;
-                        }
-                        mgr.deinit();
-                        self.allocator.destroy(mgr);
-                    }
-
-                    // Clear the connecting state
-                    self.connecting_tab_id = null;
-                    self.needs_render = true;
+        // Don't poll tabs while an ACP connection thread is active — it would clear
+        // messages that waitForResponse() in the background thread needs.
+        if (connection_active) {
+            if (self.pending_connection) |conn| {
+                switch (conn.ctx) {
+                    .acp => return,
+                    .opencode => {},
                 }
             }
         }
 
-        // Don't poll while connection thread is active - it would clear messages
-        // that waitForResponse() in the background thread needs
-        // UNLESS we just cleared the thread in this same call
-        if (self.acp_connect_thread != null and !thread_was_cleared) {
-            return;
-        }
-
-        // Poll all tabs for ACP updates
+        // Poll all tabs via unified ManagerHandle.pollEvents
         if (self.tab_manager) |*tm| {
             for (tm.tabs.items, 0..) |*tab, tab_idx| {
-                const tab_mgr = tab.getActiveAcpManager() orelse continue;
-                self.pollTabAcpManager(tab_mgr, &tab.agent_state, tab_idx == tm.active_idx);
+                const handle = tab.manager orelse continue;
+                self.pollTabManager(handle, &tab.agent_state, tab_idx == tm.active_idx);
             }
         }
     }
 
-    /// Get the manager being connected (via connecting_tab_id)
-    fn getConnectingManager(self: *App) ?*acp.AcpManager {
-        const tab_id = self.connecting_tab_id orelse return null;
-        if (self.tab_manager) |*tm| {
-            if (tm.findTabById(tab_id)) |idx| {
-                if (tm.getTab(idx)) |tab| {
-                    return tab.getActiveAcpManager();
+    /// Check if the pending connection thread completed and handle success/failure.
+    /// Returns true if a connection thread is still active.
+    fn pollConnectionThread(self: *App) bool {
+        const conn = self.pending_connection orelse return false;
+
+        const tab = self.getConnectingTab() orelse {
+            // Tab disappeared — clean up connection state
+            conn.thread.join();
+            switch (conn.ctx) {
+                .acp => |ctx| self.allocator.destroy(ctx),
+                .opencode => |ctx| self.allocator.destroy(ctx),
+            }
+            self.pending_connection = null;
+            return false;
+        };
+
+        const handle = tab.manager orelse {
+            // Manager was removed from the tab — clean up
+            conn.thread.join();
+            switch (conn.ctx) {
+                .acp => |ctx| self.allocator.destroy(ctx),
+                .opencode => |ctx| self.allocator.destroy(ctx),
+            }
+            self.pending_connection = null;
+            return false;
+        };
+
+        // Check if the manager is still initializing (thread still working)
+        if (handle.isInitializing()) return true;
+
+        // Thread is done — join and clean up
+        conn.thread.join();
+
+        switch (conn.ctx) {
+            .acp => |ctx| {
+                self.allocator.destroy(ctx);
+                switch (handle) {
+                    .acp => |mgr| {
+                        if (mgr.status == .session_active) {
+                            const agent_name = mgr.getAgentDisplayName();
+                            const model_name = mgr.getCurrentModelName();
+                            const msg = if (model_name.len > 0)
+                                std.fmt.allocPrint(self.allocator, "Connected to {s} · {s}", .{ agent_name, model_name }) catch "Connected"
+                            else
+                                std.fmt.allocPrint(self.allocator, "Connected to {s}", .{agent_name}) catch "Connected";
+                            defer if (!std.mem.eql(u8, msg, "Connected")) self.allocator.free(msg);
+                            self.showStatusMessage(msg);
+
+                            if (self.getConnectingAgentState()) |agent_state_conn| {
+                                const welcome_msg = if (model_name.len > 0)
+                                    std.fmt.allocPrint(self.allocator, "Connected to {s} · {s}. You can start chatting!", .{ agent_name, model_name }) catch "Connected! You can start chatting."
+                                else
+                                    std.fmt.allocPrint(self.allocator, "Connected to {s}. You can start chatting!", .{agent_name}) catch "Connected! You can start chatting.";
+                                defer if (!std.mem.eql(u8, welcome_msg, "Connected! You can start chatting.")) self.allocator.free(welcome_msg);
+                                agent_state_conn.addMessage(.system, welcome_msg) catch {};
+                            }
+
+                            std.log.info("ACP: Connection complete for tab {d}", .{conn.tab_id});
+                            mgr.sendNextQueuedPrompt();
+                        } else if (mgr.status == .failed) {
+                            self.showStatusMessage("Failed to connect to agent");
+                            if (self.getConnectingAgentState()) |agent_state_conn| {
+                                agent_state_conn.addMessage(.system, "Connection failed. Press 'a' to close this panel and try again.") catch {};
+                            }
+                            tab.manager = null;
+                            mgr.deinit();
+                            self.allocator.destroy(mgr);
+                        }
+                    },
+                    .opencode => {},
                 }
-            }
+            },
+            .opencode => |ctx| {
+                self.allocator.destroy(ctx);
+                switch (handle) {
+                    .opencode => |mgr| {
+                        if (mgr.status == .session_active) {
+                            self.showStatusMessage("Connected to Opencode");
+                            if (self.getConnectingAgentState()) |agent_state_conn| {
+                                agent_state_conn.addMessage(.system, "Connected to Opencode. You can start chatting!") catch {};
+                            }
+                            std.log.info("Opencode: Connection complete for tab {d}", .{conn.tab_id});
+                        } else if (mgr.status == .failed or mgr.status == .disconnected) {
+                            self.showStatusMessage("Failed to connect to Opencode");
+                            if (self.getConnectingAgentState()) |agent_state_conn| {
+                                agent_state_conn.addMessage(.system, "Connection failed. Check if opencode is installed.") catch {};
+                            }
+                            tab.manager = null;
+                            mgr.deinit();
+                            self.allocator.destroy(mgr);
+                        }
+                    },
+                    .acp => {},
+                }
+            },
         }
-        return null;
+
+        self.pending_connection = null;
+        self.needs_render = true;
+        return false;
     }
 
-    /// Get the tab being connected (via connecting_tab_id)
+    /// Get the tab being connected (via pending_connection.tab_id)
     fn getConnectingTab(self: *App) ?*agent.AgentTab {
-        const tab_id = self.connecting_tab_id orelse return null;
+        const conn = self.pending_connection orelse return null;
         if (self.tab_manager) |*tm| {
-            if (tm.findTabById(tab_id)) |idx| {
+            if (tm.findTabById(conn.tab_id)) |idx| {
                 return tm.getTab(idx);
             }
         }
@@ -6189,347 +6146,47 @@ pub const App = struct {
         return null;
     }
 
-    /// Poll a single ACP manager and route messages to its agent state
-    /// Maximum messages to process per frame to prevent UI freezes
-    const MAX_MESSAGES_PER_FRAME: usize = 20;
+    /// Poll a single tab's manager and route events to its agent state
+    fn pollTabManager(self: *App, handle: agent.tab_manager.ManagerHandle, agent_state_ptr: *agent.AgentState, is_active_tab: bool) void {
+        const was_prompting = handle.isPrompting();
 
-    fn pollTabAcpManager(self: *App, mgr: *acp.AcpManager, agent_state: *agent.AgentState, is_active_tab: bool) void {
-        // Track status before polling to detect when agent finishes
-        const status_before = mgr.status;
+        const result = handle.pollEvents(self.allocator, agent_state_ptr);
 
-        // Poll for new messages (this also updates status when agent finishes)
-        const messages = mgr.poll() catch return;
+        if (result.count > 0) self.needs_render = true;
+        if (result.more_pending) self.needs_render = true;
+        if (result.status_changed) self.needs_render = true;
+        if (result.needs_line_map_dirty) agent_state_ptr.line_map_dirty = true;
 
-        // Trigger redraw if status changed (e.g., prompting -> session_active)
-        // This ensures the "Generating..." indicator is cleared when agent finishes
-        if (mgr.status != status_before) {
-            self.needs_render = true;
-
-            // Auto-execute staged shell commands when agent finishes
-            if (status_before == .prompting and mgr.status == .session_active) {
-                if (agent_state.hasStagedPrompt() and agent_state.isStagedShellCommand()) {
-                    const staged = agent_state.getStagedPrompt();
-                    agent_mode.handleShellCommand(self, agent_state, staged) catch {};
-                    agent_state.clearStagedPrompt();
-                }
+        // Auto-execute staged shell commands when agent finishes prompting
+        if (was_prompting and !handle.isPrompting()) {
+            if (agent_state_ptr.hasStagedPrompt() and agent_state_ptr.isStagedShellCommand()) {
+                const staged = agent_state_ptr.getStagedPrompt();
+                agent_mode.handleShellCommand(self, agent_state_ptr, staged) catch {};
+                agent_state_ptr.clearStagedPrompt();
             }
         }
 
-        // Process messages with a limit to prevent UI freezes during high-volume streaming
-        const to_process = @min(messages.len, MAX_MESSAGES_PER_FRAME);
-
-        // Process each message (up to limit) via unified event conversion
-        for (messages[0..to_process]) |msg| {
-            if (agent.events.acpMessageToAgentEvent(msg)) |event| {
-                agent.events.processAgentEvent(agent_state, event);
-                self.needs_render = true;
-            }
-        }
-
-        // Clear only the messages we processed (bounded processing)
-        mgr.clearMessagesN(to_process);
-
-        // If there are more messages, request another render to process them
-        if (messages.len > to_process) {
-            self.needs_render = true;
-        }
-
-        // Check if agent just finished responding and there's a staged message to send
-        // The condition: agent is idle (session_active) and no pending prompt request
-        const has_staged = agent_state.hasStagedPrompt();
-        const agent_idle = mgr.status == .session_active and mgr.pending_prompt_id == null;
-
-        if (has_staged and agent_idle) {
-            // Take and send the staged message
-            if (agent_state.takeStagedPrompt()) |staged| {
+        // Auto-send staged prompts when manager is ready
+        if (handle.isReadyForAutoSend() and agent_state_ptr.hasStagedPrompt()) {
+            if (agent_state_ptr.isStagedShellCommand()) {
+                const staged = agent_state_ptr.getStagedPrompt();
+                agent_mode.handleShellCommand(self, agent_state_ptr, staged) catch {};
+                agent_state_ptr.clearStagedPrompt();
+            } else if (agent_state_ptr.takeStagedPrompt()) |staged| {
                 if (is_active_tab) {
                     std.log.info("Agent: Auto-sending staged message ({d} bytes)", .{staged.len});
                 }
 
-                // Add to message history
-                agent_state.addMessage(.user, staged) catch {};
+                agent_state_ptr.addMessage(.user, staged) catch {};
 
-                // Send to agent
-                const prompt_copy = self.allocator.dupe(u8, staged) catch return;
-                defer self.allocator.free(prompt_copy);
-
-                mgr.sendPrompt(prompt_copy) catch |err| {
+                handle.sendPrompt(staged) catch |err| {
                     std.log.err("Agent: Failed to send staged prompt: {any}", .{err});
-                    agent_state.addMessage(.system, "Failed to send staged message") catch {};
-                };
-
-                self.needs_render = true;
-            }
-        } else if (has_staged and is_active_tab) {
-            // Debug: log why we're not sending (agent not idle yet)
-            std.log.debug("Agent: Staged message waiting (status={}, pending_id={?})", .{
-                @intFromEnum(mgr.status),
-                mgr.pending_prompt_id,
-            });
-        }
-    }
-
-    /// Poll Opencode agent for updates
-    /// Processes SSE events from the background thread via MessageQueue
-    pub fn pollOpencodeUpdates(self: *App) void {
-        // Check if connection thread completed
-        if (self.opencode_connect_thread != null and self.connecting_opencode_tab_id != null) {
-            const connecting_mgr = self.getConnectingOpencodeManager();
-            if (connecting_mgr) |mgr| {
-                // Check if connection finished (not still starting/connecting)
-                const thread_still_working = mgr.status == .starting_server or
-                    mgr.status == .connecting or mgr.status == .idle;
-                if (!thread_still_working) {
-                    // Thread is done, clean it up
-                    if (self.opencode_connect_thread) |thread| {
-                        thread.join();
-                        self.opencode_connect_thread = null;
-                    }
-
-                    // Update UI based on result
-                    if (mgr.status == .session_active) {
-                        self.showStatusMessage("Connected to Opencode");
-                        // Add welcome message to agent state
-                        if (self.getConnectingOpencodeAgentState()) |agent_state| {
-                            agent_state.addMessage(.system, "Connected to Opencode. You can start chatting!") catch {};
-                        }
-                        std.log.info("Opencode: Connection complete for tab {?d}", .{self.connecting_opencode_tab_id});
-                    } else if (mgr.status == .failed or mgr.status == .disconnected) {
-                        self.showStatusMessage("Failed to connect to Opencode");
-                        if (self.getConnectingOpencodeAgentState()) |agent_state| {
-                            agent_state.addMessage(.system, "Connection failed. Check if opencode is installed.") catch {};
-                        }
-                        // Clean up failed manager from the tab
-                        if (self.getConnectingOpencodeTab()) |tab| {
-                            if (tab.getActiveOpencodeManager()) |m| {
-                                m.deinit();
-                                self.allocator.destroy(m);
-                                tab.manager = null;
-                            }
-                        }
-                    }
-
-                    // Clear the connecting state
-                    self.connecting_opencode_tab_id = null;
-                    if (self.opencode_connect_ctx) |ctx| {
-                        self.allocator.destroy(ctx);
-                        self.opencode_connect_ctx = null;
-                    }
-                    self.needs_render = true;
-                }
-            }
-        }
-
-        // Don't poll while connection thread is active
-        if (self.opencode_connect_thread != null) {
-            return;
-        }
-
-        // Poll all tabs for Opencode updates
-        if (self.tab_manager) |*tm| {
-            for (tm.tabs.items, 0..) |*tab, tab_idx| {
-                const tab_mgr = tab.getActiveOpencodeManager() orelse continue;
-                self.pollTabOpencodeManager(tab_mgr, &tab.agent_state, tab_idx == tm.active_idx);
-            }
-        }
-    }
-
-    /// Get the Opencode manager being connected (via connecting_opencode_tab_id)
-    fn getConnectingOpencodeManager(self: *App) ?*opencode.OpencodeManager {
-        const tab_id = self.connecting_opencode_tab_id orelse return null;
-        if (self.tab_manager) |*tm| {
-            if (tm.findTabById(tab_id)) |idx| {
-                if (tm.getTab(idx)) |tab| {
-                    return tab.getActiveOpencodeManager();
-                }
-            }
-        }
-        return null;
-    }
-
-    /// Get the tab being connected to Opencode (via connecting_opencode_tab_id)
-    fn getConnectingOpencodeTab(self: *App) ?*agent.AgentTab {
-        const tab_id = self.connecting_opencode_tab_id orelse return null;
-        if (self.tab_manager) |*tm| {
-            if (tm.findTabById(tab_id)) |idx| {
-                return tm.getTab(idx);
-            }
-        }
-        return null;
-    }
-
-    /// Get the agent state for the tab being connected to Opencode
-    fn getConnectingOpencodeAgentState(self: *App) ?*agent.AgentState {
-        if (self.getConnectingOpencodeTab()) |tab| {
-            return &tab.agent_state;
-        }
-        return null;
-    }
-
-    /// Poll a single Opencode manager and route events to its agent state
-    fn pollTabOpencodeManager(self: *App, mgr: *opencode.OpencodeManager, agent_state: *agent.AgentState, is_active_tab: bool) void {
-        // Track status before polling
-        const status_before = mgr.status;
-
-        // Process events from the message queue (limit per frame to prevent lockups)
-        var events_processed: usize = 0;
-        const max_events_per_frame: usize = 50;
-        while (mgr.poll()) |ev| {
-            events_processed += 1;
-            if (events_processed > max_events_per_frame) {
-                // More events pending, will process next frame
-                self.needs_render = true;
-                break;
-            }
-            var event = ev;
-            // Use manager's allocator since events are allocated by SSE thread
-            defer event.deinit(mgr.event_allocator);
-
-            mgr.last_event_ms = std.time.milliTimestamp();
-
-            // Protocol-specific status management (must happen before unified processing)
-            switch (event) {
-                .message_chunk, .thinking_chunk => {
-                    // Content chunks are authoritative: if we're receiving them,
-                    // the agent is generating. Reset stream_complete and status
-                    // unconditionally to recover from stale completion events
-                    // (e.g. late session.idle from a previous turn).
-                    mgr.stream_complete.store(false, .release);
-                    if (mgr.status != .prompting and !mgr.pending_abort) {
-                        mgr.status = .prompting;
-                    }
-                },
-                .message_complete => {
-                    if (mgr.status == .prompting) {
-                        mgr.status = .session_active;
-                    }
-                },
-                .status_change => |new_status| {
-                    mgr.status = new_status;
-                    self.needs_render = true;
-                },
-                .err => {
-                    mgr.status = .failed;
-                },
-                .question_prompt => |prompt| {
-                    // Question prompt needs allocator for conversion - handle inline
-                    self.processOpencodeQuestionPrompt(agent_state, prompt);
-                },
-                else => {},
-            }
-
-            // Unified event processing for common events
-            if (agent.events.opencodeEventToAgentEvent(event)) |agent_event| {
-                agent.events.processAgentEvent(agent_state, agent_event);
-                self.needs_render = true;
-            }
-        }
-
-        // Mark line map dirty when subagents are running so the spinner
-        // animation gets fresh frames on each rebuild (spinner is time-based
-        // and baked into the line map text at build time).
-        if (mgr.hasActiveChildSessions()) {
-            agent_state.line_map_dirty = true;
-        }
-
-        // If we're waiting on an abort, clear it after a short idle timeout
-        if (mgr.pending_abort) {
-            const now_ms = std.time.milliTimestamp();
-            const last_event_ms = if (mgr.last_event_ms == 0) mgr.pending_abort_since_ms else mgr.last_event_ms;
-            const idle_ms = now_ms - last_event_ms;
-            const pending_ms = now_ms - mgr.pending_abort_since_ms;
-            if (!mgr.hasPendingEvents() and pending_ms > 2000 and idle_ms > 500) {
-                std.log.info("Opencode: abort timeout elapsed; clearing pending_abort", .{});
-                mgr.pending_abort = false;
-                mgr.pending_abort_since_ms = 0;
-                if (mgr.status == .prompting) {
-                    mgr.status = .session_active;
-                }
-                self.needs_render = true;
-            }
-        }
-
-        // Trigger redraw if status changed
-        if (mgr.status != status_before) {
-            self.needs_render = true;
-        }
-
-        // Auto-send staged message when Opencode returns to idle
-        if (mgr.isReadyForAutoSend() and agent_state.hasStagedPrompt() and !mgr.pending_abort) {
-            if (agent_state.isStagedShellCommand()) {
-                const staged = agent_state.getStagedPrompt();
-                agent_mode.handleShellCommand(self, agent_state, staged) catch |err| {
-                    std.log.err("Failed to run staged shell command after Opencode idle: {any}", .{err});
-                };
-                agent_state.clearStagedPrompt();
-            } else if (agent_state.takeStagedPrompt()) |staged| {
-                if (is_active_tab) {
-                    std.log.info("Opencode: Auto-sending staged message ({d} bytes)", .{staged.len});
-                }
-
-                agent_state.addMessage(.user, staged) catch {};
-
-                const prompt_copy = self.allocator.dupe(u8, staged) catch return;
-                defer self.allocator.free(prompt_copy);
-
-                mgr.sendPrompt(prompt_copy) catch |err| {
-                    std.log.err("Opencode: Failed to send staged prompt: {any}", .{err});
-                    agent_state.addMessage(.system, "Failed to send staged message") catch {};
+                    agent_state_ptr.addMessage(.system, "Failed to send staged message") catch {};
                 };
 
                 self.needs_render = true;
             }
         }
-    }
-
-    /// Process an Opencode question prompt event (needs allocator for conversion)
-    fn processOpencodeQuestionPrompt(self: *App, agent_state: *agent.AgentState, prompt: opencode.Event.QuestionPrompt) void {
-        const question_count = prompt.questions.len;
-        if (question_count > 0) {
-            const questions = self.allocator.alloc(agent.QuestionData, question_count) catch null;
-            if (questions) |question_items| {
-                defer {
-                    for (question_items) |item| {
-                        if (item.options.len > 0) self.allocator.free(item.options);
-                    }
-                    self.allocator.free(question_items);
-                }
-
-                for (prompt.questions, 0..) |question, q_idx| {
-                    const option_count = question.options.len;
-                    const option_items = self.allocator.alloc(agent.QuestionOptionData, option_count) catch {
-                        question_items[q_idx] = .{
-                            .header = question.header,
-                            .question = question.question,
-                            .options = &[_]agent.QuestionOptionData{},
-                            .multiple = question.multiple,
-                        };
-                        continue;
-                    };
-                    for (question.options, 0..) |opt, opt_idx| {
-                        option_items[opt_idx] = .{
-                            .label = opt.label,
-                            .description = opt.description,
-                        };
-                    }
-                    question_items[q_idx] = .{
-                        .header = question.header,
-                        .question = question.question,
-                        .options = option_items,
-                        .multiple = question.multiple,
-                    };
-                }
-
-                agent_state.setPendingQuestion(.{
-                    .id = prompt.id,
-                    .tool_call_id = prompt.tool_call_id,
-                    .questions = question_items,
-                }) catch |err| {
-                    std.log.err("Failed to set pending question: {any}", .{err});
-                };
-            }
-        }
-        self.needs_render = true;
     }
 
     /// Get the diff reference string for display

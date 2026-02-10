@@ -417,38 +417,11 @@ pub const TabManager = struct {
         return false;
     }
 
-    /// Poll all tabs' ACP managers for updates
-    /// Returns true if any tab had activity
-    pub fn pollAllTabs(self: *TabManager) bool {
-        var had_activity = false;
+    /// Check if any tab has manager activity (ACP or OpenCode)
+    pub fn hasAnyActivity(self: *const TabManager) bool {
         for (self.tabs.items) |*tab| {
             if (tab.manager) |m| {
-                switch (m) {
-                    .acp => |mgr| {
-                        const messages = mgr.poll() catch continue;
-                        if (messages.len > 0) {
-                            had_activity = true;
-                        }
-                    },
-                    .opencode => {},
-                }
-            }
-        }
-        return had_activity;
-    }
-
-    /// Check if any tab has Opencode activity (has manager or pending events)
-    pub fn hasAnyOpencodeActivity(self: *const TabManager) bool {
-        for (self.tabs.items) |*tab| {
-            if (tab.manager) |m| {
-                switch (m) {
-                    .opencode => |mgr| {
-                        if (mgr.status == .prompting or mgr.hasPendingEvents() or mgr.pending_abort) {
-                            return true;
-                        }
-                    },
-                    .acp => {},
-                }
+                if (m.hasActivity()) return true;
             }
         }
         return false;
