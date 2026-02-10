@@ -270,6 +270,42 @@ pub const Client = struct {
         }
     }
 
+    /// GET /session - List sessions
+    /// Returns a dynamic JSON value (caller must deinit the Parsed wrapper).
+    pub fn listSessions(self: *Client) !std.json.Parsed(std.json.Value) {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session", .{self.base_url});
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var req = self.http_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
+
+        req.sendBodiless() catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status != .ok) {
+            log.err("List sessions failed with status: {}", .{response.head.status});
+            return error.ServerError;
+        }
+
+        var body_buffer: [8192]u8 = undefined;
+        var body_reader = response.reader(&body_buffer);
+        const body = body_reader.allocRemaining(self.allocator, std.Io.Limit.limited(1024 * 1024)) catch return error.InvalidResponse;
+        defer self.allocator.free(body);
+
+        return std.json.parseFromSlice(std.json.Value, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| {
+            const preview = if (body.len > 200) body[0..200] else body;
+            log.err("Failed to parse sessions JSON: {} body={s}", .{ err, preview });
+            return error.InvalidResponse;
+        };
+    }
+
     // =========================================================================
     // Messaging
     // =========================================================================
@@ -695,6 +731,49 @@ pub const Client = struct {
 
         return parseSessionMessages(self.allocator, body);
     }
+
+    /// GET /session/{id}/message - Fetch raw messages JSON for a session
+    /// Returns parsed JSON value (caller must deinit the Parsed wrapper).
+    pub fn fetchSessionMessagesRaw(self: *Client, session_id: []const u8) !std.json.Parsed(std.json.Value) {
+        const uri_str = try std.fmt.allocPrint(self.allocator, "{s}/session/{s}/message", .{ self.base_url, session_id });
+        defer self.allocator.free(uri_str);
+
+        const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
+
+        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        defer temp_client.deinit();
+
+        var req = temp_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
+        defer req.deinit();
+
+        req.sendBodiless() catch return error.ConnectionFailed;
+
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch return error.ConnectionFailed;
+
+        if (response.head.status == .not_found) {
+            return error.SessionNotFound;
+        }
+
+        if (response.head.status != .ok) {
+            log.err("Fetch session messages failed with status: {}", .{response.head.status});
+            return error.ServerError;
+        }
+
+        var body_buffer: [8192]u8 = undefined;
+        var body_reader = response.reader(&body_buffer);
+        const body = body_reader.allocRemaining(self.allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch return error.InvalidResponse;
+        defer self.allocator.free(body);
+
+        return std.json.parseFromSlice(std.json.Value, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| {
+            const preview = if (body.len > 200) body[0..200] else body;
+            log.err("Failed to parse session messages JSON: {} body={s}", .{ err, preview });
+            return error.InvalidResponse;
+        };
+    }
 };
 
 /// Parse session messages JSON body into ModalMessage array.
@@ -873,7 +952,8 @@ test "parseSessionMessages with structured response" {
 test "parseSessionMessages with empty session" {
     const allocator = std.testing.allocator;
 
-    const json = \\{"messages":[]}
+    const json = 
+        \\{"messages":[]}
     ;
 
     const messages = try parseSessionMessages(allocator, json);
@@ -903,7 +983,8 @@ test "parseSessionMessages with raw array format" {
 test "parseSessionMessages with malformed response" {
     const allocator = std.testing.allocator;
 
-    const json = \\not valid json at all
+    const json = 
+        \\not valid json at all
     ;
 
     const result = parseSessionMessages(allocator, json);

@@ -61,6 +61,7 @@ pub const ProvidersResponse = struct {
 /// Response from GET /config
 pub const ConfigResponse = struct {
     model: ?[]const u8 = null,
+    default_agent: ?[]const u8 = null,
 };
 
 // =============================================================================

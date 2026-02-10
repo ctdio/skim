@@ -757,6 +757,11 @@ pub const OpencodeManager = struct {
             log.warn("Failed to fetch default model config: {}", .{err});
         };
 
+        // Fetch default agent config in background (don't fail connect if this fails)
+        self.fetchDefaultAgentConfig() catch |err| {
+            log.warn("Failed to fetch default agent config: {}", .{err});
+        };
+
         // Fetch available models in background (don't fail connect if this fails)
         self.fetchAvailableModels() catch |err| {
             log.warn("Failed to fetch available models: {}", .{err});
@@ -910,9 +915,7 @@ pub const OpencodeManager = struct {
         self.message_queue.drain(self.event_allocator);
 
         self.stream_complete.store(false, .release);
-        // Seed last_event_ms so the idle safety net measures from prompt send
-        // time rather than being disabled until the first SSE event arrives.
-        self.last_event_ms = std.time.milliTimestamp();
+        self.last_event_ms = 0;
 
         // Send async
         try c.sendPromptAsync(sid, prompt);
@@ -964,7 +967,7 @@ pub const OpencodeManager = struct {
         self.message_queue.drain(self.event_allocator);
         self.active_child_count.store(0, .release);
         self.stream_complete.store(false, .release);
-        self.last_event_ms = std.time.milliTimestamp();
+        self.last_event_ms = 0;
     }
 
     /// Reject/dismiss a pending question.
@@ -1292,6 +1295,102 @@ pub const OpencodeManager = struct {
         } else {
             self.clearDefaultModelId();
         }
+    }
+
+    /// Fetch default agent from server config; fallback to last session messages
+    fn fetchDefaultAgentConfig(self: *OpencodeManager) !void {
+        if (self.current_agent != null) return;
+
+        const c = self.client orelse return error.NotConnected;
+        const directory = if (self.connect_config) |cfg| cfg.cwd else null;
+
+        var parsed = c.getConfig(directory) catch |err| {
+            log.err("Failed to fetch config: {}", .{err});
+            return error.FetchFailed;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value.default_agent) |agent| {
+            if (agent.len > 0) {
+                try self.setAgent(agent);
+                return;
+            }
+        }
+
+        var global_parsed = c.getGlobalConfig() catch |err| {
+            log.warn("Failed to fetch global config: {}", .{err});
+            return error.FetchFailed;
+        };
+        defer global_parsed.deinit();
+
+        if (global_parsed.value.default_agent) |agent| {
+            if (agent.len > 0) {
+                try self.setAgent(agent);
+                return;
+            }
+        }
+
+        try self.trySetAgentFromSessionHistory();
+    }
+
+    fn trySetAgentFromSessionHistory(self: *OpencodeManager) !void {
+        if (self.current_agent != null) return;
+
+        const c = self.client orelse return error.NotConnected;
+        var parsed = c.listSessions() catch |err| {
+            log.warn("Failed to list sessions: {}", .{err});
+            return error.FetchFailed;
+        };
+        defer parsed.deinit();
+
+        const sessions = extractSessionsArray(parsed.value) orelse return;
+
+        var candidates: std.ArrayListUnmanaged(SessionCandidate) = .{};
+        defer {
+            for (candidates.items) |cand| {
+                self.allocator.free(cand.id);
+            }
+            candidates.deinit(self.allocator);
+        }
+
+        for (sessions) |session_val| {
+            if (session_val != .object) continue;
+            const id = extractStringField(session_val.object, &[_][]const u8{ "id", "sessionID", "sessionId" }) orelse continue;
+            const updated = extractSessionTimestamp(session_val.object);
+
+            const owned_id = try self.allocator.dupe(u8, id);
+            candidates.append(self.allocator, .{ .id = owned_id, .updated = updated }) catch |err| {
+                self.allocator.free(owned_id);
+                return err;
+            };
+        }
+
+        if (candidates.items.len == 0) return;
+
+        std.mem.sort(SessionCandidate, candidates.items, {}, SessionCandidate.moreRecentFirst);
+
+        for (candidates.items) |cand| {
+            if (self.session_id != null and std.mem.eql(u8, cand.id, self.session_id.?)) continue;
+            if (try self.trySetAgentFromSessionMessages(cand.id)) break;
+        }
+    }
+
+    fn trySetAgentFromSessionMessages(self: *OpencodeManager, session_id: []const u8) !bool {
+        if (self.current_agent != null) return true;
+
+        const c = self.client orelse return error.NotConnected;
+        var parsed = c.fetchSessionMessagesRaw(session_id) catch |err| {
+            log.warn("Failed to fetch session messages for {s}: {}", .{ session_id, err });
+            return false;
+        };
+        defer parsed.deinit();
+
+        const agent = extractLatestAgentFromMessages(parsed.value) orelse return false;
+        if (agent.len == 0) return false;
+
+        try self.setAgent(agent);
+        log.info("Agent set from session history: {s}", .{agent});
+        return true;
     }
 
     /// Fetch available slash commands from the server's /command endpoint
@@ -2504,6 +2603,19 @@ pub const OpencodeManager = struct {
         return null;
     }
 
+    fn extractIntField(obj: std.json.ObjectMap, keys: []const []const u8) ?i64 {
+        for (keys) |key| {
+            if (obj.get(key)) |val| {
+                switch (val) {
+                    .integer => |n| return n,
+                    .float => |n| return @intFromFloat(n),
+                    else => {},
+                }
+            }
+        }
+        return null;
+    }
+
     fn extractObjectField(obj: std.json.ObjectMap, keys: []const []const u8) ?std.json.ObjectMap {
         for (keys) |key| {
             if (obj.get(key)) |val| {
@@ -2518,6 +2630,86 @@ pub const OpencodeManager = struct {
             if (obj.get(key)) |val| return val;
         }
         return null;
+    }
+
+    const SessionCandidate = struct {
+        id: []const u8,
+        updated: i64,
+
+        pub fn moreRecentFirst(_: void, a: SessionCandidate, b: SessionCandidate) bool {
+            return a.updated > b.updated;
+        }
+    };
+
+    fn extractSessionsArray(root: std.json.Value) ?[]const std.json.Value {
+        switch (root) {
+            .array => |arr| return arr.items,
+            .object => |obj| {
+                if (obj.get("sessions")) |val| if (val == .array) return val.array.items;
+                if (obj.get("data")) |val| if (val == .array) return val.array.items;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn extractMessagesArray(root: std.json.Value) ?[]const std.json.Value {
+        switch (root) {
+            .array => |arr| return arr.items,
+            .object => |obj| {
+                if (obj.get("messages")) |val| if (val == .array) return val.array.items;
+                if (obj.get("data")) |val| if (val == .array) return val.array.items;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn extractSessionTimestamp(obj: std.json.ObjectMap) i64 {
+        if (extractObjectField(obj, &[_][]const u8{"time"})) |time_obj| {
+            if (extractIntField(time_obj, &[_][]const u8{ "updated", "created" })) |ts| return ts;
+        }
+        return 0;
+    }
+
+    fn extractLatestAgentFromMessages(root: std.json.Value) ?[]const u8 {
+        const messages = extractMessagesArray(root) orelse return null;
+        var fallback: ?[]const u8 = null;
+
+        var i: usize = messages.len;
+        while (i > 0) {
+            i -= 1;
+            const msg_val = messages[i];
+            if (msg_val != .object) continue;
+
+            const msg_obj = msg_val.object;
+            const info_obj = extractObjectField(msg_obj, &[_][]const u8{"info"});
+            var role: ?[]const u8 = null;
+            var agent: ?[]const u8 = null;
+
+            if (info_obj) |info| {
+                role = extractStringField(info, &[_][]const u8{"role"});
+                agent = extractStringField(info, &[_][]const u8{"agent"});
+            }
+
+            if (agent == null) {
+                agent = extractStringField(msg_obj, &[_][]const u8{"agent"});
+            }
+
+            if (role == null) {
+                role = extractStringField(msg_obj, &[_][]const u8{"role"});
+            }
+
+            if (agent == null) continue;
+
+            if (role == null or std.mem.eql(u8, role.?, "assistant")) {
+                return agent;
+            }
+
+            if (fallback == null) fallback = agent;
+        }
+
+        return fallback;
     }
 
     fn extractToolCallIdFromObject(obj: std.json.ObjectMap) ?[]const u8 {
