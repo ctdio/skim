@@ -6455,18 +6455,21 @@ pub const App = struct {
         // to avoid hanging the "generating" indicator indefinitely.
         // This is a fallback — the primary completion signal comes from step-finish
         // events which push message_complete immediately.
-        // Skip when subagents are active — child session events don't flow through
-        // the message queue so last_event_ms goes stale, but the agent is still working.
-        if (mgr.status == .prompting and !mgr.pending_abort and !mgr.stream_complete.load(.acquire) and !mgr.hasActiveChildSessions()) {
+        // Use a longer timeout when subagents are active since child session events
+        // don't update last_event_ms as frequently.
+        if (mgr.status == .prompting and !mgr.pending_abort and !mgr.stream_complete.load(.acquire)) {
             const now_ms = std.time.milliTimestamp();
-            if (mgr.last_event_ms != 0) {
-                const idle_ms = now_ms - mgr.last_event_ms;
-                if (!mgr.hasPendingEvents() and idle_ms > 3_000) {
-                    std.log.warn("Opencode: no events for {d}ms while prompting; clearing stale prompting state", .{idle_ms});
-                    mgr.stream_complete.store(true, .release);
-                    mgr.status = .session_active;
-                    self.needs_render = true;
+            const idle_ms = now_ms - mgr.last_event_ms;
+            const timeout: i64 = if (mgr.hasActiveChildSessions()) 10_000 else 3_000;
+            if (!mgr.hasPendingEvents() and idle_ms > timeout) {
+                std.log.warn("Opencode: no events for {d}ms while prompting; clearing stale prompting state", .{idle_ms});
+                if (mgr.hasActiveChildSessions()) {
+                    mgr.active_child_count.store(0, .release);
+                    mgr.deferred_completion = false;
                 }
+                mgr.stream_complete.store(true, .release);
+                mgr.status = .session_active;
+                self.needs_render = true;
             }
         }
 

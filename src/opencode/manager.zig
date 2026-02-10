@@ -899,6 +899,7 @@ pub const OpencodeManager = struct {
         self.pending_abort = false;
         self.pending_abort_since_ms = 0;
         self.deferred_completion = false;
+        self.active_child_count.store(0, .release);
         self.parent_tokens.deinitMessageId(self.allocator);
         self.parent_tokens = .{};
 
@@ -909,9 +910,9 @@ pub const OpencodeManager = struct {
         self.message_queue.drain(self.event_allocator);
 
         self.stream_complete.store(false, .release);
-        // Reset last_event_ms so the idle safety net doesn't fire immediately
-        // using the stale timestamp from the previous turn.
-        self.last_event_ms = 0;
+        // Seed last_event_ms so the idle safety net measures from prompt send
+        // time rather than being disabled until the first SSE event arrives.
+        self.last_event_ms = std.time.milliTimestamp();
 
         // Send async
         try c.sendPromptAsync(sid, prompt);
@@ -961,8 +962,9 @@ pub const OpencodeManager = struct {
         // continues generating after receiving the answer. This mirrors the
         // drain + reset in sendPrompt().
         self.message_queue.drain(self.event_allocator);
+        self.active_child_count.store(0, .release);
         self.stream_complete.store(false, .release);
-        self.last_event_ms = 0;
+        self.last_event_ms = std.time.milliTimestamp();
     }
 
     /// Reject/dismiss a pending question.
@@ -1703,6 +1705,11 @@ pub const OpencodeManager = struct {
                             self.trackChildTokenUsage(props, event_sid);
                         }
                         self.trackChildToolEvent(props, event_sid);
+                        // Child session.idle provides a secondary cleanup path
+                        // when the tool result doesn't contain metadata.sessionId.
+                        if (event_type == .session_idle) {
+                            self.removeChildToolCount(event_sid);
+                        }
                         return;
                     }
                 }
@@ -1769,6 +1776,8 @@ pub const OpencodeManager = struct {
                                     if (reason != null and isStepFinishReason(reason.?)) {
                                         if (!self.hasActiveChildSessions()) {
                                             self.message_queue.push(.{ .message_complete = {} });
+                                        } else {
+                                            self.deferred_completion = true;
                                         }
                                     }
                                 } else if (isTextPartType(ptype) and partHasEndTime(part_obj.?)) {
@@ -2242,7 +2251,9 @@ pub const OpencodeManager = struct {
         var was_tracked = false;
         if (self.child_tool_counts.fetchRemove(child_sid)) |entry| {
             self.allocator.free(entry.key);
-            _ = self.active_child_count.fetchSub(1, .release);
+            if (self.active_child_count.load(.acquire) > 0) {
+                _ = self.active_child_count.fetchSub(1, .release);
+            }
             was_tracked = true;
         }
         if (self.child_last_tool.fetchRemove(child_sid)) |entry| {
