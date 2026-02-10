@@ -749,26 +749,25 @@ pub const OpencodeManager = struct {
             return error.ThreadSpawnFailed;
         };
 
-        self.status = .session_active;
-        log.info("Connected successfully", .{});
-
-        // Fetch default model config in background (don't fail connect if this fails)
+        // Fetch non-critical config before signaling session_active.
+        // The main thread joins the connect thread as soon as isInitializing()
+        // returns false, so these must complete first to avoid blocking the UI.
         self.fetchDefaultModelConfig() catch |err| {
             log.warn("Failed to fetch default model config: {}", .{err});
         };
 
-        // Fetch default agent config in background (don't fail connect if this fails)
         self.fetchDefaultAgentConfig() catch |err| {
             log.warn("Failed to fetch default agent config: {}", .{err});
         };
 
-        // Fetch available models in background (don't fail connect if this fails)
         self.fetchAvailableModels() catch |err| {
             log.warn("Failed to fetch available models: {}", .{err});
         };
 
-        // Fetch available slash commands (don't fail connect if this fails)
         self.fetchAvailableCommands();
+
+        self.status = .session_active;
+        log.info("Connected successfully", .{});
     }
 
     /// Disconnect from the server
