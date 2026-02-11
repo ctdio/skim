@@ -841,14 +841,38 @@ pub const ChatLineMap = struct {
     }
 
     fn addToolResult(self: *ChatLineMap, global_line: *usize, msg_idx: usize, msg: Message) !void {
-        // Skip showing output for MCP file tools - they have custom diff rendering
+        // Skip showing output for MCP file edit/write tools - they have custom diff rendering
         if (msg.tool_name) |name| {
-            if (std.mem.startsWith(u8, name, "mcp__acp__Read") or
-                std.mem.startsWith(u8, name, "mcp__acp__Edit") or
+            if (std.mem.startsWith(u8, name, "mcp__acp__Edit") or
                 std.mem.startsWith(u8, name, "mcp__acp__Write"))
             {
                 return;
             }
+        }
+
+        // Read tools get a minimal one-line summary instead of full output
+        if (isReadTool(msg.tool_name)) {
+            if (msg.tool_stdout) |stdout| {
+                if (stdout.len > 0) {
+                    const line_count = countLines(stdout);
+                    const summary = if (line_count == 1)
+                        try self.allocator.dupe(u8, "↳ (1 line)")
+                    else
+                        try std.fmt.allocPrint(self.allocator, "↳ ({d} lines)", .{line_count});
+                    try self.strings.append(self.allocator, summary);
+
+                    try self.records.append(self.allocator, .{
+                        .global_line = global_line.*,
+                        .line_type = .{ .tool_result = .{ .msg_idx = msg_idx } },
+                        .text = summary,
+                        .style = .{ .fg = Color.dim_gray },
+                        .indent = 1,
+                    });
+                    global_line.* += 1;
+                    return;
+                }
+            }
+            // Fall through to the "No content" fallback below
         }
 
         const max_output_lines = 8;
@@ -957,6 +981,22 @@ pub const ChatLineMap = struct {
             .indent = 1,
         });
         global_line.* += 1;
+    }
+
+    fn isReadTool(name: ?[]const u8) bool {
+        const n = name orelse return false;
+        return std.mem.startsWith(u8, n, "mcp__acp__Read") or
+            std.ascii.eqlIgnoreCase(n, "Read");
+    }
+
+    fn countLines(text: []const u8) usize {
+        var count: usize = 0;
+        var iter = std.mem.splitScalar(u8, text, '\n');
+        while (iter.next()) |line| {
+            if (line.len == 0 and iter.peek() == null) continue;
+            count += 1;
+        }
+        return count;
     }
 
     /// Braille spinner characters for subagent running animation
