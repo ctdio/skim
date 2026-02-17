@@ -205,6 +205,18 @@ pub fn build(b: *std.Build) void {
     const run_opencode_tests = b.addRunArtifact(opencode_tests);
     test_step.dependOn(&run_opencode_tests.step);
 
+    // Codex module tests
+    const codex_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/codex/codex.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    codex_tests.root_module.addImport("build_options", build_options_module);
+    const run_codex_tests = b.addRunArtifact(codex_tests);
+    test_step.dependOn(&run_codex_tests.step);
+
     // Markdown module tests
     const markdown_tests = b.addTest(.{
         .root_module = b.createModule(.{

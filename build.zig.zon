@@ -8,7 +8,7 @@
         // TUI library - use main branch for Zig 0.15 support
         .vaxis = .{
             .url = "git+https://github.com/rockorager/libvaxis#main",
-            .hash = "12200854d8757a4195cdb8a9db9098050fc9de4800067606167238ce38710f4ef711",
+            .hash = "1220b938635a5d07cd9ea827f7f564bb43cc81ecbe76996e6dc40a16f2d1d3e11a77",
         },
 
         // Official tree-sitter Zig bindings (latest commit with Zig 0.15 support)
