@@ -31,6 +31,9 @@ pub const CodexManager = struct {
     approval_policy: ?protocol.ApprovalPolicy,
     reasoning_effort: ?protocol.ReasoningEffort,
 
+    // Turn state (populated during active turn)
+    turn_id: ?[]const u8,
+
     // Request ID counter for outgoing requests
     request_id_counter: i64,
 
@@ -53,6 +56,9 @@ pub const CodexManager = struct {
         HandshakeFailed,
         ThreadStartFailed,
         ThreadStartTimeout,
+        TurnStartFailed,
+        TurnSteerFailed,
+        TurnInterruptFailed,
     } || Allocator.Error || process_mod.CodexProcess.SpawnError || transport_mod.StdioTransport.Error;
 
     pub fn init(allocator: Allocator) CodexManager {
@@ -67,6 +73,7 @@ pub const CodexManager = struct {
             .model_provider = null,
             .approval_policy = null,
             .reasoning_effort = null,
+            .turn_id = null,
             .request_id_counter = 0,
             .pending_messages = .{},
         };
@@ -222,10 +229,122 @@ pub const CodexManager = struct {
         return items;
     }
 
+    // =========================================================================
+    // Turn lifecycle
+    // =========================================================================
+
+    /// Start a new turn with the given text input.
+    pub fn startTurn(self: *CodexManager, text: []const u8) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+        if (self.status != .thread_active) return error.NotConnected;
+
+        const thread_id = self.thread_id orelse return error.NotConnected;
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        var text_input = [_]protocol.InputItem{
+            .{ .text = .{ .text = text } },
+        };
+        const msg = encoder.encodeTurnStart(req_id.number, .{
+            .thread_id = thread_id,
+            .input = &text_input,
+        }) catch return error.TurnStartFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+        self.status = .turn_active;
+    }
+
+    /// Steer an active turn with additional text input.
+    pub fn steerTurn(self: *CodexManager, text: []const u8) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+        if (self.status != .turn_active) return error.NotConnected;
+
+        const thread_id = self.thread_id orelse return error.NotConnected;
+        const turn_id = self.turn_id orelse return error.NotConnected;
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        var text_input = [_]protocol.InputItem{
+            .{ .text = .{ .text = text } },
+        };
+        const msg = encoder.encodeTurnSteer(req_id.number, .{
+            .thread_id = thread_id,
+            .turn_id = turn_id,
+            .input = &text_input,
+        }) catch return error.TurnSteerFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+    }
+
+    /// Interrupt the currently active turn.
+    pub fn interruptTurn(self: *CodexManager) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+        if (self.status != .turn_active) return error.NotConnected;
+
+        const thread_id = self.thread_id orelse return error.NotConnected;
+        const turn_id = self.turn_id orelse return error.NotConnected;
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeTurnInterrupt(req_id.number, thread_id, turn_id) catch return error.TurnInterruptFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+    }
+
+    // =========================================================================
+    // Event processing
+    // =========================================================================
+
+    /// Classify a decoded message into a typed CodexEvent.
+    /// Returns null for messages that should be filtered out (codex/event/* notifications).
+    pub fn processMessage(self: *CodexManager, msg: codec.DecodedMessage) ?CodexEvent {
+        switch (msg) {
+            .notification => |n| return self.processNotification(n.method, n.params_json),
+            .server_request => |r| return self.processNotification(r.method, r.params_json),
+            .response => return null,
+        }
+    }
+
     pub fn deinit(self: *CodexManager) void {
         self.disconnect();
         self.pending_messages.deinit(self.allocator);
     }
+
+    // =========================================================================
+    // CodexEvent — typed events produced by processMessage
+    // =========================================================================
+
+    pub const CodexEvent = union(enum) {
+        text_delta: DeltaEvent,
+        reasoning_delta: DeltaEvent,
+        command_output_delta: DeltaEvent,
+        item_started: ItemEvent,
+        item_completed: ItemEvent,
+        turn_completed: TurnCompletedEvent,
+        plan_updated: PlanUpdatedEvent,
+        unknown: void,
+
+        pub const DeltaEvent = struct {
+            thread_id: []const u8,
+            turn_id: []const u8,
+            item_id: []const u8,
+            delta: []const u8,
+        };
+
+        pub const ItemEvent = struct {
+            thread_id: []const u8,
+            turn_id: []const u8,
+            item: protocol.Item,
+        };
+
+        pub const TurnCompletedEvent = struct {
+            thread_id: []const u8,
+            turn: protocol.Turn,
+        };
+
+        pub const PlanUpdatedEvent = struct {
+            thread_id: []const u8,
+            turn_id: []const u8,
+            plan_steps: []const u8,
+        };
+    };
 
     // -------------------------------------------------------------------------
     // Internal helpers
@@ -323,6 +442,9 @@ pub const CodexManager = struct {
 
         self.approval_policy = null;
         self.reasoning_effort = null;
+
+        if (self.turn_id) |tid| self.allocator.free(tid);
+        self.turn_id = null;
     }
 
     fn freePendingMessages(self: *CodexManager) void {
@@ -330,6 +452,239 @@ pub const CodexManager = struct {
             msg.deinit(self.allocator);
         }
         self.pending_messages.clearRetainingCapacity();
+    }
+
+    fn processNotification(self: *CodexManager, method: []const u8, params_json: ?[]const u8) ?CodexEvent {
+        // Filter out codex/event/* low-level notifications (AD-3)
+        if (std.mem.startsWith(u8, method, "codex/event/")) return null;
+
+        const Method = enum {
+            agent_message_delta,
+            reasoning_delta,
+            command_output_delta,
+            item_started,
+            item_completed,
+            turn_completed,
+        };
+
+        const method_map = std.StaticStringMap(Method).initComptime(.{
+            .{ "item/agentMessage/delta", .agent_message_delta },
+            .{ "item/reasoning/summaryTextDelta", .reasoning_delta },
+            .{ "item/commandExecution/outputDelta", .command_output_delta },
+            .{ "item/started", .item_started },
+            .{ "item/completed", .item_completed },
+            .{ "turn/completed", .turn_completed },
+        });
+
+        const variant = method_map.get(method) orelse return .{ .unknown = {} };
+        const json = params_json orelse return .{ .unknown = {} };
+
+        return switch (variant) {
+            .agent_message_delta => self.parseDeltaEvent(json, .text_delta),
+            .reasoning_delta => self.parseDeltaEvent(json, .reasoning_delta),
+            .command_output_delta => self.parseDeltaEvent(json, .command_output_delta),
+            .item_started => self.parseItemEvent(json, .item_started),
+            .item_completed => self.parseItemEvent(json, .item_completed),
+            .turn_completed => self.parseTurnCompleted(json),
+        };
+    }
+
+    const DeltaTag = enum { text_delta, reasoning_delta, command_output_delta };
+
+    fn parseDeltaEvent(self: *CodexManager, json: []const u8, tag: DeltaTag) ?CodexEvent {
+        const RawDelta = struct {
+            threadId: ?[]const u8 = null,
+            turnId: ?[]const u8 = null,
+            itemId: ?[]const u8 = null,
+            delta: ?struct {
+                text: ?[]const u8 = null,
+            } = null,
+        };
+
+        // Parse without allocating — string slices reference into `json` (which is
+        // params_json, alive until the DecodedMessage is freed by the caller).
+        const parsed = std.json.parseFromSlice(RawDelta, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+        }) catch return null;
+        defer parsed.deinit();
+
+        const r = parsed.value;
+        const delta_text = if (r.delta) |d| d.text orelse "" else "";
+
+        // Update turn_id if we see one from the server
+        if (r.turnId) |tid| {
+            if (self.turn_id == null) {
+                self.turn_id = self.allocator.dupe(u8, tid) catch null;
+            }
+        }
+
+        const event = CodexEvent.DeltaEvent{
+            .thread_id = r.threadId orelse "",
+            .turn_id = r.turnId orelse "",
+            .item_id = r.itemId orelse "",
+            .delta = delta_text,
+        };
+
+        return switch (tag) {
+            .text_delta => .{ .text_delta = event },
+            .reasoning_delta => .{ .reasoning_delta = event },
+            .command_output_delta => .{ .command_output_delta = event },
+        };
+    }
+
+    const ItemTag = enum { item_started, item_completed };
+
+    fn parseItemEvent(self: *CodexManager, json: []const u8, tag: ItemTag) ?CodexEvent {
+        // Zero-alloc parse: string slices reference into `json` (which is params_json,
+        // alive until the DecodedMessage is freed by the caller).
+        const RawItemParams = struct {
+            threadId: ?[]const u8 = null,
+            turnId: ?[]const u8 = null,
+            item: ?RawItemCompact = null,
+        };
+
+        const parsed = std.json.parseFromSlice(RawItemParams, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+        }) catch return null;
+        defer parsed.deinit();
+
+        const r = parsed.value;
+        const raw_item = r.item orelse return null;
+
+        // Update turn_id from item events
+        if (r.turnId) |tid| {
+            if (self.turn_id == null) {
+                self.turn_id = self.allocator.dupe(u8, tid) catch null;
+            }
+        }
+
+        const item = convertCompactItem(raw_item);
+
+        const event = CodexEvent.ItemEvent{
+            .thread_id = r.threadId orelse "",
+            .turn_id = r.turnId orelse "",
+            .item = item,
+        };
+
+        return switch (tag) {
+            .item_started => .{ .item_started = event },
+            .item_completed => .{ .item_completed = event },
+        };
+    }
+
+    fn parseTurnCompleted(self: *CodexManager, json: []const u8) ?CodexEvent {
+        // Zero-alloc parse: string slices reference into `json` (params_json)
+        const RawTurnCompleted = struct {
+            threadId: ?[]const u8 = null,
+            turn: ?struct {
+                id: []const u8 = "",
+                status: ?[]const u8 = null,
+            } = null,
+        };
+
+        const parsed = std.json.parseFromSlice(RawTurnCompleted, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+        }) catch return null;
+        defer parsed.deinit();
+
+        const r = parsed.value;
+        const raw_turn = r.turn orelse return null;
+
+        // Turn is done — transition back to thread_active
+        self.status = .thread_active;
+
+        // Free turn_id since the turn is complete
+        if (self.turn_id) |tid| {
+            self.allocator.free(tid);
+            self.turn_id = null;
+        }
+
+        return .{ .turn_completed = .{
+            .thread_id = r.threadId orelse "",
+            .turn = .{
+                .id = raw_turn.id,
+                .status = if (raw_turn.status) |s| protocol.TurnStatus.fromString(s) else null,
+            },
+        } };
+    }
+
+    /// Compact item structure for zero-alloc parsing.
+    /// String fields borrow directly from the source JSON.
+    const RawItemCompact = struct {
+        type: ?[]const u8 = null,
+        id: ?[]const u8 = null,
+        text: ?[]const u8 = null,
+        command: ?[]const u8 = null,
+        cwd: ?[]const u8 = null,
+        exitCode: ?i32 = null,
+        stdout: ?[]const u8 = null,
+        stderr: ?[]const u8 = null,
+        status: ?[]const u8 = null,
+        path: ?[]const u8 = null,
+        diff: ?[]const u8 = null,
+        serverName: ?[]const u8 = null,
+        toolName: ?[]const u8 = null,
+        arguments: ?[]const u8 = null,
+        output: ?[]const u8 = null,
+    };
+
+    fn convertCompactItem(raw: RawItemCompact) protocol.Item {
+        const item_type = raw.type orelse return .{ .unknown = {} };
+        const item_id = raw.id orelse "";
+
+        const map = std.StaticStringMap(enum {
+            user_message,
+            agent_message,
+            reasoning,
+            command_execution,
+            file_change,
+            mcp_tool_call,
+        }).initComptime(.{
+            .{ "userMessage", .user_message },
+            .{ "agentMessage", .agent_message },
+            .{ "reasoning", .reasoning },
+            .{ "commandExecution", .command_execution },
+            .{ "fileChange", .file_change },
+            .{ "mcpToolCall", .mcp_tool_call },
+        });
+
+        const variant = map.get(item_type) orelse return .{ .unknown = {} };
+
+        return switch (variant) {
+            .user_message => .{ .user_message = .{ .id = item_id } },
+            .agent_message => .{ .agent_message = .{
+                .id = item_id,
+                .text = raw.text orelse "",
+            } },
+            .reasoning => .{ .reasoning = .{
+                .id = item_id,
+                .summary = &.{},
+                .content = &.{},
+            } },
+            .command_execution => .{ .command_execution = .{
+                .id = item_id,
+                .command = raw.command,
+                .cwd = raw.cwd,
+                .exit_code = raw.exitCode,
+                .stdout = raw.stdout,
+                .stderr = raw.stderr,
+                .status = if (raw.status) |s| protocol.CommandExecutionStatus.fromString(s) orelse .pending else .pending,
+            } },
+            .file_change => .{ .file_change = .{
+                .id = item_id,
+                .path = raw.path,
+                .diff = raw.diff,
+                .status = raw.status,
+            } },
+            .mcp_tool_call => .{ .mcp_tool_call = .{
+                .id = item_id,
+                .server_name = raw.serverName,
+                .tool_name = raw.toolName,
+                .arguments = raw.arguments,
+                .output = raw.output,
+                .status = raw.status,
+            } },
+        };
     }
 };
 
@@ -398,6 +753,157 @@ fn codexAvailable() bool {
     defer std.testing.allocator.free(result.stdout);
     defer std.testing.allocator.free(result.stderr);
     return result.term.Exited == 0;
+}
+
+test "startTurn fails when not in thread_active state" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const result = manager.startTurn("hello");
+    try std.testing.expectError(error.NotConnected, result);
+}
+
+test "interruptTurn fails when not in turn_active state" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    manager.status = .thread_active;
+    const result = manager.interruptTurn();
+    try std.testing.expectError(error.NotConnected, result);
+}
+
+test "processMessage with agentMessage/delta notification returns text_delta" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","delta":{"text":"Hello"}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .text_delta);
+    try std.testing.expectEqualStrings("Hello", event.?.text_delta.delta);
+}
+
+test "processMessage with codex/event/* method returns null (filtered)" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"codex/event/something","params":{"data":"test"}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event == null);
+}
+
+test "processMessage with turn/completed returns turn_completed and transitions status" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    manager.status = .turn_active;
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1","status":"completed"}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .turn_completed);
+    try std.testing.expectEqual(CodexManager.Status.thread_active, manager.status);
+}
+
+test "processMessage with reasoning delta returns reasoning_delta" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-2","delta":{"text":"Thinking..."}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .reasoning_delta);
+    try std.testing.expectEqualStrings("Thinking...", event.?.reasoning_delta.delta);
+}
+
+test "processMessage with item/started returns item_started" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/started","params":{"threadId":"t1","turnId":"turn-1","item":{"type":"commandExecution","id":"cmd-1","command":"ls -la"}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .item_started);
+    try std.testing.expect(event.?.item_started.item == .command_execution);
+}
+
+test "processMessage with unknown method returns unknown" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"future/unknown","params":{"data":"test"}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .unknown);
+}
+
+test "processMessage with response returns null" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"id":1,"result":{"data":"test"}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event == null);
+}
+
+test "processMessage turn_id tracking from delta events" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    try std.testing.expect(manager.turn_id == null);
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"my-turn","itemId":"item-1","delta":{"text":"Hi"}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    _ = manager.processMessage(msg);
+    try std.testing.expect(manager.turn_id != null);
+    try std.testing.expectEqualStrings("my-turn", manager.turn_id.?);
 }
 
 test "codex manager handshake" {

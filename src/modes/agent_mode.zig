@@ -1054,7 +1054,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                         const interrupted = if (active_tab) |t| (if (t.manager) |m| m.cancelPrompt() else false) else false;
                         const interrupted_opencode = if (active_tab) |t| (if (t.manager) |m| switch (m) {
                             .opencode => interrupted,
-                            .acp => false,
+                            .acp, .codex => false,
                         } else false) else false;
                         if (interrupted) {
                             std.log.info("Agent: Interrupted via staged message immediate send", .{});
@@ -1646,7 +1646,7 @@ pub fn sendPromptToActiveManager(app: *App, text: []const u8) !void {
         return;
     }
 
-    // Protocol-specific content building (ACP handles @file references, OpenCode is simpler)
+    // Protocol-specific content building (ACP handles @file references, OpenCode/Codex are simpler)
     switch (m) {
         .opencode => |mgr| {
             if (std.mem.indexOf(u8, text, "@") != null) {
@@ -1659,6 +1659,15 @@ pub fn sendPromptToActiveManager(app: *App, text: []const u8) !void {
             mgr.sendPrompt(text) catch |err| {
                 std.log.err("Opencode: Failed to send prompt: {any}", .{err});
                 try agent_state.addMessage(.system, "Failed to send prompt to Opencode");
+            };
+        },
+        .codex => |mgr| {
+            if (agent_state.hasQueuedShellOutputs()) {
+                _ = agent_state.takeQueuedShellOutputs();
+            }
+            mgr.startTurn(text) catch |err| {
+                std.log.err("Codex: Failed to start turn: {any}", .{err});
+                try agent_state.addMessage(.system, "Failed to send prompt to Codex");
             };
         },
         .acp => |mgr| {

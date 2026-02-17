@@ -20,8 +20,9 @@ pub const EnvVar = struct {
 
 /// Agent protocol type
 pub const Protocol = enum {
-    acp, // Agent Client Protocol (default, used by Claude Code, Codex)
+    acp, // Agent Client Protocol (default, used by Claude Code)
     opencode, // HTTP + SSE based protocol
+    codex, // Codex app-server protocol (stdio JSON-RPC without jsonrpc field)
 };
 
 /// Standard ACP agent server config with skim extensions
@@ -204,6 +205,8 @@ fn parseAgentServer(allocator: Allocator, name: []const u8, obj: std.json.Object
         if (proto_val == .string) {
             if (std.mem.eql(u8, proto_val.string, "opencode")) {
                 agent.protocol = .opencode;
+            } else if (std.mem.eql(u8, proto_val.string, "codex")) {
+                agent.protocol = .codex;
             }
             // "acp" or unknown values default to .acp (already set)
         }

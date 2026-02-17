@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 const AgentState = @import("state.zig").AgentState;
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const opencode = @import("../opencode/opencode.zig");
+const codex = @import("../codex/codex.zig");
 pub const ManagerHandle = @import("manager_handle.zig").ManagerHandle;
 
 /// Maximum number of tabs allowed
@@ -60,6 +61,7 @@ pub const AgentTab = struct {
                         self.allocator.destroy(mgr);
                     }
                 },
+                .codex => |mgr| self.allocator.destroy(mgr),
             }
         }
     }
@@ -70,6 +72,7 @@ pub const AgentTab = struct {
             switch (m) {
                 .acp => |mgr| return mgr,
                 .opencode => return error.AlreadyConnected,
+                .codex => return error.AlreadyConnected,
             }
         }
 
@@ -148,6 +151,7 @@ pub const AgentTab = struct {
             return switch (m) {
                 .acp => |mgr| mgr.getPendingPermission() != null,
                 .opencode => false,
+                .codex => false, // Phase 4 handles approvals
             };
         }
         return false;
@@ -159,6 +163,7 @@ pub const AgentTab = struct {
             return switch (m) {
                 .opencode => |mgr| mgr,
                 .acp => null,
+                .codex => null,
             };
         }
         return null;
@@ -170,6 +175,7 @@ pub const AgentTab = struct {
             return switch (m) {
                 .acp => |mgr| mgr,
                 .opencode => null,
+                .codex => null,
             };
         }
         return null;
@@ -181,12 +187,29 @@ pub const AgentTab = struct {
             switch (m) {
                 .opencode => |mgr| return mgr,
                 .acp => return error.AlreadyConnected,
+                .codex => return error.AlreadyConnected,
             }
         }
 
         const mgr = try self.allocator.create(opencode.OpencodeManager);
         mgr.* = opencode.OpencodeManager.init(self.allocator);
         self.manager = .{ .opencode = mgr };
+        return mgr;
+    }
+
+    /// Create and attach a Codex manager for this tab
+    pub fn createCodexManager(self: *AgentTab) !*codex.CodexManager {
+        if (self.manager) |m| {
+            switch (m) {
+                .codex => |mgr| return mgr,
+                .acp => return error.AlreadyConnected,
+                .opencode => return error.AlreadyConnected,
+            }
+        }
+
+        const mgr = try self.allocator.create(codex.CodexManager);
+        mgr.* = codex.CodexManager.init(self.allocator);
+        self.manager = .{ .codex = mgr };
         return mgr;
     }
 
@@ -202,6 +225,7 @@ pub const AgentTab = struct {
                         self.allocator.destroy(mgr);
                     }
                 },
+                .codex => |mgr| self.allocator.destroy(mgr),
             }
             self.manager = null;
         }

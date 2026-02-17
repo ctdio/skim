@@ -247,8 +247,9 @@ pub const AcpManager = struct {
 
     /// Protocol type for agent communication
     pub const Protocol = enum {
-        acp, // Agent Client Protocol (default, used by Claude Code, Codex)
+        acp, // Agent Client Protocol (default, used by Claude Code)
         opencode, // HTTP + SSE based protocol
+        codex, // Codex app-server protocol
     };
 
     pub const AgentInfo = struct {

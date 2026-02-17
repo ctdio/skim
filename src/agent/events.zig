@@ -1,4 +1,4 @@
-/// Unified event type for both ACP and OpenCode protocol events.
+/// Unified event type for ACP, OpenCode, and Codex protocol events.
 /// Provides a single dispatch point for routing protocol events to AgentState.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -11,6 +11,8 @@ const protocol = @import("../acp/protocol.zig");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const opencode_manager = @import("../opencode/manager.zig");
 const OpencodeEvent = opencode_manager.Event;
+const codex_manager = @import("../codex/manager.zig");
+const CodexEvent = codex_manager.CodexManager.CodexEvent;
 
 /// A unified event representing an update from either ACP or OpenCode.
 /// Provides a single processAgentEvent function for routing events to AgentState.
@@ -244,6 +246,60 @@ pub fn opencodeEventToAgentEvent(event: OpencodeEvent) ?AgentEvent {
     };
 }
 
+/// Convert a Codex event to a unified AgentEvent.
+/// Returns null for events that have no agent-side representation yet.
+pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
+    return switch (event) {
+        .text_delta => |d| .{ .text_chunk = d.delta },
+        .reasoning_delta => |d| .{ .thinking_chunk = d.delta },
+        .command_output_delta => |d| .{ .tool_update = .{
+            .tool_call_id = d.item_id,
+            .status = .running,
+            .stdout = d.delta,
+            .stderr = null,
+        } },
+        .item_started => |e| blk: {
+            switch (e.item) {
+                .command_execution => |cmd| break :blk .{ .tool_call = .{
+                    .tool_call_id = cmd.id,
+                    .tool_name = null,
+                    .title = cmd.command orelse "Command",
+                    .command = cmd.command,
+                } },
+                .file_change => |fc| break :blk .{ .tool_call = .{
+                    .tool_call_id = fc.id,
+                    .tool_name = null,
+                    .title = fc.path orelse "File change",
+                    .command = null,
+                } },
+                .agent_message => break :blk null,
+                .user_message, .reasoning, .mcp_tool_call, .unknown => break :blk null,
+            }
+        },
+        .item_completed => |e| blk: {
+            switch (e.item) {
+                .agent_message => break :blk .{ .message_complete = {} },
+                .command_execution => |cmd| break :blk .{ .tool_update = .{
+                    .tool_call_id = cmd.id,
+                    .status = if (cmd.exit_code) |ec| (if (ec == 0) .completed else .failed) else .completed,
+                    .stdout = cmd.stdout,
+                    .stderr = cmd.stderr,
+                } },
+                .file_change => |fc| break :blk .{ .tool_update = .{
+                    .tool_call_id = fc.id,
+                    .status = .completed,
+                    .stdout = fc.diff,
+                    .stderr = null,
+                } },
+                .user_message, .reasoning, .mcp_tool_call, .unknown => break :blk null,
+            }
+        },
+        .turn_completed => .{ .message_complete = {} },
+        .plan_updated => null,
+        .unknown => null,
+    };
+}
+
 // =============================================================================
 // Subagent info conversion (OpenCode Event → Agent state types)
 // =============================================================================
@@ -317,4 +373,116 @@ fn convertToolStatus(s: opencode_manager.ToolStatus) Message.ToolStatus {
         .completed => .completed,
         .failed => .failed,
     };
+}
+
+// =============================================================================
+// Tests — codexEventToAgentEvent
+// =============================================================================
+
+const codex_protocol = @import("../codex/protocol.zig");
+
+test "codexEventToAgentEvent: text_delta maps to text_chunk" {
+    const event = CodexEvent{ .text_delta = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item_id = "item-1",
+        .delta = "Hello world",
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .text_chunk);
+    try std.testing.expectEqualStrings("Hello world", result.?.text_chunk);
+}
+
+test "codexEventToAgentEvent: reasoning_delta maps to thinking_chunk" {
+    const event = CodexEvent{ .reasoning_delta = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item_id = "item-1",
+        .delta = "Considering...",
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .thinking_chunk);
+    try std.testing.expectEqualStrings("Considering...", result.?.thinking_chunk);
+}
+
+test "codexEventToAgentEvent: item_started command_execution maps to tool_call" {
+    const event = CodexEvent{ .item_started = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item = .{ .command_execution = .{
+            .id = "cmd-1",
+            .command = "ls -la",
+        } },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .tool_call);
+    try std.testing.expectEqualStrings("cmd-1", result.?.tool_call.tool_call_id);
+    try std.testing.expectEqualStrings("ls -la", result.?.tool_call.title);
+}
+
+test "codexEventToAgentEvent: item_completed command_execution maps to tool_update" {
+    const event = CodexEvent{ .item_completed = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item = .{ .command_execution = .{
+            .id = "cmd-1",
+            .command = "ls -la",
+            .exit_code = 0,
+            .stdout = "file1\nfile2",
+        } },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .tool_update);
+    try std.testing.expectEqual(Message.ToolStatus.completed, result.?.tool_update.status);
+    try std.testing.expectEqualStrings("file1\nfile2", result.?.tool_update.stdout.?);
+}
+
+test "codexEventToAgentEvent: item_completed command_execution with non-zero exit maps to failed" {
+    const event = CodexEvent{ .item_completed = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item = .{ .command_execution = .{
+            .id = "cmd-1",
+            .command = "false",
+            .exit_code = 1,
+        } },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .tool_update);
+    try std.testing.expectEqual(Message.ToolStatus.failed, result.?.tool_update.status);
+}
+
+test "codexEventToAgentEvent: turn_completed maps to message_complete" {
+    const event = CodexEvent{ .turn_completed = .{
+        .thread_id = "t1",
+        .turn = .{ .id = "turn-1", .status = .completed },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .message_complete);
+}
+
+test "codexEventToAgentEvent: unknown maps to null" {
+    const event = CodexEvent{ .unknown = {} };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result == null);
+}
+
+test "codexEventToAgentEvent: command_output_delta maps to tool_update running" {
+    const event = CodexEvent{ .command_output_delta = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item_id = "cmd-1",
+        .delta = "output line",
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .tool_update);
+    try std.testing.expectEqual(Message.ToolStatus.running, result.?.tool_update.status);
+    try std.testing.expectEqualStrings("output line", result.?.tool_update.stdout.?);
 }

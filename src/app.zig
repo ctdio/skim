@@ -44,6 +44,7 @@ const build_options = @import("build_options");
 const graphite = @import("git/graphite.zig");
 const acp = @import("acp/acp.zig");
 const opencode = @import("opencode/opencode.zig");
+const codex_mod = @import("codex/codex.zig");
 
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
@@ -121,6 +122,15 @@ pub const OpencodeConnectContext = struct {
     cwd: ?[]const u8,
 };
 
+/// Context for Codex connection thread
+pub const CodexConnectContext = struct {
+    mgr: *codex_mod.CodexManager,
+    command: []const u8,
+    args: ?[]const []const u8,
+    cwd: ?[]const u8,
+    model: ?[]const u8,
+};
+
 /// Unified pending connection state (replaces separate ACP/Opencode fields)
 pub const PendingConnection = struct {
     thread: std.Thread,
@@ -130,6 +140,7 @@ pub const PendingConnection = struct {
     pub const ConnectContext = union(enum) {
         acp: *AcpConnectContext,
         opencode: *OpencodeConnectContext,
+        codex: *CodexConnectContext,
     };
 };
 
@@ -1138,10 +1149,11 @@ pub const App = struct {
             switch (conn.ctx) {
                 .acp => |ctx| self.allocator.destroy(ctx),
                 .opencode => |ctx| self.allocator.destroy(ctx),
+                .codex => |ctx| self.allocator.destroy(ctx),
             }
             self.pending_connection = null;
         }
-        // Clean up tab manager (handles per-tab ACP and Opencode managers)
+        // Clean up tab manager (handles per-tab ACP, Opencode, and Codex managers)
         if (self.tab_manager) |*tm| {
             tm.deinit();
         }
@@ -5776,11 +5788,14 @@ pub const App = struct {
             };
         };
 
-        // Check protocol for Opencode routing
+        // Check protocol for Opencode/Codex routing
         if (agent_info) |info| {
             if (info.protocol == .opencode) {
-                // Route to Opencode
                 try self.connectToOpencodeAgent(target_tab, info);
+                return;
+            }
+            if (info.protocol == .codex) {
+                try self.connectToCodexAgent(target_tab, info);
                 return;
             }
         }
@@ -5898,6 +5913,69 @@ pub const App = struct {
         std.log.info("Opencode: Connected successfully", .{});
     }
 
+    /// Connect to a Codex agent for the given tab (non-blocking)
+    fn connectToCodexAgent(self: *App, target_tab: *agent.AgentTab, agent_info: *const acp.AgentInfo) !void {
+        // Clean up any existing managers on target tab
+        target_tab.disconnectAll();
+
+        // Clear pending tab selection
+        self.state.pending_tab_for_selection = null;
+
+        // Create Codex manager and store it in the tab immediately (enables rendering)
+        const mgr = try target_tab.createCodexManager();
+
+        self.showStatusMessage("Connecting to Codex...");
+        std.log.info("Codex: Connecting to {s} for tab {d}", .{ agent_info.name, target_tab.id });
+        self.needs_render = true;
+
+        // Store connection context (static lifetime for thread)
+        const ctx = try self.allocator.create(CodexConnectContext);
+        ctx.* = .{
+            .mgr = mgr,
+            .command = agent_info.command,
+            .args = agent_info.args,
+            .cwd = self.state.git_repo_root,
+            .model = agent_info.model,
+        };
+
+        // Spawn background thread for connection
+        const thread = std.Thread.spawn(.{}, codexConnectThreadFn, .{ctx}) catch |err| {
+            std.log.err("Failed to spawn Codex connect thread: {any}", .{err});
+            self.showStatusMessage("Failed to start connection");
+            self.allocator.destroy(ctx);
+            target_tab.manager = null;
+            mgr.deinit();
+            self.allocator.destroy(mgr);
+            return;
+        };
+
+        self.pending_connection = .{
+            .thread = thread,
+            .tab_id = target_tab.id,
+            .ctx = .{ .codex = ctx },
+        };
+    }
+
+    fn codexConnectThreadFn(ctx: *CodexConnectContext) void {
+        std.log.info("Codex: Background connection thread started", .{});
+
+        // Connect to codex app-server (spawn process, handshake)
+        ctx.mgr.connect(ctx.command, ctx.args, ctx.cwd) catch |err| {
+            std.log.err("Codex: Connect failed: {}", .{err});
+            return;
+        };
+
+        std.log.info("Codex: Connected, starting thread...", .{});
+
+        // Start a thread (creates conversation context)
+        ctx.mgr.startThread(ctx.model, ctx.cwd) catch |err| {
+            std.log.err("Codex: StartThread failed: {}", .{err});
+            return;
+        };
+
+        std.log.info("Codex: Thread started successfully", .{});
+    }
+
     /// Connect to the currently selected agent in the selection menu
     pub fn connectToSelectedAgent(self: *App) !void {
         const agents = self.state.configured_agents orelse return;
@@ -5943,6 +6021,7 @@ pub const App = struct {
                     const protocol: acp.AcpManager.Protocol = switch (cfg.protocol) {
                         .acp => .acp,
                         .opencode => .opencode,
+                        .codex => .codex,
                     };
 
                     acp_agents[i] = .{
@@ -6005,12 +6084,12 @@ pub const App = struct {
     fn pollAllManagers(self: *App) void {
         const connection_active = self.pollConnectionThread();
 
-        // Don't poll tabs while an ACP connection thread is active — it would clear
+        // Don't poll tabs while an ACP or Codex connection thread is active — it would clear
         // messages that waitForResponse() in the background thread needs.
         if (connection_active) {
             if (self.pending_connection) |conn| {
                 switch (conn.ctx) {
-                    .acp => return,
+                    .acp, .codex => return,
                     .opencode => {},
                 }
             }
@@ -6036,6 +6115,7 @@ pub const App = struct {
             switch (conn.ctx) {
                 .acp => |ctx| self.allocator.destroy(ctx),
                 .opencode => |ctx| self.allocator.destroy(ctx),
+                .codex => |ctx| self.allocator.destroy(ctx),
             }
             self.pending_connection = null;
             return false;
@@ -6047,6 +6127,7 @@ pub const App = struct {
             switch (conn.ctx) {
                 .acp => |ctx| self.allocator.destroy(ctx),
                 .opencode => |ctx| self.allocator.destroy(ctx),
+                .codex => |ctx| self.allocator.destroy(ctx),
             }
             self.pending_connection = null;
             return false;
@@ -6094,7 +6175,7 @@ pub const App = struct {
                             self.allocator.destroy(mgr);
                         }
                     },
-                    .opencode => {},
+                    .opencode, .codex => {},
                 }
             },
             .opencode => |ctx| {
@@ -6117,7 +6198,37 @@ pub const App = struct {
                             self.allocator.destroy(mgr);
                         }
                     },
-                    .acp => {},
+                    .acp, .codex => {},
+                }
+            },
+            .codex => |ctx| {
+                self.allocator.destroy(ctx);
+                switch (handle) {
+                    .codex => |mgr| {
+                        if (mgr.status == .thread_active) {
+                            const model_name = mgr.model orelse "Codex";
+                            const msg = std.fmt.allocPrint(self.allocator, "Connected to Codex · {s}", .{model_name}) catch "Connected to Codex";
+                            defer if (!std.mem.eql(u8, msg, "Connected to Codex")) self.allocator.free(msg);
+                            self.showStatusMessage(msg);
+
+                            if (self.getConnectingAgentState()) |agent_state_conn| {
+                                const welcome_msg = std.fmt.allocPrint(self.allocator, "Connected to Codex · {s}. You can start chatting!", .{model_name}) catch "Connected to Codex! You can start chatting.";
+                                defer if (!std.mem.eql(u8, welcome_msg, "Connected to Codex! You can start chatting.")) self.allocator.free(welcome_msg);
+                                agent_state_conn.addMessage(.system, welcome_msg) catch {};
+                            }
+
+                            std.log.info("Codex: Connection complete for tab {d}", .{conn.tab_id});
+                        } else if (mgr.status == .@"error" or mgr.status == .disconnected) {
+                            self.showStatusMessage("Failed to connect to Codex");
+                            if (self.getConnectingAgentState()) |agent_state_conn| {
+                                agent_state_conn.addMessage(.system, "Connection failed. Check if codex is installed.") catch {};
+                            }
+                            tab.manager = null;
+                            mgr.deinit();
+                            self.allocator.destroy(mgr);
+                        }
+                    },
+                    .acp, .opencode => {},
                 }
             },
         }

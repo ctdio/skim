@@ -1,18 +1,21 @@
-/// Tagged union wrapping both ACP and OpenCode manager types.
+/// Tagged union wrapping ACP, OpenCode, and Codex manager types.
 /// Provides a unified interface for operations needed by agent_mode.zig and tab_manager.zig.
 /// Protocol-specific features remain accessible via pattern matching on the union.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const OpencodeManager = @import("../opencode/opencode.zig").OpencodeManager;
+const CodexManager = @import("../codex/manager.zig").CodexManager;
 const AgentState = @import("state.zig").AgentState;
 const AgentEvent = @import("events.zig").AgentEvent;
 const processAgentEvent = @import("events.zig").processAgentEvent;
 const acpMessageToAgentEvent = @import("events.zig").acpMessageToAgentEvent;
 const opencodeEventToAgentEvent = @import("events.zig").opencodeEventToAgentEvent;
+const codexEventToAgentEvent = @import("events.zig").codexEventToAgentEvent;
 pub const ManagerHandle = union(enum) {
     acp: *AcpManager,
     opencode: *OpencodeManager,
+    codex: *CodexManager,
 
     // =========================================================================
     // Common operations
@@ -23,6 +26,10 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.cancelPrompt(),
             .opencode => |m| m.cancelPrompt(),
+            .codex => |m| {
+                m.interruptTurn() catch return false;
+                return true;
+            },
         };
     }
 
@@ -31,6 +38,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.isPrompting(),
             .opencode => |m| m.isThinking(),
+            .codex => |m| m.status == .turn_active,
         };
     }
 
@@ -39,6 +47,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => false,
             .opencode => |m| m.isCompacting(),
+            .codex => false,
         };
     }
 
@@ -47,6 +56,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.status == .session_active or m.status == .prompting,
             .opencode => |m| !m.pending_abort and m.isReadyForPrompt(),
+            .codex => |m| m.status == .thread_active,
         };
     }
 
@@ -55,6 +65,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.status == .disconnected,
             .opencode => |m| m.status == .disconnected,
+            .codex => |m| m.status == .disconnected,
         };
     }
 
@@ -63,6 +74,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.status == .discovering or m.status == .connecting or m.status == .connected,
             .opencode => |m| m.status == .idle or m.status == .starting_server or m.status == .connecting,
+            .codex => |m| m.status == .connecting or m.status == .initialized,
         };
     }
 
@@ -71,6 +83,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.getCurrentModelId(),
             .opencode => |m| m.getCurrentModelId(),
+            .codex => |m| m.model,
         };
     }
 
@@ -79,6 +92,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.getCurrentModelName(),
             .opencode => |m| m.getCurrentModelName(),
+            .codex => |m| m.model orelse "Codex",
         };
     }
 
@@ -94,6 +108,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.getAvailableModels().len,
             .opencode => |m| m.getAvailableModels().len,
+            .codex => 0, // Phase 5 handles model list
         };
     }
 
@@ -116,6 +131,7 @@ pub const ManagerHandle = union(enum) {
                     .description = model.description orelse "",
                 };
             },
+            .codex => return .{ .model_id = "", .name = "Codex", .description = "" },
         };
     }
 
@@ -124,6 +140,7 @@ pub const ManagerHandle = union(enum) {
         switch (self) {
             .acp => |m| try m.setModel(id),
             .opencode => |m| try m.setModelById(id),
+            .codex => {}, // Phase 5 handles model switching
         }
     }
 
@@ -132,6 +149,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.getPendingPermission(),
             .opencode => null,
+            .codex => null, // Phase 4 handles approvals
         };
     }
 
@@ -140,6 +158,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.server_name orelse m.agent_name orelse "Agent",
             .opencode => "Opencode",
+            .codex => "Codex",
         };
     }
 
@@ -161,6 +180,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| pollAcp(m, agent_state),
             .opencode => |m| pollOpencode(m, allocator, agent_state),
+            .codex => |m| pollCodex(m, agent_state),
         };
     }
 
@@ -169,6 +189,7 @@ pub const ManagerHandle = union(enum) {
         switch (self) {
             .acp => |m| try m.sendPrompt(text),
             .opencode => |m| try m.sendPrompt(text),
+            .codex => |m| try m.startTurn(text),
         }
     }
 
@@ -177,6 +198,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.status == .session_active or m.status == .prompting,
             .opencode => |m| m.isReadyForPrompt() and !m.pending_abort,
+            .codex => |m| m.status == .thread_active,
         };
     }
 
@@ -185,6 +207,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.status == .session_active and m.pending_prompt_id == null,
             .opencode => |m| m.isReadyForAutoSend() and !m.pending_abort,
+            .codex => |m| m.status == .thread_active,
         };
     }
 
@@ -193,6 +216,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.hasPendingOutput(),
             .opencode => |m| m.status == .prompting or m.hasPendingEvents() or m.pending_abort,
+            .codex => |m| m.status == .turn_active,
         };
     }
 
@@ -210,6 +234,11 @@ pub const ManagerHandle = union(enum) {
                 .idle, .starting_server, .connecting => "Opencode connecting... please wait.",
                 .session_active, .prompting => if (m.pending_abort) "Cancelling... please wait." else null,
             },
+            .codex => |m| switch (m.status) {
+                .disconnected, .@"error" => "Codex disconnected or failed. Close and reopen panel to reconnect.",
+                .connecting, .initialized => "Codex connecting... please wait.",
+                .thread_active, .turn_active => null,
+            },
         };
     }
 
@@ -222,6 +251,7 @@ pub const ManagerHandle = union(enum) {
         switch (self) {
             .acp => |m| m.deinit(),
             .opencode => |m| m.deinit(),
+            .codex => |m| m.deinit(),
         }
     }
 
@@ -230,6 +260,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => true,
             .opencode => |m| m.canSafelyDestroy(),
+            .codex => true,
         };
     }
 };
@@ -357,6 +388,67 @@ fn pollOpencode(m: *OpencodeManager, allocator: Allocator, agent_state: *AgentSt
         .more_pending = more_pending or m.hasPendingEvents(),
         .status_changed = m.status != status_before,
         .needs_line_map_dirty = m.hasActiveChildSessions(),
+    };
+}
+
+const MAX_CODEX_MESSAGES_PER_FRAME: usize = 20;
+
+fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResult {
+    const status_before = m.status;
+    const transport = m.transport orelse return .{
+        .count = 0,
+        .more_pending = false,
+        .status_changed = false,
+        .needs_line_map_dirty = false,
+    };
+
+    const messages = transport.drainMessages() catch return .{
+        .count = 0,
+        .more_pending = false,
+        .status_changed = false,
+        .needs_line_map_dirty = false,
+    };
+
+    const to_process = @min(messages.len, MAX_CODEX_MESSAGES_PER_FRAME);
+    var count: usize = 0;
+
+    for (messages[0..to_process]) |raw_msg| {
+        var msg = raw_msg;
+        defer msg.deinit(m.allocator);
+
+        // Process through CodexManager to classify + update turn state
+        if (m.processMessage(msg)) |codex_event| {
+            // Update manager status based on event type
+            switch (codex_event) {
+                .text_delta, .reasoning_delta, .command_output_delta => {
+                    if (m.status != .turn_active) m.status = .turn_active;
+                },
+                .turn_completed => {
+                    if (m.status == .turn_active) m.status = .thread_active;
+                },
+                else => {},
+            }
+
+            // Convert to AgentEvent and process inline while data is alive
+            if (codexEventToAgentEvent(codex_event)) |agent_event| {
+                processAgentEvent(agent_state, agent_event);
+                count += 1;
+            }
+        }
+    }
+
+    // Free any excess messages beyond the frame limit
+    for (messages[to_process..]) |raw_msg| {
+        var msg = raw_msg;
+        msg.deinit(m.allocator);
+    }
+    m.allocator.free(messages);
+
+    return .{
+        .count = count,
+        .more_pending = messages.len > to_process,
+        .status_changed = m.status != status_before,
+        .needs_line_map_dirty = false,
     };
 }
 
