@@ -1460,28 +1460,59 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
         // Discover available sessions for current project
         const cwd = app.state.git_repo_root;
 
-        // Determine which agent type we're using
-        const agent_type: sessions.AgentType = if (app.getActiveAcpManager()) |mgr| blk: {
-            if (mgr.agent_name) |name| {
-                // Check agent name to determine type
-                if (std.mem.indexOf(u8, name, "claude") != null or
-                    std.mem.indexOf(u8, name, "Claude") != null)
-                {
-                    break :blk .claude_code;
-                } else if (std.mem.indexOf(u8, name, "codex") != null or
-                    std.mem.indexOf(u8, name, "Codex") != null)
-                {
-                    break :blk .codex;
-                }
+        // Check active manager type to determine session discovery strategy
+        const session_list = if (app.getActiveManager()) |mgr| blk: {
+            switch (mgr) {
+                .codex => |cm| {
+                    // Use live thread listing from the connected CodexManager
+                    const threads = cm.listThreads() catch |err| {
+                        std.log.err("Failed to list codex threads: {any}", .{err});
+                        // Fall back to file-based discovery
+                        break :blk sessions.listSessions(app.allocator, .codex, cwd, 20) catch |err2| {
+                            std.log.err("Fallback session discovery also failed: {any}", .{err2});
+                            try agent_state.addMessage(.system, "No sessions found for this project");
+                            return;
+                        };
+                    };
+                    defer cm.freeThreadList(threads);
+                    break :blk sessions.threadsToSessionInfos(app.allocator, threads) catch |err| {
+                        std.log.err("Failed to convert threads to sessions: {any}", .{err});
+                        try agent_state.addMessage(.system, "No sessions found for this project");
+                        return;
+                    };
+                },
+                .acp => |am| {
+                    // Determine agent type from ACP manager name
+                    const agent_type: sessions.AgentType = if (am.agent_name) |name| at: {
+                        if (std.mem.indexOf(u8, name, "claude") != null or
+                            std.mem.indexOf(u8, name, "Claude") != null)
+                        {
+                            break :at .claude_code;
+                        } else if (std.mem.indexOf(u8, name, "codex") != null or
+                            std.mem.indexOf(u8, name, "Codex") != null)
+                        {
+                            break :at .codex;
+                        }
+                        break :at .claude_code;
+                    } else .claude_code;
+                    break :blk sessions.listSessions(app.allocator, agent_type, cwd, 20) catch |err| {
+                        std.log.err("Failed to discover sessions: {any}", .{err});
+                        try agent_state.addMessage(.system, "No sessions found for this project");
+                        return;
+                    };
+                },
+                .opencode => {
+                    try agent_state.addMessage(.system, "Session resume not supported for opencode");
+                    return;
+                },
             }
-            break :blk .claude_code; // Default to Claude Code
-        } else .claude_code;
-
-        // Discover sessions
-        const session_list = sessions.listSessions(app.allocator, agent_type, cwd, 20) catch |err| {
-            std.log.err("Failed to discover sessions: {any}", .{err});
-            try agent_state.addMessage(.system, "No sessions found for this project");
-            return;
+        } else blk: {
+            // No active manager, fall back to claude_code file discovery
+            break :blk sessions.listSessions(app.allocator, .claude_code, cwd, 20) catch |err| {
+                std.log.err("Failed to discover sessions: {any}", .{err});
+                try agent_state.addMessage(.system, "No sessions found for this project");
+                return;
+            };
         };
 
         if (session_list.len == 0) {

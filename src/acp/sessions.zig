@@ -34,6 +34,8 @@ pub const discovery = @import("sessions/discovery.zig");
 pub const listSessions = discovery.listSessions;
 pub const listAllSessions = discovery.listAllSessions;
 pub const freeSessions = discovery.freeSessions;
+pub const threadsToSessionInfos = discovery.threadsToSessionInfos;
+pub const threadToSessionInfo = discovery.threadToSessionInfo;
 pub const DEFAULT_LIMIT = discovery.DEFAULT_LIMIT;
 
 // Re-export adapters for direct access if needed

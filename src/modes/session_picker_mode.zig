@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const sessions = @import("../acp/sessions.zig");
+const CodexManager = @import("../codex/manager.zig").CodexManager;
 
 /// Handle keyboard input when in session picker mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -53,6 +54,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         '\r' => { // Enter key - load selected session
             try loadSelectedSession(app);
         },
+        'f' => { // Fork selected session (codex only)
+            try forkSelectedSession(app);
+        },
         else => {},
     }
 }
@@ -64,20 +68,30 @@ fn loadSelectedSession(app: *App) !void {
     const selected = app.state.session_list[app.state.session_selection];
     const session_id = selected.id;
 
-    // Get the ACP manager
+    std.log.info("Session picker: resuming session {s}", .{session_id});
+
+    // Check if this is a codex session and we have a codex manager
+    if (selected.agent_type == .codex) {
+        if (app.getActiveManager()) |mgr_handle| {
+            switch (mgr_handle) {
+                .codex => |cm| {
+                    loadCodexSession(app, cm, selected);
+                    return;
+                },
+                else => {},
+            }
+        }
+    }
+
+    // ACP path (Claude Code and other ACP agents)
     const mgr = app.getActiveAcpManager() orelse {
         freeSessionList(app);
         app.mode = .agent;
         return;
     };
 
-    // Try to resume the session via ACP
-    std.log.info("Session picker: resuming session {s}", .{session_id});
-
     // Get CWD from the session or use current
     const cwd = if (selected.project_path.len > 0) selected.project_path else app.state.git_repo_root;
-
-    // Note: Codex sessions are filtered out in discovery - codex-acp doesn't support resume
 
     // Use ACP protocol for session resume
     if (mgr.acp_client) |acp_client| {
@@ -179,6 +193,85 @@ fn loadSelectedSession(app: *App) !void {
     // Clean up and return to agent mode
     freeSessionList(app);
     app.mode = .agent;
+}
+
+/// Load a codex session via CodexManager.resumeThread
+fn loadCodexSession(app: *App, cm: *CodexManager, selected: sessions.SessionInfo) void {
+    cm.resumeThread(selected.id) catch |err| {
+        std.log.err("Session picker: failed to resume codex thread: {any}", .{err});
+        if (app.getActiveAgentState()) |agent_state| {
+            agent_state.addMessage(
+                .system,
+                "Failed to resume codex thread.",
+            ) catch {};
+        }
+        freeSessionList(app);
+        app.mode = .agent;
+        return;
+    };
+
+    // Thread resumed successfully
+    if (app.getActiveAgentState()) |agent_state| {
+        agent_state.clearMessages();
+
+        // Display session history from file-based parser
+        displaySessionHistory(app, selected) catch {
+            agent_state.addMessage(.system, "Thread resumed (couldn't load history display).") catch {};
+        };
+    }
+
+    freeSessionList(app);
+    app.mode = .agent;
+}
+
+/// Fork the selected session (codex only)
+fn forkSelectedSession(app: *App) !void {
+    if (app.state.session_list.len == 0) return;
+
+    const selected = app.state.session_list[app.state.session_selection];
+
+    // Fork is only supported for codex sessions with a connected codex manager
+    const mgr_handle = app.getActiveManager() orelse {
+        if (app.getActiveAgentState()) |agent_state| {
+            try agent_state.addMessage(.system, "No active agent to fork with.");
+        }
+        return;
+    };
+
+    switch (mgr_handle) {
+        .codex => |cm| {
+            std.log.info("Session picker: forking thread {s}", .{selected.id});
+
+            const new_thread = cm.forkThread(selected.id) catch |err| {
+                std.log.err("Session picker: failed to fork thread: {any}", .{err});
+                if (app.getActiveAgentState()) |agent_state| {
+                    try agent_state.addMessage(.system, "Failed to fork thread.");
+                }
+                return;
+            };
+
+            // forkThread already updates cm.thread_id and cm.status to .thread_active
+            if (app.getActiveAgentState()) |agent_state| {
+                agent_state.clearMessages();
+                try agent_state.addMessage(.system, "Thread forked successfully.");
+
+                // Show the new thread ID
+                const msg = std.fmt.allocPrint(app.allocator, "New thread: {s}", .{new_thread.id}) catch null;
+                if (msg) |m| {
+                    defer app.allocator.free(m);
+                    agent_state.addMessage(.system, m) catch {};
+                }
+            }
+
+            freeSessionList(app);
+            app.mode = .agent;
+        },
+        else => {
+            if (app.getActiveAgentState()) |agent_state| {
+                try agent_state.addMessage(.system, "Fork is only supported for Codex sessions.");
+            }
+        },
+    }
 }
 
 /// Display conversation history from a session in the UI

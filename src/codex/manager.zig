@@ -31,6 +31,10 @@ pub const CodexManager = struct {
     approval_policy: ?protocol.ApprovalPolicy,
     reasoning_effort: ?protocol.ReasoningEffort,
 
+    // Model list (populated after listModels)
+    models: ?[]protocol.ModelInfo,
+    current_model: ?[]const u8,
+
     // Turn state (populated during active turn)
     turn_id: ?[]const u8,
 
@@ -159,6 +163,14 @@ pub const CodexManager = struct {
         HandshakeFailed,
         ThreadStartFailed,
         ThreadStartTimeout,
+        ThreadListFailed,
+        ThreadListTimeout,
+        ThreadResumeFailed,
+        ThreadResumeTimeout,
+        ThreadForkFailed,
+        ThreadForkTimeout,
+        ModelListFailed,
+        ModelListTimeout,
         TurnStartFailed,
         TurnSteerFailed,
         TurnInterruptFailed,
@@ -176,6 +188,8 @@ pub const CodexManager = struct {
             .model_provider = null,
             .approval_policy = null,
             .reasoning_effort = null,
+            .models = null,
+            .current_model = null,
             .turn_id = null,
             .pending_approval = null,
             .request_id_counter = 0,
@@ -251,6 +265,7 @@ pub const CodexManager = struct {
         self.freeThreadState();
         self.freePendingApproval();
         self.freePendingMessages();
+        self.freeModels();
         self.status = .disconnected;
     }
 
@@ -391,6 +406,282 @@ pub const CodexManager = struct {
         const msg = encoder.encodeTurnInterrupt(req_id.number, thread_id, turn_id) catch return error.TurnInterruptFailed;
         defer self.allocator.free(msg);
         try transport.send(msg);
+    }
+
+    // =========================================================================
+    // Session management (thread list, resume, fork)
+    // =========================================================================
+
+    /// List threads from the connected app-server.
+    /// Returns an owned slice of Thread objects. Caller must free with freeThreadList().
+    pub fn listThreads(self: *CodexManager) Error![]protocol.Thread {
+        const transport = self.transport orelse return error.NotConnected;
+        if (self.status == .disconnected or self.status == .connecting) return error.NotConnected;
+
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeThreadList(req_id.number, .{}) catch return error.ThreadListFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+
+        const response = try self.waitForResponseOn(transport, req_id, 10_000) orelse return error.ThreadListTimeout;
+        var resp = response;
+        defer resp.deinit(self.allocator);
+
+        const result_json = switch (resp) {
+            .response => |r| blk: {
+                if (r.error_msg != null) return error.ThreadListFailed;
+                break :blk r.result_json orelse return error.ThreadListFailed;
+            },
+            else => return error.ThreadListFailed,
+        };
+
+        var decoder = codec.Decoder.init(self.allocator);
+        const result = decoder.parseThreadListResult(result_json) catch return error.ThreadListFailed;
+        return result.data;
+    }
+
+    /// Free a thread list returned by listThreads().
+    pub fn freeThreadList(self: *CodexManager, threads: []protocol.Thread) void {
+        for (threads) |thread| {
+            self.allocator.free(thread.id);
+            if (thread.preview) |p| self.allocator.free(p);
+            if (thread.model_provider) |mp| self.allocator.free(mp);
+            if (thread.path) |p| self.allocator.free(p);
+            if (thread.cwd) |c| self.allocator.free(c);
+            if (thread.cli_version) |cv| self.allocator.free(cv);
+            if (thread.source) |s| self.allocator.free(s);
+            if (thread.git_info) |gi| {
+                if (gi.sha) |sha| self.allocator.free(sha);
+                if (gi.branch) |b| self.allocator.free(b);
+                if (gi.origin_url) |o| self.allocator.free(o);
+            }
+            if (thread.turns) |turns| {
+                for (turns) |t| {
+                    self.allocator.free(t.id);
+                }
+                self.allocator.free(turns);
+            }
+        }
+        self.allocator.free(threads);
+    }
+
+    /// Resume an existing thread. After successful return, status is .thread_active.
+    /// The response may trigger history replay events via subsequent polling.
+    pub fn resumeThread(self: *CodexManager, thread_id: []const u8) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+        if (self.status != .initialized and self.status != .thread_active) return error.NotConnected;
+
+        self.freeThreadState();
+
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeThreadResume(req_id.number, .{
+            .thread_id = thread_id,
+        }) catch return error.ThreadResumeFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+
+        const response = try self.waitForResponseOn(transport, req_id, 15_000) orelse return error.ThreadResumeTimeout;
+        var resp = response;
+        defer resp.deinit(self.allocator);
+
+        const result_json = switch (resp) {
+            .response => |r| blk: {
+                if (r.error_msg != null) return error.ThreadResumeFailed;
+                break :blk r.result_json orelse return error.ThreadResumeFailed;
+            },
+            else => return error.ThreadResumeFailed,
+        };
+
+        // Parse thread resume result (same shape as thread/start but fewer fields)
+        const RawResumeResult = struct {
+            thread: ?std.json.Value = null,
+            model: ?[]const u8 = null,
+            modelProvider: ?[]const u8 = null,
+        };
+
+        const parsed = std.json.parseFromSlice(RawResumeResult, self.allocator, result_json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch return error.ThreadResumeFailed;
+        defer parsed.deinit();
+
+        const r = parsed.value;
+
+        // Re-parse thread object through the decoder for proper field handling
+        if (r.thread) |thread_val| {
+            var thread_json_buf: std.ArrayList(u8) = .{};
+            defer thread_json_buf.deinit(self.allocator);
+            const tw = thread_json_buf.writer(self.allocator);
+            tw.print("{f}", .{std.json.fmt(thread_val, .{})}) catch return error.ThreadResumeFailed;
+            const thread_json = thread_json_buf.items;
+
+            // Parse through the thread list wrapper format
+            var wrapper_buf: std.ArrayList(u8) = .{};
+            defer wrapper_buf.deinit(self.allocator);
+            const ww = wrapper_buf.writer(self.allocator);
+            ww.print("{{\"data\":[{s}]}}", .{thread_json}) catch return error.ThreadResumeFailed;
+
+            var decoder = codec.Decoder.init(self.allocator);
+            const list_result = decoder.parseThreadListResult(wrapper_buf.items) catch return error.ThreadResumeFailed;
+
+            if (list_result.data.len > 0) {
+                const thread = list_result.data[0];
+                self.thread_id = thread.id;
+                self.thread_info = thread;
+
+                // Free the slice (but not the first element which we now own)
+                if (list_result.data.len > 1) {
+                    for (list_result.data[1..]) |t| {
+                        self.allocator.free(t.id);
+                    }
+                }
+                self.allocator.free(list_result.data);
+            } else {
+                self.allocator.free(list_result.data);
+                return error.ThreadResumeFailed;
+            }
+        } else {
+            return error.ThreadResumeFailed;
+        }
+
+        // Store model info
+        if (r.model) |m| {
+            self.model = self.allocator.dupe(u8, m) catch return error.OutOfMemory;
+        }
+        if (r.modelProvider) |mp| {
+            self.model_provider = self.allocator.dupe(u8, mp) catch return error.OutOfMemory;
+        }
+
+        self.status = .thread_active;
+    }
+
+    /// Fork a thread, creating a new thread from the given thread's history.
+    /// Returns the new thread info. After successful return, status is .thread_active
+    /// with the new (forked) thread.
+    pub fn forkThread(self: *CodexManager, thread_id: []const u8) Error!protocol.Thread {
+        const transport = self.transport orelse return error.NotConnected;
+        if (self.status != .initialized and self.status != .thread_active) return error.NotConnected;
+
+        self.freeThreadState();
+
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeThreadFork(req_id.number, .{
+            .thread_id = thread_id,
+        }) catch return error.ThreadForkFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+
+        const response = try self.waitForResponseOn(transport, req_id, 10_000) orelse return error.ThreadForkTimeout;
+        var resp = response;
+        defer resp.deinit(self.allocator);
+
+        const result_json = switch (resp) {
+            .response => |r| blk: {
+                if (r.error_msg != null) return error.ThreadForkFailed;
+                break :blk r.result_json orelse return error.ThreadForkFailed;
+            },
+            else => return error.ThreadForkFailed,
+        };
+
+        // Parse fork result (has a thread field)
+        const RawForkResult = struct {
+            thread: ?std.json.Value = null,
+        };
+
+        const parsed = std.json.parseFromSlice(RawForkResult, self.allocator, result_json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch return error.ThreadForkFailed;
+        defer parsed.deinit();
+
+        if (parsed.value.thread) |thread_val| {
+            var thread_json_buf: std.ArrayList(u8) = .{};
+            defer thread_json_buf.deinit(self.allocator);
+            const tw = thread_json_buf.writer(self.allocator);
+            tw.print("{f}", .{std.json.fmt(thread_val, .{})}) catch return error.ThreadForkFailed;
+
+            var wrapper_buf: std.ArrayList(u8) = .{};
+            defer wrapper_buf.deinit(self.allocator);
+            const ww = wrapper_buf.writer(self.allocator);
+            ww.print("{{\"data\":[{s}]}}", .{thread_json_buf.items}) catch return error.ThreadForkFailed;
+
+            var decoder = codec.Decoder.init(self.allocator);
+            const list_result = decoder.parseThreadListResult(wrapper_buf.items) catch return error.ThreadForkFailed;
+
+            if (list_result.data.len > 0) {
+                const thread = list_result.data[0];
+                self.thread_id = thread.id;
+                self.thread_info = thread;
+
+                if (list_result.data.len > 1) {
+                    for (list_result.data[1..]) |t| {
+                        self.allocator.free(t.id);
+                    }
+                }
+                self.allocator.free(list_result.data);
+
+                self.status = .thread_active;
+                return thread;
+            } else {
+                self.allocator.free(list_result.data);
+                return error.ThreadForkFailed;
+            }
+        }
+
+        return error.ThreadForkFailed;
+    }
+
+    // =========================================================================
+    // Model management
+    // =========================================================================
+
+    /// Fetch available models from the app-server.
+    /// Results are cached in self.models.
+    pub fn listModels(self: *CodexManager) Error![]protocol.ModelInfo {
+        const transport = self.transport orelse return error.NotConnected;
+        if (self.status == .disconnected or self.status == .connecting) return error.NotConnected;
+
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeModelList(req_id.number) catch return error.ModelListFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+
+        const response = try self.waitForResponseOn(transport, req_id, 10_000) orelse return error.ModelListTimeout;
+        var resp = response;
+        defer resp.deinit(self.allocator);
+
+        const result_json = switch (resp) {
+            .response => |r| blk: {
+                if (r.error_msg != null) return error.ModelListFailed;
+                break :blk r.result_json orelse return error.ModelListFailed;
+            },
+            else => return error.ModelListFailed,
+        };
+
+        var decoder = codec.Decoder.init(self.allocator);
+        const result = decoder.parseModelListResult(result_json) catch return error.ModelListFailed;
+
+        // Free previous model list if cached
+        self.freeModels();
+        self.models = result.data;
+
+        return result.data;
+    }
+
+    /// Set the model for subsequent turns.
+    /// The model_id is stored and used when starting new threads/turns.
+    pub fn setModel(self: *CodexManager, model_id: []const u8) Allocator.Error!void {
+        if (self.current_model) |cm| self.allocator.free(cm);
+        self.current_model = try self.allocator.dupe(u8, model_id);
+    }
+
+    /// Set the reasoning effort level for subsequent turns.
+    pub fn setReasoningEffort(self: *CodexManager, effort: protocol.ReasoningEffort) void {
+        self.reasoning_effort = effort;
     }
 
     // =========================================================================
@@ -636,6 +927,24 @@ pub const CodexManager = struct {
             msg.deinit(self.allocator);
         }
         self.pending_messages.clearRetainingCapacity();
+    }
+
+    fn freeModels(self: *CodexManager) void {
+        if (self.models) |models| {
+            for (models) |m| {
+                self.allocator.free(m.id);
+                if (m.model) |model| self.allocator.free(model);
+                if (m.display_name) |dn| self.allocator.free(dn);
+                if (m.description) |d| self.allocator.free(d);
+                if (m.supported_reasoning_efforts) |efforts| self.allocator.free(efforts);
+            }
+            self.allocator.free(models);
+            self.models = null;
+        }
+        if (self.current_model) |cm| {
+            self.allocator.free(cm);
+            self.current_model = null;
+        }
     }
 
     fn processServerRequest(self: *CodexManager, req: codec.ServerRequest) ?CodexEvent {
@@ -1447,4 +1756,156 @@ test "processMessage non-approval server request falls through to notification" 
     // Should fall through to notification processing and produce text_delta
     try std.testing.expect(event.? == .text_delta);
     try std.testing.expect(manager.pending_approval == null);
+}
+
+// =============================================================================
+// Phase 5: Session & Model Tests
+// =============================================================================
+
+test "new fields initialize to null" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    try std.testing.expect(manager.models == null);
+    try std.testing.expect(manager.current_model == null);
+}
+
+test "setModel stores and frees model id" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    try std.testing.expect(manager.current_model == null);
+
+    try manager.setModel("gpt-5.1-codex-mini");
+    try std.testing.expectEqualStrings("gpt-5.1-codex-mini", manager.current_model.?);
+
+    // Setting again should replace
+    try manager.setModel("gpt-5.3-codex");
+    try std.testing.expectEqualStrings("gpt-5.3-codex", manager.current_model.?);
+}
+
+test "setReasoningEffort stores effort level" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    try std.testing.expect(manager.reasoning_effort == null);
+
+    manager.setReasoningEffort(.high);
+    try std.testing.expect(manager.reasoning_effort.? == .high);
+
+    manager.setReasoningEffort(.low);
+    try std.testing.expect(manager.reasoning_effort.? == .low);
+}
+
+test "listThreads fails when not connected" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const result = manager.listThreads();
+    try std.testing.expectError(error.NotConnected, result);
+}
+
+test "resumeThread fails when not connected" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const result = manager.resumeThread("some-thread-id");
+    try std.testing.expectError(error.NotConnected, result);
+}
+
+test "forkThread fails when not connected" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const result = manager.forkThread("some-thread-id");
+    try std.testing.expectError(error.NotConnected, result);
+}
+
+test "listModels fails when not connected" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const result = manager.listModels();
+    try std.testing.expectError(error.NotConnected, result);
+}
+
+test "freeModels cleans up properly" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    // Set a current_model
+    try manager.setModel("test-model");
+    try std.testing.expect(manager.current_model != null);
+
+    manager.freeModels();
+    try std.testing.expect(manager.current_model == null);
+    try std.testing.expect(manager.models == null);
+}
+
+test "disconnect clears models" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    try manager.setModel("test-model");
+    try std.testing.expect(manager.current_model != null);
+
+    manager.disconnect();
+    try std.testing.expect(manager.current_model == null);
+    try std.testing.expect(manager.models == null);
+}
+
+test "freeThreadList handles empty list" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    // Create an empty thread list
+    const threads = try std.testing.allocator.alloc(protocol.Thread, 0);
+    manager.freeThreadList(threads);
+}
+
+// Integration tests with real codex binary
+
+test "codex manager listThreads" {
+    if (!codexAvailable()) return;
+
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    try manager.connect("codex", null, "/home/ctdio/projects/open-source/skim-wta");
+    try std.testing.expectEqual(CodexManager.Status.initialized, manager.status);
+
+    const threads = try manager.listThreads();
+    defer manager.freeThreadList(threads);
+
+    // Should return a list (may be empty if no threads exist)
+    // The important thing is it parsed successfully
+}
+
+test "codex manager listModels" {
+    if (!codexAvailable()) return;
+
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    try manager.connect("codex", null, "/home/ctdio/projects/open-source/skim-wta");
+    try std.testing.expectEqual(CodexManager.Status.initialized, manager.status);
+
+    const models = try manager.listModels();
+
+    // Should have at least one model
+    try std.testing.expect(models.len > 0);
+    try std.testing.expect(manager.models != null);
+
+    // Check that at least one model has an id
+    try std.testing.expect(models[0].id.len > 0);
+
+    // Check for default model
+    var has_default = false;
+    for (models) |m| {
+        if (m.is_default) {
+            has_default = true;
+            break;
+        }
+    }
+    try std.testing.expect(has_default);
 }

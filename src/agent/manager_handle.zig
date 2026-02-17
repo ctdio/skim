@@ -108,7 +108,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.getAvailableModels().len,
             .opencode => |m| m.getAvailableModels().len,
-            .codex => 0, // Phase 5 handles model list
+            .codex => |m| if (m.models) |models| models.len else 0,
         };
     }
 
@@ -131,7 +131,16 @@ pub const ManagerHandle = union(enum) {
                     .description = model.description orelse "",
                 };
             },
-            .codex => return .{ .model_id = "", .name = "Codex", .description = "" },
+            .codex => |m| {
+                const models = m.models orelse return .{ .model_id = "", .name = "Codex", .description = "" };
+                if (idx >= models.len) return .{ .model_id = "", .name = "Codex", .description = "" };
+                const model = models[idx];
+                return .{
+                    .model_id = model.id,
+                    .name = model.display_name orelse model.id,
+                    .description = model.description orelse "",
+                };
+            },
         };
     }
 
@@ -140,7 +149,7 @@ pub const ManagerHandle = union(enum) {
         switch (self) {
             .acp => |m| try m.setModel(id),
             .opencode => |m| try m.setModelById(id),
-            .codex => {}, // Phase 5 handles model switching
+            .codex => |m| try m.setModel(id),
         }
     }
 
