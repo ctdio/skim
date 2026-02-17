@@ -539,42 +539,12 @@ pub const CodexManager = struct {
 
         const r = parsed.value;
 
-        // Re-parse thread object through the decoder for proper field handling
-        if (r.thread) |thread_val| {
-            var thread_json_buf: std.ArrayList(u8) = .{};
-            defer thread_json_buf.deinit(self.allocator);
-            const tw = thread_json_buf.writer(self.allocator);
-            tw.print("{f}", .{std.json.fmt(thread_val, .{})}) catch return error.ThreadResumeFailed;
-            const thread_json = thread_json_buf.items;
-
-            // Parse through the thread list wrapper format
-            var wrapper_buf: std.ArrayList(u8) = .{};
-            defer wrapper_buf.deinit(self.allocator);
-            const ww = wrapper_buf.writer(self.allocator);
-            ww.print("{{\"data\":[{s}]}}", .{thread_json}) catch return error.ThreadResumeFailed;
-
-            var decoder = codec.Decoder.init(self.allocator);
-            const list_result = decoder.parseThreadListResult(wrapper_buf.items) catch return error.ThreadResumeFailed;
-
-            if (list_result.data.len > 0) {
-                const thread = list_result.data[0];
-                self.thread_id = thread.id;
-                self.thread_info = thread;
-
-                // Free the slice (but not the first element which we now own)
-                if (list_result.data.len > 1) {
-                    for (list_result.data[1..]) |t| {
-                        self.allocator.free(t.id);
-                    }
-                }
-                self.allocator.free(list_result.data);
-            } else {
-                self.allocator.free(list_result.data);
-                return error.ThreadResumeFailed;
-            }
-        } else {
-            return error.ThreadResumeFailed;
-        }
+        const thread = self.parseThreadFromValue(
+            r.thread orelse return error.ThreadResumeFailed,
+            error.ThreadResumeFailed,
+        ) catch return error.ThreadResumeFailed;
+        self.thread_id = thread.id;
+        self.thread_info = thread;
 
         // Store model info
         if (r.model) |m| {
@@ -627,41 +597,14 @@ pub const CodexManager = struct {
         }) catch return error.ThreadForkFailed;
         defer parsed.deinit();
 
-        if (parsed.value.thread) |thread_val| {
-            var thread_json_buf: std.ArrayList(u8) = .{};
-            defer thread_json_buf.deinit(self.allocator);
-            const tw = thread_json_buf.writer(self.allocator);
-            tw.print("{f}", .{std.json.fmt(thread_val, .{})}) catch return error.ThreadForkFailed;
-
-            var wrapper_buf: std.ArrayList(u8) = .{};
-            defer wrapper_buf.deinit(self.allocator);
-            const ww = wrapper_buf.writer(self.allocator);
-            ww.print("{{\"data\":[{s}]}}", .{thread_json_buf.items}) catch return error.ThreadForkFailed;
-
-            var decoder = codec.Decoder.init(self.allocator);
-            const list_result = decoder.parseThreadListResult(wrapper_buf.items) catch return error.ThreadForkFailed;
-
-            if (list_result.data.len > 0) {
-                const thread = list_result.data[0];
-                self.thread_id = thread.id;
-                self.thread_info = thread;
-
-                if (list_result.data.len > 1) {
-                    for (list_result.data[1..]) |t| {
-                        self.allocator.free(t.id);
-                    }
-                }
-                self.allocator.free(list_result.data);
-
-                self.status = .thread_active;
-                return thread;
-            } else {
-                self.allocator.free(list_result.data);
-                return error.ThreadForkFailed;
-            }
-        }
-
-        return error.ThreadForkFailed;
+        const thread = self.parseThreadFromValue(
+            parsed.value.thread orelse return error.ThreadForkFailed,
+            error.ThreadForkFailed,
+        ) catch return error.ThreadForkFailed;
+        self.thread_id = thread.id;
+        self.thread_info = thread;
+        self.status = .thread_active;
+        return thread;
     }
 
     // =========================================================================
@@ -1048,6 +991,34 @@ pub const CodexManager = struct {
             }
             self.mcp_servers = null;
         }
+    }
+
+    fn parseThreadFromValue(self: *CodexManager, thread_val: std.json.Value, fail_err: Error) Error!protocol.Thread {
+        var thread_json_buf: std.ArrayList(u8) = .{};
+        defer thread_json_buf.deinit(self.allocator);
+        const tw = thread_json_buf.writer(self.allocator);
+        tw.print("{f}", .{std.json.fmt(thread_val, .{})}) catch return fail_err;
+
+        var wrapper_buf: std.ArrayList(u8) = .{};
+        defer wrapper_buf.deinit(self.allocator);
+        const ww = wrapper_buf.writer(self.allocator);
+        ww.print("{{\"data\":[{s}]}}", .{thread_json_buf.items}) catch return fail_err;
+
+        var decoder = codec.Decoder.init(self.allocator);
+        const list_result = decoder.parseThreadListResult(wrapper_buf.items) catch return fail_err;
+
+        if (list_result.data.len > 0) {
+            const thread = list_result.data[0];
+            if (list_result.data.len > 1) {
+                for (list_result.data[1..]) |t| {
+                    self.allocator.free(t.id);
+                }
+            }
+            self.allocator.free(list_result.data);
+            return thread;
+        }
+        self.allocator.free(list_result.data);
+        return fail_err;
     }
 
     fn parseTokenUsageNotification(self: *CodexManager, json: []const u8) ?CodexEvent {
