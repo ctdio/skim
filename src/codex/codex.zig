@@ -12,6 +12,9 @@
 
 pub const protocol = @import("protocol.zig");
 pub const codec = @import("codec.zig");
+pub const transport = @import("transport.zig");
+pub const process = @import("process.zig");
+pub const manager = @import("manager.zig");
 
 // Convenience re-exports for common types
 pub const RequestId = codec.RequestId;
@@ -21,6 +24,10 @@ pub const DecodedMessage = codec.DecodedMessage;
 pub const ServerRequest = codec.ServerRequest;
 pub const Response = codec.Response;
 pub const Notification = codec.Notification;
+
+pub const CodexManager = manager.CodexManager;
+pub const StdioTransport = transport.StdioTransport;
+pub const CodexProcess = process.CodexProcess;
 
 pub const Thread = protocol.Thread;
 pub const Turn = protocol.Turn;
