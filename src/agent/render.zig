@@ -1087,10 +1087,11 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 }
 
 fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
+    const agent_state = app.getActiveAgentState() orelse return;
+
     // Build title with server name when connected
     const title = if (app.getActiveAcpManager()) |mgr| blk: {
         if (mgr.server_name) |name| {
-            // Show server name: " Claude Code " or " Claude Code [focused] "
             break :blk name;
         }
         break :blk "Agent";
@@ -1110,7 +1111,6 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
             .prompting => " Thinking...",
             .failed => " Failed",
         };
-        // Show queued message count when prompting or during session initialization
         const queued = mgr.queuedPromptCount();
         if (queued > 0) {
             const fmt_result: ?[]const u8 = switch (mgr.status) {
@@ -1149,6 +1149,54 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     };
     _ = win.print(&title_seg, .{ .row_offset = 0 });
 
+    const title_width = 2 + (std.unicode.utf8CountCodepoints(title) catch title.len) + suffix.len;
+
+    // Codex token usage and rate limit display (between title and status)
+    var token_buf: [64]u8 = undefined;
+    var rate_buf: [64]u8 = undefined;
+    var token_text: ?[]const u8 = null;
+    var rate_text: ?[]const u8 = null;
+
+    if (agent_state.codex_token_usage) |tu| {
+        token_text = formatTokenUsage(&token_buf, tu.total_tokens, tu.model_context_window);
+    }
+
+    if (agent_state.codex_rate_limits) |rl| {
+        const max_pct = @max(rl.primary_used_percent, rl.secondary_used_percent);
+        if (max_pct >= 80.0) {
+            if (rl.primary_used_percent >= rl.secondary_used_percent) {
+                rate_text = std.fmt.bufPrint(&rate_buf, "Rate limit: {d:.0}% primary", .{rl.primary_used_percent}) catch null;
+            } else {
+                rate_text = std.fmt.bufPrint(&rate_buf, "Rate limit: {d:.0}% secondary", .{rl.secondary_used_percent}) catch null;
+            }
+        }
+    }
+
+    // Render token info after title
+    var info_col = title_width;
+    const dim_style = vaxis.Style{ .fg = Color.dim_gray };
+
+    if (token_text) |tt| {
+        const sep = " \xe2\x94\x82 "; // " | "
+        var token_seg = [_]vaxis.Cell.Segment{
+            .{ .text = sep, .style = dim_style },
+            .{ .text = tt, .style = dim_style },
+        };
+        _ = win.print(&token_seg, .{ .row_offset = 0, .col_offset = @intCast(info_col) });
+        info_col += 3 + (std.unicode.utf8CountCodepoints(tt) catch tt.len);
+    }
+
+    if (rate_text) |rt| {
+        const sep = " \xe2\x94\x82 "; // " | "
+        const warn_style = vaxis.Style{ .fg = Color.yellow };
+        var rate_seg = [_]vaxis.Cell.Segment{
+            .{ .text = sep, .style = dim_style },
+            .{ .text = "\xe2\x9a\xa0 ", .style = warn_style }, // warning sign
+            .{ .text = rt, .style = warn_style },
+        };
+        _ = win.print(&rate_seg, .{ .row_offset = 0, .col_offset = @intCast(info_col) });
+    }
+
     // Print status on the right
     const status_style = vaxis.Style{
         .fg = if (app.getActiveAcpManager()) |mgr|
@@ -1163,7 +1211,6 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     };
 
     const status_width = std.unicode.utf8CountCodepoints(status_text) catch status_text.len;
-    const title_width = 2 + (std.unicode.utf8CountCodepoints(title) catch title.len) + suffix.len; // " {title}{suffix} "
     const status_col = if (win.width > title_width + status_width)
         win.width - status_width
     else
@@ -3564,5 +3611,68 @@ fn withModalBg(s: vaxis.Style) vaxis.Style {
     return result;
 }
 
+/// Format a token count as a compact display string.
+/// Returns a slice into the provided buffer.
+/// Examples: 500 -> "500 tokens", 16709 -> "16.7K tokens", 1234567 -> "1.2M tokens"
+fn formatTokenUsage(buf: []u8, total_tokens: u64, model_context_window: u64) []const u8 {
+    if (model_context_window > 0) {
+        const pct = @as(f64, @floatFromInt(total_tokens)) / @as(f64, @floatFromInt(model_context_window)) * 100.0;
+        if (total_tokens >= 1_000_000) {
+            const m = @as(f64, @floatFromInt(total_tokens)) / 1_000_000.0;
+            return std.fmt.bufPrint(buf, "{d:.1}M tokens \xe2\x94\x82 {d:.0}% context", .{ m, pct }) catch "? tokens";
+        } else if (total_tokens >= 1_000) {
+            const k = @as(f64, @floatFromInt(total_tokens)) / 1_000.0;
+            return std.fmt.bufPrint(buf, "{d:.1}K tokens \xe2\x94\x82 {d:.0}% context", .{ k, pct }) catch "? tokens";
+        } else {
+            return std.fmt.bufPrint(buf, "{d} tokens \xe2\x94\x82 {d:.0}% context", .{ total_tokens, pct }) catch "? tokens";
+        }
+    } else {
+        if (total_tokens >= 1_000_000) {
+            const m = @as(f64, @floatFromInt(total_tokens)) / 1_000_000.0;
+            return std.fmt.bufPrint(buf, "{d:.1}M tokens", .{m}) catch "? tokens";
+        } else if (total_tokens >= 1_000) {
+            const k = @as(f64, @floatFromInt(total_tokens)) / 1_000.0;
+            return std.fmt.bufPrint(buf, "{d:.1}K tokens", .{k}) catch "? tokens";
+        } else {
+            return std.fmt.bufPrint(buf, "{d} tokens", .{total_tokens}) catch "? tokens";
+        }
+    }
+}
 
+// =============================================================================
+// Tests — formatTokenUsage
+// =============================================================================
 
+test "formatTokenUsage: small count without context window" {
+    var buf: [64]u8 = undefined;
+    const result = formatTokenUsage(&buf, 500, 0);
+    try std.testing.expectEqualStrings("500 tokens", result);
+}
+
+test "formatTokenUsage: thousands with context window" {
+    var buf: [64]u8 = undefined;
+    const result = formatTokenUsage(&buf, 16709, 258400);
+    // 16709 -> "16.7K tokens | 6% context"
+    try std.testing.expect(std.mem.startsWith(u8, result, "16.7K tokens"));
+    try std.testing.expect(std.mem.indexOf(u8, result, "6% context") != null);
+}
+
+test "formatTokenUsage: millions with context window" {
+    var buf: [64]u8 = undefined;
+    const result = formatTokenUsage(&buf, 1_234_567, 2_000_000);
+    try std.testing.expect(std.mem.startsWith(u8, result, "1.2M tokens"));
+    try std.testing.expect(std.mem.indexOf(u8, result, "62% context") != null);
+}
+
+test "formatTokenUsage: exact thousands" {
+    var buf: [64]u8 = undefined;
+    const result = formatTokenUsage(&buf, 1000, 0);
+    try std.testing.expectEqualStrings("1.0K tokens", result);
+}
+
+test "formatTokenUsage: high context percentage" {
+    var buf: [64]u8 = undefined;
+    const result = formatTokenUsage(&buf, 200000, 258400);
+    try std.testing.expect(std.mem.startsWith(u8, result, "200.0K tokens"));
+    try std.testing.expect(std.mem.indexOf(u8, result, "77% context") != null);
+}

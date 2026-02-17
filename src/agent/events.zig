@@ -42,6 +42,24 @@ pub const AgentEvent = union(enum) {
     question_prompt: QuestionPromptData,
     question_resolved: void,
 
+    // Codex-specific metrics
+    token_usage_update: CodexTokenUsageEvent,
+    rate_limits_update: CodexRateLimitsEvent,
+    mcp_server_status: void,
+
+    pub const CodexTokenUsageEvent = struct {
+        total_tokens: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+        model_context_window: u64,
+    };
+
+    pub const CodexRateLimitsEvent = struct {
+        primary_used_percent: f64,
+        secondary_used_percent: f64,
+    };
+
     pub const ToolCallEvent = struct {
         tool_call_id: []const u8,
         tool_name: ?[]const u8,
@@ -154,6 +172,22 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
             };
         },
         .message_complete => {},
+        .token_usage_update => |tu| {
+            agent_state.codex_token_usage = .{
+                .total_tokens = tu.total_tokens,
+                .input_tokens = tu.input_tokens,
+                .output_tokens = tu.output_tokens,
+                .cached_input_tokens = tu.cached_input_tokens,
+                .model_context_window = tu.model_context_window,
+            };
+        },
+        .rate_limits_update => |rl| {
+            agent_state.codex_rate_limits = .{
+                .primary_used_percent = rl.primary_used_percent,
+                .secondary_used_percent = rl.secondary_used_percent,
+            };
+        },
+        .mcp_server_status => {},
     }
 }
 
@@ -296,6 +330,21 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
         },
         .turn_completed => .{ .message_complete = {} },
         .plan_updated => null,
+        .token_usage_updated => |tu| blk: {
+            const total = tu.total orelse break :blk null;
+            break :blk @as(?AgentEvent, .{ .token_usage_update = .{
+                .total_tokens = total.total_tokens,
+                .input_tokens = total.input_tokens,
+                .output_tokens = total.output_tokens,
+                .cached_input_tokens = total.cached_input_tokens,
+                .model_context_window = tu.model_context_window orelse 0,
+            } });
+        },
+        .rate_limits_updated => |rl| .{ .rate_limits_update = .{
+            .primary_used_percent = rl.primary.used_percent,
+            .secondary_used_percent = rl.secondary.used_percent,
+        } },
+        .mcp_server_status => .{ .mcp_server_status = {} },
         .approval_requested => null,
         .unknown => null,
     };
@@ -486,4 +535,65 @@ test "codexEventToAgentEvent: command_output_delta maps to tool_update running" 
     try std.testing.expect(result.? == .tool_update);
     try std.testing.expectEqual(Message.ToolStatus.running, result.?.tool_update.status);
     try std.testing.expectEqualStrings("output line", result.?.tool_update.stdout.?);
+}
+
+// =============================================================================
+// Phase 6: Token usage and rate limits event mapping
+// =============================================================================
+
+test "codexEventToAgentEvent: token_usage_updated maps to token_usage_update" {
+    const event = CodexEvent{ .token_usage_updated = codex_protocol.TokenUsage{
+        .total = codex_protocol.TokenCounts{
+            .total_tokens = 16709,
+            .input_tokens = 16687,
+            .cached_input_tokens = 7936,
+            .output_tokens = 22,
+            .reasoning_output_tokens = 0,
+        },
+        .last = codex_protocol.TokenCounts{
+            .total_tokens = 500,
+            .input_tokens = 400,
+            .cached_input_tokens = 100,
+            .output_tokens = 100,
+            .reasoning_output_tokens = 50,
+        },
+        .model_context_window = 258400,
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .token_usage_update);
+    try std.testing.expectEqual(@as(u64, 16709), result.?.token_usage_update.total_tokens);
+    try std.testing.expectEqual(@as(u64, 16687), result.?.token_usage_update.input_tokens);
+    try std.testing.expectEqual(@as(u64, 22), result.?.token_usage_update.output_tokens);
+    try std.testing.expectEqual(@as(u64, 7936), result.?.token_usage_update.cached_input_tokens);
+    try std.testing.expectEqual(@as(u64, 258400), result.?.token_usage_update.model_context_window);
+}
+
+test "codexEventToAgentEvent: token_usage_updated without total maps to null" {
+    const event = CodexEvent{ .token_usage_updated = codex_protocol.TokenUsage{
+        .total = null,
+        .last = null,
+        .model_context_window = null,
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result == null);
+}
+
+test "codexEventToAgentEvent: rate_limits_updated maps to rate_limits_update" {
+    const event = CodexEvent{ .rate_limits_updated = codex_protocol.RateLimits{
+        .primary = .{ .used_percent = 42.5, .credits = null },
+        .secondary = .{ .used_percent = 1.0, .credits = null },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .rate_limits_update);
+    try std.testing.expectApproxEqRel(@as(f64, 42.5), result.?.rate_limits_update.primary_used_percent, 0.001);
+    try std.testing.expectApproxEqRel(@as(f64, 1.0), result.?.rate_limits_update.secondary_used_percent, 0.001);
+}
+
+test "codexEventToAgentEvent: mcp_server_status maps to mcp_server_status" {
+    const event = CodexEvent{ .mcp_server_status = {} };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .mcp_server_status);
 }

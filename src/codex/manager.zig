@@ -38,6 +38,15 @@ pub const CodexManager = struct {
     // Turn state (populated during active turn)
     turn_id: ?[]const u8,
 
+    // Token usage (populated from thread/tokenUsage/updated notifications)
+    token_usage: ?protocol.TokenUsage,
+
+    // Rate limits (populated from account/rateLimits/updated notifications)
+    rate_limits: ?protocol.RateLimits,
+
+    // MCP server status (populated from codex/event/mcp_startup_* events)
+    mcp_servers: ?McpServerStatus,
+
     // Pending approval request from the server
     pending_approval: ?PendingApproval,
 
@@ -156,6 +165,18 @@ pub const CodexManager = struct {
         }
     };
 
+    pub const McpServerEntry = struct {
+        name: []const u8,
+        state: []const u8,
+    };
+
+    pub const McpServerStatus = struct {
+        servers: []McpServerEntry,
+        complete: bool,
+        ready: ?[][]const u8,
+        failed: ?[][]const u8,
+    };
+
     pub const Error = error{
         NotConnected,
         AlreadyConnected,
@@ -174,6 +195,9 @@ pub const CodexManager = struct {
         TurnStartFailed,
         TurnSteerFailed,
         TurnInterruptFailed,
+        CompactFailed,
+        RollbackFailed,
+        ArchiveFailed,
     } || Allocator.Error || process_mod.CodexProcess.SpawnError || transport_mod.StdioTransport.Error;
 
     pub fn init(allocator: Allocator) CodexManager {
@@ -191,6 +215,9 @@ pub const CodexManager = struct {
             .models = null,
             .current_model = null,
             .turn_id = null,
+            .token_usage = null,
+            .rate_limits = null,
+            .mcp_servers = null,
             .pending_approval = null,
             .request_id_counter = 0,
             .pending_messages = .{},
@@ -266,6 +293,9 @@ pub const CodexManager = struct {
         self.freePendingApproval();
         self.freePendingMessages();
         self.freeModels();
+        self.token_usage = null;
+        self.rate_limits = null;
+        self.freeMcpServers();
         self.status = .disconnected;
     }
 
@@ -756,6 +786,56 @@ pub const CodexManager = struct {
     }
 
     // =========================================================================
+    // Thread operations (compact, rollback, archive, unarchive)
+    // =========================================================================
+
+    /// Compact the current thread to reduce context usage.
+    pub fn compactThread(self: *CodexManager) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+        const thread_id = self.thread_id orelse return error.NotConnected;
+
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeThreadCompact(req_id.number, thread_id) catch return error.CompactFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+    }
+
+    /// Rollback a thread to a specific turn.
+    pub fn rollbackThread(self: *CodexManager, turn_id: []const u8) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+        const thread_id = self.thread_id orelse return error.NotConnected;
+
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeThreadRollback(req_id.number, thread_id, turn_id) catch return error.RollbackFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+    }
+
+    /// Archive a thread.
+    pub fn archiveThread(self: *CodexManager, thread_id: []const u8) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeThreadArchive(req_id.number, thread_id) catch return error.ArchiveFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+    }
+
+    /// Unarchive a thread.
+    pub fn unarchiveThread(self: *CodexManager, thread_id: []const u8) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+
+        const req_id = self.nextRequestId();
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeThreadUnarchive(req_id.number, thread_id) catch return error.ArchiveFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+    }
+
+    // =========================================================================
     // Event processing
     // =========================================================================
 
@@ -772,6 +852,7 @@ pub const CodexManager = struct {
     pub fn deinit(self: *CodexManager) void {
         self.disconnect();
         self.pending_messages.deinit(self.allocator);
+        self.freeMcpServers();
     }
 
     // =========================================================================
@@ -786,6 +867,9 @@ pub const CodexManager = struct {
         item_completed: ItemEvent,
         turn_completed: TurnCompletedEvent,
         plan_updated: PlanUpdatedEvent,
+        token_usage_updated: protocol.TokenUsage,
+        rate_limits_updated: protocol.RateLimits,
+        mcp_server_status: void,
         approval_requested: void,
         unknown: void,
 
@@ -947,6 +1031,230 @@ pub const CodexManager = struct {
         }
     }
 
+    fn freeMcpServers(self: *CodexManager) void {
+        if (self.mcp_servers) |mcp| {
+            for (mcp.servers) |entry| {
+                self.allocator.free(entry.name);
+                self.allocator.free(entry.state);
+            }
+            self.allocator.free(mcp.servers);
+            if (mcp.ready) |ready| {
+                for (ready) |r| self.allocator.free(r);
+                self.allocator.free(ready);
+            }
+            if (mcp.failed) |failed| {
+                for (failed) |f| self.allocator.free(f);
+                self.allocator.free(failed);
+            }
+            self.mcp_servers = null;
+        }
+    }
+
+    fn parseTokenUsageNotification(self: *CodexManager, json: []const u8) ?CodexEvent {
+        var decoder = codec.Decoder.init(self.allocator);
+        const result = decoder.parseTokenUsage(json) catch return null;
+
+        // Free the string fields we don't need to store
+        self.allocator.free(result.thread_id);
+        if (result.turn_id) |tid| self.allocator.free(tid);
+
+        // Store on manager state
+        self.token_usage = result.token_usage;
+
+        return .{ .token_usage_updated = result.token_usage };
+    }
+
+    fn parseRateLimitsNotification(self: *CodexManager, json: []const u8) ?CodexEvent {
+        // The params JSON has shape: {"rateLimits": {...}}
+        // Extract the inner rateLimits object for the decoder
+        const RawWrapper = struct {
+            rateLimits: ?std.json.Value = null,
+        };
+
+        const parsed = std.json.parseFromSlice(RawWrapper, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch return null;
+        defer parsed.deinit();
+
+        if (parsed.value.rateLimits) |rl_val| {
+            // Serialize the inner object back to JSON for the decoder
+            var buf: std.ArrayList(u8) = .{};
+            defer buf.deinit(self.allocator);
+            const writer = buf.writer(self.allocator);
+            writer.print("{f}", .{std.json.fmt(rl_val, .{})}) catch return null;
+
+            var decoder = codec.Decoder.init(self.allocator);
+            const rate_limits = decoder.parseRateLimits(buf.items) catch return null;
+
+            self.rate_limits = rate_limits;
+            return .{ .rate_limits_updated = rate_limits };
+        }
+
+        return null;
+    }
+
+    fn parseMcpStatusEvent(self: *CodexManager, method: []const u8, params_json: ?[]const u8) ?CodexEvent {
+        const json = params_json orelse return null;
+
+        if (std.mem.eql(u8, method, "codex/event/mcp_startup_update")) {
+            // Parse: {"msg":{"type":"mcp_startup_update","server":"name","status":{"state":"starting"}}}
+            const RawMsg = struct {
+                msg: ?struct {
+                    server: ?[]const u8 = null,
+                    status: ?struct {
+                        state: ?[]const u8 = null,
+                    } = null,
+                } = null,
+            };
+
+            const parsed = std.json.parseFromSlice(RawMsg, self.allocator, json, .{
+                .ignore_unknown_fields = true,
+            }) catch return null;
+            defer parsed.deinit();
+
+            if (parsed.value.msg) |msg| {
+                const server_name = msg.server orelse return null;
+                const state = if (msg.status) |s| s.state orelse "unknown" else "unknown";
+
+                // Initialize mcp_servers if needed
+                if (self.mcp_servers == null) {
+                    const servers = self.allocator.alloc(McpServerEntry, 0) catch return null;
+                    self.mcp_servers = .{
+                        .servers = servers,
+                        .complete = false,
+                        .ready = null,
+                        .failed = null,
+                    };
+                }
+
+                // Check if server already exists, update it; else add new
+                var found = false;
+                if (self.mcp_servers) |*mcp| {
+                    for (mcp.servers) |*entry| {
+                        if (std.mem.eql(u8, entry.name, server_name)) {
+                            self.allocator.free(entry.state);
+                            entry.state = self.allocator.dupe(u8, state) catch return null;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        const new_name = self.allocator.dupe(u8, server_name) catch return null;
+                        const new_state = self.allocator.dupe(u8, state) catch {
+                            self.allocator.free(new_name);
+                            return null;
+                        };
+                        const new_entry = McpServerEntry{ .name = new_name, .state = new_state };
+                        const old_len = mcp.servers.len;
+                        const new_servers = self.allocator.alloc(McpServerEntry, old_len + 1) catch {
+                            self.allocator.free(new_name);
+                            self.allocator.free(new_state);
+                            return null;
+                        };
+                        @memcpy(new_servers[0..old_len], mcp.servers);
+                        new_servers[old_len] = new_entry;
+                        self.allocator.free(mcp.servers);
+                        mcp.servers = new_servers;
+                    }
+                }
+
+                return .{ .mcp_server_status = {} };
+            }
+        } else if (std.mem.eql(u8, method, "codex/event/mcp_startup_complete")) {
+            // Parse: {"msg":{"type":"mcp_startup_complete","ready":["name"],"failed":[],"cancelled":[]}}
+            const RawComplete = struct {
+                msg: ?struct {
+                    ready: ?[]const []const u8 = null,
+                    failed: ?[]const []const u8 = null,
+                } = null,
+            };
+
+            const parsed = std.json.parseFromSlice(RawComplete, self.allocator, json, .{
+                .ignore_unknown_fields = true,
+                .allocate = .alloc_always,
+            }) catch return null;
+            defer parsed.deinit();
+
+            if (parsed.value.msg) |msg| {
+                if (self.mcp_servers == null) {
+                    const servers = self.allocator.alloc(McpServerEntry, 0) catch return null;
+                    self.mcp_servers = .{
+                        .servers = servers,
+                        .complete = false,
+                        .ready = null,
+                        .failed = null,
+                    };
+                }
+
+                if (self.mcp_servers) |*mcp| {
+                    mcp.complete = true;
+
+                    // Store ready list
+                    if (msg.ready) |ready| {
+                        if (mcp.ready) |old_ready| {
+                            for (old_ready) |r| self.allocator.free(r);
+                            self.allocator.free(old_ready);
+                        }
+                        const new_ready = self.allocator.alloc([]const u8, ready.len) catch return .{ .mcp_server_status = {} };
+                        for (ready, 0..) |r, i| {
+                            new_ready[i] = self.allocator.dupe(u8, r) catch {
+                                // Partial cleanup on failure
+                                for (new_ready[0..i]) |nr| self.allocator.free(nr);
+                                self.allocator.free(new_ready);
+                                return .{ .mcp_server_status = {} };
+                            };
+                        }
+                        mcp.ready = new_ready;
+
+                        // Update server states to "ready" for matching servers
+                        for (mcp.servers) |*entry| {
+                            for (ready) |r| {
+                                if (std.mem.eql(u8, entry.name, r)) {
+                                    self.allocator.free(entry.state);
+                                    entry.state = self.allocator.dupe(u8, "ready") catch break;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Store failed list
+                    if (msg.failed) |failed| {
+                        if (mcp.failed) |old_failed| {
+                            for (old_failed) |f| self.allocator.free(f);
+                            self.allocator.free(old_failed);
+                        }
+                        const new_failed = self.allocator.alloc([]const u8, failed.len) catch return .{ .mcp_server_status = {} };
+                        for (failed, 0..) |f, i| {
+                            new_failed[i] = self.allocator.dupe(u8, f) catch {
+                                for (new_failed[0..i]) |nf| self.allocator.free(nf);
+                                self.allocator.free(new_failed);
+                                return .{ .mcp_server_status = {} };
+                            };
+                        }
+                        mcp.failed = new_failed;
+
+                        // Update server states to "failed" for matching servers
+                        for (mcp.servers) |*entry| {
+                            for (failed) |f| {
+                                if (std.mem.eql(u8, entry.name, f)) {
+                                    self.allocator.free(entry.state);
+                                    entry.state = self.allocator.dupe(u8, "failed") catch break;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return .{ .mcp_server_status = {} };
+            }
+        }
+
+        return null;
+    }
+
     fn processServerRequest(self: *CodexManager, req: codec.ServerRequest) ?CodexEvent {
         const ApprovalMethod = enum {
             command_approval,
@@ -1044,6 +1352,11 @@ pub const CodexManager = struct {
     }
 
     fn processNotification(self: *CodexManager, method: []const u8, params_json: ?[]const u8) ?CodexEvent {
+        // Exception to AD-3: MCP startup events have no high-level equivalent
+        if (std.mem.startsWith(u8, method, "codex/event/mcp_startup")) {
+            return self.parseMcpStatusEvent(method, params_json);
+        }
+
         // Filter out codex/event/* low-level notifications (AD-3)
         if (std.mem.startsWith(u8, method, "codex/event/")) return null;
 
@@ -1054,6 +1367,8 @@ pub const CodexManager = struct {
             item_started,
             item_completed,
             turn_completed,
+            token_usage_updated,
+            rate_limits_updated,
         };
 
         const method_map = std.StaticStringMap(Method).initComptime(.{
@@ -1063,6 +1378,8 @@ pub const CodexManager = struct {
             .{ "item/started", .item_started },
             .{ "item/completed", .item_completed },
             .{ "turn/completed", .turn_completed },
+            .{ "thread/tokenUsage/updated", .token_usage_updated },
+            .{ "account/rateLimits/updated", .rate_limits_updated },
         });
 
         const variant = method_map.get(method) orelse return .{ .unknown = {} };
@@ -1075,6 +1392,8 @@ pub const CodexManager = struct {
             .item_started => self.parseItemEvent(json, .item_started),
             .item_completed => self.parseItemEvent(json, .item_completed),
             .turn_completed => self.parseTurnCompleted(json),
+            .token_usage_updated => self.parseTokenUsageNotification(json),
+            .rate_limits_updated => self.parseRateLimitsNotification(json),
         };
     }
 
@@ -1908,4 +2227,257 @@ test "codex manager listModels" {
         }
     }
     try std.testing.expect(has_default);
+}
+
+// =============================================================================
+// Phase 6: Advanced Features Tests
+// =============================================================================
+
+test "new phase 6 fields initialize to null" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    try std.testing.expect(manager.token_usage == null);
+    try std.testing.expect(manager.rate_limits == null);
+    try std.testing.expect(manager.mcp_servers == null);
+}
+
+test "processMessage with token usage notification stores usage and returns event" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"thread/tokenUsage/updated","params":{"threadId":"t1","turnId":"1","tokenUsage":{"total":{"totalTokens":16709,"inputTokens":16687,"cachedInputTokens":7936,"outputTokens":22,"reasoningOutputTokens":0},"last":{"totalTokens":500,"inputTokens":400,"cachedInputTokens":100,"outputTokens":100,"reasoningOutputTokens":50},"modelContextWindow":258400}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    try std.testing.expect(manager.token_usage == null);
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .token_usage_updated);
+
+    // Verify stored state
+    try std.testing.expect(manager.token_usage != null);
+    const tu = manager.token_usage.?;
+    try std.testing.expect(tu.total != null);
+    try std.testing.expectEqual(@as(u64, 16709), tu.total.?.total_tokens);
+    try std.testing.expectEqual(@as(u64, 16687), tu.total.?.input_tokens);
+    try std.testing.expectEqual(@as(u64, 7936), tu.total.?.cached_input_tokens);
+    try std.testing.expectEqual(@as(u64, 22), tu.total.?.output_tokens);
+    try std.testing.expectEqual(@as(u64, 258400), tu.model_context_window.?);
+
+    // Verify last usage
+    try std.testing.expect(tu.last != null);
+    try std.testing.expectEqual(@as(u64, 500), tu.last.?.total_tokens);
+}
+
+test "processMessage with rate limits notification stores limits and returns event" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":42.5,"windowDurationMins":300,"resetsAt":1771349237},"secondary":{"usedPercent":1.0,"windowDurationMins":10080,"resetsAt":1771892798},"credits":{"hasCredits":false,"unlimited":false,"balance":null},"planType":null}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    try std.testing.expect(manager.rate_limits == null);
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .rate_limits_updated);
+
+    // Verify stored state
+    try std.testing.expect(manager.rate_limits != null);
+    const rl = manager.rate_limits.?;
+    try std.testing.expectApproxEqRel(@as(f64, 42.5), rl.primary.used_percent, 0.001);
+    try std.testing.expectApproxEqRel(@as(f64, 1.0), rl.secondary.used_percent, 0.001);
+}
+
+test "processMessage with MCP startup update creates server entry" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"codex/event/mcp_startup_update","params":{"msg":{"type":"mcp_startup_update","server":"codex_apps","status":{"state":"starting"}}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    try std.testing.expect(manager.mcp_servers == null);
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .mcp_server_status);
+
+    // Verify stored state
+    try std.testing.expect(manager.mcp_servers != null);
+    const mcp = manager.mcp_servers.?;
+    try std.testing.expectEqual(@as(usize, 1), mcp.servers.len);
+    try std.testing.expectEqualStrings("codex_apps", mcp.servers[0].name);
+    try std.testing.expectEqualStrings("starting", mcp.servers[0].state);
+    try std.testing.expect(!mcp.complete);
+}
+
+test "processMessage with MCP startup complete marks completion" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+
+    // First, send an update to create the server entry
+    const update_json =
+        \\{"method":"codex/event/mcp_startup_update","params":{"msg":{"type":"mcp_startup_update","server":"codex_apps","status":{"state":"starting"}}}}
+    ;
+    var update_msg = try decoder.decode(update_json);
+    defer update_msg.deinit(std.testing.allocator);
+    _ = manager.processMessage(update_msg);
+
+    // Then send completion
+    const complete_json =
+        \\{"method":"codex/event/mcp_startup_complete","params":{"msg":{"type":"mcp_startup_complete","ready":["codex_apps"],"failed":[],"cancelled":[]}}}
+    ;
+    var complete_msg = try decoder.decode(complete_json);
+    defer complete_msg.deinit(std.testing.allocator);
+    const event = manager.processMessage(complete_msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .mcp_server_status);
+
+    // Verify completion state
+    const mcp = manager.mcp_servers.?;
+    try std.testing.expect(mcp.complete);
+    try std.testing.expect(mcp.ready != null);
+    try std.testing.expectEqual(@as(usize, 1), mcp.ready.?.len);
+    try std.testing.expectEqualStrings("codex_apps", mcp.ready.?[0]);
+
+    // Server state should be updated to "ready"
+    try std.testing.expectEqualStrings("ready", mcp.servers[0].state);
+}
+
+test "MCP startup update updates existing server entry" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+
+    // First update
+    const json1 =
+        \\{"method":"codex/event/mcp_startup_update","params":{"msg":{"type":"mcp_startup_update","server":"test_server","status":{"state":"starting"}}}}
+    ;
+    var msg1 = try decoder.decode(json1);
+    defer msg1.deinit(std.testing.allocator);
+    _ = manager.processMessage(msg1);
+
+    try std.testing.expectEqualStrings("starting", manager.mcp_servers.?.servers[0].state);
+
+    // Second update for same server
+    const json2 =
+        \\{"method":"codex/event/mcp_startup_update","params":{"msg":{"type":"mcp_startup_update","server":"test_server","status":{"state":"ready"}}}}
+    ;
+    var msg2 = try decoder.decode(json2);
+    defer msg2.deinit(std.testing.allocator);
+    _ = manager.processMessage(msg2);
+
+    // Should still have one entry with updated state
+    try std.testing.expectEqual(@as(usize, 1), manager.mcp_servers.?.servers.len);
+    try std.testing.expectEqualStrings("ready", manager.mcp_servers.?.servers[0].state);
+}
+
+test "compactThread fails when not connected" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const result = manager.compactThread();
+    try std.testing.expectError(error.NotConnected, result);
+}
+
+test "rollbackThread fails when not connected" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const result = manager.rollbackThread("turn-1");
+    try std.testing.expectError(error.NotConnected, result);
+}
+
+test "archiveThread fails when not connected" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const result = manager.archiveThread("thread-1");
+    try std.testing.expectError(error.NotConnected, result);
+}
+
+test "unarchiveThread fails when not connected" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const result = manager.unarchiveThread("thread-1");
+    try std.testing.expectError(error.NotConnected, result);
+}
+
+test "disconnect clears token usage and rate limits" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    // Set some token usage data via notification
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const tu_json =
+        \\{"method":"thread/tokenUsage/updated","params":{"threadId":"t1","turnId":"1","tokenUsage":{"total":{"totalTokens":100,"inputTokens":90,"cachedInputTokens":0,"outputTokens":10,"reasoningOutputTokens":0},"modelContextWindow":100000}}}
+    ;
+    var tu_msg = try decoder.decode(tu_json);
+    defer tu_msg.deinit(std.testing.allocator);
+    _ = manager.processMessage(tu_msg);
+    try std.testing.expect(manager.token_usage != null);
+
+    // Set rate limit data via notification
+    const rl_json =
+        \\{"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":5.0},"secondary":{"usedPercent":0.0}}}}
+    ;
+    var rl_msg = try decoder.decode(rl_json);
+    defer rl_msg.deinit(std.testing.allocator);
+    _ = manager.processMessage(rl_msg);
+    try std.testing.expect(manager.rate_limits != null);
+
+    manager.disconnect();
+    try std.testing.expect(manager.token_usage == null);
+    try std.testing.expect(manager.rate_limits == null);
+    try std.testing.expect(manager.mcp_servers == null);
+}
+
+test "token usage updated event contains correct data" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"thread/tokenUsage/updated","params":{"threadId":"t1","turnId":"1","tokenUsage":{"total":{"totalTokens":5000,"inputTokens":4500,"cachedInputTokens":2000,"outputTokens":500,"reasoningOutputTokens":100},"last":{"totalTokens":1000,"inputTokens":900,"cachedInputTokens":0,"outputTokens":100,"reasoningOutputTokens":0},"modelContextWindow":128000}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+
+    const tu_event = event.?.token_usage_updated;
+    try std.testing.expect(tu_event.total != null);
+    try std.testing.expectEqual(@as(u64, 5000), tu_event.total.?.total_tokens);
+    try std.testing.expectEqual(@as(u64, 128000), tu_event.model_context_window.?);
+}
+
+test "other codex/event/* methods are still filtered" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    // Non-MCP codex/event should still be filtered
+    const json =
+        \\{"method":"codex/event/some_other_event","params":{"data":"test"}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event == null);
 }

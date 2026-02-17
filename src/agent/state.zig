@@ -724,6 +724,10 @@ pub const AgentState = struct {
     // Subagent drill-in modal (opened from history mode Enter on subagent messages)
     subagent_modal: ?SubagentModalState,
 
+    // Codex-specific metrics (updated via token_usage_update and rate_limits_update events)
+    codex_token_usage: ?CodexTokenUsageState,
+    codex_rate_limits: ?CodexRateLimitsState,
+
     pub const PanelSide = enum {
         left,
         right,
@@ -738,6 +742,19 @@ pub const AgentState = struct {
     pub const DiffViewMode = enum {
         unified,
         side_by_side,
+    };
+
+    pub const CodexTokenUsageState = struct {
+        total_tokens: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+        model_context_window: u64,
+    };
+
+    pub const CodexRateLimitsState = struct {
+        primary_used_percent: f64,
+        secondary_used_percent: f64,
     };
 
     pub fn init(allocator: Allocator, panel_side: PanelSide) AgentState {
@@ -776,6 +793,8 @@ pub const AgentState = struct {
             .expanded_user_messages = std.AutoHashMap(usize, void).init(allocator),
             .pending_question = null,
             .subagent_modal = null,
+            .codex_token_usage = null,
+            .codex_rate_limits = null,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
