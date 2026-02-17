@@ -144,13 +144,40 @@ pub const ManagerHandle = union(enum) {
         }
     }
 
-    /// Get the pending permission request, if any (ACP only).
-    pub fn getPendingPermission(self: ManagerHandle) ?*AcpManager.PendingPermission {
+    /// Unified pending approval — wraps ACP permissions and Codex approvals.
+    pub const PendingApproval = union(enum) {
+        acp_permission: *AcpManager.PendingPermission,
+        codex_command: *CodexManager.PendingApproval,
+        codex_file_change: *CodexManager.PendingApproval,
+        codex_user_input: *CodexManager.PendingApproval,
+    };
+
+    /// Get the pending approval request, if any.
+    pub fn getPendingApproval(self: ManagerHandle) ?PendingApproval {
         return switch (self) {
-            .acp => |m| m.getPendingPermission(),
+            .acp => |m| {
+                if (m.getPendingPermission()) |perm| {
+                    return .{ .acp_permission = perm };
+                }
+                return null;
+            },
             .opencode => null,
-            .codex => null, // Phase 4 handles approvals
+            .codex => |m| {
+                if (m.getPendingApproval()) |approval| {
+                    return switch (approval.*) {
+                        .command => .{ .codex_command = approval },
+                        .file_change => .{ .codex_file_change = approval },
+                        .user_input => .{ .codex_user_input = approval },
+                    };
+                }
+                return null;
+            },
         };
+    }
+
+    /// Check if there is any pending approval (convenience for tab_manager).
+    pub fn hasPendingApproval(self: ManagerHandle) bool {
+        return self.getPendingApproval() != null;
     }
 
     /// Get a display name for the agent/server.

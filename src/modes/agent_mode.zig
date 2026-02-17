@@ -6,6 +6,8 @@ const state = @import("../agent/state.zig");
 const protocol = @import("../acp/protocol.zig");
 const sessions = @import("../acp/sessions.zig");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
+const ManagerHandle = @import("../agent/manager_handle.zig").ManagerHandle;
+const CodexManager = @import("../codex/manager.zig").CodexManager;
 const command_palette = @import("../agent/command_palette.zig");
 const opencode = @import("../opencode/opencode.zig");
 
@@ -75,69 +77,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // Check for pending permission prompt (ACP-only feature)
-    if (app.getActiveAcpManager()) |mgr| {
-        if (mgr.getPendingPermission()) |perm| {
-            const num_options = perm.options.len;
-
-            // Navigation: Ctrl+n / Down / j = next, Ctrl+p / Up / k = prev
-            const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
-                key.codepoint == vaxis.Key.down or
-                (key.codepoint == 'j' and !key.mods.ctrl);
-            const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
-                key.codepoint == vaxis.Key.up or
-                (key.codepoint == 'k' and !key.mods.ctrl);
-
-            if (is_down and num_options > 0) {
-                perm.selected_index = (perm.selected_index + 1) % num_options;
-                app.needs_render = true;
+    // Check for pending approval prompt (unified across ACP + Codex)
+    if (app.getActiveManager()) |mgr| {
+        if (mgr.getPendingApproval()) |approval| {
+            if (handleApprovalKeys(app, agent_state, mgr, approval, key)) {
                 return;
             }
-            if (is_up and num_options > 0) {
-                perm.selected_index = if (perm.selected_index == 0) num_options - 1 else perm.selected_index - 1;
-                app.needs_render = true;
-                return;
-            }
-
-            // Enter: confirm selected option
-            if (key.codepoint == vaxis.Key.enter or key.codepoint == 'y' or key.codepoint == 'Y') {
-                mgr.respondToPermission(true) catch |err| {
-                    std.log.err("Agent: Failed to respond to permission: {any}", .{err});
-                };
-                app.needs_render = true;
-                return;
-            }
-
-            // Escape / n: cancel/reject
-            if (key.codepoint == 27 or key.codepoint == 'n' or key.codepoint == 'N') {
-                mgr.cancelPermission() catch |err| {
-                    std.log.err("Agent: Failed to cancel permission: {any}", .{err});
-                };
-                app.needs_render = true;
-                return;
-            }
-
-            // Allow scrolling during permission prompts
-            // Ctrl+D - page down
-            if (key.mods.ctrl and key.codepoint == 'd') {
-                agent_state.follow_bottom = false;
-                const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
-                agent_state.scrollDown(scroll_amount);
-                app.needs_render = true;
-                return;
-            }
-
-            // Ctrl+U - page up
-            if (key.mods.ctrl and key.codepoint == 'u') {
-                agent_state.follow_bottom = false;
-                const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
-                agent_state.scrollUp(scroll_amount);
-                app.needs_render = true;
-                return;
-            }
-
-            // Ignore other keys when permission prompt is active
-            return;
         }
     }
 
@@ -1675,6 +1620,307 @@ pub fn sendPromptToActiveManager(app: *App, text: []const u8) !void {
         },
     }
     app.needs_render = true;
+}
+
+/// Handle keyboard input for approval prompts (unified across ACP + Codex)
+fn handleApprovalKeys(app: *App, agent_state: *state.AgentState, mgr: ManagerHandle, approval: ManagerHandle.PendingApproval, key: vaxis.Key) bool {
+    // Allow scrolling during approval prompts
+    if (key.mods.ctrl and key.codepoint == 'd') {
+        agent_state.follow_bottom = false;
+        const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
+        agent_state.scrollDown(scroll_amount);
+        app.needs_render = true;
+        return true;
+    }
+    if (key.mods.ctrl and key.codepoint == 'u') {
+        agent_state.follow_bottom = false;
+        const scroll_amount = @max(1, agent_state.last_messages_viewport_height / 2);
+        agent_state.scrollUp(scroll_amount);
+        app.needs_render = true;
+        return true;
+    }
+
+    switch (approval) {
+        .acp_permission => |perm| return handleAcpPermissionKeys(app, mgr, perm, key),
+        .codex_command => |a| switch (a.*) {
+            .command => |*cmd| return handleCodexCommandKeys(app, mgr, cmd, key),
+            else => return true,
+        },
+        .codex_file_change => |a| switch (a.*) {
+            .file_change => |*fc| return handleCodexFileChangeKeys(app, mgr, fc, key),
+            else => return true,
+        },
+        .codex_user_input => |a| switch (a.*) {
+            .user_input => |*ui| return handleCodexUserInputKeys(app, mgr, ui, key),
+            else => return true,
+        },
+    }
+}
+
+fn handleAcpPermissionKeys(app: *App, mgr: ManagerHandle, perm: *AcpManager.PendingPermission, key: vaxis.Key) bool {
+    const num_options = perm.options.len;
+
+    const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.down or
+        (key.codepoint == 'j' and !key.mods.ctrl);
+    const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.up or
+        (key.codepoint == 'k' and !key.mods.ctrl);
+
+    if (is_down and num_options > 0) {
+        perm.selected_index = (perm.selected_index + 1) % num_options;
+        app.needs_render = true;
+        return true;
+    }
+    if (is_up and num_options > 0) {
+        perm.selected_index = if (perm.selected_index == 0) num_options - 1 else perm.selected_index - 1;
+        app.needs_render = true;
+        return true;
+    }
+
+    // Enter/y/Y: confirm selected option
+    if (key.codepoint == vaxis.Key.enter or key.codepoint == 'y' or key.codepoint == 'Y') {
+        switch (mgr) {
+            .acp => |m| m.respondToPermission(true) catch |err| {
+                std.log.err("Agent: Failed to respond to permission: {any}", .{err});
+            },
+            else => {},
+        }
+        app.needs_render = true;
+        return true;
+    }
+
+    // Escape / n: cancel/reject
+    if (key.codepoint == 27 or key.codepoint == 'n' or key.codepoint == 'N') {
+        switch (mgr) {
+            .acp => |m| m.cancelPermission() catch |err| {
+                std.log.err("Agent: Failed to cancel permission: {any}", .{err});
+            },
+            else => {},
+        }
+        app.needs_render = true;
+        return true;
+    }
+
+    return true; // Consume all other keys
+}
+
+fn handleCodexCommandKeys(app: *App, mgr: ManagerHandle, cmd: anytype, key: vaxis.Key) bool {
+    const Decision = CodexManager.CommandDecision;
+    const decision_order = [_]Decision{ .accept, .accept_for_session, .accept_with_execpolicy_amendment, .decline, .cancel };
+
+    const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.down or
+        (key.codepoint == 'j' and !key.mods.ctrl);
+    const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.up or
+        (key.codepoint == 'k' and !key.mods.ctrl);
+
+    if (is_down) {
+        const cur_idx = findDecisionIndex(Decision, &decision_order, cmd.selected_decision);
+        cmd.selected_decision = decision_order[(cur_idx + 1) % decision_order.len];
+        app.needs_render = true;
+        return true;
+    }
+    if (is_up) {
+        const cur_idx = findDecisionIndex(Decision, &decision_order, cmd.selected_decision);
+        cmd.selected_decision = decision_order[if (cur_idx == 0) decision_order.len - 1 else cur_idx - 1];
+        app.needs_render = true;
+        return true;
+    }
+
+    // y/Enter: accept (use current selection)
+    if (key.codepoint == 'y' or key.codepoint == vaxis.Key.enter) {
+        const decision_json = switch (cmd.selected_decision) {
+            .accept => "\"accept\"",
+            .accept_for_session => "\"acceptForSession\"",
+            .accept_with_execpolicy_amendment => "\"accept\"", // Simplified — full amendment requires exec policy data
+            .decline => "\"decline\"",
+            .cancel => "\"cancel\"",
+        };
+        respondToCodexApproval(mgr, decision_json);
+        app.needs_render = true;
+        return true;
+    }
+
+    // Y: accept for session (shortcut)
+    if (key.codepoint == 'Y') {
+        respondToCodexApproval(mgr, "\"acceptForSession\"");
+        app.needs_render = true;
+        return true;
+    }
+
+    // n: decline
+    if (key.codepoint == 'n') {
+        respondToCodexApproval(mgr, "\"decline\"");
+        app.needs_render = true;
+        return true;
+    }
+
+    // ESC: cancel (decline + interrupt)
+    if (key.codepoint == 27) {
+        cancelCodexApproval(mgr);
+        app.needs_render = true;
+        return true;
+    }
+
+    return true; // Consume all other keys
+}
+
+fn handleCodexFileChangeKeys(app: *App, mgr: ManagerHandle, fc: anytype, key: vaxis.Key) bool {
+    const Decision = CodexManager.FileChangeDecision;
+    const decision_order = [_]Decision{ .accept, .accept_for_session, .decline, .cancel };
+
+    const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.down or
+        (key.codepoint == 'j' and !key.mods.ctrl);
+    const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.up or
+        (key.codepoint == 'k' and !key.mods.ctrl);
+
+    if (is_down) {
+        const cur_idx = findDecisionIndex(Decision, &decision_order, fc.selected_decision);
+        fc.selected_decision = decision_order[(cur_idx + 1) % decision_order.len];
+        app.needs_render = true;
+        return true;
+    }
+    if (is_up) {
+        const cur_idx = findDecisionIndex(Decision, &decision_order, fc.selected_decision);
+        fc.selected_decision = decision_order[if (cur_idx == 0) decision_order.len - 1 else cur_idx - 1];
+        app.needs_render = true;
+        return true;
+    }
+
+    // y/Enter: accept
+    if (key.codepoint == 'y' or key.codepoint == vaxis.Key.enter) {
+        const decision_json = switch (fc.selected_decision) {
+            .accept => "\"accept\"",
+            .accept_for_session => "\"acceptForSession\"",
+            .decline => "\"decline\"",
+            .cancel => "\"cancel\"",
+        };
+        respondToCodexApproval(mgr, decision_json);
+        app.needs_render = true;
+        return true;
+    }
+
+    // Y: accept for session
+    if (key.codepoint == 'Y') {
+        respondToCodexApproval(mgr, "\"acceptForSession\"");
+        app.needs_render = true;
+        return true;
+    }
+
+    // n: decline
+    if (key.codepoint == 'n') {
+        respondToCodexApproval(mgr, "\"decline\"");
+        app.needs_render = true;
+        return true;
+    }
+
+    // ESC: cancel
+    if (key.codepoint == 27) {
+        cancelCodexApproval(mgr);
+        app.needs_render = true;
+        return true;
+    }
+
+    return true;
+}
+
+fn handleCodexUserInputKeys(app: *App, mgr: ManagerHandle, ui: anytype, key: vaxis.Key) bool {
+    if (ui.questions.len == 0) return true;
+
+    const q = &ui.questions[ui.active_question];
+
+    const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.down or
+        (key.codepoint == 'j' and !key.mods.ctrl);
+    const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.up or
+        (key.codepoint == 'k' and !key.mods.ctrl);
+
+    if (q.options) |opts| {
+        if (is_down and opts.len > 0) {
+            q.selected_index = (q.selected_index + 1) % opts.len;
+            app.needs_render = true;
+            return true;
+        }
+        if (is_up and opts.len > 0) {
+            q.selected_index = if (q.selected_index == 0) opts.len - 1 else q.selected_index - 1;
+            app.needs_render = true;
+            return true;
+        }
+    }
+
+    // Tab: next question
+    if (key.codepoint == vaxis.Key.tab and ui.questions.len > 1) {
+        ui.active_question = (ui.active_question + 1) % ui.questions.len;
+        app.needs_render = true;
+        return true;
+    }
+
+    // Enter: submit
+    if (key.codepoint == vaxis.Key.enter) {
+        submitCodexUserInput(app.allocator, mgr, ui);
+        app.needs_render = true;
+        return true;
+    }
+
+    // ESC: cancel
+    if (key.codepoint == 27) {
+        cancelCodexApproval(mgr);
+        app.needs_render = true;
+        return true;
+    }
+
+    return true;
+}
+
+fn respondToCodexApproval(mgr: ManagerHandle, decision_json: []const u8) void {
+    switch (mgr) {
+        .codex => |m| m.respondToApproval(decision_json) catch |err| {
+            std.log.err("Codex: Failed to respond to approval: {any}", .{err});
+        },
+        else => {},
+    }
+}
+
+fn cancelCodexApproval(mgr: ManagerHandle) void {
+    switch (mgr) {
+        .codex => |m| m.cancelApproval() catch |err| {
+            std.log.err("Codex: Failed to cancel approval: {any}", .{err});
+        },
+        else => {},
+    }
+}
+
+fn submitCodexUserInput(allocator: std.mem.Allocator, mgr: ManagerHandle, ui: anytype) void {
+    // Collect selected option labels as answers
+    var answers_list: std.ArrayListUnmanaged([]const u8) = .{};
+    defer answers_list.deinit(allocator);
+
+    for (ui.questions) |q| {
+        if (q.options) |opts| {
+            if (q.selected_index < opts.len) {
+                answers_list.append(allocator, opts[q.selected_index].label) catch continue;
+            }
+        }
+    }
+
+    switch (mgr) {
+        .codex => |m| m.respondToUserInput(answers_list.items) catch |err| {
+            std.log.err("Codex: Failed to respond to user input: {any}", .{err});
+        },
+        else => {},
+    }
+}
+
+fn findDecisionIndex(comptime T: type, decisions: []const T, current: T) usize {
+    for (decisions, 0..) |d, i| {
+        if (d == current) return i;
+    }
+    return 0;
 }
 
 fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *state.PendingQuestion, key: vaxis.Key) !bool {

@@ -1,0 +1,8 @@
+──────────────────────────────────────────────────────────────────────
+ Allow file change?
+ src/components/Header.tsx
+ ▸ Accept
+   Accept for session
+   Decline
+   Cancel
+              j/k:navigate  y:accept  Y:session  n:decline  ESC:cancel

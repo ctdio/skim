@@ -34,6 +34,9 @@ pub const CodexManager = struct {
     // Turn state (populated during active turn)
     turn_id: ?[]const u8,
 
+    // Pending approval request from the server
+    pending_approval: ?PendingApproval,
+
     // Request ID counter for outgoing requests
     request_id_counter: i64,
 
@@ -47,6 +50,106 @@ pub const CodexManager = struct {
         thread_active,
         turn_active,
         @"error",
+    };
+
+    pub const CommandDecision = enum {
+        accept,
+        accept_for_session,
+        accept_with_execpolicy_amendment,
+        decline,
+        cancel,
+    };
+
+    pub const FileChangeDecision = enum {
+        accept,
+        accept_for_session,
+        decline,
+        cancel,
+    };
+
+    pub const UserInputQuestion = struct {
+        id: []const u8,
+        header: ?[]const u8,
+        question: []const u8,
+        options: ?[]const protocol.UserInputOption,
+        is_other: bool,
+        selected_index: usize,
+    };
+
+    pub const PendingApproval = union(enum) {
+        command: struct {
+            request_id: codec.RequestId,
+            item_id: ?[]const u8,
+            thread_id: []const u8,
+            turn_id: ?[]const u8,
+            command: []const u8,
+            cwd: ?[]const u8,
+            reason: ?[]const u8,
+            selected_decision: CommandDecision,
+        },
+        file_change: struct {
+            request_id: codec.RequestId,
+            item_id: ?[]const u8,
+            thread_id: []const u8,
+            turn_id: ?[]const u8,
+            path: []const u8,
+            selected_decision: FileChangeDecision,
+        },
+        user_input: struct {
+            request_id: codec.RequestId,
+            thread_id: []const u8,
+            turn_id: ?[]const u8,
+            questions: []UserInputQuestion,
+            active_question: usize,
+        },
+
+        pub fn deinit(self: *PendingApproval, allocator: Allocator) void {
+            switch (self.*) {
+                .command => |*c| {
+                    switch (c.request_id) {
+                        .string => |s| allocator.free(s),
+                        else => {},
+                    }
+                    if (c.item_id) |id| allocator.free(id);
+                    allocator.free(c.thread_id);
+                    if (c.turn_id) |tid| allocator.free(tid);
+                    allocator.free(c.command);
+                    if (c.cwd) |cwd| allocator.free(cwd);
+                    if (c.reason) |r| allocator.free(r);
+                },
+                .file_change => |*f| {
+                    switch (f.request_id) {
+                        .string => |s| allocator.free(s),
+                        else => {},
+                    }
+                    if (f.item_id) |id| allocator.free(id);
+                    allocator.free(f.thread_id);
+                    if (f.turn_id) |tid| allocator.free(tid);
+                    allocator.free(f.path);
+                },
+                .user_input => |*u| {
+                    switch (u.request_id) {
+                        .string => |s| allocator.free(s),
+                        else => {},
+                    }
+                    allocator.free(u.thread_id);
+                    if (u.turn_id) |tid| allocator.free(tid);
+                    for (u.questions) |*q| {
+                        allocator.free(q.id);
+                        if (q.header) |h| allocator.free(h);
+                        allocator.free(q.question);
+                        if (q.options) |opts| {
+                            for (opts) |o| {
+                                allocator.free(o.label);
+                                if (o.description) |d| allocator.free(d);
+                            }
+                            allocator.free(opts);
+                        }
+                    }
+                    allocator.free(u.questions);
+                },
+            }
+        }
     };
 
     pub const Error = error{
@@ -74,6 +177,7 @@ pub const CodexManager = struct {
             .approval_policy = null,
             .reasoning_effort = null,
             .turn_id = null,
+            .pending_approval = null,
             .request_id_counter = 0,
             .pending_messages = .{},
         };
@@ -145,6 +249,7 @@ pub const CodexManager = struct {
         }
 
         self.freeThreadState();
+        self.freePendingApproval();
         self.freePendingMessages();
         self.status = .disconnected;
     }
@@ -289,6 +394,77 @@ pub const CodexManager = struct {
     }
 
     // =========================================================================
+    // Approval handling
+    // =========================================================================
+
+    pub fn getPendingApproval(self: *CodexManager) ?*PendingApproval {
+        if (self.pending_approval) |*approval| return approval;
+        return null;
+    }
+
+    /// Respond to a pending command/file-change approval with a decision.
+    pub fn respondToApproval(self: *CodexManager, decision_json: []const u8) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+        var approval = self.pending_approval orelse return;
+
+        const request_id = switch (approval) {
+            .command => |c| c.request_id,
+            .file_change => |f| f.request_id,
+            .user_input => |u| u.request_id,
+        };
+
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeApprovalResponse(request_id, decision_json) catch return error.TurnSteerFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+
+        approval.deinit(self.allocator);
+        self.pending_approval = null;
+    }
+
+    /// Respond to a pending user-input request with answers.
+    pub fn respondToUserInput(self: *CodexManager, answers: []const []const u8) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+        var approval = self.pending_approval orelse return;
+
+        const request_id = switch (approval) {
+            .user_input => |u| u.request_id,
+            else => return,
+        };
+
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeUserInputResponse(request_id, answers) catch return error.TurnSteerFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+
+        approval.deinit(self.allocator);
+        self.pending_approval = null;
+    }
+
+    /// Cancel a pending approval (decline + interrupt turn).
+    pub fn cancelApproval(self: *CodexManager) Error!void {
+        const transport = self.transport orelse return error.NotConnected;
+        var approval = self.pending_approval orelse return;
+
+        const request_id = switch (approval) {
+            .command => |c| c.request_id,
+            .file_change => |f| f.request_id,
+            .user_input => |u| u.request_id,
+        };
+
+        var encoder = codec.Encoder.init(self.allocator);
+        const msg = encoder.encodeApprovalResponse(request_id, "\"cancel\"") catch return error.TurnSteerFailed;
+        defer self.allocator.free(msg);
+        try transport.send(msg);
+
+        approval.deinit(self.allocator);
+        self.pending_approval = null;
+
+        // Also interrupt the turn
+        self.interruptTurn() catch {};
+    }
+
+    // =========================================================================
     // Event processing
     // =========================================================================
 
@@ -297,7 +473,7 @@ pub const CodexManager = struct {
     pub fn processMessage(self: *CodexManager, msg: codec.DecodedMessage) ?CodexEvent {
         switch (msg) {
             .notification => |n| return self.processNotification(n.method, n.params_json),
-            .server_request => |r| return self.processNotification(r.method, r.params_json),
+            .server_request => |r| return self.processServerRequest(r),
             .response => return null,
         }
     }
@@ -319,6 +495,7 @@ pub const CodexManager = struct {
         item_completed: ItemEvent,
         turn_completed: TurnCompletedEvent,
         plan_updated: PlanUpdatedEvent,
+        approval_requested: void,
         unknown: void,
 
         pub const DeltaEvent = struct {
@@ -447,11 +624,114 @@ pub const CodexManager = struct {
         self.turn_id = null;
     }
 
+    fn freePendingApproval(self: *CodexManager) void {
+        if (self.pending_approval) |*approval| {
+            approval.deinit(self.allocator);
+            self.pending_approval = null;
+        }
+    }
+
     fn freePendingMessages(self: *CodexManager) void {
         for (self.pending_messages.items) |*msg| {
             msg.deinit(self.allocator);
         }
         self.pending_messages.clearRetainingCapacity();
+    }
+
+    fn processServerRequest(self: *CodexManager, req: codec.ServerRequest) ?CodexEvent {
+        const ApprovalMethod = enum {
+            command_approval,
+            file_change_approval,
+            user_input,
+        };
+
+        const approval_map = std.StaticStringMap(ApprovalMethod).initComptime(.{
+            .{ "item/commandExecution/requestApproval", .command_approval },
+            .{ "item/fileChange/requestApproval", .file_change_approval },
+            .{ "tool/requestUserInput", .user_input },
+        });
+
+        if (approval_map.get(req.method)) |approval_type| {
+            const json = req.params_json orelse return .{ .unknown = {} };
+            return switch (approval_type) {
+                .command_approval => self.parseCommandApprovalRequest(req.id, json),
+                .file_change_approval => self.parseFileChangeApprovalRequest(req.id, json),
+                .user_input => self.parseUserInputRequest(req.id, json),
+            };
+        }
+
+        // Fall through to notification processing for non-approval server requests
+        return self.processNotification(req.method, req.params_json);
+    }
+
+    fn parseCommandApprovalRequest(self: *CodexManager, request_id: codec.RequestId, json: []const u8) ?CodexEvent {
+        var decoder = codec.Decoder.init(self.allocator);
+        const params = decoder.parseCommandApproval(json) catch return null;
+
+        // Free any existing pending approval
+        self.freePendingApproval();
+
+        self.pending_approval = .{ .command = .{
+            .request_id = dupeRequestId(self.allocator, request_id) catch return null,
+            .item_id = params.item_id,
+            .thread_id = params.thread_id,
+            .turn_id = params.turn_id,
+            .command = params.command,
+            .cwd = params.cwd,
+            .reason = params.reason,
+            .selected_decision = .accept,
+        } };
+
+        return .{ .approval_requested = {} };
+    }
+
+    fn parseFileChangeApprovalRequest(self: *CodexManager, request_id: codec.RequestId, json: []const u8) ?CodexEvent {
+        var decoder = codec.Decoder.init(self.allocator);
+        const params = decoder.parseFileChangeApproval(json) catch return null;
+
+        self.freePendingApproval();
+
+        self.pending_approval = .{ .file_change = .{
+            .request_id = dupeRequestId(self.allocator, request_id) catch return null,
+            .item_id = params.item_id,
+            .thread_id = params.thread_id,
+            .turn_id = params.turn_id,
+            .path = params.path,
+            .selected_decision = .accept,
+        } };
+
+        return .{ .approval_requested = {} };
+    }
+
+    fn parseUserInputRequest(self: *CodexManager, request_id: codec.RequestId, json: []const u8) ?CodexEvent {
+        var decoder = codec.Decoder.init(self.allocator);
+        const params = decoder.parseUserInput(json) catch return null;
+
+        self.freePendingApproval();
+
+        const questions = self.allocator.alloc(UserInputQuestion, params.questions.len) catch return null;
+        for (params.questions, 0..) |q, i| {
+            questions[i] = .{
+                .id = q.id,
+                .header = q.header,
+                .question = q.question,
+                .options = q.options,
+                .is_other = q.is_other,
+                .selected_index = 0,
+            };
+        }
+        // params.questions shell is freed but inner strings are now owned by our questions
+        self.allocator.free(params.questions);
+
+        self.pending_approval = .{ .user_input = .{
+            .request_id = dupeRequestId(self.allocator, request_id) catch return null,
+            .thread_id = params.thread_id,
+            .turn_id = params.turn_id,
+            .questions = questions,
+            .active_question = 0,
+        } };
+
+        return .{ .approval_requested = {} };
     }
 
     fn processNotification(self: *CodexManager, method: []const u8, params_json: ?[]const u8) ?CodexEvent {
@@ -687,6 +967,18 @@ pub const CodexManager = struct {
         };
     }
 };
+
+// =============================================================================
+// Standalone helpers
+// =============================================================================
+
+fn dupeRequestId(allocator: Allocator, id: codec.RequestId) Allocator.Error!codec.RequestId {
+    return switch (id) {
+        .string => |s| .{ .string = try allocator.dupe(u8, s) },
+        .number => |n| .{ .number = n },
+        .null_value => .{ .null_value = {} },
+    };
+}
 
 // =============================================================================
 // Tests
@@ -932,4 +1224,227 @@ test "codex manager thread start" {
     try std.testing.expectEqual(CodexManager.Status.thread_active, manager.status);
     try std.testing.expect(manager.thread_id != null);
     try std.testing.expect(manager.model != null);
+}
+
+// =============================================================================
+// Phase 4: Approval Tests
+// =============================================================================
+
+test "processMessage with command approval server request stores pending approval" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/commandExecution/requestApproval","id":"req_cmd_1","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","command":"ls -la","cwd":"/home/user","reason":"needs file listing"}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    try std.testing.expect(manager.pending_approval == null);
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .approval_requested);
+    try std.testing.expect(manager.pending_approval != null);
+
+    const approval = manager.pending_approval.?;
+    switch (approval) {
+        .command => |cmd| {
+            try std.testing.expectEqualStrings("t1", cmd.thread_id);
+            try std.testing.expectEqualStrings("turn-1", cmd.turn_id.?);
+            try std.testing.expectEqualStrings("item-1", cmd.item_id.?);
+            try std.testing.expectEqualStrings("ls -la", cmd.command);
+            try std.testing.expectEqualStrings("/home/user", cmd.cwd.?);
+            try std.testing.expectEqualStrings("needs file listing", cmd.reason.?);
+            try std.testing.expect(cmd.selected_decision == .accept);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "processMessage with file change approval server request stores pending approval" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/fileChange/requestApproval","id":"req_fc_1","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-2","path":"/home/user/file.zig"}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .approval_requested);
+
+    switch (manager.pending_approval.?) {
+        .file_change => |fc| {
+            try std.testing.expectEqualStrings("t1", fc.thread_id);
+            try std.testing.expectEqualStrings("/home/user/file.zig", fc.path);
+            try std.testing.expect(fc.selected_decision == .accept);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "processMessage with user input server request stores pending approval" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"tool/requestUserInput","id":"req_ui_1","params":{"threadId":"t1","turnId":"turn-1","questions":[{"id":"q1","header":"Choose auth","question":"Which auth method?","options":[{"label":"OAuth 2.0","description":"Standard OAuth"},{"label":"API Key"}],"isOther":false,"isSecret":false}]}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .approval_requested);
+
+    switch (manager.pending_approval.?) {
+        .user_input => |ui| {
+            try std.testing.expectEqualStrings("t1", ui.thread_id);
+            try std.testing.expectEqual(@as(usize, 1), ui.questions.len);
+            try std.testing.expectEqualStrings("q1", ui.questions[0].id);
+            try std.testing.expectEqualStrings("Choose auth", ui.questions[0].header.?);
+            try std.testing.expectEqualStrings("Which auth method?", ui.questions[0].question);
+            try std.testing.expectEqual(@as(usize, 2), ui.questions[0].options.?.len);
+            try std.testing.expectEqualStrings("OAuth 2.0", ui.questions[0].options.?[0].label);
+            try std.testing.expectEqualStrings("Standard OAuth", ui.questions[0].options.?[0].description.?);
+            try std.testing.expectEqualStrings("API Key", ui.questions[0].options.?[1].label);
+            try std.testing.expect(ui.questions[0].options.?[1].description == null);
+            try std.testing.expect(!ui.questions[0].is_other);
+            try std.testing.expectEqual(@as(usize, 0), ui.active_question);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "new approval replaces existing pending approval" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+
+    // First approval
+    const json1 =
+        \\{"method":"item/commandExecution/requestApproval","id":"req_1","params":{"threadId":"t1","command":"ls"}}
+    ;
+    var msg1 = try decoder.decode(json1);
+    defer msg1.deinit(std.testing.allocator);
+    _ = manager.processMessage(msg1);
+    try std.testing.expect(manager.pending_approval != null);
+
+    // Second approval should replace the first
+    const json2 =
+        \\{"method":"item/fileChange/requestApproval","id":"req_2","params":{"threadId":"t1","path":"/tmp/file.txt"}}
+    ;
+    var msg2 = try decoder.decode(json2);
+    defer msg2.deinit(std.testing.allocator);
+    _ = manager.processMessage(msg2);
+
+    switch (manager.pending_approval.?) {
+        .file_change => |fc| try std.testing.expectEqualStrings("/tmp/file.txt", fc.path),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "pending approval with string request id" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/commandExecution/requestApproval","id":"req_string_123","params":{"threadId":"t1","command":"echo hello"}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    _ = manager.processMessage(msg);
+    try std.testing.expect(manager.pending_approval != null);
+
+    switch (manager.pending_approval.?) {
+        .command => |cmd| {
+            switch (cmd.request_id) {
+                .string => |s| try std.testing.expectEqualStrings("req_string_123", s),
+                else => try std.testing.expect(false),
+            }
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "pending approval with numeric request id" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/commandExecution/requestApproval","id":42,"params":{"threadId":"t1","command":"echo hello"}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    _ = manager.processMessage(msg);
+
+    switch (manager.pending_approval.?.command.request_id) {
+        .number => |n| try std.testing.expectEqual(@as(i64, 42), n),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "freePendingApproval cleans up properly" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/commandExecution/requestApproval","id":"req_1","params":{"threadId":"t1","command":"ls","cwd":"/tmp","reason":"testing"}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    _ = manager.processMessage(msg);
+    try std.testing.expect(manager.pending_approval != null);
+
+    manager.freePendingApproval();
+    try std.testing.expect(manager.pending_approval == null);
+}
+
+test "disconnect clears pending approval" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/commandExecution/requestApproval","id":"req_1","params":{"threadId":"t1","command":"ls"}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    _ = manager.processMessage(msg);
+    try std.testing.expect(manager.pending_approval != null);
+
+    manager.disconnect();
+    try std.testing.expect(manager.pending_approval == null);
+}
+
+test "processMessage non-approval server request falls through to notification" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    // A server request with a notification-like method that isn't an approval
+    const json =
+        \\{"method":"item/agentMessage/delta","id":"req_99","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","delta":{"text":"Hello"}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    const event = manager.processMessage(msg);
+    try std.testing.expect(event != null);
+    // Should fall through to notification processing and produce text_delta
+    try std.testing.expect(event.? == .text_delta);
+    try std.testing.expect(manager.pending_approval == null);
 }

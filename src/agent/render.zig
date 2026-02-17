@@ -10,6 +10,8 @@ const Message = state.Message;
 const MAX_SLASH_MENU_VISIBLE = state.MAX_SLASH_MENU_VISIBLE;
 const InputEditor = @import("input_editor.zig").InputEditor;
 const AcpManager = @import("../acp/manager.zig").AcpManager;
+const ManagerHandle = @import("manager_handle.zig").ManagerHandle;
+const CodexManager = @import("../codex/manager.zig").CodexManager;
 const diff_algo = @import("diff.zig");
 const DiffLine = diff_algo.DiffLine;
 const chat_line_map = @import("chat_line_map.zig");
@@ -916,18 +918,16 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     // Calculate dynamic input height based on content or mode
     const text = agent_state.input.getText();
 
-    // Check if there's a pending permission
-    const pending_permission = if (app.getActiveManager()) |mgr| mgr.getPendingPermission() else null;
+    // Check if there's a pending approval or question
+    const pending_approval = if (app.getActiveManager()) |mgr| mgr.getPendingApproval() else null;
     const pending_question = agent_state.getPendingQuestion();
 
-    // Calculate height based on mode or pending permission
+    // Calculate height based on mode or pending approval
     // Note: model_selection mode renders as a centered dialog overlay, not in the input area
     const visible_lines = if (pending_question) |question| blk: {
         break :blk question_prompt.countQuestionPromptLines(app.allocator, win.width, question);
-    } else if (pending_permission) |perm| blk: {
-        // Separator (1) + title (1) + description (0 or 1) + options + footer (1)
-        const desc_rows: usize = if (perm.description != null) 1 else 0;
-        break :blk 3 + desc_rows + perm.options.len;
+    } else if (pending_approval) |approval| blk: {
+        break :blk countApprovalLines(approval);
     } else blk: {
         // Calculate wrapped line count accounting for panel width
         // This ensures the input area expands properly in side-by-side mode
@@ -1053,7 +1053,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         .width = win.width,
         .height = @intCast(input_height),
     });
-    try renderInputArea(app, input_win, agent_state, is_focused, pending_permission, pending_question);
+    try renderInputArea(app, input_win, agent_state, is_focused, pending_approval, pending_question);
 
     // Render slash command menu as overlay (if visible)
     if (agent_state.slash_menu.visible) {
@@ -1208,7 +1208,7 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
 
         // Check if tab has activity (thinking or permission)
         const has_activity = tab.isThinking();
-        const has_permission = tab.hasPendingPermission();
+        const has_permission = tab.hasPendingApproval();
 
         // Activity indicator suffix
         const suffix_len: usize = if (has_permission or has_activity) 1 else 0;
@@ -2359,7 +2359,7 @@ fn renderInputArea(
     win: vaxis.Window,
     agent_state: *AgentState,
     is_focused: bool,
-    pending_permission: ?*AcpManager.PendingPermission,
+    pending_approval: ?ManagerHandle.PendingApproval,
     pending_question: ?*state.PendingQuestion,
 ) !void {
     if (win.height == 0) return;
@@ -2381,9 +2381,9 @@ fn renderInputArea(
         return;
     }
 
-    // Check if there's a pending permission - render inline permission prompt instead
-    if (pending_permission) |perm| {
-        try renderInlinePermissionPrompt(win, perm);
+    // Check if there's a pending approval - render inline approval prompt instead
+    if (pending_approval) |approval| {
+        try renderInlineApprovalPrompt(win, approval);
         return;
     }
 
@@ -3073,8 +3073,59 @@ fn renderWrappedText(
     return row - start_row; // Return number of rows used
 }
 
-/// Render the permission prompt inline in place of the input area
-fn renderInlinePermissionPrompt(win: vaxis.Window, perm: *AcpManager.PendingPermission) !void {
+/// Calculate the number of lines needed for an approval prompt
+fn countApprovalLines(approval: ManagerHandle.PendingApproval) usize {
+    return switch (approval) {
+        .acp_permission => |perm| blk: {
+            // Separator (1) + title (1) + description (0 or 1) + options + footer (1)
+            const desc_rows: usize = if (perm.description != null) 1 else 0;
+            break :blk 3 + desc_rows + perm.options.len;
+        },
+        .codex_command => |a| switch (a.*) {
+            .command => |cmd| blk: {
+                // Separator (1) + "Run command?" title (1) + command (1) + cwd (0/1) + reason (0/1) + decisions (5) + footer (1)
+                const cwd_row: usize = if (cmd.cwd != null) 1 else 0;
+                const reason_row: usize = if (cmd.reason != null) 1 else 0;
+                break :blk 3 + cwd_row + reason_row + 5;
+            },
+            else => 3,
+        },
+        .codex_file_change => 3 + 1 + 4, // Separator + title + path + 4 decisions + footer
+        .codex_user_input => |a| switch (a.*) {
+            .user_input => |ui| blk: {
+                if (ui.questions.len == 0) break :blk 3;
+                const q = ui.questions[ui.active_question];
+                const header_row: usize = if (q.header != null) 1 else 0;
+                const opts_len: usize = if (q.options) |opts| opts.len else 0;
+                break :blk 3 + header_row + opts_len;
+            },
+            else => 3,
+        },
+    };
+}
+
+/// Render the approval prompt inline in place of the input area.
+/// Dispatches to type-specific renderers based on the approval variant.
+fn renderInlineApprovalPrompt(win: vaxis.Window, approval: ManagerHandle.PendingApproval) !void {
+    switch (approval) {
+        .acp_permission => |perm| try renderAcpPermissionPrompt(win, perm),
+        .codex_command => |a| switch (a.*) {
+            .command => |*cmd| try renderCommandApproval(win, cmd),
+            else => {},
+        },
+        .codex_file_change => |a| switch (a.*) {
+            .file_change => |*fc| try renderFileChangeApproval(win, fc),
+            else => {},
+        },
+        .codex_user_input => |a| switch (a.*) {
+            .user_input => |*ui| try renderUserInputApproval(win, ui),
+            else => {},
+        },
+    }
+}
+
+/// Render ACP permission prompt (unchanged behavior from original)
+fn renderAcpPermissionPrompt(win: vaxis.Window, perm: *AcpManager.PendingPermission) !void {
     var row: usize = 0;
 
     // Row 0: Separator line
@@ -3137,6 +3188,208 @@ fn renderInlinePermissionPrompt(win: vaxis.Window, perm: *AcpManager.PendingPerm
         };
         _ = win.print(&kb_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(kb_col) });
     }
+}
+
+/// Render Codex command approval prompt
+pub fn renderCommandApproval(win: vaxis.Window, cmd: anytype) !void {
+    var row: usize = 0;
+    renderApprovalSeparator(win, &row);
+
+    // Title
+    const title_style = vaxis.Style{ .fg = Color.magenta, .bold = true };
+    var title_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "Run command?", .style = title_style },
+    };
+    _ = win.print(&title_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+    row += 1;
+
+    // Command text
+    const cmd_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
+    const max_text_width = if (win.width > 3) win.width - 3 else 1;
+    const cmd_text = cmd.command;
+    const cmd_rows = renderWrappedText(win, cmd_text, row, 1, max_text_width, cmd_style);
+    row += cmd_rows;
+
+    // CWD (if present)
+    if (cmd.cwd) |cwd| {
+        const cwd_style = vaxis.Style{ .fg = Color.dim_gray, .italic = true };
+        var cwd_seg = [_]vaxis.Cell.Segment{
+            .{ .text = "cwd: ", .style = cwd_style },
+            .{ .text = cwd, .style = cwd_style },
+        };
+        _ = win.print(&cwd_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+        row += 1;
+    }
+
+    // Reason (if present)
+    if (cmd.reason) |reason| {
+        const reason_style = vaxis.Style{ .fg = Color.dim_gray, .italic = true };
+        const reason_rows = renderWrappedText(win, reason, row, 1, max_text_width, reason_style);
+        row += reason_rows;
+    }
+
+    // Decision options
+    const decisions = [_]struct { label: []const u8, decision: CodexManager.CommandDecision }{
+        .{ .label = "Accept", .decision = .accept },
+        .{ .label = "Accept for session", .decision = .accept_for_session },
+        .{ .label = "Accept with policy amendment", .decision = .accept_with_execpolicy_amendment },
+        .{ .label = "Decline", .decision = .decline },
+        .{ .label = "Cancel", .decision = .cancel },
+    };
+
+    const normal_style = vaxis.Style{ .fg = Color.white };
+    const selected_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
+
+    for (decisions) |d| {
+        if (row >= win.height) break;
+        const is_selected = cmd.selected_decision == d.decision;
+        const style = if (is_selected) selected_style else normal_style;
+        const indicator: []const u8 = if (is_selected) "▸ " else "  ";
+        var seg = [_]vaxis.Cell.Segment{
+            .{ .text = indicator, .style = style },
+            .{ .text = d.label, .style = style },
+        };
+        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+        row += 1;
+    }
+
+    // Footer
+    if (row < win.height) {
+        const footer = "j/k:navigate  y:accept  Y:session  n:decline  ESC:cancel";
+        renderApprovalFooter(win, row, footer);
+    }
+}
+
+/// Render Codex file change approval prompt
+pub fn renderFileChangeApproval(win: vaxis.Window, fc: anytype) !void {
+    var row: usize = 0;
+    renderApprovalSeparator(win, &row);
+
+    // Title
+    const title_style = vaxis.Style{ .fg = Color.magenta, .bold = true };
+    var title_seg = [_]vaxis.Cell.Segment{
+        .{ .text = "Allow file change?", .style = title_style },
+    };
+    _ = win.print(&title_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+    row += 1;
+
+    // File path
+    const path_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
+    const max_text_width = if (win.width > 3) win.width - 3 else 1;
+    const path_rows = renderWrappedText(win, fc.path, row, 1, max_text_width, path_style);
+    row += path_rows;
+
+    // Decision options
+    const decisions = [_]struct { label: []const u8, decision: CodexManager.FileChangeDecision }{
+        .{ .label = "Accept", .decision = .accept },
+        .{ .label = "Accept for session", .decision = .accept_for_session },
+        .{ .label = "Decline", .decision = .decline },
+        .{ .label = "Cancel", .decision = .cancel },
+    };
+
+    const normal_style = vaxis.Style{ .fg = Color.white };
+    const selected_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
+
+    for (decisions) |d| {
+        if (row >= win.height) break;
+        const is_selected = fc.selected_decision == d.decision;
+        const style = if (is_selected) selected_style else normal_style;
+        const indicator: []const u8 = if (is_selected) "▸ " else "  ";
+        var seg = [_]vaxis.Cell.Segment{
+            .{ .text = indicator, .style = style },
+            .{ .text = d.label, .style = style },
+        };
+        _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+        row += 1;
+    }
+
+    // Footer
+    if (row < win.height) {
+        const footer = "j/k:navigate  y:accept  Y:session  n:decline  ESC:cancel";
+        renderApprovalFooter(win, row, footer);
+    }
+}
+
+/// Render Codex user input approval prompt
+pub fn renderUserInputApproval(win: vaxis.Window, ui: anytype) !void {
+    var row: usize = 0;
+    renderApprovalSeparator(win, &row);
+
+    if (ui.questions.len == 0) return;
+    const q = ui.questions[ui.active_question];
+
+    // Header (if present)
+    if (q.header) |header| {
+        const header_style = vaxis.Style{ .fg = Color.magenta, .bold = true };
+        const max_text_width = if (win.width > 3) win.width - 3 else 1;
+        const header_rows = renderWrappedText(win, header, row, 1, max_text_width, header_style);
+        row += header_rows;
+    }
+
+    // Question text
+    const question_style = vaxis.Style{ .fg = Color.white, .bold = true };
+    const max_text_width = if (win.width > 3) win.width - 3 else 1;
+    const q_rows = renderWrappedText(win, q.question, row, 1, max_text_width, question_style);
+    row += q_rows;
+
+    // Options
+    if (q.options) |opts| {
+        const normal_style = vaxis.Style{ .fg = Color.white };
+        const selected_style = vaxis.Style{ .fg = Color.black, .bg = Color.cyan, .bold = true };
+
+        for (opts, 0..) |opt, i| {
+            if (row >= win.height) break;
+            const is_selected = i == q.selected_index;
+            const style = if (is_selected) selected_style else normal_style;
+            const indicator: []const u8 = if (is_selected) "▸ " else "  ";
+            var seg = [_]vaxis.Cell.Segment{
+                .{ .text = indicator, .style = style },
+                .{ .text = opt.label, .style = style },
+            };
+            _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+
+            // Show description on same row if present
+            if (opt.description) |desc| {
+                const desc_style = vaxis.Style{ .fg = Color.dim_gray };
+                var desc_seg = [_]vaxis.Cell.Segment{
+                    .{ .text = " - ", .style = desc_style },
+                    .{ .text = desc, .style = desc_style },
+                };
+                _ = win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(3 + opt.label.len) });
+            }
+
+            row += 1;
+        }
+    }
+
+    // Footer with question navigation hint
+    if (row < win.height) {
+        const footer = if (ui.questions.len > 1)
+            "j/k:navigate  Tab:next question  Enter:submit  ESC:cancel"
+        else
+            "j/k:navigate  Enter:submit  ESC:cancel";
+        renderApprovalFooter(win, row, footer);
+    }
+}
+
+fn renderApprovalSeparator(win: vaxis.Window, row: *usize) void {
+    const separator_style = vaxis.Style{ .fg = Color.dim_gray };
+    for (0..win.width) |col| {
+        win.writeCell(@intCast(col), @intCast(row.*), .{
+            .char = .{ .grapheme = "─", .width = 1 },
+            .style = separator_style,
+        });
+    }
+    row.* += 1;
+}
+
+fn renderApprovalFooter(win: vaxis.Window, row: usize, footer: []const u8) void {
+    const kb_style = vaxis.Style{ .fg = Color.dim_gray };
+    const kb_col = if (win.width > footer.len) win.width - footer.len else 0;
+    var kb_seg = [_]vaxis.Cell.Segment{
+        .{ .text = footer, .style = kb_style },
+    };
+    _ = win.print(&kb_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(kb_col) });
 }
 
 // =============================================================================
@@ -3310,5 +3563,6 @@ fn withModalBg(s: vaxis.Style) vaxis.Style {
     result.bg = Color.dialog_bg;
     return result;
 }
+
 
 

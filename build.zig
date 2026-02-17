@@ -353,6 +353,31 @@ pub fn build(b: *std.Build) void {
     question_prompt_tests.linkLibC();
     const run_question_prompt_tests = b.addRunArtifact(question_prompt_tests);
     test_step.dependOn(&run_question_prompt_tests.step);
+
+    const approval_root_module = b.createModule(.{
+        .root_source_file = b.path("src/approval_test_root.zig"),
+    });
+    approval_root_module.addImport("vaxis", vaxis);
+    approval_root_module.addImport("tree-sitter", tree_sitter);
+    approval_root_module.addImport("markdown", markdown_module);
+    approval_root_module.addImport("build_options", build_options_module);
+    const approval_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/approval_scenarios.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    approval_tests.root_module.addImport("vaxis", vaxis);
+    approval_tests.root_module.addImport("tree-sitter", tree_sitter);
+    approval_tests.root_module.addImport("build_options", build_options_module);
+    approval_tests.root_module.addImport("approval_test_root", approval_root_module);
+    for (grammars) |grammar| {
+        approval_tests.linkLibrary(grammar);
+    }
+    approval_tests.linkLibC();
+    const run_approval_tests = b.addRunArtifact(approval_tests);
+    test_step.dependOn(&run_approval_tests.step);
 }
 
 // Grammar metadata for building

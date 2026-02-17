@@ -145,14 +145,10 @@ pub const AgentTab = struct {
         return false;
     }
 
-    /// Check if this tab has a pending permission request
-    pub fn hasPendingPermission(self: *const AgentTab) bool {
+    /// Check if this tab has a pending approval/permission request
+    pub fn hasPendingApproval(self: *const AgentTab) bool {
         if (self.manager) |m| {
-            return switch (m) {
-                .acp => |mgr| mgr.getPendingPermission() != null,
-                .opencode => false,
-                .codex => false, // Phase 4 handles approvals
-            };
+            return m.hasPendingApproval();
         }
         return false;
     }
@@ -421,10 +417,10 @@ pub const TabManager = struct {
         self.full_screen = !self.full_screen;
     }
 
-    /// Check if any tab has a pending permission
-    pub fn hasAnyPendingPermission(self: *const TabManager) bool {
+    /// Check if any tab has a pending approval/permission
+    pub fn hasAnyPendingApproval(self: *const TabManager) bool {
         for (self.tabs.items) |*tab| {
-            if (tab.hasPendingPermission()) {
+            if (tab.hasPendingApproval()) {
                 return true;
             }
         }

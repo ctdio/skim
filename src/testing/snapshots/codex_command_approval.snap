@@ -1,0 +1,11 @@
+──────────────────────────────────────────────────────────────────────
+ Run command?
+ npm install --save express
+ cwd: /home/user/project
+ Installing web framework dependency
+ ▸ Accept
+   Accept for session
+   Accept with policy amendment
+   Decline
+   Cancel
+              j/k:navigate  y:accept  Y:session  n:decline  ESC:cancel

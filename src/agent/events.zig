@@ -296,6 +296,7 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
         },
         .turn_completed => .{ .message_complete = {} },
         .plan_updated => null,
+        .approval_requested => null,
         .unknown => null,
     };
 }
