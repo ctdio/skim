@@ -1375,9 +1375,7 @@ pub const CodexManager = struct {
             threadId: ?[]const u8 = null,
             turnId: ?[]const u8 = null,
             itemId: ?[]const u8 = null,
-            delta: ?struct {
-                text: ?[]const u8 = null,
-            } = null,
+            delta: ?[]const u8 = null,
         };
 
         // Parse without allocating — string slices reference into `json` (which is
@@ -1388,7 +1386,7 @@ pub const CodexManager = struct {
         defer parsed.deinit();
 
         const r = parsed.value;
-        const delta_text = if (r.delta) |d| d.text orelse "" else "";
+        const delta_text = r.delta orelse "";
 
         // Update turn_id if we see one from the server
         if (r.turnId) |tid| {
@@ -1669,7 +1667,7 @@ test "processMessage with agentMessage/delta notification returns text_delta" {
 
     var decoder = codec.Decoder.init(std.testing.allocator);
     const json =
-        \\{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","delta":{"text":"Hello"}}}
+        \\{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","delta":"Hello"}}
     ;
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
@@ -1720,7 +1718,7 @@ test "processMessage with reasoning delta returns reasoning_delta" {
 
     var decoder = codec.Decoder.init(std.testing.allocator);
     const json =
-        \\{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-2","delta":{"text":"Thinking..."}}}
+        \\{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-2","delta":"Thinking..."}}
     ;
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
@@ -1787,7 +1785,7 @@ test "processMessage turn_id tracking from delta events" {
 
     var decoder = codec.Decoder.init(std.testing.allocator);
     const json =
-        \\{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"my-turn","itemId":"item-1","delta":{"text":"Hi"}}}
+        \\{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"my-turn","itemId":"item-1","delta":"Hi"}}
     ;
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
@@ -1803,7 +1801,7 @@ test "codex manager handshake" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
 
-    try manager.connect("codex", null, "/home/ctdio/projects/open-source/skim-wta");
+    try manager.connect("codex", &.{"app-server"}, "/home/ctdio/projects/open-source/skim-wta");
 
     try std.testing.expectEqual(CodexManager.Status.initialized, manager.status);
     try std.testing.expect(manager.process != null);
@@ -1816,7 +1814,7 @@ test "codex manager thread start" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
 
-    try manager.connect("codex", null, "/home/ctdio/projects/open-source/skim-wta");
+    try manager.connect("codex", &.{"app-server"}, "/home/ctdio/projects/open-source/skim-wta");
     try std.testing.expectEqual(CodexManager.Status.initialized, manager.status);
 
     try manager.startThread(null, "/home/ctdio/projects/open-source/skim-wta");
@@ -2036,7 +2034,7 @@ test "processMessage non-approval server request falls through to notification" 
     var decoder = codec.Decoder.init(std.testing.allocator);
     // A server request with a notification-like method that isn't an approval
     const json =
-        \\{"method":"item/agentMessage/delta","id":"req_99","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","delta":{"text":"Hello"}}}
+        \\{"method":"item/agentMessage/delta","id":"req_99","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","delta":"Hello"}}
     ;
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
@@ -2161,7 +2159,7 @@ test "codex manager listThreads" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
 
-    try manager.connect("codex", null, "/home/ctdio/projects/open-source/skim-wta");
+    try manager.connect("codex", &.{"app-server"}, "/home/ctdio/projects/open-source/skim-wta");
     try std.testing.expectEqual(CodexManager.Status.initialized, manager.status);
 
     const threads = try manager.listThreads();
@@ -2177,7 +2175,7 @@ test "codex manager listModels" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
 
-    try manager.connect("codex", null, "/home/ctdio/projects/open-source/skim-wta");
+    try manager.connect("codex", &.{"app-server"}, "/home/ctdio/projects/open-source/skim-wta");
     try std.testing.expectEqual(CodexManager.Status.initialized, manager.status);
 
     const models = try manager.listModels();

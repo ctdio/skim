@@ -52,7 +52,7 @@ pub const CodexProcess = struct {
 
         self.child.stdin_behavior = .Pipe;
         self.child.stdout_behavior = .Pipe;
-        self.child.stderr_behavior = .Pipe;
+        self.child.stderr_behavior = .Ignore;
 
         self.child.spawn() catch |err| {
             std.log.err("Codex: Failed to spawn process: {}", .{err});
@@ -61,7 +61,6 @@ pub const CodexProcess = struct {
 
         self.stdin = self.child.stdin.?;
         self.stdout = self.child.stdout.?;
-        self.stderr = self.child.stderr;
 
         return self;
     }
@@ -83,7 +82,7 @@ pub const CodexProcess = struct {
 
         self.child.stdin_behavior = .Pipe;
         self.child.stdout_behavior = .Pipe;
-        self.child.stderr_behavior = .Pipe;
+        self.child.stderr_behavior = .Ignore;
 
         self.child.spawn() catch |err| {
             std.log.err("Codex: Failed to spawn process: {}", .{err});
@@ -92,7 +91,6 @@ pub const CodexProcess = struct {
 
         self.stdin = self.child.stdin.?;
         self.stdout = self.child.stdout.?;
-        self.stderr = self.child.stderr;
 
         return self;
     }
@@ -147,13 +145,13 @@ pub const CodexProcess = struct {
 // Helpers
 // =============================================================================
 
-/// Build argv: [command, "app-server", ...extra_args]
+/// Build argv: [command, ...extra_args]
+/// The caller provides all arguments (e.g. "app-server") via extra_args.
 fn buildArgv(allocator: Allocator, command: []const u8, extra_args: []const []const u8) ![]const []const u8 {
-    var argv = try allocator.alloc([]const u8, 2 + extra_args.len);
+    var argv = try allocator.alloc([]const u8, 1 + extra_args.len);
     argv[0] = command;
-    argv[1] = "app-server";
     for (extra_args, 0..) |arg, i| {
-        argv[2 + i] = arg;
+        argv[1 + i] = arg;
     }
     return argv;
 }
@@ -210,10 +208,10 @@ test "kill sets crashed status" {
     try std.testing.expectEqual(CodexProcess.Status.crashed, proc.status);
 }
 
-test "buildArgv inserts app-server" {
+test "buildArgv passes args through" {
     const allocator = std.testing.allocator;
 
-    const argv = try buildArgv(allocator, "codex", &.{ "--flag", "value" });
+    const argv = try buildArgv(allocator, "codex", &.{ "app-server", "--flag", "value" });
     defer allocator.free(argv);
 
     try std.testing.expectEqual(@as(usize, 4), argv.len);
@@ -229,7 +227,6 @@ test "buildArgv with no extra args" {
     const argv = try buildArgv(allocator, "/usr/bin/codex", &.{});
     defer allocator.free(argv);
 
-    try std.testing.expectEqual(@as(usize, 2), argv.len);
+    try std.testing.expectEqual(@as(usize, 1), argv.len);
     try std.testing.expectEqualStrings("/usr/bin/codex", argv[0]);
-    try std.testing.expectEqualStrings("app-server", argv[1]);
 }
