@@ -83,7 +83,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.getCurrentModelId(),
             .opencode => |m| m.getCurrentModelId(),
-            .codex => |m| m.model,
+            .codex => |m| m.current_model orelse m.model,
         };
     }
 
@@ -92,7 +92,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.getCurrentModelName(),
             .opencode => |m| m.getCurrentModelName(),
-            .codex => |m| m.model orelse "Codex",
+            .codex => |m| m.current_model orelse m.model orelse "Codex",
         };
     }
 
@@ -454,8 +454,11 @@ fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResul
 
         // Process through CodexManager to classify + update turn state
         if (m.processMessage(msg)) |codex_event| {
+            var event_to_free = codex_event;
+            defer m.deinitEvent(&event_to_free);
+
             // Update manager status based on event type
-            switch (codex_event) {
+            switch (event_to_free) {
                 .text_delta, .reasoning_delta, .command_output_delta => {
                     if (m.status != .turn_active) m.status = .turn_active;
                 },
@@ -466,7 +469,7 @@ fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResul
             }
 
             // Convert to AgentEvent and process inline while data is alive
-            if (codexEventToAgentEvent(codex_event)) |agent_event| {
+            if (codexEventToAgentEvent(event_to_free)) |agent_event| {
                 processAgentEvent(agent_state, agent_event);
                 count += 1;
             }

@@ -1512,6 +1512,24 @@ pub const UI = struct {
                             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, tok_str), .style = .{ .fg = Color.dim } });
                         }
                     }
+                } else if (app.getActiveManager()) |mgr| {
+                    switch (mgr) {
+                        .codex => |cm| {
+                            const model_name = cm.current_model orelse cm.model orelse "Codex";
+                            if (model_name.len > 0) {
+                                var model_buf: [128]u8 = undefined;
+                                const model_str = if (cm.reasoning_effort) |effort|
+                                    std.fmt.bufPrint(&model_buf, " {s} [{s}]", .{ model_name, effort.toString() }) catch ""
+                                else
+                                    std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch "";
+
+                                if (model_str.len > 0) {
+                                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
+                                }
+                            }
+                        },
+                        else => {},
+                    }
                 }
 
                 // Keybindings on the right

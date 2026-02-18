@@ -13,6 +13,7 @@ pub const LocalCommand = struct {
 pub const local_commands = [_]LocalCommand{
     .{ .name = "clear", .description = "Clear session and start fresh" },
     .{ .name = "model", .description = "Switch AI model" },
+    .{ .name = "thinking", .description = "Set Codex thinking effort" },
     .{ .name = "resume", .description = "Resume previous session" },
 };
 
@@ -103,6 +104,7 @@ test "SlashMenuState basic operations" {
 test "isLocalCommand" {
     try std.testing.expect(isLocalCommand("clear"));
     try std.testing.expect(isLocalCommand("model"));
+    try std.testing.expect(isLocalCommand("thinking"));
     try std.testing.expect(isLocalCommand("resume"));
     try std.testing.expect(!isLocalCommand("status"));
     try std.testing.expect(!isLocalCommand("review"));

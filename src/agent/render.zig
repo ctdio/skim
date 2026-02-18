@@ -2802,8 +2802,6 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
         }
     }
 
-    if (entry_count == 0) return;
-
     const entries = entries_buf[0..entry_count];
 
     // Use filtered indices for search support
@@ -2886,8 +2884,12 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
 
     // Rows 3+: Model list
     if (filtered_count == 0) {
+        const empty_text: []const u8 = if (entry_count == 0)
+            "No models available"
+        else
+            "No matching models";
         var no_match_seg = [_]vaxis.Cell.Segment{
-            .{ .text = "No matching models", .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
+            .{ .text = empty_text, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } },
         };
         _ = dialog_win.print(&no_match_seg, .{ .row_offset = @intCast(P + 3), .col_offset = P });
     } else {

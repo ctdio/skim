@@ -8,6 +8,7 @@ const sessions = @import("../acp/sessions.zig");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const ManagerHandle = @import("../agent/manager_handle.zig").ManagerHandle;
 const CodexManager = @import("../codex/manager.zig").CodexManager;
+const codex_protocol = @import("../codex/protocol.zig");
 const command_palette = @import("../agent/command_palette.zig");
 const opencode = @import("../opencode/opencode.zig");
 
@@ -727,19 +728,33 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 return;
             }
             if (key.codepoint == 't') {
-                // Space+t - cycle model variant (Opencode only)
-                if (app.getActiveOpencodeManager()) |mgr| {
-                    if (mgr.getCurrentModelId() == null) {
-                        try agent_state.addMessage(.system, "Select a model to use variants");
-                    } else if (mgr.cycleVariant()) |variant| {
-                        const msg = std.fmt.allocPrint(app.allocator, "Variant: {s}", .{variant}) catch "Variant updated";
-                        defer if (!std.mem.eql(u8, msg, "Variant updated")) app.allocator.free(msg);
-                        try agent_state.addMessage(.system, msg);
-                    } else {
-                        try agent_state.addMessage(.system, "No variants available for current model");
+                // Space+t - cycle model variant (Opencode) or thinking effort (Codex)
+                if (app.getActiveManager()) |mgr| {
+                    switch (mgr) {
+                        .opencode => |op| {
+                            if (op.getCurrentModelId() == null) {
+                                try agent_state.addMessage(.system, "Select a model to use variants");
+                            } else if (op.cycleVariant()) |variant| {
+                                const msg = std.fmt.allocPrint(app.allocator, "Variant: {s}", .{variant}) catch "Variant updated";
+                                defer if (!std.mem.eql(u8, msg, "Variant updated")) app.allocator.free(msg);
+                                try agent_state.addMessage(.system, msg);
+                            } else {
+                                try agent_state.addMessage(.system, "No variants available for current model");
+                            }
+                        },
+                        .codex => |cm| {
+                            const next_effort = getNextCodexReasoningEffort(cm);
+                            cm.setReasoningEffort(next_effort);
+                            var msg_buf: [64]u8 = undefined;
+                            const msg = std.fmt.bufPrint(&msg_buf, "Thinking effort: {s}", .{next_effort.toString()}) catch "Thinking effort updated";
+                            try agent_state.addMessage(.system, msg);
+                        },
+                        .acp => {
+                            try agent_state.addMessage(.system, "Space+t is available for Opencode variants or Codex thinking effort");
+                        },
                     }
                 } else {
-                    try agent_state.addMessage(.system, "Variant toggle is only available for Opencode agents");
+                    try agent_state.addMessage(.system, "No active agent");
                 }
                 app.needs_render = true;
                 return;
@@ -977,6 +992,20 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             .send => {
                 const raw_text = agent_state.input.getText();
                 const text = std.mem.trim(u8, raw_text, &std.ascii.whitespace);
+
+                // Handle typed local slash commands directly (without requiring slash-menu selection)
+                if (text.len > 1 and text[0] == '/') {
+                    const cmd_name = extractSlashCommandName(text);
+                    if (cmd_name.len > 0 and state.AgentState.isLocalSlashCommand(cmd_name)) {
+                        const args = extractCommandArgs(text, cmd_name);
+                        try handleLocalCommand(app, agent_state, cmd_name, args);
+                        agent_state.input.clear();
+                        agent_state.hideSlashMenu();
+                        app.needs_render = true;
+                        return;
+                    }
+                }
+
                 const is_thinking = app.isAgentThinking();
                 const session_not_ready = app.isSessionInitializing();
 
@@ -1097,6 +1126,37 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Update file picker visibility based on current input
     updateFilePickerVisibility(app, agent_state);
+}
+
+fn getNextCodexReasoningEffort(cm: *CodexManager) codex_protocol.ReasoningEffort {
+    const all_efforts = [_]codex_protocol.ReasoningEffort{ .low, .medium, .high, .xhigh };
+    var supported: []const codex_protocol.ReasoningEffort = &all_efforts;
+    var default_effort: ?codex_protocol.ReasoningEffort = null;
+
+    const current_model_id = cm.current_model orelse cm.model;
+    if (current_model_id) |model_id| {
+        if (cm.models) |models| {
+            for (models) |m| {
+                if (!std.mem.eql(u8, m.id, model_id)) continue;
+                if (m.supported_reasoning_efforts) |efforts| {
+                    if (efforts.len > 0) {
+                        supported = efforts;
+                    }
+                }
+                default_effort = m.default_reasoning_effort;
+                break;
+            }
+        }
+    }
+
+    const current = cm.reasoning_effort orelse default_effort orelse supported[0];
+    var idx: usize = 0;
+    while (idx < supported.len) : (idx += 1) {
+        if (supported[idx] == current) {
+            return supported[(idx + 1) % supported.len];
+        }
+    }
+    return supported[0];
 }
 
 /// Insert a file reference into the input (displayed as @path/to/file)
@@ -1391,6 +1451,15 @@ fn extractCommandArgs(input: []const u8, command_name: []const u8) []const u8 {
     return std.mem.trim(u8, after_cmd[i..], &std.ascii.whitespace);
 }
 
+fn extractSlashCommandName(input: []const u8) []const u8 {
+    if (input.len < 2 or input[0] != '/') return "";
+    const after_slash = input[1..];
+    if (std.mem.indexOfScalar(u8, after_slash, ' ')) |space_idx| {
+        return after_slash[0..space_idx];
+    }
+    return after_slash;
+}
+
 /// Handle local slash commands (executed by skim, not sent to agent)
 fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: []const u8, args: []const u8) !void {
     if (std.mem.eql(u8, command_name, "clear")) {
@@ -1441,6 +1510,19 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
     }
 
     if (std.mem.eql(u8, command_name, "model")) {
+        if (app.getActiveManager()) |mgr| {
+            switch (mgr) {
+                .codex => |cm| {
+                    _ = cm.listModels() catch |err| {
+                        std.log.err("Codex: failed to load model list: {any}", .{err});
+                        try agent_state.addMessage(.system, "Failed to load Codex models");
+                        return;
+                    };
+                },
+                .acp, .opencode => {},
+            }
+        }
+
         // Switch to model selection mode with optional preselected model
         app.resetModelFilter();
         app.mode = .model_selection;
@@ -1453,6 +1535,44 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
         }
 
         try agent_state.addMessage(.system, "Switching to model selection...");
+        return;
+    }
+
+    if (std.mem.eql(u8, command_name, "thinking")) {
+        if (app.getActiveManager()) |mgr| {
+            switch (mgr) {
+                .codex => |cm| {
+                    const trimmed_args = std.mem.trim(u8, args, &std.ascii.whitespace);
+                    if (trimmed_args.len == 0) {
+                        const current = if (cm.reasoning_effort) |effort| effort.toString() else "default";
+                        var status_buf: [128]u8 = undefined;
+                        const status = std.fmt.bufPrint(&status_buf, "Thinking effort: {s} (options: low|medium|high|xhigh)", .{current}) catch "Thinking effort: default";
+                        try agent_state.addMessage(.system, status);
+                        return;
+                    }
+
+                    const effort_text = if (std.mem.indexOfAny(u8, trimmed_args, &std.ascii.whitespace)) |idx|
+                        trimmed_args[0..idx]
+                    else
+                        trimmed_args;
+
+                    if (codex_protocol.ReasoningEffort.fromString(effort_text)) |effort| {
+                        cm.setReasoningEffort(effort);
+                        var confirm_buf: [96]u8 = undefined;
+                        const confirm = std.fmt.bufPrint(&confirm_buf, "Thinking effort set to: {s}", .{effort.toString()}) catch "Thinking effort updated";
+                        try agent_state.addMessage(.system, confirm);
+                    } else {
+                        try agent_state.addMessage(.system, "Invalid thinking effort. Use: low, medium, high, or xhigh");
+                    }
+                    return;
+                },
+                .acp, .opencode => {
+                    try agent_state.addMessage(.system, "Thinking settings are only available for Codex");
+                    return;
+                },
+            }
+        }
+        try agent_state.addMessage(.system, "No active agent");
         return;
     }
 

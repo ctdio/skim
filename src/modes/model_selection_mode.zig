@@ -82,7 +82,13 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                     const actual_idx = app.state.model_filtered_indices.items[app.state.model_selection];
                     if (actual_idx < mgr.getModelCount()) {
                         const selected_model = mgr.getModelInfo(actual_idx);
-                        mgr.setModelById(selected_model.model_id) catch {};
+                        mgr.setModelById(selected_model.model_id) catch |err| {
+                            if (app.getActiveAgentState()) |agent_state| {
+                                const msg = std.fmt.allocPrint(app.allocator, "Failed to switch model: {s}", .{@errorName(err)}) catch "Failed to switch model";
+                                defer if (!std.mem.eql(u8, msg, "Failed to switch model")) app.allocator.free(msg);
+                                agent_state.addMessage(.system, msg) catch {};
+                            }
+                        };
                     }
                 }
             }

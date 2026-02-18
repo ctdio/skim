@@ -198,6 +198,7 @@ pub const CodexManager = struct {
         CompactFailed,
         RollbackFailed,
         ArchiveFailed,
+        ModelSwitchDuringTurn,
     } || Allocator.Error || process_mod.CodexProcess.SpawnError || transport_mod.StdioTransport.Error;
 
     pub fn init(allocator: Allocator) CodexManager {
@@ -647,9 +648,20 @@ pub const CodexManager = struct {
 
     /// Set the model for subsequent turns.
     /// The model_id is stored and used when starting new threads/turns.
-    pub fn setModel(self: *CodexManager, model_id: []const u8) Allocator.Error!void {
+    pub fn setModel(self: *CodexManager, model_id: []const u8) Error!void {
         if (self.current_model) |cm| self.allocator.free(cm);
         self.current_model = try self.allocator.dupe(u8, model_id);
+
+        if (self.status == .turn_active) return error.ModelSwitchDuringTurn;
+        if (self.status != .initialized and self.status != .thread_active) return;
+
+        const cwd_copy = if (self.thread_info) |thread|
+            if (thread.cwd) |cwd| try self.allocator.dupe(u8, cwd) else null
+        else
+            null;
+        defer if (cwd_copy) |cwd| self.allocator.free(cwd);
+
+        try self.startThread(self.current_model, cwd_copy);
     }
 
     /// Set the reasoning effort level for subsequent turns.
@@ -840,6 +852,28 @@ pub const CodexManager = struct {
             plan_steps: []const u8,
         };
     };
+
+    /// Release memory owned by a CodexEvent payload.
+    pub fn deinitEvent(self: *CodexManager, event: *CodexEvent) void {
+        switch (event.*) {
+            .text_delta, .reasoning_delta, .command_output_delta => |d| {
+                self.allocator.free(d.thread_id);
+                self.allocator.free(d.turn_id);
+                self.allocator.free(d.item_id);
+                self.allocator.free(d.delta);
+            },
+            .item_started, .item_completed => |e| {
+                self.allocator.free(e.thread_id);
+                self.allocator.free(e.turn_id);
+                freeOwnedItem(self.allocator, e.item);
+            },
+            .turn_completed => |e| {
+                self.allocator.free(e.thread_id);
+                self.allocator.free(e.turn.id);
+            },
+            else => {},
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Internal helpers
@@ -1378,8 +1412,7 @@ pub const CodexManager = struct {
             delta: ?[]const u8 = null,
         };
 
-        // Parse without allocating — string slices reference into `json` (which is
-        // params_json, alive until the DecodedMessage is freed by the caller).
+        // Parse and then immediately duplicate fields used by downstream consumers.
         const parsed = std.json.parseFromSlice(RawDelta, self.allocator, json, .{
             .ignore_unknown_fields = true,
         }) catch return null;
@@ -1395,11 +1428,20 @@ pub const CodexManager = struct {
             }
         }
 
+        const owned_thread_id = self.allocator.dupe(u8, r.threadId orelse "") catch return null;
+        errdefer self.allocator.free(owned_thread_id);
+        const owned_turn_id = self.allocator.dupe(u8, r.turnId orelse "") catch return null;
+        errdefer self.allocator.free(owned_turn_id);
+        const owned_item_id = self.allocator.dupe(u8, r.itemId orelse "") catch return null;
+        errdefer self.allocator.free(owned_item_id);
+        const owned_delta = self.allocator.dupe(u8, delta_text) catch return null;
+        errdefer self.allocator.free(owned_delta);
+
         const event = CodexEvent.DeltaEvent{
-            .thread_id = r.threadId orelse "",
-            .turn_id = r.turnId orelse "",
-            .item_id = r.itemId orelse "",
-            .delta = delta_text,
+            .thread_id = owned_thread_id,
+            .turn_id = owned_turn_id,
+            .item_id = owned_item_id,
+            .delta = owned_delta,
         };
 
         return switch (tag) {
@@ -1412,8 +1454,7 @@ pub const CodexManager = struct {
     const ItemTag = enum { item_started, item_completed };
 
     fn parseItemEvent(self: *CodexManager, json: []const u8, tag: ItemTag) ?CodexEvent {
-        // Zero-alloc parse: string slices reference into `json` (which is params_json,
-        // alive until the DecodedMessage is freed by the caller).
+        // Parse and then immediately duplicate fields used by downstream consumers.
         const RawItemParams = struct {
             threadId: ?[]const u8 = null,
             turnId: ?[]const u8 = null,
@@ -1435,11 +1476,16 @@ pub const CodexManager = struct {
             }
         }
 
-        const item = convertCompactItem(raw_item);
+        const owned_thread_id = self.allocator.dupe(u8, r.threadId orelse "") catch return null;
+        errdefer self.allocator.free(owned_thread_id);
+        const owned_turn_id = self.allocator.dupe(u8, r.turnId orelse "") catch return null;
+        errdefer self.allocator.free(owned_turn_id);
+        const item = convertCompactItemOwned(self.allocator, raw_item) catch return null;
+        errdefer freeOwnedItem(self.allocator, item);
 
         const event = CodexEvent.ItemEvent{
-            .thread_id = r.threadId orelse "",
-            .turn_id = r.turnId orelse "",
+            .thread_id = owned_thread_id,
+            .turn_id = owned_turn_id,
             .item = item,
         };
 
@@ -1450,7 +1496,7 @@ pub const CodexManager = struct {
     }
 
     fn parseTurnCompleted(self: *CodexManager, json: []const u8) ?CodexEvent {
-        // Zero-alloc parse: string slices reference into `json` (params_json)
+        // Parse and then immediately duplicate fields used by downstream consumers.
         const RawTurnCompleted = struct {
             threadId: ?[]const u8 = null,
             turn: ?struct {
@@ -1476,17 +1522,21 @@ pub const CodexManager = struct {
             self.turn_id = null;
         }
 
+        const owned_thread_id = self.allocator.dupe(u8, r.threadId orelse "") catch return null;
+        errdefer self.allocator.free(owned_thread_id);
+        const owned_turn_id = self.allocator.dupe(u8, raw_turn.id) catch return null;
+        errdefer self.allocator.free(owned_turn_id);
+
         return .{ .turn_completed = .{
-            .thread_id = r.threadId orelse "",
+            .thread_id = owned_thread_id,
             .turn = .{
-                .id = raw_turn.id,
+                .id = owned_turn_id,
                 .status = if (raw_turn.status) |s| protocol.TurnStatus.fromString(s) else null,
             },
         } };
     }
 
-    /// Compact item structure for zero-alloc parsing.
-    /// String fields borrow directly from the source JSON.
+    /// Compact item structure for low-overhead parsing.
     const RawItemCompact = struct {
         type: ?[]const u8 = null,
         id: ?[]const u8 = null,
@@ -1505,9 +1555,11 @@ pub const CodexManager = struct {
         output: ?[]const u8 = null,
     };
 
-    fn convertCompactItem(raw: RawItemCompact) protocol.Item {
+    fn convertCompactItemOwned(allocator: Allocator, raw: RawItemCompact) Allocator.Error!protocol.Item {
         const item_type = raw.type orelse return .{ .unknown = {} };
         const item_id = raw.id orelse "";
+        const owned_id = try allocator.dupe(u8, item_id);
+        errdefer allocator.free(owned_id);
 
         const map = std.StaticStringMap(enum {
             user_message,
@@ -1528,42 +1580,111 @@ pub const CodexManager = struct {
         const variant = map.get(item_type) orelse return .{ .unknown = {} };
 
         return switch (variant) {
-            .user_message => .{ .user_message = .{ .id = item_id } },
-            .agent_message => .{ .agent_message = .{
-                .id = item_id,
-                .text = raw.text orelse "",
-            } },
+            .user_message => .{ .user_message = .{ .id = owned_id } },
+            .agent_message => blk: {
+                const owned_text = try allocator.dupe(u8, raw.text orelse "");
+                errdefer allocator.free(owned_text);
+                break :blk .{ .agent_message = .{
+                    .id = owned_id,
+                    .text = owned_text,
+                } };
+            },
             .reasoning => .{ .reasoning = .{
-                .id = item_id,
+                .id = owned_id,
                 .summary = &.{},
                 .content = &.{},
             } },
-            .command_execution => .{ .command_execution = .{
-                .id = item_id,
-                .command = raw.command,
-                .cwd = raw.cwd,
-                .exit_code = raw.exitCode,
-                .stdout = raw.stdout,
-                .stderr = raw.stderr,
-                .status = if (raw.status) |s| protocol.CommandExecutionStatus.fromString(s) orelse .pending else .pending,
-            } },
-            .file_change => .{ .file_change = .{
-                .id = item_id,
-                .path = raw.path,
-                .diff = raw.diff,
-                .status = raw.status,
-            } },
-            .mcp_tool_call => .{ .mcp_tool_call = .{
-                .id = item_id,
-                .server_name = raw.serverName,
-                .tool_name = raw.toolName,
-                .arguments = raw.arguments,
-                .output = raw.output,
-                .status = raw.status,
-            } },
+            .command_execution => blk: {
+                const owned_command = if (raw.command) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_command) |v| allocator.free(v);
+                const owned_cwd = if (raw.cwd) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_cwd) |v| allocator.free(v);
+                const owned_stdout = if (raw.stdout) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_stdout) |v| allocator.free(v);
+                const owned_stderr = if (raw.stderr) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_stderr) |v| allocator.free(v);
+                break :blk .{ .command_execution = .{
+                    .id = owned_id,
+                    .command = owned_command,
+                    .cwd = owned_cwd,
+                    .exit_code = raw.exitCode,
+                    .stdout = owned_stdout,
+                    .stderr = owned_stderr,
+                    .status = if (raw.status) |s| protocol.CommandExecutionStatus.fromString(s) orelse .pending else .pending,
+                } };
+            },
+            .file_change => blk: {
+                const owned_path = if (raw.path) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_path) |v| allocator.free(v);
+                const owned_diff = if (raw.diff) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_diff) |v| allocator.free(v);
+                const owned_status = if (raw.status) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_status) |v| allocator.free(v);
+                break :blk .{ .file_change = .{
+                    .id = owned_id,
+                    .path = owned_path,
+                    .diff = owned_diff,
+                    .status = owned_status,
+                } };
+            },
+            .mcp_tool_call => blk: {
+                const owned_server_name = if (raw.serverName) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_server_name) |v| allocator.free(v);
+                const owned_tool_name = if (raw.toolName) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_tool_name) |v| allocator.free(v);
+                const owned_arguments = if (raw.arguments) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_arguments) |v| allocator.free(v);
+                const owned_output = if (raw.output) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_output) |v| allocator.free(v);
+                const owned_status = if (raw.status) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_status) |v| allocator.free(v);
+                break :blk .{ .mcp_tool_call = .{
+                    .id = owned_id,
+                    .server_name = owned_server_name,
+                    .tool_name = owned_tool_name,
+                    .arguments = owned_arguments,
+                    .output = owned_output,
+                    .status = owned_status,
+                } };
+            },
         };
     }
 };
+
+fn freeOwnedItem(allocator: Allocator, item: protocol.Item) void {
+    switch (item) {
+        .user_message => |u| allocator.free(u.id),
+        .agent_message => |a| {
+            allocator.free(a.id);
+            allocator.free(a.text);
+        },
+        .reasoning => |r| {
+            allocator.free(r.id);
+        },
+        .command_execution => |c| {
+            allocator.free(c.id);
+            if (c.command) |v| allocator.free(v);
+            if (c.cwd) |v| allocator.free(v);
+            if (c.stdout) |v| allocator.free(v);
+            if (c.stderr) |v| allocator.free(v);
+        },
+        .file_change => |f| {
+            allocator.free(f.id);
+            if (f.path) |v| allocator.free(v);
+            if (f.diff) |v| allocator.free(v);
+            if (f.status) |v| allocator.free(v);
+        },
+        .mcp_tool_call => |m| {
+            allocator.free(m.id);
+            if (m.server_name) |v| allocator.free(v);
+            if (m.tool_name) |v| allocator.free(v);
+            if (m.arguments) |v| allocator.free(v);
+            if (m.output) |v| allocator.free(v);
+            if (m.status) |v| allocator.free(v);
+        },
+        .unknown => {},
+    }
+}
 
 // =============================================================================
 // Standalone helpers
@@ -1644,6 +1765,11 @@ fn codexAvailable() bool {
     return result.term.Exited == 0;
 }
 
+fn consumeProcessEventForTest(manager: *CodexManager, msg: codec.DecodedMessage) void {
+    var event = manager.processMessage(msg);
+    if (event) |*e| manager.deinitEvent(e);
+}
+
 test "startTurn fails when not in thread_active state" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
@@ -1672,7 +1798,8 @@ test "processMessage with agentMessage/delta notification returns text_delta" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .text_delta);
     try std.testing.expectEqualStrings("Hello", event.?.text_delta.delta);
@@ -1689,7 +1816,8 @@ test "processMessage with codex/event/* method returns null (filtered)" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event == null);
 }
 
@@ -1706,7 +1834,8 @@ test "processMessage with turn/completed returns turn_completed and transitions 
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .turn_completed);
     try std.testing.expectEqual(CodexManager.Status.thread_active, manager.status);
@@ -1723,7 +1852,8 @@ test "processMessage with reasoning delta returns reasoning_delta" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .reasoning_delta);
     try std.testing.expectEqualStrings("Thinking...", event.?.reasoning_delta.delta);
@@ -1740,7 +1870,8 @@ test "processMessage with item/started returns item_started" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .item_started);
     try std.testing.expect(event.?.item_started.item == .command_execution);
@@ -1757,7 +1888,8 @@ test "processMessage with unknown method returns unknown" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .unknown);
 }
@@ -1773,7 +1905,8 @@ test "processMessage with response returns null" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event == null);
 }
 
@@ -1790,7 +1923,7 @@ test "processMessage turn_id tracking from delta events" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    _ = manager.processMessage(msg);
+    consumeProcessEventForTest(&manager, msg);
     try std.testing.expect(manager.turn_id != null);
     try std.testing.expectEqualStrings("my-turn", manager.turn_id.?);
 }
@@ -1839,7 +1972,8 @@ test "processMessage with command approval server request stores pending approva
     defer msg.deinit(std.testing.allocator);
 
     try std.testing.expect(manager.pending_approval == null);
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .approval_requested);
     try std.testing.expect(manager.pending_approval != null);
@@ -1870,7 +2004,8 @@ test "processMessage with file change approval server request stores pending app
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .approval_requested);
 
@@ -1895,7 +2030,8 @@ test "processMessage with user input server request stores pending approval" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .approval_requested);
 
@@ -1930,7 +2066,7 @@ test "new approval replaces existing pending approval" {
     ;
     var msg1 = try decoder.decode(json1);
     defer msg1.deinit(std.testing.allocator);
-    _ = manager.processMessage(msg1);
+    consumeProcessEventForTest(&manager, msg1);
     try std.testing.expect(manager.pending_approval != null);
 
     // Second approval should replace the first
@@ -1939,7 +2075,7 @@ test "new approval replaces existing pending approval" {
     ;
     var msg2 = try decoder.decode(json2);
     defer msg2.deinit(std.testing.allocator);
-    _ = manager.processMessage(msg2);
+    consumeProcessEventForTest(&manager, msg2);
 
     switch (manager.pending_approval.?) {
         .file_change => |fc| try std.testing.expectEqualStrings("/tmp/file.txt", fc.path),
@@ -1958,7 +2094,7 @@ test "pending approval with string request id" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    _ = manager.processMessage(msg);
+    consumeProcessEventForTest(&manager, msg);
     try std.testing.expect(manager.pending_approval != null);
 
     switch (manager.pending_approval.?) {
@@ -1983,7 +2119,7 @@ test "pending approval with numeric request id" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    _ = manager.processMessage(msg);
+    consumeProcessEventForTest(&manager, msg);
 
     switch (manager.pending_approval.?.command.request_id) {
         .number => |n| try std.testing.expectEqual(@as(i64, 42), n),
@@ -2002,7 +2138,7 @@ test "freePendingApproval cleans up properly" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    _ = manager.processMessage(msg);
+    consumeProcessEventForTest(&manager, msg);
     try std.testing.expect(manager.pending_approval != null);
 
     manager.freePendingApproval();
@@ -2020,7 +2156,7 @@ test "disconnect clears pending approval" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    _ = manager.processMessage(msg);
+    consumeProcessEventForTest(&manager, msg);
     try std.testing.expect(manager.pending_approval != null);
 
     manager.disconnect();
@@ -2039,7 +2175,8 @@ test "processMessage non-approval server request falls through to notification" 
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     // Should fall through to notification processing and produce text_delta
     try std.testing.expect(event.? == .text_delta);
@@ -2223,7 +2360,8 @@ test "processMessage with token usage notification stores usage and returns even
     defer msg.deinit(std.testing.allocator);
 
     try std.testing.expect(manager.token_usage == null);
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .token_usage_updated);
 
@@ -2254,7 +2392,8 @@ test "processMessage with rate limits notification stores limits and returns eve
     defer msg.deinit(std.testing.allocator);
 
     try std.testing.expect(manager.rate_limits == null);
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .rate_limits_updated);
 
@@ -2277,7 +2416,8 @@ test "processMessage with MCP startup update creates server entry" {
     defer msg.deinit(std.testing.allocator);
 
     try std.testing.expect(manager.mcp_servers == null);
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .mcp_server_status);
 
@@ -2302,7 +2442,7 @@ test "processMessage with MCP startup complete marks completion" {
     ;
     var update_msg = try decoder.decode(update_json);
     defer update_msg.deinit(std.testing.allocator);
-    _ = manager.processMessage(update_msg);
+    consumeProcessEventForTest(&manager, update_msg);
 
     // Then send completion
     const complete_json =
@@ -2310,7 +2450,8 @@ test "processMessage with MCP startup complete marks completion" {
     ;
     var complete_msg = try decoder.decode(complete_json);
     defer complete_msg.deinit(std.testing.allocator);
-    const event = manager.processMessage(complete_msg);
+    var event = manager.processMessage(complete_msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .mcp_server_status);
 
@@ -2337,7 +2478,7 @@ test "MCP startup update updates existing server entry" {
     ;
     var msg1 = try decoder.decode(json1);
     defer msg1.deinit(std.testing.allocator);
-    _ = manager.processMessage(msg1);
+    consumeProcessEventForTest(&manager, msg1);
 
     try std.testing.expectEqualStrings("starting", manager.mcp_servers.?.servers[0].state);
 
@@ -2347,7 +2488,7 @@ test "MCP startup update updates existing server entry" {
     ;
     var msg2 = try decoder.decode(json2);
     defer msg2.deinit(std.testing.allocator);
-    _ = manager.processMessage(msg2);
+    consumeProcessEventForTest(&manager, msg2);
 
     // Should still have one entry with updated state
     try std.testing.expectEqual(@as(usize, 1), manager.mcp_servers.?.servers.len);
@@ -2397,7 +2538,7 @@ test "disconnect clears token usage and rate limits" {
     ;
     var tu_msg = try decoder.decode(tu_json);
     defer tu_msg.deinit(std.testing.allocator);
-    _ = manager.processMessage(tu_msg);
+    consumeProcessEventForTest(&manager, tu_msg);
     try std.testing.expect(manager.token_usage != null);
 
     // Set rate limit data via notification
@@ -2406,7 +2547,7 @@ test "disconnect clears token usage and rate limits" {
     ;
     var rl_msg = try decoder.decode(rl_json);
     defer rl_msg.deinit(std.testing.allocator);
-    _ = manager.processMessage(rl_msg);
+    consumeProcessEventForTest(&manager, rl_msg);
     try std.testing.expect(manager.rate_limits != null);
 
     manager.disconnect();
@@ -2426,7 +2567,8 @@ test "token usage updated event contains correct data" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event != null);
 
     const tu_event = event.?.token_usage_updated;
@@ -2447,6 +2589,7 @@ test "other codex/event/* methods are still filtered" {
     var msg = try decoder.decode(json);
     defer msg.deinit(std.testing.allocator);
 
-    const event = manager.processMessage(msg);
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
     try std.testing.expect(event == null);
 }
