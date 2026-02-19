@@ -697,7 +697,7 @@ pub const AgentState = struct {
     slash_menu: SlashMenuState,
     // Input area scrolling
     input_scroll_offset: usize, // Vertical scroll offset for multi-line input
-    // Interrupt tracking (double-ESC to cancel, double Ctrl+C to exit)
+    // Interrupt tracking (double-ESC to cancel) and keypress timing state
     last_esc_timestamp: i64, // Timestamp of last ESC press (ms since epoch)
     last_ctrl_c_timestamp: i64, // Timestamp of last Ctrl+C press (ms since epoch)
     // Viewport tracking for smart scrolling
@@ -2450,7 +2450,7 @@ pub const AgentState = struct {
     }
 
     /// Record a Ctrl+C key press and check if it's a double Ctrl+C
-    /// Returns true if this is a double Ctrl+C (second Ctrl+C within threshold)
+    /// Returns true if this is a second Ctrl+C within threshold
     pub fn recordCtrlCPress(self: *AgentState) bool {
         const now_ms = std.time.milliTimestamp();
         const elapsed = now_ms - self.last_ctrl_c_timestamp;

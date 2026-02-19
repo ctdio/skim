@@ -44,6 +44,7 @@ pub const CommandAction = union(enum) {
 pub const Command = struct {
     name: []const u8, // Original full path/name
     display_name: []const u8, // Truncated/formatted for display
+    aliases: []const []const u8 = &[_][]const u8{},
     description: []const u8,
     action: CommandAction,
     category: Category,
@@ -188,6 +189,7 @@ pub const CommandPaletteState = struct {
         try self.commands.append(self.allocator, .{
             .name = "Quit",
             .display_name = "Quit",
+            .aliases = &[_][]const u8{ ":q", ":quit", ":qa" },
             .description = "Exit Skim",
             .action = .quit,
             .category = .navigation,
@@ -278,6 +280,7 @@ pub const CommandPaletteState = struct {
 
                 if (category_matches and
                     (containsIgnoreCase(cmd.name, search_query) or
+                        containsAlias(cmd.aliases, search_query) or
                         containsIgnoreCase(cmd.description, search_query)))
                 {
                     try self.filtered_commands.append(self.allocator, idx);
@@ -407,6 +410,13 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
             }
         }
         if (match) return true;
+    }
+    return false;
+}
+
+fn containsAlias(aliases: []const []const u8, query: []const u8) bool {
+    for (aliases) |alias| {
+        if (containsIgnoreCase(alias, query)) return true;
     }
     return false;
 }

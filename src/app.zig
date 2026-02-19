@@ -2018,7 +2018,7 @@ pub const App = struct {
     }
 
     fn handleKey(self: *App, key: vaxis.Key) !void {
-        // Handle Ctrl-C for double-press exit (or single press in modal overlays)
+        // Handle Ctrl-C in modal overlays
         if (key.mods.ctrl and key.codepoint == 'c') {
             // In modal overlay modes, single Ctrl-C closes the modal
             switch (self.mode) {
@@ -2095,49 +2095,19 @@ pub const App = struct {
                     return;
                 },
                 .agent => {
-                    // In agent mode, respect vim mode state:
-                    // - History mode: single Ctrl+C exits history mode
-                    // - Insert mode: first Ctrl+C exits to normal vim mode
-                    // - Normal vim mode: double Ctrl+C exits the app
+                    // In agent mode, single Ctrl+C exits history mode.
                     if (self.getActiveAgentState()) |agent_state| {
                         if (agent_state.isInHistoryMode()) {
                             agent_state.exitHistoryMode();
                             agent_state.input.vim.vim_mode = .normal;
                             self.needs_render = true;
                             return;
-                        } else if (agent_state.input.vim.vim_mode == .insert) {
-                            // First Ctrl+C in insert mode - exit to normal vim mode
-                            // (handled by vim_editor, will be processed below)
-                            // Fall through to agent_mode.handleKey
-                        } else {
-                            // In normal vim mode - require double Ctrl+C to exit app
-                            if (agent_state.recordCtrlCPress()) {
-                                // Double Ctrl+C detected - exit the app
-                                self.should_quit = true;
-                            } else {
-                                // Single Ctrl+C - show hint in status bar
-                                self.needs_render = true;
-                            }
-                            return;
                         }
                     }
                 },
-                .normal, .comment => {
-                    // In normal/comment modes, double-press to quit
-                    const now: i64 = @intCast(std.time.nanoTimestamp());
-                    if (now - self.last_ctrl_c < App.CTRL_C_TIMEOUT_NS) {
-                        self.should_quit = true;
-                        return;
-                    }
-                    self.last_ctrl_c = now;
-                    self.needs_render = true; // Show hint in status bar
-                    return;
-                },
+                .normal, .comment => {},
             }
         }
-
-        // Reset double-press timer on any other key
-        self.last_ctrl_c = 0;
 
         switch (self.mode) {
             .normal => try normal_mode.handleKey(self, key),

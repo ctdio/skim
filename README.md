@@ -223,7 +223,7 @@ Navigate files and position cursor with vim-style movements:
 | Key | Action |
 |-----|--------|
 | `Ctrl-g` | Open current file in $EDITOR |
-| `Ctrl-C` × 2 | Force exit (double-press within 1 second) |
+| `:` | Open command palette (`:quit` to exit) |
 
 ### SEARCH Mode
 

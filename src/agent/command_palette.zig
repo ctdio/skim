@@ -64,7 +64,7 @@ pub const COMMANDS = [_]AgentCommand{
     },
     .{
         .name = "Quit",
-        .aliases = &[_][]const u8{ ":q", ":quit" },
+        .aliases = &[_][]const u8{ ":q", ":quit", ":qa" },
         .description = "Close current tab",
         .action = .close_tab,
     },

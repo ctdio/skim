@@ -85,7 +85,6 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "Ctrl-w h/l", .desc = "Focus diff / agent" },
         .{ .key = "r", .desc = "Refresh diff" },
         .{ .key = "Ctrl-g", .desc = "Open in $EDITOR" },
-        .{ .key = "Ctrl-C ×2", .desc = "Force quit" },
     };
     for (core_bindings) |b| {
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });

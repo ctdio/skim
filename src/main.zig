@@ -533,7 +533,7 @@ fn printHelp(_: std.mem.Allocator) !void {
         \\    Enter              Focus mode
         \\    c                  Add comment on cursor line
         \\    s                  Toggle split view
-        \\    Ctrl-C × 2         Force exit (double-press)
+        \\    :                  Command palette (use :quit to exit)
         \\    ?                  Help
         \\
     );
