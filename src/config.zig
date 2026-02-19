@@ -34,6 +34,7 @@ pub const AgentServerConfig = struct {
     env: ?[]const EnvVar = null, // Environment variables
     skim: ?SkimAgentExtensions = null, // Namespaced skim extensions
     protocol: Protocol = .acp, // Protocol to use for communication
+    approval_policy: ?[]const u8 = null, // Codex: "never", "on-request", "unless-trusted", "always"
 };
 
 pub const Config = struct {
@@ -195,7 +196,6 @@ fn parseAgentServer(allocator: Allocator, name: []const u8, obj: std.json.Object
             if (skim_val.object.get("model")) |v| {
                 if (v == .string) skim_ext.model = try allocator.dupe(u8, v.string);
             }
-
             agent.skim = skim_ext;
         }
     }
@@ -210,6 +210,11 @@ fn parseAgentServer(allocator: Allocator, name: []const u8, obj: std.json.Object
             }
             // "acp" or unknown values default to .acp (already set)
         }
+    }
+
+    // Parse approval_policy (optional, codex thread/start parameter)
+    if (obj.get("approval_policy")) |v| {
+        if (v == .string) agent.approval_policy = try allocator.dupe(u8, v.string);
     }
 
     return agent;
@@ -309,6 +314,7 @@ fn freeAgentServer(allocator: Allocator, agent: *const AgentServerConfig) void {
         if (skim.mode) |m| allocator.free(m);
         if (skim.model) |m| allocator.free(m);
     }
+    if (agent.approval_policy) |p| allocator.free(p);
 }
 
 /// Free agent servers array and all contained data.

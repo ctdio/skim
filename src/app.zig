@@ -129,6 +129,7 @@ pub const CodexConnectContext = struct {
     args: ?[]const []const u8,
     cwd: ?[]const u8,
     model: ?[]const u8,
+    approval_policy: ?[]const u8,
 };
 
 /// Unified pending connection state (replaces separate ACP/Opencode fields)
@@ -1582,6 +1583,7 @@ pub const App = struct {
         }
 
         var first_render = true;
+        var last_shimmer_render: i64 = 0;
 
         // Main event loop
         while (!self.should_quit) {
@@ -1696,6 +1698,16 @@ pub const App = struct {
 
                 if (self.pending_connection != null or has_any_manager) {
                     self.pollAllManagers();
+                }
+            }
+
+            // Throttled re-render for the shimmer animation on the thinking indicator.
+            // The shimmer changes phase every 80ms, so re-rendering faster is wasted work.
+            if (manager_active and !self.needs_render) {
+                const now_ms = std.time.milliTimestamp();
+                if (now_ms - last_shimmer_render >= 80) {
+                    self.needs_render = true;
+                    last_shimmer_render = now_ms;
                 }
             }
 
@@ -5936,6 +5948,7 @@ pub const App = struct {
             .args = agent_info.args,
             .cwd = self.state.git_repo_root,
             .model = agent_info.model,
+            .approval_policy = agent_info.approval_policy,
         };
 
         // Spawn background thread for connection
@@ -5958,6 +5971,8 @@ pub const App = struct {
 
     fn codexConnectThreadFn(ctx: *CodexConnectContext) void {
         std.log.info("Codex: Background connection thread started", .{});
+
+        ctx.mgr.requested_approval_policy = ctx.approval_policy;
 
         // Connect to codex app-server (spawn process, handshake)
         ctx.mgr.connect(ctx.command, ctx.args, ctx.cwd) catch |err| {
@@ -6031,6 +6046,7 @@ pub const App = struct {
                         .env = env_slice,
                         .skim = skim_ext,
                         .protocol = protocol,
+                        .approval_policy = cfg.approval_policy,
                     };
                 }
 

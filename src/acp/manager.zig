@@ -262,6 +262,7 @@ pub const AcpManager = struct {
         from_config: bool = false, // true if loaded from config
         is_default: bool = false, // true if marked as default in config
         protocol: Protocol = .acp, // Protocol for communication
+        approval_policy: ?[]const u8 = null, // Codex approval policy (e.g., "never")
     };
 
     pub fn init(allocator: Allocator) AcpManager {
@@ -2397,6 +2398,7 @@ pub const ConfigAgent = struct {
     env: ?[]const ConfigEnvVar = null,
     skim: ?SkimAgentExtensions = null,
     protocol: AcpManager.Protocol = .acp, // Protocol for communication
+    approval_policy: ?[]const u8 = null, // Codex: "never", "on-request", etc.
 };
 
 /// Load agent list from config agents.
@@ -2434,6 +2436,7 @@ pub fn loadAgentList(allocator: Allocator, config_agents: ?[]const ConfigAgent) 
             .from_config = true,
             .is_default = skim.default,
             .protocol = cfg.protocol,
+            .approval_policy = if (cfg.approval_policy) |p| try allocator.dupe(u8, p) else null,
         };
     }
     return result;
@@ -2470,6 +2473,7 @@ pub fn freeAgentList(allocator: Allocator, agents: []AcpManager.AgentInfo) void 
         }
         if (agent.model) |m| allocator.free(m);
         if (agent.mode) |m| allocator.free(m);
+        if (agent.approval_policy) |p| allocator.free(p);
     }
     allocator.free(agents);
 }

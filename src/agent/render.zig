@@ -1089,42 +1089,51 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
 fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     const agent_state = app.getActiveAgentState() orelse return;
 
-    // Build title with server name when connected
-    const title = if (app.getActiveAcpManager()) |mgr| blk: {
-        if (mgr.server_name) |name| {
-            break :blk name;
-        }
-        break :blk "Agent";
+    // Build title and status from active manager
+    var status_buf: [64]u8 = undefined;
+    const title: []const u8 = if (app.getActiveManager()) |mgr| switch (mgr) {
+        .acp => |m| if (m.server_name) |name| name else "Agent",
+        .opencode => "Opencode",
+        .codex => "Codex",
     } else "Agent";
 
     const suffix = if (is_focused) " [focused]" else "";
 
-    // Status from ACP connection
-    var status_buf: [64]u8 = undefined;
-    const status_text = if (app.getActiveAcpManager()) |mgr| blk: {
-        const base_status = switch (mgr.status) {
-            .disconnected => " Disconnected",
-            .discovering => " Discovering...",
-            .connecting => " Connecting...",
-            .connected => " Creating session...",
-            .session_active => " Active",
-            .prompting => " Thinking...",
-            .failed => " Failed",
-        };
-        const queued = mgr.queuedPromptCount();
-        if (queued > 0) {
-            const fmt_result: ?[]const u8 = switch (mgr.status) {
-                .discovering => std.fmt.bufPrint(&status_buf, " Discovering... ({d} queued)", .{queued}) catch null,
-                .connecting => std.fmt.bufPrint(&status_buf, " Connecting... ({d} queued)", .{queued}) catch null,
-                .connected => std.fmt.bufPrint(&status_buf, " Creating session... ({d} queued)", .{queued}) catch null,
-                .prompting => std.fmt.bufPrint(&status_buf, " Thinking... ({d} queued)", .{queued}) catch null,
-                else => null,
+    const status_text: []const u8 = if (app.getActiveManager()) |mgr| switch (mgr) {
+        .acp => |m| blk: {
+            const base_status: []const u8 = switch (m.status) {
+                .disconnected => " Disconnected",
+                .discovering => " Discovering...",
+                .connecting => " Connecting...",
+                .connected => " Creating session...",
+                .session_active => " Active",
+                .prompting => " Thinking...",
+                .failed => " Failed",
             };
-            if (fmt_result) |result| {
-                break :blk result;
+            const queued = m.queuedPromptCount();
+            if (queued > 0) {
+                const fmt_result: ?[]const u8 = switch (m.status) {
+                    .discovering => std.fmt.bufPrint(&status_buf, " Discovering... ({d} queued)", .{queued}) catch null,
+                    .connecting => std.fmt.bufPrint(&status_buf, " Connecting... ({d} queued)", .{queued}) catch null,
+                    .connected => std.fmt.bufPrint(&status_buf, " Creating session... ({d} queued)", .{queued}) catch null,
+                    .prompting => std.fmt.bufPrint(&status_buf, " Thinking... ({d} queued)", .{queued}) catch null,
+                    else => null,
+                };
+                if (fmt_result) |result| {
+                    break :blk result;
+                }
             }
-        }
-        break :blk base_status;
+            break :blk base_status;
+        },
+        .codex => |m| switch (m.status) {
+            .disconnected => " Disconnected",
+            .connecting => " Connecting...",
+            .initialized => " Connected",
+            .thread_active => " Active",
+            .turn_active => " Thinking...",
+            .@"error" => " Error",
+        },
+        .opencode => |m| if (m.isThinking()) " Thinking..." else " Active",
     } else " Not connected";
 
     const title_style = vaxis.Style{

@@ -23,6 +23,9 @@ pub const CodexManager = struct {
     transport: ?*transport_mod.StdioTransport,
     status: Status,
 
+    // User-requested approval policy (set before startThread, sent on thread/start)
+    requested_approval_policy: ?[]const u8,
+
     // Thread state (populated after startThread)
     thread_id: ?[]const u8,
     thread_info: ?protocol.Thread,
@@ -207,6 +210,7 @@ pub const CodexManager = struct {
             .process = null,
             .transport = null,
             .status = .disconnected,
+            .requested_approval_policy = null,
             .thread_id = null,
             .thread_info = null,
             .model = null,
@@ -313,6 +317,7 @@ pub const CodexManager = struct {
         const msg = encoder.encodeThreadStart(req_id.number, .{
             .model = model,
             .cwd = cwd,
+            .approval_policy = if (self.requested_approval_policy) |p| protocol.ApprovalPolicy.fromString(p) else null,
         }) catch return error.ThreadStartFailed;
         defer self.allocator.free(msg);
         try transport.send(msg);
@@ -1540,6 +1545,8 @@ pub const CodexManager = struct {
     const RawItemCompact = struct {
         type: ?[]const u8 = null,
         id: ?[]const u8 = null,
+        callId: ?[]const u8 = null,
+        name: ?[]const u8 = null,
         text: ?[]const u8 = null,
         command: ?[]const u8 = null,
         cwd: ?[]const u8 = null,
@@ -1557,7 +1564,7 @@ pub const CodexManager = struct {
 
     fn convertCompactItemOwned(allocator: Allocator, raw: RawItemCompact) Allocator.Error!protocol.Item {
         const item_type = raw.type orelse return .{ .unknown = {} };
-        const item_id = raw.id orelse "";
+        const item_id = raw.id orelse raw.callId orelse "";
         const owned_id = try allocator.dupe(u8, item_id);
         errdefer allocator.free(owned_id);
 
@@ -1568,6 +1575,7 @@ pub const CodexManager = struct {
             command_execution,
             file_change,
             mcp_tool_call,
+            function_call,
         }).initComptime(.{
             .{ "userMessage", .user_message },
             .{ "agentMessage", .agent_message },
@@ -1575,6 +1583,10 @@ pub const CodexManager = struct {
             .{ "commandExecution", .command_execution },
             .{ "fileChange", .file_change },
             .{ "mcpToolCall", .mcp_tool_call },
+            .{ "functionCall", .function_call },
+            .{ "function_call", .function_call },
+            .{ "functionCallOutput", .function_call },
+            .{ "function_call_output", .function_call },
         });
 
         const variant = map.get(item_type) orelse return .{ .unknown = {} };
@@ -1647,6 +1659,26 @@ pub const CodexManager = struct {
                     .status = owned_status,
                 } };
             },
+            .function_call => blk: {
+                const owned_call_id = if (raw.callId) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_call_id) |v| allocator.free(v);
+                const owned_name = if (raw.name) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_name) |v| allocator.free(v);
+                const owned_arguments = if (raw.arguments) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_arguments) |v| allocator.free(v);
+                const owned_output = if (raw.output) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_output) |v| allocator.free(v);
+                const owned_status = if (raw.status) |v| try allocator.dupe(u8, v) else null;
+                errdefer if (owned_status) |v| allocator.free(v);
+                break :blk .{ .function_call = .{
+                    .id = owned_id,
+                    .call_id = owned_call_id,
+                    .name = owned_name,
+                    .arguments = owned_arguments,
+                    .output = owned_output,
+                    .status = owned_status,
+                } };
+            },
         };
     }
 };
@@ -1681,6 +1713,14 @@ fn freeOwnedItem(allocator: Allocator, item: protocol.Item) void {
             if (m.arguments) |v| allocator.free(v);
             if (m.output) |v| allocator.free(v);
             if (m.status) |v| allocator.free(v);
+        },
+        .function_call => |f| {
+            allocator.free(f.id);
+            if (f.call_id) |v| allocator.free(v);
+            if (f.name) |v| allocator.free(v);
+            if (f.arguments) |v| allocator.free(v);
+            if (f.output) |v| allocator.free(v);
+            if (f.status) |v| allocator.free(v);
         },
         .unknown => {},
     }
@@ -1875,6 +1915,27 @@ test "processMessage with item/started returns item_started" {
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .item_started);
     try std.testing.expect(event.?.item_started.item == .command_execution);
+}
+
+test "processMessage with function call item parses call_id fallback" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/started","params":{"threadId":"t1","turnId":"turn-1","item":{"type":"functionCall","callId":"call_123","name":"spawn_agent","arguments":"{\"agent_type\":\"explorer\"}"}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .item_started);
+    try std.testing.expect(event.?.item_started.item == .function_call);
+    const fc = event.?.item_started.item.function_call;
+    try std.testing.expectEqualStrings("call_123", fc.id);
+    try std.testing.expectEqualStrings("spawn_agent", fc.name.?);
 }
 
 test "processMessage with unknown method returns unknown" {
