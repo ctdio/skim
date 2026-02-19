@@ -1158,7 +1158,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     };
     _ = win.print(&title_seg, .{ .row_offset = 0 });
 
-    const title_width = 2 + (std.unicode.utf8CountCodepoints(title) catch title.len) + suffix.len;
+    const title_width = 2 + RenderUtils.displayWidth(title) + RenderUtils.displayWidth(suffix);
 
     // Codex token usage and rate limit display (between title and status)
     var token_buf: [64]u8 = undefined;
@@ -1185,25 +1185,26 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     var info_col = title_width;
     const dim_style = vaxis.Style{ .fg = Color.dim_gray };
 
+    // Reserve right edge for status to avoid overlapping token/context text.
+    const status_width = RenderUtils.displayWidth(status_text);
+    const status_col = if (win.width > title_width + status_width)
+        win.width - status_width
+    else
+        title_width;
+    const info_end = if (status_col > 0) status_col - 1 else 0;
+
     if (token_text) |tt| {
         const sep = " \xe2\x94\x82 "; // " | "
-        var token_seg = [_]vaxis.Cell.Segment{
-            .{ .text = sep, .style = dim_style },
-            .{ .text = tt, .style = dim_style },
-        };
-        _ = win.print(&token_seg, .{ .row_offset = 0, .col_offset = @intCast(info_col) });
-        info_col += 3 + (std.unicode.utf8CountCodepoints(tt) catch tt.len);
+        printTitleInfoSegmentClipped(win, 0, &info_col, info_end, sep, dim_style);
+        printTitleInfoSegmentClipped(win, 0, &info_col, info_end, tt, dim_style);
     }
 
     if (rate_text) |rt| {
         const sep = " \xe2\x94\x82 "; // " | "
         const warn_style = vaxis.Style{ .fg = Color.yellow };
-        var rate_seg = [_]vaxis.Cell.Segment{
-            .{ .text = sep, .style = dim_style },
-            .{ .text = "\xe2\x9a\xa0 ", .style = warn_style }, // warning sign
-            .{ .text = rt, .style = warn_style },
-        };
-        _ = win.print(&rate_seg, .{ .row_offset = 0, .col_offset = @intCast(info_col) });
+        printTitleInfoSegmentClipped(win, 0, &info_col, info_end, sep, dim_style);
+        printTitleInfoSegmentClipped(win, 0, &info_col, info_end, "\xe2\x9a\xa0 ", warn_style); // warning sign
+        printTitleInfoSegmentClipped(win, 0, &info_col, info_end, rt, warn_style);
     }
 
     // Print status on the right
@@ -1219,16 +1220,24 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
             Color.white,
     };
 
-    const status_width = std.unicode.utf8CountCodepoints(status_text) catch status_text.len;
-    const status_col = if (win.width > title_width + status_width)
-        win.width - status_width
-    else
-        title_width;
-
     var status_seg = [_]vaxis.Cell.Segment{
         .{ .text = status_text, .style = status_style },
     };
     _ = win.print(&status_seg, .{ .row_offset = 0, .col_offset = @intCast(status_col) });
+}
+
+fn printTitleInfoSegmentClipped(win: vaxis.Window, row: usize, col: *usize, end_col: usize, text: []const u8, style: vaxis.Style) void {
+    if (col.* >= end_col) return;
+
+    const available = end_col - col.*;
+    const clipped = RenderUtils.sliceByDisplayWidth(text, available);
+    if (clipped.len == 0) return;
+
+    var seg = [_]vaxis.Cell.Segment{
+        .{ .text = clipped, .style = style },
+    };
+    _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col.*) });
+    col.* += RenderUtils.displayWidth(clipped);
 }
 
 /// Render the tab bar when multiple tabs exist (vim-style)
