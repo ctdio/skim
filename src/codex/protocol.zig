@@ -234,6 +234,15 @@ pub const McpToolCallItem = struct {
     status: ?[]const u8 = null,
 };
 
+pub const FunctionCallItem = struct {
+    id: []const u8,
+    call_id: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    arguments: ?[]const u8 = null,
+    output: ?[]const u8 = null,
+    status: ?[]const u8 = null,
+};
+
 pub const Item = union(enum) {
     user_message: UserMessageItem,
     agent_message: AgentMessageItem,
@@ -241,6 +250,7 @@ pub const Item = union(enum) {
     command_execution: CommandExecutionItem,
     file_change: FileChangeItem,
     mcp_tool_call: McpToolCallItem,
+    function_call: FunctionCallItem,
     unknown: void,
 };
 

@@ -821,6 +821,7 @@ pub const Decoder = struct {
             command_execution,
             file_change,
             mcp_tool_call,
+            function_call,
         }).initComptime(.{
             .{ "userMessage", .user_message },
             .{ "agentMessage", .agent_message },
@@ -828,11 +829,16 @@ pub const Decoder = struct {
             .{ "commandExecution", .command_execution },
             .{ "fileChange", .file_change },
             .{ "mcpToolCall", .mcp_tool_call },
+            .{ "functionCall", .function_call },
+            .{ "function_call", .function_call },
+            .{ "functionCallOutput", .function_call },
+            .{ "function_call_output", .function_call },
         });
 
         const variant = map.get(item_type) orelse return .{ .unknown = {} };
 
-        const item_id = if (raw.id) |id| try self.allocator.dupe(u8, id) else try self.allocator.dupe(u8, "");
+        const item_identifier = raw.id orelse raw.callId orelse "";
+        const item_id = try self.allocator.dupe(u8, item_identifier);
 
         return switch (variant) {
             .user_message => .{ .user_message = .{
@@ -871,6 +877,14 @@ pub const Decoder = struct {
                 .id = item_id,
                 .server_name = if (raw.serverName) |sn| try self.allocator.dupe(u8, sn) else null,
                 .tool_name = if (raw.toolName) |tn| try self.allocator.dupe(u8, tn) else null,
+                .arguments = if (raw.arguments) |a| try self.allocator.dupe(u8, a) else null,
+                .output = if (raw.output) |o| try self.allocator.dupe(u8, o) else null,
+                .status = if (raw.status) |s| try self.allocator.dupe(u8, s) else null,
+            } },
+            .function_call => .{ .function_call = .{
+                .id = item_id,
+                .call_id = if (raw.callId) |c| try self.allocator.dupe(u8, c) else null,
+                .name = if (raw.name) |n| try self.allocator.dupe(u8, n) else null,
                 .arguments = if (raw.arguments) |a| try self.allocator.dupe(u8, a) else null,
                 .output = if (raw.output) |o| try self.allocator.dupe(u8, o) else null,
                 .status = if (raw.status) |s| try self.allocator.dupe(u8, s) else null,
@@ -976,6 +990,8 @@ const RawTextContent = struct {
 const RawItem = struct {
     type: ?[]const u8 = null,
     id: ?[]const u8 = null,
+    callId: ?[]const u8 = null,
+    name: ?[]const u8 = null,
     text: ?[]const u8 = null,
     content: ?std.json.Value = null,
     summary: ?std.json.Value = null,
@@ -1579,6 +1595,40 @@ test "parse item started - mcp tool call" {
     try std.testing.expectEqualStrings("read_file", mc.tool_name.?);
     try std.testing.expectEqualStrings("file contents here", mc.output.?);
     try std.testing.expectEqualStrings("completed", mc.status.?);
+}
+
+test "parse item started - function call spawn_agent" {
+    const allocator = std.testing.allocator;
+    var decoder = Decoder.init(allocator);
+
+    const json =
+        \\{"threadId":"019c6c65","turnId":"1","item":{"type":"functionCall","callId":"call_123","name":"spawn_agent","arguments":"{\"agent_type\":\"explorer\"}","status":"completed","output":"{\"agent_id\":\"019c-subagent\"}"}}
+    ;
+
+    const result = try decoder.parseItemStarted(json);
+    defer {
+        allocator.free(result.thread_id);
+        allocator.free(result.turn_id);
+        switch (result.item) {
+            .function_call => |fc| {
+                allocator.free(fc.id);
+                if (fc.call_id) |id| allocator.free(id);
+                if (fc.name) |name| allocator.free(name);
+                if (fc.arguments) |args| allocator.free(args);
+                if (fc.output) |output| allocator.free(output);
+                if (fc.status) |status| allocator.free(status);
+            },
+            else => {},
+        }
+    }
+
+    try std.testing.expect(result.item == .function_call);
+    const fc = result.item.function_call;
+    try std.testing.expectEqualStrings("call_123", fc.id);
+    try std.testing.expectEqualStrings("call_123", fc.call_id.?);
+    try std.testing.expectEqualStrings("spawn_agent", fc.name.?);
+    try std.testing.expectEqualStrings("{\"agent_type\":\"explorer\"}", fc.arguments.?);
+    try std.testing.expectEqualStrings("{\"agent_id\":\"019c-subagent\"}", fc.output.?);
 }
 
 test "parse item started - unknown type" {

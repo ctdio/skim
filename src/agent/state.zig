@@ -1419,6 +1419,36 @@ pub const AgentState = struct {
         orphaned.deinit(self.allocator);
     }
 
+    /// Merge a discovered subagent session_id into an existing tool message
+    /// without overwriting previously captured description/agent_type fields.
+    pub fn mergeSubagentSessionIdOnTool(self: *AgentState, tool_call_id: []const u8, session_id: []const u8, title: ?[]const u8) void {
+        var i = self.messages.items.len;
+        while (i > 0) {
+            i -= 1;
+            const msg = &self.messages.items[i];
+            if (msg.role != .tool) continue;
+            const id = msg.tool_call_id orelse continue;
+            if (!std.mem.eql(u8, id, tool_call_id)) continue;
+
+            if (msg.subagent_info) |*info| {
+                if (info.session_id == null) {
+                    info.session_id = self.allocator.dupe(u8, session_id) catch null;
+                }
+                if (title != null and info.title == null) {
+                    info.title = self.allocator.dupe(u8, title.?) catch null;
+                }
+            } else {
+                msg.subagent_info = .{
+                    .session_id = self.allocator.dupe(u8, session_id) catch null,
+                    .title = if (title) |t| self.allocator.dupe(u8, t) catch null else null,
+                };
+            }
+
+            self.line_map_dirty = true;
+            return;
+        }
+    }
+
     /// Merge partial subagent info (tool_count, summary) into an existing tool message,
     /// preserving fields like description and agent_type from the initial event.
     pub const TokenUpdate = struct {

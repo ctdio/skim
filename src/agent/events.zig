@@ -131,7 +131,17 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
                         .start_time_ms = info.start_time_ms,
                     });
                 } else if (convertSubagentInfo(agent_state.allocator, info)) |owned| {
-                    agent_state.setSubagentInfoOnTool(tu.tool_call_id, owned);
+                    if (owned.session_id != null and owned.description == null and owned.agent_type == null) {
+                        agent_state.mergeSubagentSessionIdOnTool(
+                            tu.tool_call_id,
+                            owned.session_id.?,
+                            owned.title,
+                        );
+                        var to_free = owned;
+                        to_free.deinit(agent_state.allocator);
+                    } else {
+                        agent_state.setSubagentInfoOnTool(tu.tool_call_id, owned);
+                    }
                 }
             }
         },
@@ -306,6 +316,13 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
                     .title = fc.path orelse "File change",
                     .command = null,
                 } },
+                .function_call => |fc| break :blk .{ .tool_call = .{
+                    .tool_call_id = fc.id,
+                    .tool_name = fc.name,
+                    .title = fc.name orelse "Function call",
+                    .command = fc.arguments,
+                    .subagent_info = parseCodexSubagentInfo(fc.name, fc.arguments, fc.output),
+                } },
                 .agent_message => break :blk null,
                 .user_message, .reasoning, .mcp_tool_call, .unknown => break :blk null,
             }
@@ -324,6 +341,13 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
                     .status = .completed,
                     .stdout = fc.diff,
                     .stderr = null,
+                } },
+                .function_call => |fc| break :blk .{ .tool_update = .{
+                    .tool_call_id = fc.id,
+                    .status = mapFunctionCallStatus(fc.status),
+                    .stdout = fc.output,
+                    .stderr = null,
+                    .subagent_info = parseCodexSubagentInfo(fc.name, fc.arguments, fc.output),
                 } },
                 .user_message, .reasoning, .mcp_tool_call, .unknown => break :blk null,
             }
@@ -425,6 +449,75 @@ fn convertToolStatus(s: opencode_manager.ToolStatus) Message.ToolStatus {
     };
 }
 
+fn mapFunctionCallStatus(raw_status: ?[]const u8) Message.ToolStatus {
+    const status = raw_status orelse return .completed;
+    if (std.mem.eql(u8, status, "pending")) return .pending;
+    if (std.mem.eql(u8, status, "running")) return .running;
+    if (std.mem.eql(u8, status, "failed")) return .failed;
+    if (std.mem.eql(u8, status, "error")) return .failed;
+    return .completed;
+}
+
+fn parseCodexSubagentInfo(name: ?[]const u8, arguments: ?[]const u8, output: ?[]const u8) ?OpencodeEvent.SubagentEventInfo {
+    const maybe_agent_type = parseAgentTypeFromArgs(arguments);
+    const maybe_description = parseDescriptionFromArgs(arguments);
+    const maybe_session_id = parseSessionIdFromOutput(output);
+
+    const is_spawn = if (name) |n| std.mem.eql(u8, n, "spawn_agent") else false;
+    if (!is_spawn and maybe_session_id == null) return null;
+
+    return .{
+        .description = maybe_description,
+        .agent_type = maybe_agent_type,
+        .session_id = maybe_session_id,
+        .title = if (name) |n| n else null,
+        .tool_count = 0,
+        .summary = &.{},
+    };
+}
+
+fn parseAgentTypeFromArgs(arguments: ?[]const u8) ?[]const u8 {
+    const args = arguments orelse return null;
+    const ParsedArgs = struct {
+        agent_type: ?[]const u8 = null,
+        agentType: ?[]const u8 = null,
+    };
+    const parsed = std.json.parseFromSlice(ParsedArgs, std.heap.page_allocator, args, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_if_needed,
+    }) catch return null;
+    defer parsed.deinit();
+    return parsed.value.agent_type orelse parsed.value.agentType;
+}
+
+fn parseDescriptionFromArgs(arguments: ?[]const u8) ?[]const u8 {
+    const args = arguments orelse return null;
+    const ParsedArgs = struct {
+        message: ?[]const u8 = null,
+    };
+    const parsed = std.json.parseFromSlice(ParsedArgs, std.heap.page_allocator, args, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_if_needed,
+    }) catch return null;
+    defer parsed.deinit();
+    return parsed.value.message;
+}
+
+fn parseSessionIdFromOutput(output: ?[]const u8) ?[]const u8 {
+    const raw_output = output orelse return null;
+    const ParsedOutput = struct {
+        agent_id: ?[]const u8 = null,
+        session_id: ?[]const u8 = null,
+        id: ?[]const u8 = null,
+    };
+    const parsed = std.json.parseFromSlice(ParsedOutput, std.heap.page_allocator, raw_output, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_if_needed,
+    }) catch return null;
+    defer parsed.deinit();
+    return parsed.value.agent_id orelse parsed.value.session_id orelse parsed.value.id;
+}
+
 // =============================================================================
 // Tests — codexEventToAgentEvent
 // =============================================================================
@@ -505,6 +598,47 @@ test "codexEventToAgentEvent: item_completed command_execution with non-zero exi
     try std.testing.expect(result != null);
     try std.testing.expect(result.? == .tool_update);
     try std.testing.expectEqual(Message.ToolStatus.failed, result.?.tool_update.status);
+}
+
+test "codexEventToAgentEvent: item_started spawn_agent maps to tool_call with subagent info" {
+    const event = CodexEvent{ .item_started = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item = .{ .function_call = .{
+            .id = "call-1",
+            .call_id = "call-1",
+            .name = "spawn_agent",
+            .arguments = "{\"agent_type\":\"explorer\",\"message\":\"Explore architecture\"}",
+        } },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .tool_call);
+    try std.testing.expectEqualStrings("call-1", result.?.tool_call.tool_call_id);
+    try std.testing.expect(result.?.tool_call.subagent_info != null);
+    const info = result.?.tool_call.subagent_info.?;
+    try std.testing.expectEqualStrings("explorer", info.agent_type.?);
+    try std.testing.expectEqualStrings("Explore architecture", info.description.?);
+}
+
+test "codexEventToAgentEvent: item_completed spawn_agent output maps to session_id" {
+    const event = CodexEvent{ .item_completed = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item = .{ .function_call = .{
+            .id = "call-1",
+            .call_id = "call-1",
+            .name = "spawn_agent",
+            .output = "{\"agent_id\":\"019c-subagent\"}",
+            .status = "completed",
+        } },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .tool_update);
+    try std.testing.expect(result.?.tool_update.subagent_info != null);
+    const info = result.?.tool_update.subagent_info.?;
+    try std.testing.expectEqualStrings("019c-subagent", info.session_id.?);
 }
 
 test "codexEventToAgentEvent: turn_completed maps to message_complete" {

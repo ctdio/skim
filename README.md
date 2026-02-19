@@ -56,7 +56,7 @@ zig build
 ./zig-out/bin/skim --staged
 ```
 
-Navigate with `j`/`k`, switch files with `h`/`l`. Press `Enter` to focus a file. Press `s` to toggle unified/side-by-side views.
+Navigate with `j`/`k`, switch files with `h`/`l`. Press `Enter` to focus a file. Press `s` to toggle unified/side-by-side views. Press `Ctrl-e` to open the agent panel.
 
 ## Usage
 
