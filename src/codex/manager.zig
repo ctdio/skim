@@ -852,9 +852,27 @@ pub const CodexManager = struct {
         };
 
         pub const PlanUpdatedEvent = struct {
+            pub const PlanEntryPriority = enum {
+                high,
+                medium,
+                low,
+            };
+
+            pub const PlanEntryStatus = enum {
+                pending,
+                in_progress,
+                completed,
+            };
+
+            pub const PlanEntry = struct {
+                content: []const u8,
+                priority: PlanEntryPriority = .medium,
+                status: PlanEntryStatus = .pending,
+            };
+
             thread_id: []const u8,
             turn_id: []const u8,
-            plan_steps: []const u8,
+            entries: []PlanEntry,
         };
     };
 
@@ -875,6 +893,12 @@ pub const CodexManager = struct {
             .turn_completed => |e| {
                 self.allocator.free(e.thread_id);
                 self.allocator.free(e.turn.id);
+            },
+            .plan_updated => |p| {
+                self.allocator.free(p.thread_id);
+                self.allocator.free(p.turn_id);
+                for (p.entries) |entry| self.allocator.free(entry.content);
+                self.allocator.free(p.entries);
             },
             else => {},
         }
@@ -1377,6 +1401,7 @@ pub const CodexManager = struct {
             item_started,
             item_completed,
             turn_completed,
+            plan_updated,
             token_usage_updated,
             rate_limits_updated,
         };
@@ -1388,6 +1413,10 @@ pub const CodexManager = struct {
             .{ "item/started", .item_started },
             .{ "item/completed", .item_completed },
             .{ "turn/completed", .turn_completed },
+            .{ "turn/planUpdated", .plan_updated },
+            .{ "turn/plan_updated", .plan_updated },
+            .{ "thread/planUpdated", .plan_updated },
+            .{ "thread/plan_updated", .plan_updated },
             .{ "thread/tokenUsage/updated", .token_usage_updated },
             .{ "account/rateLimits/updated", .rate_limits_updated },
         });
@@ -1402,6 +1431,7 @@ pub const CodexManager = struct {
             .item_started => self.parseItemEvent(json, .item_started),
             .item_completed => self.parseItemEvent(json, .item_completed),
             .turn_completed => self.parseTurnCompleted(json),
+            .plan_updated => self.parsePlanUpdated(json),
             .token_usage_updated => self.parseTokenUsageNotification(json),
             .rate_limits_updated => self.parseRateLimitsNotification(json),
         };
@@ -1539,6 +1569,92 @@ pub const CodexManager = struct {
                 .status = if (raw_turn.status) |s| protocol.TurnStatus.fromString(s) else null,
             },
         } };
+    }
+
+    fn parsePlanUpdated(self: *CodexManager, json: []const u8) ?CodexEvent {
+        const RawPlanEntry = struct {
+            content: ?[]const u8 = null,
+            step: ?[]const u8 = null,
+            title: ?[]const u8 = null,
+            status: ?[]const u8 = null,
+            state: ?[]const u8 = null,
+            priority: ?[]const u8 = null,
+        };
+
+        const RawPlan = struct {
+            entries: ?[]RawPlanEntry = null,
+            steps: ?[]RawPlanEntry = null,
+        };
+
+        const RawPlanUpdated = struct {
+            threadId: ?[]const u8 = null,
+            turnId: ?[]const u8 = null,
+            entries: ?[]RawPlanEntry = null,
+            steps: ?[]RawPlanEntry = null,
+            plan: ?RawPlan = null,
+        };
+
+        const parsed = std.json.parseFromSlice(RawPlanUpdated, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch return null;
+        defer parsed.deinit();
+
+        const raw = parsed.value;
+        const raw_entries = if (raw.entries) |entries|
+            entries
+        else if (raw.steps) |steps|
+            steps
+        else if (raw.plan) |plan|
+            if (plan.entries) |entries| entries else if (plan.steps) |steps| steps else return null
+        else
+            return null;
+
+        const owned_thread_id = self.allocator.dupe(u8, raw.threadId orelse "") catch return null;
+        errdefer self.allocator.free(owned_thread_id);
+        const owned_turn_id = self.allocator.dupe(u8, raw.turnId orelse "") catch return null;
+        errdefer self.allocator.free(owned_turn_id);
+
+        const entries = self.allocator.alloc(CodexEvent.PlanUpdatedEvent.PlanEntry, raw_entries.len) catch return null;
+        var copied: usize = 0;
+        errdefer {
+            for (entries[0..copied]) |entry| self.allocator.free(entry.content);
+            self.allocator.free(entries);
+        }
+
+        for (raw_entries) |entry| {
+            const content_text = entry.content orelse entry.step orelse entry.title orelse continue;
+            const content = self.allocator.dupe(u8, content_text) catch continue;
+            entries[copied] = .{
+                .content = content,
+                .status = parsePlanStatus(entry.status orelse entry.state),
+                .priority = parsePlanPriority(entry.priority),
+            };
+            copied += 1;
+        }
+
+        return .{ .plan_updated = .{
+            .thread_id = owned_thread_id,
+            .turn_id = owned_turn_id,
+            .entries = entries[0..copied],
+        } };
+    }
+
+    fn parsePlanStatus(raw_status: ?[]const u8) CodexEvent.PlanUpdatedEvent.PlanEntryStatus {
+        const status = raw_status orelse return .pending;
+        if (std.mem.eql(u8, status, "in-progress")) return .in_progress;
+        if (std.mem.eql(u8, status, "running")) return .in_progress;
+        if (std.mem.eql(u8, status, "done")) return .completed;
+        if (std.mem.eql(u8, status, "in_progress")) return .in_progress;
+        if (std.mem.eql(u8, status, "completed")) return .completed;
+        return .pending;
+    }
+
+    fn parsePlanPriority(raw_priority: ?[]const u8) CodexEvent.PlanUpdatedEvent.PlanEntryPriority {
+        const priority = raw_priority orelse return .medium;
+        if (std.mem.eql(u8, priority, "high")) return .high;
+        if (std.mem.eql(u8, priority, "low")) return .low;
+        return .medium;
     }
 
     /// Compact item structure for low-overhead parsing.
@@ -2439,6 +2555,32 @@ test "processMessage with token usage notification stores usage and returns even
     // Verify last usage
     try std.testing.expect(tu.last != null);
     try std.testing.expectEqual(@as(u64, 500), tu.last.?.total_tokens);
+}
+
+test "processMessage with turn/planUpdated returns plan_updated entries" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"turn/planUpdated","params":{"threadId":"t1","turnId":"turn-1","entries":[{"step":"Investigate rendering path","status":"completed","priority":"high"},{"content":"Wire codex plan updates","status":"in_progress","priority":"medium"}]}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .plan_updated);
+
+    const plan = event.?.plan_updated;
+    try std.testing.expectEqualStrings("t1", plan.thread_id);
+    try std.testing.expectEqualStrings("turn-1", plan.turn_id);
+    try std.testing.expectEqual(@as(usize, 2), plan.entries.len);
+    try std.testing.expectEqualStrings("Investigate rendering path", plan.entries[0].content);
+    try std.testing.expectEqual(CodexManager.CodexEvent.PlanUpdatedEvent.PlanEntryStatus.completed, plan.entries[0].status);
+    try std.testing.expectEqual(CodexManager.CodexEvent.PlanUpdatedEvent.PlanEntryPriority.high, plan.entries[0].priority);
+    try std.testing.expectEqual(CodexManager.CodexEvent.PlanUpdatedEvent.PlanEntryStatus.in_progress, plan.entries[1].status);
 }
 
 test "processMessage with rate limits notification stores limits and returns event" {

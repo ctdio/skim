@@ -13,6 +13,7 @@ const opencode_manager = @import("../opencode/manager.zig");
 const OpencodeEvent = opencode_manager.Event;
 const codex_manager = @import("../codex/manager.zig");
 const CodexEvent = codex_manager.CodexManager.CodexEvent;
+const CodexPlanEntry = codex_manager.CodexManager.CodexEvent.PlanUpdatedEvent.PlanEntry;
 
 /// A unified event representing an update from either ACP or OpenCode.
 /// Provides a single processAgentEvent function for routing events to AgentState.
@@ -31,8 +32,9 @@ pub const AgentEvent = union(enum) {
     tool_update: ToolUpdateEvent,
     tool_diff: ToolDiffEvent,
 
-    // Plan (ACP-only, but still part of unified type)
+    // Plan updates (ACP + Codex)
     plan_update: []const protocol.PlanEntry,
+    codex_plan_update: []const CodexPlanEntry,
     commands_update: []const protocol.AvailableCommand,
 
     // Session lifecycle
@@ -159,6 +161,30 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
         .plan_update => |entries| {
             agent_state.updatePlan(entries) catch |err| {
                 std.log.err("plan_update: updatePlan failed: {}", .{err});
+            };
+        },
+        .codex_plan_update => |entries| {
+            const plan_entries = agent_state.allocator.alloc(protocol.PlanEntry, entries.len) catch return;
+            defer agent_state.allocator.free(plan_entries);
+
+            for (entries, 0..) |entry, idx| {
+                plan_entries[idx] = .{
+                    .content = entry.content,
+                    .status = switch (entry.status) {
+                        .pending => .pending,
+                        .in_progress => .in_progress,
+                        .completed => .completed,
+                    },
+                    .priority = switch (entry.priority) {
+                        .high => .high,
+                        .medium => .medium,
+                        .low => .low,
+                    },
+                };
+            }
+
+            agent_state.updatePlan(plan_entries) catch |err| {
+                std.log.err("codex_plan_update: updatePlan failed: {}", .{err});
             };
         },
         .commands_update => |commands| {
@@ -323,8 +349,14 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
                     .command = fc.arguments,
                     .subagent_info = parseCodexSubagentInfo(fc.name, fc.arguments, fc.output),
                 } },
+                .mcp_tool_call => |m| break :blk .{ .tool_call = .{
+                    .tool_call_id = m.id,
+                    .tool_name = m.tool_name,
+                    .title = m.tool_name orelse m.server_name orelse "MCP tool call",
+                    .command = m.arguments,
+                } },
                 .agent_message => break :blk null,
-                .user_message, .reasoning, .mcp_tool_call, .unknown => break :blk null,
+                .user_message, .reasoning, .unknown => break :blk null,
             }
         },
         .item_completed => |e| blk: {
@@ -349,11 +381,17 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
                     .stderr = null,
                     .subagent_info = parseCodexSubagentInfo(fc.name, fc.arguments, fc.output),
                 } },
-                .user_message, .reasoning, .mcp_tool_call, .unknown => break :blk null,
+                .mcp_tool_call => |m| break :blk .{ .tool_update = .{
+                    .tool_call_id = m.id,
+                    .status = mapFunctionCallStatus(m.status),
+                    .stdout = m.output,
+                    .stderr = null,
+                } },
+                .user_message, .reasoning, .unknown => break :blk null,
             }
         },
         .turn_completed => .{ .message_complete = {} },
-        .plan_updated => null,
+        .plan_updated => |p| .{ .codex_plan_update = p.entries },
         .token_usage_updated => |tu| blk: {
             const total = tu.total orelse break :blk null;
             break :blk @as(?AgentEvent, .{ .token_usage_update = .{
@@ -453,6 +491,7 @@ fn mapFunctionCallStatus(raw_status: ?[]const u8) Message.ToolStatus {
     const status = raw_status orelse return .completed;
     if (std.mem.eql(u8, status, "pending")) return .pending;
     if (std.mem.eql(u8, status, "running")) return .running;
+    if (std.mem.eql(u8, status, "in_progress")) return .running;
     if (std.mem.eql(u8, status, "failed")) return .failed;
     if (std.mem.eql(u8, status, "error")) return .failed;
     return .completed;
@@ -600,6 +639,46 @@ test "codexEventToAgentEvent: item_completed command_execution with non-zero exi
     try std.testing.expectEqual(Message.ToolStatus.failed, result.?.tool_update.status);
 }
 
+test "codexEventToAgentEvent: item_started mcp_tool_call maps to tool_call" {
+    const event = CodexEvent{ .item_started = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item = .{ .mcp_tool_call = .{
+            .id = "mcp-1",
+            .server_name = "functions",
+            .tool_name = "update_plan",
+            .arguments = "{\"plan\":[{\"step\":\"a\",\"status\":\"pending\"}]}",
+            .status = "pending",
+        } },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .tool_call);
+    try std.testing.expectEqualStrings("mcp-1", result.?.tool_call.tool_call_id);
+    try std.testing.expectEqualStrings("update_plan", result.?.tool_call.title);
+    try std.testing.expectEqualStrings("{\"plan\":[{\"step\":\"a\",\"status\":\"pending\"}]}", result.?.tool_call.command.?);
+}
+
+test "codexEventToAgentEvent: item_completed mcp_tool_call maps to tool_update" {
+    const event = CodexEvent{ .item_completed = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item = .{ .mcp_tool_call = .{
+            .id = "mcp-1",
+            .server_name = "functions",
+            .tool_name = "update_plan",
+            .output = "Plan updated",
+            .status = "completed",
+        } },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .tool_update);
+    try std.testing.expectEqualStrings("mcp-1", result.?.tool_update.tool_call_id);
+    try std.testing.expectEqual(Message.ToolStatus.completed, result.?.tool_update.status);
+    try std.testing.expectEqualStrings("Plan updated", result.?.tool_update.stdout.?);
+}
+
 test "codexEventToAgentEvent: item_started spawn_agent maps to tool_call with subagent info" {
     const event = CodexEvent{ .item_started = .{
         .thread_id = "t1",
@@ -649,6 +728,25 @@ test "codexEventToAgentEvent: turn_completed maps to message_complete" {
     const result = codexEventToAgentEvent(event);
     try std.testing.expect(result != null);
     try std.testing.expect(result.? == .message_complete);
+}
+
+test "codexEventToAgentEvent: plan_updated maps to codex_plan_update" {
+    const entries = [_]CodexPlanEntry{
+        .{ .content = "First step", .status = .in_progress, .priority = .medium },
+        .{ .content = "Second step", .status = .pending, .priority = .low },
+    };
+    const event = CodexEvent{ .plan_updated = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .entries = entries[0..],
+    } };
+
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .codex_plan_update);
+    try std.testing.expectEqual(@as(usize, 2), result.?.codex_plan_update.len);
+    try std.testing.expectEqualStrings("First step", result.?.codex_plan_update[0].content);
+    try std.testing.expectEqual(CodexPlanEntry.PlanEntryStatus.in_progress, result.?.codex_plan_update[0].status);
 }
 
 test "codexEventToAgentEvent: unknown maps to null" {
