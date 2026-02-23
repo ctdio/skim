@@ -105,6 +105,7 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
                 tc.title,
                 tc.command,
             ) catch {};
+            maybeApplyUpdatePlanToolCall(agent_state, tc.tool_name, tc.title, tc.command);
             if (tc.subagent_info) |info| {
                 if (convertSubagentInfo(agent_state.allocator, info)) |owned| {
                     agent_state.setSubagentInfoOnTool(tc.tool_call_id, owned);
@@ -557,10 +558,78 @@ fn parseSessionIdFromOutput(output: ?[]const u8) ?[]const u8 {
     return parsed.value.agent_id orelse parsed.value.session_id orelse parsed.value.id;
 }
 
+fn maybeApplyUpdatePlanToolCall(agent_state: *AgentState, tool_name: ?[]const u8, title: []const u8, command: ?[]const u8) void {
+    const is_update_plan = if (tool_name) |name|
+        std.mem.eql(u8, name, "update_plan")
+    else
+        std.mem.eql(u8, title, "update_plan");
+    if (!is_update_plan) return;
+
+    const args = command orelse return;
+    const RawEntry = struct {
+        step: ?[]const u8 = null,
+        content: ?[]const u8 = null,
+        status: ?[]const u8 = null,
+        priority: ?[]const u8 = null,
+    };
+    const RawArgs = struct {
+        plan: ?[]const RawEntry = null,
+    };
+
+    const parsed = std.json.parseFromSlice(RawArgs, std.heap.page_allocator, args, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_if_needed,
+    }) catch |err| {
+        std.log.debug("maybeApplyUpdatePlanToolCall: failed to parse args: {}", .{err});
+        return;
+    };
+    defer parsed.deinit();
+
+    const raw_entries = parsed.value.plan orelse return;
+    if (raw_entries.len == 0) return;
+
+    const entries = agent_state.allocator.alloc(protocol.PlanEntry, raw_entries.len) catch return;
+    defer agent_state.allocator.free(entries);
+
+    var count: usize = 0;
+    for (raw_entries) |entry| {
+        const content = entry.step orelse entry.content orelse continue;
+        entries[count] = .{
+            .content = content,
+            .status = parseProtocolPlanStatus(entry.status),
+            .priority = parseProtocolPlanPriority(entry.priority),
+        };
+        count += 1;
+    }
+    if (count == 0) return;
+
+    agent_state.updatePlan(entries[0..count]) catch |err| {
+        std.log.err("maybeApplyUpdatePlanToolCall: updatePlan failed: {}", .{err});
+    };
+}
+
+fn parseProtocolPlanStatus(raw_status: ?[]const u8) protocol.PlanEntryStatus {
+    const status = raw_status orelse return .pending;
+    if (std.mem.eql(u8, status, "in_progress")) return .in_progress;
+    if (std.mem.eql(u8, status, "in-progress")) return .in_progress;
+    if (std.mem.eql(u8, status, "running")) return .in_progress;
+    if (std.mem.eql(u8, status, "completed")) return .completed;
+    if (std.mem.eql(u8, status, "done")) return .completed;
+    return .pending;
+}
+
+fn parseProtocolPlanPriority(raw_priority: ?[]const u8) protocol.PlanEntryPriority {
+    const priority = raw_priority orelse return .medium;
+    if (std.mem.eql(u8, priority, "high")) return .high;
+    if (std.mem.eql(u8, priority, "low")) return .low;
+    return .medium;
+}
+
 // =============================================================================
 // Tests — codexEventToAgentEvent
 // =============================================================================
 
+const codex_codec = @import("../codex/codec.zig");
 const codex_protocol = @import("../codex/protocol.zig");
 
 test "codexEventToAgentEvent: text_delta maps to text_chunk" {
@@ -659,6 +728,24 @@ test "codexEventToAgentEvent: item_started mcp_tool_call maps to tool_call" {
     try std.testing.expectEqualStrings("{\"plan\":[{\"step\":\"a\",\"status\":\"pending\"}]}", result.?.tool_call.command.?);
 }
 
+test "processAgentEvent: update_plan tool call populates todos without plan_updated event" {
+    const allocator = std.testing.allocator;
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    processAgentEvent(&agent_state, .{ .tool_call = .{
+        .tool_call_id = "mcp-1",
+        .tool_name = "update_plan",
+        .title = "update_plan",
+        .command = "{\"plan\":[{\"step\":\"Investigate todo render\",\"status\":\"in_progress\",\"priority\":\"high\"},{\"content\":\"Validate codex fallback\",\"status\":\"pending\",\"priority\":\"low\"}]}",
+    } });
+
+    try std.testing.expectEqual(@as(usize, 2), agent_state.planEntryCount());
+    try std.testing.expectEqual(@as(usize, 2), agent_state.messages.items.len);
+    try std.testing.expectEqual(Message.Role.tool, agent_state.messages.items[0].role);
+    try std.testing.expectEqual(Message.Role.plan_snapshot, agent_state.messages.items[1].role);
+}
+
 test "codexEventToAgentEvent: item_completed mcp_tool_call maps to tool_update" {
     const event = CodexEvent{ .item_completed = .{
         .thread_id = "t1",
@@ -747,6 +834,43 @@ test "codexEventToAgentEvent: plan_updated maps to codex_plan_update" {
     try std.testing.expectEqual(@as(usize, 2), result.?.codex_plan_update.len);
     try std.testing.expectEqualStrings("First step", result.?.codex_plan_update[0].content);
     try std.testing.expectEqual(CodexPlanEntry.PlanEntryStatus.in_progress, result.?.codex_plan_update[0].status);
+}
+
+test "processAgentEvent: codex plan notification updates todo state end-to-end" {
+    const allocator = std.testing.allocator;
+
+    var manager = codex_manager.CodexManager.init(allocator);
+    defer manager.deinit();
+
+    var decoder = codex_codec.Decoder.init(allocator);
+    const json =
+        \\{"method":"thread/plan_updated","params":{"threadId":"thread-1","turnId":"turn-1","plan":{"steps":[{"title":"Reproduce protocol event","state":"running","priority":"high"},{"step":"Verify todo render pipeline","state":"done","priority":"medium"}]}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(allocator);
+
+    var codex_event = manager.processMessage(msg);
+    defer if (codex_event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(codex_event != null);
+
+    const agent_event = codexEventToAgentEvent(codex_event.?);
+    try std.testing.expect(agent_event != null);
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    processAgentEvent(&agent_state, agent_event.?);
+
+    try std.testing.expectEqual(@as(usize, 2), agent_state.planEntryCount());
+    try std.testing.expectEqual(CodexPlanEntry.PlanEntryStatus.in_progress, codex_event.?.plan_updated.entries[0].status);
+    try std.testing.expectEqual(CodexPlanEntry.PlanEntryStatus.completed, codex_event.?.plan_updated.entries[1].status);
+
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(Message.Role.plan_snapshot, agent_state.messages.items[0].role);
+    try std.testing.expect(agent_state.messages.items[0].plan_snapshot_entries != null);
+    const snapshot_entries = agent_state.messages.items[0].plan_snapshot_entries.?;
+    try std.testing.expectEqual(@as(usize, 2), snapshot_entries.len);
+    try std.testing.expectEqualStrings("Reproduce protocol event", snapshot_entries[0].content);
+    try std.testing.expectEqualStrings("Verify todo render pipeline", snapshot_entries[1].content);
 }
 
 test "codexEventToAgentEvent: unknown maps to null" {

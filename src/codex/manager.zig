@@ -2583,6 +2583,34 @@ test "processMessage with turn/planUpdated returns plan_updated entries" {
     try std.testing.expectEqual(CodexManager.CodexEvent.PlanUpdatedEvent.PlanEntryStatus.in_progress, plan.entries[1].status);
 }
 
+test "processMessage with thread/plan_updated parses nested plan steps" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"thread/plan_updated","params":{"threadId":"t1","turnId":"turn-2","plan":{"steps":[{"title":"First nested step","state":"running","priority":"high"},{"step":"Second nested step","state":"done","priority":"low"}]}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .plan_updated);
+
+    const plan = event.?.plan_updated;
+    try std.testing.expectEqualStrings("t1", plan.thread_id);
+    try std.testing.expectEqualStrings("turn-2", plan.turn_id);
+    try std.testing.expectEqual(@as(usize, 2), plan.entries.len);
+    try std.testing.expectEqualStrings("First nested step", plan.entries[0].content);
+    try std.testing.expectEqual(CodexManager.CodexEvent.PlanUpdatedEvent.PlanEntryStatus.in_progress, plan.entries[0].status);
+    try std.testing.expectEqual(CodexManager.CodexEvent.PlanUpdatedEvent.PlanEntryPriority.high, plan.entries[0].priority);
+    try std.testing.expectEqualStrings("Second nested step", plan.entries[1].content);
+    try std.testing.expectEqual(CodexManager.CodexEvent.PlanUpdatedEvent.PlanEntryStatus.completed, plan.entries[1].status);
+    try std.testing.expectEqual(CodexManager.CodexEvent.PlanUpdatedEvent.PlanEntryPriority.low, plan.entries[1].priority);
+}
+
 test "processMessage with rate limits notification stores limits and returns event" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
