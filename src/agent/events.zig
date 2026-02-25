@@ -394,7 +394,7 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
         .turn_completed => .{ .message_complete = {} },
         .plan_updated => |p| .{ .codex_plan_update = p.entries },
         .token_usage_updated => |tu| blk: {
-            const total = tu.total orelse break :blk null;
+            const total = tu.total orelse tu.last orelse break :blk null;
             break :blk @as(?AgentEvent, .{ .token_usage_update = .{
                 .total_tokens = total.total_tokens,
                 .input_tokens = total.input_tokens,
@@ -933,6 +933,25 @@ test "codexEventToAgentEvent: token_usage_updated without total maps to null" {
     } };
     const result = codexEventToAgentEvent(event);
     try std.testing.expect(result == null);
+}
+
+test "codexEventToAgentEvent: token_usage_updated falls back to last when total missing" {
+    const event = CodexEvent{ .token_usage_updated = codex_protocol.TokenUsage{
+        .total = null,
+        .last = codex_protocol.TokenCounts{
+            .total_tokens = 900,
+            .input_tokens = 700,
+            .cached_input_tokens = 100,
+            .output_tokens = 200,
+            .reasoning_output_tokens = 20,
+        },
+        .model_context_window = 128000,
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .token_usage_update);
+    try std.testing.expectEqual(@as(u64, 900), result.?.token_usage_update.total_tokens);
+    try std.testing.expectEqual(@as(u64, 128000), result.?.token_usage_update.model_context_window);
 }
 
 test "codexEventToAgentEvent: rate_limits_updated maps to rate_limits_update" {

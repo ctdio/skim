@@ -3636,15 +3636,16 @@ fn withModalBg(s: vaxis.Style) vaxis.Style {
 /// Examples: 500 -> "500 tokens", 16709 -> "16.7K tokens", 1234567 -> "1.2M tokens"
 fn formatTokenUsage(buf: []u8, total_tokens: u64, model_context_window: u64) []const u8 {
     if (model_context_window > 0) {
-        const pct = @as(f64, @floatFromInt(total_tokens)) / @as(f64, @floatFromInt(model_context_window)) * 100.0;
+        const used_pct = @as(f64, @floatFromInt(total_tokens)) / @as(f64, @floatFromInt(model_context_window)) * 100.0;
+        const remaining_pct = @max(@as(f64, 0.0), 100.0 - used_pct);
         if (total_tokens >= 1_000_000) {
             const m = @as(f64, @floatFromInt(total_tokens)) / 1_000_000.0;
-            return std.fmt.bufPrint(buf, "{d:.1}M tokens \xe2\x94\x82 {d:.0}% context", .{ m, pct }) catch "? tokens";
+            return std.fmt.bufPrint(buf, "{d:.1}M tokens \xe2\x94\x82 {d:.0}% left", .{ m, remaining_pct }) catch "? tokens";
         } else if (total_tokens >= 1_000) {
             const k = @as(f64, @floatFromInt(total_tokens)) / 1_000.0;
-            return std.fmt.bufPrint(buf, "{d:.1}K tokens \xe2\x94\x82 {d:.0}% context", .{ k, pct }) catch "? tokens";
+            return std.fmt.bufPrint(buf, "{d:.1}K tokens \xe2\x94\x82 {d:.0}% left", .{ k, remaining_pct }) catch "? tokens";
         } else {
-            return std.fmt.bufPrint(buf, "{d} tokens \xe2\x94\x82 {d:.0}% context", .{ total_tokens, pct }) catch "? tokens";
+            return std.fmt.bufPrint(buf, "{d} tokens \xe2\x94\x82 {d:.0}% left", .{ total_tokens, remaining_pct }) catch "? tokens";
         }
     } else {
         if (total_tokens >= 1_000_000) {
@@ -3672,16 +3673,16 @@ test "formatTokenUsage: small count without context window" {
 test "formatTokenUsage: thousands with context window" {
     var buf: [64]u8 = undefined;
     const result = formatTokenUsage(&buf, 16709, 258400);
-    // 16709 -> "16.7K tokens | 6% context"
+    // 16709/258400 -> "16.7K tokens | 94% left"
     try std.testing.expect(std.mem.startsWith(u8, result, "16.7K tokens"));
-    try std.testing.expect(std.mem.indexOf(u8, result, "6% context") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "94% left") != null);
 }
 
 test "formatTokenUsage: millions with context window" {
     var buf: [64]u8 = undefined;
     const result = formatTokenUsage(&buf, 1_234_567, 2_000_000);
     try std.testing.expect(std.mem.startsWith(u8, result, "1.2M tokens"));
-    try std.testing.expect(std.mem.indexOf(u8, result, "62% context") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "38% left") != null);
 }
 
 test "formatTokenUsage: exact thousands" {
@@ -3694,5 +3695,5 @@ test "formatTokenUsage: high context percentage" {
     var buf: [64]u8 = undefined;
     const result = formatTokenUsage(&buf, 200000, 258400);
     try std.testing.expect(std.mem.startsWith(u8, result, "200.0K tokens"));
-    try std.testing.expect(std.mem.indexOf(u8, result, "77% context") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "23% left") != null);
 }

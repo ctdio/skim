@@ -1099,10 +1099,11 @@ pub const CodexManager = struct {
     }
 
     fn parseRateLimitsNotification(self: *CodexManager, json: []const u8) ?CodexEvent {
-        // The params JSON has shape: {"rateLimits": {...}}
-        // Extract the inner rateLimits object for the decoder
+        // The params JSON has shape: {"rateLimits": {...}} or {"rate_limits": {...}}
+        // Extract the inner object for the decoder.
         const RawWrapper = struct {
             rateLimits: ?std.json.Value = null,
+            rate_limits: ?std.json.Value = null,
         };
 
         const parsed = std.json.parseFromSlice(RawWrapper, self.allocator, json, .{
@@ -1111,7 +1112,8 @@ pub const CodexManager = struct {
         }) catch return null;
         defer parsed.deinit();
 
-        if (parsed.value.rateLimits) |rl_val| {
+        const rate_limits_value = parsed.value.rateLimits orelse parsed.value.rate_limits;
+        if (rate_limits_value) |rl_val| {
             // Serialize the inner object back to JSON for the decoder
             var buf: std.ArrayList(u8) = .{};
             defer buf.deinit(self.allocator);
@@ -1418,7 +1420,9 @@ pub const CodexManager = struct {
             .{ "thread/planUpdated", .plan_updated },
             .{ "thread/plan_updated", .plan_updated },
             .{ "thread/tokenUsage/updated", .token_usage_updated },
+            .{ "thread/token_usage/updated", .token_usage_updated },
             .{ "account/rateLimits/updated", .rate_limits_updated },
+            .{ "account/rate_limits/updated", .rate_limits_updated },
         });
 
         const variant = method_map.get(method) orelse return .{ .unknown = {} };
@@ -2633,6 +2637,46 @@ test "processMessage with rate limits notification stores limits and returns eve
     const rl = manager.rate_limits.?;
     try std.testing.expectApproxEqRel(@as(f64, 42.5), rl.primary.used_percent, 0.001);
     try std.testing.expectApproxEqRel(@as(f64, 1.0), rl.secondary.used_percent, 0.001);
+}
+
+test "processMessage with snake_case token usage notification stores usage" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"thread/token_usage/updated","params":{"thread_id":"t1","turn_id":"1","token_usage":{"total":{"total_tokens":2500,"input_tokens":2000,"cached_input_tokens":500,"output_tokens":500,"reasoning_output_tokens":0},"model_context_window":128000}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .token_usage_updated);
+    try std.testing.expect(manager.token_usage != null);
+    try std.testing.expectEqual(@as(u64, 2500), manager.token_usage.?.total.?.total_tokens);
+    try std.testing.expectEqual(@as(u64, 128000), manager.token_usage.?.model_context_window.?);
+}
+
+test "processMessage with snake_case rate limits notification stores limits" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"account/rate_limits/updated","params":{"rate_limits":{"primary":{"used_percent":10.5},"secondary":{"used_percent":2.25}}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .rate_limits_updated);
+    try std.testing.expect(manager.rate_limits != null);
+    try std.testing.expectApproxEqRel(@as(f64, 10.5), manager.rate_limits.?.primary.used_percent, 0.001);
+    try std.testing.expectApproxEqRel(@as(f64, 2.25), manager.rate_limits.?.secondary.used_percent, 0.001);
 }
 
 test "processMessage with MCP startup update creates server entry" {

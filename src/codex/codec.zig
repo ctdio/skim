@@ -577,13 +577,16 @@ pub const Decoder = struct {
         defer parsed.deinit();
 
         const r = parsed.value;
+        const token_usage = r.tokenUsage orelse r.token_usage orelse RawTokenUsage{};
+        const thread_id = r.threadId orelse r.thread_id orelse return error.InvalidTokenUsagePayload;
+        const turn_id = r.turnId orelse r.turn_id;
         return .{
-            .thread_id = try self.allocator.dupe(u8, r.threadId),
-            .turn_id = if (r.turnId) |tid| try self.allocator.dupe(u8, tid) else null,
+            .thread_id = try self.allocator.dupe(u8, thread_id),
+            .turn_id = if (turn_id) |tid| try self.allocator.dupe(u8, tid) else null,
             .token_usage = .{
-                .total = if (r.tokenUsage.total) |t| convertRawTokenCounts(t) else null,
-                .last = if (r.tokenUsage.last) |l| convertRawTokenCounts(l) else null,
-                .model_context_window = r.tokenUsage.modelContextWindow,
+                .total = if (token_usage.total) |t| convertRawTokenCounts(t) else null,
+                .last = if (token_usage.last) |l| convertRawTokenCounts(l) else null,
+                .model_context_window = token_usage.modelContextWindow orelse token_usage.model_context_window,
             },
         };
     }
@@ -700,6 +703,7 @@ pub const Decoder = struct {
     pub fn parseRateLimits(self: *Decoder, json: []const u8) !protocol.RateLimits {
         const RawEntry = struct {
             usedPercent: ?f64 = null,
+            used_percent: ?f64 = null,
             credits: ?f64 = null,
         };
 
@@ -717,11 +721,11 @@ pub const Decoder = struct {
         const r = parsed.value;
         return .{
             .primary = if (r.primary) |e| .{
-                .used_percent = e.usedPercent orelse 0,
+                .used_percent = e.usedPercent orelse e.used_percent orelse 0,
                 .credits = e.credits,
             } else .{},
             .secondary = if (r.secondary) |e| .{
-                .used_percent = e.usedPercent orelse 0,
+                .used_percent = e.usedPercent orelse e.used_percent orelse 0,
                 .credits = e.credits,
             } else .{},
         };
@@ -949,11 +953,11 @@ fn writeId(writer: anytype, id: RequestId) !void {
 
 fn convertRawTokenCounts(r: RawTokenCounts) protocol.TokenCounts {
     return .{
-        .total_tokens = r.totalTokens orelse 0,
-        .input_tokens = r.inputTokens orelse 0,
-        .cached_input_tokens = r.cachedInputTokens orelse 0,
-        .output_tokens = r.outputTokens orelse 0,
-        .reasoning_output_tokens = r.reasoningOutputTokens orelse 0,
+        .total_tokens = r.totalTokens orelse r.total_tokens orelse 0,
+        .input_tokens = r.inputTokens orelse r.input_tokens orelse 0,
+        .cached_input_tokens = r.cachedInputTokens orelse r.cached_input_tokens orelse 0,
+        .output_tokens = r.outputTokens orelse r.output_tokens orelse 0,
+        .reasoning_output_tokens = r.reasoningOutputTokens orelse r.reasoning_output_tokens orelse 0,
     };
 }
 
@@ -1066,20 +1070,31 @@ const RawItemStartedParams = struct {
 
 const RawTokenCounts = struct {
     totalTokens: ?u64 = null,
+    total_tokens: ?u64 = null,
     inputTokens: ?u64 = null,
+    input_tokens: ?u64 = null,
     cachedInputTokens: ?u64 = null,
+    cached_input_tokens: ?u64 = null,
     outputTokens: ?u64 = null,
+    output_tokens: ?u64 = null,
     reasoningOutputTokens: ?u64 = null,
+    reasoning_output_tokens: ?u64 = null,
+};
+
+const RawTokenUsage = struct {
+    total: ?RawTokenCounts = null,
+    last: ?RawTokenCounts = null,
+    modelContextWindow: ?u64 = null,
+    model_context_window: ?u64 = null,
 };
 
 const RawTokenUsageParams = struct {
-    threadId: []const u8,
+    threadId: ?[]const u8 = null,
+    thread_id: ?[]const u8 = null,
     turnId: ?[]const u8 = null,
-    tokenUsage: struct {
-        total: ?RawTokenCounts = null,
-        last: ?RawTokenCounts = null,
-        modelContextWindow: ?u64 = null,
-    },
+    turn_id: ?[]const u8 = null,
+    tokenUsage: ?RawTokenUsage = null,
+    token_usage: ?RawTokenUsage = null,
 };
 
 // =============================================================================
@@ -1679,6 +1694,27 @@ test "parse token usage" {
     try std.testing.expectEqual(@as(u64, 258400), result.token_usage.model_context_window.?);
 }
 
+test "parse token usage with snake_case fields" {
+    const allocator = std.testing.allocator;
+    var decoder = Decoder.init(allocator);
+
+    const json =
+        \\{"thread_id":"thread_1","turn_id":"2","token_usage":{"total":{"total_tokens":1000,"input_tokens":900,"cached_input_tokens":200,"output_tokens":100,"reasoning_output_tokens":20},"last":{"total_tokens":120,"input_tokens":100,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":5},"model_context_window":128000}}
+    ;
+
+    const result = try decoder.parseTokenUsage(json);
+    defer {
+        allocator.free(result.thread_id);
+        if (result.turn_id) |tid| allocator.free(tid);
+    }
+
+    try std.testing.expectEqualStrings("thread_1", result.thread_id);
+    try std.testing.expectEqualStrings("2", result.turn_id.?);
+    try std.testing.expectEqual(@as(u64, 1000), result.token_usage.total.?.total_tokens);
+    try std.testing.expectEqual(@as(u64, 120), result.token_usage.last.?.total_tokens);
+    try std.testing.expectEqual(@as(u64, 128000), result.token_usage.model_context_window.?);
+}
+
 test "parse model list with object reasoning efforts" {
     const allocator = std.testing.allocator;
     var decoder = Decoder.init(allocator);
@@ -1822,6 +1858,20 @@ test "parse rate limits with primary/secondary" {
     try std.testing.expectApproxEqRel(@as(f64, 100.0), result.primary.credits.?, 0.001);
     try std.testing.expectApproxEqRel(@as(f64, 0.0), result.secondary.used_percent, 0.001);
     try std.testing.expect(result.secondary.credits == null);
+}
+
+test "parse rate limits with snake_case used_percent" {
+    const allocator = std.testing.allocator;
+    var decoder = Decoder.init(allocator);
+
+    const json =
+        \\{"primary":{"used_percent":42.5},"secondary":{"used_percent":1.25}}
+    ;
+
+    const result = try decoder.parseRateLimits(json);
+
+    try std.testing.expectApproxEqRel(@as(f64, 42.5), result.primary.used_percent, 0.001);
+    try std.testing.expectApproxEqRel(@as(f64, 1.25), result.secondary.used_percent, 0.001);
 }
 
 test "parse turn completed" {
