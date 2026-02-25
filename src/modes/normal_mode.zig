@@ -449,8 +449,14 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
                 app.state.empty_menu_selection = (app.state.empty_menu_selection + 1) % menu_items_count;
                 return;
             },
-            'p' => {
-                app.state.empty_menu_selection = if (app.state.empty_menu_selection == 0) menu_items_count - 1 else app.state.empty_menu_selection - 1;
+            'p', 'P' => {
+                // Ctrl-P: Open file palette (VSCode-style)
+                // Ctrl-Shift-P: Try to open command palette (if terminal supports it)
+                if (key.mods.shift or key.codepoint == 'P') {
+                    try app.startCommandPaletteInCommandMode();
+                } else {
+                    try app.startCommandPalette();
+                }
                 return;
             },
             'e' => {
@@ -474,6 +480,12 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
     }
     if (key.codepoint == vaxis.Key.up) {
         app.state.empty_menu_selection = if (app.state.empty_menu_selection == 0) menu_items_count - 1 else app.state.empty_menu_selection - 1;
+        return;
+    }
+
+    // Some terminals send Shift+; as ';' + shift instead of ':'.
+    if (!key.mods.ctrl and !key.mods.alt and (key.codepoint == ':' or (key.codepoint == ';' and key.mods.shift))) {
+        try app.startCommandPaletteInCommandMode();
         return;
     }
 
