@@ -1467,6 +1467,9 @@ pub const App = struct {
 
         // Refresh graphite stack (branch state may have changed)
         self.refreshGraphiteStack();
+
+        // Keep external session discovery metadata in sync with the current diff.
+        self.syncSessionMetadata();
     }
 
     /// Stage the current file (git add) and refresh the view
@@ -5290,26 +5293,11 @@ pub const App = struct {
         const port = server.getPort();
         std.log.info("TUI server started on port {d}", .{port});
 
-        // Build file list
-        var file_list: std.ArrayList([]const u8) = .{};
-        defer file_list.deinit(self.allocator);
-        for (self.state.files) |file| {
-            const path = if (file.new_path.len > 0) file.new_path else file.old_path;
-            try file_list.append(self.allocator, path);
-        }
-
-        // Write session file
-        try sm.writeSession(.{
-            .pid = session_mgr.getCurrentPid(),
-            .port = port,
-            .cwd = self.state.git_repo_root,
-            .diff_ref = self.getDiffRefString(),
-            .files = file_list.items,
-            .started_at = std.time.timestamp(),
-        });
-
         self.tui_server = server;
         self.session_manager = sm;
+
+        // Write initial session metadata once server and manager are registered.
+        try self.writeSessionMetadata();
     }
 
     /// Handle incoming request from CLI/MCP
@@ -5329,6 +5317,34 @@ pub const App = struct {
         }
 
         return tui_server.errorResponse(tui_server.ErrorCode.METHOD_NOT_FOUND, "Unknown method");
+    }
+
+    fn writeSessionMetadata(self: *App) !void {
+        const sm = &(self.session_manager orelse return);
+        const server = &(self.tui_server orelse return);
+
+        var file_list: std.ArrayList([]const u8) = .{};
+        defer file_list.deinit(self.allocator);
+
+        for (self.state.files) |file| {
+            const path = if (file.new_path.len > 0) file.new_path else file.old_path;
+            try file_list.append(self.allocator, path);
+        }
+
+        try sm.writeSession(.{
+            .pid = session_mgr.getCurrentPid(),
+            .port = server.getPort(),
+            .cwd = self.state.git_repo_root,
+            .diff_ref = self.getDiffRefString(),
+            .files = file_list.items,
+            .started_at = std.time.timestamp(),
+        });
+    }
+
+    fn syncSessionMetadata(self: *App) void {
+        self.writeSessionMetadata() catch |err| {
+            std.log.warn("Failed to sync session metadata: {any}", .{err});
+        };
     }
 
     /// Handle get_context request - returns session state
