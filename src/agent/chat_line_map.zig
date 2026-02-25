@@ -1599,10 +1599,10 @@ pub const ChatLineMap = struct {
             return;
         }
 
-        // Calculate total line length (note: this is byte length, not display width)
-        var total_len: usize = 0;
+        // Calculate total line width in terminal cells.
+        var total_width: usize = 0;
         for (segments.items) |seg| {
-            total_len += seg.text.len;
+            total_width += RenderUtils.displayWidth(seg.text);
         }
 
         // Calculate available width (accounting for indent)
@@ -1610,7 +1610,7 @@ pub const ChatLineMap = struct {
 
         // If fits on one line, is a code block, or is a table (don't wrap these), output as-is
         // Tables use UTF-8 box-drawing chars where byte length != display width
-        if (total_len <= available_width or is_code_block or is_table) {
+        if (total_width <= available_width or is_code_block or is_table) {
             try self.outputSegmentLine(global_line, msg_idx, line_idx, segments.items, indent, is_code_block);
             return;
         }
@@ -1621,11 +1621,12 @@ pub const ChatLineMap = struct {
         var current_width: usize = 0;
 
         for (segments.items) |seg| {
+            const seg_width = RenderUtils.displayWidth(seg.text);
             // Try to fit this segment on the current line
-            if (current_width + seg.text.len <= available_width) {
+            if (current_width + seg_width <= available_width) {
                 // Fits entirely
                 try current_line.append(self.allocator, seg);
-                current_width += seg.text.len;
+                current_width += seg_width;
             } else {
                 // Need to split this segment
                 var remaining = seg.text;
@@ -1633,24 +1634,26 @@ pub const ChatLineMap = struct {
 
                 while (remaining.len > 0) {
                     const space_left = if (available_width > current_width) available_width - current_width else 0;
+                    const remaining_width = RenderUtils.displayWidth(remaining);
 
-                    if (remaining.len <= space_left) {
+                    if (remaining_width <= space_left) {
                         // Rest fits on current line
                         try current_line.append(self.allocator, .{
                             .text = remaining,
                             .style = remaining_style,
                         });
-                        current_width += remaining.len;
+                        current_width += remaining_width;
                         break;
                     }
 
-                    // Find a good break point (word boundary)
-                    var break_at: usize = space_left;
+                    // Find a good break point (word boundary) without splitting UTF-8 graphemes.
+                    const fitting = RenderUtils.sliceByDisplayWidth(remaining, space_left);
+                    var break_at: usize = fitting.len;
 
-                    // Look for last space within the available space
-                    if (space_left > 0) {
+                    // Prefer the last space in the fitting slice.
+                    if (space_left > 0 and fitting.len > 0) {
                         var last_space: ?usize = null;
-                        for (remaining[0..space_left], 0..) |c, i| {
+                        for (fitting, 0..) |c, i| {
                             if (c == ' ') last_space = i;
                         }
                         if (last_space) |sp| {
@@ -1668,8 +1671,8 @@ pub const ChatLineMap = struct {
 
                     // If still no break point (very long word at start of line), force break at available width
                     if (break_at == 0) {
-                        break_at = @min(available_width, remaining.len);
-                        if (break_at == 0) break_at = 1; // At least one character
+                        const one_cell = RenderUtils.sliceByDisplayWidth(remaining, 1);
+                        break_at = if (one_cell.len > 0) one_cell.len else @min(@as(usize, 1), remaining.len);
                     }
 
                     // Add portion to current line
@@ -1682,6 +1685,7 @@ pub const ChatLineMap = struct {
                             .text = text_portion,
                             .style = remaining_style,
                         });
+                        current_width += RenderUtils.displayWidth(text_portion);
                     }
 
                     // Flush current line
@@ -2586,4 +2590,32 @@ test "formatTokenCount formats small, thousands, millions" {
     try std.testing.expectEqualStrings("45.3k", formatTokenCount(&buf, 45_300));
     try std.testing.expectEqualStrings("1.2M", formatTokenCount(&buf, 1_200_000));
     try std.testing.expectEqualStrings("0", formatTokenCount(&buf, 0));
+}
+
+test "markdown segment wrapping preserves UTF-8 grapheme boundaries" {
+    const allocator = std.testing.allocator;
+    var line_map = ChatLineMap.init(allocator);
+    defer line_map.deinit();
+
+    const content = "••••••••••";
+    var messages = [_]Message{.{
+        .role = .agent,
+        .content = content,
+        .timestamp = 0,
+    }};
+    defer messages[0].deinit(allocator);
+
+    _ = messages[0].ensureMarkdownParsed();
+    try line_map.build(&messages, 6, .unified, null, null);
+
+    var rebuilt: std.ArrayList(u8) = .{};
+    defer rebuilt.deinit(allocator);
+
+    for (line_map.records.items) |record| {
+        if (record.line_type != .message_content) continue;
+        try std.testing.expect(std.unicode.utf8ValidateSlice(record.text));
+        try rebuilt.appendSlice(allocator, record.text);
+    }
+
+    try std.testing.expectEqualStrings(content, rebuilt.items);
 }
