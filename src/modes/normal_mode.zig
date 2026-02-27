@@ -449,14 +449,9 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
                 app.state.empty_menu_selection = (app.state.empty_menu_selection + 1) % menu_items_count;
                 return;
             },
-            'p', 'P' => {
-                // Ctrl-P: Open file palette (VSCode-style)
-                // Ctrl-Shift-P: Try to open command palette (if terminal supports it)
-                if (key.mods.shift or key.codepoint == 'P') {
-                    try app.startCommandPaletteInCommandMode();
-                } else {
-                    try app.startCommandPalette();
-                }
+            'p' => {
+                // Ctrl-P: navigate up in empty menu (symmetric with Ctrl-N)
+                app.state.empty_menu_selection = if (app.state.empty_menu_selection == 0) menu_items_count - 1 else app.state.empty_menu_selection - 1;
                 return;
             },
             'e' => {
