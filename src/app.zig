@@ -33,6 +33,7 @@ const branch_selection_mode = @import("modes/branch_selection_mode.zig");
 const commit_selection_mode = @import("modes/commit_selection_mode.zig");
 const graphite_mode = @import("modes/graphite_mode.zig");
 const model_selection_mode = @import("modes/model_selection_mode.zig");
+const permission_selection_mode = @import("modes/permission_selection_mode.zig");
 const agent_selection_mode = @import("modes/agent_selection_mode.zig");
 const session_picker_mode = @import("modes/session_picker_mode.zig");
 const agent_mode = @import("modes/agent_mode.zig");
@@ -324,6 +325,7 @@ pub const App = struct {
         graphite_stack, // Graphite stack picker
         agent, // Agent chat panel
         model_selection, // AI model selection menu
+        permission_selection, // Codex permission mode menu
         agent_selection, // Agent selection menu (before connecting)
         session_picker, // Session picker for /resume command
     };
@@ -427,6 +429,7 @@ pub const App = struct {
         model_filter_query: [256]u8, // Search query for filtering models
         model_filter_len: usize, // Length of search query
         model_filtered_indices: std.ArrayList(usize), // Indices of models matching filter
+        permission_selection: usize, // Selected index in permission mode picker
 
         // Agent selection state (for choosing which agent to connect to)
         configured_agents: ?[]acp.AgentInfo, // Available agents from config or fallback
@@ -695,6 +698,7 @@ pub const App = struct {
                 .model_filter_query = [_]u8{0} ** 256,
                 .model_filter_len = 0,
                 .model_filtered_indices = .{},
+                .permission_selection = 0,
                 .configured_agents = null, // Loaded when agent panel opens
                 .agent_selection_idx = 0,
                 .pending_tab_for_selection = null, // No tab waiting for agent selection
@@ -880,6 +884,7 @@ pub const App = struct {
                 .model_filter_query = [_]u8{0} ** 256,
                 .model_filter_len = 0,
                 .model_filtered_indices = .{},
+                .permission_selection = 0,
                 .configured_agents = null,
                 .agent_selection_idx = 0,
                 .pending_tab_for_selection = null,
@@ -1017,6 +1022,7 @@ pub const App = struct {
                 .model_filter_query = [_]u8{0} ** 256,
                 .model_filter_len = 0,
                 .model_filtered_indices = .{},
+                .permission_selection = 0,
                 .configured_agents = null,
                 .agent_selection_idx = 0,
                 .pending_tab_for_selection = null,
@@ -2082,6 +2088,11 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
+                .permission_selection => {
+                    self.mode = .agent;
+                    self.needs_render = true;
+                    return;
+                },
                 .session_picker => {
                     // Cancel session picker, return to agent mode
                     sessions.freeSessions(self.allocator, self.state.session_list);
@@ -2124,6 +2135,7 @@ pub const App = struct {
             .commit_diff_mode => try commit_selection_mode.handleDiffModeKey(self, key),
             .graphite_stack => try graphite_mode.handleKey(self, key),
             .model_selection => try model_selection_mode.handleKey(self, key),
+            .permission_selection => try permission_selection_mode.handleKey(self, key),
             .agent_selection => try agent_selection_mode.handleKey(self, key),
             .session_picker => try session_picker_mode.handleKey(self, key),
             .agent => try agent_mode.handleKey(self, key),
@@ -4755,6 +4767,17 @@ pub const App = struct {
             }
         }
 
+        // Render permission selection dialog if in permission_selection mode
+        if (self.mode == .permission_selection) {
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try UI.renderPermissionSelectionDialog(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+            } else {
+                try UI.renderPermissionSelectionDialog(self, win);
+            }
+        }
+
         // Render agent selection dialog if in agent_selection mode
         if (self.mode == .agent_selection) {
             if (profile_frame) {
@@ -5958,7 +5981,10 @@ pub const App = struct {
     fn codexConnectThreadFn(ctx: *CodexConnectContext) void {
         std.log.info("Codex: Background connection thread started", .{});
 
-        ctx.mgr.requested_approval_policy = ctx.approval_policy;
+        ctx.mgr.requested_approval_policy = if (ctx.approval_policy) |approval_policy|
+            codex_mod.protocol.ApprovalPolicy.fromString(approval_policy)
+        else
+            null;
 
         // Connect to codex app-server (spawn process, handshake)
         ctx.mgr.connect(ctx.command, ctx.args, ctx.cwd) catch |err| {

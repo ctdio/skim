@@ -175,6 +175,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     const slash_bindings = [_]Binding{
         .{ .key = "/clear", .desc = "Clear session" },
         .{ .key = "/model", .desc = "Switch AI model" },
+        .{ .key = "/permissions", .desc = "Switch Codex permission mode" },
         .{ .key = "/resume", .desc = "Resume session" },
     };
     for (slash_bindings) |b| {

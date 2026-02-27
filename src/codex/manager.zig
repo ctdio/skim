@@ -24,7 +24,7 @@ pub const CodexManager = struct {
     status: Status,
 
     // User-requested approval policy (set before startThread, sent on thread/start)
-    requested_approval_policy: ?[]const u8,
+    requested_approval_policy: ?protocol.ApprovalPolicy,
 
     // Thread state (populated after startThread)
     thread_id: ?[]const u8,
@@ -196,6 +196,7 @@ pub const CodexManager = struct {
         ModelListFailed,
         ModelListTimeout,
         TurnStartFailed,
+        ApprovalSwitchDuringTurn,
         TurnSteerFailed,
         TurnInterruptFailed,
         CompactFailed,
@@ -317,7 +318,7 @@ pub const CodexManager = struct {
         const msg = encoder.encodeThreadStart(req_id.number, .{
             .model = model,
             .cwd = cwd,
-            .approval_policy = if (self.requested_approval_policy) |p| protocol.ApprovalPolicy.fromString(p) else null,
+            .approval_policy = self.requested_approval_policy,
         }) catch return error.ThreadStartFailed;
         defer self.allocator.free(msg);
         try transport.send(msg);
@@ -672,6 +673,24 @@ pub const CodexManager = struct {
     /// Set the reasoning effort level for subsequent turns.
     pub fn setReasoningEffort(self: *CodexManager, effort: protocol.ReasoningEffort) void {
         self.reasoning_effort = effort;
+    }
+
+    /// Set approval policy for subsequent turns.
+    /// Restarts the active thread so policy applies immediately.
+    pub fn setApprovalPolicy(self: *CodexManager, policy: protocol.ApprovalPolicy) Error!void {
+        self.requested_approval_policy = policy;
+        self.approval_policy = policy;
+
+        if (self.status == .turn_active) return error.ApprovalSwitchDuringTurn;
+        if (self.status != .initialized and self.status != .thread_active) return;
+
+        const cwd_copy = if (self.thread_info) |thread|
+            if (thread.cwd) |cwd| try self.allocator.dupe(u8, cwd) else null
+        else
+            null;
+        defer if (cwd_copy) |cwd| self.allocator.free(cwd);
+
+        try self.startThread(self.current_model, cwd_copy);
     }
 
     // =========================================================================

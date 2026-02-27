@@ -1576,6 +1576,37 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
         return;
     }
 
+    if (std.mem.eql(u8, command_name, "permissions")) {
+        if (app.getActiveManager()) |mgr| {
+            switch (mgr) {
+                .codex => |cm| {
+                    const trimmed_args = std.mem.trim(u8, args, &std.ascii.whitespace);
+                    if (trimmed_args.len > 0) {
+                        if (std.mem.eql(u8, trimmed_args, "full") or
+                            std.mem.eql(u8, trimmed_args, "full-access") or
+                            std.mem.eql(u8, trimmed_args, "dangerously-skip-permissions"))
+                        {
+                            app.state.permission_selection = 1;
+                        } else {
+                            app.state.permission_selection = 0;
+                        }
+                    } else {
+                        app.state.permission_selection = if (cm.approval_policy == .never) 1 else 0;
+                    }
+                    app.mode = .permission_selection;
+                    try agent_state.addMessage(.system, "Switching to permission mode selection...");
+                    return;
+                },
+                .acp, .opencode => {
+                    try agent_state.addMessage(.system, "Approval policy switching is only available for Codex");
+                    return;
+                },
+            }
+        }
+        try agent_state.addMessage(.system, "No active agent");
+        return;
+    }
+
     if (std.mem.eql(u8, command_name, "resume")) {
         // Discover available sessions for current project
         const cwd = app.state.git_repo_root;

@@ -958,6 +958,137 @@ pub const UI = struct {
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 1 - DIALOG_PADDING), .col_offset = @intCast(DIALOG_PADDING) });
     }
 
+    pub fn renderPermissionSelectionDialog(app: *App, win: vaxis.Window) !void {
+        const Option = struct {
+            label: []const u8,
+            description: []const u8,
+            policy: @import("codex/protocol.zig").ApprovalPolicy,
+        };
+
+        const options = [_]Option{
+            .{
+                .label = "Default",
+                .description = "Ask when needed (Codex default behavior)",
+                .policy = .on_request,
+            },
+            .{
+                .label = "Full Access",
+                .description = "No permission prompts",
+                .policy = .never,
+            },
+        };
+
+        var current_policy: ?@import("codex/protocol.zig").ApprovalPolicy = null;
+        if (app.getActiveManager()) |mgr| {
+            switch (mgr) {
+                .codex => |cm| current_policy = cm.approval_policy,
+                .acp, .opencode => {},
+            }
+        }
+
+        const title = " Permission Mode ";
+        const instructions = "↑↓/Ctrl-n/p:Navigate  |  Enter:Select  |  ESC:Cancel";
+
+        var max_desc_len: usize = 0;
+        for (options) |opt| {
+            if (opt.description.len > max_desc_len) max_desc_len = opt.description.len;
+        }
+
+        const content_width = @max(max_desc_len + 6, instructions.len);
+        const dialog_width = @max(@max(content_width + 4, title.len + 4), 78);
+        const rows_per_option: usize = 2;
+        const header_rows: usize = 2; // title + separator
+        const ideal_height = (DIALOG_PADDING * 2) + header_rows + (options.len * rows_per_option) + 1;
+        const popup_width = @min(dialog_width, win.width -| 4);
+        const popup_height = @min(ideal_height, win.height -| 4);
+        const x_offset = if (win.width > popup_width) (win.width - popup_width) / 2 else 0;
+        const max_dialog_height = (DIALOG_PADDING * 2) + header_rows + (options.len * rows_per_option) + 1;
+        const y_offset = if (win.height > max_dialog_height) (win.height - max_dialog_height) / 2 else 0;
+
+        const popup_win = win.child(.{
+            .x_off = @intCast(x_offset),
+            .y_off = @intCast(y_offset),
+            .width = @intCast(popup_width),
+            .height = @intCast(popup_height),
+        });
+
+        popup_win.clear();
+
+        const bg_cell = vaxis.Cell{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{ .bg = Color.dialog_bg },
+        };
+        popup_win.fill(bg_cell);
+
+        const title_copy = try RenderUtils.copyFrameText(app, title);
+        var title_seg = [_]vaxis.Cell.Segment{.{
+            .text = title_copy,
+            .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg, .bold = true },
+        }};
+        _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(DIALOG_PADDING) });
+
+        if (popup_width > DIALOG_PADDING * 2) {
+            const sep_width = popup_width - (DIALOG_PADDING * 2);
+            const sep_text = try RenderUtils.frameTextSlice(app, sep_width);
+            @memset(sep_text, '-');
+            var sep_seg = [_]vaxis.Cell.Segment{.{
+                .text = sep_text,
+                .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg },
+            }};
+            _ = popup_win.print(&sep_seg, .{ .row_offset = @intCast(DIALOG_PADDING + 1), .col_offset = @intCast(DIALOG_PADDING) });
+        }
+
+        var row: usize = DIALOG_PADDING + 2;
+        for (options, 0..) |opt, idx| {
+            if (row >= popup_height - 1 - DIALOG_PADDING) break;
+            const is_selected = idx == app.state.permission_selection;
+            const is_current = if (current_policy) |policy| policy == opt.policy else false;
+
+            var line_segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            defer line_segments.deinit(app.allocator);
+
+            const caret = if (is_selected) "▶ " else "  ";
+            const caret_copy = try RenderUtils.copyFrameText(app, caret);
+            try line_segments.append(app.allocator, .{
+                .text = caret_copy,
+                .style = .{ .fg = Color.cyan, .bg = Color.dialog_bg },
+            });
+
+            const label_copy = try RenderUtils.copyFrameText(app, opt.label);
+            try line_segments.append(app.allocator, .{
+                .text = label_copy,
+                .style = .{ .fg = if (is_selected) Color.white else Color.dim, .bg = Color.dialog_bg, .bold = is_selected },
+            });
+
+            if (is_current) {
+                const current_copy = try RenderUtils.copyFrameText(app, "  ✓ current");
+                try line_segments.append(app.allocator, .{
+                    .text = current_copy,
+                    .style = .{ .fg = Color.green, .bg = Color.dialog_bg },
+                });
+            }
+
+            _ = popup_win.print(line_segments.items, .{ .row_offset = @intCast(row), .col_offset = @intCast(DIALOG_PADDING) });
+            row += 1;
+
+            if (row >= popup_height - 1 - DIALOG_PADDING) break;
+            const desc_copy = try RenderUtils.copyFrameText(app, opt.description);
+            var desc_seg = [_]vaxis.Cell.Segment{.{
+                .text = desc_copy,
+                .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
+            }};
+            _ = popup_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(DIALOG_PADDING + 3) });
+            row += 1;
+        }
+
+        const instr_copy = try RenderUtils.copyFrameText(app, instructions);
+        var instr_seg = [_]vaxis.Cell.Segment{.{
+            .text = instr_copy,
+            .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
+        }};
+        _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 1 - DIALOG_PADDING), .col_offset = @intCast(DIALOG_PADDING) });
+    }
+
     pub fn renderAgentSelectionDialog(app: *App, win: vaxis.Window) !void {
         const agents = app.state.configured_agents orelse return;
         if (agents.len == 0) return;
@@ -1328,6 +1459,7 @@ pub const UI = struct {
             .commit_diff_mode => "-- COMMIT DIFF MODE --",
             .graphite_stack => "-- GRAPHITE STACK --",
             .model_selection => "-- MODEL SELECTION --",
+            .permission_selection => "-- PERMISSION MODE --",
             .agent_selection => "-- AGENT SELECTION --",
             .session_picker => "-- RESUME SESSION --",
             .agent => blk: {
@@ -1375,6 +1507,7 @@ pub const UI = struct {
             .commit_diff_mode => "j/k/1/2:Select  |  Enter:Confirm  |  ESC:Back",
             .graphite_stack => "j/k:Move  |  Enter:Select  |  ESC:Back  |  [s/]s:Navigate",
             .model_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
+            .permission_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .agent_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .session_picker => "j/k:Move  |  Enter:Load  |  ESC:Cancel",
             .agent => blk: {
@@ -1527,6 +1660,16 @@ pub const UI = struct {
                                     try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
                                 }
                             }
+
+                            const permission_label = if (cm.approval_policy == .never) " [Full Access]" else " [Default]";
+                            const permission_style: vaxis.Style = if (cm.approval_policy == .never)
+                                .{ .fg = Color.yellow, .bold = true }
+                            else
+                                .{ .fg = Color.white };
+                            try segments.append(app.allocator, .{
+                                .text = try RenderUtils.copyFrameText(app, permission_label),
+                                .style = permission_style,
+                            });
                         },
                         else => {},
                     }
