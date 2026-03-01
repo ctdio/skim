@@ -145,6 +145,7 @@ pub const CommandPaletteState = struct {
         try self.commands.append(self.allocator, .{
             .name = "Toggle View Mode",
             .display_name = "Toggle View Mode",
+            .aliases = &[_][]const u8{ ":v", ":view" },
             .description = "Switch between unified and side-by-side",
             .action = .toggle_view_mode,
             .category = .view,
@@ -156,6 +157,7 @@ pub const CommandPaletteState = struct {
         try self.commands.append(self.allocator, .{
             .name = "Refresh Diff",
             .display_name = "Refresh Diff",
+            .aliases = &[_][]const u8{ ":e", ":refresh" },
             .description = "Reload the diff from git",
             .action = .refresh_diff,
             .category = .view,
@@ -167,6 +169,7 @@ pub const CommandPaletteState = struct {
         try self.commands.append(self.allocator, .{
             .name = "Show Help",
             .display_name = "Show Help",
+            .aliases = &[_][]const u8{ ":h", ":help" },
             .description = "Display help overlay",
             .action = .show_help,
             .category = .help,
@@ -178,6 +181,7 @@ pub const CommandPaletteState = struct {
         try self.commands.append(self.allocator, .{
             .name = "Switch Agent",
             .display_name = "Switch Agent",
+            .aliases = &[_][]const u8{":agent"},
             .description = "Select a different AI agent",
             .action = .switch_agent,
             .category = .view,
@@ -202,6 +206,7 @@ pub const CommandPaletteState = struct {
         try self.commands.append(self.allocator, .{
             .name = "diff:working",
             .display_name = "diff:working",
+            .aliases = &[_][]const u8{ ":dw", ":working" },
             .description = "Switch to working directory changes",
             .action = .{ .switch_diff_mode = .working },
             .category = .diff,
@@ -213,6 +218,7 @@ pub const CommandPaletteState = struct {
         try self.commands.append(self.allocator, .{
             .name = "diff:staged",
             .display_name = "diff:staged",
+            .aliases = &[_][]const u8{ ":ds", ":staged" },
             .description = "Switch to staged changes",
             .action = .{ .switch_diff_mode = .staged },
             .category = .diff,
@@ -224,6 +230,7 @@ pub const CommandPaletteState = struct {
         try self.commands.append(self.allocator, .{
             .name = "diff:main",
             .display_name = "diff:main",
+            .aliases = &[_][]const u8{ ":dm", ":main" },
             .description = "Compare against main branch",
             .action = .{ .switch_diff_mode = .main },
             .category = .diff,
@@ -235,6 +242,7 @@ pub const CommandPaletteState = struct {
         try self.commands.append(self.allocator, .{
             .name = "Select Commit...",
             .display_name = "Select Commit...",
+            .aliases = &[_][]const u8{ ":dc", ":commit" },
             .description = "Diff against a specific commit",
             .action = .select_commit,
             .category = .diff,
