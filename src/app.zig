@@ -490,6 +490,7 @@ pub const App = struct {
 
     pub fn init(allocator: Allocator, config: anytype) !App {
         const log = std.log.scoped(.app_init);
+        const is_agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false;
 
         const profile_render = if (profiling_enabled) readEnvBool(allocator, "SKIM_PROFILE_RENDER") else false;
         const profile_every_n = if (profiling_enabled) readEnvU32(allocator, "SKIM_PROFILE_RENDER_EVERY", 30) else 0;
@@ -501,8 +502,8 @@ pub const App = struct {
         const is_pager_mode = config.diff_source == .stdin;
 
         // Get git repository root (for resolving file paths)
-        // In pager mode, use current directory as fallback
-        const git_repo_root = if (is_pager_mode)
+        // In pager/agent-only mode, use current directory as fallback
+        const git_repo_root = if (is_agent_only or is_pager_mode)
             try allocator.dupe(u8, ".")
         else
             try git.getRepoRoot(allocator);
@@ -510,7 +511,9 @@ pub const App = struct {
 
         // Load and parse diff BEFORE initializing TUI
         // This ensures git errors print correctly (TUI puts terminal in raw mode)
-        const files = if (is_pager_mode) blk: {
+        const files = if (is_agent_only) blk: {
+            break :blk try allocator.alloc(parser.FileDiff, 0);
+        } else if (is_pager_mode) blk: {
             // Pager mode: parse directly from stdin content
             // Strip ANSI codes since git sends colored output to pagers
             const stdin_text = config.stdin_content orelse "";
@@ -724,7 +727,7 @@ pub const App = struct {
             .pending_connection = null,
             .pending_subagent_fetch = .{},
             .in_bracketed_paste = false,
-            .agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false,
+            .agent_only = is_agent_only,
             .tab_manager = null, // Lazy initialization on first agent panel open
             .profile_render = profile_render,
             .profile_every_n = profile_every_n,

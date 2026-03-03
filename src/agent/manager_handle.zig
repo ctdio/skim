@@ -6,6 +6,9 @@ const Allocator = std.mem.Allocator;
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const OpencodeManager = @import("../opencode/opencode.zig").OpencodeManager;
 const CodexManager = @import("../codex/manager.zig").CodexManager;
+const CodexCodec = @import("../codex/codec.zig");
+const CodexProcess = @import("../codex/process.zig").CodexProcess;
+const CodexTransport = @import("../codex/transport.zig").StdioTransport;
 const AgentState = @import("state.zig").AgentState;
 const AgentEvent = @import("events.zig").AgentEvent;
 const processAgentEvent = @import("events.zig").processAgentEvent;
@@ -427,8 +430,6 @@ fn pollOpencode(m: *OpencodeManager, allocator: Allocator, agent_state: *AgentSt
     };
 }
 
-const MAX_CODEX_MESSAGES_PER_FRAME: usize = 20;
-
 fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResult {
     const status_before = m.status;
     const transport = m.transport orelse return .{
@@ -445,7 +446,7 @@ fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResul
         .needs_line_map_dirty = false,
     };
 
-    const to_process = @min(messages.len, MAX_CODEX_MESSAGES_PER_FRAME);
+    const to_process = messages.len;
     var count: usize = 0;
 
     for (messages[0..to_process]) |raw_msg| {
@@ -476,16 +477,11 @@ fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResul
         }
     }
 
-    // Free any excess messages beyond the frame limit
-    for (messages[to_process..]) |raw_msg| {
-        var msg = raw_msg;
-        msg.deinit(m.allocator);
-    }
     m.allocator.free(messages);
 
     return .{
         .count = count,
-        .more_pending = messages.len > to_process,
+        .more_pending = false,
         .status_changed = m.status != status_before,
         .needs_line_map_dirty = false,
     };
@@ -528,4 +524,41 @@ fn convertQuestionPrompt(allocator: Allocator, prompt: @import("../opencode/mana
         .tool_call_id = prompt.tool_call_id,
         .questions = questions,
     } };
+}
+
+test "pollCodex processes all delta messages without dropping overflow" {
+    const allocator = std.testing.allocator;
+
+    var manager = CodexManager.init(allocator);
+    defer manager.deinit();
+
+    const proc = try CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    const transport = try CodexTransport.init(allocator, proc);
+    manager.process = proc;
+    manager.transport = transport;
+    manager.status = .thread_active;
+
+    var decoder = CodexCodec.Decoder.init(allocator);
+    var expected_text: std.ArrayListUnmanaged(u8) = .{};
+    defer expected_text.deinit(allocator);
+
+    const chunk_count: usize = 60;
+    for (0..chunk_count) |i| {
+        const char_byte: u8 = @as(u8, @intCast('a' + @as(u8, @intCast(i % 26))));
+        try expected_text.append(allocator, char_byte);
+
+        const json = try std.fmt.allocPrint(allocator, "{{\"method\":\"item/agentMessage/delta\",\"params\":{{\"threadId\":\"t1\",\"turnId\":\"turn-1\",\"itemId\":\"item-1\",\"delta\":\"{c}\"}}}}", .{char_byte});
+        defer allocator.free(json);
+
+        const msg = try decoder.decode(json);
+        try transport.pending_messages.append(allocator, msg);
+    }
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const result = pollCodex(&manager, &agent_state);
+    try std.testing.expectEqual(chunk_count, result.count);
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqualStrings(expected_text.items, agent_state.messages.items[0].content);
 }
