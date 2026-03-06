@@ -276,7 +276,7 @@ pub fn acpMessageToAgentEvent(msg: AcpManager.PendingMessage) ?AgentEvent {
 
 /// Convert an OpenCode Event to a unified AgentEvent.
 /// Returns null for events that are handled separately (status_change).
-pub fn opencodeEventToAgentEvent(event: OpencodeEvent) ?AgentEvent {
+pub fn opencodeEventToAgentEvent(allocator: Allocator, event: OpencodeEvent) ?AgentEvent {
     return switch (event) {
         .message_chunk => |c| .{ .text_chunk = c.delta },
         .thinking_chunk => |c| .{ .thinking_chunk = c.delta },
@@ -308,13 +308,30 @@ pub fn opencodeEventToAgentEvent(event: OpencodeEvent) ?AgentEvent {
             .old_text = d.old_text,
             .new_text = d.new_text,
         } },
-        .commands_update => |commands| .{ .commands_update = commands },
+        .commands_update => |commands| .{ .commands_update = convertOpencodeCommands(allocator, commands) orelse return null },
         .session_compacted => .{ .session_compacted = {} },
         .question_prompt => null, // Handled separately by pollEvents (needs allocator for conversion)
         .question_resolved => .{ .question_resolved = {} },
         .err => |e| .{ .error_message = e.message orelse @tagName(e.code) },
         .status_change => null, // Handled separately by caller
     };
+}
+
+fn convertOpencodeCommands(allocator: Allocator, commands: []const opencode_manager.AvailableCommand) ?[]const protocol.AvailableCommand {
+    const converted = allocator.alloc(protocol.AvailableCommand, commands.len) catch return null;
+
+    for (commands, 0..) |cmd, idx| {
+        converted[idx] = .{
+            .name = cmd.name,
+            .description = cmd.description,
+            .input = if (cmd.input) |input|
+                .{ .hint = input.hint }
+            else
+                null,
+        };
+    }
+
+    return converted;
 }
 
 /// Convert a Codex event to a unified AgentEvent.

@@ -67,6 +67,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.needs_render = true;
         },
         27, 'q' => { // ESC or q - cancel
+            app.pending_agent_connect_idx = null;
             // If we were creating a new tab, close it since user cancelled
             if (app.state.pending_tab_for_selection) |tab_id| {
                 if (app.tab_manager) |*tm| {
@@ -80,12 +81,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.needs_render = true;
         },
         '\r' => { // Enter - select agent and connect
-            try app.connectToSelectedAgent();
-            // Clear pending tab selection (connection will be routed to it in pollAcpUpdates)
-            // Don't clear here - let the connection completion handler route to the right tab
-            // Switch to agent mode after starting connection
-            app.mode = .agent;
-            app.needs_render = true;
+            app.queueSelectedAgentConnection();
         },
         else => {},
     }

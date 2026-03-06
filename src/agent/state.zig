@@ -244,6 +244,19 @@ pub const FilePickerState = struct {
         return self.files.items.len > 0;
     }
 
+    /// Check if an exact file path exists in the loaded file list.
+    pub fn containsPath(self: *const FilePickerState, path: []const u8) bool {
+        if (path.len == 0) return false;
+
+        for (self.files.items) |file_path| {
+            if (std.mem.eql(u8, file_path, path)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// Check if async load is in progress
     pub fn isLoading(self: *const FilePickerState) bool {
         return self.loading_thread != null and !self.loading_complete.load(.acquire);
@@ -3022,6 +3035,18 @@ test "getFileFilter extracts filter text" {
     try std.testing.expectEqualStrings("foo", FilePickerState.getFileFilter("check @foo", 10));
     try std.testing.expectEqualStrings("", FilePickerState.getFileFilter("@", 1));
     try std.testing.expectEqualStrings("", FilePickerState.getFileFilter("no at", 5));
+}
+
+test "containsPath matches loaded files" {
+    var state = FilePickerState.init(std.testing.allocator);
+    defer state.deinit();
+
+    try state.files.append(state.allocator, try state.allocator.dupe(u8, "src/app.zig"));
+    try state.files.append(state.allocator, try state.allocator.dupe(u8, "src/agent/render.zig"));
+
+    try std.testing.expect(state.containsPath("src/app.zig"));
+    try std.testing.expect(!state.containsPath("src/missing.zig"));
+    try std.testing.expect(!state.containsPath(""));
 }
 
 test "fuzzyScore returns null for non-matches" {

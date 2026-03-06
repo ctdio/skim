@@ -302,6 +302,7 @@ pub const App = struct {
     session_manager: ?session_mgr.SessionManager, // Session file management
     blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
     pending_connection: ?PendingConnection, // Background connection thread (ACP or Opencode)
+    pending_agent_connect_idx: ?usize, // Selected agent index queued to start after the next render
     pending_subagent_fetch: PendingSubagentFetch, // Thread-safe result from subagent fetch worker
     in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
     agent_only: bool, // Start in agent-only mode (no diff view)
@@ -725,6 +726,7 @@ pub const App = struct {
             .session_manager = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
             .pending_connection = null,
+            .pending_agent_connect_idx = null,
             .pending_subagent_fetch = .{},
             .in_bracketed_paste = false,
             .agent_only = is_agent_only,
@@ -911,6 +913,7 @@ pub const App = struct {
             .session_manager = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
             .pending_connection = null,
+            .pending_agent_connect_idx = null,
             .pending_subagent_fetch = .{},
             .in_bracketed_paste = false,
             .agent_only = false,
@@ -1049,6 +1052,7 @@ pub const App = struct {
             .session_manager = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
             .pending_connection = null,
+            .pending_agent_connect_idx = null,
             .pending_subagent_fetch = .{},
             .in_bracketed_paste = false,
             .agent_only = false,
@@ -1357,12 +1361,29 @@ pub const App = struct {
 
     /// Check if the active tab's session is initializing
     pub fn isSessionInitializing(self: *App) bool {
+        if (self.pending_agent_connect_idx != null) return true;
         if (self.tab_manager) |*tm| {
             if (tm.activeTab()) |tab| {
                 return tab.isSessionInitializing();
             }
         }
         return false;
+    }
+
+    pub fn queueSelectedAgentConnection(self: *App) void {
+        const agents = self.state.configured_agents orelse return;
+        if (self.state.agent_selection_idx >= agents.len) return;
+
+        self.pending_agent_connect_idx = self.state.agent_selection_idx;
+        self.mode = .agent;
+        self.needs_render = true;
+    }
+
+    pub fn getPendingAgentInfo(self: *const App) ?*const acp.AgentInfo {
+        const idx = self.pending_agent_connect_idx orelse return null;
+        const agents = self.state.configured_agents orelse return null;
+        if (idx >= agents.len) return null;
+        return &agents[idx];
     }
 
     /// Check if any tab has a running shell command
@@ -1776,6 +1797,14 @@ pub const App = struct {
                 if (!self.should_suspend_for_editor) {
                     self.needs_render = false; // Clear the flag after rendering
                 }
+            }
+
+            if (self.pending_agent_connect_idx != null) {
+                self.startQueuedAgentConnection() catch |err| {
+                    std.log.err("Failed to start queued agent connection: {any}", .{err});
+                    self.pending_agent_connect_idx = null;
+                    self.showStatusMessage("Failed to start connection");
+                };
             }
 
             if (first_render) {
@@ -6010,7 +6039,23 @@ pub const App = struct {
     pub fn connectToSelectedAgent(self: *App) !void {
         const agents = self.state.configured_agents orelse return;
         if (self.state.agent_selection_idx >= agents.len) return;
+        self.pending_agent_connect_idx = null;
         try self.connectToAgent(&agents[self.state.agent_selection_idx]);
+    }
+
+    fn startQueuedAgentConnection(self: *App) !void {
+        const idx = self.pending_agent_connect_idx orelse return;
+        const agents = self.state.configured_agents orelse {
+            self.pending_agent_connect_idx = null;
+            return;
+        };
+        if (idx >= agents.len) {
+            self.pending_agent_connect_idx = null;
+            return;
+        }
+
+        self.state.agent_selection_idx = idx;
+        try self.connectToSelectedAgent();
     }
 
     /// Load configured agents from config file.
@@ -6437,6 +6482,115 @@ test "search highlighting - basic match" {
 
     // Verify the match has search highlight style
     try std.testing.expect(result[1].style.bold);
+}
+
+test "queueSelectedAgentConnection switches to agent mode and queues selection" {
+    const allocator = std.testing.allocator;
+
+    const agents = [_]acp.AgentInfo{
+        .{
+            .name = "Codex",
+            .command = "codex",
+            .args = &.{},
+            .protocol = .codex,
+        },
+    };
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent_selection,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = std.heap.ArenaAllocator.init(allocator),
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = null,
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer app.pending_highlight_jobs.deinit();
+    defer app.blame_cache.deinit();
+    defer app.frame_segment_arena.deinit();
+
+    app.state.configured_agents = &agents;
+    app.state.agent_selection_idx = 0;
+
+    app.queueSelectedAgentConnection();
+
+    try std.testing.expectEqual(App.Mode.agent, app.mode);
+    try std.testing.expect(app.needs_render);
+    try std.testing.expectEqual(@as(?usize, 0), app.pending_agent_connect_idx);
+    try std.testing.expectEqualStrings("Codex", app.getPendingAgentInfo().?.name);
+}
+
+test "isSessionInitializing returns true for queued agent connection" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = std.heap.ArenaAllocator.init(allocator),
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+        .pending_connection = null,
+        .pending_agent_connect_idx = 0,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = null,
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer app.pending_highlight_jobs.deinit();
+    defer app.blame_cache.deinit();
+    defer app.frame_segment_arena.deinit();
+
+    try std.testing.expect(app.isSessionInitializing());
 }
 
 test "search highlighting - multiple matches" {

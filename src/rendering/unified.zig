@@ -497,6 +497,20 @@ pub const UnifiedRenderer = struct {
             // Get the chunk of text for this row (slice by display width, not bytes)
             const remaining_text = text[byte_offset_in_text..];
             const chunk = app.profileSliceByDisplayWidth(remaining_text, content_width);
+            const should_pad = is_cursor or is_in_visual or (line_type != null and line_type.? != .context);
+            const content_start_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing;
+            const has_search = app.state.search_state.query_len > 0;
+
+            if (!should_pad and !has_search and line_spans != null and line_spans.?.len == 0) {
+                var plain_seg = [_]vaxis.Cell.Segment{.{
+                    .text = chunk,
+                    .style = style,
+                }};
+                _ = win.print(&plain_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });
+                byte_offset_in_text += chunk.len;
+                rows_rendered += 1;
+                continue;
+            }
 
             // Generate syntax-highlighted segments for this chunk
             const chunk_byte_offset = byte_offset + byte_offset_in_text;
@@ -504,9 +518,6 @@ pub const UnifiedRenderer = struct {
             defer app.frameSegmentAllocator().free(segments);
 
             // Pad segments to full width for cursor, visual selection, or diff lines (add/delete)
-            const should_pad = is_cursor or is_in_visual or (line_type != null and line_type.? != .context);
-            const content_start_col = Layout.sidebar_width + gutter_width + Layout.gutter_spacing;
-
             if (should_pad) {
                 // Always pad to ensure background extends to the right edge
                 const available_width = win.width -| content_start_col;

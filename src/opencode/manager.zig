@@ -5,7 +5,6 @@ const protocol = @import("protocol.zig");
 const patch = @import("patch.zig");
 const sse = @import("sse.zig");
 const server = @import("server.zig");
-const acp_protocol = @import("../acp/protocol.zig");
 
 // =============================================================================
 // Opencode Manager
@@ -23,7 +22,17 @@ const acp_protocol = @import("../acp/protocol.zig");
 
 const log = std.log.scoped(.opencode);
 
-fn freeAvailableCommand(allocator: Allocator, cmd: acp_protocol.AvailableCommand) void {
+pub const AvailableCommandInput = struct {
+    hint: []const u8,
+};
+
+pub const AvailableCommand = struct {
+    name: []const u8,
+    description: []const u8,
+    input: ?AvailableCommandInput = null,
+};
+
+fn freeAvailableCommand(allocator: Allocator, cmd: AvailableCommand) void {
     allocator.free(cmd.name);
     allocator.free(cmd.description);
     if (cmd.input) |input| {
@@ -31,7 +40,7 @@ fn freeAvailableCommand(allocator: Allocator, cmd: acp_protocol.AvailableCommand
     }
 }
 
-fn freeAvailableCommands(allocator: Allocator, commands: []const acp_protocol.AvailableCommand) void {
+fn freeAvailableCommands(allocator: Allocator, commands: []const AvailableCommand) void {
     for (commands) |cmd| {
         freeAvailableCommand(allocator, cmd);
     }
@@ -79,7 +88,7 @@ pub const Event = union(enum) {
     /// Question resolved (question.resolved)
     question_resolved: void,
     /// Available slash commands update
-    commands_update: []const acp_protocol.AvailableCommand,
+    commands_update: []const AvailableCommand,
     /// Session context was compacted
     session_compacted: void,
     /// Status changed
@@ -1409,7 +1418,7 @@ pub const OpencodeManager = struct {
             return;
         }
 
-        var commands_list: std.ArrayListUnmanaged(acp_protocol.AvailableCommand) = .{};
+        var commands_list: std.ArrayListUnmanaged(AvailableCommand) = .{};
         errdefer {
             for (commands_list.items) |cmd| freeAvailableCommand(self.event_allocator, cmd);
             commands_list.deinit(self.event_allocator);
@@ -3889,7 +3898,7 @@ test "commands_update event round-trips through message queue" {
     const desc = try manager.event_allocator.dupe(u8, "Show status");
     errdefer manager.event_allocator.free(desc);
 
-    const commands = try manager.event_allocator.alloc(acp_protocol.AvailableCommand, 1);
+    const commands = try manager.event_allocator.alloc(AvailableCommand, 1);
     errdefer manager.event_allocator.free(commands);
     commands[0] = .{ .name = name, .description = desc, .input = null };
 

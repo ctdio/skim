@@ -579,7 +579,7 @@ const FileRefRange = struct {
 
 /// Find all valid @file references in the input text (files that exist)
 /// Returns a list of ranges. Caller owns the returned slice.
-fn findFileRefRanges(allocator: std.mem.Allocator, text: []const u8) ![]FileRefRange {
+fn findFileRefRanges(allocator: std.mem.Allocator, file_picker: *const state.FilePickerState, text: []const u8) ![]FileRefRange {
     var ranges: std.ArrayList(FileRefRange) = .{};
     errdefer ranges.deinit(allocator);
 
@@ -605,13 +605,11 @@ fn findFileRefRanges(allocator: std.mem.Allocator, text: []const u8) ![]FileRefR
 
                 const file_path = text[path_start..path_end];
                 if (file_path.len > 0) {
-                    // Check if file exists
-                    const cwd = std.fs.cwd();
-                    if (cwd.access(file_path, .{})) {
+                    if (file_picker.containsPath(file_path)) {
                         try ranges.append(allocator, .{ .start = i, .end = path_end });
                         i = path_end;
                         continue;
-                    } else |_| {}
+                    }
                 }
             }
         }
@@ -619,14 +617,6 @@ fn findFileRefRanges(allocator: std.mem.Allocator, text: []const u8) ![]FileRefR
     }
 
     return ranges.toOwnedSlice(allocator);
-}
-
-/// Check if a position is within any file reference range
-fn isInFileRef(pos: usize, ranges: []const FileRefRange) bool {
-    for (ranges) |r| {
-        if (pos >= r.start and pos < r.end) return true;
-    }
-    return false;
 }
 
 // =============================================================================
@@ -1095,6 +1085,10 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
         .acp => |m| if (m.server_name) |name| name else "Agent",
         .opencode => "Opencode",
         .codex => "Codex",
+    } else if (app.getPendingAgentInfo()) |info| switch (info.protocol) {
+        .acp => info.name,
+        .opencode => "Opencode",
+        .codex => "Codex",
     } else "Agent";
 
     const suffix = if (is_focused) " [focused]" else "";
@@ -1134,6 +1128,10 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
             .@"error" => " Error",
         },
         .opencode => |m| if (m.isThinking()) " Thinking..." else " Active",
+    } else if (app.getPendingAgentInfo()) |info| switch (info.protocol) {
+        .acp => " Connecting...",
+        .opencode => " Connecting...",
+        .codex => " Connecting...",
     } else " Not connected";
 
     const title_style = vaxis.Style{
@@ -1194,13 +1192,13 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     const info_end = if (status_col > 0) status_col - 1 else 0;
 
     if (token_text) |tt| {
-        const sep = " \xe2\x94\x82 "; // " | "
+        const sep = " | ";
         printTitleInfoSegmentClipped(win, 0, &info_col, info_end, sep, dim_style);
         printTitleInfoSegmentClipped(win, 0, &info_col, info_end, tt, dim_style);
     }
 
     if (rate_text) |rt| {
-        const sep = " \xe2\x94\x82 "; // " | "
+        const sep = " | ";
         const warn_style = vaxis.Style{ .fg = Color.yellow };
         printTitleInfoSegmentClipped(win, 0, &info_col, info_end, sep, dim_style);
         printTitleInfoSegmentClipped(win, 0, &info_col, info_end, "\xe2\x9a\xa0 ", warn_style); // warning sign
@@ -1369,7 +1367,11 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     if (agent_state.messages.items.len == 0) {
         if (is_loading) {
             // Show prominent loading status in center
-            const loading_text = if (app.getActiveAcpManager()) |mgr| switch (mgr.status) {
+            const loading_text = if (app.getPendingAgentInfo()) |info| switch (info.protocol) {
+                .acp => "Connecting to agent...",
+                .opencode => "Connecting to Opencode...",
+                .codex => "Connecting to Codex...",
+            } else if (app.getActiveAcpManager()) |mgr| switch (mgr.status) {
                 .discovering => "Discovering agent...",
                 .connecting => "Connecting to agent...",
                 .connected => "Creating session...",
@@ -1405,16 +1407,18 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
         return;
     }
 
-    // Ensure markdown is parsed for agent messages
-    // This lazy-initializes the parser and parses content on first render
-    // Parsing is skipped for non-agent messages (user, tool, etc.)
-    for (agent_state.messages.items) |*msg| {
-        _ = msg.ensureMarkdownParsed();
+    const wrap_width = if (win.width > 5) win.width - 5 else 1;
+    const line_map_needs_refresh = agent_state.line_map_dirty or
+        agent_state.line_map.needsRebuild(wrap_width, agent_state.diff_view_mode);
+
+    if (line_map_needs_refresh) {
+        for (agent_state.messages.items) |*msg| {
+            _ = msg.ensureMarkdownParsed();
+        }
     }
 
     // Get the pre-computed line map (builds if dirty)
     // Reserve 4 cols for indent + 1 col for scrollbar
-    const wrap_width = if (win.width > 5) win.width - 5 else 1;
     const line_map = agent_state.ensureLineMap(wrap_width, &app.syntax_highlighter) catch {
         // Fallback: show error message
         var err_seg = [_]vaxis.Cell.Segment{
@@ -2549,7 +2553,7 @@ fn renderInputArea(
     const file_ref_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
 
     // Find file reference ranges for highlighting
-    const file_ref_ranges = findFileRefRanges(app.allocator, text) catch &[_]FileRefRange{};
+    const file_ref_ranges = findFileRefRanges(app.allocator, &agent_state.file_picker, text) catch &[_]FileRefRange{};
     defer if (file_ref_ranges.len > 0) app.allocator.free(file_ref_ranges);
     const has_file_refs = file_ref_ranges.len > 0;
     // Use the same max_input_width as calculated earlier for consistency
@@ -2632,6 +2636,7 @@ fn renderInputArea(
                     const cursor = agent_state.input.vim.cursor_pos;
                     const sel_start = if (in_visual_mode) @min(anchor, cursor) else 0;
                     const sel_end = if (in_visual_mode) @max(anchor, cursor) else 0;
+                    var file_ref_idx: usize = 0;
 
                     // Visual selection style
                     const visual_style = vaxis.Style{
@@ -2656,7 +2661,12 @@ fn renderInputArea(
 
                         const abs_pos = segment_start + byte_idx;
                         const in_selection = in_visual_mode and abs_pos >= sel_start and abs_pos <= sel_end;
-                        const in_file_ref = isInFileRef(abs_pos, file_ref_ranges);
+                        while (file_ref_idx < file_ref_ranges.len and file_ref_ranges[file_ref_idx].end <= abs_pos) {
+                            file_ref_idx += 1;
+                        }
+                        const in_file_ref = file_ref_idx < file_ref_ranges.len and
+                            abs_pos >= file_ref_ranges[file_ref_idx].start and
+                            abs_pos < file_ref_ranges[file_ref_idx].end;
                         const style = if (in_selection)
                             visual_style
                         else if (in_file_ref)
@@ -3635,17 +3645,19 @@ fn withModalBg(s: vaxis.Style) vaxis.Style {
 /// Returns a slice into the provided buffer.
 /// Examples: 500 -> "500 tokens", 16709 -> "16.7K tokens", 1234567 -> "1.2M tokens"
 fn formatTokenUsage(buf: []u8, total_tokens: u64, model_context_window: u64) []const u8 {
+    const separator = " | ";
+
     if (model_context_window > 0) {
         const used_pct = @as(f64, @floatFromInt(total_tokens)) / @as(f64, @floatFromInt(model_context_window)) * 100.0;
         const remaining_pct = @max(@as(f64, 0.0), 100.0 - used_pct);
         if (total_tokens >= 1_000_000) {
             const m = @as(f64, @floatFromInt(total_tokens)) / 1_000_000.0;
-            return std.fmt.bufPrint(buf, "{d:.1}M tokens \xe2\x94\x82 {d:.0}% left", .{ m, remaining_pct }) catch "? tokens";
+            return std.fmt.bufPrint(buf, "{d:.1}M tokens{s}{d:.0}% left", .{ m, separator, remaining_pct }) catch "? tokens";
         } else if (total_tokens >= 1_000) {
             const k = @as(f64, @floatFromInt(total_tokens)) / 1_000.0;
-            return std.fmt.bufPrint(buf, "{d:.1}K tokens \xe2\x94\x82 {d:.0}% left", .{ k, remaining_pct }) catch "? tokens";
+            return std.fmt.bufPrint(buf, "{d:.1}K tokens{s}{d:.0}% left", .{ k, separator, remaining_pct }) catch "? tokens";
         } else {
-            return std.fmt.bufPrint(buf, "{d} tokens \xe2\x94\x82 {d:.0}% left", .{ total_tokens, remaining_pct }) catch "? tokens";
+            return std.fmt.bufPrint(buf, "{d} tokens{s}{d:.0}% left", .{ total_tokens, separator, remaining_pct }) catch "? tokens";
         }
     } else {
         if (total_tokens >= 1_000_000) {
@@ -3673,16 +3685,13 @@ test "formatTokenUsage: small count without context window" {
 test "formatTokenUsage: thousands with context window" {
     var buf: [64]u8 = undefined;
     const result = formatTokenUsage(&buf, 16709, 258400);
-    // 16709/258400 -> "16.7K tokens | 94% left"
-    try std.testing.expect(std.mem.startsWith(u8, result, "16.7K tokens"));
-    try std.testing.expect(std.mem.indexOf(u8, result, "94% left") != null);
+    try std.testing.expectEqualStrings("16.7K tokens | 94% left", result);
 }
 
 test "formatTokenUsage: millions with context window" {
     var buf: [64]u8 = undefined;
     const result = formatTokenUsage(&buf, 1_234_567, 2_000_000);
-    try std.testing.expect(std.mem.startsWith(u8, result, "1.2M tokens"));
-    try std.testing.expect(std.mem.indexOf(u8, result, "38% left") != null);
+    try std.testing.expectEqualStrings("1.2M tokens | 38% left", result);
 }
 
 test "formatTokenUsage: exact thousands" {
@@ -3694,6 +3703,5 @@ test "formatTokenUsage: exact thousands" {
 test "formatTokenUsage: high context percentage" {
     var buf: [64]u8 = undefined;
     const result = formatTokenUsage(&buf, 200000, 258400);
-    try std.testing.expect(std.mem.startsWith(u8, result, "200.0K tokens"));
-    try std.testing.expect(std.mem.indexOf(u8, result, "23% left") != null);
+    try std.testing.expectEqualStrings("200.0K tokens | 23% left", result);
 }

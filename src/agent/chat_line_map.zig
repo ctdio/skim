@@ -1650,14 +1650,14 @@ pub const ChatLineMap = struct {
                     const fitting = RenderUtils.sliceByDisplayWidth(remaining, space_left);
                     var break_at: usize = fitting.len;
 
-                    // Prefer the last space in the fitting slice.
+                    // Prefer the last natural break point in the fitting slice.
                     if (space_left > 0 and fitting.len > 0) {
-                        var last_space: ?usize = null;
+                        var last_breakable: ?usize = null;
                         for (fitting, 0..) |c, i| {
-                            if (c == ' ') last_space = i;
+                            if (isBreakableChar(c)) last_breakable = i;
                         }
-                        if (last_space) |sp| {
-                            break_at = sp + 1; // Include the space in current line
+                        if (last_breakable) |idx| {
+                            break_at = idx + 1;
                         }
                     }
 
@@ -2618,4 +2618,35 @@ test "markdown segment wrapping preserves UTF-8 grapheme boundaries" {
     }
 
     try std.testing.expectEqualStrings(content, rebuilt.items);
+}
+
+test "markdown inline code prefers slash break points" {
+    const allocator = std.testing.allocator;
+    var line_map = ChatLineMap.init(allocator);
+    defer line_map.deinit();
+
+    var messages = [_]Message{.{
+        .role = .agent,
+        .content = "`src/app.zig`",
+        .timestamp = 0,
+    }};
+    defer messages[0].deinit(allocator);
+
+    _ = messages[0].ensureMarkdownParsed();
+    try line_map.build(&messages, 9, .unified, null, null);
+
+    var lines: [2][]const u8 = undefined;
+    var line_count: usize = 0;
+
+    for (line_map.records.items) |record| {
+        if (record.line_type != .message_content) continue;
+        if (line_count < lines.len) {
+            lines[line_count] = record.text;
+        }
+        line_count += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), line_count);
+    try std.testing.expectEqualStrings("src/", lines[0]);
+    try std.testing.expectEqualStrings("app.zig", lines[1]);
 }

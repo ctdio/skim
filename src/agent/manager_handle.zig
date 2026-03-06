@@ -400,7 +400,11 @@ fn pollOpencode(m: *OpencodeManager, allocator: Allocator, agent_state: *AgentSt
         }
 
         // Process event inline while data is still alive
-        if (opencodeEventToAgentEvent(event)) |agent_event| {
+        if (opencodeEventToAgentEvent(allocator, event)) |agent_event| {
+            defer switch (agent_event) {
+                .commands_update => |commands| allocator.free(commands),
+                else => {},
+            };
             processAgentEvent(agent_state, agent_event);
             count += 1;
         }
