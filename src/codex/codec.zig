@@ -157,6 +157,11 @@ pub const Encoder = struct {
             try writer.print("\"reasoningEffort\":{f}", .{std.json.fmt(effort.toString(), .{})});
             first = false;
         }
+        if (params.service_tier) |service_tier| {
+            if (!first) try writer.writeByte(',');
+            try writer.print("\"serviceTier\":{f}", .{std.json.fmt(service_tier.toString(), .{})});
+            first = false;
+        }
         if (params.input) |input_items| {
             if (!first) try writer.writeByte(',');
             try writer.writeAll("\"input\":[");
@@ -233,6 +238,12 @@ pub const Encoder = struct {
             id,
             std.json.fmt(params.thread_id, .{}),
         });
+        if (params.reasoning_effort) |effort| {
+            try writer.print(",\"effort\":{f}", .{std.json.fmt(effort.toString(), .{})});
+        }
+        if (params.service_tier) |service_tier| {
+            try writer.print(",\"serviceTier\":{f}", .{std.json.fmt(service_tier.toString(), .{})});
+        }
         if (params.input) |input_items| {
             try writer.writeAll(",\"input\":[");
             for (input_items, 0..) |item, i| {
@@ -488,6 +499,7 @@ pub const Decoder = struct {
                 .network_access = s.networkAccess orelse false,
             } else null,
             .reasoning_effort = if (r.reasoningEffort) |re| protocol.ReasoningEffort.fromString(re) else null,
+            .service_tier = if (r.serviceTier) |st| protocol.ServiceTier.fromString(st) else null,
         };
     }
 
@@ -1041,6 +1053,7 @@ const RawThreadStartResult = struct {
     approvalPolicy: ?[]const u8 = null,
     sandbox: ?RawSandboxPolicy = null,
     reasoningEffort: ?[]const u8 = null,
+    serviceTier: ?[]const u8 = null,
 };
 
 const RawReasoningEffort = struct {
@@ -1150,6 +1163,7 @@ test "encode thread start" {
         .cwd = "/home/user/projects/skim",
         .approval_policy = .on_request,
         .reasoning_effort = .medium,
+        .service_tier = .fast,
         .input = &text_input,
     });
     defer allocator.free(result);
@@ -1160,6 +1174,7 @@ test "encode thread start" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"model\":\"gpt-5.1-codex-mini\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"approvalPolicy\":\"on-request\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"reasoningEffort\":\"medium\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"serviceTier\":\"fast\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"input\":[") != null);
 }
 
@@ -1172,6 +1187,8 @@ test "encode turn start" {
     };
     const result = try encoder.encodeTurnStart(5, .{
         .thread_id = "019c6c65-9df2-7003-b62e-9ab034e6d054",
+        .reasoning_effort = .low,
+        .service_tier = .fast,
         .input = &text_input,
     });
     defer allocator.free(result);
@@ -1180,6 +1197,8 @@ test "encode turn start" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"id\":5") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"method\":\"turn/start\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"threadId\":\"019c6c65-9df2-7003-b62e-9ab034e6d054\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"effort\":\"low\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"serviceTier\":\"fast\"") != null);
 }
 
 test "encode turn interrupt" {
@@ -1277,7 +1296,7 @@ test "decode thread start response" {
     var decoder = Decoder.init(allocator);
 
     const json =
-        \\{"id":1,"result":{"thread":{"id":"019c6c65-9df2-7003-b62e-9ab034e6d054","preview":"","modelProvider":"openai","createdAt":1771345124,"updatedAt":1771345125,"path":"/home/user/.codex/sessions/019c6c65-9df2-7003-b62e-9ab034e6d054.jsonl","cwd":"/home/user/projects/skim","cliVersion":"0.98.0","source":"vscode","gitInfo":{"sha":"abc123","branch":"codex-app-server","originUrl":"git@github.com:ctdio/skim.git"},"turns":[]},"model":"gpt-5.1-codex-mini","modelProvider":"openai","cwd":"/home/user/projects/skim","approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite","writableRoots":[],"networkAccess":false},"reasoningEffort":"medium"}}
+        \\{"id":1,"result":{"thread":{"id":"019c6c65-9df2-7003-b62e-9ab034e6d054","preview":"","modelProvider":"openai","createdAt":1771345124,"updatedAt":1771345125,"path":"/home/user/.codex/sessions/019c6c65-9df2-7003-b62e-9ab034e6d054.jsonl","cwd":"/home/user/projects/skim","cliVersion":"0.98.0","source":"vscode","gitInfo":{"sha":"abc123","branch":"codex-app-server","originUrl":"git@github.com:ctdio/skim.git"},"turns":[]},"model":"gpt-5.1-codex-mini","modelProvider":"openai","cwd":"/home/user/projects/skim","approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite","writableRoots":[],"networkAccess":false},"reasoningEffort":"medium","serviceTier":"fast"}}
     ;
 
     var msg = try decoder.decode(json);
@@ -1382,7 +1401,7 @@ test "parse thread start result" {
     var decoder = Decoder.init(allocator);
 
     const json =
-        \\{"thread":{"id":"019c6c65-9df2-7003-b62e-9ab034e6d054","preview":"","modelProvider":"openai","createdAt":1771345124,"updatedAt":1771345125,"path":"/home/user/.codex/sessions/019c6c65-9df2-7003-b62e-9ab034e6d054.jsonl","cwd":"/home/user/projects/skim","cliVersion":"0.98.0","source":"vscode","gitInfo":{"sha":"abc123","branch":"codex-app-server","originUrl":"git@github.com:ctdio/skim.git"},"turns":[]},"model":"gpt-5.1-codex-mini","modelProvider":"openai","cwd":"/home/user/projects/skim","approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite","writableRoots":[],"networkAccess":false},"reasoningEffort":"medium"}
+        \\{"thread":{"id":"019c6c65-9df2-7003-b62e-9ab034e6d054","preview":"","modelProvider":"openai","createdAt":1771345124,"updatedAt":1771345125,"path":"/home/user/.codex/sessions/019c6c65-9df2-7003-b62e-9ab034e6d054.jsonl","cwd":"/home/user/projects/skim","cliVersion":"0.98.0","source":"vscode","gitInfo":{"sha":"abc123","branch":"codex-app-server","originUrl":"git@github.com:ctdio/skim.git"},"turns":[]},"model":"gpt-5.1-codex-mini","modelProvider":"openai","cwd":"/home/user/projects/skim","approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite","writableRoots":[],"networkAccess":false},"reasoningEffort":"medium","serviceTier":"fast"}
     ;
 
     const result = try decoder.parseThreadStartResult(json);
@@ -1415,6 +1434,7 @@ test "parse thread start result" {
     try std.testing.expectEqualStrings("gpt-5.1-codex-mini", result.model.?);
     try std.testing.expect(result.approval_policy.? == .on_request);
     try std.testing.expect(result.reasoning_effort.? == .medium);
+    try std.testing.expect(result.service_tier.? == .fast);
 
     const gi = result.thread.git_info.?;
     try std.testing.expectEqualStrings("abc123", gi.sha.?);

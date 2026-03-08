@@ -1650,9 +1650,15 @@ pub const UI = struct {
                         .codex => |cm| {
                             const model_name = cm.current_model orelse cm.model orelse "Codex";
                             if (model_name.len > 0) {
-                                var model_buf: [128]u8 = undefined;
+                                const fast_mode_enabled = if (cm.service_tier) |service_tier| service_tier == .fast else false;
+                                var model_buf: [160]u8 = undefined;
                                 const model_str = if (cm.reasoning_effort) |effort|
-                                    std.fmt.bufPrint(&model_buf, " {s} [{s}]", .{ model_name, effort.toString() }) catch ""
+                                    if (fast_mode_enabled)
+                                        std.fmt.bufPrint(&model_buf, " {s} [{s}] [fast]", .{ model_name, effort.toString() }) catch ""
+                                    else
+                                        std.fmt.bufPrint(&model_buf, " {s} [{s}]", .{ model_name, effort.toString() }) catch ""
+                                else if (fast_mode_enabled)
+                                    std.fmt.bufPrint(&model_buf, " {s} [fast]", .{model_name}) catch ""
                                 else
                                     std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch "";
 

@@ -1460,6 +1460,11 @@ fn extractSlashCommandName(input: []const u8) []const u8 {
     return after_slash;
 }
 
+fn toggleFastServiceTier(current_service_tier: ?codex_protocol.ServiceTier) codex_protocol.ServiceTier {
+    const service_tier = current_service_tier orelse .flex;
+    return if (service_tier == .fast) .flex else .fast;
+}
+
 /// Handle local slash commands (executed by skim, not sent to agent)
 fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: []const u8, args: []const u8) !void {
     if (std.mem.eql(u8, command_name, "clear")) {
@@ -1535,6 +1540,48 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
         }
 
         try agent_state.addMessage(.system, "Switching to model selection...");
+        return;
+    }
+
+    if (std.mem.eql(u8, command_name, "fast")) {
+        if (app.getActiveManager()) |mgr| {
+            switch (mgr) {
+                .codex => |cm| {
+                    const trimmed_args = std.mem.trim(u8, args, &std.ascii.whitespace);
+                    if (trimmed_args.len == 0) {
+                        const next_service_tier = toggleFastServiceTier(cm.service_tier);
+                        cm.setServiceTier(next_service_tier);
+                        const status = if (next_service_tier == .fast) "Fast mode enabled" else "Fast mode disabled";
+                        try agent_state.addMessage(.system, status);
+                        return;
+                    }
+
+                    if (std.mem.eql(u8, trimmed_args, "off") or
+                        std.mem.eql(u8, trimmed_args, "disable") or
+                        std.mem.eql(u8, trimmed_args, "flex"))
+                    {
+                        cm.setServiceTier(.flex);
+                        try agent_state.addMessage(.system, "Fast mode disabled");
+                        return;
+                    }
+
+                    if (std.mem.eql(u8, trimmed_args, "status")) {
+                        const service_tier = cm.service_tier orelse .flex;
+                        const status = if (service_tier == .fast) "Fast mode is enabled" else "Fast mode is disabled";
+                        try agent_state.addMessage(.system, status);
+                        return;
+                    }
+
+                    try agent_state.addMessage(.system, "Invalid fast mode option. Use: /fast, /fast off, or /fast status");
+                    return;
+                },
+                .acp, .opencode => {
+                    try agent_state.addMessage(.system, "Fast mode is only available for Codex");
+                    return;
+                },
+            }
+        }
+        try agent_state.addMessage(.system, "No active agent");
         return;
     }
 
@@ -2764,6 +2811,24 @@ test "parsePromptContent multiple @file references" {
     try std.testing.expect(std.mem.endsWith(u8, parsed.blocks[1].embedded_resource.resource.uri, "/README.md"));
     try std.testing.expectEqualStrings(" and ", parsed.blocks[2].text.text);
     try std.testing.expect(std.mem.endsWith(u8, parsed.blocks[3].embedded_resource.resource.uri, "/build.zig"));
+}
+
+test "toggleFastServiceTier enables fast mode when unset" {
+    const result = toggleFastServiceTier(null);
+
+    try std.testing.expectEqual(codex_protocol.ServiceTier.fast, result);
+}
+
+test "toggleFastServiceTier disables fast mode when enabled" {
+    const result = toggleFastServiceTier(.fast);
+
+    try std.testing.expectEqual(codex_protocol.ServiceTier.flex, result);
+}
+
+test "toggleFastServiceTier enables fast mode when flex" {
+    const result = toggleFastServiceTier(.flex);
+
+    try std.testing.expectEqual(codex_protocol.ServiceTier.fast, result);
 }
 
 /// Execute an agent command palette action

@@ -25,6 +25,8 @@ pub const CodexManager = struct {
 
     // User-requested approval policy (set before startThread, sent on thread/start)
     requested_approval_policy: ?protocol.ApprovalPolicy,
+    requested_reasoning_effort: ?protocol.ReasoningEffort,
+    requested_service_tier: ?protocol.ServiceTier,
 
     // Thread state (populated after startThread)
     thread_id: ?[]const u8,
@@ -33,6 +35,7 @@ pub const CodexManager = struct {
     model_provider: ?[]const u8,
     approval_policy: ?protocol.ApprovalPolicy,
     reasoning_effort: ?protocol.ReasoningEffort,
+    service_tier: ?protocol.ServiceTier,
 
     // Model list (populated after listModels)
     models: ?[]protocol.ModelInfo,
@@ -212,12 +215,15 @@ pub const CodexManager = struct {
             .transport = null,
             .status = .disconnected,
             .requested_approval_policy = null,
+            .requested_reasoning_effort = null,
+            .requested_service_tier = null,
             .thread_id = null,
             .thread_info = null,
             .model = null,
             .model_provider = null,
             .approval_policy = null,
             .reasoning_effort = null,
+            .service_tier = null,
             .models = null,
             .current_model = null,
             .turn_id = null,
@@ -319,6 +325,8 @@ pub const CodexManager = struct {
             .model = model,
             .cwd = cwd,
             .approval_policy = self.requested_approval_policy,
+            .reasoning_effort = self.requested_reasoning_effort,
+            .service_tier = self.requested_service_tier,
         }) catch return error.ThreadStartFailed;
         defer self.allocator.free(msg);
         try transport.send(msg);
@@ -346,7 +354,10 @@ pub const CodexManager = struct {
         self.model = result.model;
         self.model_provider = result.model_provider;
         self.approval_policy = result.approval_policy;
-        self.reasoning_effort = result.reasoning_effort;
+        self.reasoning_effort = result.reasoning_effort orelse self.requested_reasoning_effort;
+        self.service_tier = result.service_tier orelse self.requested_service_tier;
+        self.requested_reasoning_effort = self.reasoning_effort;
+        self.requested_service_tier = self.service_tier;
 
         // Free fields from ThreadStartResult that we don't store in the manager
         if (result.cwd) |c| self.allocator.free(c);
@@ -403,6 +414,8 @@ pub const CodexManager = struct {
         };
         const msg = encoder.encodeTurnStart(req_id.number, .{
             .thread_id = thread_id,
+            .reasoning_effort = self.requested_reasoning_effort,
+            .service_tier = self.requested_service_tier,
             .input = &text_input,
         }) catch return error.TurnStartFailed;
         defer self.allocator.free(msg);
@@ -536,6 +549,8 @@ pub const CodexManager = struct {
             thread: ?std.json.Value = null,
             model: ?[]const u8 = null,
             modelProvider: ?[]const u8 = null,
+            reasoningEffort: ?[]const u8 = null,
+            serviceTier: ?[]const u8 = null,
         };
 
         const parsed = std.json.parseFromSlice(RawResumeResult, self.allocator, result_json, .{
@@ -560,6 +575,10 @@ pub const CodexManager = struct {
         if (r.modelProvider) |mp| {
             self.model_provider = self.allocator.dupe(u8, mp) catch return error.OutOfMemory;
         }
+        self.reasoning_effort = if (r.reasoningEffort) |re| protocol.ReasoningEffort.fromString(re) else null;
+        self.requested_reasoning_effort = self.reasoning_effort;
+        self.service_tier = if (r.serviceTier) |st| protocol.ServiceTier.fromString(st) else null;
+        self.requested_service_tier = self.service_tier;
 
         self.status = .thread_active;
     }
@@ -672,7 +691,14 @@ pub const CodexManager = struct {
 
     /// Set the reasoning effort level for subsequent turns.
     pub fn setReasoningEffort(self: *CodexManager, effort: protocol.ReasoningEffort) void {
+        self.requested_reasoning_effort = effort;
         self.reasoning_effort = effort;
+    }
+
+    /// Set the service tier for subsequent turns.
+    pub fn setServiceTier(self: *CodexManager, service_tier: protocol.ServiceTier) void {
+        self.requested_service_tier = service_tier;
+        self.service_tier = service_tier;
     }
 
     /// Set approval policy for subsequent turns.
@@ -1019,6 +1045,7 @@ pub const CodexManager = struct {
 
         self.approval_policy = null;
         self.reasoning_effort = null;
+        self.service_tier = null;
 
         if (self.turn_id) |tid| self.allocator.free(tid);
         self.turn_id = null;
@@ -2393,6 +2420,9 @@ test "new fields initialize to null" {
 
     try std.testing.expect(manager.models == null);
     try std.testing.expect(manager.current_model == null);
+    try std.testing.expect(manager.requested_reasoning_effort == null);
+    try std.testing.expect(manager.requested_service_tier == null);
+    try std.testing.expect(manager.service_tier == null);
 }
 
 test "setModel stores and frees model id" {
@@ -2414,12 +2444,31 @@ test "setReasoningEffort stores effort level" {
     defer manager.deinit();
 
     try std.testing.expect(manager.reasoning_effort == null);
+    try std.testing.expect(manager.requested_reasoning_effort == null);
 
     manager.setReasoningEffort(.high);
     try std.testing.expect(manager.reasoning_effort.? == .high);
+    try std.testing.expect(manager.requested_reasoning_effort.? == .high);
 
     manager.setReasoningEffort(.low);
     try std.testing.expect(manager.reasoning_effort.? == .low);
+    try std.testing.expect(manager.requested_reasoning_effort.? == .low);
+}
+
+test "setServiceTier stores service tier" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    try std.testing.expect(manager.service_tier == null);
+    try std.testing.expect(manager.requested_service_tier == null);
+
+    manager.setServiceTier(.fast);
+    try std.testing.expect(manager.service_tier.? == .fast);
+    try std.testing.expect(manager.requested_service_tier.? == .fast);
+
+    manager.setServiceTier(.flex);
+    try std.testing.expect(manager.service_tier.? == .flex);
+    try std.testing.expect(manager.requested_service_tier.? == .flex);
 }
 
 test "listThreads fails when not connected" {

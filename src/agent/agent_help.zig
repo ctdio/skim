@@ -174,6 +174,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     try content_lines.append(app.allocator, .{ .section = "SLASH COMMANDS" });
     const slash_bindings = [_]Binding{
         .{ .key = "/clear", .desc = "Clear session" },
+        .{ .key = "/fast", .desc = "Toggle Codex fast mode" },
         .{ .key = "/model", .desc = "Switch AI model" },
         .{ .key = "/permissions", .desc = "Switch Codex permission mode" },
         .{ .key = "/resume", .desc = "Resume session" },

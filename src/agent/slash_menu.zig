@@ -12,6 +12,7 @@ pub const LocalCommand = struct {
 /// Local slash commands that skim handles (not sent to agent)
 pub const local_commands = [_]LocalCommand{
     .{ .name = "clear", .description = "Clear session and start fresh" },
+    .{ .name = "fast", .description = "Toggle Codex fast mode" },
     .{ .name = "model", .description = "Switch AI model" },
     .{ .name = "thinking", .description = "Set Codex thinking effort" },
     .{ .name = "permissions", .description = "Switch Codex permission mode" },
@@ -104,6 +105,7 @@ test "SlashMenuState basic operations" {
 
 test "isLocalCommand" {
     try std.testing.expect(isLocalCommand("clear"));
+    try std.testing.expect(isLocalCommand("fast"));
     try std.testing.expect(isLocalCommand("model"));
     try std.testing.expect(isLocalCommand("thinking"));
     try std.testing.expect(isLocalCommand("permissions"));

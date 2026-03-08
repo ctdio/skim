@@ -36,6 +36,7 @@ pub const TokenUsage = protocol.TokenUsage;
 pub const TokenCounts = protocol.TokenCounts;
 pub const ModelInfo = protocol.ModelInfo;
 pub const ReasoningEffort = protocol.ReasoningEffort;
+pub const ServiceTier = protocol.ServiceTier;
 pub const ApprovalPolicy = protocol.ApprovalPolicy;
 pub const ItemStartedParams = protocol.ItemStartedParams;
 

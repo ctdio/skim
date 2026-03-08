@@ -64,6 +64,26 @@ pub const ReasoningEffort = enum {
     }
 };
 
+pub const ServiceTier = enum {
+    fast,
+    flex,
+
+    pub fn fromString(s: []const u8) ?ServiceTier {
+        const map = std.StaticStringMap(ServiceTier).initComptime(.{
+            .{ "fast", .fast },
+            .{ "flex", .flex },
+        });
+        return map.get(s);
+    }
+
+    pub fn toString(self: ServiceTier) []const u8 {
+        return switch (self) {
+            .fast => "fast",
+            .flex => "flex",
+        };
+    }
+};
+
 pub const ApprovalPolicy = enum {
     never,
     unless_trusted,
@@ -292,6 +312,7 @@ pub const ThreadStartParams = struct {
     cwd: ?[]const u8 = null,
     approval_policy: ?ApprovalPolicy = null,
     reasoning_effort: ?ReasoningEffort = null,
+    service_tier: ?ServiceTier = null,
     input: ?[]InputItem = null,
 };
 
@@ -303,6 +324,7 @@ pub const ThreadStartResult = struct {
     approval_policy: ?ApprovalPolicy = null,
     sandbox: ?SandboxPolicy = null,
     reasoning_effort: ?ReasoningEffort = null,
+    service_tier: ?ServiceTier = null,
 };
 
 pub const ThreadResumeParams = struct {
@@ -336,6 +358,8 @@ pub const ThreadListResult = struct {
 
 pub const TurnStartParams = struct {
     thread_id: []const u8,
+    reasoning_effort: ?ReasoningEffort = null,
+    service_tier: ?ServiceTier = null,
     input: ?[]InputItem = null,
 };
 
