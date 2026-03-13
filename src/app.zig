@@ -104,6 +104,22 @@ const PendingJob = struct {
     old_content: []const u8, // Owned OLD hunk content
 };
 
+const PendingBlameResult = struct {
+    path: []const u8, // Owned by c_allocator
+    blame_data: ?blame.BlameData,
+    duration_ns: u64,
+};
+
+const BlameFetchContext = struct {
+    app: *App,
+    path: []const u8, // Owned by c_allocator
+
+    pub fn deinit(self: *BlameFetchContext) void {
+        std.heap.c_allocator.free(self.path);
+        std.heap.c_allocator.destroy(self);
+    }
+};
+
 // Static buffer for vaxis Tty writer (must persist for lifetime of Tty)
 var tty_static_buffer: [4096]u8 = undefined;
 
@@ -301,6 +317,10 @@ pub const App = struct {
     tui_server: ?tui_server.TuiServer, // TCP server for CLI/MCP connections
     session_manager: ?session_mgr.SessionManager, // Session file management
     blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
+    pending_blame_results: std.ArrayListUnmanaged(PendingBlameResult),
+    pending_blame_mutex: std.Thread.Mutex,
+    pending_blame_ready: std.atomic.Value(bool),
+    blame_requests_in_flight: std.StringHashMapUnmanaged(void),
     pending_connection: ?PendingConnection, // Background connection thread (ACP or Opencode)
     pending_agent_connect_idx: ?usize, // Selected agent index queued to start after the next render
     pending_subagent_fetch: PendingSubagentFetch, // Thread-safe result from subagent fetch worker
@@ -725,6 +745,10 @@ pub const App = struct {
             .tui_server = null,
             .session_manager = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+            .pending_blame_results = .{},
+            .pending_blame_mutex = .{},
+            .pending_blame_ready = std.atomic.Value(bool).init(false),
+            .blame_requests_in_flight = .{},
             .pending_connection = null,
             .pending_agent_connect_idx = null,
             .pending_subagent_fetch = .{},
@@ -912,6 +936,10 @@ pub const App = struct {
             .tui_server = null,
             .session_manager = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+            .pending_blame_results = .{},
+            .pending_blame_mutex = .{},
+            .pending_blame_ready = std.atomic.Value(bool).init(false),
+            .blame_requests_in_flight = .{},
             .pending_connection = null,
             .pending_agent_connect_idx = null,
             .pending_subagent_fetch = .{},
@@ -1051,6 +1079,10 @@ pub const App = struct {
             .tui_server = null,
             .session_manager = null,
             .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+            .pending_blame_results = .{},
+            .pending_blame_mutex = .{},
+            .pending_blame_ready = std.atomic.Value(bool).init(false),
+            .blame_requests_in_flight = .{},
             .pending_connection = null,
             .pending_agent_connect_idx = null,
             .pending_subagent_fetch = .{},
@@ -1178,6 +1210,13 @@ pub const App = struct {
             entry.value_ptr.deinit();
         }
         self.blame_cache.deinit();
+        self.drainPendingBlameResults();
+        self.pending_blame_results.deinit(std.heap.c_allocator);
+        var in_flight_iter = self.blame_requests_in_flight.keyIterator();
+        while (in_flight_iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.blame_requests_in_flight.deinit(self.allocator);
         self.syntax_highlighter.deinit();
         // Only deinit vx/tty in TUI mode (not headless)
         if (self.vx) |*vx| {
@@ -1632,7 +1671,8 @@ pub const App = struct {
             const shell_cmd_running = self.hasAnyRunningShellCommand();
             // Check if a connection thread is running (need to poll for completion)
             const connecting = self.pending_connection != null;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !shell_cmd_running and !connecting;
+            const blame_active = self.pending_blame_ready.load(.acquire) or self.blame_requests_in_flight.count() > 0;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !shell_cmd_running and !connecting and !blame_active;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -1760,6 +1800,7 @@ pub const App = struct {
 
             // Poll subagent fetch result (worker thread -> main thread)
             self.pollSubagentFetch();
+            self.pollPendingBlameResults();
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
@@ -1971,6 +2012,10 @@ pub const App = struct {
 
                 // Reset the flag after processing
                 self.needs_async_highlight = false;
+            }
+
+            if (self.state.show_blame) {
+                self.requestBlameForViewport();
             }
         }
 
@@ -2211,9 +2256,8 @@ pub const App = struct {
         self.state.show_blame = !self.state.show_blame;
         self.needs_render = true;
 
-        // If enabling blame, fetch blame for all visible files
         if (self.state.show_blame) {
-            self.fetchBlameForVisibleFiles();
+            self.requestBlameForViewport();
         }
     }
 
@@ -2263,31 +2307,156 @@ pub const App = struct {
         self.needs_render = true;
     }
 
-    /// Fetch blame data for all visible files (cached per file path)
-    fn fetchBlameForVisibleFiles(self: *App) void {
-        for (self.state.files) |*file| {
-            const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+    /// Submit async blame requests for files near the current viewport.
+    fn requestBlameForViewport(self: *App) void {
+        if (!self.state.show_blame or self.state.pager_mode or self.state.files.len == 0) return;
 
-            // Skip if already cached
-            if (self.blame_cache.contains(file_path)) continue;
+        const viewport_height = @max(self.state.viewport_height, 1);
+        const scroll_line = self.state.global_scroll_offset;
+        const visible_end = scroll_line + viewport_height;
+        const start_file_idx = self.state.line_map.getFileIndexForLine(scroll_line) orelse 0;
+        const buffer_lines = viewport_height;
+        const max_files_per_pass: usize = 2;
 
-            // Skip untracked files (no blame available)
+        var submitted: usize = 0;
+        var file_idx = start_file_idx;
+        while (file_idx < self.state.files.len) : (file_idx += 1) {
+            if (submitted >= max_files_per_pass) break;
+
+            if (self.state.line_map.getFileHeaderLine(file_idx)) |file_header_line| {
+                if (file_header_line > visible_end + buffer_lines) break;
+            }
+
+            const file = &self.state.files[file_idx];
             if (file.is_untracked) continue;
 
-            // Fetch blame data
-            const blame_data = blame.getBlame(self.allocator, file_path, null) catch {
-                // Silently skip files that fail to blame (binary, too large, etc.)
-                continue;
-            };
+            const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
+            if (self.blame_cache.contains(file_path) or self.blame_requests_in_flight.contains(file_path)) continue;
 
-            // Cache it (need to dupe the key since file_path is from parsed diff)
-            const key = self.allocator.dupe(u8, file_path) catch continue;
-            self.blame_cache.put(key, blame_data) catch {
-                self.allocator.free(key);
-                var bd = blame_data;
-                bd.deinit();
-            };
+            self.startAsyncBlameFetch(file_path) catch continue;
+            submitted += 1;
         }
+    }
+
+    fn startAsyncBlameFetch(self: *App, file_path: []const u8) !void {
+        const key = try self.allocator.dupe(u8, file_path);
+        errdefer self.allocator.free(key);
+
+        try self.blame_requests_in_flight.put(self.allocator, key, {});
+        errdefer if (self.blame_requests_in_flight.fetchRemove(file_path)) |entry| {
+            self.allocator.free(entry.key);
+        };
+
+        const ctx = try std.heap.c_allocator.create(BlameFetchContext);
+        errdefer std.heap.c_allocator.destroy(ctx);
+
+        ctx.* = .{
+            .app = self,
+            .path = std.heap.c_allocator.dupe(u8, file_path) catch {
+                if (self.blame_requests_in_flight.fetchRemove(file_path)) |entry| {
+                    self.allocator.free(entry.key);
+                }
+                return error.OutOfMemory;
+            },
+        };
+        errdefer ctx.deinit();
+
+        const thread = try std.Thread.spawn(.{}, blameFetchWorker, .{ctx});
+        thread.detach();
+    }
+
+    fn blameFetchWorker(ctx: *BlameFetchContext) void {
+        var timer = std.time.Timer.start() catch null;
+        const blame_data = blame.getBlame(std.heap.c_allocator, ctx.path, null) catch null;
+        const duration_ns: u64 = if (timer) |*t| t.read() else 0;
+
+        const result = PendingBlameResult{
+            .path = ctx.path,
+            .blame_data = blame_data,
+            .duration_ns = duration_ns,
+        };
+
+        ctx.app.pending_blame_mutex.lock();
+        ctx.app.pending_blame_results.append(std.heap.c_allocator, result) catch {
+            ctx.app.pending_blame_mutex.unlock();
+            if (result.blame_data) |data| {
+                var owned_data = data;
+                owned_data.deinit();
+            }
+            ctx.deinit();
+            return;
+        };
+        ctx.app.pending_blame_mutex.unlock();
+        ctx.app.pending_blame_ready.store(true, .release);
+
+        std.heap.c_allocator.destroy(ctx);
+    }
+
+    fn pollPendingBlameResults(self: *App) void {
+        if (!self.pending_blame_ready.load(.acquire)) return;
+
+        self.pending_blame_mutex.lock();
+        var results = self.pending_blame_results;
+        self.pending_blame_results = .{};
+        self.pending_blame_mutex.unlock();
+        self.pending_blame_ready.store(false, .release);
+
+        defer results.deinit(std.heap.c_allocator);
+
+        for (results.items) |result| {
+            if (self.blame_requests_in_flight.fetchRemove(result.path)) |entry| {
+                self.allocator.free(entry.key);
+            }
+
+            if (result.blame_data) |blame_data| {
+                if (self.blame_cache.contains(result.path)) {
+                    var data = blame_data;
+                    data.deinit();
+                    std.heap.c_allocator.free(result.path);
+                    continue;
+                }
+
+                const owned_key = self.allocator.dupe(u8, result.path) catch {
+                    var data = blame_data;
+                    data.deinit();
+                    std.heap.c_allocator.free(result.path);
+                    continue;
+                };
+
+                self.blame_cache.put(owned_key, blame_data) catch {
+                    self.allocator.free(owned_key);
+                    var data = blame_data;
+                    data.deinit();
+                    std.heap.c_allocator.free(result.path);
+                    continue;
+                };
+
+                if (self.profile_render) {
+                    std.log.scoped(.profile_blame).debug(
+                        "loaded blame: path={s} duration_ns={d} cached={d} in_flight={d}",
+                        .{ result.path, result.duration_ns, self.blame_cache.count(), self.blame_requests_in_flight.count() },
+                    );
+                }
+            }
+
+            std.heap.c_allocator.free(result.path);
+        }
+        self.needs_render = true;
+    }
+
+    fn drainPendingBlameResults(self: *App) void {
+        self.pending_blame_mutex.lock();
+        defer self.pending_blame_mutex.unlock();
+
+        for (self.pending_blame_results.items) |result| {
+            if (result.blame_data) |data| {
+                var owned_data = data;
+                owned_data.deinit();
+            }
+            std.heap.c_allocator.free(result.path);
+        }
+        self.pending_blame_results.clearRetainingCapacity();
+        self.pending_blame_ready.store(false, .release);
     }
 
     /// Get blame info for a specific file line (returns null if not available)

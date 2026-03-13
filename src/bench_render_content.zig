@@ -183,11 +183,12 @@ fn buildDiffText(
     var out: std.ArrayList(u8) = .{};
     errdefer out.deinit(allocator);
 
+    var path_buf: [256]u8 = undefined;
     var header_buf: [256]u8 = undefined;
     var line_buf: [256]u8 = undefined;
 
     for (0..file_count) |file_idx| {
-        const file_path = try std.fmt.bufPrint(&header_buf, "src/bench/file_{d}.zig", .{file_idx});
+        const file_path = try std.fmt.bufPrint(&path_buf, "src/bench/file_{d}.zig", .{file_idx});
 
         try appendLine(allocator, &out, try std.fmt.bufPrint(&header_buf, "diff --git a/{s} b/{s}", .{ file_path, file_path }));
         try appendLine(allocator, &out, try std.fmt.bufPrint(&header_buf, "--- a/{s}", .{file_path}));
