@@ -972,7 +972,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     } else 0;
 
     // Calculate input area height (always shows normal input)
-    // Layout: separator (1) + visible text lines + padding (1)
+    // Layout: top padding (1) + visible text lines + padding (1)
     // Note: Footer is now rendered by the unified status bar in app.zig, not here
     const padding_height: usize = 1; // Blank line between text and footer/statusline
     const input_height: usize = 1 + visible_lines + padding_height;
@@ -2417,7 +2417,7 @@ fn renderInputArea(
     // Using fill() instead of clear() for more robust clearing
     const blank_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
-        .style = .{},
+        .style = .{ .bg = Color.comment_bg },
     };
     win.fill(blank_cell);
 
@@ -2504,18 +2504,9 @@ fn renderInputArea(
     agent_state.input_scroll_offset = scroll_offset;
 
     // Layout:
-    // Row 0: Separator line
+    // Row 0: Top padding
     // Rows 1..: Input lines with "> " prompt on first line
-    // Last row: Footer with mode (left) and keybindings (right)
-
-    // Separator line
-    const separator_style = vaxis.Style{ .fg = Color.dim_gray };
-    for (0..win.width) |col| {
-        win.writeCell(@intCast(col), 0, .{
-            .char = .{ .grapheme = "─", .width = 1 },
-            .style = separator_style,
-        });
-    }
+    // Last row remains blank padding before the unified status bar
 
     // Check if we're in shell command mode (using shell_mode flag)
     const is_shell_mode = agent_state.isShellMode();
@@ -2523,13 +2514,13 @@ fn renderInputArea(
     // Dim prompt when session is not ready
     const session_ready = app.isSessionReady();
     const prompt_style = if (is_shell_mode)
-        vaxis.Style{ .fg = Color.yellow, .bold = true }
+        withCommentBg(.{ .fg = Color.yellow, .bold = true })
     else if (session_ready)
-        vaxis.Style{ .fg = Color.magenta, .bold = true }
+        withCommentBg(.{ .fg = Color.magenta, .bold = true })
     else
-        vaxis.Style{ .fg = Color.dim_gray };
-    const text_style = vaxis.Style{ .fg = Color.white };
-    const file_ref_style = vaxis.Style{ .fg = Color.cyan, .bold = true };
+        withCommentBg(.{ .fg = Color.dim_gray });
+    const text_style = withCommentBg(.{ .fg = Color.white });
+    const file_ref_style = withCommentBg(.{ .fg = Color.cyan, .bold = true });
 
     // Find file reference ranges for highlighting
     const file_ref_ranges = findFileRefRanges(app.allocator, &agent_state.file_picker, text) catch &[_]FileRefRange{};
@@ -2537,7 +2528,6 @@ fn renderInputArea(
     const has_file_refs = file_ref_ranges.len > 0;
     // Use the same max_input_width as calculated earlier for consistency
     const max_input_width = max_input_width_for_calc;
-    // Content starts after separator
     const content_start_row: usize = 1;
 
     // Split text by newlines and wrap each line
@@ -2754,7 +2744,7 @@ fn renderInputArea(
     // Render scrollbar if input area is scrollable
     if (total_display_lines > visible_lines) {
         const scrollbar_info = calculateScrollbar(visible_lines, total_display_lines, scroll_offset);
-        // Render scrollbar in input area (offset by staged message + separator)
+        // Render scrollbar in input area
         const scrollbar_win = win.child(.{
             .x_off = 0,
             .y_off = @intCast(content_start_row),
@@ -3620,6 +3610,12 @@ fn withModalBg(s: vaxis.Style) vaxis.Style {
     return result;
 }
 
+fn withCommentBg(s: vaxis.Style) vaxis.Style {
+    var result = s;
+    result.bg = Color.comment_bg;
+    return result;
+}
+
 /// Format a token count as a compact display string.
 /// Returns a slice into the provided buffer.
 /// Examples: 500 -> "500 tokens", 16709 -> "16.7K tokens", 1234567 -> "1.2M tokens"
@@ -3683,4 +3679,12 @@ test "formatTokenUsage: high context percentage" {
     var buf: [64]u8 = undefined;
     const result = formatTokenUsage(&buf, 200000, 258400);
     try std.testing.expectEqualStrings("200.0K tokens | 23% left", result);
+}
+
+test "withCommentBg applies comment background and preserves foreground" {
+    const style = withCommentBg(.{ .fg = Color.magenta, .bold = true });
+
+    try std.testing.expectEqual(Color.magenta, style.fg);
+    try std.testing.expectEqual(Color.comment_bg, style.bg);
+    try std.testing.expect(style.bold);
 }
