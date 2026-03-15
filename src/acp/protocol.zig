@@ -45,6 +45,26 @@ pub const ContentBlock = union(enum) {
     resource_link: ResourceLinkContent,
     embedded_resource: EmbeddedResourceContent,
     diff: DiffContent,
+
+    pub fn deinit(self: *const ContentBlock, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .text => |text| allocator.free(text.text),
+            .resource_link => |resource_link| {
+                allocator.free(resource_link.uri);
+                if (resource_link.name) |name| allocator.free(name);
+            },
+            .embedded_resource => |embedded_resource| {
+                allocator.free(embedded_resource.resource.uri);
+                allocator.free(embedded_resource.resource.mimeType);
+                allocator.free(embedded_resource.resource.text);
+            },
+            .diff => |diff| {
+                allocator.free(diff.path);
+                allocator.free(diff.old_text);
+                allocator.free(diff.new_text);
+            },
+        }
+    }
 };
 
 // =============================================================================
@@ -233,6 +253,10 @@ pub const PlanEntry = struct {
     content: []const u8,
     priority: PlanEntryPriority = .medium,
     status: PlanEntryStatus = .pending,
+
+    pub fn deinit(self: *const PlanEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.content);
+    }
 };
 
 /// Plan update in session/update notification
@@ -254,6 +278,15 @@ pub const FileLocation = struct {
 pub const MessageUpdate = struct {
     type: []const u8 = "message_update",
     content: []const ContentBlock,
+
+    pub fn deinit(self: *const MessageUpdate, allocator: std.mem.Allocator) void {
+        for (self.content) |*block| {
+            block.deinit(allocator);
+        }
+        if (!isStaticEmptyContentSlice(self.content)) {
+            allocator.free(self.content);
+        }
+    }
 };
 
 /// Tool call in session/update notification
@@ -270,6 +303,28 @@ pub const ToolCall = struct {
     tool_name: ?[]const u8 = null, // "Bash", "Edit", "Read", etc.
     command: ?[]const u8 = null, // For Bash tools: the command being executed
     description: ?[]const u8 = null, // For Bash tools: short description
+
+    pub fn deinit(self: *const ToolCall, allocator: std.mem.Allocator) void {
+        allocator.free(self.tool_call_id);
+        if (self.title) |title| allocator.free(title);
+        for (self.locations) |location| {
+            allocator.free(location.path);
+        }
+        if (!isStaticEmptyLocationSlice(self.locations)) {
+            allocator.free(self.locations);
+        }
+        for (self.content) |*block| {
+            block.deinit(allocator);
+        }
+        if (!isStaticEmptyContentSlice(self.content)) {
+            allocator.free(self.content);
+        }
+        if (self.raw_input) |raw_input| allocator.free(raw_input);
+        if (self.raw_output) |raw_output| allocator.free(raw_output);
+        if (self.tool_name) |tool_name| allocator.free(tool_name);
+        if (self.command) |command| allocator.free(command);
+        if (self.description) |description| allocator.free(description);
+    }
 };
 
 /// Tool call update in session/update notification
@@ -283,6 +338,20 @@ pub const ToolCallUpdate = struct {
     stderr: ?[]const u8 = null, // For Bash tools: error output
     interrupted: bool = false, // For Bash tools: was the command interrupted
     terminal_id: ?[]const u8 = null, // For terminal-based tools: reference to terminal output
+
+    pub fn deinit(self: *const ToolCallUpdate, allocator: std.mem.Allocator) void {
+        allocator.free(self.tool_call_id);
+        for (self.content) |*block| {
+            block.deinit(allocator);
+        }
+        if (!isStaticEmptyContentSlice(self.content)) {
+            allocator.free(self.content);
+        }
+        if (self.tool_name) |tool_name| allocator.free(tool_name);
+        if (self.stdout) |stdout| allocator.free(stdout);
+        if (self.stderr) |stderr| allocator.free(stderr);
+        if (self.terminal_id) |terminal_id| allocator.free(terminal_id);
+    }
 };
 
 /// Type of session update notification
@@ -311,6 +380,10 @@ pub const SessionUpdateType = enum {
 /// Current mode update in session/update notification
 pub const CurrentModeUpdate = struct {
     mode_id: []const u8,
+
+    pub fn deinit(self: *const CurrentModeUpdate, allocator: std.mem.Allocator) void {
+        allocator.free(self.mode_id);
+    }
 };
 
 // =============================================================================
@@ -336,6 +409,17 @@ pub const AvailableCommand = struct {
 /// Available commands update in session/update notification
 pub const AvailableCommandsUpdate = struct {
     commands: []const AvailableCommand,
+
+    pub fn deinit(self: *const AvailableCommandsUpdate, allocator: std.mem.Allocator) void {
+        for (self.commands) |command| {
+            allocator.free(command.name);
+            allocator.free(command.description);
+            if (command.input) |input| allocator.free(input.hint);
+        }
+        if (!isStaticEmptyCommandSlice(self.commands)) {
+            allocator.free(self.commands);
+        }
+    }
 };
 
 /// Parameters for session/update notification
@@ -348,7 +432,40 @@ pub const SessionUpdateParams = struct {
     plan: ?PlanUpdate = null,
     current_mode_update: ?CurrentModeUpdate = null,
     available_commands: ?AvailableCommandsUpdate = null,
+
+    pub fn deinit(self: *const SessionUpdateParams, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_id);
+        if (self.message) |message| message.deinit(allocator);
+        if (self.tool_call) |tool_call| tool_call.deinit(allocator);
+        if (self.tool_call_update) |tool_call_update| tool_call_update.deinit(allocator);
+        if (self.plan) |plan| {
+            for (plan.entries) |entry| {
+                entry.deinit(allocator);
+            }
+            if (!isStaticEmptyPlanSlice(plan.entries)) {
+                allocator.free(plan.entries);
+            }
+        }
+        if (self.current_mode_update) |current_mode_update| current_mode_update.deinit(allocator);
+        if (self.available_commands) |available_commands| available_commands.deinit(allocator);
+    }
 };
+
+fn isStaticEmptyContentSlice(content: []const ContentBlock) bool {
+    return content.len == 0 and @intFromPtr(content.ptr) == @intFromPtr((&[_]ContentBlock{}).ptr);
+}
+
+fn isStaticEmptyLocationSlice(locations: []const FileLocation) bool {
+    return locations.len == 0 and @intFromPtr(locations.ptr) == @intFromPtr((&[_]FileLocation{}).ptr);
+}
+
+fn isStaticEmptyPlanSlice(entries: []const PlanEntry) bool {
+    return entries.len == 0 and @intFromPtr(entries.ptr) == @intFromPtr((&[_]PlanEntry{}).ptr);
+}
+
+fn isStaticEmptyCommandSlice(commands: []const AvailableCommand) bool {
+    return commands.len == 0 and @intFromPtr(commands.ptr) == @intFromPtr((&[_]AvailableCommand{}).ptr);
+}
 
 // =============================================================================
 // Permission Request (Request from Agent)

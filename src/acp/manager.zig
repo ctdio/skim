@@ -1911,6 +1911,7 @@ pub const AcpManager = struct {
                             std.log.warn("ACP background: failed to parse session/update: {any}", .{err});
                             return true; // Still handled, just failed to parse
                         };
+                        defer update.deinit(self.allocator);
                         // Process the update (this appends to pending_messages with mutex)
                         handleSessionUpdate(update, ctx);
                         return true; // Message was handled
@@ -2273,11 +2274,19 @@ pub const AcpManager = struct {
             if (exiting_plan_mode) {
                 std.log.info("ACP: Exiting plan mode, clearing plan entries", .{});
                 // Send empty plan update to clear UI
+                const cleared_text = self.allocator.dupe(u8, "Plan cleared") catch return;
+                const empty_entries = self.allocator.alloc(protocol.PlanEntry, 0) catch {
+                    self.allocator.free(cleared_text);
+                    return;
+                };
                 self.pending_messages.append(self.allocator, .{
                     .kind = .plan_update,
-                    .text = self.allocator.dupe(u8, "Plan cleared") catch "",
-                    .plan_entries = &.{}, // Empty slice
-                }) catch {};
+                    .text = cleared_text,
+                    .plan_entries = empty_entries,
+                }) catch {
+                    self.allocator.free(cleared_text);
+                    self.allocator.free(empty_entries);
+                };
             }
 
             // Add a pending message to trigger UI update

@@ -836,24 +836,54 @@ pub const Decoder = struct {
         // Duplicate args array
         var args: [][]const u8 = &.{};
         if (parsed.value.args) |raw_args| {
-            const args_alloc = try self.allocator.alloc([]const u8, raw_args.len);
-            for (raw_args, 0..) |arg, i| {
-                args_alloc[i] = try self.allocator.dupe(u8, arg);
+            if (raw_args.len > 0) {
+                const args_alloc = try self.allocator.alloc([]const u8, raw_args.len);
+                errdefer self.allocator.free(args_alloc);
+
+                var args_count: usize = 0;
+                errdefer {
+                    for (args_alloc[0..args_count]) |arg| {
+                        self.allocator.free(arg);
+                    }
+                }
+
+                for (raw_args, 0..) |arg, i| {
+                    args_alloc[i] = try self.allocator.dupe(u8, arg);
+                    args_count += 1;
+                }
+                args = args_alloc;
             }
-            args = args_alloc;
         }
 
         // Duplicate env vars array
         var env: []EnvVar = &.{};
         if (parsed.value.env) |raw_env| {
-            const env_alloc = try self.allocator.alloc(EnvVar, raw_env.len);
-            for (raw_env, 0..) |ev, i| {
-                env_alloc[i] = .{
-                    .name = try self.allocator.dupe(u8, ev.name),
-                    .value = try self.allocator.dupe(u8, ev.value),
-                };
+            if (raw_env.len > 0) {
+                const env_alloc = try self.allocator.alloc(EnvVar, raw_env.len);
+                errdefer self.allocator.free(env_alloc);
+
+                var env_count: usize = 0;
+                errdefer {
+                    for (env_alloc[0..env_count]) |owned_env| {
+                        self.allocator.free(owned_env.name);
+                        self.allocator.free(owned_env.value);
+                    }
+                }
+
+                for (raw_env, 0..) |ev, i| {
+                    const name = try self.allocator.dupe(u8, ev.name);
+                    errdefer self.allocator.free(name);
+
+                    const value = try self.allocator.dupe(u8, ev.value);
+
+                    env_alloc[i] = .{
+                        .name = name,
+                        .value = value,
+                    };
+                    env_count += 1;
+                }
+                env = env_alloc;
             }
-            env = env_alloc;
         }
 
         return .{
@@ -988,8 +1018,11 @@ pub const Decoder = struct {
 
         // Parse message content if present
         var message_result: ?protocol.MessageUpdate = null;
+        errdefer if (message_result) |message| message.deinit(self.allocator);
         var tool_call_result: ?protocol.ToolCall = null;
+        errdefer if (tool_call_result) |tool_call| tool_call.deinit(self.allocator);
         var tool_call_update_result: ?protocol.ToolCallUpdate = null;
+        errdefer if (tool_call_update_result) |tool_call_update| tool_call_update.deinit(self.allocator);
         var update_type: protocol.SessionUpdateType = .unknown;
 
         // Handle Claude Code ACP format: update.content
@@ -1098,9 +1131,9 @@ pub const Decoder = struct {
             // Handle tool_call_update (completion/status update)
             if (update_type == .tool_call_update) {
                 const tool_call_id = if (upd.toolCallId) |id|
-                    self.allocator.dupe(u8, id) catch ""
+                    try self.allocator.dupe(u8, id)
                 else
-                    "";
+                    try self.allocator.dupe(u8, "");
 
                 std.log.info("CODEC: tool_call_update id={s} has_content={} stdout_len={?d} rawOutput={}", .{
                     tool_call_id,
@@ -1310,9 +1343,9 @@ pub const Decoder = struct {
                             if (i > 0) {
                                 // Build tool_call with diff content
                                 const tool_call_id = if (upd.toolCallId) |id|
-                                    self.allocator.dupe(u8, id) catch ""
+                                    try self.allocator.dupe(u8, id)
                                 else
-                                    "";
+                                    try self.allocator.dupe(u8, "");
                                 const title = if (upd.title) |t|
                                     self.allocator.dupe(u8, t) catch null
                                 else
@@ -1343,7 +1376,7 @@ pub const Decoder = struct {
 
             // Build tool_call for non-diff tools (like Bash) when we have a tool_call update type
             if (update_type == .tool_call and tool_call_result == null and upd.toolCallId != null) {
-                const tool_call_id = self.allocator.dupe(u8, upd.toolCallId.?) catch "";
+                const tool_call_id = try self.allocator.dupe(u8, upd.toolCallId.?);
                 const title = if (upd.title) |t|
                     self.allocator.dupe(u8, t) catch null
                 else
@@ -1399,6 +1432,14 @@ pub const Decoder = struct {
 
         // Handle plan updates
         var plan_result: ?protocol.PlanUpdate = null;
+        errdefer if (plan_result) |plan| {
+            for (plan.entries) |entry| {
+                entry.deinit(self.allocator);
+            }
+            if (plan.entries.len > 0) {
+                self.allocator.free(plan.entries);
+            }
+        };
         if (update_type == .plan) {
             if (r.update) |upd| {
                 if (upd.entries) |raw_entries| {
@@ -1428,13 +1469,14 @@ pub const Decoder = struct {
 
         // Handle current mode updates
         var mode_update_result: ?protocol.CurrentModeUpdate = null;
+        errdefer if (mode_update_result) |mode_update| mode_update.deinit(self.allocator);
         if (update_type == .current_mode_update) {
             // Check update.currentModeId first (nested format from Claude Code)
             if (r.update) |upd| {
                 if (upd.currentModeId) |mode_id| {
                     std.log.info("ACP Codec: Found currentModeId={s}", .{mode_id});
                     mode_update_result = .{
-                        .mode_id = self.allocator.dupe(u8, mode_id) catch "",
+                        .mode_id = try self.allocator.dupe(u8, mode_id),
                     };
                 }
             }
@@ -1443,7 +1485,7 @@ pub const Decoder = struct {
                 const mode_id = r.currentModeUpdate.?.modeId;
                 std.log.info("ACP Codec: Found modeId at top-level={s}", .{mode_id});
                 mode_update_result = .{
-                    .mode_id = self.allocator.dupe(u8, mode_id) catch "",
+                    .mode_id = try self.allocator.dupe(u8, mode_id),
                 };
             }
             if (mode_update_result == null) {
@@ -1453,6 +1495,7 @@ pub const Decoder = struct {
 
         // Handle available commands updates (slash commands)
         var commands_result: ?protocol.AvailableCommandsUpdate = null;
+        errdefer if (commands_result) |commands| commands.deinit(self.allocator);
         if (update_type == .available_commands_update) {
             // Check update.availableCommands (nested format from agent)
             if (r.update) |upd| {
@@ -1519,8 +1562,11 @@ pub const Decoder = struct {
             }
         }
 
+        const session_id = try self.allocator.dupe(u8, r.sessionId);
+        errdefer self.allocator.free(session_id);
+
         return .{
-            .session_id = r.sessionId,
+            .session_id = session_id,
             .update_type = update_type,
             .message = message_result,
             .tool_call = tool_call_result,

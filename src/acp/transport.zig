@@ -226,7 +226,7 @@ pub const StdioTransport = struct {
                     logAcpMessage("<<<", json_line);
 
                     // Decode message
-                    const message = self.decoder.decode(json_line) catch |err| {
+                    var message = self.decoder.decode(json_line) catch |err| {
                         std.log.warn("ACP Transport: decode error: {}", .{err});
                         self.shiftLineBuffer(line_buffer, newline_pos + 1);
                         continue;
@@ -244,6 +244,8 @@ pub const StdioTransport = struct {
                         self.message_mutex.lock();
                         self.pending_messages.append(self.allocator, message) catch {};
                         self.message_mutex.unlock();
+                    } else {
+                        message.deinit(self.allocator);
                     }
                 }
             }

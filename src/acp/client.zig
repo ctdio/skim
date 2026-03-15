@@ -553,6 +553,7 @@ pub const Client = struct {
                                     std.log.err("ACP Client: failed to parse session/update: {any}", .{err});
                                     continue;
                                 };
+                                defer update.deinit(self.allocator);
                                 callback(update, callback_ctx);
                             }
                         }
