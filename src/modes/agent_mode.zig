@@ -881,7 +881,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             (key.codepoint == 'M' and key.mods.alt);
 
         if (is_mode_cycle) {
-            if (app.getActiveAcpManager()) |mgr| {
+            if (app.getActiveManager()) |mgr| {
                 if (mgr.cycleToNextMode()) |_| {
                     app.needs_render = true;
                 }

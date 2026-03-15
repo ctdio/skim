@@ -84,6 +84,33 @@ pub const ServiceTier = enum {
     }
 };
 
+pub const CollaborationMode = enum {
+    default,
+    plan,
+
+    pub fn fromString(s: []const u8) ?CollaborationMode {
+        const map = std.StaticStringMap(CollaborationMode).initComptime(.{
+            .{ "default", .default },
+            .{ "plan", .plan },
+        });
+        return map.get(s);
+    }
+
+    pub fn toString(self: CollaborationMode) []const u8 {
+        return switch (self) {
+            .default => "default",
+            .plan => "plan",
+        };
+    }
+
+    pub fn displayName(self: CollaborationMode) []const u8 {
+        return switch (self) {
+            .default => "Code",
+            .plan => "Plan",
+        };
+    }
+};
+
 pub const ApprovalPolicy = enum {
     never,
     unless_trusted,
@@ -301,6 +328,7 @@ pub const InitializeParams = struct {
     client_name: ?[]const u8 = null,
     title: ?[]const u8 = null,
     client_version: ?[]const u8 = null,
+    experimental_api: bool = false,
 };
 
 pub const InitializeResult = struct {
@@ -360,6 +388,7 @@ pub const TurnStartParams = struct {
     thread_id: []const u8,
     reasoning_effort: ?ReasoningEffort = null,
     service_tier: ?ServiceTier = null,
+    collaboration_mode: ?CollaborationMode = null,
     input: ?[]InputItem = null,
 };
 

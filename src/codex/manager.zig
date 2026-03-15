@@ -27,6 +27,7 @@ pub const CodexManager = struct {
     requested_approval_policy: ?protocol.ApprovalPolicy,
     requested_reasoning_effort: ?protocol.ReasoningEffort,
     requested_service_tier: ?protocol.ServiceTier,
+    requested_collaboration_mode: ?protocol.CollaborationMode,
 
     // Thread state (populated after startThread)
     thread_id: ?[]const u8,
@@ -36,6 +37,7 @@ pub const CodexManager = struct {
     approval_policy: ?protocol.ApprovalPolicy,
     reasoning_effort: ?protocol.ReasoningEffort,
     service_tier: ?protocol.ServiceTier,
+    collaboration_mode: ?protocol.CollaborationMode,
 
     // Model list (populated after listModels)
     models: ?[]protocol.ModelInfo,
@@ -217,6 +219,7 @@ pub const CodexManager = struct {
             .requested_approval_policy = null,
             .requested_reasoning_effort = null,
             .requested_service_tier = null,
+            .requested_collaboration_mode = null,
             .thread_id = null,
             .thread_info = null,
             .model = null,
@@ -224,6 +227,7 @@ pub const CodexManager = struct {
             .approval_policy = null,
             .reasoning_effort = null,
             .service_tier = null,
+            .collaboration_mode = null,
             .models = null,
             .current_model = null,
             .turn_id = null,
@@ -260,6 +264,7 @@ pub const CodexManager = struct {
             .client_name = "skim",
             .title = "Skim",
             .client_version = "0.1.0",
+            .experimental_api = true,
         }) catch return error.HandshakeFailed;
         defer self.allocator.free(init_msg);
         try transport.send(init_msg);
@@ -416,6 +421,7 @@ pub const CodexManager = struct {
             .thread_id = thread_id,
             .reasoning_effort = self.requested_reasoning_effort,
             .service_tier = self.requested_service_tier,
+            .collaboration_mode = self.requested_collaboration_mode,
             .input = &text_input,
         }) catch return error.TurnStartFailed;
         defer self.allocator.free(msg);
@@ -699,6 +705,30 @@ pub const CodexManager = struct {
     pub fn setServiceTier(self: *CodexManager, service_tier: protocol.ServiceTier) void {
         self.requested_service_tier = service_tier;
         self.service_tier = service_tier;
+    }
+
+    /// Check if Codex collaboration modes are available.
+    pub fn hasModes(self: *const CodexManager) bool {
+        _ = self;
+        return true;
+    }
+
+    /// Get the current collaboration mode for display.
+    pub fn getCurrentModeName(self: *const CodexManager) []const u8 {
+        const mode = self.requested_collaboration_mode orelse self.collaboration_mode orelse .default;
+        return mode.displayName();
+    }
+
+    /// Cycle to the next collaboration mode for subsequent turns.
+    pub fn cycleToNextMode(self: *CodexManager) ?[]const u8 {
+        const current_mode = self.requested_collaboration_mode orelse self.collaboration_mode orelse .default;
+        const next_mode: protocol.CollaborationMode = switch (current_mode) {
+            .default => .plan,
+            .plan => .default,
+        };
+        self.requested_collaboration_mode = next_mode;
+        self.collaboration_mode = next_mode;
+        return next_mode.displayName();
     }
 
     /// Set approval policy for subsequent turns.
@@ -1046,6 +1076,7 @@ pub const CodexManager = struct {
         self.approval_policy = null;
         self.reasoning_effort = null;
         self.service_tier = null;
+        self.collaboration_mode = null;
 
         if (self.turn_id) |tid| self.allocator.free(tid);
         self.turn_id = null;
@@ -2422,7 +2453,9 @@ test "new fields initialize to null" {
     try std.testing.expect(manager.current_model == null);
     try std.testing.expect(manager.requested_reasoning_effort == null);
     try std.testing.expect(manager.requested_service_tier == null);
+    try std.testing.expect(manager.requested_collaboration_mode == null);
     try std.testing.expect(manager.service_tier == null);
+    try std.testing.expect(manager.collaboration_mode == null);
 }
 
 test "setModel stores and frees model id" {
@@ -2469,6 +2502,23 @@ test "setServiceTier stores service tier" {
     manager.setServiceTier(.flex);
     try std.testing.expect(manager.service_tier.? == .flex);
     try std.testing.expect(manager.requested_service_tier.? == .flex);
+}
+
+test "cycleToNextMode stores collaboration mode" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    try std.testing.expectEqualStrings("Code", manager.getCurrentModeName());
+
+    try std.testing.expectEqualStrings("Plan", manager.cycleToNextMode().?);
+    try std.testing.expect(manager.collaboration_mode.? == .plan);
+    try std.testing.expect(manager.requested_collaboration_mode.? == .plan);
+    try std.testing.expectEqualStrings("Plan", manager.getCurrentModeName());
+
+    try std.testing.expectEqualStrings("Code", manager.cycleToNextMode().?);
+    try std.testing.expect(manager.collaboration_mode.? == .default);
+    try std.testing.expect(manager.requested_collaboration_mode.? == .default);
+    try std.testing.expectEqualStrings("Code", manager.getCurrentModeName());
 }
 
 test "listThreads fails when not connected" {

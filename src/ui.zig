@@ -1588,7 +1588,7 @@ pub const UI = struct {
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, agent_mode_str), .style = .{ .bold = true } });
 
                 // Session mode (if available)
-                if (app.getActiveAcpManager()) |mgr| {
+                if (app.getActiveManager()) |mgr| {
                     if (mgr.hasModes()) {
                         const session_mode_name = mgr.getCurrentModeName();
                         if (session_mode_name.len > 0) {
@@ -1685,7 +1685,7 @@ pub const UI = struct {
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
 
                 // Agent-specific keybindings based on vim mode
-                const has_modes = if (app.getActiveAcpManager()) |mgr| mgr.hasModes() else false;
+                const has_modes = if (app.getActiveManager()) |mgr| mgr.hasModes() else false;
                 const agent_keybindings = switch (agent_state.input.vim.vim_mode) {
                     .insert => "S-Enter:newline  Enter:send  ESC:normal",
                     .normal => if (has_modes) "Tab:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",

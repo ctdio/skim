@@ -99,6 +99,33 @@ pub const ManagerHandle = union(enum) {
         };
     }
 
+    /// Check if the active manager supports session modes.
+    pub fn hasModes(self: ManagerHandle) bool {
+        return switch (self) {
+            .acp => |m| m.hasModes(),
+            .opencode => false,
+            .codex => |m| m.hasModes(),
+        };
+    }
+
+    /// Get the current mode display name.
+    pub fn getCurrentModeName(self: ManagerHandle) []const u8 {
+        return switch (self) {
+            .acp => |m| m.getCurrentModeName(),
+            .opencode => "",
+            .codex => |m| m.getCurrentModeName(),
+        };
+    }
+
+    /// Cycle to the next available mode.
+    pub fn cycleToNextMode(self: ManagerHandle) ?[]const u8 {
+        return switch (self) {
+            .acp => |m| m.cycleToNextMode(),
+            .opencode => null,
+            .codex => |m| m.cycleToNextMode(),
+        };
+    }
+
     /// Resolved model view for the UI — protocol-independent.
     pub const ModelView = struct {
         model_id: []const u8,

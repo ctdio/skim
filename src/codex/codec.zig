@@ -117,7 +117,11 @@ pub const Encoder = struct {
             try writer.print("\"version\":{f}", .{std.json.fmt(version, .{})});
         }
 
-        try writer.writeAll("}}}");
+        try writer.writeAll("}");
+        if (params.experimental_api) {
+            try writer.writeAll(",\"capabilities\":{\"experimentalApi\":true}");
+        }
+        try writer.writeAll("}}");
         return output.toOwnedSlice(self.allocator);
     }
 
@@ -243,6 +247,9 @@ pub const Encoder = struct {
         }
         if (params.service_tier) |service_tier| {
             try writer.print(",\"serviceTier\":{f}", .{std.json.fmt(service_tier.toString(), .{})});
+        }
+        if (params.collaboration_mode) |collaboration_mode| {
+            try writer.print(",\"collaborationMode\":{f}", .{std.json.fmt(collaboration_mode.toString(), .{})});
         }
         if (params.input) |input_items| {
             try writer.writeAll(",\"input\":[");
@@ -1122,6 +1129,7 @@ test "encode initialize" {
         .client_name = "skim",
         .title = "Skim",
         .client_version = "0.1.0",
+        .experimental_api = true,
     });
     defer allocator.free(result);
 
@@ -1134,6 +1142,7 @@ test "encode initialize" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"name\":\"skim\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"title\":\"Skim\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"version\":\"0.1.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"capabilities\":{\"experimentalApi\":true}") != null);
     // Must NOT have flat clientName/clientVersion
     try std.testing.expect(std.mem.indexOf(u8, result, "\"clientName\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"clientVersion\"") == null);
@@ -1189,6 +1198,7 @@ test "encode turn start" {
         .thread_id = "019c6c65-9df2-7003-b62e-9ab034e6d054",
         .reasoning_effort = .low,
         .service_tier = .fast,
+        .collaboration_mode = .plan,
         .input = &text_input,
     });
     defer allocator.free(result);
@@ -1199,6 +1209,7 @@ test "encode turn start" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"threadId\":\"019c6c65-9df2-7003-b62e-9ab034e6d054\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"effort\":\"low\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"serviceTier\":\"fast\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"collaborationMode\":\"plan\"") != null);
 }
 
 test "encode turn interrupt" {
