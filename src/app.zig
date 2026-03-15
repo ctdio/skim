@@ -3870,24 +3870,34 @@ pub const App = struct {
                 const alloc = agent_state.allocator;
                 switch (m.role) {
                     .user => {
-                        const content = if (m.content) |c| (alloc.dupe(u8, c) catch "") else "";
+                        const content = if (m.content) |c|
+                            alloc.dupe(u8, c) catch continue
+                        else
+                            alloc.dupe(u8, "") catch continue;
                         modal.messages.append(alloc, .{
                             .role = .user,
                             .content = content,
                             .timestamp = 0,
-                        }) catch {};
+                        }) catch {
+                            alloc.free(content);
+                        };
                     },
                     .assistant => {
-                        const content = if (m.content) |c| (alloc.dupe(u8, c) catch "") else "";
+                        const content = if (m.content) |c|
+                            alloc.dupe(u8, c) catch continue
+                        else
+                            alloc.dupe(u8, "") catch continue;
                         modal.messages.append(alloc, .{
                             .role = .agent,
                             .content = content,
                             .timestamp = 0,
-                        }) catch {};
+                        }) catch {
+                            alloc.free(content);
+                        };
                     },
                     .tool => {
                         const display = m.tool_title orelse m.tool_name orelse "Tool";
-                        const content = alloc.dupe(u8, display) catch "";
+                        const content = alloc.dupe(u8, display) catch continue;
                         const duped_name = if (m.tool_name) |n| (alloc.dupe(u8, n) catch null) else null;
                         modal.messages.append(alloc, .{
                             .role = .tool,
@@ -3895,7 +3905,10 @@ pub const App = struct {
                             .tool_name = duped_name,
                             .tool_status = .completed,
                             .timestamp = 0,
-                        }) catch {};
+                        }) catch {
+                            alloc.free(content);
+                            if (duped_name) |name| alloc.free(name);
+                        };
                     },
                 }
 
