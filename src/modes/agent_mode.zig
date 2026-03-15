@@ -729,33 +729,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             }
             if (key.codepoint == 't') {
                 // Space+t - cycle model variant (Opencode) or thinking effort (Codex)
-                if (app.getActiveManager()) |mgr| {
-                    switch (mgr) {
-                        .opencode => |op| {
-                            if (op.getCurrentModelId() == null) {
-                                try agent_state.addMessage(.system, "Select a model to use variants");
-                            } else if (op.cycleVariant()) |variant| {
-                                const msg = std.fmt.allocPrint(app.allocator, "Variant: {s}", .{variant}) catch "Variant updated";
-                                defer if (!std.mem.eql(u8, msg, "Variant updated")) app.allocator.free(msg);
-                                try agent_state.addMessage(.system, msg);
-                            } else {
-                                try agent_state.addMessage(.system, "No variants available for current model");
-                            }
-                        },
-                        .codex => |cm| {
-                            const next_effort = getNextCodexReasoningEffort(cm);
-                            cm.setReasoningEffort(next_effort);
-                            var msg_buf: [64]u8 = undefined;
-                            const msg = std.fmt.bufPrint(&msg_buf, "Thinking effort: {s}", .{next_effort.toString()}) catch "Thinking effort updated";
-                            try agent_state.addMessage(.system, msg);
-                        },
-                        .acp => {
-                            try agent_state.addMessage(.system, "Space+t is available for Opencode variants or Codex thinking effort");
-                        },
-                    }
-                } else {
-                    try agent_state.addMessage(.system, "No active agent");
-                }
+                try cycleThinkingMode(app, agent_state);
                 app.needs_render = true;
                 return;
             }
@@ -950,9 +924,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // Ctrl+T: Toggle plan expansion (expand/collapse todo list)
-    if (key.mods.ctrl and key.codepoint == 't') {
-        agent_state.togglePlanExpanded();
+    // Ctrl+T: Cycle model variant (Opencode) or thinking effort (Codex)
+    if ((key.mods.ctrl and key.codepoint == 't') or key.codepoint == 20) {
+        try cycleThinkingMode(app, agent_state);
         app.needs_render = true;
         return;
     }
@@ -1465,6 +1439,37 @@ fn toggleFastServiceTier(current_service_tier: ?codex_protocol.ServiceTier) code
     return if (service_tier == .fast) .flex else .fast;
 }
 
+fn cycleThinkingMode(app: *App, agent_state: *agent.AgentState) !void {
+    if (app.getActiveManager()) |mgr| {
+        switch (mgr) {
+            .opencode => |op| {
+                if (op.getCurrentModelId() == null) {
+                    try agent_state.addMessage(.system, "Select a model to use variants");
+                } else if (op.cycleVariant()) |variant| {
+                    const msg = std.fmt.allocPrint(app.allocator, "Variant: {s}", .{variant}) catch "Variant updated";
+                    defer if (!std.mem.eql(u8, msg, "Variant updated")) app.allocator.free(msg);
+                    try agent_state.addMessage(.system, msg);
+                } else {
+                    try agent_state.addMessage(.system, "No variants available for current model");
+                }
+            },
+            .codex => |cm| {
+                const next_effort = getNextCodexReasoningEffort(cm);
+                cm.setReasoningEffort(next_effort);
+                var msg_buf: [64]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msg_buf, "Thinking effort: {s}", .{next_effort.toString()}) catch "Thinking effort updated";
+                try agent_state.addMessage(.system, msg);
+            },
+            .acp => {
+                try agent_state.addMessage(.system, "Thinking settings are only available for Codex");
+            },
+        }
+        return;
+    }
+
+    try agent_state.addMessage(.system, "No active agent");
+}
+
 /// Handle local slash commands (executed by skim, not sent to agent)
 fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: []const u8, args: []const u8) !void {
     if (std.mem.eql(u8, command_name, "clear")) {
@@ -1540,6 +1545,32 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
         }
 
         try agent_state.addMessage(.system, "Switching to model selection...");
+        return;
+    }
+
+    if (std.mem.eql(u8, command_name, "plan")) {
+        const trimmed_args = std.mem.trim(u8, args, &std.ascii.whitespace);
+        if (trimmed_args.len == 0) {
+            agent_state.togglePlanVisibility();
+        } else if (std.mem.eql(u8, trimmed_args, "show") or std.mem.eql(u8, trimmed_args, "on")) {
+            if (!agent_state.plan.visible) {
+                agent_state.togglePlanVisibility();
+            }
+        } else if (std.mem.eql(u8, trimmed_args, "hide") or std.mem.eql(u8, trimmed_args, "off")) {
+            if (agent_state.plan.visible) {
+                agent_state.togglePlanVisibility();
+            }
+        } else if (std.mem.eql(u8, trimmed_args, "status")) {
+            const status = if (agent_state.plan.visible) "Plan is visible" else "Plan is hidden";
+            try agent_state.addMessage(.system, status);
+            return;
+        } else {
+            try agent_state.addMessage(.system, "Invalid plan option. Use: /plan, /plan show, /plan hide, or /plan status");
+            return;
+        }
+
+        const status = if (agent_state.plan.visible) "Plan shown" else "Plan hidden";
+        try agent_state.addMessage(.system, status);
         return;
     }
 
@@ -2874,7 +2905,7 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
             agent_state.cmd_palette.startRenameInput();
         },
         .toggle_plan => {
-            agent_state.togglePlanExpanded();
+            agent_state.togglePlanVisibility();
         },
     }
 }

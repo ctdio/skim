@@ -61,7 +61,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "Ctrl-w w", .desc = "Cycle panel focus" },
         .{ .key = "Ctrl-w o", .desc = "Toggle fullscreen" },
         .{ .key = "Ctrl-s", .desc = "Stash / unstash prompt" },
-        .{ .key = "Ctrl-t", .desc = "Toggle todo list" },
+        .{ .key = "Ctrl-t", .desc = "Cycle thinking effort / variant" },
     };
     for (global_bindings) |b| {
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
@@ -101,7 +101,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "Space b/Esc", .desc = "History mode" },
         .{ .key = "Space f", .desc = "Follow mode (scroll bottom)" },
         .{ .key = "Space s", .desc = "Toggle diff view" },
-        .{ .key = "Space t", .desc = "Cycle model variant" },
+        .{ .key = "Space t", .desc = "Cycle thinking effort / variant" },
         .{ .key = "Tab", .desc = "Cycle session modes" },
         .{ .key = "Esc Esc", .desc = "Interrupt agent" },
     };
@@ -176,6 +176,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "/clear", .desc = "Clear session" },
         .{ .key = "/fast", .desc = "Toggle Codex fast mode" },
         .{ .key = "/model", .desc = "Switch AI model" },
+        .{ .key = "/plan", .desc = "Show or hide the plan" },
         .{ .key = "/permissions", .desc = "Switch Codex permission mode" },
         .{ .key = "/resume", .desc = "Resume session" },
     };

@@ -2288,23 +2288,6 @@ pub const AcpManager = struct {
                     self.allocator.free(empty_entries);
                 };
             }
-
-            // Add a pending message to trigger UI update
-            const mode_name = blk: {
-                for (self.available_modes.items) |mode| {
-                    if (std.mem.eql(u8, mode.id, mode_update.mode_id)) {
-                        break :blk mode.name orelse mode.id;
-                    }
-                }
-                break :blk mode_update.mode_id;
-            };
-            const msg_text = std.fmt.allocPrint(self.allocator, "Mode changed to: {s}", .{mode_name}) catch return;
-            self.pending_messages.append(self.allocator, .{
-                .kind = .agent_text,
-                .text = msg_text,
-            }) catch {
-                self.allocator.free(msg_text);
-            };
         }
 
         // Handle available commands updates (slash commands)

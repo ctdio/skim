@@ -14,6 +14,7 @@ pub const local_commands = [_]LocalCommand{
     .{ .name = "clear", .description = "Clear session and start fresh" },
     .{ .name = "fast", .description = "Toggle Codex fast mode" },
     .{ .name = "model", .description = "Switch AI model" },
+    .{ .name = "plan", .description = "Toggle agent plan visibility" },
     .{ .name = "thinking", .description = "Set Codex thinking effort" },
     .{ .name = "permissions", .description = "Switch Codex permission mode" },
     .{ .name = "resume", .description = "Resume previous session" },
@@ -107,6 +108,7 @@ test "isLocalCommand" {
     try std.testing.expect(isLocalCommand("clear"));
     try std.testing.expect(isLocalCommand("fast"));
     try std.testing.expect(isLocalCommand("model"));
+    try std.testing.expect(isLocalCommand("plan"));
     try std.testing.expect(isLocalCommand("thinking"));
     try std.testing.expect(isLocalCommand("permissions"));
     try std.testing.expect(isLocalCommand("resume"));
