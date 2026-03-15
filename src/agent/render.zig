@@ -1408,14 +1408,6 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
     }
 
     const wrap_width = if (win.width > 5) win.width - 5 else 1;
-    const line_map_needs_refresh = agent_state.line_map_dirty or
-        agent_state.line_map.needsRebuild(wrap_width, agent_state.diff_view_mode);
-
-    if (line_map_needs_refresh) {
-        for (agent_state.messages.items) |*msg| {
-            _ = msg.ensureMarkdownParsed();
-        }
-    }
 
     // Get the pre-computed line map (builds if dirty)
     // Reserve 4 cols for indent + 1 col for scrollbar
@@ -1749,7 +1741,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
 
         // Print text - special handling for tool headers and agent messages
         switch (record.line_type) {
-            .message_content => |mc| {
+            .message_content => {
                 // Check if we have pre-computed styled segments
                 if (record.segments) |segments| {
                     // Render each segment with its own style
@@ -1760,20 +1752,7 @@ fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void 
                         col = result.col; // result.col is the final column position
                     }
                 } else {
-                    // Fall back to traditional rendering
-                    const messages = agent_state.messages.items;
-                    if (mc.msg_idx < messages.len) {
-                        const msg = &messages[mc.msg_idx];
-                        // For agent messages, try to render with markdown styling
-                        if (msg.role == .agent and record.text.len > 0) {
-                            renderTextWithMarkdown(win, record.text, msg, record.style, is_cursor_line, is_in_visual, row, col_offset);
-                        } else {
-                            // Non-agent messages or empty text - use plain rendering
-                            _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
-                        }
-                    } else {
-                        _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
-                    }
+                    _ = safePrint(win, record.text, withHighlightBg(record.style, is_cursor_line, is_in_visual), row, col_offset);
                 }
             },
             .tool_header => |th| {

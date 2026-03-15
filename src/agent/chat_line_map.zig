@@ -161,6 +161,7 @@ pub const SideLineKind = enum { context, add, delete, empty };
 pub const ChatLineMap = struct {
     records: std.ArrayList(ChatLineRecord),
     strings: std.ArrayList([]const u8), // Owned strings to free on deinit
+    segment_slices: std.ArrayList([]const StyledSegment), // Owned segment arrays to free on deinit
     highlights: std.ArrayList([]const Highlight), // Owned highlight arrays to free on deinit
     allocator: Allocator,
     wrap_width: usize, // Width used for wrapping (rebuild if changed)
@@ -168,6 +169,7 @@ pub const ChatLineMap = struct {
     diff_view_mode: AgentState.DiffViewMode, // Current view mode
     last_msg_start_idx: usize, // Cached index where last message starts (for O(1) streaming updates)
     last_msg_strings_start: usize, // Cached index where last message's strings start (for efficient cleanup)
+    last_msg_segment_slices_start: usize, // Cached index where last message's segment arrays start
     last_msg_highlights_start: usize, // Cached index where last message's highlights start
     // Reference to expanded user messages set (set during build, used for collapsed/expanded state)
     expanded_user_messages: ?*const std.AutoHashMap(usize, void),
@@ -183,6 +185,7 @@ pub const ChatLineMap = struct {
         var self = ChatLineMap{
             .records = .{},
             .strings = .{},
+            .segment_slices = .{},
             .highlights = .{},
             .allocator = allocator,
             .wrap_width = 0,
@@ -190,6 +193,7 @@ pub const ChatLineMap = struct {
             .diff_view_mode = .unified,
             .last_msg_start_idx = 0,
             .last_msg_strings_start = 0,
+            .last_msg_segment_slices_start = 0,
             .last_msg_highlights_start = 0,
             .expanded_user_messages = null,
             .messages_with_formatted_tables = std.AutoHashMap(usize, void).init(allocator),
@@ -200,6 +204,7 @@ pub const ChatLineMap = struct {
         // This warms up the allocator and avoids page faults on first use
         self.records.ensureTotalCapacity(allocator, 64) catch {};
         self.strings.ensureTotalCapacity(allocator, 16) catch {};
+        self.segment_slices.ensureTotalCapacity(allocator, 16) catch {};
 
         return self;
     }
@@ -211,6 +216,8 @@ pub const ChatLineMap = struct {
             self.allocator.free(s);
         }
         self.strings.deinit(self.allocator);
+        self.freeSegmentSlices(0);
+        self.segment_slices.deinit(self.allocator);
         // Free owned highlight arrays
         self.freeHighlights(0);
         self.highlights.deinit(self.allocator);
@@ -229,6 +236,12 @@ pub const ChatLineMap = struct {
         }
     }
 
+    fn freeSegmentSlices(self: *ChatLineMap, start_idx: usize) void {
+        for (self.segment_slices.items[start_idx..]) |segments| {
+            self.allocator.free(segments);
+        }
+    }
+
     /// Build or rebuild the line map from messages
     pub fn build(
         self: *ChatLineMap,
@@ -243,6 +256,8 @@ pub const ChatLineMap = struct {
             self.allocator.free(s);
         }
         self.strings.clearRetainingCapacity();
+        self.freeSegmentSlices(0);
+        self.segment_slices.clearRetainingCapacity();
         self.freeHighlights(0);
         self.highlights.clearRetainingCapacity();
         self.records.clearRetainingCapacity();
@@ -255,6 +270,7 @@ pub const ChatLineMap = struct {
         self.build_count +%= 1;
         self.last_msg_start_idx = 0;
         self.last_msg_strings_start = 0;
+        self.last_msg_segment_slices_start = 0;
         self.last_msg_highlights_start = 0;
         self.expanded_user_messages = expanded_user_messages;
 
@@ -273,6 +289,7 @@ pub const ChatLineMap = struct {
             if (msg_idx == messages.len - 1) {
                 self.last_msg_start_idx = self.records.items.len;
                 self.last_msg_strings_start = self.strings.items.len;
+                self.last_msg_segment_slices_start = self.segment_slices.items.len;
                 self.last_msg_highlights_start = self.highlights.items.len;
             }
 
@@ -384,6 +401,7 @@ pub const ChatLineMap = struct {
                 // Track where the last message starts (for O(1) streaming updates)
                 self.last_msg_start_idx = self.records.items.len;
                 self.last_msg_strings_start = self.strings.items.len;
+                self.last_msg_segment_slices_start = self.segment_slices.items.len;
                 self.last_msg_highlights_start = self.highlights.items.len;
 
                 switch (msg.role) {
@@ -494,6 +512,11 @@ pub const ChatLineMap = struct {
             if (highlights_start < self.highlights.items.len) {
                 self.freeHighlights(highlights_start);
                 self.highlights.shrinkRetainingCapacity(highlights_start);
+            }
+            const segment_slices_start = self.last_msg_segment_slices_start;
+            if (segment_slices_start < self.segment_slices.items.len) {
+                self.freeSegmentSlices(segment_slices_start);
+                self.segment_slices.shrinkRetainingCapacity(segment_slices_start);
             }
 
             // Shrink records to remove last message
@@ -1737,6 +1760,7 @@ pub const ChatLineMap = struct {
 
         // Multiple segments - store them for per-segment rendering
         const segments_copy = try self.allocator.dupe(StyledSegment, segs);
+        try self.segment_slices.append(self.allocator, segments_copy);
 
         // Calculate total text for fallback rendering
         var total_len: usize = 0;
@@ -2649,4 +2673,33 @@ test "markdown inline code prefers slash break points" {
     try std.testing.expectEqual(@as(usize, 2), line_count);
     try std.testing.expectEqualStrings("src/", lines[0]);
     try std.testing.expectEqualStrings("app.zig", lines[1]);
+}
+
+test "markdown bold line stores owned styled segments" {
+    const allocator = std.testing.allocator;
+    var line_map = ChatLineMap.init(allocator);
+    defer line_map.deinit();
+
+    var messages = [_]Message{.{
+        .role = .agent,
+        .content = "before **bold** after",
+        .timestamp = 0,
+    }};
+    defer messages[0].deinit(allocator);
+
+    _ = messages[0].ensureMarkdownParsed();
+    try line_map.build(&messages, 80, .unified, null, null);
+
+    var found_multi_segment_line = false;
+    for (line_map.records.items) |record| {
+        if (record.line_type != .message_content) continue;
+        if (record.segments) |segments| {
+            found_multi_segment_line = true;
+            try std.testing.expect(segments.len >= 3);
+            break;
+        }
+    }
+
+    try std.testing.expect(found_multi_segment_line);
+    try std.testing.expectEqual(@as(usize, 1), line_map.segment_slices.items.len);
 }

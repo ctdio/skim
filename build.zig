@@ -134,6 +134,26 @@ pub fn build(b: *std.Build) void {
     const render_content_step = b.step("bench-render-content", "Run render content benchmark");
     render_content_step.dependOn(&render_content_run.step);
 
+    // Agent render benchmark executable
+    const agent_render_exe = b.addExecutable(.{
+        .name = "bench_agent_render",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_agent_render.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    agent_render_exe.root_module.addImport("vaxis", vaxis);
+    agent_render_exe.root_module.addImport("tree-sitter", tree_sitter);
+    agent_render_exe.root_module.addImport("build_options", build_options_module);
+    for (grammars) |grammar| {
+        agent_render_exe.linkLibrary(grammar);
+    }
+    agent_render_exe.linkLibC();
+    const agent_render_run = b.addRunArtifact(agent_render_exe);
+    const agent_render_step = b.step("bench-agent-render", "Run agent render benchmark");
+    agent_render_step.dependOn(&agent_render_run.step);
+
     // Async benchmark executable
     const async_exe = b.addExecutable(.{
         .name = "bench_async",

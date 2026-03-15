@@ -2166,12 +2166,15 @@ pub const AgentState = struct {
 
                 if (width_or_mode_changed or prev_message_count == 0 or self.earlier_message_dirty) {
                     // Width/mode changed, first build, or earlier message modified - full rebuild required
+                    self.ensureMarkdownParsedInRange(0, message_count);
                     try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode, highlighter, &self.expanded_user_messages);
                 } else if (message_count > prev_message_count) {
                     // New messages added - incremental add
+                    self.ensureMarkdownParsedInRange(prev_message_count, message_count);
                     try self.line_map.updateForNewMessage(self.messages.items, wrap_width, self.diff_view_mode, highlighter, &self.expanded_user_messages);
                 } else if (message_count == prev_message_count and message_count > 0) {
                     // Same message count but dirty - last message content changed (streaming)
+                    self.ensureMarkdownParsedInRange(message_count - 1, message_count);
                     try self.line_map.updateLastMessage(self.messages.items, wrap_width, self.diff_view_mode, highlighter, &self.expanded_user_messages);
                     // Also refresh any active subagent blocks (they are earlier messages
                     // that change independently of the last message).
@@ -2180,6 +2183,7 @@ pub const AgentState = struct {
                 }
                 // If message_count < prev_message_count, messages were cleared - rebuild
                 else if (message_count < prev_message_count) {
+                    self.ensureMarkdownParsedInRange(0, message_count);
                     try self.line_map.build(self.messages.items, wrap_width, self.diff_view_mode, highlighter, &self.expanded_user_messages);
                 }
 
@@ -2190,6 +2194,15 @@ pub const AgentState = struct {
             // Otherwise skip update this frame - use stale line map
         }
         return &self.line_map;
+    }
+
+    fn ensureMarkdownParsedInRange(self: *AgentState, start_idx: usize, end_idx: usize) void {
+        if (start_idx >= end_idx or start_idx >= self.messages.items.len) return;
+
+        const clamped_end = @min(end_idx, self.messages.items.len);
+        for (self.messages.items[start_idx..clamped_end]) |*msg| {
+            _ = msg.ensureMarkdownParsed();
+        }
     }
 
     // =========================================================================
@@ -2953,6 +2966,29 @@ test "AgentState append creates new message if last is user" {
 
     try std.testing.expectEqual(@as(usize, 2), state.messageCount());
     try std.testing.expectEqual(Message.Role.agent, state.messages.items[1].role);
+}
+
+test "AgentState ensureLineMap parses agent markdown lazily" {
+    const allocator = std.testing.allocator;
+
+    var state = AgentState.init(allocator, .right);
+    defer state.deinit();
+
+    try state.addMessage(.agent, "before **bold** after");
+
+    const line_map = try state.ensureLineMap(80, null);
+
+    var found_multi_segment_line = false;
+    for (line_map.records.items) |record| {
+        if (record.line_type != .message_content) continue;
+        if (record.segments) |_| {
+            found_multi_segment_line = true;
+            break;
+        }
+    }
+
+    try std.testing.expect(found_multi_segment_line);
+    try std.testing.expect(state.messages.items[0].md_tree_valid);
 }
 
 test "AgentState addDiffMessage dedupes consecutive diffs" {
