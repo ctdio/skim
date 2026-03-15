@@ -147,6 +147,7 @@ pub const CodexConnectContext = struct {
     args: ?[]const []const u8,
     cwd: ?[]const u8,
     model: ?[]const u8,
+    mode: ?[]const u8,
     approval_policy: ?[]const u8,
 };
 
@@ -6185,6 +6186,7 @@ pub const App = struct {
             .args = agent_info.args,
             .cwd = self.state.git_repo_root,
             .model = agent_info.model,
+            .mode = if (agent_info.skim) |skim| skim.mode else null,
             .approval_policy = agent_info.approval_policy,
         };
 
@@ -6209,10 +6211,7 @@ pub const App = struct {
     fn codexConnectThreadFn(ctx: *CodexConnectContext) void {
         std.log.info("Codex: Background connection thread started", .{});
 
-        ctx.mgr.requested_approval_policy = if (ctx.approval_policy) |approval_policy|
-            codex_mod.protocol.ApprovalPolicy.fromString(approval_policy)
-        else
-            null;
+        applyCodexSessionConfig(ctx.mgr, ctx.mode, ctx.approval_policy);
 
         // Connect to codex app-server (spawn process, handshake)
         ctx.mgr.connect(ctx.command, ctx.args, ctx.cwd) catch |err| {
@@ -6229,6 +6228,22 @@ pub const App = struct {
         };
 
         std.log.info("Codex: Thread started successfully", .{});
+    }
+
+    fn applyCodexSessionConfig(
+        mgr: *codex_mod.CodexManager,
+        mode: ?[]const u8,
+        approval_policy: ?[]const u8,
+    ) void {
+        mgr.requested_collaboration_mode = if (mode) |mode_id|
+            codex_mod.protocol.CollaborationMode.fromString(mode_id)
+        else
+            null;
+
+        mgr.requested_approval_policy = if (approval_policy) |policy_id|
+            codex_mod.protocol.ApprovalPolicy.fromString(policy_id)
+        else
+            null;
     }
 
     /// Connect to the currently selected agent in the selection menu
@@ -6787,6 +6802,29 @@ test "isSessionInitializing returns true for queued agent connection" {
     defer app.frame_segment_arena.deinit();
 
     try std.testing.expect(app.isSessionInitializing());
+}
+
+test "applyCodexSessionConfig enables plan collaboration mode" {
+    var mgr = codex_mod.CodexManager.init(std.testing.allocator);
+    defer mgr.deinit();
+
+    App.applyCodexSessionConfig(&mgr, "plan", "never");
+
+    try std.testing.expect(mgr.requested_collaboration_mode != null);
+    try std.testing.expect(mgr.requested_collaboration_mode.? == .plan);
+    try std.testing.expect(mgr.requested_approval_policy != null);
+    try std.testing.expect(mgr.requested_approval_policy.? == .never);
+}
+
+test "applyCodexSessionConfig ignores unknown mode" {
+    var mgr = codex_mod.CodexManager.init(std.testing.allocator);
+    defer mgr.deinit();
+
+    App.applyCodexSessionConfig(&mgr, "unknown-mode", "on-request");
+
+    try std.testing.expect(mgr.requested_collaboration_mode == null);
+    try std.testing.expect(mgr.requested_approval_policy != null);
+    try std.testing.expect(mgr.requested_approval_policy.? == .on_request);
 }
 
 test "search highlighting - multiple matches" {
