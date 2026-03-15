@@ -454,6 +454,7 @@ fn convertSubagentInfo(allocator: Allocator, src: OpencodeEvent.SubagentEventInf
 
     if (src.summary.len > 0) {
         var summaries: std.ArrayList(SubagentToolSummary) = .{};
+        defer summaries.deinit(allocator);
         summaries.ensureTotalCapacity(allocator, src.summary.len) catch return info;
         for (src.summary) |entry| {
             const owned_name = allocator.dupe(u8, entry.tool_name) catch continue;
@@ -468,7 +469,12 @@ fn convertSubagentInfo(allocator: Allocator, src: OpencodeEvent.SubagentEventInf
                 continue;
             };
         }
-        info.summary = summaries.toOwnedSlice(allocator) catch &.{};
+        info.summary = summaries.toOwnedSlice(allocator) catch {
+            for (summaries.items) |*entry| {
+                entry.deinit(allocator);
+            }
+            return info;
+        };
     }
 
     return info;
@@ -479,6 +485,7 @@ fn convertSubagentInfo(allocator: Allocator, src: OpencodeEvent.SubagentEventInf
 fn convertSummaryOnly(allocator: Allocator, src: []opencode_manager.Event.SubagentToolSummary) []SubagentToolSummary {
     if (src.len == 0) return &.{};
     var summaries: std.ArrayList(SubagentToolSummary) = .{};
+    defer summaries.deinit(allocator);
     summaries.ensureTotalCapacity(allocator, src.len) catch return &.{};
     for (src) |entry| {
         const owned_name = allocator.dupe(u8, entry.tool_name) catch continue;
@@ -493,7 +500,12 @@ fn convertSummaryOnly(allocator: Allocator, src: []opencode_manager.Event.Subage
             continue;
         };
     }
-    return summaries.toOwnedSlice(allocator) catch &.{};
+    return summaries.toOwnedSlice(allocator) catch {
+        for (summaries.items) |*entry| {
+            entry.deinit(allocator);
+        }
+        return &.{};
+    };
 }
 
 fn convertToolStatus(s: opencode_manager.ToolStatus) Message.ToolStatus {

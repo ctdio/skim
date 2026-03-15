@@ -1180,6 +1180,12 @@ pub const Decoder = struct {
                     if (content_val == .array) {
                         std.log.info("CODEC: content array has {d} items", .{content_val.array.items.len});
                         var text_blocks: std.ArrayList(protocol.ContentBlock) = .{};
+                        defer text_blocks.deinit(self.allocator);
+                        errdefer {
+                            for (text_blocks.items) |*block| {
+                                block.deinit(self.allocator);
+                            }
+                        }
                         for (content_val.array.items, 0..) |item, idx| {
                             if (item != .object) {
                                 std.log.info("CODEC: content[{d}] is not object, is {s}", .{ idx, @tagName(item) });
@@ -1249,7 +1255,7 @@ pub const Decoder = struct {
                         }
                         std.log.info("CODEC: parsed {d} text blocks from content", .{text_blocks.items.len});
                         if (text_blocks.items.len > 0) {
-                            update_content = text_blocks.toOwnedSlice(self.allocator) catch &.{};
+                            update_content = try text_blocks.toOwnedSlice(self.allocator);
                         }
                     }
                 }

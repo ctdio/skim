@@ -2885,7 +2885,13 @@ pub const OpencodeManager = struct {
                         };
                     }
                     if (summaries.items.len > 0) {
-                        info.summary = summaries.toOwnedSlice(self.event_allocator) catch &.{};
+                        info.summary = summaries.toOwnedSlice(self.event_allocator) catch blk: {
+                            for (summaries.items) |*entry| {
+                                entry.deinit(self.event_allocator);
+                            }
+                            summaries.deinit(self.event_allocator);
+                            break :blk &.{};
+                        };
                     }
                 }
             }
