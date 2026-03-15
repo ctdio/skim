@@ -67,6 +67,9 @@ pub const HighlightWorker = struct {
             if (result.highlights) |highlights| {
                 self.highlighter.freeHighlights(highlights);
             }
+            if (result.old_highlights) |old_highlights| {
+                self.highlighter.freeHighlights(old_highlights);
+            }
         }
         self.result_queue.deinit(self.allocator);
 
@@ -126,7 +129,14 @@ pub const HighlightWorker = struct {
                     .highlights = highlights,
                     .old_highlights = old_highlights,
                     .failed = highlights == null and old_highlights == null,
-                }) catch {};
+                }) catch {
+                    if (highlights) |owned_highlights| {
+                        self.highlighter.freeHighlights(owned_highlights);
+                    }
+                    if (old_highlights) |owned_old_highlights| {
+                        self.highlighter.freeHighlights(owned_old_highlights);
+                    }
+                };
                 self.mutex.unlock();
             } else {
                 // No jobs available, sleep briefly to avoid busy-wait
@@ -229,4 +239,44 @@ pub fn highlightWorker(job: *AsyncHighlightJob) void {
     job.old_highlights = old_highlights;
     job.done = true;
     job.mutex.unlock();
+}
+
+fn allocTestHighlights(allocator: std.mem.Allocator, count: usize) ![]syntax.Highlight {
+    const highlights = try allocator.alloc(syntax.Highlight, count);
+    errdefer allocator.free(highlights);
+
+    var initialized: usize = 0;
+    errdefer {
+        for (highlights[0..initialized]) |highlight| {
+            allocator.free(highlight.category);
+        }
+    }
+
+    for (highlights, 0..) |*highlight, idx| {
+        highlight.* = .{
+            .start_byte = idx,
+            .end_byte = idx + 1,
+            .category = try allocator.dupe(u8, "keyword"),
+        };
+        initialized += 1;
+    }
+
+    return highlights;
+}
+
+test "HighlightWorker deinit frees queued old highlights" {
+    const allocator = std.testing.allocator;
+
+    const worker = try HighlightWorker.init(allocator);
+    defer worker.deinit();
+
+    worker.mutex.lock();
+    try worker.result_queue.append(allocator, .{
+        .file_idx = 0,
+        .hunk_idx = 0,
+        .highlights = try allocTestHighlights(allocator, 1),
+        .old_highlights = try allocTestHighlights(allocator, 1),
+        .failed = false,
+    });
+    worker.mutex.unlock();
 }

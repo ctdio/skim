@@ -100,6 +100,7 @@ const ViewportAnchor = struct {
 };
 
 const PendingJob = struct {
+    file_path: []const u8, // Owned file path used by worker
     content: []const u8, // Owned NEW hunk content
     old_content: []const u8, // Owned OLD hunk content
 };
@@ -1122,6 +1123,7 @@ pub const App = struct {
         // Free pending job content strings
         var iter = self.pending_highlight_jobs.iterator();
         while (iter.next()) |entry| {
+            self.allocator.free(entry.value_ptr.file_path);
             self.allocator.free(entry.value_ptr.content);
             self.allocator.free(entry.value_ptr.old_content);
         }
@@ -1866,6 +1868,7 @@ pub const App = struct {
                     // Remove from pending jobs and free content
                     const key = HunkKey{ .file_idx = file_idx, .hunk_idx = hunk_idx };
                     if (self.pending_highlight_jobs.fetchRemove(key)) |entry| {
+                        self.allocator.free(entry.value.file_path);
                         self.allocator.free(entry.value.content);
                         self.allocator.free(entry.value.old_content);
                     }
@@ -1983,26 +1986,37 @@ pub const App = struct {
                             };
                             errdefer self.allocator.free(old_content);
 
-                            // Submit job to worker
-                            worker.submitJob(.{
-                                .file_path = file_path,
+                            const file_path_copy = self.allocator.dupe(u8, file_path) catch {
+                                self.allocator.free(content);
+                                self.allocator.free(old_content);
+                                continue;
+                            };
+                            errdefer self.allocator.free(file_path_copy);
+
+                            self.pending_highlight_jobs.put(key, .{
+                                .file_path = file_path_copy,
                                 .content = content,
                                 .old_content = old_content,
-                                .file_idx = check_idx,
-                                .hunk_idx = hunk_idx,
                             }) catch {
+                                self.allocator.free(file_path_copy);
                                 self.allocator.free(content);
                                 self.allocator.free(old_content);
                                 continue;
                             };
 
-                            // Track pending job (store both content strings)
-                            self.pending_highlight_jobs.put(key, .{
+                            worker.submitJob(.{
+                                .file_path = file_path_copy,
                                 .content = content,
                                 .old_content = old_content,
+                                .file_idx = check_idx,
+                                .hunk_idx = hunk_idx,
                             }) catch {
-                                self.allocator.free(content);
-                                self.allocator.free(old_content);
+                                if (self.pending_highlight_jobs.fetchRemove(key)) |entry| {
+                                    self.allocator.free(entry.value.file_path);
+                                    self.allocator.free(entry.value.content);
+                                    self.allocator.free(entry.value.old_content);
+                                }
+                                continue;
                             };
 
                             hunks_submitted += 1;
