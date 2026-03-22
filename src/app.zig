@@ -6186,7 +6186,7 @@ pub const App = struct {
             .args = agent_info.args,
             .cwd = self.state.git_repo_root,
             .model = agent_info.model,
-            .mode = if (agent_info.skim) |skim| skim.mode else null,
+            .mode = agent_info.mode,
             .approval_policy = agent_info.approval_policy,
         };
 

@@ -1560,12 +1560,17 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
             if (agent_state.plan.visible) {
                 agent_state.togglePlanVisibility();
             }
+        } else if (std.mem.eql(u8, trimmed_args, "expand") or std.mem.eql(u8, trimmed_args, "collapse")) {
+            agent_state.togglePlanExpanded();
+            const expand_status = if (agent_state.plan.expanded) "Plan expanded" else "Plan collapsed";
+            try agent_state.addMessage(.system, expand_status);
+            return;
         } else if (std.mem.eql(u8, trimmed_args, "status")) {
             const status = if (agent_state.plan.visible) "Plan is visible" else "Plan is hidden";
             try agent_state.addMessage(.system, status);
             return;
         } else {
-            try agent_state.addMessage(.system, "Invalid plan option. Use: /plan, /plan show, /plan hide, or /plan status");
+            try agent_state.addMessage(.system, "Invalid plan option. Use: /plan, /plan show, /plan hide, /plan expand, or /plan status");
             return;
         }
 
@@ -2906,6 +2911,9 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
         },
         .toggle_plan => {
             agent_state.togglePlanVisibility();
+        },
+        .expand_plan => {
+            agent_state.togglePlanExpanded();
         },
     }
 }

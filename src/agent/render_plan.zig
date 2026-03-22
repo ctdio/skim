@@ -74,6 +74,8 @@ pub fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry, expand
     if (!expanded) {
         const entry = findActiveOrLastCompleted(entries);
         renderPlanEntry(win, row, entry);
+        row += 1;
+        renderBottomBar(win, row);
         return;
     }
 
@@ -82,6 +84,11 @@ pub fn renderPlanArea(win: vaxis.Window, entries: []const OwnedPlanEntry, expand
         if (row >= win.height) break;
         renderPlanEntry(win, row, entry);
         row += 1;
+    }
+
+    // Render bottom bar
+    if (row < win.height) {
+        renderBottomBar(win, row);
     }
 }
 
@@ -148,4 +155,16 @@ fn renderPlanEntry(win: vaxis.Window, row: usize, entry: OwnedPlanEntry) void {
         .{ .text = content, .style = content_style },
     };
     _ = win.print(&content_seg, .{ .row_offset = @intCast(row), .col_offset = 3 });
+}
+
+/// Render the bottom bar (horizontal line)
+fn renderBottomBar(win: vaxis.Window, row: usize) void {
+    const bar_style = vaxis.Style{ .fg = Color.dim_gray };
+
+    for (0..win.width) |col| {
+        win.writeCell(@intCast(col), @intCast(row), .{
+            .char = .{ .grapheme = "─", .width = 1 },
+            .style = bar_style,
+        });
+    }
 }

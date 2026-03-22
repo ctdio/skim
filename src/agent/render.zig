@@ -936,15 +936,15 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
             }
         }
         if (total_display_lines == 0) total_display_lines = 1; // Always show at least one line
-        break :blk @max(3, @min(total_display_lines, MAX_INPUT_LINES));
+        break :blk @min(total_display_lines, MAX_INPUT_LINES);
     };
 
     // Calculate plan height (only if visible and has entries)
     const plan_entry_count = agent_state.plan.count();
     const plan_height: usize = if (agent_state.plan.visible and plan_entry_count > 0) blk: {
-        // Header (1) + entries (all if expanded, 1 if collapsed)
+        // Header (1) + entries (all if expanded, 1 if collapsed) + bottom bar (1)
         const visible_entries: usize = if (agent_state.plan.expanded) plan_entry_count else 1;
-        break :blk 1 + visible_entries;
+        break :blk 1 + visible_entries + 1;
     } else 0;
 
     // Calculate status area height (shown between messages and plan when agent is thinking or session initializing with queued message)
@@ -2412,14 +2412,13 @@ fn renderInputArea(
 ) !void {
     if (win.height == 0) return;
 
-    // Fill the entire input area with spaces to prevent artifacts from previous renders
-    // (e.g., permission dialogs leaving remnants when dismissed)
-    // Using fill() instead of clear() for more robust clearing
-    const blank_cell = vaxis.Cell{
+    // Fill the entire input area with the input background color
+    // This ensures padding rows also have the colored background
+    const input_bg_cell = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
         .style = .{ .bg = Color.comment_bg },
     };
-    win.fill(blank_cell);
+    win.fill(input_bg_cell);
 
     // Note: model_selection mode is now rendered as a centered dialog overlay in renderAgentPanel
 

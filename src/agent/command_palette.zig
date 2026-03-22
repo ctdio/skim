@@ -14,6 +14,7 @@ pub const AgentCommandAction = union(enum) {
     prev_tab: void,
     rename_tab: void,
     toggle_plan: void,
+    expand_plan: void,
 };
 
 /// A command in the palette
@@ -61,6 +62,12 @@ pub const COMMANDS = [_]AgentCommand{
         .aliases = &[_][]const u8{ ":plan", ":todo" },
         .description = "Show/hide plan view",
         .action = .toggle_plan,
+    },
+    .{
+        .name = "Expand Plan",
+        .aliases = &[_][]const u8{ ":plan expand", ":todo expand" },
+        .description = "Expand/collapse plan entries",
+        .action = .expand_plan,
     },
     .{
         .name = "Quit",
