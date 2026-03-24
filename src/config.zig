@@ -35,6 +35,8 @@ pub const AgentServerConfig = struct {
     skim: ?SkimAgentExtensions = null, // Namespaced skim extensions
     protocol: Protocol = .acp, // Protocol to use for communication
     approval_policy: ?[]const u8 = null, // Codex: "never", "on-request", "unless-trusted", "always"
+    sandbox_mode: ?[]const u8 = null, // Codex CLI: "read-only", "workspace-write", "danger-full-access"
+    web_search: bool = false, // Codex CLI: enable native web search tool
 };
 
 pub const Config = struct {
@@ -217,6 +219,16 @@ fn parseAgentServer(allocator: Allocator, name: []const u8, obj: std.json.Object
         if (v == .string) agent.approval_policy = try allocator.dupe(u8, v.string);
     }
 
+    // Parse sandbox_mode (optional, codex CLI launch flag)
+    if (obj.get("sandbox_mode")) |v| {
+        if (v == .string) agent.sandbox_mode = try allocator.dupe(u8, v.string);
+    }
+
+    // Parse web_search (optional, codex CLI launch flag)
+    if (obj.get("web_search")) |v| {
+        if (v == .bool) agent.web_search = v.bool;
+    }
+
     return agent;
 }
 
@@ -315,6 +327,7 @@ fn freeAgentServer(allocator: Allocator, agent: *const AgentServerConfig) void {
         if (skim.model) |m| allocator.free(m);
     }
     if (agent.approval_policy) |p| allocator.free(p);
+    if (agent.sandbox_mode) |mode| allocator.free(mode);
 }
 
 /// Free agent servers array and all contained data.
@@ -383,7 +396,11 @@ test "parse agent_servers config from json" {
         \\      }
         \\    },
         \\    "Codex": {
-        \\      "command": "codex"
+        \\      "command": "codex",
+        \\      "protocol": "codex",
+        \\      "approval_policy": "never",
+        \\      "sandbox_mode": "workspace-write",
+        \\      "web_search": true
         \\    }
         \\  }
         \\}
@@ -421,6 +438,10 @@ test "parse agent_servers config from json" {
     try std.testing.expectEqualStrings("Codex", codex.name);
     try std.testing.expectEqualStrings("codex", codex.command);
     try std.testing.expectEqual(@as(?[]const []const u8, null), codex.args);
+    try std.testing.expectEqual(Protocol.codex, codex.protocol);
+    try std.testing.expectEqualStrings("never", codex.approval_policy.?);
+    try std.testing.expectEqualStrings("workspace-write", codex.sandbox_mode.?);
+    try std.testing.expect(codex.web_search);
     try std.testing.expectEqual(@as(?SkimAgentExtensions, null), codex.skim);
 }
 

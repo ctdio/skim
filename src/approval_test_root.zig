@@ -11,3 +11,5 @@ pub const FileChangeDecision = CodexManager.FileChangeDecision;
 pub const renderCommandApproval = render.renderCommandApproval;
 pub const renderFileChangeApproval = render.renderFileChangeApproval;
 pub const renderUserInputApproval = render.renderUserInputApproval;
+pub const getInputPromptStyle = render.getInputPromptStyle;
+pub const Color = @import("rendering/common.zig").Color;

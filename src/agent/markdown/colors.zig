@@ -116,7 +116,7 @@ pub const default: MarkdownColors = .{
 
     // Inline code - subtle background distinction
     .inline_code = .{
-        .fg = .{ .rgb = [3]u8{ 255, 123, 114 } }, // Coral red #FF7B72
+        .fg = Color.cyan,
     },
     .inline_code_bg = .{ .rgb = [3]u8{ 45, 45, 50 } }, // Dark gray background
 
@@ -226,6 +226,10 @@ test "default colors defined" {
     // Link text should be styled
     try std.testing.expect(default.link_text.fg != .default);
     try std.testing.expect(default.link_text.ul_style != .off);
+}
+
+test "inline code uses cyan accent" {
+    try std.testing.expectEqual(Color.cyan, default.inline_code.fg);
 }
 
 test "mergeStyles - overlay fg" {

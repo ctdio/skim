@@ -43,6 +43,29 @@ test "snapshot: codex_file_change_approval" {
     try snapshot.expectSnapshot(allocator, "codex_file_change_approval", text);
 }
 
+test "snapshot: ansi_agent_input_prompt_ready" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 20, 1);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+    win.fill(.{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = .{ .bg = approval_root.Color.comment_bg },
+    });
+
+    var prompt_seg = [_]harness.Cell.Segment{
+        .{ .text = "> ", .style = approval_root.getInputPromptStyle(false, true) },
+        .{ .text = "hello", .style = .{ .fg = approval_root.Color.white, .bg = approval_root.Color.comment_bg } },
+    };
+    _ = win.print(&prompt_seg, .{ .row_offset = 0, .col_offset = 1 });
+
+    const ansi = try ctx.captureToAnsi();
+    defer allocator.free(ansi);
+
+    try snapshot.expectSnapshot(allocator, "ansi_agent_input_prompt_ready", ansi);
+}
+
 test "snapshot: codex_user_input_single_question" {
     const allocator = std.testing.allocator;
     var ctx = try harness.createTestContext(allocator, 70, 12);

@@ -2512,12 +2512,7 @@ fn renderInputArea(
 
     // Dim prompt when session is not ready
     const session_ready = app.isSessionReady();
-    const prompt_style = if (is_shell_mode)
-        withCommentBg(.{ .fg = Color.yellow, .bold = true })
-    else if (session_ready)
-        withCommentBg(.{ .fg = Color.magenta, .bold = true })
-    else
-        withCommentBg(.{ .fg = Color.dim_gray });
+    const prompt_style = getInputPromptStyle(is_shell_mode, session_ready);
     const text_style = withCommentBg(.{ .fg = Color.white });
     const file_ref_style = withCommentBg(.{ .fg = Color.cyan, .bold = true });
 
@@ -3615,6 +3610,15 @@ fn withCommentBg(s: vaxis.Style) vaxis.Style {
     return result;
 }
 
+pub fn getInputPromptStyle(is_shell_mode: bool, session_ready: bool) vaxis.Style {
+    return if (is_shell_mode)
+        withCommentBg(.{ .fg = Color.yellow, .bold = true })
+    else if (session_ready)
+        withCommentBg(.{ .fg = Color.chat_content, .bold = true })
+    else
+        withCommentBg(.{ .fg = Color.dim_gray });
+}
+
 /// Format a token count as a compact display string.
 /// Returns a slice into the provided buffer.
 /// Examples: 500 -> "500 tokens", 16709 -> "16.7K tokens", 1234567 -> "1.2M tokens"
@@ -3684,6 +3688,22 @@ test "withCommentBg applies comment background and preserves foreground" {
     const style = withCommentBg(.{ .fg = Color.magenta, .bold = true });
 
     try std.testing.expectEqual(Color.magenta, style.fg);
+    try std.testing.expectEqual(Color.comment_bg, style.bg);
+    try std.testing.expect(style.bold);
+}
+
+test "getInputPromptStyle uses bright gray when session is ready" {
+    const style = getInputPromptStyle(false, true);
+
+    try std.testing.expectEqual(Color.chat_content, style.fg);
+    try std.testing.expectEqual(Color.comment_bg, style.bg);
+    try std.testing.expect(style.bold);
+}
+
+test "getInputPromptStyle keeps shell prompt yellow" {
+    const style = getInputPromptStyle(true, true);
+
+    try std.testing.expectEqual(Color.yellow, style.fg);
     try std.testing.expectEqual(Color.comment_bg, style.bg);
     try std.testing.expect(style.bold);
 }

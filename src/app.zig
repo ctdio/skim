@@ -142,6 +142,7 @@ pub const OpencodeConnectContext = struct {
 
 /// Context for Codex connection thread
 pub const CodexConnectContext = struct {
+    allocator: Allocator,
     mgr: *codex_mod.CodexManager,
     command: []const u8,
     args: ?[]const []const u8,
@@ -149,6 +150,8 @@ pub const CodexConnectContext = struct {
     model: ?[]const u8,
     mode: ?[]const u8,
     approval_policy: ?[]const u8,
+    sandbox_mode: ?[]const u8,
+    web_search: bool,
 };
 
 /// Unified pending connection state (replaces separate ACP/Opencode fields)
@@ -6181,6 +6184,7 @@ pub const App = struct {
         // Store connection context (static lifetime for thread)
         const ctx = try self.allocator.create(CodexConnectContext);
         ctx.* = .{
+            .allocator = self.allocator,
             .mgr = mgr,
             .command = agent_info.command,
             .args = agent_info.args,
@@ -6188,6 +6192,8 @@ pub const App = struct {
             .model = agent_info.model,
             .mode = agent_info.mode,
             .approval_policy = agent_info.approval_policy,
+            .sandbox_mode = agent_info.sandbox_mode,
+            .web_search = agent_info.web_search,
         };
 
         // Spawn background thread for connection
@@ -6213,8 +6219,21 @@ pub const App = struct {
 
         applyCodexSessionConfig(ctx.mgr, ctx.mode, ctx.approval_policy);
 
+        const launch = buildCodexLaunchArgs(
+            ctx.allocator,
+            ctx.command,
+            ctx.args,
+            ctx.sandbox_mode,
+            ctx.web_search,
+        ) catch |err| {
+            std.log.err("Codex: Failed to build launch args: {}", .{err});
+            return;
+        };
+        defer ctx.allocator.free(launch.args);
+        defer if (launch.sandbox_override) |s| ctx.allocator.free(s);
+
         // Connect to codex app-server (spawn process, handshake)
-        ctx.mgr.connect(ctx.command, ctx.args, ctx.cwd) catch |err| {
+        ctx.mgr.connect(ctx.command, launch.args, ctx.cwd) catch |err| {
             std.log.err("Codex: Connect failed: {}", .{err});
             return;
         };
@@ -6228,6 +6247,82 @@ pub const App = struct {
         };
 
         std.log.info("Codex: Thread started successfully", .{});
+    }
+
+    const CodexLaunchArgs = struct {
+        args: []const []const u8,
+        sandbox_override: ?[]const u8, // heap-allocated, must be freed separately
+    };
+
+    fn buildCodexLaunchArgs(
+        allocator: Allocator,
+        command: []const u8,
+        args: ?[]const []const u8,
+        sandbox_mode: ?[]const u8,
+        web_search: bool,
+    ) Allocator.Error!CodexLaunchArgs {
+        const base_args = args orelse &.{};
+        const is_native_codex = isCodexCommand(command);
+        const app_server_index = if (is_native_codex) findArg(base_args, "app-server") else null;
+        const should_append_app_server = is_native_codex and app_server_index == null;
+
+        // Use -c config overrides so settings propagate into app-server mode.
+        // Top-level CLI flags like --sandbox don't reliably reach the app-server subprocess.
+        const sandbox_override: ?[]const u8 = if (sandbox_mode != null and is_native_codex)
+            try std.fmt.allocPrint(allocator, "sandbox_mode=\"{s}\"", .{sandbox_mode.?})
+        else
+            null;
+        errdefer if (sandbox_override) |s| allocator.free(s);
+
+        const extra_count: usize =
+            (if (sandbox_override != null) @as(usize, 2) else 0) +
+            (if (web_search and is_native_codex) @as(usize, 1) else 0) +
+            (if (should_append_app_server) @as(usize, 1) else 0);
+
+        const result = try allocator.alloc([]const u8, base_args.len + extra_count);
+        errdefer allocator.free(result);
+
+        const insert_at = app_server_index orelse base_args.len;
+        var next_index: usize = 0;
+
+        for (base_args[0..insert_at]) |arg| {
+            result[next_index] = arg;
+            next_index += 1;
+        }
+
+        if (sandbox_override) |override| {
+            result[next_index] = "-c";
+            next_index += 1;
+            result[next_index] = override;
+            next_index += 1;
+        }
+
+        if (web_search and is_native_codex) {
+            result[next_index] = "--search";
+            next_index += 1;
+        }
+
+        for (base_args[insert_at..]) |arg| {
+            result[next_index] = arg;
+            next_index += 1;
+        }
+
+        if (should_append_app_server) {
+            result[next_index] = "app-server";
+        }
+
+        return .{ .args = result, .sandbox_override = sandbox_override };
+    }
+
+    fn isCodexCommand(command: []const u8) bool {
+        return std.mem.eql(u8, std.fs.path.basename(command), "codex");
+    }
+
+    fn findArg(args: []const []const u8, needle: []const u8) ?usize {
+        for (args, 0..) |arg, index| {
+            if (std.mem.eql(u8, arg, needle)) return index;
+        }
+        return null;
     }
 
     fn applyCodexSessionConfig(
@@ -6318,6 +6413,8 @@ pub const App = struct {
                         .skim = skim_ext,
                         .protocol = protocol,
                         .approval_policy = cfg.approval_policy,
+                        .sandbox_mode = cfg.sandbox_mode,
+                        .web_search = cfg.web_search,
                     };
                 }
 
@@ -6825,6 +6922,45 @@ test "applyCodexSessionConfig ignores unknown mode" {
     try std.testing.expect(mgr.requested_collaboration_mode == null);
     try std.testing.expect(mgr.requested_approval_policy != null);
     try std.testing.expect(mgr.requested_approval_policy.? == .on_request);
+}
+
+test "buildCodexLaunchArgs adds app-server and first-class settings" {
+    const allocator = std.testing.allocator;
+
+    const launch = try App.buildCodexLaunchArgs(allocator, "codex", null, "workspace-write", true);
+    defer allocator.free(launch.args);
+    defer if (launch.sandbox_override) |s| allocator.free(s);
+
+    try std.testing.expectEqual(@as(usize, 4), launch.args.len);
+    try std.testing.expectEqualStrings("-c", launch.args[0]);
+    try std.testing.expectEqualStrings("sandbox_mode=\"workspace-write\"", launch.args[1]);
+    try std.testing.expectEqualStrings("--search", launch.args[2]);
+    try std.testing.expectEqualStrings("app-server", launch.args[3]);
+}
+
+test "buildCodexLaunchArgs inserts first-class settings before app-server" {
+    const allocator = std.testing.allocator;
+    const base_args = &[_][]const u8{
+        "-c",
+        "model=\"gpt-5.4\"",
+        "app-server",
+        "--listen",
+        "stdio://",
+    };
+
+    const launch = try App.buildCodexLaunchArgs(allocator, "codex", base_args, "workspace-write", true);
+    defer allocator.free(launch.args);
+    defer if (launch.sandbox_override) |s| allocator.free(s);
+
+    try std.testing.expectEqual(@as(usize, 8), launch.args.len);
+    try std.testing.expectEqualStrings("-c", launch.args[0]);
+    try std.testing.expectEqualStrings("model=\"gpt-5.4\"", launch.args[1]);
+    try std.testing.expectEqualStrings("-c", launch.args[2]);
+    try std.testing.expectEqualStrings("sandbox_mode=\"workspace-write\"", launch.args[3]);
+    try std.testing.expectEqualStrings("--search", launch.args[4]);
+    try std.testing.expectEqualStrings("app-server", launch.args[5]);
+    try std.testing.expectEqualStrings("--listen", launch.args[6]);
+    try std.testing.expectEqualStrings("stdio://", launch.args[7]);
 }
 
 test "search highlighting - multiple matches" {

@@ -356,7 +356,7 @@ fn getStyleForHighlight(hl: Highlight, base_style: vaxis.Style) vaxis.Style {
     const fg_color: vaxis.Color = switch (color_cat) {
         .keyword => .{ .rgb = [3]u8{ 255, 123, 114 } }, // Coral red #FF7B72
         .function => .{ .rgb = [3]u8{ 210, 168, 255 } }, // Purple #D2A8FF
-        .type => .{ .rgb = [3]u8{ 255, 166, 87 } }, // Orange #FFA657
+        .type => .{ .index = 6 }, // Cyan accent to match agent UI
         .string => .{ .rgb = [3]u8{ 165, 214, 255 } }, // Light blue #A5D6FF
         .number => .{ .rgb = [3]u8{ 121, 192, 255 } }, // Cyan #79C0FF
         .comment => .{ .rgb = [3]u8{ 139, 148, 158 } }, // Gray #8B949E
@@ -426,6 +426,16 @@ test "render code block with language" {
         }
     }
     try std.testing.expect(found_lang);
+}
+
+test "type highlights use cyan accent" {
+    const style = getStyleForHighlight(.{
+        .start_byte = 0,
+        .end_byte = 4,
+        .category = "type",
+    }, .{ .fg = .default, .bg = .default });
+
+    try std.testing.expectEqual(vaxis.Color{ .index = 6 }, style.fg);
 }
 
 test "render unknown language falls back to plain" {

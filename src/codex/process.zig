@@ -26,9 +26,9 @@ pub const CodexProcess = struct {
         SpawnFailed,
     } || Allocator.Error || std.process.Child.SpawnError;
 
-    /// Spawn a new codex app-server process.
-    /// The command should be the path to the codex binary.
-    /// Extra args are appended after "app-server".
+    /// Spawn a new codex process for app-server transport.
+    /// The command should be the path to the codex binary or a wrapper.
+    /// The caller provides the full argument list needed to launch app-server mode.
     pub fn spawn(allocator: Allocator, command: []const u8, args: ?[]const []const u8, cwd: ?[]const u8) SpawnError!*CodexProcess {
         const self = try allocator.create(CodexProcess);
         errdefer allocator.destroy(self);
@@ -146,7 +146,7 @@ pub const CodexProcess = struct {
 // =============================================================================
 
 /// Build argv: [command, ...extra_args]
-/// The caller provides all arguments (e.g. "app-server") via extra_args.
+/// The caller provides the complete argument list via extra_args.
 fn buildArgv(allocator: Allocator, command: []const u8, extra_args: []const []const u8) ![]const []const u8 {
     var argv = try allocator.alloc([]const u8, 1 + extra_args.len);
     argv[0] = command;

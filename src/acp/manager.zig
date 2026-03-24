@@ -263,6 +263,8 @@ pub const AcpManager = struct {
         is_default: bool = false, // true if marked as default in config
         protocol: Protocol = .acp, // Protocol for communication
         approval_policy: ?[]const u8 = null, // Codex approval policy (e.g., "never")
+        sandbox_mode: ?[]const u8 = null, // Codex sandbox mode (e.g., "workspace-write")
+        web_search: bool = false, // Codex web search flag
     };
 
     pub fn init(allocator: Allocator) AcpManager {
@@ -2391,6 +2393,8 @@ pub const ConfigAgent = struct {
     skim: ?SkimAgentExtensions = null,
     protocol: AcpManager.Protocol = .acp, // Protocol for communication
     approval_policy: ?[]const u8 = null, // Codex: "never", "on-request", etc.
+    sandbox_mode: ?[]const u8 = null, // Codex: "read-only", "workspace-write", etc.
+    web_search: bool = false, // Codex: enable native web search
 };
 
 /// Load agent list from config agents.
@@ -2429,6 +2433,8 @@ pub fn loadAgentList(allocator: Allocator, config_agents: ?[]const ConfigAgent) 
             .is_default = skim.default,
             .protocol = cfg.protocol,
             .approval_policy = if (cfg.approval_policy) |p| try allocator.dupe(u8, p) else null,
+            .sandbox_mode = if (cfg.sandbox_mode) |mode| try allocator.dupe(u8, mode) else null,
+            .web_search = cfg.web_search,
         };
     }
     return result;
@@ -2466,6 +2472,7 @@ pub fn freeAgentList(allocator: Allocator, agents: []AcpManager.AgentInfo) void 
         if (agent.model) |m| allocator.free(m);
         if (agent.mode) |m| allocator.free(m);
         if (agent.approval_policy) |p| allocator.free(p);
+        if (agent.sandbox_mode) |mode| allocator.free(mode);
     }
     allocator.free(agents);
 }

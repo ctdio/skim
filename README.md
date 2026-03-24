@@ -330,7 +330,11 @@ Configure agents and panel settings in `~/.skim/config.json`:
       }
     },
     "Codex": {
-      "command": "codex-acp"
+      "command": "codex",
+      "protocol": "codex",
+      "approval_policy": "never",
+      "sandbox_mode": "workspace-write",
+      "web_search": true
     },
     "OpenCode": {
       "command": "opencode",
@@ -345,9 +349,15 @@ Configure agents and panel settings in `~/.skim/config.json`:
 | `command` | string | Yes | CLI command to spawn the agent |
 | `args` | string[] | No | Additional CLI arguments to pass to the agent |
 | `env` | object | No | Environment variables (supports `${VAR}` expansion) |
+| `protocol` | string | No | Communication protocol: `"acp"`, `"opencode"`, or `"codex"` |
+| `approval_policy` | string | No | Codex approval mode for new threads (`"never"`, `"on-request"`) |
+| `sandbox_mode` | string | No | Codex sandbox mode (`"read-only"`, `"workspace-write"`, `"danger-full-access"`) |
+| `web_search` | bool | No | Enable Codex native web search tool |
 | `skim.default` | bool | No | Auto-connect to this agent (default: `false`) |
 | `skim.model` | string | No | AI model to use (e.g., `"opus"`, `"sonnet"`) |
 | `skim.mode` | string | No | Agent session mode (e.g., `"plan"`, `"code"`) |
+
+For native Codex, set `"protocol": "codex"` and use `"command": "codex"`. Skim will launch `codex app-server` automatically and apply `sandbox_mode` / `web_search` as first-class Codex settings.
 
 **Agent Selection:**
 - **Single agent**: Auto-connects immediately

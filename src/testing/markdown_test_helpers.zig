@@ -88,7 +88,7 @@ const default: MarkdownColors = .{
         .fg = .{ .rgb = [3]u8{ 100, 100, 100 } },
     },
     .inline_code = .{
-        .fg = .{ .rgb = [3]u8{ 255, 123, 114 } },
+        .fg = .{ .index = 6 },
     },
     .inline_code_bg = .{ .rgb = [3]u8{ 45, 45, 50 } },
     .link_text = .{
