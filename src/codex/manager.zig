@@ -45,6 +45,7 @@ pub const CodexManager = struct {
 
     // Turn state (populated during active turn)
     turn_id: ?[]const u8,
+    pending_turn_start_request_id: ?i64,
 
     // Token usage (populated from thread/tokenUsage/updated notifications)
     token_usage: ?protocol.TokenUsage,
@@ -231,6 +232,7 @@ pub const CodexManager = struct {
             .models = null,
             .current_model = null,
             .turn_id = null,
+            .pending_turn_start_request_id = null,
             .token_usage = null,
             .rate_limits = null,
             .mcp_servers = null,
@@ -422,10 +424,12 @@ pub const CodexManager = struct {
             .reasoning_effort = self.requested_reasoning_effort,
             .service_tier = self.requested_service_tier,
             .collaboration_mode = self.requested_collaboration_mode,
+            .collaboration_mode_model = self.current_model orelse self.model,
             .input = &text_input,
         }) catch return error.TurnStartFailed;
         defer self.allocator.free(msg);
         try transport.send(msg);
+        self.pending_turn_start_request_id = req_id.number;
         self.status = .turn_active;
     }
 
@@ -783,13 +787,16 @@ pub const CodexManager = struct {
         const transport = self.transport orelse return error.NotConnected;
         var approval = self.pending_approval orelse return;
 
-        const request_id = switch (approval) {
-            .user_input => |u| u.request_id,
+        const response = switch (approval) {
+            .user_input => |u| .{
+                .request_id = u.request_id,
+                .questions = u.questions,
+            },
             else => return,
         };
 
         var encoder = codec.Encoder.init(self.allocator);
-        const msg = encoder.encodeUserInputResponse(request_id, answers) catch return error.TurnSteerFailed;
+        const msg = encoder.encodeUserInputResponse(response.request_id, response.questions, answers) catch return error.TurnSteerFailed;
         defer self.allocator.free(msg);
         try transport.send(msg);
 
@@ -880,7 +887,10 @@ pub const CodexManager = struct {
         switch (msg) {
             .notification => |n| return self.processNotification(n.method, n.params_json),
             .server_request => |r| return self.processServerRequest(r),
-            .response => return null,
+            .response => |r| {
+                self.processResponse(r);
+                return null;
+            },
         }
     }
 
@@ -1080,6 +1090,7 @@ pub const CodexManager = struct {
 
         if (self.turn_id) |tid| self.allocator.free(tid);
         self.turn_id = null;
+        self.pending_turn_start_request_id = null;
     }
 
     fn freePendingApproval(self: *CodexManager) void {
@@ -1205,6 +1216,44 @@ pub const CodexManager = struct {
         }
 
         return null;
+    }
+
+    fn processResponse(self: *CodexManager, response: codec.Response) void {
+        const pending_request_id = self.pending_turn_start_request_id orelse return;
+        const response_id = response.id orelse return;
+
+        switch (response_id) {
+            .number => |id| if (id != pending_request_id) return,
+            else => return,
+        }
+
+        self.pending_turn_start_request_id = null;
+
+        if (response.error_msg != null) {
+            std.log.err("Codex: turn/start response error code={d} message={s}", .{
+                response.error_msg.?.code,
+                response.error_msg.?.message,
+            });
+            if (self.status == .turn_active) self.status = .thread_active;
+            return;
+        }
+
+        const result_json = response.result_json orelse return;
+        const RawTurnStartResult = struct {
+            turn: ?struct {
+                id: []const u8,
+            } = null,
+        };
+
+        const parsed = std.json.parseFromSlice(RawTurnStartResult, self.allocator, result_json, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch return;
+        defer parsed.deinit();
+
+        const turn = parsed.value.turn orelse return;
+        if (self.turn_id) |existing_turn_id| self.allocator.free(existing_turn_id);
+        self.turn_id = self.allocator.dupe(u8, turn.id) catch null;
     }
 
     fn parseMcpStatusEvent(self: *CodexManager, method: []const u8, params_json: ?[]const u8) ?CodexEvent {
@@ -1378,6 +1427,7 @@ pub const CodexManager = struct {
         const approval_map = std.StaticStringMap(ApprovalMethod).initComptime(.{
             .{ "item/commandExecution/requestApproval", .command_approval },
             .{ "item/fileChange/requestApproval", .file_change_approval },
+            .{ "item/tool/requestUserInput", .user_input },
             .{ "tool/requestUserInput", .user_input },
         });
 
@@ -2024,6 +2074,26 @@ test "interruptTurn fails when not in turn_active state" {
     try std.testing.expectError(error.NotConnected, result);
 }
 
+test "processMessage with turn/start response stores async turn id" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    manager.status = .turn_active;
+    manager.pending_turn_start_request_id = 7;
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"id":7,"result":{"turn":{"id":"turn-1","items":[],"status":"inProgress","error":null}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    try std.testing.expect(manager.turn_id == null);
+    try std.testing.expect(manager.processMessage(msg) == null);
+    try std.testing.expectEqualStrings("turn-1", manager.turn_id.?);
+    try std.testing.expect(manager.pending_turn_start_request_id == null);
+}
+
 test "processMessage with agentMessage/delta notification returns text_delta" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
@@ -2307,6 +2377,36 @@ test "processMessage with user input server request stores pending approval" {
             try std.testing.expect(ui.questions[0].options.?[1].description == null);
             try std.testing.expect(!ui.questions[0].is_other);
             try std.testing.expectEqual(@as(usize, 0), ui.active_question);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "processMessage with item/tool/requestUserInput stores pending approval" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/tool/requestUserInput","id":0,"params":{"threadId":"t1","turnId":"turn-1","itemId":"call-1","questions":[{"id":"q1","header":"Choose auth","question":"Which auth method?","options":[{"label":"OAuth 2.0","description":"Standard OAuth"},{"label":"API Key"}],"isOther":false,"isSecret":false}]}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .approval_requested);
+
+    switch (manager.pending_approval.?) {
+        .user_input => |ui| {
+            try std.testing.expectEqualStrings("t1", ui.thread_id);
+            try std.testing.expectEqual(@as(usize, 1), ui.questions.len);
+            try std.testing.expectEqualStrings("q1", ui.questions[0].id);
+            try std.testing.expectEqualStrings("Choose auth", ui.questions[0].header.?);
+            try std.testing.expectEqualStrings("Which auth method?", ui.questions[0].question);
+            try std.testing.expectEqual(@as(usize, 2), ui.questions[0].options.?.len);
+            try std.testing.expectEqualStrings("OAuth 2.0", ui.questions[0].options.?[0].label);
         },
         else => try std.testing.expect(false),
     }

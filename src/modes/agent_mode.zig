@@ -8,6 +8,8 @@ const sessions = @import("../acp/sessions.zig");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const ManagerHandle = @import("../agent/manager_handle.zig").ManagerHandle;
 const CodexManager = @import("../codex/manager.zig").CodexManager;
+const CodexProcess = @import("../codex/process.zig").CodexProcess;
+const CodexTransport = @import("../codex/transport.zig").StdioTransport;
 const codex_protocol = @import("../codex/protocol.zig");
 const command_palette = @import("../agent/command_palette.zig");
 const opencode = @import("../opencode/opencode.zig");
@@ -387,37 +389,35 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // Double-ESC to interrupt agent (only in normal vim mode)
-    // ESC must be pressed twice within 5 seconds to trigger cancellation
+    // Once the prompt is already in normal mode, treat ESC as an immediate
+    // interrupt while the agent is actively generating.
     if (key.codepoint == 27 and agent_state.input.vim.vim_mode == .normal) {
-        if (agent_state.recordEscPress()) {
-            // Double-ESC detected - try to cancel the prompt
-            const tab = if (app.tab_manager) |*tm| tm.activeTab() else null;
-            const cancelled = if (tab) |t| (if (t.manager) |m| m.cancelPrompt() else false) else false;
+        const tab = if (app.tab_manager) |*tm| tm.activeTab() else null;
+        const manager = if (tab) |t| t.manager else null;
+        const cancelled = if (manager) |m|
+            if (m.isPrompting()) m.cancelPrompt() else false
+        else
+            false;
 
-            if (cancelled) {
-                agent_state.addMessage(.system, "Interrupted") catch |err| {
-                    std.log.err("Failed to add interrupt message: {any}", .{err});
+        if (cancelled) {
+            agent_state.addMessage(.system, "Interrupted") catch |err| {
+                std.log.err("Failed to add interrupt message: {any}", .{err});
+            };
+
+            // Auto-execute staged shell commands after interrupt
+            if (agent_state.hasStagedPrompt() and agent_state.isStagedShellCommand()) {
+                const staged = agent_state.getStagedPrompt();
+                handleShellCommand(app, agent_state, staged) catch |err| {
+                    std.log.err("Failed to run staged shell command after interrupt: {any}", .{err});
                 };
-
-                // Auto-execute staged shell commands after interrupt
-                if (agent_state.hasStagedPrompt() and agent_state.isStagedShellCommand()) {
-                    const staged = agent_state.getStagedPrompt();
-                    handleShellCommand(app, agent_state, staged) catch |err| {
-                        std.log.err("Failed to run staged shell command after interrupt: {any}", .{err});
-                    };
-                    agent_state.clearStagedPrompt();
-                }
-
-                app.needs_render = true;
-                return;
+                agent_state.clearStagedPrompt();
             }
-            // No active prompt to cancel, just ignore
-        } else {
-            // First ESC - re-render to show "press esc again" hint
+
             app.needs_render = true;
+            return;
         }
-        // First ESC or no cancellation - continue to other ESC handling
+
+        app.needs_render = true;
     }
 
     // Handle slash command menu navigation when visible
@@ -2317,9 +2317,10 @@ fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *sta
     }
 
     if (key.codepoint == 27) {
+        const tab = if (app.tab_manager) |*tm| tm.activeTab() else null;
+
         // For OpenCode: reject the question via the dedicated endpoint
         if (pending.id) |request_id| {
-            const tab = if (app.tab_manager) |*tm| tm.activeTab() else null;
             if (tab) |t| {
                 if (t.manager) |m| {
                     if (m == .opencode) {
@@ -2327,6 +2328,16 @@ fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *sta
                             std.log.err("Failed to reject question: {}", .{err});
                         };
                     }
+                }
+            }
+        }
+
+        if (tab) |t| {
+            if (t.manager) |m| {
+                if (m == .codex) {
+                    m.codex.cancelApproval() catch |err| {
+                        std.log.err("Failed to cancel Codex question: {}", .{err});
+                    };
                 }
             }
         }
@@ -2403,6 +2414,22 @@ fn submitPendingQuestion(app: *App, agent_state: *state.AgentState, pending: *st
         std.log.warn("Question has no request ID, falling back to text prompt", .{});
     }
 
+    if (m == .codex) {
+        const answers = buildCodexUserInputAnswers(app.allocator, pending) catch null;
+        defer if (answers) |a| app.allocator.free(a);
+
+        if (answers) |a| {
+            m.codex.respondToUserInput(a) catch |err| {
+                std.log.err("Failed to reply to Codex question: {}", .{err});
+                try agent_state.addMessage(.system, "Failed to send question reply");
+                return;
+            };
+            agent_state.clearPendingQuestion();
+            app.needs_render = true;
+            return;
+        }
+    }
+
     // ACP / fallback: send answer as a regular text prompt
     const answer_opt = try agent_state.buildPendingQuestionAnswer(app.allocator);
     const answer = answer_opt orelse return;
@@ -2444,6 +2471,31 @@ fn buildQuestionAnswers(allocator: std.mem.Allocator, pending: *state.PendingQue
     }
 
     return try outer.toOwnedSlice(allocator);
+}
+
+fn buildCodexUserInputAnswers(allocator: std.mem.Allocator, pending: *state.PendingQuestion) ![]const []const u8 {
+    var answers: std.ArrayList([]const u8) = .{};
+    errdefer answers.deinit(allocator);
+
+    for (pending.questions, 0..) |question, qi| {
+        const q_state = pending.states[qi];
+        try answers.append(allocator, getSelectedQuestionAnswer(question, q_state));
+    }
+
+    return try answers.toOwnedSlice(allocator);
+}
+
+fn getSelectedQuestionAnswer(question: state.Question, q_state: state.QuestionState) []const u8 {
+    for (question.options, 0..) |opt, oi| {
+        if (!q_state.selected[oi]) continue;
+        if (opt.is_custom) {
+            const custom_text = std.mem.trim(u8, q_state.custom_input.getText(), &std.ascii.whitespace);
+            if (custom_text.len > 0) return custom_text;
+        }
+        return opt.label;
+    }
+
+    return "";
 }
 
 /// Send a prompt, parsing @file references and embedding file content.
@@ -2865,6 +2917,114 @@ test "toggleFastServiceTier enables fast mode when flex" {
     const result = toggleFastServiceTier(.flex);
 
     try std.testing.expectEqual(codex_protocol.ServiceTier.fast, result);
+}
+
+test "buildCodexUserInputAnswers preserves selected option and custom text" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = state.AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const opts1 = try allocator.alloc(state.QuestionOptionData, 1);
+    opts1[0] = .{ .label = "Protocol", .description = null };
+
+    const questions = try allocator.alloc(state.QuestionData, 2);
+    questions[0] = .{
+        .header = "Scope",
+        .question = "What should we fix?",
+        .options = opts1,
+        .multiple = false,
+        .allow_custom = false,
+    };
+    questions[1] = .{
+        .header = "Constraints",
+        .question = "Anything else to account for?",
+        .options = &.{},
+        .multiple = false,
+        .allow_custom = true,
+    };
+
+    try agent_state.setPendingQuestion(.{ .questions = questions });
+
+    allocator.free(opts1);
+    allocator.free(questions);
+
+    const pending = agent_state.getPendingQuestion() orelse return error.TestUnexpectedResult;
+    pending.states[0].selected[0] = true;
+
+    const custom_idx = pending.questions[1].custom_index orelse return error.TestUnexpectedResult;
+    pending.states[1].selected[custom_idx] = true;
+    pending.states[1].custom_active = true;
+    pending.states[1].custom_input.setText("Keep the patch small");
+
+    const answers = try buildCodexUserInputAnswers(allocator, pending);
+    defer allocator.free(answers);
+
+    try std.testing.expectEqual(@as(usize, 2), answers.len);
+    try std.testing.expectEqualStrings("Protocol", answers[0]);
+    try std.testing.expectEqualStrings("Keep the patch small", answers[1]);
+}
+
+test "ESC interrupts active Codex turn in normal mode" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    const mgr = try tab.createCodexManager();
+
+    const proc = try CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    const transport = try CodexTransport.init(allocator, proc);
+    mgr.process = proc;
+    mgr.transport = transport;
+    mgr.status = .turn_active;
+    mgr.thread_id = try allocator.dupe(u8, "thread-1");
+    mgr.turn_id = try allocator.dupe(u8, "turn-1");
+
+    tab.agent_state.input.vim.vim_mode = .normal;
+
+    try handleKey(&app, .{ .codepoint = 27 });
+
+    try std.testing.expect(app.needs_render);
+    try std.testing.expectEqual(@as(usize, 1), tab.agent_state.messages.items.len);
+    try std.testing.expectEqual(state.Message.Role.system, tab.agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Interrupted", tab.agent_state.messages.items[0].content);
 }
 
 /// Execute an agent command palette action

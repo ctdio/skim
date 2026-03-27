@@ -389,6 +389,7 @@ pub const TurnStartParams = struct {
     reasoning_effort: ?ReasoningEffort = null,
     service_tier: ?ServiceTier = null,
     collaboration_mode: ?CollaborationMode = null,
+    collaboration_mode_model: ?[]const u8 = null,
     input: ?[]InputItem = null,
 };
 

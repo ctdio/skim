@@ -20,6 +20,7 @@ const CodexPlanEntry = codex_manager.CodexManager.CodexEvent.PlanUpdatedEvent.Pl
 pub const AgentEvent = union(enum) {
     // Streaming content
     text_chunk: []const u8,
+    completed_agent_message: []const u8,
     thinking_chunk: []const u8,
     message_complete: void,
 
@@ -95,6 +96,9 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
         .text_chunk => |text| {
             agent_state.appendToLastAgentMessage(text) catch {};
         },
+        .completed_agent_message => |text| {
+            agent_state.addCompletedAgentMessage(text) catch {};
+        },
         .thinking_chunk => |text| {
             agent_state.appendToLastThinkingMessage(text) catch {};
         },
@@ -106,6 +110,7 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
                 tc.command,
             ) catch {};
             maybeApplyUpdatePlanToolCall(agent_state, tc.tool_name, tc.title, tc.command);
+            maybeApplyRequestUserInputToolCall(agent_state, tc.tool_call_id, tc.tool_name, tc.title, tc.command);
             if (tc.subagent_info) |info| {
                 if (convertSubagentInfo(agent_state.allocator, info)) |owned| {
                     agent_state.setSubagentInfoOnTool(tc.tool_call_id, owned);
@@ -119,6 +124,7 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
                 tu.stdout,
                 tu.stderr,
             ) catch {};
+            maybeResolvePendingQuestionFromToolUpdate(agent_state, tu.tool_call_id, tu.status);
             if (tu.subagent_info) |info| {
                 // Partial update (from child session tracking) — only has
                 // tool_count and summary, no description/agent_type. Merge
@@ -379,7 +385,10 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
         },
         .item_completed => |e| blk: {
             switch (e.item) {
-                .agent_message => break :blk .{ .message_complete = {} },
+                .agent_message => |msg| break :blk if (msg.text.len > 0)
+                    .{ .completed_agent_message = msg.text }
+                else
+                    .{ .message_complete = {} },
                 .command_execution => |cmd| break :blk .{ .tool_update = .{
                     .tool_call_id = cmd.id,
                     .status = if (cmd.exit_code) |ec| (if (ec == 0) .completed else .failed) else .completed,
@@ -637,6 +646,111 @@ fn maybeApplyUpdatePlanToolCall(agent_state: *AgentState, tool_name: ?[]const u8
     };
 }
 
+fn maybeApplyRequestUserInputToolCall(agent_state: *AgentState, tool_call_id: []const u8, tool_name: ?[]const u8, title: []const u8, command: ?[]const u8) void {
+    if (!isRequestUserInputToolCall(tool_name, title)) return;
+
+    const args = command orelse return;
+    const prompt = parseRequestUserInputToolCall(agent_state.allocator, tool_call_id, args) orelse return;
+    defer freeQuestionPromptArrays(agent_state.allocator, prompt);
+
+    agent_state.setPendingQuestion(prompt) catch |err| {
+        std.log.err("maybeApplyRequestUserInputToolCall: setPendingQuestion failed: {}", .{err});
+    };
+}
+
+fn isRequestUserInputToolCall(tool_name: ?[]const u8, title: []const u8) bool {
+    if (tool_name) |name| {
+        return std.mem.eql(u8, name, "request_user_input");
+    }
+    return std.mem.eql(u8, title, "request_user_input");
+}
+
+fn parseRequestUserInputToolCall(allocator: Allocator, tool_call_id: []const u8, args: []const u8) ?QuestionPromptData {
+    const state = @import("state.zig");
+
+    const RawOption = struct {
+        label: []const u8 = "",
+        description: ?[]const u8 = null,
+    };
+
+    const RawQuestion = struct {
+        header: ?[]const u8 = null,
+        question: ?[]const u8 = null,
+        prompt: ?[]const u8 = null,
+        options: ?[]const RawOption = null,
+        isOther: bool = false,
+        is_other: bool = false,
+        multiple: bool = false,
+    };
+
+    const RawArgs = struct {
+        questions: ?[]const RawQuestion = null,
+    };
+
+    const parsed = std.json.parseFromSlice(RawArgs, std.heap.page_allocator, args, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_if_needed,
+    }) catch |err| {
+        std.log.debug("parseRequestUserInputToolCall: failed to parse args: {}", .{err});
+        return null;
+    };
+    defer parsed.deinit();
+
+    const raw_questions = parsed.value.questions orelse return null;
+    if (raw_questions.len == 0) return null;
+
+    const questions = allocator.alloc(state.QuestionData, raw_questions.len) catch return null;
+    errdefer {
+        for (questions) |question| {
+            allocator.free(question.options);
+        }
+        allocator.free(questions);
+    }
+
+    for (raw_questions, 0..) |raw_question, question_idx| {
+        const question_text = raw_question.question orelse raw_question.prompt orelse "";
+        const raw_options = raw_question.options orelse &.{};
+
+        const option_items = allocator.alloc(state.QuestionOptionData, raw_options.len) catch return null;
+        for (raw_options, 0..) |opt, opt_idx| {
+            option_items[opt_idx] = .{
+                .label = opt.label,
+                .description = opt.description,
+            };
+        }
+
+        questions[question_idx] = .{
+            .header = raw_question.header,
+            .question = question_text,
+            .options = option_items,
+            .multiple = raw_question.multiple,
+            .allow_custom = raw_question.isOther or raw_question.is_other,
+        };
+    }
+
+    return .{
+        .tool_call_id = tool_call_id,
+        .questions = questions,
+    };
+}
+
+fn freeQuestionPromptArrays(allocator: Allocator, prompt: QuestionPromptData) void {
+    for (prompt.questions) |question| {
+        allocator.free(question.options);
+    }
+    allocator.free(prompt.questions);
+}
+
+fn maybeResolvePendingQuestionFromToolUpdate(agent_state: *AgentState, tool_call_id: []const u8, status: Message.ToolStatus) void {
+    if (status != .completed and status != .failed) return;
+
+    const pending = agent_state.getPendingQuestion() orelse return;
+    const pending_tool_call_id = pending.tool_call_id orelse return;
+    if (!std.mem.eql(u8, pending_tool_call_id, tool_call_id)) return;
+
+    agent_state.clearPendingQuestion();
+}
+
 fn parseProtocolPlanStatus(raw_status: ?[]const u8) protocol.PlanEntryStatus {
     const status = raw_status orelse return .pending;
     if (std.mem.eql(u8, status, "in_progress")) return .in_progress;
@@ -719,6 +833,21 @@ test "codexEventToAgentEvent: item_completed command_execution maps to tool_upda
     try std.testing.expect(result.? == .tool_update);
     try std.testing.expectEqual(Message.ToolStatus.completed, result.?.tool_update.status);
     try std.testing.expectEqualStrings("file1\nfile2", result.?.tool_update.stdout.?);
+}
+
+test "codexEventToAgentEvent: item_completed agent_message maps to completed agent text" {
+    const event = CodexEvent{ .item_completed = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item = .{ .agent_message = .{
+            .id = "msg-1",
+            .text = "Plan mode reply",
+        } },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .completed_agent_message);
+    try std.testing.expectEqualStrings("Plan mode reply", result.?.completed_agent_message);
 }
 
 test "codexEventToAgentEvent: item_completed command_execution with non-zero exit maps to failed" {
@@ -847,7 +976,7 @@ test "codexEventToAgentEvent: turn_completed maps to message_complete" {
 }
 
 test "codexEventToAgentEvent: plan_updated maps to codex_plan_update" {
-    const entries = [_]CodexPlanEntry{
+    var entries = [_]CodexPlanEntry{
         .{ .content = "First step", .status = .in_progress, .priority = .medium },
         .{ .content = "Second step", .status = .pending, .priority = .low },
     };
@@ -862,7 +991,7 @@ test "codexEventToAgentEvent: plan_updated maps to codex_plan_update" {
     try std.testing.expect(result.? == .codex_plan_update);
     try std.testing.expectEqual(@as(usize, 2), result.?.codex_plan_update.len);
     try std.testing.expectEqualStrings("First step", result.?.codex_plan_update[0].content);
-    try std.testing.expectEqual(CodexPlanEntry.PlanEntryStatus.in_progress, result.?.codex_plan_update[0].status);
+    try std.testing.expectEqual(CodexEvent.PlanUpdatedEvent.PlanEntryStatus.in_progress, result.?.codex_plan_update[0].status);
 }
 
 test "processAgentEvent: codex plan notification updates todo state end-to-end" {
@@ -890,8 +1019,8 @@ test "processAgentEvent: codex plan notification updates todo state end-to-end" 
     processAgentEvent(&agent_state, agent_event.?);
 
     try std.testing.expectEqual(@as(usize, 2), agent_state.planEntryCount());
-    try std.testing.expectEqual(CodexPlanEntry.PlanEntryStatus.in_progress, codex_event.?.plan_updated.entries[0].status);
-    try std.testing.expectEqual(CodexPlanEntry.PlanEntryStatus.completed, codex_event.?.plan_updated.entries[1].status);
+    try std.testing.expectEqual(CodexEvent.PlanUpdatedEvent.PlanEntryStatus.in_progress, codex_event.?.plan_updated.entries[0].status);
+    try std.testing.expectEqual(CodexEvent.PlanUpdatedEvent.PlanEntryStatus.completed, codex_event.?.plan_updated.entries[1].status);
 
     try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
     try std.testing.expectEqual(Message.Role.plan_snapshot, agent_state.messages.items[0].role);
@@ -900,6 +1029,118 @@ test "processAgentEvent: codex plan notification updates todo state end-to-end" 
     try std.testing.expectEqual(@as(usize, 2), snapshot_entries.len);
     try std.testing.expectEqualStrings("Reproduce protocol event", snapshot_entries[0].content);
     try std.testing.expectEqualStrings("Verify todo render pipeline", snapshot_entries[1].content);
+}
+
+test "processAgentEvent: codex completed agent message without delta still renders" {
+    const allocator = std.testing.allocator;
+
+    var manager = codex_manager.CodexManager.init(allocator);
+    defer manager.deinit();
+
+    var decoder = codex_codec.Decoder.init(allocator);
+    const json =
+        \\{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Plan output is ready"}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(allocator);
+
+    var codex_event = manager.processMessage(msg);
+    defer if (codex_event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(codex_event != null);
+
+    const agent_event = codexEventToAgentEvent(codex_event.?);
+    try std.testing.expect(agent_event != null);
+    try std.testing.expect(agent_event.? == .completed_agent_message);
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    processAgentEvent(&agent_state, agent_event.?);
+
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(Message.Role.agent, agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Plan output is ready", agent_state.messages.items[0].content);
+}
+
+test "processAgentEvent: codex request_user_input function call opens pending question" {
+    const allocator = std.testing.allocator;
+
+    var manager = codex_manager.CodexManager.init(allocator);
+    defer manager.deinit();
+
+    var decoder = codex_codec.Decoder.init(allocator);
+    const json =
+        \\{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"functionCall","id":"call-1","callId":"call-1","name":"request_user_input","arguments":"{\"questions\":[{\"header\":\"Split Model\",\"question\":\"How should sessions be split?\",\"options\":[{\"label\":\"Tab scoped\",\"description\":\"Keep one session per pane\"},{\"label\":\"Shared\",\"description\":\"Reuse one session across panes\"}],\"isOther\":false},{\"header\":\"V1 Scope\",\"question\":\"What should land first?\",\"options\":[{\"label\":\"Display prompt\",\"description\":\"Show the plan questions\"}],\"isOther\":true}]}"}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(allocator);
+
+    var codex_event = manager.processMessage(msg);
+    defer if (codex_event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(codex_event != null);
+
+    const agent_event = codexEventToAgentEvent(codex_event.?);
+    try std.testing.expect(agent_event != null);
+    try std.testing.expect(agent_event.? == .tool_call);
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    processAgentEvent(&agent_state, agent_event.?);
+
+    const pending = agent_state.getPendingQuestion() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("call-1", pending.tool_call_id.?);
+    try std.testing.expectEqual(@as(usize, 2), pending.questions.len);
+    try std.testing.expectEqualStrings("How should sessions be split?", pending.questions[0].prompt);
+    try std.testing.expectEqual(@as(usize, 2), pending.questions[0].options.len);
+    try std.testing.expect(pending.questions[0].custom_index == null);
+    try std.testing.expectEqual(@as(usize, 2), pending.questions[1].options.len);
+    try std.testing.expectEqual(@as(usize, 1), pending.questions[1].custom_index.?);
+}
+
+test "processAgentEvent: codex request_user_input completion clears matching pending question" {
+    const allocator = std.testing.allocator;
+
+    var manager = codex_manager.CodexManager.init(allocator);
+    defer manager.deinit();
+
+    var decoder = codex_codec.Decoder.init(allocator);
+
+    const start_json =
+        \\{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"functionCall","id":"call-1","callId":"call-1","name":"request_user_input","arguments":"{\"questions\":[{\"header\":\"Scope\",\"question\":\"What should we fix first?\",\"options\":[{\"label\":\"UI\"}],\"isOther\":false}]}"}}}
+    ;
+    var start_msg = try decoder.decode(start_json);
+    defer start_msg.deinit(allocator);
+
+    const complete_json =
+        \\{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"functionCall","id":"call-1","callId":"call-1","name":"request_user_input","status":"completed","output":"{\"status\":\"submitted\"}"}}}
+    ;
+    var complete_msg = try decoder.decode(complete_json);
+    defer complete_msg.deinit(allocator);
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    var start_event = manager.processMessage(start_msg);
+    defer if (start_event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(start_event != null);
+
+    const start_agent_event = codexEventToAgentEvent(start_event.?);
+    try std.testing.expect(start_agent_event != null);
+    processAgentEvent(&agent_state, start_agent_event.?);
+
+    try std.testing.expect(agent_state.getPendingQuestion() != null);
+
+    var complete_event = manager.processMessage(complete_msg);
+    defer if (complete_event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(complete_event != null);
+
+    const complete_agent_event = codexEventToAgentEvent(complete_event.?);
+    try std.testing.expect(complete_agent_event != null);
+    try std.testing.expect(complete_agent_event.? == .tool_update);
+    processAgentEvent(&agent_state, complete_agent_event.?);
+
+    try std.testing.expect(agent_state.getPendingQuestion() == null);
 }
 
 test "codexEventToAgentEvent: unknown maps to null" {

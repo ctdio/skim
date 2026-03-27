@@ -497,6 +497,25 @@ fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResul
                 .turn_completed => {
                     if (m.status == .turn_active) m.status = .thread_active;
                 },
+                .approval_requested => {
+                    if (m.getPendingApproval()) |approval| {
+                        switch (approval.*) {
+                            .user_input => {
+                                if (convertCodexUserInputPrompt(agent_state.allocator, approval)) |agent_event| {
+                                    processAgentEvent(agent_state, agent_event);
+                                    count += 1;
+
+                                    const prompt_data = agent_event.question_prompt;
+                                    for (prompt_data.questions) |q| {
+                                        if (q.options.len > 0) agent_state.allocator.free(q.options);
+                                    }
+                                    agent_state.allocator.free(prompt_data.questions);
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+                },
                 else => {},
             }
 
@@ -557,6 +576,48 @@ fn convertQuestionPrompt(allocator: Allocator, prompt: @import("../opencode/mana
     } };
 }
 
+fn convertCodexUserInputPrompt(allocator: Allocator, approval: *const CodexManager.PendingApproval) ?AgentEvent {
+    const state = @import("state.zig");
+    const prompt = switch (approval.*) {
+        .user_input => |ui| ui,
+        else => return null,
+    };
+    const question_count = prompt.questions.len;
+    if (question_count == 0) return null;
+
+    const questions = allocator.alloc(state.QuestionData, question_count) catch return null;
+    for (prompt.questions, 0..) |question, q_idx| {
+        const raw_options = question.options orelse &.{};
+        const option_items = allocator.alloc(state.QuestionOptionData, raw_options.len) catch {
+            questions[q_idx] = .{
+                .header = question.header,
+                .question = question.question,
+                .options = &[_]state.QuestionOptionData{},
+                .multiple = false,
+                .allow_custom = question.is_other,
+            };
+            continue;
+        };
+        for (raw_options, 0..) |opt, opt_idx| {
+            option_items[opt_idx] = .{
+                .label = opt.label,
+                .description = opt.description,
+            };
+        }
+        questions[q_idx] = .{
+            .header = question.header,
+            .question = question.question,
+            .options = option_items,
+            .multiple = false,
+            .allow_custom = question.is_other,
+        };
+    }
+
+    return .{ .question_prompt = .{
+        .questions = questions,
+    } };
+}
+
 test "pollCodex processes all delta messages without dropping overflow" {
     const allocator = std.testing.allocator;
 
@@ -592,4 +653,40 @@ test "pollCodex processes all delta messages without dropping overflow" {
     try std.testing.expectEqual(chunk_count, result.count);
     try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
     try std.testing.expectEqualStrings(expected_text.items, agent_state.messages.items[0].content);
+}
+
+test "pollCodex routes user input approvals through question prompt state" {
+    const allocator = std.testing.allocator;
+
+    var manager = CodexManager.init(allocator);
+    defer manager.deinit();
+
+    const proc = try CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    const transport = try CodexTransport.init(allocator, proc);
+    manager.process = proc;
+    manager.transport = transport;
+    manager.status = .turn_active;
+
+    var decoder = CodexCodec.Decoder.init(allocator);
+    const json =
+        \\{"id":0,"method":"item/tool/requestUserInput","params":{"threadId":"t1","turnId":"turn-1","itemId":"call-1","questions":[{"id":"q1","header":"Scope","question":"What should we fix first?","options":[{"label":"UI"},{"label":"Protocol"}],"isOther":false},{"id":"q2","header":"Details","question":"Any constraints?","options":[{"label":"Keep it small"}],"isOther":true}]}}
+    ;
+    const msg = try decoder.decode(json);
+    try transport.pending_messages.append(allocator, msg);
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const result = pollCodex(&manager, &agent_state);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+
+    const pending = agent_state.getPendingQuestion() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), pending.questions.len);
+
+    try std.testing.expectEqual(@as(usize, 2), pending.questions[0].options.len);
+    try std.testing.expect(pending.questions[0].custom_index == null);
+
+    try std.testing.expectEqual(@as(usize, 2), pending.questions[1].options.len);
+    try std.testing.expectEqual(@as(usize, 1), pending.questions[1].custom_index.?);
+    try std.testing.expectEqualStrings("Type your own answer", pending.questions[1].options[1].label);
 }

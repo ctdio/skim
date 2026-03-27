@@ -151,7 +151,7 @@ test "PlanState basic operations" {
     // Add entries
     const entries = [_]protocol.PlanEntry{
         .{ .content = "Task 1", .priority = .high, .status = .pending },
-        .{ .content = "Task 2", .priority = .normal, .status = .in_progress },
+        .{ .content = "Task 2", .priority = .medium, .status = .in_progress },
     };
     try state.update(&entries);
 
@@ -176,7 +176,7 @@ test "PlanState snapshot" {
     defer state.deinit();
 
     const entries = [_]protocol.PlanEntry{
-        .{ .content = "Test task", .priority = .normal, .status = .pending },
+        .{ .content = "Test task", .priority = .medium, .status = .pending },
     };
     try state.update(&entries);
 

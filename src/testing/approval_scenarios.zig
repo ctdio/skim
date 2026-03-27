@@ -185,3 +185,86 @@ test "snapshot: codex_user_input_with_is_other" {
 
     try snapshot.expectSnapshot(allocator, "codex_user_input_with_is_other", text);
 }
+
+test "renderAgentPanel shows codex user input prompt after approval request" {
+    const allocator = std.testing.allocator;
+
+    var app = initRenderTestApp(allocator);
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    var ctx = try harness.createTestContext(allocator, 80, 18);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    const mgr = try tab.createCodexManager();
+
+    const proc = try approval_root.CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    mgr.process = proc;
+    mgr.transport = try approval_root.CodexTransport.init(allocator, proc);
+    mgr.status = .turn_active;
+
+    var decoder = approval_root.CodexCodec.Decoder.init(allocator);
+    const json =
+        \\{"id":0,"method":"item/tool/requestUserInput","params":{"threadId":"t1","turnId":"turn-1","itemId":"call-1","questions":[{"id":"q1","header":"Scope","question":"How should sessions be split?","options":[{"label":"Tab scoped","description":"Keep one session per pane"},{"label":"Shared","description":"Reuse one session across panes"}],"isOther":false},{"id":"q2","header":"Constraints","question":"Any constraints?","options":[{"label":"Keep it small","description":"Prefer a narrow patch"}],"isOther":true}]}}
+    ;
+    const msg = try decoder.decode(json);
+    try mgr.transport.?.pending_messages.append(allocator, msg);
+
+    const result = tab.manager.?.pollEvents(allocator, &tab.agent_state);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+
+    const pending = tab.agent_state.getPendingQuestion() orelse return error.TestUnexpectedResult;
+    pending.active_index = 1;
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "Any constraints?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Keep it small") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Type your own answer") != null);
+}
+
+fn initRenderTestApp(allocator: std.mem.Allocator) approval_root.App {
+    return .{
+        .allocator = allocator,
+        .vx = null,
+        .tty = null,
+        .mode = .agent,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_blame_results = .{},
+        .pending_blame_mutex = .{},
+        .pending_blame_ready = std.atomic.Value(bool).init(false),
+        .blame_requests_in_flight = .{},
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = approval_root.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+}

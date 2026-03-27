@@ -55,3 +55,37 @@ test "snapshot: agent_question_prompt" {
 
     try snapshot.expectSnapshot(allocator, "agent_question_prompt", text);
 }
+
+test "snapshot: agent_question_prompt_with_custom_option" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 16);
+    defer ctx.deinit();
+
+    var state = question_prompt.AgentState.init(allocator, .left);
+    defer state.deinit();
+
+    const opts = try allocator.alloc(question_prompt.QuestionOptionData, 1);
+    opts[0] = .{ .label = "Minimal patch", .description = "Keep the fix narrow" };
+
+    const questions = try allocator.alloc(question_prompt.QuestionData, 1);
+    questions[0] = .{
+        .header = "Scope",
+        .question = "How broad should the fix be?",
+        .options = opts,
+        .multiple = false,
+        .allow_custom = true,
+    };
+
+    try state.setPendingQuestion(.{ .questions = questions });
+
+    allocator.free(opts);
+    allocator.free(questions);
+
+    const win = ctx.window();
+    try question_prompt.renderInlineQuestionPrompt(allocator, win, state.getPendingQuestion().?);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "agent_question_prompt_with_custom_option", text);
+}

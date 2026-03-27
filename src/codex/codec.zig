@@ -249,7 +249,15 @@ pub const Encoder = struct {
             try writer.print(",\"serviceTier\":{f}", .{std.json.fmt(service_tier.toString(), .{})});
         }
         if (params.collaboration_mode) |collaboration_mode| {
-            try writer.print(",\"collaborationMode\":{f}", .{std.json.fmt(collaboration_mode.toString(), .{})});
+            if (params.collaboration_mode_model) |model| {
+                try writer.print(
+                    ",\"collaborationMode\":{{\"mode\":{f},\"settings\":{{\"model\":{f}}}}}",
+                    .{
+                        std.json.fmt(collaboration_mode.toString(), .{}),
+                        std.json.fmt(model, .{}),
+                    },
+                );
+            }
         }
         if (params.input) |input_items| {
             try writer.writeAll(",\"input\":[");
@@ -351,19 +359,33 @@ pub const Encoder = struct {
         return output.toOwnedSlice(self.allocator);
     }
 
-    pub fn encodeUserInputResponse(self: *Encoder, id: RequestId, answers: []const []const u8) ![]u8 {
+    pub fn encodeUserInputResponse(
+        self: *Encoder,
+        id: RequestId,
+        questions: anytype,
+        answers: []const []const u8,
+    ) ![]u8 {
         var output: std.ArrayList(u8) = .{};
         errdefer output.deinit(self.allocator);
         const writer = output.writer(self.allocator);
 
         try writer.writeAll("{\"id\":");
         try writeId(writer, id);
-        try writer.writeAll(",\"result\":{\"answers\":[");
-        for (answers, 0..) |answer, i| {
+        try writer.writeAll(",\"result\":{\"answers\":{");
+        for (questions, 0..) |question, i| {
             if (i > 0) try writer.writeByte(',');
-            try writer.print("{f}", .{std.json.fmt(answer, .{})});
+            try writer.print("{f}:{{\"answers\":[", .{std.json.fmt(question.id, .{})});
+
+            if (i < answers.len) {
+                const answer = std.mem.trim(u8, answers[i], &std.ascii.whitespace);
+                if (answer.len > 0) {
+                    try writer.print("{f}", .{std.json.fmt(answer, .{})});
+                }
+            }
+
+            try writer.writeAll("]}");
         }
-        try writer.writeAll("]}}");
+        try writer.writeAll("}}}");
         return output.toOwnedSlice(self.allocator);
     }
 
@@ -1199,6 +1221,7 @@ test "encode turn start" {
         .reasoning_effort = .low,
         .service_tier = .fast,
         .collaboration_mode = .plan,
+        .collaboration_mode_model = "gpt-5.4",
         .input = &text_input,
     });
     defer allocator.free(result);
@@ -1209,7 +1232,7 @@ test "encode turn start" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"threadId\":\"019c6c65-9df2-7003-b62e-9ab034e6d054\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"effort\":\"low\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"serviceTier\":\"fast\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"collaborationMode\":\"plan\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"collaborationMode\":{\"mode\":\"plan\",\"settings\":{\"model\":\"gpt-5.4\"}}") != null);
 }
 
 test "encode turn interrupt" {
@@ -1873,6 +1896,42 @@ test "parse user input" {
     try std.testing.expectEqualStrings("Most capable", q.options.?[0].description.?);
     try std.testing.expectEqualStrings("GPT-4", q.options.?[1].label);
     try std.testing.expect(q.options.?[1].description == null);
+}
+
+test "encode user input response maps answers by question id" {
+    const allocator = std.testing.allocator;
+    var encoder = Encoder.init(allocator);
+
+    const questions = [_]protocol.UserInputQuestion{
+        .{
+            .id = "scope",
+            .header = "Scope",
+            .question = "What should we fix?",
+            .options = null,
+            .is_other = false,
+            .is_secret = false,
+        },
+        .{
+            .id = "constraints",
+            .header = "Constraints",
+            .question = "Anything else?",
+            .options = null,
+            .is_other = true,
+            .is_secret = false,
+        },
+    };
+    const answers = [_][]const u8{
+        "Question prompt flow",
+        "",
+    };
+
+    const json = try encoder.encodeUserInputResponse(.{ .number = 7 }, &questions, &answers);
+    defer allocator.free(json);
+
+    try std.testing.expectEqualStrings(
+        "{\"id\":7,\"result\":{\"answers\":{\"scope\":{\"answers\":[\"Question prompt flow\"]},\"constraints\":{\"answers\":[]}}}}",
+        json,
+    );
 }
 
 test "parse rate limits with primary/secondary" {

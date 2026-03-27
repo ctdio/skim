@@ -615,6 +615,7 @@ pub const QuestionData = struct {
     question: []const u8,
     options: []const QuestionOptionData = &.{},
     multiple: bool = false,
+    allow_custom: bool = true,
 };
 
 pub const QuestionPromptData = struct {
@@ -912,14 +913,16 @@ pub const AgentState = struct {
             errdefer self.allocator.free(prompt_copy);
 
             var custom_index: ?usize = null;
-            for (q.options, 0..) |opt, opt_idx| {
-                if (std.ascii.eqlIgnoreCase(opt.label, custom_label) or std.ascii.eqlIgnoreCase(opt.label, "Other")) {
-                    custom_index = opt_idx;
-                    break;
+            if (q.allow_custom) {
+                for (q.options, 0..) |opt, opt_idx| {
+                    if (std.ascii.eqlIgnoreCase(opt.label, custom_label) or std.ascii.eqlIgnoreCase(opt.label, "Other")) {
+                        custom_index = opt_idx;
+                        break;
+                    }
                 }
             }
 
-            const add_custom = custom_index == null;
+            const add_custom = q.allow_custom and custom_index == null;
             const options_len = q.options.len + (if (add_custom) @as(usize, 1) else 0);
             var options = try self.allocator.alloc(QuestionOption, options_len);
             errdefer self.allocator.free(options);
@@ -1066,6 +1069,38 @@ pub const AgentState = struct {
         if (self.follow_bottom) {
             self.scrollToBottom();
         }
+    }
+
+    /// Finalize an agent message that arrived as a completed item rather than streamed deltas.
+    pub fn addCompletedAgentMessage(self: *AgentState, text: []const u8) !void {
+        if (self.messages.items.len > 0) {
+            const last = &self.messages.items[self.messages.items.len - 1];
+            if (last.role == .agent) {
+                const current = last.content;
+                if (std.mem.eql(u8, current, text)) return;
+
+                if (current.len == 0) {
+                    const owned_text = try self.allocator.dupe(u8, text);
+                    errdefer self.allocator.free(owned_text);
+
+                    self.allocator.free(last.content);
+                    last.content = owned_text;
+                    self.line_map_dirty = true;
+
+                    if (self.follow_bottom) {
+                        self.scrollToBottom();
+                    }
+                    return;
+                }
+
+                if (text.len > current.len and std.mem.startsWith(u8, text, current)) {
+                    try self.appendToLastAgentMessage(text[current.len..]);
+                    return;
+                }
+            }
+        }
+
+        try self.addMessage(.agent, text);
     }
 
     /// Add a diff message (from tool_call with edit content)
@@ -2997,8 +3032,8 @@ test "AgentState addDiffMessage dedupes consecutive diffs" {
     var state = AgentState.init(allocator, .right);
     defer state.deinit();
 
-    try state.addDiffMessage("Edit", "file.txt", "old", "new");
-    try state.addDiffMessage("Edit file.txt", "file.txt", "old", "new");
+    try state.addDiffMessage(null, "Edit", "file.txt", "old", "new");
+    try state.addDiffMessage(null, "Edit file.txt", "file.txt", "old", "new");
 
     try std.testing.expectEqual(@as(usize, 1), state.messageCount());
     try std.testing.expectEqual(Message.Role.diff, state.messages.items[0].role);
