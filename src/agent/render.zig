@@ -2412,6 +2412,13 @@ fn renderInputArea(
 ) !void {
     if (win.height == 0) return;
 
+    // Question prompts should use the panel's plain background instead of the
+    // normal input bubble background.
+    if (pending_question) |question| {
+        try question_prompt.renderInlineQuestionPrompt(app.allocator, win, question);
+        return;
+    }
+
     // Fill the entire input area with the input background color
     // This ensures padding rows also have the colored background
     const input_bg_cell = vaxis.Cell{
@@ -2421,12 +2428,6 @@ fn renderInputArea(
     win.fill(input_bg_cell);
 
     // Note: model_selection mode is now rendered as a centered dialog overlay in renderAgentPanel
-
-    // Check if there's a pending question - render inline question prompt instead
-    if (pending_question) |question| {
-        try question_prompt.renderInlineQuestionPrompt(app.allocator, win, question);
-        return;
-    }
 
     // Check if there's a pending approval - render inline approval prompt instead
     if (pending_approval) |approval| {

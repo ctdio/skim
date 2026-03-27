@@ -226,6 +226,39 @@ test "renderAgentPanel shows codex user input prompt after approval request" {
     try std.testing.expect(std.mem.indexOf(u8, text, "Type your own answer") != null);
 }
 
+test "renderAgentPanel uses plain background for question prompt input area" {
+    const allocator = std.testing.allocator;
+
+    var app = initRenderTestApp(allocator);
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    var ctx = try harness.createTestContext(allocator, 80, 18);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    const mgr = try tab.createCodexManager();
+
+    const proc = try approval_root.CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    mgr.process = proc;
+    mgr.transport = try approval_root.CodexTransport.init(allocator, proc);
+    mgr.status = .turn_active;
+
+    var decoder = approval_root.CodexCodec.Decoder.init(allocator);
+    const json =
+        \\{"id":0,"method":"item/tool/requestUserInput","params":{"threadId":"t1","turnId":"turn-1","itemId":"call-1","questions":[{"id":"q1","header":"Scope","question":"How should sessions be split?","options":[{"label":"Tab scoped","description":"Keep one session per pane"},{"label":"Shared","description":"Reuse one session across panes"}],"isOther":false}]}}
+    ;
+    const msg = try decoder.decode(json);
+    try mgr.transport.?.pending_messages.append(allocator, msg);
+
+    const result = tab.manager.?.pollEvents(allocator, &tab.agent_state);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const cell = ctx.screen.readCell(79, 17) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(harness.Cell.Color, .default), cell.style.bg);
+}
+
 fn initRenderTestApp(allocator: std.mem.Allocator) approval_root.App {
     return .{
         .allocator = allocator,
