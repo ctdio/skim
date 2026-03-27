@@ -862,6 +862,7 @@ pub const Decoder = struct {
         const map = std.StaticStringMap(enum {
             user_message,
             agent_message,
+            plan,
             reasoning,
             command_execution,
             file_change,
@@ -870,6 +871,8 @@ pub const Decoder = struct {
         }).initComptime(.{
             .{ "userMessage", .user_message },
             .{ "agentMessage", .agent_message },
+            .{ "Plan", .plan },
+            .{ "plan", .plan },
             .{ "reasoning", .reasoning },
             .{ "commandExecution", .command_execution },
             .{ "fileChange", .file_change },
@@ -891,6 +894,10 @@ pub const Decoder = struct {
                 .content = try self.convertRawContentToTextContent(raw.content),
             } },
             .agent_message => .{ .agent_message = .{
+                .id = item_id,
+                .text = if (raw.text) |t| try self.allocator.dupe(u8, t) else try self.allocator.dupe(u8, ""),
+            } },
+            .plan => .{ .plan = .{
                 .id = item_id,
                 .text = if (raw.text) |t| try self.allocator.dupe(u8, t) else try self.allocator.dupe(u8, ""),
             } },
@@ -1533,6 +1540,34 @@ test "parse item started - agent message with id and text" {
     try std.testing.expect(result.item == .agent_message);
     try std.testing.expectEqualStrings("msg_123", result.item.agent_message.id);
     try std.testing.expectEqualStrings("Hello, I can help!", result.item.agent_message.text);
+}
+
+test "parse item started - plan with id and text" {
+    const allocator = std.testing.allocator;
+    var decoder = Decoder.init(allocator);
+
+    const json =
+        \\{"threadId":"019c6c65","turnId":"1","item":{"type":"Plan","id":"plan_123","text":"# Final plan"}}
+    ;
+
+    const result = try decoder.parseItemStarted(json);
+    defer {
+        allocator.free(result.thread_id);
+        allocator.free(result.turn_id);
+        switch (result.item) {
+            .plan => |plan| {
+                allocator.free(plan.id);
+                allocator.free(plan.text);
+            },
+            else => {},
+        }
+    }
+
+    try std.testing.expectEqualStrings("019c6c65", result.thread_id);
+    try std.testing.expectEqualStrings("1", result.turn_id);
+    try std.testing.expect(result.item == .plan);
+    try std.testing.expectEqualStrings("plan_123", result.item.plan.id);
+    try std.testing.expectEqualStrings("# Final plan", result.item.plan.text);
 }
 
 test "parse item started - reasoning with id, summary, content arrays" {

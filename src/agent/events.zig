@@ -379,7 +379,7 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
                     .title = m.tool_name orelse m.server_name orelse "MCP tool call",
                     .command = m.arguments,
                 } },
-                .agent_message => break :blk null,
+                .agent_message, .plan => break :blk null,
                 .user_message, .reasoning, .unknown => break :blk null,
             }
         },
@@ -387,6 +387,10 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
             switch (e.item) {
                 .agent_message => |msg| break :blk if (msg.text.len > 0)
                     .{ .completed_agent_message = msg.text }
+                else
+                    .{ .message_complete = {} },
+                .plan => |plan| break :blk if (plan.text.len > 0)
+                    .{ .completed_agent_message = plan.text }
                 else
                     .{ .message_complete = {} },
                 .command_execution => |cmd| break :blk .{ .tool_update = .{
@@ -850,6 +854,21 @@ test "codexEventToAgentEvent: item_completed agent_message maps to completed age
     try std.testing.expectEqualStrings("Plan mode reply", result.?.completed_agent_message);
 }
 
+test "codexEventToAgentEvent: item_completed plan maps to completed agent text" {
+    const event = CodexEvent{ .item_completed = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item = .{ .plan = .{
+            .id = "plan-1",
+            .text = "<proposed_plan>\n# Plan\n</proposed_plan>",
+        } },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .completed_agent_message);
+    try std.testing.expectEqualStrings("<proposed_plan>\n# Plan\n</proposed_plan>", result.?.completed_agent_message);
+}
+
 test "codexEventToAgentEvent: item_completed command_execution with non-zero exit maps to failed" {
     const event = CodexEvent{ .item_completed = .{
         .thread_id = "t1",
@@ -1060,6 +1079,37 @@ test "processAgentEvent: codex completed agent message without delta still rende
     try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
     try std.testing.expectEqual(Message.Role.agent, agent_state.messages.items[0].role);
     try std.testing.expectEqualStrings("Plan output is ready", agent_state.messages.items[0].content);
+}
+
+test "processAgentEvent: codex completed plan item without delta still renders" {
+    const allocator = std.testing.allocator;
+
+    var manager = codex_manager.CodexManager.init(allocator);
+    defer manager.deinit();
+
+    var decoder = codex_codec.Decoder.init(allocator);
+    const json =
+        \\{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"Plan","id":"plan-1","text":"<proposed_plan>\n# Agent Split Panes v1\n</proposed_plan>"}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(allocator);
+
+    var codex_event = manager.processMessage(msg);
+    defer if (codex_event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(codex_event != null);
+
+    const agent_event = codexEventToAgentEvent(codex_event.?);
+    try std.testing.expect(agent_event != null);
+    try std.testing.expect(agent_event.? == .completed_agent_message);
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    processAgentEvent(&agent_state, agent_event.?);
+
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(Message.Role.agent, agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("<proposed_plan>\n# Agent Split Panes v1\n</proposed_plan>", agent_state.messages.items[0].content);
 }
 
 test "processAgentEvent: codex request_user_input function call opens pending question" {

@@ -249,6 +249,11 @@ pub const AgentMessageItem = struct {
     text: []const u8,
 };
 
+pub const PlanItem = struct {
+    id: []const u8,
+    text: []const u8,
+};
+
 pub const ReasoningItem = struct {
     id: []const u8,
     summary: [][]const u8,
@@ -293,6 +298,7 @@ pub const FunctionCallItem = struct {
 pub const Item = union(enum) {
     user_message: UserMessageItem,
     agent_message: AgentMessageItem,
+    plan: PlanItem,
     reasoning: ReasoningItem,
     command_execution: CommandExecutionItem,
     file_change: FileChangeItem,

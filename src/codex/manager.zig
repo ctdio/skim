@@ -1818,6 +1818,7 @@ pub const CodexManager = struct {
         const map = std.StaticStringMap(enum {
             user_message,
             agent_message,
+            plan,
             reasoning,
             command_execution,
             file_change,
@@ -1826,6 +1827,8 @@ pub const CodexManager = struct {
         }).initComptime(.{
             .{ "userMessage", .user_message },
             .{ "agentMessage", .agent_message },
+            .{ "Plan", .plan },
+            .{ "plan", .plan },
             .{ "reasoning", .reasoning },
             .{ "commandExecution", .command_execution },
             .{ "fileChange", .file_change },
@@ -1844,6 +1847,14 @@ pub const CodexManager = struct {
                 const owned_text = try allocator.dupe(u8, raw.text orelse "");
                 errdefer allocator.free(owned_text);
                 break :blk .{ .agent_message = .{
+                    .id = owned_id,
+                    .text = owned_text,
+                } };
+            },
+            .plan => blk: {
+                const owned_text = try allocator.dupe(u8, raw.text orelse "");
+                errdefer allocator.free(owned_text);
+                break :blk .{ .plan = .{
                     .id = owned_id,
                     .text = owned_text,
                 } };
@@ -1936,6 +1947,10 @@ fn freeOwnedItem(allocator: Allocator, item: protocol.Item) void {
         .agent_message => |a| {
             allocator.free(a.id);
             allocator.free(a.text);
+        },
+        .plan => |p| {
+            allocator.free(p.id);
+            allocator.free(p.text);
         },
         .reasoning => |r| {
             allocator.free(r.id);
@@ -2182,6 +2197,26 @@ test "processMessage with item/started returns item_started" {
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .item_started);
     try std.testing.expect(event.?.item_started.item == .command_execution);
+}
+
+test "processMessage with item/completed plan returns item_completed" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/completed","params":{"threadId":"t1","turnId":"turn-1","item":{"type":"Plan","id":"plan-1","text":"# Final plan"}}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .item_completed);
+    try std.testing.expect(event.?.item_completed.item == .plan);
+    try std.testing.expectEqualStrings("plan-1", event.?.item_completed.item.plan.id);
+    try std.testing.expectEqualStrings("# Final plan", event.?.item_completed.item.plan.text);
 }
 
 test "processMessage with function call item parses call_id fallback" {
