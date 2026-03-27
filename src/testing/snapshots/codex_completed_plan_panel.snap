@@ -1,0 +1,23 @@
+ Codex [focused]                                                          Active
+┃ Design split panes for the agent panel.                                      │
+┃                                                                              ▴
+                                                                               │
+ I’m expanding this into a handoff-grade spec now.                             │
+                                                                               │
+ <proposed_plan>                                                               │
+                                                                               │
+ Split Panes                                                                   │
+                                                                               │
+ Summary                                                                       │
+                                                                               │
+ Add vertical panes inside the agent panel.                                    │
+                                                                               │
+ Key Changes                                                                   │
+                                                                               │
+ • Keep tabs as workspaces.                                                    │
+ • Route input through the focused pane.                                       │
+ </proposed_plan>                                                              │
+                                                                               │
+                                                                               │
+
+ >

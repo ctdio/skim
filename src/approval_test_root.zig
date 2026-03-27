@@ -3,17 +3,22 @@ pub const codex_manager = @import("codex/manager.zig");
 pub const codex_codec = @import("codex/codec.zig");
 pub const codex_protocol = @import("codex/protocol.zig");
 pub const codex_process = @import("codex/process.zig");
+pub const codex_session_replay = @import("codex/session_replay.zig");
 pub const codex_transport = @import("codex/transport.zig");
+pub const agent_state = @import("agent/state.zig");
 pub const App = @import("app.zig").App;
 pub const TabManager = @import("agent/tab_manager.zig").TabManager;
 
 pub const CodexManager = codex_manager.CodexManager;
 pub const CodexCodec = codex_codec;
+pub const AgentState = agent_state.AgentState;
+pub const AgentMessage = agent_state.Message;
 pub const UserInputOption = codex_protocol.UserInputOption;
 pub const UserInputQuestion = CodexManager.UserInputQuestion;
 pub const CommandDecision = CodexManager.CommandDecision;
 pub const FileChangeDecision = CodexManager.FileChangeDecision;
 pub const CodexProcess = codex_process.CodexProcess;
+pub const CodexSessionReplay = codex_session_replay;
 pub const CodexTransport = codex_transport.StdioTransport;
 
 pub const renderCommandApproval = render.renderCommandApproval;

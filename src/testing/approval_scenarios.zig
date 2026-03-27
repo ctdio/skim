@@ -2,6 +2,9 @@ const std = @import("std");
 const harness = @import("harness.zig");
 const snapshot = @import("snapshot.zig");
 const approval_root = @import("approval_test_root");
+const codex_replay = approval_root.CodexSessionReplay;
+
+const FRAME_TEXT_CAPACITY: usize = 262144;
 
 test "snapshot: codex_command_approval" {
     const allocator = std.testing.allocator;
@@ -189,8 +192,8 @@ test "snapshot: codex_user_input_with_is_other" {
 test "renderAgentPanel shows codex user input prompt after approval request" {
     const allocator = std.testing.allocator;
 
-    var app = initRenderTestApp(allocator);
-    defer if (app.tab_manager) |*tm| tm.deinit();
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
 
     var ctx = try harness.createTestContext(allocator, 80, 18);
     defer ctx.deinit();
@@ -229,8 +232,8 @@ test "renderAgentPanel shows codex user input prompt after approval request" {
 test "renderAgentPanel uses plain background for question prompt input area" {
     const allocator = std.testing.allocator;
 
-    var app = initRenderTestApp(allocator);
-    defer if (app.tab_manager) |*tm| tm.deinit();
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
 
     var ctx = try harness.createTestContext(allocator, 80, 18);
     defer ctx.deinit();
@@ -259,7 +262,78 @@ test "renderAgentPanel uses plain background for question prompt input area" {
     try std.testing.expectEqual(@as(harness.Cell.Color, .default), cell.style.bg);
 }
 
-fn initRenderTestApp(allocator: std.mem.Allocator) approval_root.App {
+test "snapshot: codex_completed_plan_panel" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 80, 24);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    const mgr = try tab.createCodexManager();
+    mgr.status = .thread_active;
+
+    const log =
+        \\{"timestamp":"2026-03-27T03:54:03.784Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1","model_context_window":258400,"collaboration_mode_kind":"plan"}}
+        \\{"timestamp":"2026-03-27T03:54:03.789Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Design split panes for the agent panel."}]}}
+        \\{"timestamp":"2026-03-27T03:54:09.550Z","type":"event_msg","payload":{"type":"agent_message","message":"I’m expanding this into a handoff-grade spec now.","phase":"commentary","memory_citation":null}}
+        \\{"timestamp":"2026-03-27T03:55:11.957Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-1","turn_id":"turn-1","item":{"type":"Plan","id":"turn-1-plan","text":"<proposed_plan>\n# Split Panes\n\n## Summary\nAdd vertical panes inside the agent panel.\n\n## Key Changes\n- Keep tabs as workspaces.\n- Route input through the focused pane.\n</proposed_plan>"}}}
+        \\{"timestamp":"2026-03-27T03:55:11.988Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1","last_agent_message":"I’m expanding this into a handoff-grade spec now."}}
+    ;
+
+    const summary = try codex_replay.replaySessionFromString(allocator, &tab.agent_state, log);
+    mgr.status = summary.manager_status;
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "codex_completed_plan_panel", text);
+}
+
+test "snapshot: codex_replay_in_progress_panel" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 80, 24);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Replay");
+    const mgr = try tab.createCodexManager();
+    mgr.status = .thread_active;
+    tab.agent_state.visible = true;
+    app.mode = .agent;
+
+    const log =
+        \\{"timestamp":"2026-03-27T03:54:03.784Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1","model_context_window":258400,"collaboration_mode_kind":"plan"}}
+        \\{"timestamp":"2026-03-27T03:54:03.789Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Design split panes for the agent panel."}]}}
+        \\{"timestamp":"2026-03-27T03:54:09.550Z","type":"event_msg","payload":{"type":"agent_message","message":"I’m expanding this into a handoff-grade spec now.","phase":"commentary","memory_citation":null}}
+        \\{"timestamp":"2026-03-27T03:55:11.957Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-1","turn_id":"turn-1","item":{"type":"Plan","id":"turn-1-plan","text":"<proposed_plan>\n# Split Panes\n\n## Summary\nAdd vertical panes inside the agent panel.\n\n## Key Changes\n- Keep tabs as workspaces.\n- Route input through the focused pane.\n</proposed_plan>"}}}
+        \\{"timestamp":"2026-03-27T03:55:11.988Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1","last_agent_message":"I’m expanding this into a handoff-grade spec now."}}
+    ;
+
+    const lines = try codex_replay.loadReplayLinesFromString(allocator, log);
+    tab.agent_state.startDebugReplay(lines, false, false);
+
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "codex_replay_in_progress_panel", text);
+}
+
+fn initRenderTestApp(allocator: std.mem.Allocator) !approval_root.App {
+    const frame_buffer = try allocator.alloc(u8, FRAME_TEXT_CAPACITY);
+
     return .{
         .allocator = allocator,
         .vx = null,
@@ -273,7 +347,7 @@ fn initRenderTestApp(allocator: std.mem.Allocator) approval_root.App {
         .editor_is_prompt_edit = false,
         .last_ctrl_c = 0,
         .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
+        .frame_text_buffer = frame_buffer,
         .frame_text_used = 0,
         .frame_segment_arena = undefined,
         .syntax_highlighter = undefined,
@@ -300,4 +374,9 @@ fn initRenderTestApp(allocator: std.mem.Allocator) approval_root.App {
         .profile_active_frame = false,
         .profile_counters = .{},
     };
+}
+
+fn deinitRenderTestApp(app: *approval_root.App) void {
+    if (app.tab_manager) |*tm| tm.deinit();
+    app.allocator.free(app.frame_text_buffer);
 }

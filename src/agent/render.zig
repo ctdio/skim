@@ -1114,7 +1114,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
                     else => null,
                 };
                 if (fmt_result) |result| {
-                    break :blk result;
+                    break :blk try RenderUtils.copyFrameText(app, result);
                 }
             }
             break :blk base_status;
@@ -1158,6 +1158,25 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
 
     const title_width = 2 + RenderUtils.displayWidth(title) + RenderUtils.displayWidth(suffix);
 
+    var replay_buf: [48]u8 = undefined;
+    var replay_text: ?[]const u8 = null;
+    if (agent_state.getDebugReplayConst()) |replay| {
+        const replay_state: []const u8 = if (replay.isComplete())
+            "done"
+        else if (replay.playing)
+            "play"
+        else
+            "pause";
+        replay_text = std.fmt.bufPrint(&replay_buf, "Replay {d}/{d} [{s}]", .{
+            replay.current_index,
+            replay.lines.len,
+            replay_state,
+        }) catch null;
+        if (replay_text) |text| {
+            replay_text = try RenderUtils.copyFrameText(app, text);
+        }
+    }
+
     // Codex token usage and rate limit display (between title and status)
     var token_buf: [64]u8 = undefined;
     var rate_buf: [64]u8 = undefined;
@@ -1165,16 +1184,20 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     var rate_text: ?[]const u8 = null;
 
     if (agent_state.codex_token_usage) |tu| {
-        token_text = formatTokenUsage(&token_buf, tu.total_tokens, tu.model_context_window);
+        token_text = try RenderUtils.copyFrameText(app, formatTokenUsage(&token_buf, tu.total_tokens, tu.model_context_window));
     }
 
     if (agent_state.codex_rate_limits) |rl| {
         const max_pct = @max(rl.primary_used_percent, rl.secondary_used_percent);
         if (max_pct >= 80.0) {
             if (rl.primary_used_percent >= rl.secondary_used_percent) {
-                rate_text = std.fmt.bufPrint(&rate_buf, "Rate limit: {d:.0}% primary", .{rl.primary_used_percent}) catch null;
+                if (std.fmt.bufPrint(&rate_buf, "Rate limit: {d:.0}% primary", .{rl.primary_used_percent}) catch null) |text| {
+                    rate_text = try RenderUtils.copyFrameText(app, text);
+                }
             } else {
-                rate_text = std.fmt.bufPrint(&rate_buf, "Rate limit: {d:.0}% secondary", .{rl.secondary_used_percent}) catch null;
+                if (std.fmt.bufPrint(&rate_buf, "Rate limit: {d:.0}% secondary", .{rl.secondary_used_percent}) catch null) |text| {
+                    rate_text = try RenderUtils.copyFrameText(app, text);
+                }
             }
         }
     }
@@ -1190,6 +1213,12 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
     else
         title_width;
     const info_end = if (status_col > 0) status_col - 1 else 0;
+
+    if (replay_text) |rt| {
+        const sep = " | ";
+        printTitleInfoSegmentClipped(win, 0, &info_col, info_end, sep, dim_style);
+        printTitleInfoSegmentClipped(win, 0, &info_col, info_end, rt, dim_style);
+    }
 
     if (token_text) |tt| {
         const sep = " | ";

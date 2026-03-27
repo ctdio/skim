@@ -33,6 +33,32 @@ tmux send-keys -t skim-harness.0 Enter
 
 For navigation keys and commands, reference the project keybindings in `README.md` (the authoritative list is under **Keybindings**).
 
+## Replay Saved Codex Sessions
+
+The replay command is useful when you want an agent to investigate or verify a UI issue against a real saved session instead of a live agent:
+
+```bash
+tmux new-session -d -s skim-replay -c /home/ctdio/projects/open-source/skim \
+  "./zig-out/bin/skim debug replay-codex ~/.codex/sessions/...jsonl --tui"
+tmux split-window -v -t skim-replay -c /home/ctdio/projects/open-source/skim "tail -f ~/.skim/tui.log"
+tmux attach -t skim-replay
+```
+
+Replay-specific controls:
+
+```bash
+tmux send-keys -t skim-replay.0 Space   # play/pause
+tmux send-keys -t skim-replay.0 n       # step one event
+tmux send-keys -t skim-replay.0 r       # restart
+tmux send-keys -t skim-replay.0 q       # exit replay
+```
+
+This works well for agent-assisted testing:
+- Use a real session log as a deterministic fixture
+- Capture pane output before and after specific replay steps
+- Reproduce rendering or input bugs without waiting on live agent traffic
+- Pair replay output with snapshot tests for durable regression coverage
+
 ## Clean Up
 
 Detach from the session:
@@ -45,6 +71,7 @@ Kill the session when finished:
 
 ```bash
 tmux kill-session -t skim-harness
+tmux kill-session -t skim-replay
 ```
 
 ## Notes

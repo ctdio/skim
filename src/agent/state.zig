@@ -8,6 +8,7 @@ const protocol = @import("../acp/protocol.zig");
 const git_files = @import("../git/files.zig");
 const command_palette = @import("command_palette.zig");
 const clipboard = @import("../clipboard.zig");
+const CodexManager = @import("../codex/manager.zig").CodexManager;
 const history = @import("history.zig");
 pub const HistoryState = history.HistoryState;
 const slash_menu = @import("slash_menu.zig");
@@ -741,6 +742,7 @@ pub const AgentState = struct {
     // Codex-specific metrics (updated via token_usage_update and rate_limits_update events)
     codex_token_usage: ?CodexTokenUsageState,
     codex_rate_limits: ?CodexRateLimitsState,
+    debug_replay: ?DebugReplayState,
 
     pub const PanelSide = enum {
         left,
@@ -769,6 +771,38 @@ pub const AgentState = struct {
     pub const CodexRateLimitsState = struct {
         primary_used_percent: f64,
         secondary_used_percent: f64,
+    };
+
+    pub const DebugReplayState = struct {
+        lines: [][]const u8,
+        current_index: usize,
+        manager_status: CodexManager.Status,
+        exit_quits_app: bool,
+        playing: bool,
+        step_interval_ms: i64,
+        last_step_ms: i64,
+
+        pub fn init(lines: [][]const u8, autoplay: bool, exit_quits_app: bool) DebugReplayState {
+            const now = std.time.milliTimestamp();
+            return .{
+                .lines = lines,
+                .current_index = 0,
+                .manager_status = .thread_active,
+                .exit_quits_app = exit_quits_app,
+                .playing = autoplay,
+                .step_interval_ms = 150,
+                .last_step_ms = now - 150,
+            };
+        }
+
+        pub fn deinit(self: *DebugReplayState, allocator: Allocator) void {
+            for (self.lines) |line| allocator.free(line);
+            allocator.free(self.lines);
+        }
+
+        pub fn isComplete(self: *const DebugReplayState) bool {
+            return self.current_index >= self.lines.len;
+        }
     };
 
     pub fn init(allocator: Allocator, panel_side: PanelSide) AgentState {
@@ -809,6 +843,7 @@ pub const AgentState = struct {
             .subagent_modal = null,
             .codex_token_usage = null,
             .codex_rate_limits = null,
+            .debug_replay = null,
         };
 
         // Pre-allocate capacity to avoid cold allocation lag on first message/tool
@@ -828,6 +863,9 @@ pub const AgentState = struct {
         }
         if (self.subagent_modal) |*modal| {
             modal.deinit();
+        }
+        if (self.debug_replay) |*replay| {
+            replay.deinit(self.allocator);
         }
         self.line_map.deinit();
         self.plan.deinit();
@@ -1563,6 +1601,85 @@ pub const AgentState = struct {
         }
         self.messages.clearRetainingCapacity();
         self.scroll_offset = 0;
+        self.line_map_dirty = true;
+    }
+
+    pub fn hasDebugReplay(self: *const AgentState) bool {
+        return self.debug_replay != null;
+    }
+
+    pub fn getDebugReplay(self: *AgentState) ?*DebugReplayState {
+        if (self.debug_replay) |*replay| return replay;
+        return null;
+    }
+
+    pub fn getDebugReplayConst(self: *const AgentState) ?*const DebugReplayState {
+        if (self.debug_replay) |*replay| return replay;
+        return null;
+    }
+
+    pub fn isDebugReplayPlaying(self: *const AgentState) bool {
+        if (self.debug_replay) |replay| {
+            return replay.playing and !replay.isComplete();
+        }
+        return false;
+    }
+
+    pub fn startDebugReplay(self: *AgentState, lines: [][]const u8, autoplay: bool, exit_quits_app: bool) void {
+        self.clearDebugReplay();
+        self.resetForDebugReplay();
+        self.debug_replay = DebugReplayState.init(lines, autoplay, exit_quits_app);
+    }
+
+    pub fn clearDebugReplay(self: *AgentState) void {
+        if (self.debug_replay) |*replay| {
+            replay.deinit(self.allocator);
+            self.debug_replay = null;
+        }
+    }
+
+    pub fn toggleDebugReplayPlaying(self: *AgentState) bool {
+        if (self.debug_replay) |*replay| {
+            if (!replay.isComplete()) {
+                replay.playing = !replay.playing;
+                if (replay.playing) {
+                    replay.last_step_ms = std.time.milliTimestamp() - replay.step_interval_ms;
+                }
+            }
+            return replay.playing;
+        }
+        return false;
+    }
+
+    pub fn restartDebugReplay(self: *AgentState) void {
+        if (self.debug_replay) |*replay| {
+            const autoplay = replay.playing;
+            self.resetForDebugReplay();
+            replay.current_index = 0;
+            replay.manager_status = .thread_active;
+            replay.playing = autoplay;
+            replay.last_step_ms = std.time.milliTimestamp() - replay.step_interval_ms;
+        }
+    }
+
+    fn resetForDebugReplay(self: *AgentState) void {
+        self.clearMessages();
+        self.clearPlan();
+        self.clearPendingQuestion();
+        self.closeSubagentModal();
+        self.clearQueuedShellOutputs();
+        self.clearShellMode();
+        self.clearStagedPrompt();
+        self.clearStash();
+        self.codex_token_usage = null;
+        self.codex_rate_limits = null;
+        self.help_visible = false;
+        self.help_scroll_offset = 0;
+        self.history = HistoryState.init();
+        self.expanded_user_messages.clearRetainingCapacity();
+        self.input = InputEditor.State.init();
+        self.follow_bottom = true;
+        self.scrollToBottom();
         self.line_map_dirty = true;
     }
 

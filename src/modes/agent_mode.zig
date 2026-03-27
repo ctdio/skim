@@ -26,6 +26,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
+    if (try handleDebugReplayKey(app, agent_state, key)) {
+        return;
+    }
+
+    if (agent_state.hasDebugReplay() and !agent_state.isInHistoryMode()) {
+        return;
+    }
+
     // Check for pending question prompt
     if (agent_state.getPendingQuestion()) |question| {
         if (try handleQuestionPrompt(app, agent_state, question, key)) {
@@ -1100,6 +1108,40 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Update file picker visibility based on current input
     updateFilePickerVisibility(app, agent_state);
+}
+
+fn handleDebugReplayKey(app: *App, agent_state: *agent.AgentState, key: vaxis.Key) !bool {
+    if (!agent_state.hasDebugReplay()) return false;
+    if (agent_state.hasSubagentModal()) return false;
+
+    if (key.codepoint == 'q' or key.codepoint == 27) {
+        app.exitActiveDebugReplay();
+        return true;
+    }
+
+    if (key.mods.ctrl and key.codepoint == 'e') {
+        return true;
+    }
+
+    if (key.codepoint == ' ') {
+        const playing = app.toggleActiveDebugReplayPlaying();
+        app.showStatusMessage(if (playing) "Replay playing" else "Replay paused");
+        return true;
+    }
+
+    if (key.codepoint == 'n') {
+        _ = try app.stepActiveDebugReplay();
+        app.showStatusMessage("Replay stepped");
+        return true;
+    }
+
+    if (key.codepoint == 'r') {
+        app.restartActiveDebugReplay();
+        app.showStatusMessage("Replay restarted");
+        return true;
+    }
+
+    return false;
 }
 
 fn getNextCodexReasoningEffort(cm: *CodexManager) codex_protocol.ReasoningEffort {
@@ -3025,6 +3067,108 @@ test "ESC interrupts active Codex turn in normal mode" {
     try std.testing.expectEqual(@as(usize, 1), tab.agent_state.messages.items.len);
     try std.testing.expectEqual(state.Message.Role.system, tab.agent_state.messages.items[0].role);
     try std.testing.expectEqualStrings("Interrupted", tab.agent_state.messages.items[0].content);
+}
+
+test "q exits debug replay session" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Replay");
+    const lines = try allocator.alloc([]const u8, 0);
+    tab.agent_state.startDebugReplay(lines, false, true);
+
+    try handleKey(&app, .{ .codepoint = 'q' });
+
+    try std.testing.expect(app.should_quit);
+    try std.testing.expect(!tab.agent_state.hasDebugReplay());
+}
+
+test "ctrl-e does not exit debug replay session" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Replay");
+    const lines = try allocator.alloc([]const u8, 0);
+    tab.agent_state.startDebugReplay(lines, false, true);
+
+    try handleKey(&app, .{ .codepoint = 'e', .mods = .{ .ctrl = true } });
+
+    try std.testing.expect(!app.should_quit);
+    try std.testing.expect(tab.agent_state.hasDebugReplay());
 }
 
 /// Execute an agent command palette action

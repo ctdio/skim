@@ -560,6 +560,35 @@ For AI agents that support MCP (Model Context Protocol), add skim to your agent'
 | `add_comment` | Add a review comment to a specific line |
 | `get_comments` | Get all comments from a skim instance |
 
+### Debug Replay
+
+Skim can replay a saved Codex JSONL session through the real agent panel. This is useful for reproducing rendering bugs, checking interaction flows, and building stable UI fixtures from real agent traffic.
+
+```bash
+# Headless render of the final panel state
+skim debug replay-codex ~/.codex/sessions/...jsonl --width 80 --height 24
+
+# Interactive replay in the TUI
+skim debug replay-codex ~/.codex/sessions/...jsonl --tui
+```
+
+**Replay controls:**
+
+| Key | Action |
+|-----|--------|
+| `Space` | Play / pause replay |
+| `n` | Step one event |
+| `r` | Restart replay |
+| `q` / `ESC` | Exit replay |
+
+This is a good fit for agent-assisted testing:
+- Reproduce a UI bug from a real Codex session without reconnecting to a live agent
+- Capture the final render headlessly and compare it against snapshots
+- Run the replay under tmux, send keys programmatically, and capture the visible pane for review
+- Turn support reports into deterministic fixtures for follow-up tests
+
+The panel snapshots for this workflow live in `src/testing/approval_scenarios.zig`.
+
 ### Claude Code Skill
 
 Install the skim skill to teach Claude Code how to review code with skim:

@@ -21,6 +21,8 @@ const editor = @import("editor.zig");
 const comment_editor = @import("comments/editor.zig");
 const command_palette = @import("command_palette.zig");
 const help = @import("help.zig");
+const codex_session_replay = @import("codex/session_replay.zig");
+const codex_manager = @import("codex/manager.zig");
 
 // Mode handlers
 const normal_mode = @import("modes/normal_mode.zig");
@@ -1441,6 +1443,116 @@ pub const App = struct {
         return false;
     }
 
+    pub fn hasActiveDebugReplay(self: *const App) bool {
+        if (self.getActiveAgentStateConst()) |agent_state| {
+            return agent_state.hasDebugReplay();
+        }
+        return false;
+    }
+
+    pub fn isActiveDebugReplayPlaying(self: *const App) bool {
+        if (self.getActiveAgentStateConst()) |agent_state| {
+            return agent_state.isDebugReplayPlaying();
+        }
+        return false;
+    }
+
+    pub fn toggleActiveDebugReplayPlaying(self: *App) bool {
+        const agent_state = self.getActiveAgentState() orelse return false;
+        const playing = agent_state.toggleDebugReplayPlaying();
+        self.needs_render = true;
+        return playing;
+    }
+
+    pub fn restartActiveDebugReplay(self: *App) void {
+        const agent_state = self.getActiveAgentState() orelse return;
+        agent_state.restartDebugReplay();
+        if (agent_state.getDebugReplayConst()) |replay| {
+            self.syncActiveDebugReplayManagerStatus(replay.manager_status);
+        }
+        self.needs_render = true;
+    }
+
+    pub fn exitActiveDebugReplay(self: *App) void {
+        const agent_state = self.getActiveAgentState() orelse return;
+        const quit_app = if (agent_state.getDebugReplayConst()) |replay| replay.exit_quits_app else false;
+
+        agent_state.clearDebugReplay();
+        agent_state.exitHistoryMode();
+        agent_state.input.vim.vim_mode = .normal;
+
+        if (quit_app) {
+            self.should_quit = true;
+            return;
+        }
+
+        if (self.tab_manager) |*tm| {
+            tm.panel_visible = false;
+        }
+        agent_state.visible = false;
+        self.mode = .normal;
+        self.needs_render = true;
+    }
+
+    pub fn stepActiveDebugReplay(self: *App) !bool {
+        const agent_state = self.getActiveAgentState() orelse return false;
+        const replay = agent_state.getDebugReplay() orelse return false;
+        if (replay.isComplete()) {
+            replay.playing = false;
+            return false;
+        }
+
+        var summary = codex_session_replay.ReplaySummary{
+            .manager_status = replay.manager_status,
+        };
+        try codex_session_replay.replaySessionLine(
+            self.allocator,
+            agent_state,
+            replay.lines[replay.current_index],
+            &summary,
+        );
+
+        replay.current_index += 1;
+        replay.manager_status = summary.manager_status;
+        replay.last_step_ms = std.time.milliTimestamp();
+        if (replay.isComplete()) {
+            replay.playing = false;
+        }
+
+        self.syncActiveDebugReplayManagerStatus(replay.manager_status);
+        if (!agent_state.isInHistoryMode() and agent_state.messages.items.len > 0) {
+            agent_state.enterHistoryMode();
+        }
+        self.needs_render = true;
+        return true;
+    }
+
+    pub fn advanceDebugReplayIfDue(self: *App) void {
+        const agent_state = self.getActiveAgentState() orelse return;
+        const replay = agent_state.getDebugReplay() orelse return;
+        if (!replay.playing or replay.isComplete()) return;
+
+        const now = std.time.milliTimestamp();
+        if (now - replay.last_step_ms < replay.step_interval_ms) return;
+
+        _ = self.stepActiveDebugReplay() catch |err| {
+            std.log.err("Failed to advance debug replay: {any}", .{err});
+            if (agent_state.getDebugReplay()) |active_replay| {
+                active_replay.playing = false;
+            }
+            return;
+        };
+    }
+
+    fn syncActiveDebugReplayManagerStatus(self: *App, status: codex_manager.CodexManager.Status) void {
+        if (self.getActiveManager()) |mgr| {
+            switch (mgr) {
+                .codex => |codex_mgr| codex_mgr.status = status,
+                else => {},
+            }
+        }
+    }
+
     /// Auto-name the active tab from the user's first prompt
     pub fn autoNameActiveTab(self: *App, prompt: []const u8) void {
         if (self.tab_manager) |*tm| {
@@ -1673,12 +1785,13 @@ pub const App = struct {
             const stats_loading = self.state.menu_stats_loading;
             // Check all tabs for manager activity (ACP or OpenCode)
             const manager_active = self.hasAnyManagerActivity();
+            const replay_playing = self.isActiveDebugReplayPlaying();
             // Check if a shell command is running (needs streaming output) - check all tabs
             const shell_cmd_running = self.hasAnyRunningShellCommand();
             // Check if a connection thread is running (need to poll for completion)
             const connecting = self.pending_connection != null;
             const blame_active = self.pending_blame_ready.load(.acquire) or self.blame_requests_in_flight.count() > 0;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !shell_cmd_running and !connecting and !blame_active;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -1686,13 +1799,15 @@ pub const App = struct {
                 // - High activity (prompting): 5ms for smooth streaming (~200 FPS)
                 // - Medium activity (connecting, shell running): 8ms (~125 FPS)
                 // - Low activity (just rendering): 16ms (~60 FPS)
-                const is_high_activity = manager_active or shell_cmd_running;
+                const is_high_activity = manager_active or replay_playing or shell_cmd_running;
                 const is_medium_activity = connecting or server_active;
                 const sleep_ms: u64 = if (is_high_activity) 5 else if (is_medium_activity) 8 else 16;
                 std.Thread.sleep(sleep_ms * std.time.ns_per_ms);
             }
             // When not blocking (acp_active, mcp_active, etc.), events are still
             // captured by the vaxis reader thread and available via tryEvent()
+
+            self.advanceDebugReplayIfDue();
 
             // Check if we need to suspend for editor
             if (self.should_suspend_for_editor) {
@@ -4630,8 +4745,12 @@ pub const App = struct {
         // Hide cursor by default - comment input will show it when needed
         win.hideCursor();
 
+        if (win.width == 0 or win.height == 0) {
+            return;
+        }
+
         // Content height without dividers (continuous mode)
-        const content_height = win.height - Layout.header_height - Layout.status_height;
+        const content_height = win.height -| Layout.header_height -| Layout.status_height;
 
         // Check if agent panel should be shown (visible and not full-screen)
         // Don't show when in agent_selection mode (selecting which agent to connect to)
@@ -4943,7 +5062,7 @@ pub const App = struct {
         // This is outside the files check so it renders even when there are no files
         const status_win = win.child(.{
             .x_off = 0,
-            .y_off = win.height - Layout.status_height,
+            .y_off = win.height -| Layout.status_height,
             .width = @intCast(win.width),
             .height = @intCast(Layout.status_height),
         });
@@ -6696,7 +6815,7 @@ pub const App = struct {
 
     /// Show a temporary status message (displayed for 3 seconds)
     /// Note: This duplicates the message, so caller can free their copy.
-    fn showStatusMessage(self: *App, message: []const u8) void {
+    pub fn showStatusMessage(self: *App, message: []const u8) void {
         // Free previous allocated message if any
         if (self.state.status_message_owned) |old| {
             self.allocator.free(old);

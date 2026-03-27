@@ -16,7 +16,6 @@ const Allocator = std.mem.Allocator;
 const UnifiedRenderer = render_unified.UnifiedRenderer;
 
 const DEFAULT_WIDTH: u16 = 120;
-
 /// Attempt to detect terminal width using ioctl.
 /// Returns null if not a TTY or detection fails.
 fn getTerminalWidth() ?u16 {
@@ -26,9 +25,7 @@ fn getTerminalWidth() ?u16 {
 
     var ws: std.posix.winsize = undefined;
     const result = std.posix.system.ioctl(stderr.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));
-    if (result == 0 and ws.col > 0) {
-        return ws.col;
-    }
+    if (result == 0 and ws.col > 0) return ws.col;
     return null;
 }
 

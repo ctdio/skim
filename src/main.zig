@@ -42,6 +42,8 @@ pub fn main() !void {
     if (args.len >= 2) {
         if (std.mem.eql(u8, args[1], "session")) {
             return cli.session.run(allocator, args);
+        } else if (std.mem.eql(u8, args[1], "debug")) {
+            return cli.debug.run(allocator, args);
         } else if (std.mem.eql(u8, args[1], "print")) {
             return cli.print.run(allocator, args);
         } else if (std.mem.eql(u8, args[1], "sessions")) {
@@ -479,11 +481,13 @@ fn printHelp(_: std.mem.Allocator) !void {
         \\USAGE:
         \\    skim [OPTIONS] [<ref> | <ref1> <ref2> | <ref1>..<ref2> | <ref1>...<ref2>]
         \\    skim diff [OPTIONS] [<refs>]
+        \\    skim debug <command> [options]
         \\    skim agent
         \\    skim mcp
         \\
         \\SUBCOMMANDS:
         \\    diff               Review diffs (same as running skim directly)
+        \\    debug              Debug utilities such as session replay
         \\    print              Pretty-print diffs to stdout with colors
         \\    sessions           List running skim sessions
         \\    context            Get diff context from a running session
@@ -517,6 +521,7 @@ fn printHelp(_: std.mem.Allocator) !void {
         \\    skim main...feature       # Changes on feature since diverging from main
         \\    skim HEAD~5               # Working dir vs. 5 commits ago
         \\    skim agent                # Open AI agent panel (full-screen)
+        \\    skim debug replay-codex ~/.codex/sessions/...jsonl
         \\
         \\AI INTEGRATION:
         \\    skim agent                # Open AI agent panel (full-screen)
@@ -549,7 +554,7 @@ fn printVersion() !void {
 /// Check if arg is a skim subcommand (not a git diff flag)
 fn isSkimSubcommand(arg: []const u8) bool {
     const subcommands = [_][]const u8{
-        "session", "print", "sessions", "context", "comment", "mcp", "diff", "agent",
+        "session", "debug", "print", "sessions", "context", "comment", "mcp", "diff", "agent",
     };
     for (subcommands) |cmd| {
         if (std.mem.eql(u8, arg, cmd)) return true;
