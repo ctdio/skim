@@ -282,7 +282,7 @@ pub const ManagerHandle = union(enum) {
         return switch (self) {
             .acp => |m| m.hasPendingOutput(),
             .opencode => |m| m.status == .prompting or m.hasPendingEvents() or m.pending_abort,
-            .codex => |m| m.status == .turn_active,
+            .codex => |m| m.status == .turn_active or m.hasPendingMessages(),
         };
     }
 
@@ -336,6 +336,7 @@ pub const ManagerHandle = union(enum) {
 // =============================================================================
 
 const MAX_ACP_MESSAGES_PER_FRAME: usize = 20;
+const MAX_CODEX_MESSAGES_PER_FRAME: usize = 20;
 const MAX_OPENCODE_EVENTS_PER_FRAME: usize = 50;
 
 fn pollAcp(m: *AcpManager, agent_state: *AgentState) ManagerHandle.PollResult {
@@ -463,27 +464,25 @@ fn pollOpencode(m: *OpencodeManager, allocator: Allocator, agent_state: *AgentSt
 
 fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResult {
     const status_before = m.status;
-    const transport = m.transport orelse return .{
+    _ = m.pollEvents() catch return .{
         .count = 0,
         .more_pending = false,
         .status_changed = false,
         .needs_line_map_dirty = false,
     };
 
-    const messages = transport.drainMessages() catch return .{
+    const pending_count = m.pendingMessageCount();
+    if (pending_count == 0) return .{
         .count = 0,
         .more_pending = false,
         .status_changed = false,
         .needs_line_map_dirty = false,
     };
 
-    const to_process = messages.len;
+    const to_process = @min(pending_count, MAX_CODEX_MESSAGES_PER_FRAME);
     var count: usize = 0;
 
-    for (messages[0..to_process]) |raw_msg| {
-        var msg = raw_msg;
-        defer msg.deinit(m.allocator);
-
+    for (m.pending_messages.items[0..to_process]) |msg| {
         // Process through CodexManager to classify + update turn state
         if (m.processMessage(msg)) |codex_event| {
             var event_to_free = codex_event;
@@ -527,11 +526,11 @@ fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResul
         }
     }
 
-    m.allocator.free(messages);
+    m.clearPendingMessagesN(to_process);
 
     return .{
         .count = count,
-        .more_pending = false,
+        .more_pending = m.hasPendingMessages(),
         .status_changed = m.status != status_before,
         .needs_line_map_dirty = false,
     };
@@ -618,7 +617,7 @@ fn convertCodexUserInputPrompt(allocator: Allocator, approval: *const CodexManag
     } };
 }
 
-test "pollCodex processes all delta messages without dropping overflow" {
+test "pollCodex batches large delta bursts across frames" {
     const allocator = std.testing.allocator;
 
     var manager = CodexManager.init(allocator);
@@ -649,10 +648,47 @@ test "pollCodex processes all delta messages without dropping overflow" {
     var agent_state = AgentState.init(allocator, .right);
     defer agent_state.deinit();
 
-    const result = pollCodex(&manager, &agent_state);
-    try std.testing.expectEqual(chunk_count, result.count);
+    const first_result = pollCodex(&manager, &agent_state);
+    try std.testing.expectEqual(MAX_CODEX_MESSAGES_PER_FRAME, first_result.count);
+    try std.testing.expect(first_result.more_pending);
     try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqualStrings(expected_text.items[0..MAX_CODEX_MESSAGES_PER_FRAME], agent_state.messages.items[0].content);
+
+    const second_result = pollCodex(&manager, &agent_state);
+    try std.testing.expectEqual(chunk_count - MAX_CODEX_MESSAGES_PER_FRAME, second_result.count);
+    try std.testing.expect(!second_result.more_pending);
     try std.testing.expectEqualStrings(expected_text.items, agent_state.messages.items[0].content);
+}
+
+test "codex handle stays active while queued messages remain" {
+    const allocator = std.testing.allocator;
+
+    var manager = CodexManager.init(allocator);
+    defer manager.deinit();
+
+    const proc = try CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    const transport = try CodexTransport.init(allocator, proc);
+    manager.process = proc;
+    manager.transport = transport;
+    manager.status = .thread_active;
+
+    var decoder = CodexCodec.Decoder.init(allocator);
+    const json =
+        \\{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","delta":"x"}}
+    ;
+    const msg = try decoder.decode(json);
+    try transport.pending_messages.append(allocator, msg);
+
+    const handle: ManagerHandle = .{ .codex = &manager };
+    try std.testing.expect(handle.hasActivity());
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const result = pollCodex(&manager, &agent_state);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expect(!result.more_pending);
+    try std.testing.expect(!handle.hasActivity());
 }
 
 test "pollCodex routes user input approvals through question prompt state" {

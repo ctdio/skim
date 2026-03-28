@@ -97,6 +97,13 @@ pub const StdioTransport = struct {
         return items;
     }
 
+    /// Return the number of queued messages waiting to be drained.
+    pub fn pendingMessageCount(self: *StdioTransport) usize {
+        self.message_mutex.lock();
+        defer self.message_mutex.unlock();
+        return self.pending_messages.items.len;
+    }
+
     /// Free a slice of messages returned by drainMessages()
     pub fn freeMessages(self: *StdioTransport, messages: []codec.DecodedMessage) void {
         if (messages.len == 0) return;

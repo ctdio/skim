@@ -404,6 +404,40 @@ pub const CodexManager = struct {
         return items;
     }
 
+    /// Return the number of already-drained messages waiting to be processed.
+    pub fn pendingMessageCount(self: *const CodexManager) usize {
+        return self.pending_messages.items.len;
+    }
+
+    /// Check for queued work in either the manager buffer or the transport queue.
+    pub fn hasPendingMessages(self: *const CodexManager) bool {
+        if (self.pending_messages.items.len > 0) return true;
+        if (self.transport) |transport| {
+            return transport.pendingMessageCount() > 0;
+        }
+        return false;
+    }
+
+    /// Clear only the first `count` queued messages after they have been processed.
+    pub fn clearPendingMessagesN(self: *CodexManager, count: usize) void {
+        const to_clear = @min(count, self.pending_messages.items.len);
+        if (to_clear == 0) return;
+
+        for (self.pending_messages.items[0..to_clear]) |*msg| {
+            msg.deinit(self.allocator);
+        }
+
+        const remaining = self.pending_messages.items.len - to_clear;
+        if (remaining > 0) {
+            std.mem.copyForwards(
+                codec.DecodedMessage,
+                self.pending_messages.items[0..remaining],
+                self.pending_messages.items[to_clear..],
+            );
+        }
+        self.pending_messages.items.len = remaining;
+    }
+
     // =========================================================================
     // Turn lifecycle
     // =========================================================================
