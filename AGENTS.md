@@ -152,6 +152,17 @@ For AI agents that support MCP (Model Context Protocol), skim provides a stdio-b
 - Run: `zig build test`
 - Coverage includes: arg parsing, diff execution, parser, line_map, comments, editor
 
+### Ziglint
+- Use `./scripts/ziglint.sh <paths...>` while iterating on touched Zig files
+  for fast, file-scoped feedback.
+- Run `zig build lint` before finishing a Zig task to validate against the
+  repo defaults in `.ziglint.zon`.
+- Treat ziglint as incremental: fix findings in files you touched for the
+  current task, but do not do broad cleanup of pre-existing findings unless
+  explicitly requested.
+- The wrapper script prefers an installed `ziglint` binary and otherwise uses
+  `mise` with the pinned `github:rockorager/ziglint@v0.5.2` tool version.
+
 ### Snapshot Testing (IMPORTANT for UI changes)
 
 **When modifying UI rendering, ALWAYS add or update snapshot tests.**
