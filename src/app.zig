@@ -21,6 +21,7 @@ const editor = @import("editor.zig");
 const comment_editor = @import("comments/editor.zig");
 const command_palette = @import("command_palette.zig");
 const help = @import("help.zig");
+const acp_session_replay = @import("acp/session_replay.zig");
 const codex_session_replay = @import("codex/session_replay.zig");
 const codex_manager = @import("codex/manager.zig");
 
@@ -47,6 +48,7 @@ const build_options = @import("build_options");
 const graphite = @import("git/graphite.zig");
 const acp = @import("acp/acp.zig");
 const opencode = @import("opencode/opencode.zig");
+const opencode_session_replay = @import("opencode/session_replay.zig");
 const codex_mod = @import("codex/codex.zig");
 
 const DiffSource = git.DiffSource;
@@ -1502,18 +1504,51 @@ pub const App = struct {
             return false;
         }
 
-        var summary = codex_session_replay.ReplaySummary{
-            .manager_status = replay.manager_status,
-        };
-        try codex_session_replay.replaySessionLine(
-            self.allocator,
-            agent_state,
-            replay.lines[replay.current_index],
-            &summary,
-        );
+        switch (replay.kind) {
+            .acp => {
+                var summary = acp_session_replay.ReplaySummary{
+                    .manager_status = switch (replay.manager_status) {
+                        .acp => |status| status,
+                        else => .session_active,
+                    },
+                };
+                try acp_session_replay.replaySessionLine(
+                    self.allocator,
+                    agent_state,
+                    replay.lines[replay.current_index],
+                    &summary,
+                );
+                replay.manager_status = .{ .acp = summary.manager_status };
+            },
+            .opencode => {
+                const mgr_handle = self.getActiveManager() orelse return false;
+                switch (mgr_handle) {
+                    .opencode => |mgr| {
+                        try opencode_session_replay.replaySessionLine(mgr, replay.lines[replay.current_index]);
+                        _ = mgr_handle.pollEvents(self.allocator, agent_state);
+                        replay.manager_status = .{ .opencode = mgr.status };
+                    },
+                    else => return false,
+                }
+            },
+            .codex => {
+                var summary = codex_session_replay.ReplaySummary{
+                    .manager_status = switch (replay.manager_status) {
+                        .codex => |status| status,
+                        else => .thread_active,
+                    },
+                };
+                try codex_session_replay.replaySessionLine(
+                    self.allocator,
+                    agent_state,
+                    replay.lines[replay.current_index],
+                    &summary,
+                );
+                replay.manager_status = .{ .codex = summary.manager_status };
+            },
+        }
 
         replay.current_index += 1;
-        replay.manager_status = summary.manager_status;
         replay.last_step_ms = std.time.milliTimestamp();
         if (replay.isComplete()) {
             replay.playing = false;
@@ -1544,11 +1579,21 @@ pub const App = struct {
         };
     }
 
-    fn syncActiveDebugReplayManagerStatus(self: *App, status: codex_manager.CodexManager.Status) void {
+    fn syncActiveDebugReplayManagerStatus(self: *App, status: agent_state_mod.DebugReplayManagerStatus) void {
         if (self.getActiveManager()) |mgr| {
             switch (mgr) {
-                .codex => |codex_mgr| codex_mgr.status = status,
-                else => {},
+                .acp => |acp_mgr| switch (status) {
+                    .acp => |acp_status| acp_mgr.status = acp_status,
+                    else => {},
+                },
+                .opencode => |opencode_mgr| switch (status) {
+                    .opencode => |opencode_status| opencode_mgr.status = opencode_status,
+                    else => {},
+                },
+                .codex => |codex_mgr| switch (status) {
+                    .codex => |codex_status| codex_mgr.status = codex_status,
+                    else => {},
+                },
             }
         }
     }

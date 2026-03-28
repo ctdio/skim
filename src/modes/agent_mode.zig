@@ -3112,7 +3112,7 @@ test "q exits debug replay session" {
 
     const tab = try app.tab_manager.?.createTab("Replay");
     const lines = try allocator.alloc([]const u8, 0);
-    tab.agent_state.startDebugReplay(lines, false, true);
+    tab.agent_state.startDebugReplay(.codex, lines, .{ .codex = .thread_active }, false, true);
 
     try handleKey(&app, .{ .codepoint = 'q' });
 
@@ -3163,7 +3163,7 @@ test "ctrl-e does not exit debug replay session" {
 
     const tab = try app.tab_manager.?.createTab("Replay");
     const lines = try allocator.alloc([]const u8, 0);
-    tab.agent_state.startDebugReplay(lines, false, true);
+    tab.agent_state.startDebugReplay(.codex, lines, .{ .codex = .thread_active }, false, true);
 
     try handleKey(&app, .{ .codepoint = 'e', .mods = .{ .ctrl = true } });
 

@@ -2,7 +2,9 @@ const std = @import("std");
 const harness = @import("harness.zig");
 const snapshot = @import("snapshot.zig");
 const approval_root = @import("approval_test_root");
+const acp_replay = approval_root.AcpSessionReplay;
 const codex_replay = approval_root.CodexSessionReplay;
+const opencode_replay = approval_root.OpencodeSessionReplay;
 
 const FRAME_TEXT_CAPACITY: usize = 262144;
 
@@ -317,7 +319,7 @@ test "snapshot: codex_replay_in_progress_panel" {
     ;
 
     const lines = try codex_replay.loadReplayLinesFromString(allocator, log);
-    tab.agent_state.startDebugReplay(lines, false, false);
+    tab.agent_state.startDebugReplay(.codex, lines, .{ .codex = .thread_active }, false, false);
 
     try std.testing.expect(try app.stepActiveDebugReplay());
     try std.testing.expect(try app.stepActiveDebugReplay());
@@ -329,6 +331,79 @@ test "snapshot: codex_replay_in_progress_panel" {
     defer allocator.free(text);
 
     try snapshot.expectSnapshot(allocator, "codex_replay_in_progress_panel", text);
+}
+
+test "snapshot: acp_replay_in_progress_panel" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 80, 24);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Replay");
+    const mgr = try tab.createAcpManager();
+    mgr.status = .session_active;
+    tab.agent_state.visible = true;
+    app.mode = .agent;
+
+    const log =
+        \\{"type":"user","message":{"role":"user","content":"Design ACP replay next."}}
+        \\{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I’m reading the real Claude session format first."}]}}
+        \\{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replay can work at transcript granularity even without a native ACP event log."}]}}
+    ;
+
+    const lines = try acp_replay.loadReplayLinesFromString(allocator, log);
+    tab.agent_state.startDebugReplay(.acp, lines, .{ .acp = .session_active }, false, false);
+
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "acp_replay_in_progress_panel", text);
+}
+
+test "snapshot: opencode_replay_in_progress_panel" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 80, 24);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Replay");
+    const mgr = try tab.createOpencodeManager();
+    mgr.status = .session_active;
+    tab.agent_state.visible = true;
+    app.mode = .agent;
+
+    const log =
+        \\[12:00:00.000] {"type":"session.status","properties":{"sessionID":"ses_demo","status":"busy"}}
+        \\[12:00:00.010] {"payload":{"type":"message.part.updated","properties":{"part":{"sessionID":"ses_demo","type":"tool","callID":"call_1","tool":"bash","state":{"status":"pending","input":{"command":"rg debug replay src"}}}}}}
+        \\[12:00:00.020] {"payload":{"type":"message.part.updated","properties":{"part":{"sessionID":"ses_demo","type":"tool","callID":"call_1","tool":"bash","state":{"status":"running","input":{"command":"rg debug replay src"}}}}}}
+        \\[12:00:00.030] {"payload":{"type":"message.part.updated","properties":{"sessionID":"ses_demo","delta":"Tracing the replay state through the app now."}}}
+    ;
+
+    const lines = try opencode_replay.loadReplayLinesFromString(allocator, log);
+    tab.agent_state.startDebugReplay(.opencode, lines, .{ .opencode = .session_active }, false, false);
+
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "opencode_replay_in_progress_panel", text);
 }
 
 fn initRenderTestApp(allocator: std.mem.Allocator) !approval_root.App {

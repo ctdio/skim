@@ -5,10 +5,12 @@ const chat_line_map = @import("chat_line_map.zig");
 const ChatLineMap = chat_line_map.ChatLineMap;
 const SyntaxHighlighter = chat_line_map.SyntaxHighlighter;
 const protocol = @import("../acp/protocol.zig");
+const AcpManager = @import("../acp/manager.zig").AcpManager;
 const git_files = @import("../git/files.zig");
 const command_palette = @import("command_palette.zig");
 const clipboard = @import("../clipboard.zig");
 const CodexManager = @import("../codex/manager.zig").CodexManager;
+const OpencodeStatus = @import("../opencode/manager.zig").Status;
 const history = @import("history.zig");
 pub const HistoryState = history.HistoryState;
 const slash_menu = @import("slash_menu.zig");
@@ -24,6 +26,18 @@ pub const QueuedShellOutput = shell_mod.QueuedShellOutput;
 pub const RunningShellCommand = shell_mod.RunningShellCommand;
 const markdown = @import("markdown/markdown.zig");
 pub const MarkdownParser = markdown.MarkdownParser;
+
+pub const DebugReplayKind = enum {
+    acp,
+    opencode,
+    codex,
+};
+
+pub const DebugReplayManagerStatus = union(DebugReplayKind) {
+    acp: AcpManager.Status,
+    opencode: OpencodeStatus,
+    codex: CodexManager.Status,
+};
 
 /// Maximum number of slash commands visible in menu at once
 pub const MAX_SLASH_MENU_VISIBLE: usize = slash_menu.MAX_VISIBLE;
@@ -774,20 +788,31 @@ pub const AgentState = struct {
     };
 
     pub const DebugReplayState = struct {
+        kind: DebugReplayKind,
         lines: [][]const u8,
         current_index: usize,
-        manager_status: CodexManager.Status,
+        initial_manager_status: DebugReplayManagerStatus,
+        manager_status: DebugReplayManagerStatus,
         exit_quits_app: bool,
         playing: bool,
         step_interval_ms: i64,
         last_step_ms: i64,
 
-        pub fn init(lines: [][]const u8, autoplay: bool, exit_quits_app: bool) DebugReplayState {
+        pub fn init(
+            kind: DebugReplayKind,
+            lines: [][]const u8,
+            initial_manager_status: DebugReplayManagerStatus,
+            autoplay: bool,
+            exit_quits_app: bool,
+        ) DebugReplayState {
             const now = std.time.milliTimestamp();
+            std.debug.assert(std.meta.activeTag(initial_manager_status) == kind);
             return .{
+                .kind = kind,
                 .lines = lines,
                 .current_index = 0,
-                .manager_status = .thread_active,
+                .initial_manager_status = initial_manager_status,
+                .manager_status = initial_manager_status,
                 .exit_quits_app = exit_quits_app,
                 .playing = autoplay,
                 .step_interval_ms = 150,
@@ -1625,10 +1650,17 @@ pub const AgentState = struct {
         return false;
     }
 
-    pub fn startDebugReplay(self: *AgentState, lines: [][]const u8, autoplay: bool, exit_quits_app: bool) void {
+    pub fn startDebugReplay(
+        self: *AgentState,
+        kind: DebugReplayKind,
+        lines: [][]const u8,
+        initial_manager_status: DebugReplayManagerStatus,
+        autoplay: bool,
+        exit_quits_app: bool,
+    ) void {
         self.clearDebugReplay();
         self.resetForDebugReplay();
-        self.debug_replay = DebugReplayState.init(lines, autoplay, exit_quits_app);
+        self.debug_replay = DebugReplayState.init(kind, lines, initial_manager_status, autoplay, exit_quits_app);
     }
 
     pub fn clearDebugReplay(self: *AgentState) void {
@@ -1656,7 +1688,7 @@ pub const AgentState = struct {
             const autoplay = replay.playing;
             self.resetForDebugReplay();
             replay.current_index = 0;
-            replay.manager_status = .thread_active;
+            replay.manager_status = replay.initial_manager_status;
             replay.playing = autoplay;
             replay.last_step_ms = std.time.milliTimestamp() - replay.step_interval_ms;
         }

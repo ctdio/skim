@@ -1736,8 +1736,18 @@ pub const OpencodeManager = struct {
     }
 
     /// Process SSE event data JSON
+    pub fn replayEventData(self: *OpencodeManager, data: []const u8) void {
+        self.processEventDataWithLogging(data, false);
+    }
+
     fn processEventData(self: *OpencodeManager, data: []const u8) void {
-        self.logSseEvent(data);
+        self.processEventDataWithLogging(data, true);
+    }
+
+    fn processEventDataWithLogging(self: *OpencodeManager, data: []const u8, should_log_event: bool) void {
+        if (should_log_event) {
+            self.logSseEvent(data);
+        }
         // Quick check for events we care about before full JSON parse
         // This avoids expensive parsing for the many session/message update events
         const dominated_events = [_][]const u8{

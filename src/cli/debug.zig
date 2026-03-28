@@ -3,25 +3,34 @@
 //! Debugging utilities for replaying internal session data.
 
 const std = @import("std");
+const acp_replay = @import("../acp/session_replay.zig");
 const agent_render = @import("../agent/render.zig");
 const TabManager = @import("../agent/tab_manager.zig").TabManager;
 const App = @import("../app.zig").App;
 const codex_replay = @import("../codex/session_replay.zig");
 const DiffSource = @import("../git/diff.zig").DiffSource;
 const logging = @import("../logging.zig");
+const opencode_replay = @import("../opencode/session_replay.zig");
 const harness = @import("../testing/harness.zig");
 
 const Allocator = std.mem.Allocator;
 
 const FRAME_TEXT_CAPACITY: usize = 262144;
 
-pub const ReplayCodexConfig = struct {
+const ReplayCommand = enum {
+    acp,
+    codex,
+    opencode,
+};
+
+pub const ReplayConfig = struct {
+    command: ReplayCommand,
     session_path: []const u8,
     width: ?u16,
     height: ?u16,
     tui: bool,
 
-    fn deinit(self: *const ReplayCodexConfig, allocator: Allocator) void {
+    fn deinit(self: *const ReplayConfig, allocator: Allocator) void {
         allocator.free(self.session_path);
     }
 };
@@ -31,14 +40,13 @@ const TerminalSize = struct {
     height: u16,
 };
 
-const ReplayCodexError = error{
+const ReplayError = error{
     MissingSessionPath,
     DuplicateSessionPath,
     MissingWidthValue,
     MissingHeightValue,
     InvalidWidthValue,
     InvalidHeightValue,
-    UnexpectedPositionalArgument,
     UnknownOption,
 };
 
@@ -55,8 +63,18 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
     }
 
     const subcmd = args[2];
+    if (std.mem.eql(u8, subcmd, "replay-acp")) {
+        try runReplayCommand(allocator, args, .acp);
+        return;
+    }
+
     if (std.mem.eql(u8, subcmd, "replay-codex")) {
-        try runReplayCodex(allocator, args);
+        try runReplayCommand(allocator, args, .codex);
+        return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "replay-opencode")) {
+        try runReplayCommand(allocator, args, .opencode);
         return;
     }
 
@@ -72,9 +90,9 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
     std.process.exit(1);
 }
 
-fn runReplayCodex(allocator: Allocator, args: []const []const u8) !void {
-    const config = parseReplayCodexArgs(allocator, args) catch |err| {
-        try printReplayCodexError(err);
+fn runReplayCommand(allocator: Allocator, args: []const []const u8, command: ReplayCommand) !void {
+    const config = parseReplayArgs(allocator, args, command) catch |err| {
+        try printReplayError(command, err);
         std.process.exit(1);
     };
     defer config.deinit(allocator);
@@ -83,21 +101,43 @@ fn runReplayCodex(allocator: Allocator, args: []const []const u8) !void {
     const height = resolveHeight(config.height);
 
     if (config.tui) {
-        try runReplayCodexTui(allocator, config.session_path);
+        try runReplayTui(allocator, command, config.session_path);
         return;
     }
 
-    try runReplayCodexHeadless(allocator, config.session_path, width, height);
+    try runReplayHeadless(allocator, command, config.session_path, width, height);
 }
 
-fn runReplayCodexHeadless(allocator: Allocator, session_path: []const u8, width: u16, height: u16) !void {
+fn runReplayHeadless(allocator: Allocator, command: ReplayCommand, session_path: []const u8, width: u16, height: u16) !void {
     var app = try initReplayApp(allocator);
     defer deinitReplayApp(&app);
 
     const tab = try app.tab_manager.?.createTab("Replay");
-    const mgr = try tab.createCodexManager();
-    const summary = try codex_replay.replaySessionFile(allocator, &tab.agent_state, session_path);
-    mgr.status = summary.manager_status;
+    switch (command) {
+        .acp => {
+            const mgr = try tab.createAcpManager();
+            const summary = try acp_replay.replaySessionFile(allocator, &tab.agent_state, session_path);
+            mgr.status = summary.manager_status;
+        },
+        .codex => {
+            const mgr = try tab.createCodexManager();
+            const summary = try codex_replay.replaySessionFile(allocator, &tab.agent_state, session_path);
+            mgr.status = summary.manager_status;
+        },
+        .opencode => {
+            const mgr = try tab.createOpencodeManager();
+            mgr.status = .session_active;
+            try opencode_replay.configureReplayManager(allocator, mgr, session_path);
+
+            const lines = try opencode_replay.loadReplayLines(allocator, session_path);
+            defer opencode_replay.freeReplayLines(allocator, lines);
+
+            for (lines) |line| {
+                try opencode_replay.replaySessionLine(mgr, line);
+                _ = tab.manager.?.pollEvents(allocator, &tab.agent_state);
+            }
+        },
+    }
 
     var ctx = try harness.createTestContext(allocator, width, height);
     defer ctx.deinit();
@@ -113,7 +153,7 @@ fn runReplayCodexHeadless(allocator: Allocator, session_path: []const u8, width:
     try stdout_writer.interface.writeByte('\n');
 }
 
-fn runReplayCodexTui(allocator: Allocator, session_path: []const u8) !void {
+fn runReplayTui(allocator: Allocator, command: ReplayCommand, session_path: []const u8) !void {
     logging.init(.tui);
     defer logging.deinit();
 
@@ -132,11 +172,32 @@ fn runReplayCodexTui(allocator: Allocator, session_path: []const u8) !void {
 
     const tm = try app.ensureTabManager();
     const tab = try tm.ensureTab();
-    const mgr = try tab.createCodexManager();
-    mgr.status = .thread_active;
 
-    const lines = try codex_replay.loadReplayLines(allocator, session_path);
-    tab.agent_state.startDebugReplay(lines, true, true);
+    switch (command) {
+        .acp => {
+            const mgr = try tab.createAcpManager();
+            mgr.status = .session_active;
+
+            const lines = try acp_replay.loadReplayLines(allocator, session_path);
+            tab.agent_state.startDebugReplay(.acp, lines, .{ .acp = .session_active }, true, true);
+        },
+        .codex => {
+            const mgr = try tab.createCodexManager();
+            mgr.status = .thread_active;
+
+            const lines = try codex_replay.loadReplayLines(allocator, session_path);
+            tab.agent_state.startDebugReplay(.codex, lines, .{ .codex = .thread_active }, true, true);
+        },
+        .opencode => {
+            const mgr = try tab.createOpencodeManager();
+            mgr.status = .session_active;
+            try opencode_replay.configureReplayManager(allocator, mgr, session_path);
+
+            const lines = try opencode_replay.loadReplayLines(allocator, session_path);
+            tab.agent_state.startDebugReplay(.opencode, lines, .{ .opencode = .session_active }, true, true);
+        },
+    }
+
     tab.agent_state.visible = true;
 
     tm.panel_visible = true;
@@ -147,7 +208,7 @@ fn runReplayCodexTui(allocator: Allocator, session_path: []const u8) !void {
     try app.run();
 }
 
-fn parseReplayCodexArgs(allocator: Allocator, args: []const []const u8) !ReplayCodexConfig {
+fn parseReplayArgs(allocator: Allocator, args: []const []const u8, command: ReplayCommand) !ReplayConfig {
     var session_path: ?[]const u8 = null;
     errdefer if (session_path) |path| allocator.free(path);
 
@@ -160,7 +221,7 @@ fn parseReplayCodexArgs(allocator: Allocator, args: []const []const u8) !ReplayC
         const arg = args[i];
 
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try printReplayCodexHelp();
+            try printReplayHelp(command);
             std.process.exit(0);
         }
 
@@ -171,37 +232,38 @@ fn parseReplayCodexArgs(allocator: Allocator, args: []const []const u8) !ReplayC
 
         if (std.mem.startsWith(u8, arg, "--width=") or std.mem.startsWith(u8, arg, "-w=")) {
             const prefix_len = if (std.mem.startsWith(u8, arg, "--width=")) "--width=".len else "-w=".len;
-            width = std.fmt.parseInt(u16, arg[prefix_len..], 10) catch return ReplayCodexError.InvalidWidthValue;
+            width = std.fmt.parseInt(u16, arg[prefix_len..], 10) catch return ReplayError.InvalidWidthValue;
             continue;
         }
 
         if (std.mem.eql(u8, arg, "--width") or std.mem.eql(u8, arg, "-w")) {
             i += 1;
-            if (i >= args.len) return ReplayCodexError.MissingWidthValue;
-            width = std.fmt.parseInt(u16, args[i], 10) catch return ReplayCodexError.InvalidWidthValue;
+            if (i >= args.len) return ReplayError.MissingWidthValue;
+            width = std.fmt.parseInt(u16, args[i], 10) catch return ReplayError.InvalidWidthValue;
             continue;
         }
 
         if (std.mem.startsWith(u8, arg, "--height=")) {
-            height = std.fmt.parseInt(u16, arg["--height=".len..], 10) catch return ReplayCodexError.InvalidHeightValue;
+            height = std.fmt.parseInt(u16, arg["--height=".len..], 10) catch return ReplayError.InvalidHeightValue;
             continue;
         }
 
         if (std.mem.eql(u8, arg, "--height")) {
             i += 1;
-            if (i >= args.len) return ReplayCodexError.MissingHeightValue;
-            height = std.fmt.parseInt(u16, args[i], 10) catch return ReplayCodexError.InvalidHeightValue;
+            if (i >= args.len) return ReplayError.MissingHeightValue;
+            height = std.fmt.parseInt(u16, args[i], 10) catch return ReplayError.InvalidHeightValue;
             continue;
         }
 
-        if (arg.len > 0 and arg[0] == '-') return ReplayCodexError.UnknownOption;
+        if (arg.len > 0 and arg[0] == '-') return ReplayError.UnknownOption;
 
-        if (session_path != null) return ReplayCodexError.DuplicateSessionPath;
+        if (session_path != null) return ReplayError.DuplicateSessionPath;
         session_path = try allocator.dupe(u8, arg);
     }
 
     return .{
-        .session_path = session_path orelse return ReplayCodexError.MissingSessionPath,
+        .command = command,
+        .session_path = session_path orelse return ReplayError.MissingSessionPath,
         .width = width,
         .height = height,
         .tui = tui,
@@ -218,24 +280,26 @@ fn printHelp() !void {
         \\    skim debug <command> [options]
         \\
         \\COMMANDS:
+        \\    replay-acp <session.jsonl>      Render a saved ACP/Claude session transcript
         \\    replay-codex <session.jsonl>    Render a saved Codex JSONL session
+        \\    replay-opencode <session.log>   Render a saved Opencode SSE event log
         \\
         \\EXAMPLES:
+        \\    skim debug replay-acp ~/.claude/projects/.../session.jsonl --tui
         \\    skim debug replay-codex ~/.codex/sessions/...jsonl
-        \\    skim debug replay-codex session.jsonl --width 80 --height 24
-        \\    skim debug replay-codex session.jsonl --tui
+        \\    skim debug replay-opencode ~/.skim/opencode/events/ses_...log --tui
         \\
     );
 }
 
-fn printReplayCodexHelp() !void {
+fn printReplayHelp(command: ReplayCommand) !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
-    try stdout_writer.interface.writeAll(
-        \\skim debug replay-codex - Render a saved Codex session
+    try stdout_writer.interface.print(
+        \\skim debug {s} - Render a saved {s}
         \\
         \\USAGE:
-        \\    skim debug replay-codex <session.jsonl> [--tui] [--width <N>] [--height <N>]
+        \\    skim debug {s} <session-path> [--tui] [--width <N>] [--height <N>]
         \\
         \\OPTIONS:
         \\    --tui              Open the full TUI and incrementally replay events
@@ -243,26 +307,45 @@ fn printReplayCodexHelp() !void {
         \\    --height <N>       Output height (default: auto-detect, fallback: 24)
         \\    -h, --help         Print this help message
         \\
-    );
+    , .{
+        commandName(command),
+        commandLabel(command),
+        commandName(command),
+    });
 }
 
-fn printReplayCodexError(err: anyerror) !void {
+fn printReplayError(command: ReplayCommand, err: anyerror) !void {
     var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
     defer stderr_writer.interface.flush() catch {};
 
     switch (err) {
-        ReplayCodexError.MissingSessionPath => try stderr_writer.interface.writeAll("replay-codex requires a session path.\n"),
-        ReplayCodexError.DuplicateSessionPath => try stderr_writer.interface.writeAll("replay-codex accepts exactly one session path.\n"),
-        ReplayCodexError.MissingWidthValue => try stderr_writer.interface.writeAll("--width requires a value.\n"),
-        ReplayCodexError.MissingHeightValue => try stderr_writer.interface.writeAll("--height requires a value.\n"),
-        ReplayCodexError.InvalidWidthValue => try stderr_writer.interface.writeAll("Invalid --width value.\n"),
-        ReplayCodexError.InvalidHeightValue => try stderr_writer.interface.writeAll("Invalid --height value.\n"),
-        ReplayCodexError.UnexpectedPositionalArgument => try stderr_writer.interface.writeAll("Unexpected positional argument.\n"),
-        ReplayCodexError.UnknownOption => try stderr_writer.interface.writeAll("Unknown option for replay-codex.\n"),
+        ReplayError.MissingSessionPath => try stderr_writer.interface.print("{s} requires a session path.\n", .{commandName(command)}),
+        ReplayError.DuplicateSessionPath => try stderr_writer.interface.print("{s} accepts exactly one session path.\n", .{commandName(command)}),
+        ReplayError.MissingWidthValue => try stderr_writer.interface.writeAll("--width requires a value.\n"),
+        ReplayError.MissingHeightValue => try stderr_writer.interface.writeAll("--height requires a value.\n"),
+        ReplayError.InvalidWidthValue => try stderr_writer.interface.writeAll("Invalid --width value.\n"),
+        ReplayError.InvalidHeightValue => try stderr_writer.interface.writeAll("Invalid --height value.\n"),
+        ReplayError.UnknownOption => try stderr_writer.interface.print("Unknown option for {s}.\n", .{commandName(command)}),
         else => return err,
     }
 
-    try printReplayCodexHelp();
+    try printReplayHelp(command);
+}
+
+fn commandName(command: ReplayCommand) []const u8 {
+    return switch (command) {
+        .acp => "replay-acp",
+        .codex => "replay-codex",
+        .opencode => "replay-opencode",
+    };
+}
+
+fn commandLabel(command: ReplayCommand) []const u8 {
+    return switch (command) {
+        .acp => "ACP/Claude session transcript",
+        .codex => "Codex session",
+        .opencode => "Opencode session log",
+    };
 }
 
 fn resolveWidth(config_width: ?u16) u16 {
@@ -341,7 +424,7 @@ fn getTerminalSize() ?TerminalSize {
     };
 }
 
-test "parseReplayCodexArgs parses size overrides" {
+test "parseReplayArgs parses size overrides" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{
         "skim",
@@ -353,58 +436,60 @@ test "parseReplayCodexArgs parses size overrides" {
         "--height=40",
     };
 
-    const config = try parseReplayCodexArgs(allocator, args);
+    const config = try parseReplayArgs(allocator, args, .codex);
     defer config.deinit(allocator);
 
+    try std.testing.expectEqual(ReplayCommand.codex, config.command);
     try std.testing.expectEqualStrings("/tmp/session.jsonl", config.session_path);
     try std.testing.expectEqual(@as(?u16, 100), config.width);
     try std.testing.expectEqual(@as(?u16, 40), config.height);
     try std.testing.expect(!config.tui);
 }
 
-test "parseReplayCodexArgs enables tui mode" {
+test "parseReplayArgs enables tui mode" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{
         "skim",
         "debug",
-        "replay-codex",
+        "replay-acp",
         "/tmp/session.jsonl",
         "--tui",
     };
 
-    const config = try parseReplayCodexArgs(allocator, args);
+    const config = try parseReplayArgs(allocator, args, .acp);
     defer config.deinit(allocator);
 
+    try std.testing.expectEqual(ReplayCommand.acp, config.command);
     try std.testing.expectEqualStrings("/tmp/session.jsonl", config.session_path);
     try std.testing.expectEqual(@as(?u16, null), config.width);
     try std.testing.expectEqual(@as(?u16, null), config.height);
     try std.testing.expect(config.tui);
 }
 
-test "parseReplayCodexArgs rejects missing path" {
+test "parseReplayArgs rejects missing path" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{
         "skim",
         "debug",
-        "replay-codex",
+        "replay-opencode",
         "--width",
         "80",
     };
 
-    const result = parseReplayCodexArgs(allocator, args);
-    try std.testing.expectError(ReplayCodexError.MissingSessionPath, result);
+    const result = parseReplayArgs(allocator, args, .opencode);
+    try std.testing.expectError(ReplayError.MissingSessionPath, result);
 }
 
-test "parseReplayCodexArgs rejects extra path" {
+test "parseReplayArgs rejects extra path" {
     const allocator = std.testing.allocator;
     const args = &[_][]const u8{
         "skim",
         "debug",
-        "replay-codex",
+        "replay-opencode",
         "/tmp/one.jsonl",
         "/tmp/two.jsonl",
     };
 
-    const result = parseReplayCodexArgs(allocator, args);
-    try std.testing.expectError(ReplayCodexError.DuplicateSessionPath, result);
+    const result = parseReplayArgs(allocator, args, .opencode);
+    try std.testing.expectError(ReplayError.DuplicateSessionPath, result);
 }
