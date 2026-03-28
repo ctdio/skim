@@ -1,0 +1,30 @@
+.{
+    .paths = .{
+        "build.zig",
+        "src",
+    },
+
+    .rules = .{
+        // Incremental rollout: keep ziglint useful on touched code without
+        // forcing a repo-wide cleanup of long-standing style differences.
+        .Z004 = .{ .enabled = false },
+        .Z006 = .{ .enabled = false },
+        .Z007 = .{ .enabled = false },
+        .Z010 = .{ .enabled = false },
+        .Z011 = .{ .enabled = false },
+        .Z012 = .{ .enabled = false },
+        .Z013 = .{ .enabled = false },
+        .Z015 = .{ .enabled = false },
+        .Z017 = .{ .enabled = false },
+        .Z018 = .{ .enabled = false },
+        .Z019 = .{ .enabled = false },
+        .Z020 = .{ .enabled = false },
+        .Z023 = .{ .enabled = false },
+        .Z024 = .{ .enabled = false },
+        .Z025 = .{ .enabled = false },
+        .Z026 = .{ .enabled = false },
+        .Z028 = .{ .enabled = false },
+        .Z030 = .{ .enabled = false },
+        .Z032 = .{ .enabled = false },
+    },
+}

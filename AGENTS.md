@@ -23,6 +23,9 @@ zig build
 # Build optimized release binary (for production use)
 zig build -Doptimize=ReleaseFast
 
+# Run repo-configured ziglint checks
+zig build lint
+
 # Build and run (passes args to the app)
 zig build run -- [args]
 
@@ -36,6 +39,9 @@ zig build test
 
 # Debug with stderr logging
 ./zig-out/bin/skim 2>debug.log
+
+# Run ziglint directly against specific files
+./scripts/ziglint.sh src/app.zig
 ```
 
 **IMPORTANT for debugging**: Always use `zig build` (debug mode) when debugging. Debug builds have:
@@ -203,6 +209,9 @@ test "snapshot: my_feature" {
 
 ### Code Style
 - Run `zig fmt`
+- Run `zig build lint` after Zig changes. The repo config is intentionally
+  incremental, so fix findings in touched code and avoid broad cleanup unless
+  requested.
 - Descriptive names, focused functions
 - Explicit error handling
 

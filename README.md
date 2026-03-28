@@ -45,6 +45,20 @@ zig build -Doptimize=ReleaseFast
 
 The binary will be available at `./zig-out/bin/skim`.
 
+### Development Checks
+
+```bash
+# Run the test suite
+zig build test
+
+# Run repo-configured ziglint checks
+zig build lint
+```
+
+`zig build lint` uses the repo's [`.ziglint.zon`](.ziglint.zon). The wrapper script
+prefers a locally installed `ziglint` binary and otherwise falls back to
+`mise x github:rockorager/ziglint@v0.5.2 -- ziglint`.
+
 ## Quick Start
 
 ```bash

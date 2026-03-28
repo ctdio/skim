@@ -179,6 +179,11 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    const lint_cmd = b.addSystemCommand(&.{b.pathFromRoot("scripts/ziglint.sh")});
+    lint_cmd.setCwd(b.path("."));
+    const lint_step = b.step("lint", "Run ziglint");
+    lint_step.dependOn(&lint_cmd.step);
+
     // Tests - Zig 0.15: use root_module instead of direct fields
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
