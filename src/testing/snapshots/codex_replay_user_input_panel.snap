@@ -1,0 +1,17 @@
+ Codex [focused]  | Replay 3/3 [done]                                                                        Thinking...
+┃                                                                                                                      │
+                                                                                                                       ▴
+ ○ request_user_input({"questions":[{"header":"Pane Model","id":"pane_model","question":"V1 split model?","            │
+    │      options":[{"label":"Independent"},{"label":"Shared"}],"isOther":true}]})                                    │
+                                                                                                                       │
+
+ Generating...
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ V1 split model?
+ ▸ 1. Independent
+   2. Shared
+   3. Type your own answer
+     Something else
+ j/k: select  enter: confirm  esc: dismiss

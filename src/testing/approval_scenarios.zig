@@ -292,6 +292,7 @@ test "snapshot: codex_completed_plan_panel" {
     const text = try ctx.captureToText();
     defer allocator.free(text);
 
+    try std.testing.expect(std.mem.indexOf(u8, text, "Press Enter to accept this plan") != null);
     try snapshot.expectSnapshot(allocator, "codex_completed_plan_panel", text);
 }
 
@@ -331,6 +332,137 @@ test "snapshot: codex_replay_in_progress_panel" {
     defer allocator.free(text);
 
     try snapshot.expectSnapshot(allocator, "codex_replay_in_progress_panel", text);
+}
+
+test "snapshot: codex_replay_user_input_panel" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 120, 18);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Replay");
+    const mgr = try tab.createCodexManager();
+    mgr.status = .thread_active;
+    tab.agent_state.visible = true;
+    app.mode = .agent;
+
+    const log =
+        \\{"timestamp":"2026-03-28T14:43:35.617Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+        \\{"timestamp":"2026-03-28T14:43:35.618Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Pick the pane model for v1."}]}}
+        \\{"timestamp":"2026-03-28T14:43:47.709Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"questions\":[{\"header\":\"Pane Model\",\"id\":\"pane_model\",\"question\":\"V1 split model?\",\"options\":[{\"label\":\"Independent\"},{\"label\":\"Shared\"}],\"isOther\":true}]}","call_id":"call-request-1"}}
+    ;
+
+    const lines = try codex_replay.loadReplayLinesFromString(allocator, log);
+    tab.agent_state.startDebugReplay(.codex, lines, .{ .codex = .thread_active }, false, false);
+
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "codex_replay_user_input_panel", text);
+}
+
+test "debug replay previews codex question answer before clearing prompt" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    const tab = try app.tab_manager.?.createTab("Replay");
+    const mgr = try tab.createCodexManager();
+    mgr.status = .thread_active;
+    tab.agent_state.visible = true;
+    app.mode = .agent;
+
+    const log =
+        \\{"timestamp":"2026-03-28T14:43:35.617Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+        \\{"timestamp":"2026-03-28T14:43:35.618Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Pick the pane model for v1."}]}}
+        \\{"timestamp":"2026-03-28T14:43:47.709Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"questions\":[{\"header\":\"Pane Model\",\"id\":\"pane_model\",\"question\":\"V1 split model?\",\"options\":[{\"label\":\"Independent\"},{\"label\":\"Shared\"}],\"isOther\":true}]}","call_id":"call-request-1"}}
+        \\{"timestamp":"2026-03-28T14:44:13.322Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-request-1","output":"{\"answers\":{\"pane_model\":{\"answers\":[\"Shared\"]}}}"}}
+    ;
+
+    const lines = try codex_replay.loadReplayLinesFromString(allocator, log);
+    tab.agent_state.startDebugReplay(.codex, lines, .{ .codex = .thread_active }, false, false);
+
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+
+    try std.testing.expect(approval_root.agent_state.debug_replay_question_prompt_linger_ms >= 1200);
+
+    const replay_prompt = tab.agent_state.getDebugReplayConst() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(?i64, approval_root.agent_state.debug_replay_question_prompt_linger_ms),
+        replay_prompt.step_delay_override_ms,
+    );
+
+    const replay_before = tab.agent_state.getDebugReplayConst() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), replay_before.current_index);
+
+    try std.testing.expect(try app.stepActiveDebugReplay());
+
+    try std.testing.expect(approval_root.agent_state.debug_replay_question_answer_preview_linger_ms >= 1500);
+
+    const replay_preview = tab.agent_state.getDebugReplayConst() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), replay_preview.current_index);
+    try std.testing.expectEqual(
+        @as(?i64, approval_root.agent_state.debug_replay_question_answer_preview_linger_ms),
+        replay_preview.step_delay_override_ms,
+    );
+
+    const pending = tab.agent_state.getPendingQuestion() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), pending.states[0].cursor_index);
+    try std.testing.expect(!pending.states[0].selected[0]);
+    try std.testing.expect(pending.states[0].selected[1]);
+
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(tab.agent_state.getPendingQuestion() == null);
+}
+
+test "snapshot: codex_replay_user_input_selected_panel" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 120, 18);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Replay");
+    const mgr = try tab.createCodexManager();
+    mgr.status = .thread_active;
+    tab.agent_state.visible = true;
+    app.mode = .agent;
+
+    const log =
+        \\{"timestamp":"2026-03-28T14:43:35.617Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+        \\{"timestamp":"2026-03-28T14:43:35.618Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Pick the pane model for v1."}]}}
+        \\{"timestamp":"2026-03-28T14:43:47.709Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"questions\":[{\"header\":\"Pane Model\",\"id\":\"pane_model\",\"question\":\"V1 split model?\",\"options\":[{\"label\":\"Independent\"},{\"label\":\"Shared\"}],\"isOther\":true}]}","call_id":"call-request-1"}}
+        \\{"timestamp":"2026-03-28T14:44:13.322Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-request-1","output":"{\"answers\":{\"pane_model\":{\"answers\":[\"Shared\"]}}}"}}
+    ;
+
+    const lines = try codex_replay.loadReplayLinesFromString(allocator, log);
+    tab.agent_state.startDebugReplay(.codex, lines, .{ .codex = .thread_active }, false, false);
+
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+    try std.testing.expect(try app.stepActiveDebugReplay());
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "codex_replay_user_input_selected_panel", text);
 }
 
 test "snapshot: acp_replay_in_progress_panel" {

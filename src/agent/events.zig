@@ -678,6 +678,7 @@ fn parseRequestUserInputToolCall(allocator: Allocator, tool_call_id: []const u8,
     };
 
     const RawQuestion = struct {
+        id: ?[]const u8 = null,
         header: ?[]const u8 = null,
         question: ?[]const u8 = null,
         prompt: ?[]const u8 = null,
@@ -724,6 +725,7 @@ fn parseRequestUserInputToolCall(allocator: Allocator, tool_call_id: []const u8,
         }
 
         questions[question_idx] = .{
+            .id = raw_question.id,
             .header = raw_question.header,
             .question = question_text,
             .options = option_items,

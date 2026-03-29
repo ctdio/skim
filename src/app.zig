@@ -1504,6 +1504,22 @@ pub const App = struct {
             return false;
         }
 
+        const current_line = replay.lines[replay.current_index];
+
+        if (replay.kind == .codex and !replay.previewing_current_line) {
+            if (try codex_session_replay.previewPendingQuestionResolution(self.allocator, agent_state, current_line)) {
+                replay.previewing_current_line = true;
+                replay.step_delay_override_ms = agent_state_mod.debug_replay_question_answer_preview_linger_ms;
+                replay.last_step_ms = std.time.milliTimestamp();
+                self.syncActiveDebugReplayManagerStatus(replay.manager_status);
+                if (!agent_state.isInHistoryMode() and agent_state.messages.items.len > 0) {
+                    agent_state.enterHistoryMode();
+                }
+                self.needs_render = true;
+                return true;
+            }
+        }
+
         switch (replay.kind) {
             .acp => {
                 var summary = acp_session_replay.ReplaySummary{
@@ -1515,7 +1531,7 @@ pub const App = struct {
                 try acp_session_replay.replaySessionLine(
                     self.allocator,
                     agent_state,
-                    replay.lines[replay.current_index],
+                    current_line,
                     &summary,
                 );
                 replay.manager_status = .{ .acp = summary.manager_status };
@@ -1524,7 +1540,7 @@ pub const App = struct {
                 const mgr_handle = self.getActiveManager() orelse return false;
                 switch (mgr_handle) {
                     .opencode => |mgr| {
-                        try opencode_session_replay.replaySessionLine(mgr, replay.lines[replay.current_index]);
+                        try opencode_session_replay.replaySessionLine(mgr, current_line);
                         _ = mgr_handle.pollEvents(self.allocator, agent_state);
                         replay.manager_status = .{ .opencode = mgr.status };
                     },
@@ -1541,14 +1557,22 @@ pub const App = struct {
                 try codex_session_replay.replaySessionLine(
                     self.allocator,
                     agent_state,
-                    replay.lines[replay.current_index],
+                    current_line,
                     &summary,
                 );
                 replay.manager_status = .{ .codex = summary.manager_status };
             },
         }
 
+        replay.previewing_current_line = false;
         replay.current_index += 1;
+        replay.step_delay_override_ms = switch (replay.kind) {
+            .codex => if (codex_session_replay.lineStartsRequestUserInput(self.allocator, current_line))
+                agent_state_mod.debug_replay_question_prompt_linger_ms
+            else
+                null,
+            else => null,
+        };
         replay.last_step_ms = std.time.milliTimestamp();
         if (replay.isComplete()) {
             replay.playing = false;
@@ -1568,7 +1592,8 @@ pub const App = struct {
         if (!replay.playing or replay.isComplete()) return;
 
         const now = std.time.milliTimestamp();
-        if (now - replay.last_step_ms < replay.step_interval_ms) return;
+        const step_delay_ms = replay.step_delay_override_ms orelse replay.step_interval_ms;
+        if (now - replay.last_step_ms < step_delay_ms) return;
 
         _ = self.stepActiveDebugReplay() catch |err| {
             std.log.err("Failed to advance debug replay: {any}", .{err});

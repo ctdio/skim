@@ -1,6 +1,8 @@
 const std = @import("std");
-const AgentState = @import("../agent/state.zig").AgentState;
-const AgentMessage = @import("../agent/state.zig").Message;
+const agent_events = @import("../agent/events.zig");
+const agent_state_mod = @import("../agent/state.zig");
+const AgentState = agent_state_mod.AgentState;
+const AgentMessage = agent_state_mod.Message;
 const CodexManager = @import("manager.zig").CodexManager;
 
 pub const ReplaySummary = struct {
@@ -71,6 +73,52 @@ pub fn replaySessionLine(allocator: std.mem.Allocator, agent_state: *AgentState,
     try replayLine(allocator, agent_state, trimmed, summary);
 }
 
+pub fn lineStartsRequestUserInput(allocator: std.mem.Allocator, line: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (trimmed.len == 0) return false;
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{
+        .ignore_unknown_fields = true,
+    }) catch return false;
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return false;
+    if (!std.mem.eql(u8, getObjectString(root.object, "type") orelse return false, "response_item")) return false;
+
+    const payload = getObjectValue(root.object, "payload") orelse return false;
+    if (payload != .object) return false;
+    if (!std.mem.eql(u8, getObjectString(payload.object, "type") orelse return false, "function_call")) return false;
+    return std.mem.eql(u8, getObjectString(payload.object, "name") orelse return false, "request_user_input");
+}
+
+pub fn previewPendingQuestionResolution(allocator: std.mem.Allocator, agent_state: *AgentState, line: []const u8) !bool {
+    const pending = agent_state.getPendingQuestion() orelse return false;
+    const pending_tool_call_id = pending.tool_call_id orelse return false;
+
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (trimmed.len == 0) return false;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return false;
+    if (!std.mem.eql(u8, getObjectString(root.object, "type") orelse return false, "response_item")) return false;
+
+    const payload = getObjectValue(root.object, "payload") orelse return false;
+    if (payload != .object) return false;
+    if (!std.mem.eql(u8, getObjectString(payload.object, "type") orelse return false, "function_call_output")) return false;
+
+    const call_id = getObjectString(payload.object, "call_id") orelse return false;
+    if (!std.mem.eql(u8, call_id, pending_tool_call_id)) return false;
+
+    const output = getObjectString(payload.object, "output") orelse return false;
+    return applyPendingQuestionReplayAnswers(allocator, pending, output);
+}
+
 fn replayLine(allocator: std.mem.Allocator, agent_state: *AgentState, line: []const u8, summary: *ReplaySummary) !void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{
         .ignore_unknown_fields = true,
@@ -111,7 +159,7 @@ fn replayEventMessage(agent_state: *AgentState, payload: std.json.ObjectMap, sum
     if (std.mem.eql(u8, payload_type, "agent_message")) {
         const message = getObjectString(payload, "message") orelse return;
         if (message.len == 0) return;
-        try agent_state.addCompletedAgentMessage(message);
+        replayAgentEvent(agent_state, .{ .completed_agent_message = message });
         return;
     }
 
@@ -133,14 +181,14 @@ fn replayCompletedItem(agent_state: *AgentState, item: std.json.ObjectMap) !void
     if (std.mem.eql(u8, item_type, "Plan") or std.mem.eql(u8, item_type, "plan")) {
         const text = getObjectString(item, "text") orelse return;
         if (text.len == 0) return;
-        try agent_state.addCompletedAgentMessage(text);
+        replayAgentEvent(agent_state, .{ .completed_agent_message = text });
         return;
     }
 
     if (std.mem.eql(u8, item_type, "agentMessage") or std.mem.eql(u8, item_type, "agent_message")) {
         const text = getObjectString(item, "text") orelse return;
         if (text.len == 0) return;
-        try agent_state.addCompletedAgentMessage(text);
+        replayAgentEvent(agent_state, .{ .completed_agent_message = text });
     }
 }
 
@@ -167,16 +215,128 @@ fn replayResponseItem(allocator: std.mem.Allocator, agent_state: *AgentState, pa
         const name = getObjectString(payload, "name") orelse return;
         const arguments = getObjectString(payload, "arguments");
         const command = extractToolCommand(allocator, name, arguments);
-        const title = command orelse name;
-        try agent_state.addToolMessage(call_id, name, title, command);
+        const title = if (std.mem.eql(u8, name, "exec_command"))
+            command orelse name
+        else
+            name;
+        replayAgentEvent(agent_state, .{ .tool_call = .{
+            .tool_call_id = call_id,
+            .tool_name = name,
+            .title = title,
+            .command = command,
+        } });
         return;
     }
 
     if (std.mem.eql(u8, payload_type, "function_call_output")) {
         const call_id = getObjectString(payload, "call_id") orelse return;
         const output = getObjectString(payload, "output");
-        try agent_state.updateToolMessage(call_id, .completed, output, null);
+        replayAgentEvent(agent_state, .{ .tool_update = .{
+            .tool_call_id = call_id,
+            .status = .completed,
+            .stdout = output,
+            .stderr = null,
+        } });
     }
+}
+
+fn replayAgentEvent(agent_state: *AgentState, event: agent_events.AgentEvent) void {
+    agent_events.processAgentEvent(agent_state, event);
+}
+
+fn applyPendingQuestionReplayAnswers(allocator: std.mem.Allocator, pending: *agent_state_mod.PendingQuestion, output: []const u8) bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, output, .{
+        .ignore_unknown_fields = true,
+    }) catch return false;
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return false;
+    const answers_value = getObjectValue(parsed.value.object, "answers") orelse return false;
+    if (answers_value != .object) return false;
+
+    var applied_any = false;
+    pending.confirming = false;
+
+    for (pending.questions, pending.states, 0..) |*question, *question_state, question_idx| {
+        const answer_entry = findPendingQuestionReplayAnswer(answers_value.object, question.*, question_idx, pending.questions.len) orelse continue;
+        if (answer_entry != .object) continue;
+
+        const answer_list = getObjectValue(answer_entry.object, "answers") orelse continue;
+        if (answer_list != .array) continue;
+
+        if (applyReplayAnswersToQuestion(question, question_state, answer_list.array.items)) {
+            applied_any = true;
+        }
+    }
+
+    return applied_any;
+}
+
+fn findPendingQuestionReplayAnswer(
+    answers: std.json.ObjectMap,
+    question: agent_state_mod.Question,
+    question_idx: usize,
+    question_count: usize,
+) ?std.json.Value {
+    _ = question_idx;
+    if (question.id) |id| {
+        if (answers.get(id)) |entry| return entry;
+    }
+
+    if (question_count == 1) {
+        var iter = answers.iterator();
+        if (iter.next()) |entry| return entry.value_ptr.*;
+    }
+
+    return null;
+}
+
+fn applyReplayAnswersToQuestion(
+    question: *agent_state_mod.Question,
+    question_state: *agent_state_mod.QuestionState,
+    answer_items: []const std.json.Value,
+) bool {
+    @memset(question_state.selected, false);
+    question_state.custom_active = false;
+    question_state.custom_input.clear();
+
+    var first_selected: ?usize = null;
+
+    for (answer_items) |answer_item| {
+        if (answer_item != .string) continue;
+        const selected_idx = selectReplayQuestionAnswer(question, question_state, answer_item.string) orelse continue;
+        if (first_selected == null) {
+            first_selected = selected_idx;
+        }
+        if (!question.multiple) break;
+    }
+
+    if (first_selected) |selected_idx| {
+        question_state.cursor_index = selected_idx;
+        return true;
+    }
+
+    return false;
+}
+
+fn selectReplayQuestionAnswer(
+    question: *agent_state_mod.Question,
+    question_state: *agent_state_mod.QuestionState,
+    answer: []const u8,
+) ?usize {
+    for (question.options, 0..) |option, option_idx| {
+        if (!std.mem.eql(u8, option.label, answer)) continue;
+        question_state.selected[option_idx] = true;
+        return option_idx;
+    }
+
+    if (question.custom_index) |custom_idx| {
+        question_state.selected[custom_idx] = true;
+        question_state.custom_input.setText(answer);
+        return custom_idx;
+    }
+
+    return null;
 }
 
 fn extractMessageText(allocator: std.mem.Allocator, blocks: []const std.json.Value) ![]const u8 {
@@ -349,6 +509,70 @@ test "replaySessionFromString reports active turn status for in-progress session
     try std.testing.expectEqual(CodexManager.Status.turn_active, summary.manager_status);
     try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
     try std.testing.expectEqualStrings("Still working...", agent_state.messages.items[0].content);
+}
+
+test "replaySessionFromString restores request_user_input pending question" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const log =
+        \\{"timestamp":"2026-03-28T14:43:47.709Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"questions\":[{\"header\":\"Split Model\",\"id\":\"split_model\",\"question\":\"When a user creates a split in agent mode, what should each pane represent?\",\"options\":[{\"label\":\"Independent sessions (Recommended)\",\"description\":\"Each pane has its own AgentState and manager connection.\"},{\"label\":\"Shared session\",\"description\":\"All panes mirror the same live session.\"}]}]}","call_id":"call-request-1"}}
+    ;
+
+    _ = try replaySessionFromString(allocator, &agent_state, log);
+
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(AgentMessage.Role.tool, agent_state.messages.items[0].role);
+
+    const pending = agent_state.getPendingQuestion() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("call-request-1", pending.tool_call_id.?);
+    try std.testing.expectEqual(@as(usize, 1), pending.questions.len);
+    try std.testing.expectEqualStrings("When a user creates a split in agent mode, what should each pane represent?", pending.questions[0].prompt);
+    try std.testing.expectEqual(@as(usize, 2), pending.questions[0].options.len);
+}
+
+test "replaySessionFromString clears restored request_user_input after tool output" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const log =
+        \\{"timestamp":"2026-03-28T14:43:47.709Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"questions\":[{\"header\":\"Split Model\",\"id\":\"split_model\",\"question\":\"When a user creates a split in agent mode, what should each pane represent?\",\"options\":[{\"label\":\"Independent sessions (Recommended)\",\"description\":\"Each pane has its own AgentState and manager connection.\"}]}]}","call_id":"call-request-1"}}
+        \\{"timestamp":"2026-03-28T14:44:13.322Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-request-1","output":"{\"answers\":{\"split_model\":{\"answers\":[\"Independent sessions (Recommended)\"]}}}"}}
+    ;
+
+    _ = try replaySessionFromString(allocator, &agent_state, log);
+
+    try std.testing.expect(agent_state.getPendingQuestion() == null);
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expect(agent_state.messages.items[0].tool_status == AgentMessage.ToolStatus.completed);
+    try std.testing.expect(agent_state.messages.items[0].tool_stdout != null);
+}
+
+test "previewPendingQuestionResolution applies recorded codex answers to pending question" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const question_log =
+        \\{"timestamp":"2026-03-28T14:43:47.709Z","type":"response_item","payload":{"type":"function_call","name":"request_user_input","arguments":"{\"questions\":[{\"header\":\"Split Model\",\"id\":\"split_model\",\"question\":\"Which pane model should v1 use?\",\"options\":[{\"label\":\"Independent sessions (Recommended)\"},{\"label\":\"Shared session\"}]}]}","call_id":"call-request-1"}}
+    ;
+    _ = try replaySessionFromString(allocator, &agent_state, question_log);
+
+    const output_line =
+        \\{"timestamp":"2026-03-28T14:44:13.322Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-request-1","output":"{\"answers\":{\"split_model\":{\"answers\":[\"Shared session\"]}}}"}}
+    ;
+
+    try std.testing.expect(try previewPendingQuestionResolution(allocator, &agent_state, output_line));
+
+    const pending = agent_state.getPendingQuestion() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), pending.states[0].cursor_index);
+    try std.testing.expect(!pending.states[0].selected[0]);
+    try std.testing.expect(pending.states[0].selected[1]);
 }
 
 test "loadReplayLinesFromString keeps non-empty jsonl entries" {

@@ -1089,6 +1089,19 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                             }
                         }
                     }
+                } else if (agent_state.isAwaitingPlanResponse()) {
+                    const reply = state.default_plan_acceptance_reply;
+                    try agent_state.addMessage(.user, reply);
+                    app.autoNameActiveTab(reply);
+                    try sendPromptToActiveManager(app, reply);
+                    agent_state.input.clear();
+
+                    if (agent_state.hasStash()) {
+                        agent_state.unstashPrompt();
+                        agent_state.clearStash();
+                        agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
+                        agent_state.input.vim.vim_mode = .insert;
+                    }
                 }
                 app.needs_render = true;
             },
@@ -3169,6 +3182,69 @@ test "ctrl-e does not exit debug replay session" {
 
     try std.testing.expect(!app.should_quit);
     try std.testing.expect(tab.agent_state.hasDebugReplay());
+}
+
+test "empty enter after completed plan sends default acceptance reply" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    const mgr = try tab.createCodexManager();
+
+    const proc = try CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    const transport = try CodexTransport.init(allocator, proc);
+    mgr.process = proc;
+    mgr.transport = transport;
+    mgr.status = .thread_active;
+    mgr.thread_id = try allocator.dupe(u8, "thread-1");
+
+    try tab.agent_state.addCompletedAgentMessage("<proposed_plan>\n# Plan\n</proposed_plan>");
+    tab.agent_state.input.vim.vim_mode = .insert;
+
+    try handleKey(&app, .{ .codepoint = vaxis.Key.enter });
+
+    try std.testing.expect(app.needs_render);
+    try std.testing.expectEqual(CodexManager.Status.turn_active, mgr.status);
+    try std.testing.expectEqual(@as(usize, 2), tab.agent_state.messages.items.len);
+    try std.testing.expectEqual(state.Message.Role.user, tab.agent_state.messages.items[1].role);
+    try std.testing.expectEqualStrings(state.default_plan_acceptance_reply, tab.agent_state.messages.items[1].content);
 }
 
 /// Execute an agent command palette action

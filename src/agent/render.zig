@@ -911,6 +911,10 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     // Check if there's a pending approval or question
     const pending_approval = if (app.getActiveManager()) |mgr| mgr.getPendingApproval() else null;
     const pending_question = agent_state.getPendingQuestion();
+    const show_plan_acceptance_hint = pending_question == null and
+        pending_approval == null and
+        text.len == 0 and
+        agent_state.isAwaitingPlanResponse();
 
     // Calculate height based on mode or pending approval
     // Note: model_selection mode renders as a centered dialog overlay, not in the input area
@@ -918,6 +922,11 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         break :blk question_prompt.countQuestionPromptLines(app.allocator, win.width, question);
     } else if (pending_approval) |approval| blk: {
         break :blk countApprovalLines(approval);
+    } else if (show_plan_acceptance_hint) blk: {
+        const input_col: usize = 3;
+        const max_input_width = if (win.width > input_col + 2) win.width - input_col - 2 else 1;
+        const hint_text = state.plan_acceptance_hint;
+        break :blk @max(@as(usize, 1), (hint_text.len + max_input_width - 1) / max_input_width);
     } else blk: {
         // Calculate wrapped line count accounting for panel width
         // This ensures the input area expands properly in side-by-side mode
@@ -1043,7 +1052,7 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         .width = win.width,
         .height = @intCast(input_height),
     });
-    try renderInputArea(app, input_win, agent_state, is_focused, pending_approval, pending_question);
+    try renderInputArea(app, input_win, agent_state, is_focused, pending_approval, pending_question, show_plan_acceptance_hint);
 
     // Render slash command menu as overlay (if visible)
     if (agent_state.slash_menu.visible) {
@@ -2438,6 +2447,7 @@ fn renderInputArea(
     is_focused: bool,
     pending_approval: ?ManagerHandle.PendingApproval,
     pending_question: ?*state.PendingQuestion,
+    show_plan_acceptance_hint: bool,
 ) !void {
     if (win.height == 0) return;
 
@@ -2465,6 +2475,11 @@ fn renderInputArea(
     }
 
     const text = agent_state.input.getText();
+    if (show_plan_acceptance_hint) {
+        try renderPlanAcceptanceHint(app, win, agent_state);
+        return;
+    }
+
     const input_col: usize = 3; // After "> " or "  "
 
     // Calculate how many display lines we'll have with wrapping
@@ -2778,6 +2793,42 @@ fn renderInputArea(
         renderScrollbar(scrollbar_win, scrollbar_info);
     }
     // Note: Footer is now rendered by the unified status bar in UI.renderStatus
+}
+
+fn renderPlanAcceptanceHint(app: *App, win: vaxis.Window, agent_state: *AgentState) !void {
+    const session_ready = app.isSessionReady();
+    const prompt_style = getInputPromptStyle(agent_state.isShellMode(), session_ready);
+    const hint_style = withCommentBg(.{ .fg = Color.dim_gray, .italic = true });
+    const input_col: usize = 3;
+    const max_input_width = if (win.width > input_col + 2) win.width - input_col - 2 else 1;
+    const content_start_row: usize = 1;
+
+    var wrapped_lines = try RenderUtils.wrapText(app.allocator, state.plan_acceptance_hint, max_input_width);
+    defer wrapped_lines.deinit(app.allocator);
+
+    if (wrapped_lines.items.len == 0) {
+        wrapped_lines.append(app.allocator, "") catch {};
+    }
+
+    for (wrapped_lines.items, 0..) |chunk, row_idx| {
+        const row = content_start_row + row_idx;
+        if (row >= win.height) break;
+
+        const prefix = if (row_idx == 0)
+            "> "
+        else
+            "  ";
+
+        var prefix_seg = [_]vaxis.Cell.Segment{
+            .{ .text = prefix, .style = prompt_style },
+        };
+        _ = win.print(&prefix_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
+
+        var hint_seg = [_]vaxis.Cell.Segment{
+            .{ .text = chunk, .style = hint_style },
+        };
+        _ = win.print(&hint_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(input_col) });
+    }
 }
 
 fn clipText(text: []const u8, max_len: usize) []const u8 {

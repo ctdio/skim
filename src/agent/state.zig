@@ -65,6 +65,11 @@ pub const MAX_FILE_MENU_VISIBLE: usize = 10;
 pub const MAX_FILE_SIZE: usize = 1024 * 1024;
 /// Maximum number of filtered results
 pub const MAX_FILTERED_RESULTS: usize = 1000;
+pub const plan_acceptance_hint = "Press Enter to accept this plan, or type feedback.";
+pub const default_plan_acceptance_reply = "This plan looks correct.";
+pub const debug_replay_step_interval_ms: i64 = 150;
+pub const debug_replay_question_prompt_linger_ms: i64 = 1200;
+pub const debug_replay_question_answer_preview_linger_ms: i64 = 1500;
 
 /// State for the @ file picker menu
 pub const FilePickerState = struct {
@@ -626,6 +631,7 @@ pub const QuestionOptionData = struct {
 };
 
 pub const QuestionData = struct {
+    id: ?[]const u8 = null,
     header: ?[]const u8 = null,
     question: []const u8,
     options: []const QuestionOptionData = &.{},
@@ -646,6 +652,7 @@ pub const QuestionOption = struct {
 };
 
 pub const Question = struct {
+    id: ?[]const u8 = null,
     header: ?[]const u8 = null,
     prompt: []const u8,
     options: []QuestionOption,
@@ -653,6 +660,7 @@ pub const Question = struct {
     custom_index: ?usize = null,
 
     fn deinit(self: *Question, allocator: Allocator) void {
+        if (self.id) |id| allocator.free(id);
         if (self.header) |h| allocator.free(h);
         allocator.free(self.prompt);
         for (self.options) |opt| {
@@ -796,7 +804,9 @@ pub const AgentState = struct {
         exit_quits_app: bool,
         playing: bool,
         step_interval_ms: i64,
+        step_delay_override_ms: ?i64,
         last_step_ms: i64,
+        previewing_current_line: bool,
 
         pub fn init(
             kind: DebugReplayKind,
@@ -815,8 +825,10 @@ pub const AgentState = struct {
                 .manager_status = initial_manager_status,
                 .exit_quits_app = exit_quits_app,
                 .playing = autoplay,
-                .step_interval_ms = 150,
-                .last_step_ms = now - 150,
+                .step_interval_ms = debug_replay_step_interval_ms,
+                .step_delay_override_ms = null,
+                .last_step_ms = now - debug_replay_step_interval_ms,
+                .previewing_current_line = false,
             };
         }
 
@@ -920,6 +932,13 @@ pub const AgentState = struct {
         }
     }
 
+    pub fn isAwaitingPlanResponse(self: *const AgentState) bool {
+        if (self.messages.items.len == 0) return false;
+
+        const last = self.messages.items[self.messages.items.len - 1];
+        return last.role == .agent and isProposedPlanMessage(last.content);
+    }
+
     pub fn hasSubagentModal(self: *const AgentState) bool {
         return self.subagent_modal != null;
     }
@@ -966,6 +985,12 @@ pub const AgentState = struct {
         const custom_desc = "Something else";
 
         for (prompt.questions, 0..) |q, idx| {
+            const question_id_copy: ?[]const u8 = if (q.id) |id|
+                try self.allocator.dupe(u8, id)
+            else
+                null;
+            errdefer if (question_id_copy) |id| self.allocator.free(id);
+
             const header_copy: ?[]const u8 = if (q.header) |h|
                 try self.allocator.dupe(u8, h)
             else
@@ -1025,6 +1050,7 @@ pub const AgentState = struct {
             @memset(selected, false);
 
             questions[idx] = .{
+                .id = question_id_copy,
                 .header = header_copy,
                 .prompt = prompt_copy,
                 .options = options,
@@ -1690,7 +1716,9 @@ pub const AgentState = struct {
             replay.current_index = 0;
             replay.manager_status = replay.initial_manager_status;
             replay.playing = autoplay;
+            replay.step_delay_override_ms = null;
             replay.last_step_ms = std.time.milliTimestamp() - replay.step_interval_ms;
+            replay.previewing_current_line = false;
         }
     }
 
@@ -3096,6 +3124,11 @@ pub const Message = struct {
         self.md_tree_valid = false;
     }
 };
+
+fn isProposedPlanMessage(text: []const u8) bool {
+    const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
+    return std.mem.startsWith(u8, trimmed, "<proposed_plan>") and std.mem.endsWith(u8, trimmed, "</proposed_plan>");
+}
 
 // =============================================================================
 // Tests
