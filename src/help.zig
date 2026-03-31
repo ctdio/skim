@@ -153,7 +153,11 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "Ctrl-l", .desc = "Clear history" },
         .{ .key = "Ctrl-d / u", .desc = "Page down / up" },
         .{ .key = "Ctrl-t", .desc = "Cycle thinking effort / variant" },
-        .{ .key = "Ctrl-w o", .desc = "Toggle fullscreen" },
+        .{ .key = "Ctrl-w h/j/k/l", .desc = "Focus pane / diff edge" },
+        .{ .key = "Ctrl-w v / s", .desc = "Split vertically / horizontally" },
+        .{ .key = "Ctrl-w c / o", .desc = "Close pane / only pane" },
+        .{ .key = "Ctrl-w H/J/K/L", .desc = "Move pane to edge" },
+        .{ .key = "Ctrl-w + - < >", .desc = "Resize pane" },
         .{ .key = "gg / G", .desc = "Top / bottom" },
         .{ .key = "?", .desc = "Agent help (detailed)" },
     };

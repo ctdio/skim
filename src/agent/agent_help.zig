@@ -57,9 +57,6 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     const global_bindings = [_]Binding{
         .{ .key = "Ctrl-e", .desc = "Close panel, return to diff" },
         .{ .key = "Ctrl-g", .desc = "Edit prompt in $EDITOR" },
-        .{ .key = "Ctrl-w h/l", .desc = "Focus diff / agent" },
-        .{ .key = "Ctrl-w w", .desc = "Cycle panel focus" },
-        .{ .key = "Ctrl-w o", .desc = "Toggle fullscreen" },
         .{ .key = "Ctrl-s", .desc = "Stash / unstash prompt" },
         .{ .key = "Ctrl-t", .desc = "Cycle thinking effort / variant" },
     };
@@ -96,6 +93,12 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "x / dd", .desc = "Delete char / line" },
         .{ .key = ":", .desc = "Command palette" },
         .{ .key = "?", .desc = "This help" },
+        .{ .key = "Ctrl-w h/j/k/l", .desc = "Focus pane / diff edge" },
+        .{ .key = "Ctrl-w w", .desc = "Cycle panes / diff focus" },
+        .{ .key = "Ctrl-w v / s", .desc = "Vertical / horizontal split" },
+        .{ .key = "Ctrl-w c / o", .desc = "Close pane / only pane" },
+        .{ .key = "Ctrl-w H/J/K/L", .desc = "Move pane to edge" },
+        .{ .key = "Ctrl-w + - < >", .desc = "Resize focused pane" },
         .{ .key = "gb", .desc = "History mode" },
         .{ .key = "gt / gT", .desc = "Next / prev tab" },
         .{ .key = "Space b/Esc", .desc = "History mode" },

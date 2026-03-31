@@ -228,9 +228,12 @@ Navigate files and position cursor with vim-style movements:
 | Key | Action |
 |-----|--------|
 | `Ctrl-e` | Toggle agent panel |
-| `Ctrl-w h/l` | Focus agent panel (based on panel side) |
-| `Ctrl-w w` | Cycle focus between panels |
-| `Ctrl-w o` | Toggle agent panel full screen |
+| `Ctrl-w h/j/k/l` | Focus panes in normal mode, falling back to diff at outer edge |
+| `Ctrl-w w` | Cycle panes / diff focus in normal mode |
+| `Ctrl-w v` / `Ctrl-w s` | Open vertical / horizontal split in agent normal mode |
+| `Ctrl-w c` / `Ctrl-w o` | Close focused pane / keep only focused pane |
+| `Ctrl-w H/J/K/L` | Move focused pane to far edge |
+| `Ctrl-w + - < >` | Resize focused pane |
 
 #### Other
 
@@ -412,9 +415,6 @@ The agent panel uses vim-style modal editing.
 |-----|--------|
 | `Ctrl-E` | Close panel, return to diff |
 | `Ctrl-G` | Edit prompt in $EDITOR |
-| `Ctrl-W h/l` | Focus diff/agent panel |
-| `Ctrl-W w` | Cycle focus between panels |
-| `Ctrl-W o` | Toggle full screen |
 | `Ctrl-S` | Stash/unstash prompt |
 | `Ctrl-T` | Toggle todo list expansion |
 
@@ -431,6 +431,15 @@ The agent panel uses vim-style modal editing.
 | `Up` | Restore stashed prompt (empty input) |
 
 ##### Normal Mode
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-W h/j/k/l` | Focus pane / diff edge |
+| `Ctrl-W w` | Cycle panes / diff focus |
+| `Ctrl-W v` / `Ctrl-W s` | Open vertical / horizontal split |
+| `Ctrl-W c` / `Ctrl-W o` | Close pane / only pane |
+| `Ctrl-W H/J/K/L` | Move pane to edge |
+| `Ctrl-W + - < >` | Resize focused pane |
 
 | Key | Action |
 |-----|--------|

@@ -10,6 +10,9 @@ const Allocator = std.mem.Allocator;
 pub const AgentCommandAction = union(enum) {
     new_tab: void,
     close_tab: void,
+    vertical_split: void,
+    horizontal_split: void,
+    close_split: void,
     next_tab: void,
     prev_tab: void,
     rename_tab: void,
@@ -38,6 +41,24 @@ pub const COMMANDS = [_]AgentCommand{
         .aliases = &[_][]const u8{ ":tabc", ":tabclose" },
         .description = "Close current tab",
         .action = .close_tab,
+    },
+    .{
+        .name = "Vertical Split",
+        .aliases = &[_][]const u8{ ":vsp", ":vsplit" },
+        .description = "Open a second pane with a new session",
+        .action = .vertical_split,
+    },
+    .{
+        .name = "Horizontal Split",
+        .aliases = &[_][]const u8{ ":sp", ":split" },
+        .description = "Open a stacked pane with a new session",
+        .action = .horizontal_split,
+    },
+    .{
+        .name = "Close Split",
+        .aliases = &[_][]const u8{ ":only", ":splitclose" },
+        .description = "Close the current split pane",
+        .action = .close_split,
     },
     .{
         .name = "Next Tab",

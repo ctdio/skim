@@ -12,6 +12,7 @@ const InputEditor = @import("input_editor.zig").InputEditor;
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const ManagerHandle = @import("manager_handle.zig").ManagerHandle;
 const CodexManager = @import("../codex/manager.zig").CodexManager;
+const AgentTab = @import("tab_manager.zig").AgentTab;
 const diff_algo = @import("diff.zig");
 const DiffLine = diff_algo.DiffLine;
 const chat_line_map = @import("chat_line_map.zig");
@@ -34,6 +35,14 @@ const RenderUtils = rendering_utils.RenderUtils;
 // Import markdown rendering for agent messages
 const markdown = @import("markdown/markdown.zig");
 const MarkdownColors = markdown.MarkdownColors;
+
+const PaneRenderOptions = struct {
+    tab: *AgentTab,
+    is_focused: bool,
+    show_tab_bar: bool,
+    show_tab_name: bool,
+    show_global_dialogs: bool,
+};
 
 /// Safely print text to window, handling invalid UTF-8 gracefully.
 /// If text contains invalid UTF-8, renders valid portions and replaces invalid bytes with �.
@@ -894,30 +903,69 @@ fn getInputLineInfo(text: []const u8, cursor_pos: usize) InputLineInfo {
 pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     if (win.width == 0 or win.height == 0) return;
 
-    const agent_state = app.getActiveAgentState() orelse return;
-    const is_focused = app.mode == .agent;
+    const tm = if (app.tab_manager) |*manager| manager else return;
+    var snapshot = try tm.collectPaneLayout(app.allocator, win.width, win.height);
+    defer snapshot.deinit();
+    if (snapshot.panes.items.len == 0) return;
 
-    // Use fill() instead of clear() to ensure all cells are explicitly set to spaces
-    // This prevents artifacts from previous renders (e.g., permission dialogs)
+    const multiple_panes = snapshot.panes.items.len > 1;
+    for (snapshot.panes.items) |pane| {
+        const tab = tm.getTab(pane.tab_idx) orelse continue;
+        const pane_win = win.child(.{
+            .x_off = @intCast(pane.x),
+            .y_off = @intCast(pane.y),
+            .width = @intCast(pane.width),
+            .height = @intCast(pane.height),
+        });
+        const is_focused = app.mode == .agent and snapshot.focused_pane_id != null and snapshot.focused_pane_id.? == pane.node_id;
+        try renderPane(app, pane_win, .{
+            .tab = tab,
+            .is_focused = is_focused,
+            .show_tab_bar = !multiple_panes and tm.tabCount() > 1,
+            .show_tab_name = multiple_panes,
+            .show_global_dialogs = is_focused,
+        });
+    }
+
+    for (snapshot.dividers.items) |divider| {
+        switch (divider.orientation) {
+            .vertical => {
+                for (0..divider.length) |row| {
+                    win.writeCell(@intCast(divider.x), @intCast(divider.y + row), .{
+                        .char = .{ .grapheme = "│", .width = 1 },
+                        .style = .{ .fg = Color.dim_gray },
+                    });
+                }
+            },
+            .horizontal => {
+                for (0..divider.length) |col| {
+                    win.writeCell(@intCast(divider.x + col), @intCast(divider.y), .{
+                        .char = .{ .grapheme = "─", .width = 1 },
+                        .style = .{ .fg = Color.dim_gray },
+                    });
+                }
+            },
+        }
+    }
+}
+
+fn renderPane(app: *App, win: vaxis.Window, options: PaneRenderOptions) !void {
+    const agent_state = &options.tab.agent_state;
+
     const blank = vaxis.Cell{
         .char = .{ .grapheme = " ", .width = 1 },
         .style = .{},
     };
     win.fill(blank);
 
-    // Calculate dynamic input height based on content or mode
     const text = agent_state.input.getText();
-
-    // Check if there's a pending approval or question
-    const pending_approval = if (app.getActiveManager()) |mgr| mgr.getPendingApproval() else null;
+    const pending_approval = if (options.tab.manager) |mgr| mgr.getPendingApproval() else null;
     const pending_question = agent_state.getPendingQuestion();
     const show_plan_acceptance_hint = pending_question == null and
         pending_approval == null and
         text.len == 0 and
         agent_state.isAwaitingPlanResponse();
 
-    // Calculate height based on mode or pending approval
-    // Note: model_selection mode renders as a centered dialog overlay, not in the input area
     const visible_lines = if (pending_question) |question| blk: {
         break :blk question_prompt.countQuestionPromptLines(app.allocator, win.width, question);
     } else if (pending_approval) |approval| blk: {
@@ -928,45 +976,35 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         const hint_text = state.plan_acceptance_hint;
         break :blk @max(@as(usize, 1), (hint_text.len + max_input_width - 1) / max_input_width);
     } else blk: {
-        // Calculate wrapped line count accounting for panel width
-        // This ensures the input area expands properly in side-by-side mode
-        // Account for: prompt/continuation (3 chars) + scrollbar (1 char when visible) + margin (1 char)
-        const input_col: usize = 3; // After "> " or "  "
+        const input_col: usize = 3;
         const max_input_width = if (win.width > input_col + 2) win.width - input_col - 2 else 1;
         var total_display_lines: usize = 0;
         var line_iter = std.mem.splitScalar(u8, text, '\n');
         while (line_iter.next()) |text_line| {
             if (text_line.len == 0) {
-                total_display_lines += 1; // Empty line still takes one display line
+                total_display_lines += 1;
             } else {
-                // Calculate how many chunks this line wraps into
                 const chunks = (text_line.len + max_input_width - 1) / max_input_width;
                 total_display_lines += chunks;
             }
         }
-        if (total_display_lines == 0) total_display_lines = 1; // Always show at least one line
+        if (total_display_lines == 0) total_display_lines = 1;
         break :blk @min(total_display_lines, MAX_INPUT_LINES);
     };
 
-    // Calculate plan height (only if visible and has entries)
     const plan_entry_count = agent_state.plan.count();
     const plan_height: usize = if (agent_state.plan.visible and plan_entry_count > 0) blk: {
-        // Header (1) + entries (all if expanded, 1 if collapsed) + bottom bar (1)
         const visible_entries: usize = if (agent_state.plan.expanded) plan_entry_count else 1;
         break :blk 1 + visible_entries + 1;
     } else 0;
 
-    // Calculate status area height (shown between messages and plan when agent is thinking or session initializing with queued message)
-    // Layout: empty row + "Generating..."/"Waiting..."/"Compacting..." (with inline hint) + empty row + optional queued message + empty row
-    const is_thinking = app.isAgentThinking();
-    const is_compacting = app.isAgentCompacting();
-    const session_initializing = app.isSessionInitializing();
+    const is_thinking = options.tab.isThinking();
+    const is_compacting = options.tab.isCompacting();
+    const session_initializing = options.tab.isSessionInitializing();
     const show_status_area = is_thinking or (session_initializing and agent_state.hasStagedPrompt());
-    // Show interrupt hint inline when agent is thinking and vim is in normal mode
-    const show_interrupt_hint = is_thinking and agent_state.input.vim.vim_mode == .normal;
+    const show_interrupt_hint = is_thinking and agent_state.input.vim.vim_mode == .normal and options.is_focused;
     const status_height: usize = if (show_status_area) blk: {
-        var height: usize = 3; // empty + "Generating..."/"Waiting..." + empty
-        // Add queued message height if present
+        var height: usize = 3;
         if (agent_state.hasStagedPrompt()) {
             const staged_text = agent_state.getStagedPrompt();
             var line_count: usize = 0;
@@ -975,21 +1013,14 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
                 line_count += 1;
                 if (line_count >= 3) break;
             }
-            height += 1 + line_count + 1 + 1; // label + content lines + trailing bar + empty spacing
+            height += 1 + line_count + 1 + 1;
         }
         break :blk height;
     } else 0;
 
-    // Calculate input area height (always shows normal input)
-    // Layout: top padding (1) + visible text lines + padding (1)
-    // Note: Footer is now rendered by the unified status bar in app.zig, not here
-    const padding_height: usize = 1; // Blank line between text and footer/statusline
+    const padding_height: usize = 1;
     const input_height: usize = 1 + visible_lines + padding_height;
-
-    // Calculate tab bar height (only shown when multiple tabs exist)
-    const tab_bar_height: usize = if (app.tab_manager) |tm| (if (tm.tabCount() > 1) @as(usize, 1) else 0) else 0;
-
-    // Layout: title (1 row) + tab bar (0 or 1) + messages (variable) + status (conditional) + plan (conditional) + input area (dynamic)
+    const tab_bar_height: usize = if (options.show_tab_bar) 1 else 0;
     const title_height: usize = 1;
     const fixed_height = title_height + tab_bar_height + status_height + plan_height + input_height;
     const messages_height = if (win.height > fixed_height)
@@ -997,13 +1028,10 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
     else
         1;
 
-    // Store viewport height for smart scrolling in key handlers
     agent_state.last_messages_viewport_height = messages_height;
 
-    // Render title bar
-    try renderTitleBar(app, win, is_focused);
+    try renderTitleBar(app, win, options.tab, options.is_focused, options.show_tab_name);
 
-    // Render tab bar (if multiple tabs)
     if (tab_bar_height > 0) {
         const tab_bar_win = win.child(.{
             .x_off = 0,
@@ -1014,16 +1042,14 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         _ = renderTabBar(app, tab_bar_win);
     }
 
-    // Render message history
     const messages_win = win.child(.{
         .x_off = 0,
         .y_off = @intCast(title_height + tab_bar_height),
         .width = win.width,
         .height = @intCast(messages_height),
     });
-    try renderMessages(app, messages_win, agent_state);
+    try renderMessages(app, messages_win, options.tab, agent_state);
 
-    // Render status area (if agent is thinking or session initializing with queued message)
     if (status_height > 0) {
         const status_win = win.child(.{
             .x_off = 0,
@@ -1034,7 +1060,6 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         renderStatusArea(status_win, agent_state, is_thinking, is_compacting, show_interrupt_hint);
     }
 
-    // Render plan area (if visible and has entries)
     if (plan_height > 0) {
         const plan_win = win.child(.{
             .x_off = 0,
@@ -1045,64 +1070,58 @@ pub fn renderAgentPanel(app: *App, win: vaxis.Window) !void {
         render_plan.renderPlanArea(plan_win, agent_state.plan.entries.items, agent_state.plan.expanded);
     }
 
-    // Render input area (or permission prompt if pending)
+    const input_top = title_height + tab_bar_height + messages_height + status_height + plan_height;
     const input_win = win.child(.{
         .x_off = 0,
-        .y_off = @intCast(title_height + tab_bar_height + messages_height + status_height + plan_height),
+        .y_off = @intCast(input_top),
         .width = win.width,
         .height = @intCast(input_height),
     });
-    try renderInputArea(app, input_win, agent_state, is_focused, pending_approval, pending_question, show_plan_acceptance_hint);
+    try renderInputArea(app, input_win, options.tab, agent_state, options.is_focused, pending_approval, pending_question, show_plan_acceptance_hint);
 
-    // Render slash command menu as overlay (if visible)
     if (agent_state.slash_menu.visible) {
-        try renderSlashMenu(win, agent_state, title_height + tab_bar_height + messages_height + status_height + plan_height);
+        try renderSlashMenu(win, agent_state, input_top);
     }
 
-    // Render file picker menu as overlay (if visible)
     if (agent_state.file_picker.visible) {
-        try renderFilePicker(win, agent_state, title_height + tab_bar_height + messages_height + status_height + plan_height);
+        try renderFilePicker(win, agent_state, input_top);
     }
 
-    // Render agent command palette as centered dialog (if visible)
     if (agent_state.cmd_palette.visible) {
         renderAgentCommandPalette(win, &agent_state.cmd_palette);
     }
 
-    // Render model selection dialog as centered overlay (if in model_selection mode)
-    if (app.mode == .model_selection) {
+    if (options.show_global_dialogs and app.mode == .model_selection) {
         renderModelSelectionDialog(app, win);
     }
 
-    // Render help popup as overlay (if visible)
     if (agent_state.help_visible) {
         try agent_help.renderHelpPopup(app, win, agent_state);
     }
 
-    // Render subagent drill-in modal as overlay (if active)
     if (agent_state.getSubagentModal()) |modal| {
         renderSubagentModal(win, modal, app.allocator);
     }
 }
 
-fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
-    const agent_state = app.getActiveAgentState() orelse return;
+fn renderTitleBar(app: *App, win: vaxis.Window, tab: *AgentTab, is_focused: bool, show_tab_name: bool) !void {
+    const agent_state = &tab.agent_state;
 
     // Build title and status from active manager
     var status_buf: [64]u8 = undefined;
-    const title: []const u8 = if (app.getActiveManager()) |mgr| switch (mgr) {
-        .acp => |m| if (m.server_name) |name| name else "Agent",
-        .opencode => "Opencode",
-        .codex => "Codex",
-    } else if (app.getPendingAgentInfo()) |info| switch (info.protocol) {
-        .acp => info.name,
-        .opencode => "Opencode",
-        .codex => "Codex",
-    } else "Agent";
+    const base_title: []const u8 = if (tab.manager) |mgr|
+        mgr.getDisplayName()
+    else
+        "Agent";
+    var title_buf: [160]u8 = undefined;
+    const title: []const u8 = if (show_tab_name)
+        std.fmt.bufPrint(&title_buf, "{s} · {s}", .{ tab.name, base_title }) catch base_title
+    else
+        base_title;
 
     const suffix = if (is_focused) " [focused]" else "";
 
-    const status_text: []const u8 = if (app.getActiveManager()) |mgr| switch (mgr) {
+    const status_text: []const u8 = if (tab.manager) |mgr| switch (mgr) {
         .acp => |m| blk: {
             const base_status: []const u8 = switch (m.status) {
                 .disconnected => " Disconnected",
@@ -1137,10 +1156,6 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
             .@"error" => " Error",
         },
         .opencode => |m| if (m.isThinking()) " Thinking..." else " Active",
-    } else if (app.getPendingAgentInfo()) |info| switch (info.protocol) {
-        .acp => " Connecting...",
-        .opencode => " Connecting...",
-        .codex => " Connecting...",
     } else " Not connected";
 
     const title_style = vaxis.Style{
@@ -1245,12 +1260,21 @@ fn renderTitleBar(app: *App, win: vaxis.Window, is_focused: bool) !void {
 
     // Print status on the right
     const status_style = vaxis.Style{
-        .fg = if (app.getActiveAcpManager()) |mgr|
-            switch (mgr.status) {
-                .session_active => Color.green,
-                .discovering, .connecting, .connected, .prompting => Color.dim_gray,
-                .disconnected => Color.white,
-                .failed => Color.red,
+        .fg = if (tab.manager) |mgr|
+            switch (mgr) {
+                .acp => |m| switch (m.status) {
+                    .session_active => Color.green,
+                    .discovering, .connecting, .connected, .prompting => Color.dim_gray,
+                    .disconnected => Color.white,
+                    .failed => Color.red,
+                },
+                .opencode => |m| if (m.isThinking()) Color.dim_gray else Color.green,
+                .codex => |m| switch (m.status) {
+                    .thread_active => Color.green,
+                    .connecting, .initialized, .turn_active => Color.dim_gray,
+                    .disconnected => Color.white,
+                    .@"error" => Color.red,
+                },
             }
         else
             Color.white,
@@ -1391,33 +1415,36 @@ fn renderTabBar(app: *App, win: vaxis.Window) bool {
     return true;
 }
 
-fn renderMessages(app: *App, win: vaxis.Window, agent_state: *AgentState) !void {
+fn renderMessages(app: *App, win: vaxis.Window, tab: *AgentTab, agent_state: *AgentState) !void {
     if (win.height == 0) return;
 
     // Clear the message area to remove any overlay artifacts
     win.clear();
 
     // Check agent connection status (unified across ACP and Opencode)
-    const is_thinking = app.isAgentThinking();
-    const is_loading = app.isSessionInitializing();
+    const is_thinking = tab.isThinking();
+    const is_loading = tab.isSessionInitializing();
 
     // If no messages, show status-aware placeholder
     if (agent_state.messages.items.len == 0) {
         if (is_loading) {
             // Show prominent loading status in center
-            const loading_text = if (app.getPendingAgentInfo()) |info| switch (info.protocol) {
-                .acp => "Connecting to agent...",
-                .opencode => "Connecting to Opencode...",
-                .codex => "Connecting to Codex...",
-            } else if (app.getActiveAcpManager()) |mgr| switch (mgr.status) {
-                .discovering => "Discovering agent...",
-                .connecting => "Connecting to agent...",
-                .connected => "Creating session...",
-                else => "Initializing...",
-            } else if (app.getActiveOpencodeManager()) |mgr| switch (mgr.status) {
-                .idle, .starting_server => "Starting server...",
-                .connecting => "Connecting to Opencode...",
-                else => "Initializing...",
+            const loading_text = if (tab.manager) |mgr| switch (mgr) {
+                .acp => |m| switch (m.status) {
+                    .discovering => "Discovering agent...",
+                    .connecting => "Connecting to agent...",
+                    .connected => "Creating session...",
+                    else => "Initializing...",
+                },
+                .opencode => |m| switch (m.status) {
+                    .idle, .starting_server => "Starting server...",
+                    .connecting => "Connecting to Opencode...",
+                    else => "Initializing...",
+                },
+                .codex => |m| switch (m.status) {
+                    .connecting, .initialized => "Connecting to Codex...",
+                    else => "Initializing...",
+                },
             } else "Initializing...";
             const loading_style = vaxis.Style{
                 .fg = Color.dim_gray,
@@ -2443,6 +2470,7 @@ fn renderFilePicker(win: vaxis.Window, agent_state: *AgentState, input_top: usiz
 fn renderInputArea(
     app: *App,
     win: vaxis.Window,
+    tab: *AgentTab,
     agent_state: *AgentState,
     is_focused: bool,
     pending_approval: ?ManagerHandle.PendingApproval,
@@ -2476,7 +2504,7 @@ fn renderInputArea(
 
     const text = agent_state.input.getText();
     if (show_plan_acceptance_hint) {
-        try renderPlanAcceptanceHint(app, win, agent_state);
+        try renderPlanAcceptanceHint(app, win, agent_state, tab.isSessionReady());
         return;
     }
 
@@ -2556,7 +2584,7 @@ fn renderInputArea(
     const is_shell_mode = agent_state.isShellMode();
 
     // Dim prompt when session is not ready
-    const session_ready = app.isSessionReady();
+    const session_ready = tab.isSessionReady();
     const prompt_style = getInputPromptStyle(is_shell_mode, session_ready);
     const text_style = withCommentBg(.{ .fg = Color.white });
     const file_ref_style = withCommentBg(.{ .fg = Color.cyan, .bold = true });
@@ -2795,8 +2823,7 @@ fn renderInputArea(
     // Note: Footer is now rendered by the unified status bar in UI.renderStatus
 }
 
-fn renderPlanAcceptanceHint(app: *App, win: vaxis.Window, agent_state: *AgentState) !void {
-    const session_ready = app.isSessionReady();
+fn renderPlanAcceptanceHint(app: *App, win: vaxis.Window, agent_state: *AgentState, session_ready: bool) !void {
     const prompt_style = getInputPromptStyle(agent_state.isShellMode(), session_ready);
     const hint_style = withCommentBg(.{ .fg = Color.dim_gray, .italic = true });
     const input_col: usize = 3;

@@ -335,42 +335,6 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
 
-        // Ctrl+W chord for window navigation in history mode
-        if (key.mods.ctrl and key.codepoint == 'w') {
-            app.state.pending_ctrl_w = true;
-            agent_state.history.pending_g = false;
-            agent_state.history.pending_y = false;
-            return;
-        }
-
-        // Handle pending Ctrl+W chord in history mode
-        if (app.state.pending_ctrl_w) {
-            app.state.pending_ctrl_w = false;
-            agent_state.history.pending_g = false;
-            agent_state.history.pending_y = false;
-            // ESC cancels pending Ctrl+w
-            if (key.codepoint == 27) {
-                return;
-            }
-            if (key.codepoint == 'o') {
-                // Toggle fullscreen
-                if (app.tab_manager) |*tm| {
-                    tm.toggleFullScreen();
-                    app.needs_render = true;
-                }
-                return;
-            }
-            if (key.codepoint == 'h' or key.codepoint == 'l' or key.codepoint == 'w') {
-                // Window navigation - exit history mode and switch to diff
-                agent_state.exitHistoryMode();
-                app.mode = .normal;
-                app.needs_render = true;
-                return;
-            }
-            // Unknown Ctrl+w sequence - ignore
-            return;
-        }
-
         // Enter - drill into subagent message (if cursor is on a subagent tool message with session_id)
         if (key.codepoint == vaxis.Key.enter) {
             if (agent_state.getMessageIdxAtCursorLine()) |msg_idx| {
@@ -750,75 +714,137 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
     }
 
-    // Ctrl+W chord for window navigation (vim-style)
-    if (key.mods.ctrl and key.codepoint == 'w') {
-        app.state.pending_ctrl_w = true;
-        return;
-    }
-
-    // Handle pending Ctrl+W chord
-    if (app.state.pending_ctrl_w) {
-        app.state.pending_ctrl_w = false;
-        // ESC cancels pending Ctrl+w
-        if (key.codepoint == 27) { // ESC
+    if (agent_state.input.vim.vim_mode == .normal) {
+        if (key.mods.ctrl and key.codepoint == 'w') {
+            app.state.pending_ctrl_w = true;
             return;
         }
-        // Support both Ctrl+w h and Ctrl+w Ctrl+h (vim-style)
-        // Handle both control character codepoints AND ctrl+letter combinations
-        const effective_key: u21 = blk: {
-            // First check control character codepoints
-            // Note: Some terminals send 127 (DEL) for Ctrl+H instead of 8 (BS)
-            if (key.codepoint == 8 or key.codepoint == 127) break :blk 'h'; // Ctrl+h / backspace
-            if (key.codepoint == 12) break :blk 'l'; // Ctrl+l as control char
-            if (key.codepoint == 23) break :blk 'w'; // Ctrl+w as control char
-            // Also handle ctrl+letter (some terminals report this way)
-            if (key.mods.ctrl) {
-                if (key.codepoint == 'h') break :blk 'h';
-                if (key.codepoint == 'l') break :blk 'l';
-                if (key.codepoint == 'w') break :blk 'w';
+
+        if (app.state.pending_ctrl_w) {
+            app.state.pending_ctrl_w = false;
+            if (key.codepoint == 27) {
+                return;
             }
-            break :blk key.codepoint;
-        };
 
-        // Check agent panel position to determine correct navigation
-        const agent_on_left = agent_state.panel_side == .left;
+            const agent_on_left = agent_state.panel_side == .left;
+            const tm = if (app.tab_manager) |*manager| manager else return;
 
-        switch (effective_key) {
-            'h' => {
-                // If agent is on right, focus left (diff)
-                // If agent is on left, already leftmost - no-op
-                if (!agent_on_left) {
-                    app.mode = .normal;
+            switch (key.codepoint) {
+                'h' => {
+                    if (tm.focusPaneDirection(.left)) {
+                        app.needs_render = true;
+                        return;
+                    }
+                    if (!agent_on_left) {
+                        app.mode = .normal;
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                'j' => {
+                    if (tm.focusPaneDirection(.down)) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                'k' => {
+                    if (tm.focusPaneDirection(.up)) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                'l' => {
+                    if (tm.focusPaneDirection(.right)) {
+                        app.needs_render = true;
+                        return;
+                    }
+                    if (agent_on_left) {
+                        app.mode = .normal;
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                'w' => {
+                    if (tm.focusNextPane()) {
+                        app.needs_render = true;
+                    } else {
+                        app.mode = .normal;
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                'o' => {
+                    if (!tm.collapseToActivePane()) {
+                        tm.toggleFullScreen();
+                    }
                     app.needs_render = true;
-                }
-                return;
-            },
-            'l' => {
-                // If agent is on left, focus right (diff)
-                // If agent is on right, already rightmost - no-op
-                if (agent_on_left) {
-                    app.mode = .normal;
-                    app.needs_render = true;
-                }
-                return;
-            },
-            'w' => {
-                // Cycle windows: always return to diff
-                app.mode = .normal;
-                app.needs_render = true;
-                return;
-            },
-            'o' => {
-                // Toggle fullscreen (vim's "only window" concept)
-                if (app.tab_manager) |*tm| {
-                    tm.toggleFullScreen();
-                    app.needs_render = true;
-                }
-                return;
-            },
-            else => {},
+                    return;
+                },
+                'v' => {
+                    try openSplit(app, .vertical);
+                    return;
+                },
+                's' => {
+                    try openSplit(app, .horizontal);
+                    return;
+                },
+                'c' => {
+                    if (tm.closeFocusedPane()) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                'H' => {
+                    if (try tm.moveFocusedPane(.left)) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                'J' => {
+                    if (try tm.moveFocusedPane(.down)) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                'K' => {
+                    if (try tm.moveFocusedPane(.up)) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                'L' => {
+                    if (try tm.moveFocusedPane(.right)) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                '+' => {
+                    if (tm.resizeFocusedPane(.taller)) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                '-' => {
+                    if (tm.resizeFocusedPane(.shorter)) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                '<' => {
+                    if (tm.resizeFocusedPane(.narrower)) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                '>' => {
+                    if (tm.resizeFocusedPane(.wider)) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
+                else => return,
+            }
         }
-        return;
     }
 
     // Ctrl+E - close agent panel and return to diff (toggle)
@@ -3253,6 +3279,8 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
         .new_tab => {
             const tm = try app.ensureTabManager();
             const new_tab = try tm.createTab("New Tab");
+            new_tab.agent_state.input.vim.vim_mode = agent_state.input.vim.vim_mode;
+            tm.showTabInFocusedPane(new_tab.id);
 
             // Store tab ID for agent selection to target
             app.state.pending_tab_for_selection = new_tab.id;
@@ -3277,6 +3305,16 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
                 _ = tm.closeActiveTab();
             }
         },
+        .vertical_split => {
+            try openSplit(app, .vertical);
+        },
+        .horizontal_split => {
+            try openSplit(app, .horizontal);
+        },
+        .close_split => {
+            const tm = try app.ensureTabManager();
+            _ = tm.collapseToActivePane();
+        },
         .next_tab => {
             const tm = try app.ensureTabManager();
             tm.nextTab();
@@ -3296,4 +3334,20 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
             agent_state.togglePlanExpanded();
         },
     }
+}
+
+fn openSplit(app: *App, orientation: agent.tab_manager.SplitOrientation) !void {
+    const tm = try app.ensureTabManager();
+    const active_tab = tm.activeTab() orelse return;
+    const new_tab = try tm.createHiddenTab("New Tab");
+    new_tab.agent_state.input.vim.vim_mode = active_tab.agent_state.input.vim.vim_mode;
+    _ = try tm.splitFocusedPane(orientation, new_tab.id);
+
+    app.state.pending_tab_for_selection = new_tab.id;
+    if (app.state.configured_agents == null) {
+        app.state.configured_agents = app.loadConfiguredAgents();
+    }
+
+    app.mode = .agent_selection;
+    app.needs_render = true;
 }

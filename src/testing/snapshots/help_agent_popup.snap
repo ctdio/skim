@@ -2,8 +2,6 @@
 │                                                                      │
 │ GLOBAL                                                               │
 │  Ctrl-e         │ Close panel                                        │
-│  Ctrl-w h/l     │ Focus diff / agent                                 │
-│  Ctrl-w o       │ Toggle fullscreen                                  │
 │                                                                      │
 │ INSERT MODE                                                          │
 │  Enter          │ Send prompt                                        │
@@ -14,7 +12,9 @@
 │                                                                      │
 │ NORMAL MODE                                                          │
 │  i/a/I/A        │ Enter insert                                       │
-│  Space s        │ Toggle diff view                                   │
-│  Space t        │ Cycle model variant                                │
+│  Ctrl-w h/j/k/l │ Focus pane / diff edge                             │
+│  Ctrl-w v / s   │ Vertical / horizontal split                        │
+│  Ctrl-w c / o   │ Close pane / only pane                             │
+│  Ctrl-w H/J/K/L │ Move pane to edge                                  │
 │                                                                      │
 ╰───────────────────────── ? or Esc to close ──────────────────────────╯
