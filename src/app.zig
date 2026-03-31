@@ -6727,22 +6727,13 @@ pub const App = struct {
                             defer if (!std.mem.eql(u8, msg, "Connected")) self.allocator.free(msg);
                             self.showStatusMessage(msg);
 
-                            if (self.getConnectingAgentState()) |agent_state_conn| {
-                                const welcome_msg = if (model_name.len > 0)
-                                    std.fmt.allocPrint(self.allocator, "Connected to {s} · {s}. You can start chatting!", .{ agent_name, model_name }) catch "Connected! You can start chatting."
-                                else
-                                    std.fmt.allocPrint(self.allocator, "Connected to {s}. You can start chatting!", .{agent_name}) catch "Connected! You can start chatting.";
-                                defer if (!std.mem.eql(u8, welcome_msg, "Connected! You can start chatting.")) self.allocator.free(welcome_msg);
-                                agent_state_conn.addMessage(.system, welcome_msg) catch {};
-                            }
+                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), true);
 
                             std.log.info("ACP: Connection complete for tab {d}", .{conn.tab_id});
                             mgr.sendNextQueuedPrompt();
                         } else if (mgr.status == .failed) {
                             self.showStatusMessage("Failed to connect to agent");
-                            if (self.getConnectingAgentState()) |agent_state_conn| {
-                                agent_state_conn.addMessage(.system, "Connection failed. Press 'a' to close this panel and try again.") catch {};
-                            }
+                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), false);
                             tab.manager = null;
                             mgr.deinit();
                             self.allocator.destroy(mgr);
@@ -6757,15 +6748,11 @@ pub const App = struct {
                     .opencode => |mgr| {
                         if (mgr.status == .session_active) {
                             self.showStatusMessage("Connected to Opencode");
-                            if (self.getConnectingAgentState()) |agent_state_conn| {
-                                agent_state_conn.addMessage(.system, "Connected to Opencode. You can start chatting!") catch {};
-                            }
+                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), true);
                             std.log.info("Opencode: Connection complete for tab {d}", .{conn.tab_id});
                         } else if (mgr.status == .failed or mgr.status == .disconnected) {
                             self.showStatusMessage("Failed to connect to Opencode");
-                            if (self.getConnectingAgentState()) |agent_state_conn| {
-                                agent_state_conn.addMessage(.system, "Connection failed. Check if opencode is installed.") catch {};
-                            }
+                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), false);
                             tab.manager = null;
                             mgr.deinit();
                             self.allocator.destroy(mgr);
@@ -6784,18 +6771,12 @@ pub const App = struct {
                             defer if (!std.mem.eql(u8, msg, "Connected to Codex")) self.allocator.free(msg);
                             self.showStatusMessage(msg);
 
-                            if (self.getConnectingAgentState()) |agent_state_conn| {
-                                const welcome_msg = std.fmt.allocPrint(self.allocator, "Connected to Codex · {s}. You can start chatting!", .{model_name}) catch "Connected to Codex! You can start chatting.";
-                                defer if (!std.mem.eql(u8, welcome_msg, "Connected to Codex! You can start chatting.")) self.allocator.free(welcome_msg);
-                                agent_state_conn.addMessage(.system, welcome_msg) catch {};
-                            }
+                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), true);
 
                             std.log.info("Codex: Connection complete for tab {d}", .{conn.tab_id});
                         } else if (mgr.status == .@"error" or mgr.status == .disconnected) {
                             self.showStatusMessage("Failed to connect to Codex");
-                            if (self.getConnectingAgentState()) |agent_state_conn| {
-                                agent_state_conn.addMessage(.system, "Connection failed. Check if codex is installed.") catch {};
-                            }
+                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), false);
                             tab.manager = null;
                             mgr.deinit();
                             self.allocator.destroy(mgr);
@@ -6809,6 +6790,15 @@ pub const App = struct {
         self.pending_connection = null;
         self.needs_render = true;
         return false;
+    }
+
+    fn maybeAddConnectionSystemMessage(self: *App, agent_state_opt: ?*agent.AgentState, connected: bool) void {
+        _ = self;
+        if (!connected) return;
+
+        if (agent_state_opt) |agent_state_conn| {
+            agent_state_conn.addMessage(.system, "Agent ready.") catch {};
+        }
     }
 
     /// Get the tab being connected (via pending_connection.tab_id)
@@ -7088,6 +7078,61 @@ test "isSessionInitializing returns true for queued agent connection" {
     defer app.frame_segment_arena.deinit();
 
     try std.testing.expect(app.isSessionInitializing());
+}
+
+test "maybeAddConnectionSystemMessage only emits ready message on success" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = std.heap.ArenaAllocator.init(allocator),
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = null,
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer app.pending_highlight_jobs.deinit();
+    defer app.blame_cache.deinit();
+    defer app.frame_segment_arena.deinit();
+
+    var agent_state = agent.AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    app.maybeAddConnectionSystemMessage(&agent_state, false);
+    try std.testing.expectEqual(@as(usize, 0), agent_state.messages.items.len);
+
+    app.maybeAddConnectionSystemMessage(&agent_state, true);
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(agent.AgentState.Message.Role.system, agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Agent ready.", agent_state.messages.items[0].content);
 }
 
 test "applyCodexSessionConfig enables plan collaboration mode" {

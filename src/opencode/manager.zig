@@ -1957,14 +1957,10 @@ pub const OpencodeManager = struct {
             },
             .permission_asked => {
                 self.pending_permission = true;
-                const detail = if (properties) |props| extractDetailFromProperties(props) else null;
-                self.pushSystemMessage(tryBuildSystemMessage(self, "Permission requested", detail));
                 self.clearPromptingState();
             },
             .permission_resolved => {
                 self.pending_permission = false;
-                const detail = if (properties) |props| extractDetailFromProperties(props) else null;
-                self.pushSystemMessage(tryBuildSystemMessage(self, "Permission resolved", detail));
                 self.clearPromptingState();
             },
             .question_asked => {
@@ -1983,9 +1979,6 @@ pub const OpencodeManager = struct {
                                 }
                             }
                             self.message_queue.push(.{ .question_prompt = prompt });
-                        } else {
-                            const detail = extractDetailFromProperties(props);
-                            self.pushSystemMessage(tryBuildSystemMessage(self, "Question", detail));
                         }
                     }
                 }
@@ -3304,19 +3297,6 @@ pub const OpencodeManager = struct {
         return any_diff;
     }
 
-    fn tryBuildSystemMessage(self: *OpencodeManager, prefix: []const u8, detail: ?[]const u8) ?[]const u8 {
-        if (detail) |d| {
-            return std.fmt.allocPrint(self.event_allocator, "{s}: {s}", .{ prefix, d }) catch null;
-        }
-        return std.fmt.allocPrint(self.event_allocator, "{s}.", .{prefix}) catch null;
-    }
-
-    fn pushSystemMessage(self: *OpencodeManager, message: ?[]const u8) void {
-        if (message) |msg| {
-            self.message_queue.push(.{ .system_message = msg });
-        }
-    }
-
     fn isMessageCompletionStatus(status: []const u8) bool {
         return std.mem.eql(u8, status, "completed") or
             std.mem.eql(u8, status, "complete") or
@@ -3745,7 +3725,7 @@ test "opencode event: message.updated completion clears status" {
     }
 }
 
-test "opencode event: permission.asked emits system message and clears status" {
+test "opencode event: permission.asked clears status without system message" {
     const allocator = std.testing.allocator;
     var manager = OpencodeManager.init(allocator);
     defer manager.deinit();
@@ -3760,9 +3740,7 @@ test "opencode event: permission.asked emits system message and clears status" {
     var ev1 = ev1_opt.?;
     defer ev1.deinit(manager.event_allocator);
     switch (ev1) {
-        .system_message => |msg| {
-            try std.testing.expect(std.mem.indexOf(u8, msg, "Permission requested") != null);
-        },
+        .message_complete => {},
         else => try std.testing.expect(false),
     }
 
@@ -3771,15 +3749,6 @@ test "opencode event: permission.asked emits system message and clears status" {
     var ev2 = ev2_opt.?;
     defer ev2.deinit(manager.event_allocator);
     switch (ev2) {
-        .message_complete => {},
-        else => try std.testing.expect(false),
-    }
-
-    const ev3_opt = manager.poll();
-    try std.testing.expect(ev3_opt != null);
-    var ev3 = ev3_opt.?;
-    defer ev3.deinit(manager.event_allocator);
-    switch (ev3) {
         .status_change => |status| try std.testing.expectEqual(Status.session_active, status),
         else => try std.testing.expect(false),
     }
