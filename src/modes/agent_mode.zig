@@ -992,6 +992,15 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         // Don't return - let normal ESC handling proceed (switches to normal mode)
     }
 
+    if (agent_state.isAwaitingPlanResponse() and
+        agent_state.input.getText().len == 0 and
+        key.matches(vaxis.Key.enter, .{}))
+    {
+        try acceptCompletedPlan(app, agent_state);
+        app.needs_render = true;
+        return;
+    }
+
     // Delegate to input editor
     const action = try agent.InputEditor.handleKey(&agent_state.input, key, app.allocator);
 
@@ -1116,18 +1125,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                         }
                     }
                 } else if (agent_state.isAwaitingPlanResponse()) {
-                    const reply = state.default_plan_acceptance_reply;
-                    try agent_state.addMessage(.user, reply);
-                    app.autoNameActiveTab(reply);
-                    try sendPromptToActiveManager(app, reply);
-                    agent_state.input.clear();
-
-                    if (agent_state.hasStash()) {
-                        agent_state.unstashPrompt();
-                        agent_state.clearStash();
-                        agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
-                        agent_state.input.vim.vim_mode = .insert;
-                    }
+                    try acceptCompletedPlan(app, agent_state);
                 }
                 app.needs_render = true;
             },
@@ -1916,6 +1914,24 @@ fn updateFilePickerVisibility(_: *App, agent_state: *agent.AgentState) void {
 /// Tries Opencode manager first if available, then falls back to ACP.
 /// MVP Limitation for Opencode: @file references and shell outputs are NOT supported
 /// (sent as literal text or discarded).
+fn acceptCompletedPlan(app: *App, agent_state: *state.AgentState) !void {
+    const reply = state.default_plan_acceptance_reply;
+    try agent_state.addMessage(.user, reply);
+    app.autoNameActiveTab(reply);
+    if (app.getActiveManager()) |mgr| {
+        mgr.prepareAcceptedPlanPrompt();
+    }
+    try sendPromptToActiveManager(app, reply);
+    agent_state.input.clear();
+
+    if (agent_state.hasStash()) {
+        agent_state.unstashPrompt();
+        agent_state.clearStash();
+        agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
+        agent_state.input.vim.vim_mode = .insert;
+    }
+}
+
 pub fn sendPromptToActiveManager(app: *App, text: []const u8) !void {
     const tab = (if (app.tab_manager) |*tm| tm.activeTab() else null) orelse {
         if (app.getActiveAgentState()) |agent_state| {
@@ -3095,7 +3111,7 @@ test "ESC interrupts active Codex turn in normal mode" {
     mgr.process = proc;
     mgr.transport = transport;
     mgr.status = .turn_active;
-    mgr.thread_id = try allocator.dupe(u8, "thread-1");
+    mgr.thread_id = "thread-1";
     mgr.turn_id = try allocator.dupe(u8, "turn-1");
 
     tab.agent_state.input.vim.vim_mode = .normal;
@@ -3259,7 +3275,7 @@ test "empty enter after completed plan sends default acceptance reply" {
     mgr.process = proc;
     mgr.transport = transport;
     mgr.status = .thread_active;
-    mgr.thread_id = try allocator.dupe(u8, "thread-1");
+    mgr.thread_id = "thread-1";
 
     try tab.agent_state.addCompletedAgentMessage("<proposed_plan>\n# Plan\n</proposed_plan>");
     tab.agent_state.input.vim.vim_mode = .insert;
@@ -3268,6 +3284,8 @@ test "empty enter after completed plan sends default acceptance reply" {
 
     try std.testing.expect(app.needs_render);
     try std.testing.expectEqual(CodexManager.Status.turn_active, mgr.status);
+    try std.testing.expect(mgr.collaboration_mode.? == .default);
+    try std.testing.expect(mgr.requested_collaboration_mode.? == .default);
     try std.testing.expectEqual(@as(usize, 2), tab.agent_state.messages.items.len);
     try std.testing.expectEqual(state.Message.Role.user, tab.agent_state.messages.items[1].role);
     try std.testing.expectEqualStrings(state.default_plan_acceptance_reply, tab.agent_state.messages.items[1].content);

@@ -1,5 +1,6 @@
 pub const acp_session_replay = @import("acp/session_replay.zig");
 pub const render = @import("agent/render.zig");
+pub const agent_mode = @import("modes/agent_mode.zig");
 pub const codex_manager = @import("codex/manager.zig");
 pub const codex_codec = @import("codex/codec.zig");
 pub const codex_protocol = @import("codex/protocol.zig");
@@ -30,4 +31,5 @@ pub const renderFileChangeApproval = render.renderFileChangeApproval;
 pub const renderUserInputApproval = render.renderUserInputApproval;
 pub const renderAgentPanel = render.renderAgentPanel;
 pub const getInputPromptStyle = render.getInputPromptStyle;
+pub const handleAgentKey = agent_mode.handleKey;
 pub const Color = @import("rendering/common.zig").Color;

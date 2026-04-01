@@ -21,6 +21,7 @@ pub const AgentEvent = union(enum) {
     // Streaming content
     text_chunk: []const u8,
     completed_agent_message: []const u8,
+    completed_plan_message: []const u8,
     thinking_chunk: []const u8,
     message_complete: void,
 
@@ -98,6 +99,9 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
         },
         .completed_agent_message => |text| {
             agent_state.addCompletedAgentMessage(text) catch {};
+        },
+        .completed_plan_message => |text| {
+            addCompletedPlanMessage(agent_state, text) catch {};
         },
         .thinking_chunk => |text| {
             agent_state.appendToLastThinkingMessage(text) catch {};
@@ -390,7 +394,7 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
                 else
                     .{ .message_complete = {} },
                 .plan => |plan| break :blk if (plan.text.len > 0)
-                    .{ .completed_agent_message = plan.text }
+                    .{ .completed_plan_message = plan.text }
                 else
                     .{ .message_complete = {} },
                 .command_execution => |cmd| break :blk .{ .tool_update = .{
@@ -774,6 +778,26 @@ fn parseProtocolPlanPriority(raw_priority: ?[]const u8) protocol.PlanEntryPriori
     return .medium;
 }
 
+fn addCompletedPlanMessage(agent_state: *AgentState, text: []const u8) !void {
+    if (isWrappedProposedPlan(text)) {
+        try agent_state.addCompletedAgentMessage(text);
+        return;
+    }
+
+    const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
+    if (trimmed.len == 0) return;
+
+    const wrapped = try std.fmt.allocPrint(agent_state.allocator, "<proposed_plan>\n{s}\n</proposed_plan>", .{trimmed});
+    defer agent_state.allocator.free(wrapped);
+
+    try agent_state.addCompletedAgentMessage(wrapped);
+}
+
+fn isWrappedProposedPlan(text: []const u8) bool {
+    const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
+    return std.mem.startsWith(u8, trimmed, "<proposed_plan>") and std.mem.endsWith(u8, trimmed, "</proposed_plan>");
+}
+
 // =============================================================================
 // Tests — codexEventToAgentEvent
 // =============================================================================
@@ -867,8 +891,23 @@ test "codexEventToAgentEvent: item_completed plan maps to completed agent text" 
     } };
     const result = codexEventToAgentEvent(event);
     try std.testing.expect(result != null);
-    try std.testing.expect(result.? == .completed_agent_message);
-    try std.testing.expectEqualStrings("<proposed_plan>\n# Plan\n</proposed_plan>", result.?.completed_agent_message);
+    try std.testing.expect(result.? == .completed_plan_message);
+    try std.testing.expectEqualStrings("<proposed_plan>\n# Plan\n</proposed_plan>", result.?.completed_plan_message);
+}
+
+test "codexEventToAgentEvent: item_completed plan without tags normalizes to proposed plan message" {
+    const event = CodexEvent{ .item_completed = .{
+        .thread_id = "t1",
+        .turn_id = "turn-1",
+        .item = .{ .plan = .{
+            .id = "plan-1",
+            .text = "# Plan",
+        } },
+    } };
+    const result = codexEventToAgentEvent(event);
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.? == .completed_plan_message);
+    try std.testing.expectEqualStrings("# Plan", result.?.completed_plan_message);
 }
 
 test "codexEventToAgentEvent: item_completed command_execution with non-zero exit maps to failed" {
@@ -1071,7 +1110,7 @@ test "processAgentEvent: codex completed agent message without delta still rende
 
     const agent_event = codexEventToAgentEvent(codex_event.?);
     try std.testing.expect(agent_event != null);
-    try std.testing.expect(agent_event.? == .completed_agent_message);
+    try std.testing.expect(agent_event.? == .completed_plan_message);
 
     var agent_state = AgentState.init(allocator, .right);
     defer agent_state.deinit();
@@ -1091,7 +1130,7 @@ test "processAgentEvent: codex completed plan item without delta still renders" 
 
     var decoder = codex_codec.Decoder.init(allocator);
     const json =
-        \\{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"Plan","id":"plan-1","text":"<proposed_plan>\n# Agent Split Panes v1\n</proposed_plan>"}}}
+        \\{"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"Plan","id":"plan-1","text":"# Agent Split Panes v1"}}}
     ;
     var msg = try decoder.decode(json);
     defer msg.deinit(allocator);

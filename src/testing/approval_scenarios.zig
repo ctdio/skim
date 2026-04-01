@@ -1,4 +1,5 @@
 const std = @import("std");
+const vaxis = @import("vaxis");
 const harness = @import("harness.zig");
 const snapshot = @import("snapshot.zig");
 const approval_root = @import("approval_test_root");
@@ -281,7 +282,7 @@ test "snapshot: codex_completed_plan_panel" {
         \\{"timestamp":"2026-03-27T03:54:03.784Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1","model_context_window":258400,"collaboration_mode_kind":"plan"}}
         \\{"timestamp":"2026-03-27T03:54:03.789Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Design split panes for the agent panel."}]}}
         \\{"timestamp":"2026-03-27T03:54:09.550Z","type":"event_msg","payload":{"type":"agent_message","message":"I’m expanding this into a handoff-grade spec now.","phase":"commentary","memory_citation":null}}
-        \\{"timestamp":"2026-03-27T03:55:11.957Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-1","turn_id":"turn-1","item":{"type":"Plan","id":"turn-1-plan","text":"<proposed_plan>\n# Split Panes\n\n## Summary\nAdd vertical panes inside the agent panel.\n\n## Key Changes\n- Keep tabs as workspaces.\n- Route input through the focused pane.\n</proposed_plan>"}}}
+        \\{"timestamp":"2026-03-27T03:55:11.957Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-1","turn_id":"turn-1","item":{"type":"Plan","id":"turn-1-plan","text":"# Split Panes\n\n## Summary\nAdd vertical panes inside the agent panel.\n\n## Key Changes\n- Keep tabs as workspaces.\n- Route input through the focused pane."}}}
         \\{"timestamp":"2026-03-27T03:55:11.988Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1","last_agent_message":"I’m expanding this into a handoff-grade spec now."}}
     ;
 
@@ -294,6 +295,37 @@ test "snapshot: codex_completed_plan_panel" {
 
     try std.testing.expect(std.mem.indexOf(u8, text, "Press Enter to accept this plan") != null);
     try snapshot.expectSnapshot(allocator, "codex_completed_plan_panel", text);
+}
+
+test "accepting a codex completed plan switches the next turn to code mode" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    const mgr = try tab.createCodexManager();
+
+    const proc = try approval_root.CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    const transport = try approval_root.CodexTransport.init(allocator, proc);
+    mgr.process = proc;
+    mgr.transport = transport;
+    mgr.status = .thread_active;
+    mgr.thread_id = "thread-1";
+    mgr.collaboration_mode = .plan;
+    mgr.requested_collaboration_mode = .plan;
+
+    try tab.agent_state.addCompletedAgentMessage("<proposed_plan>\n# Plan\n</proposed_plan>");
+    tab.agent_state.input.vim.vim_mode = .insert;
+
+    try approval_root.handleAgentKey(&app, .{ .codepoint = vaxis.Key.enter });
+
+    try std.testing.expect(app.needs_render);
+    try std.testing.expectEqual(approval_root.CodexManager.Status.turn_active, mgr.status);
+    try std.testing.expectEqual(.default, mgr.collaboration_mode.?);
+    try std.testing.expectEqual(.default, mgr.requested_collaboration_mode.?);
+    try std.testing.expectEqual(@as(usize, 2), tab.agent_state.messages.items.len);
+    try std.testing.expectEqualStrings("This plan looks correct.", tab.agent_state.messages.items[1].content);
 }
 
 test "snapshot: codex_replay_in_progress_panel" {

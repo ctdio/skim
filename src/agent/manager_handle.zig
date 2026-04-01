@@ -126,6 +126,14 @@ pub const ManagerHandle = union(enum) {
         };
     }
 
+    /// Adjust manager mode before sending a plan-acceptance prompt.
+    pub fn prepareAcceptedPlanPrompt(self: ManagerHandle) void {
+        switch (self) {
+            .acp, .opencode => {},
+            .codex => |m| m.setCollaborationMode(.default),
+        }
+    }
+
     /// Resolved model view for the UI — protocol-independent.
     pub const ModelView = struct {
         model_id: []const u8,

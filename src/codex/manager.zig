@@ -757,6 +757,11 @@ pub const CodexManager = struct {
         return mode.displayName();
     }
 
+    pub fn setCollaborationMode(self: *CodexManager, mode: protocol.CollaborationMode) void {
+        self.requested_collaboration_mode = mode;
+        self.collaboration_mode = mode;
+    }
+
     /// Cycle to the next collaboration mode for subsequent turns.
     pub fn cycleToNextMode(self: *CodexManager) ?[]const u8 {
         const current_mode = self.requested_collaboration_mode orelse self.collaboration_mode orelse .default;
@@ -764,8 +769,7 @@ pub const CodexManager = struct {
             .default => .plan,
             .plan => .default,
         };
-        self.requested_collaboration_mode = next_mode;
-        self.collaboration_mode = next_mode;
+        self.setCollaborationMode(next_mode);
         return next_mode.displayName();
     }
 

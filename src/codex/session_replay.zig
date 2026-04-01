@@ -181,7 +181,7 @@ fn replayCompletedItem(agent_state: *AgentState, item: std.json.ObjectMap) !void
     if (std.mem.eql(u8, item_type, "Plan") or std.mem.eql(u8, item_type, "plan")) {
         const text = getObjectString(item, "text") orelse return;
         if (text.len == 0) return;
-        replayAgentEvent(agent_state, .{ .completed_agent_message = text });
+        replayAgentEvent(agent_state, .{ .completed_plan_message = text });
         return;
     }
 
@@ -451,7 +451,7 @@ test "replaySessionFromString replays codex session items into agent state" {
         \\{"timestamp":"2026-03-27T03:54:09.550Z","type":"event_msg","payload":{"type":"agent_message","message":"I’m expanding this into a handoff-grade spec now.","phase":"commentary","memory_citation":null}}
         \\{"timestamp":"2026-03-27T03:54:09.551Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git status --short\",\"workdir\":\"/tmp/project\"}","call_id":"call-1"}}
         \\{"timestamp":"2026-03-27T03:54:09.552Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"M src/agent/render.zig"}}
-        \\{"timestamp":"2026-03-27T03:55:11.957Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-1","turn_id":"turn-1","item":{"type":"Plan","id":"turn-1-plan","text":"<proposed_plan>\n# Split Panes\n\n## Summary\n- Add panes\n- Keep tabs\n</proposed_plan>"}}}
+        \\{"timestamp":"2026-03-27T03:55:11.957Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-1","turn_id":"turn-1","item":{"type":"Plan","id":"turn-1-plan","text":"# Split Panes\n\n## Summary\n- Add panes\n- Keep tabs"}}}
         \\{"timestamp":"2026-03-27T03:55:11.986Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":104367,"cached_input_tokens":101632,"output_tokens":3184,"reasoning_output_tokens":52,"total_tokens":107551},"last_token_usage":{"input_tokens":104367,"cached_input_tokens":101632,"output_tokens":3184,"reasoning_output_tokens":52,"total_tokens":107551},"model_context_window":258400},"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":53.0,"window_minutes":300,"resets_at":1774594435},"secondary":{"used_percent":16.0,"window_minutes":10080,"resets_at":1775181235},"credits":null,"plan_type":"team"}}}
         \\{"timestamp":"2026-03-27T03:55:11.988Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1","last_agent_message":"I’m expanding this into a handoff-grade spec now."}}
     ;
