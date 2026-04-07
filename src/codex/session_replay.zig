@@ -153,6 +153,7 @@ fn replayEventMessage(agent_state: *AgentState, payload: std.json.ObjectMap, sum
 
     if (std.mem.eql(u8, payload_type, "task_complete")) {
         summary.manager_status = .thread_active;
+        replayAgentEvent(agent_state, .{ .clear_plan = {} });
         return;
     }
 
@@ -534,6 +535,27 @@ test "replaySessionFromString reports active turn status for in-progress session
     try std.testing.expectEqual(CodexManager.Status.turn_active, summary.manager_status);
     try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
     try std.testing.expectEqualStrings("Still working...", agent_state.messages.items[0].content);
+}
+
+test "replaySessionFromString clears codex todo state on task_complete" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const log =
+        \\{"timestamp":"2026-04-07T14:43:35.617Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+        \\{"timestamp":"2026-04-07T14:43:35.618Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"plan\":[{\"step\":\"Implement Codex apply_patch handling\",\"status\":\"in_progress\",\"priority\":\"high\"}]}","call_id":"call-plan-1"}}
+        \\{"timestamp":"2026-04-07T14:43:35.619Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+    ;
+
+    const summary = try replaySessionFromString(allocator, &agent_state, log);
+
+    try std.testing.expectEqual(CodexManager.Status.thread_active, summary.manager_status);
+    try std.testing.expectEqual(@as(usize, 0), agent_state.planEntryCount());
+    try std.testing.expectEqual(@as(usize, 2), agent_state.messages.items.len);
+    try std.testing.expectEqual(AgentMessage.Role.tool, agent_state.messages.items[0].role);
+    try std.testing.expectEqual(AgentMessage.Role.plan_snapshot, agent_state.messages.items[1].role);
 }
 
 test "replaySessionFromString restores request_user_input pending question" {

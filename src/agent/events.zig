@@ -38,6 +38,7 @@ pub const AgentEvent = union(enum) {
     // Plan updates (ACP + Codex)
     plan_update: []const protocol.PlanEntry,
     codex_plan_update: []const CodexPlanEntry,
+    clear_plan: void,
     commands_update: []const protocol.AvailableCommand,
 
     // Session lifecycle
@@ -104,8 +105,7 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
         .completed_plan_message => |text| {
             addCompletedPlanMessage(agent_state, text) catch {};
         },
-        .thinking_chunk => |text| {
-            agent_state.appendToLastThinkingMessage(text) catch {};
+        .thinking_chunk => {
         },
         .tool_call => |tc| {
             agent_state.addToolMessage(
@@ -199,6 +199,9 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
             agent_state.updatePlan(plan_entries) catch |err| {
                 std.log.err("codex_plan_update: updatePlan failed: {}", .{err});
             };
+        },
+        .clear_plan => {
+            agent_state.clearPlan();
         },
         .commands_update => |commands| {
             agent_state.updateAvailableCommands(commands) catch {};
@@ -427,7 +430,7 @@ pub fn codexEventToAgentEvent(event: CodexEvent) ?AgentEvent {
                 .user_message, .reasoning, .unknown => break :blk null,
             }
         },
-        .turn_completed => .{ .message_complete = {} },
+        .turn_completed => .{ .clear_plan = {} },
         .plan_updated => |p| .{ .codex_plan_update = p.entries },
         .token_usage_updated => |tu| blk: {
             const total = tu.total orelse tu.last orelse break :blk null;
@@ -1089,6 +1092,16 @@ test "processAgentEvent: apply_patch tool call creates diff messages for multipl
     }
 }
 
+test "processAgentEvent: thinking chunk does not add a chat message" {
+    const allocator = std.testing.allocator;
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    processAgentEvent(&agent_state, .{ .thinking_chunk = "Considering options..." });
+
+    try std.testing.expectEqual(@as(usize, 0), agent_state.messages.items.len);
+}
+
 test "codexEventToAgentEvent: item_completed mcp_tool_call maps to tool_update" {
     const event = CodexEvent{ .item_completed = .{
         .thread_id = "t1",
@@ -1150,14 +1163,14 @@ test "codexEventToAgentEvent: item_completed spawn_agent output maps to session_
     try std.testing.expectEqualStrings("019c-subagent", info.session_id.?);
 }
 
-test "codexEventToAgentEvent: turn_completed maps to message_complete" {
+test "codexEventToAgentEvent: turn_completed maps to clear_plan" {
     const event = CodexEvent{ .turn_completed = .{
         .thread_id = "t1",
         .turn = .{ .id = "turn-1", .status = .completed },
     } };
     const result = codexEventToAgentEvent(event);
     try std.testing.expect(result != null);
-    try std.testing.expect(result.? == .message_complete);
+    try std.testing.expect(result.? == .clear_plan);
 }
 
 test "codexEventToAgentEvent: plan_updated maps to codex_plan_update" {
@@ -1214,6 +1227,25 @@ test "processAgentEvent: codex plan notification updates todo state end-to-end" 
     try std.testing.expectEqual(@as(usize, 2), snapshot_entries.len);
     try std.testing.expectEqualStrings("Reproduce protocol event", snapshot_entries[0].content);
     try std.testing.expectEqualStrings("Verify todo render pipeline", snapshot_entries[1].content);
+}
+
+test "processAgentEvent: codex turn completion clears todo state" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    var entries = [_]CodexPlanEntry{
+        .{ .content = "Implement Codex apply_patch handling", .status = .in_progress, .priority = .high },
+    };
+
+    processAgentEvent(&agent_state, .{ .codex_plan_update = entries[0..] });
+    try std.testing.expectEqual(@as(usize, 1), agent_state.planEntryCount());
+
+    processAgentEvent(&agent_state, .{ .clear_plan = {} });
+    try std.testing.expectEqual(@as(usize, 0), agent_state.planEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(Message.Role.plan_snapshot, agent_state.messages.items[0].role);
 }
 
 test "processAgentEvent: codex completed agent message without delta still renders" {
