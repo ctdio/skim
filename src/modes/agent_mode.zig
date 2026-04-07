@@ -2905,6 +2905,45 @@ pub fn parsePromptContent(allocator: std.mem.Allocator, input_text: []const u8) 
 // Tests
 // =============================================================================
 
+const PoisonAllocator = struct {
+    backing: std.mem.Allocator,
+
+    pub fn init(backing: std.mem.Allocator) PoisonAllocator {
+        return .{ .backing = backing };
+    }
+
+    pub fn allocator(self: *PoisonAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *PoisonAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *PoisonAllocator = @ptrCast(@alignCast(ctx));
+        @memset(memory, 0xAA);
+        self.backing.rawFree(memory, alignment, ret_addr);
+    }
+};
+
 test "parsePromptContent plain text no @ references" {
     const allocator = std.testing.allocator;
     const parsed = try parsePromptContent(allocator, "hello world");
@@ -3291,13 +3330,135 @@ test "empty enter after completed plan sends default acceptance reply" {
     try std.testing.expectEqualStrings(state.default_plan_acceptance_reply, tab.agent_state.messages.items[1].content);
 }
 
+test "new tab action preserves vim mode when tabs reallocate" {
+    var poison = PoisonAllocator.init(std.testing.allocator);
+    const allocator = poison.allocator();
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = std.mem.zeroes(@FieldType(App, "state")),
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    tab.agent_state.input.vim.vim_mode = .visual;
+
+    var exact_tabs: std.ArrayList(agent.AgentTab) = .{};
+    try exact_tabs.ensureTotalCapacityPrecise(allocator, 1);
+    try exact_tabs.append(allocator, app.tab_manager.?.tabs.items[0]);
+    app.tab_manager.?.tabs.deinit(allocator);
+    app.tab_manager.?.tabs = exact_tabs;
+    try std.testing.expectEqual(@as(usize, 1), app.tab_manager.?.tabs.capacity);
+
+    try executeAgentCommand(&app, &tab.agent_state, .new_tab);
+
+    try std.testing.expectEqual(@as(usize, 2), app.tab_manager.?.tabCount());
+    try std.testing.expectEqual(App.Mode.agent_selection, app.mode);
+    try std.testing.expect(app.state.pending_tab_for_selection != null);
+    try std.testing.expectEqual(state.InputEditor.VimMode.visual, app.tab_manager.?.activeTab().?.agent_state.input.vim.vim_mode);
+}
+
+test "openSplit preserves vim mode when tabs reallocate" {
+    var poison = PoisonAllocator.init(std.testing.allocator);
+    const allocator = poison.allocator();
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = std.mem.zeroes(@FieldType(App, "state")),
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    tab.agent_state.input.vim.vim_mode = .visual;
+
+    var exact_tabs: std.ArrayList(agent.AgentTab) = .{};
+    try exact_tabs.ensureTotalCapacityPrecise(allocator, 1);
+    try exact_tabs.append(allocator, app.tab_manager.?.tabs.items[0]);
+    app.tab_manager.?.tabs.deinit(allocator);
+    app.tab_manager.?.tabs = exact_tabs;
+    try std.testing.expectEqual(@as(usize, 1), app.tab_manager.?.tabs.capacity);
+
+    try openSplit(&app, .vertical);
+
+    try std.testing.expectEqual(@as(usize, 2), app.tab_manager.?.tabCount());
+    try std.testing.expect(app.tab_manager.?.isPaneSplitActive());
+    try std.testing.expectEqual(App.Mode.agent_selection, app.mode);
+    try std.testing.expect(app.state.pending_tab_for_selection != null);
+    try std.testing.expectEqual(state.InputEditor.VimMode.visual, app.tab_manager.?.activeTab().?.agent_state.input.vim.vim_mode);
+}
+
 /// Execute an agent command palette action
 fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: command_palette.AgentCommandAction) !void {
     switch (action) {
         .new_tab => {
             const tm = try app.ensureTabManager();
+            const vim_mode = agent_state.input.vim.vim_mode;
             const new_tab = try tm.createTab("New Tab");
-            new_tab.agent_state.input.vim.vim_mode = agent_state.input.vim.vim_mode;
+            new_tab.agent_state.input.vim.vim_mode = vim_mode;
             tm.showTabInFocusedPane(new_tab.id);
 
             // Store tab ID for agent selection to target
@@ -3356,9 +3517,9 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
 
 fn openSplit(app: *App, orientation: agent.tab_manager.SplitOrientation) !void {
     const tm = try app.ensureTabManager();
-    const active_tab = tm.activeTab() orelse return;
+    const vim_mode = (tm.activeTab() orelse return).agent_state.input.vim.vim_mode;
     const new_tab = try tm.createHiddenTab("New Tab");
-    new_tab.agent_state.input.vim.vim_mode = active_tab.agent_state.input.vim.vim_mode;
+    new_tab.agent_state.input.vim.vim_mode = vim_mode;
     _ = try tm.splitFocusedPane(orientation, new_tab.id);
 
     app.state.pending_tab_for_selection = new_tab.id;

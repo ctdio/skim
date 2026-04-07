@@ -265,6 +265,31 @@ test "renderAgentPanel uses plain background for question prompt input area" {
     try std.testing.expectEqual(@as(harness.Cell.Color, .default), cell.style.bg);
 }
 
+test "renderAgentPanel handles nested split panes in a short viewport" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 60, 3);
+    defer ctx.deinit();
+
+    _ = try app.tab_manager.?.createTab("Tab 1");
+    const tab2 = try app.tab_manager.?.createHiddenTab("Tab 2");
+    try std.testing.expect(try app.tab_manager.?.splitFocusedPane(.vertical, tab2.id));
+
+    const tab3 = try app.tab_manager.?.createHiddenTab("Tab 3");
+    try std.testing.expect(try app.tab_manager.?.splitFocusedPane(.horizontal, tab3.id));
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try std.testing.expect(text.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Tab 3") != null);
+}
+
 test "snapshot: codex_completed_plan_panel" {
     const allocator = std.testing.allocator;
 
