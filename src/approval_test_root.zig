@@ -25,6 +25,7 @@ pub const FileChangeDecision = CodexManager.FileChangeDecision;
 pub const CodexProcess = codex_process.CodexProcess;
 pub const CodexSessionReplay = codex_session_replay;
 pub const CodexTransport = codex_transport.StdioTransport;
+pub const SyntaxHighlighter = @import("highlighting/core.zig").SyntaxHighlighter;
 
 pub const renderCommandApproval = render.renderCommandApproval;
 pub const renderFileChangeApproval = render.renderFileChangeApproval;

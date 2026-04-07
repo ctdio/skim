@@ -391,6 +391,40 @@ test "snapshot: codex_replay_in_progress_panel" {
     try snapshot.expectSnapshot(allocator, "codex_replay_in_progress_panel", text);
 }
 
+test "snapshot: codex_replay_apply_patch_diff_panel" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 100, 24);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Replay");
+    const mgr = try tab.createCodexManager();
+    mgr.status = .thread_active;
+    tab.agent_state.visible = true;
+    app.mode = .agent;
+
+    const log =
+        \\{"timestamp":"2026-04-07T14:28:32.593Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Add a regression test for tab reallocation."}]}}
+        \\{"timestamp":"2026-04-07T14:28:57.480Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call-apply-patch-1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: src/modes/agent_mode.zig\n@@\n test \"old test\" {\n-    try std.testing.expect(true);\n+    try std.testing.expect(false);\n }\n*** End Patch\n"}}
+        \\{"timestamp":"2026-04-07T14:28:57.541Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-apply-patch-1","output":"{\"output\":\"Success. Updated the following files:\\nM src/modes/agent_mode.zig\\n\"}"}}
+        \\{"timestamp":"2026-04-07T14:29:07.781Z","type":"event_msg","payload":{"type":"agent_message","message":"The realloc-path tests are in.","phase":"commentary","memory_citation":null}}
+    ;
+
+    const summary = try codex_replay.replaySessionFromString(allocator, &tab.agent_state, log);
+    mgr.status = summary.manager_status;
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "src/modes/agent_mode.zig") != null);
+    try snapshot.expectSnapshot(allocator, "codex_replay_apply_patch_diff_panel", text);
+}
+
 test "snapshot: codex_replay_user_input_panel" {
     const allocator = std.testing.allocator;
 
@@ -597,6 +631,8 @@ test "snapshot: opencode_replay_in_progress_panel" {
 
 fn initRenderTestApp(allocator: std.mem.Allocator) !approval_root.App {
     const frame_buffer = try allocator.alloc(u8, FRAME_TEXT_CAPACITY);
+    var syntax_highlighter = try approval_root.SyntaxHighlighter.init(allocator);
+    errdefer syntax_highlighter.deinit();
 
     return .{
         .allocator = allocator,
@@ -614,7 +650,7 @@ fn initRenderTestApp(allocator: std.mem.Allocator) !approval_root.App {
         .frame_text_buffer = frame_buffer,
         .frame_text_used = 0,
         .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
+        .syntax_highlighter = syntax_highlighter,
         .highlight_worker = null,
         .pending_highlight_jobs = undefined,
         .needs_render = false,
@@ -642,5 +678,6 @@ fn initRenderTestApp(allocator: std.mem.Allocator) !approval_root.App {
 
 fn deinitRenderTestApp(app: *approval_root.App) void {
     if (app.tab_manager) |*tm| tm.deinit();
+    app.syntax_highlighter.deinit();
     app.allocator.free(app.frame_text_buffer);
 }

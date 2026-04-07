@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const sessions = @import("../acp/sessions.zig");
+const codex_replay = @import("../codex/session_replay.zig");
 const CodexManager = @import("../codex/manager.zig").CodexManager;
 
 /// Handle keyboard input when in session picker mode
@@ -283,6 +284,15 @@ fn displaySessionHistory(app: *App, session_info: sessions.SessionInfo) !void {
 /// context_injected: true if history was injected as context (not native resume)
 fn displaySessionHistoryWithMode(app: *App, session_info: sessions.SessionInfo, context_injected: bool) !void {
     const agent_state = app.getActiveAgentState() orelse return error.NoAgentState;
+
+    if (session_info.agent_type == .codex and !context_injected) {
+        const session_path = try sessions.history_parser.findCodexSessionFile(app.allocator, session_info.id);
+        defer app.allocator.free(session_path);
+
+        _ = try codex_replay.replaySessionFile(app.allocator, agent_state, session_path);
+        try agent_state.addMessage(.system, "--- Session resumed ---");
+        return;
+    }
 
     // Parse session file based on agent type
     const history = switch (session_info.agent_type) {

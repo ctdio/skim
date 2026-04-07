@@ -61,25 +61,24 @@ pub fn parseCodexSession(
     allocator: Allocator,
     session_id: []const u8,
 ) ParseError![]HistoryMessage {
-    const home = std.posix.getenv("HOME") orelse return error.FileNotFound;
-
-    // Codex stores files as: ~/.codex/sessions/YYYY/MM/DD/rollout-timestamp-uuid.jsonl
-    // We need to search for the file by session ID suffix
-    var sessions_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const sessions_dir = std.fmt.bufPrint(&sessions_path_buf, "{s}/.codex/sessions", .{home}) catch {
-        return error.IoError;
-    };
-
-    // Walk the sessions directory to find the file
-    const session_file = findCodexSessionFile(allocator, sessions_dir, session_id) catch {
-        return error.FileNotFound;
-    };
+    const session_file = try findCodexSessionFile(allocator, session_id);
     defer allocator.free(session_file);
 
     return parseSessionFile(allocator, session_file, .codex);
 }
 
-fn findCodexSessionFile(allocator: Allocator, base_dir: []const u8, session_id: []const u8) ![]const u8 {
+pub fn findCodexSessionFile(allocator: Allocator, session_id: []const u8) ParseError![]const u8 {
+    const home = std.posix.getenv("HOME") orelse return error.FileNotFound;
+
+    var sessions_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sessions_dir = std.fmt.bufPrint(&sessions_path_buf, "{s}/.codex/sessions", .{home}) catch {
+        return error.IoError;
+    };
+
+    return findCodexSessionFileInDir(allocator, sessions_dir, session_id) catch error.FileNotFound;
+}
+
+fn findCodexSessionFileInDir(allocator: Allocator, base_dir: []const u8, session_id: []const u8) ![]const u8 {
     // Walk year directories
     var base = std.fs.openDirAbsolute(base_dir, .{ .iterate = true }) catch return error.FileNotFound;
     defer base.close();

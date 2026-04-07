@@ -10,6 +10,7 @@ const SubagentToolSummary = @import("state.zig").SubagentToolSummary;
 const protocol = @import("../acp/protocol.zig");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const opencode_manager = @import("../opencode/manager.zig");
+const apply_patch_mod = @import("../opencode/patch.zig");
 const OpencodeEvent = opencode_manager.Event;
 const codex_manager = @import("../codex/manager.zig");
 const CodexEvent = codex_manager.CodexManager.CodexEvent;
@@ -113,6 +114,7 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
                 tc.title,
                 tc.command,
             ) catch {};
+            maybeApplyPatchToolCall(agent_state, tc.tool_call_id, tc.tool_name, tc.command);
             maybeApplyUpdatePlanToolCall(agent_state, tc.tool_name, tc.title, tc.command);
             maybeApplyRequestUserInputToolCall(agent_state, tc.tool_call_id, tc.tool_name, tc.title, tc.command);
             if (tc.subagent_info) |info| {
@@ -654,6 +656,57 @@ fn maybeApplyUpdatePlanToolCall(agent_state: *AgentState, tool_name: ?[]const u8
     };
 }
 
+fn maybeApplyPatchToolCall(agent_state: *AgentState, tool_call_id: []const u8, tool_name: ?[]const u8, command: ?[]const u8) void {
+    const patch_text = command orelse return;
+    if (!isApplyPatchTool(tool_name, patch_text)) return;
+
+    const files = apply_patch_mod.parseApplyPatch(agent_state.allocator, patch_text) catch |err| {
+        std.log.debug("maybeApplyPatchToolCall: failed to parse apply_patch text: {}", .{err});
+        return;
+    };
+    defer {
+        for (files) |*file| file.deinit(agent_state.allocator);
+        agent_state.allocator.free(files);
+    }
+
+    for (files) |file| {
+        const display_path = file.new_path orelse file.path;
+        const applied = apply_patch_mod.buildOldNewFromHunks(agent_state.allocator, file.hunks) catch |err| {
+            std.log.debug("maybeApplyPatchToolCall: failed to build diff for {s}: {}", .{ display_path, err });
+            continue;
+        };
+        defer agent_state.allocator.free(applied.old_text);
+        defer agent_state.allocator.free(applied.new_text);
+
+        const action = switch (file.kind) {
+            .add => "Add",
+            .update => "Edit",
+            .delete => "Delete",
+        };
+        const title = std.fmt.allocPrint(agent_state.allocator, "{s} {s}", .{ action, display_path }) catch {
+            continue;
+        };
+        defer agent_state.allocator.free(title);
+
+        agent_state.addDiffMessage(
+            tool_call_id,
+            title,
+            display_path,
+            applied.old_text,
+            applied.new_text,
+        ) catch |err| {
+            std.log.err("maybeApplyPatchToolCall: failed to add diff message: {any}", .{err});
+        };
+    }
+}
+
+fn isApplyPatchTool(tool_name: ?[]const u8, patch_text: []const u8) bool {
+    if (tool_name) |name| {
+        if (std.ascii.eqlIgnoreCase(name, "apply_patch") or std.ascii.eqlIgnoreCase(name, "applyPatch")) return true;
+    }
+    return std.mem.indexOf(u8, patch_text, "*** Begin Patch") != null;
+}
+
 fn maybeApplyRequestUserInputToolCall(agent_state: *AgentState, tool_call_id: []const u8, tool_name: ?[]const u8, title: []const u8, command: ?[]const u8) void {
     if (!isRequestUserInputToolCall(tool_name, title)) return;
 
@@ -962,6 +1015,78 @@ test "processAgentEvent: update_plan tool call populates todos without plan_upda
     try std.testing.expectEqual(@as(usize, 2), agent_state.messages.items.len);
     try std.testing.expectEqual(Message.Role.tool, agent_state.messages.items[0].role);
     try std.testing.expectEqual(Message.Role.plan_snapshot, agent_state.messages.items[1].role);
+}
+
+test "processAgentEvent: apply_patch tool call creates diff message" {
+    const allocator = std.testing.allocator;
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    processAgentEvent(&agent_state, .{ .tool_call = .{
+        .tool_call_id = "call-apply-patch-1",
+        .tool_name = "apply_patch",
+        .title = "apply_patch",
+        .command = "*** Begin Patch\n" ++
+            "*** Update File: src/example.zig\n" ++
+            "@@\n" ++
+            " const x = 1;\n" ++
+            "-const y = 2;\n" ++
+            "+const y = 3;\n" ++
+            "*** End Patch\n",
+    } });
+
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(Message.Role.diff, agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Edit src/example.zig", agent_state.messages.items[0].content);
+    try std.testing.expectEqualStrings("src/example.zig", agent_state.messages.items[0].diff_path.?);
+    try std.testing.expectEqualStrings("const x = 1;\nconst y = 2;", agent_state.messages.items[0].diff_old.?);
+    try std.testing.expectEqualStrings("const x = 1;\nconst y = 3;", agent_state.messages.items[0].diff_new.?);
+    try std.testing.expectEqualStrings("call-apply-patch-1", agent_state.messages.items[0].tool_call_id.?);
+}
+
+test "processAgentEvent: apply_patch tool call creates diff messages for multiple files" {
+    const allocator = std.testing.allocator;
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    processAgentEvent(&agent_state, .{ .tool_call = .{
+        .tool_call_id = "call-apply-patch-2",
+        .tool_name = "apply_patch",
+        .title = "apply_patch",
+        .command = "*** Begin Patch\n" ++
+            "*** Add File: src/added.zig\n" ++
+            "+const added = 1;\n" ++
+            "*** Update File: src/edited.zig\n" ++
+            "-const value = 1;\n" ++
+            "+const value = 2;\n" ++
+            "*** Delete File: src/deleted.zig\n" ++
+            "-const removed = true;\n" ++
+            "*** End Patch\n",
+    } });
+
+    try std.testing.expectEqual(@as(usize, 3), agent_state.messages.items.len);
+
+    try std.testing.expectEqual(Message.Role.diff, agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Add src/added.zig", agent_state.messages.items[0].content);
+    try std.testing.expectEqualStrings("src/added.zig", agent_state.messages.items[0].diff_path.?);
+    try std.testing.expectEqualStrings("", agent_state.messages.items[0].diff_old.?);
+    try std.testing.expectEqualStrings("const added = 1;", agent_state.messages.items[0].diff_new.?);
+
+    try std.testing.expectEqual(Message.Role.diff, agent_state.messages.items[1].role);
+    try std.testing.expectEqualStrings("Edit src/edited.zig", agent_state.messages.items[1].content);
+    try std.testing.expectEqualStrings("src/edited.zig", agent_state.messages.items[1].diff_path.?);
+    try std.testing.expectEqualStrings("const value = 1;", agent_state.messages.items[1].diff_old.?);
+    try std.testing.expectEqualStrings("const value = 2;", agent_state.messages.items[1].diff_new.?);
+
+    try std.testing.expectEqual(Message.Role.diff, agent_state.messages.items[2].role);
+    try std.testing.expectEqualStrings("Delete src/deleted.zig", agent_state.messages.items[2].content);
+    try std.testing.expectEqualStrings("src/deleted.zig", agent_state.messages.items[2].diff_path.?);
+    try std.testing.expectEqualStrings("const removed = true;", agent_state.messages.items[2].diff_old.?);
+    try std.testing.expectEqualStrings("", agent_state.messages.items[2].diff_new.?);
+
+    for (agent_state.messages.items) |msg| {
+        try std.testing.expectEqualStrings("call-apply-patch-2", msg.tool_call_id.?);
+    }
 }
 
 test "codexEventToAgentEvent: item_completed mcp_tool_call maps to tool_update" {

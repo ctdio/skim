@@ -228,7 +228,32 @@ fn replayResponseItem(allocator: std.mem.Allocator, agent_state: *AgentState, pa
         return;
     }
 
+    if (std.mem.eql(u8, payload_type, "custom_tool_call")) {
+        const call_id = getObjectString(payload, "call_id") orelse return;
+        const name = getObjectString(payload, "name") orelse return;
+        const input = getObjectString(payload, "input");
+        replayAgentEvent(agent_state, .{ .tool_call = .{
+            .tool_call_id = call_id,
+            .tool_name = name,
+            .title = name,
+            .command = input,
+        } });
+        return;
+    }
+
     if (std.mem.eql(u8, payload_type, "function_call_output")) {
+        const call_id = getObjectString(payload, "call_id") orelse return;
+        const output = getObjectString(payload, "output");
+        replayAgentEvent(agent_state, .{ .tool_update = .{
+            .tool_call_id = call_id,
+            .status = .completed,
+            .stdout = output,
+            .stderr = null,
+        } });
+        return;
+    }
+
+    if (std.mem.eql(u8, payload_type, "custom_tool_call_output")) {
         const call_id = getObjectString(payload, "call_id") orelse return;
         const output = getObjectString(payload, "output");
         replayAgentEvent(agent_state, .{ .tool_update = .{
@@ -550,6 +575,72 @@ test "replaySessionFromString clears restored request_user_input after tool outp
     try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
     try std.testing.expect(agent_state.messages.items[0].tool_status == AgentMessage.ToolStatus.completed);
     try std.testing.expect(agent_state.messages.items[0].tool_stdout != null);
+}
+
+test "replaySessionFromString replays custom apply_patch tool calls into diff messages" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const log =
+        \\{"timestamp":"2026-04-07T14:28:32.593Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Add a regression test for tab reallocation."}]}}
+        \\{"timestamp":"2026-04-07T14:28:57.480Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call-apply-patch-1","name":"apply_patch","input":"*** Begin Patch\n*** Update File: src/modes/agent_mode.zig\n@@\n test \"old test\" {\n-    try std.testing.expect(true);\n+    try std.testing.expect(false);\n }\n*** End Patch\n"}}
+        \\{"timestamp":"2026-04-07T14:28:57.541Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-apply-patch-1","output":"{\"output\":\"Success. Updated the following files:\\nM src/modes/agent_mode.zig\\n\"}"}}
+    ;
+
+    _ = try replaySessionFromString(allocator, &agent_state, log);
+
+    try std.testing.expectEqual(@as(usize, 3), agent_state.messages.items.len);
+    try std.testing.expectEqual(AgentMessage.Role.user, agent_state.messages.items[0].role);
+    try std.testing.expectEqual(AgentMessage.Role.diff, agent_state.messages.items[1].role);
+    try std.testing.expectEqualStrings("Edit src/modes/agent_mode.zig", agent_state.messages.items[1].content);
+    try std.testing.expectEqualStrings("src/modes/agent_mode.zig", agent_state.messages.items[1].diff_path.?);
+    try std.testing.expectEqualStrings("test \"old test\" {\n    try std.testing.expect(true);\n}", agent_state.messages.items[1].diff_old.?);
+    try std.testing.expectEqualStrings("test \"old test\" {\n    try std.testing.expect(false);\n}", agent_state.messages.items[1].diff_new.?);
+    try std.testing.expectEqual(AgentMessage.Role.tool, agent_state.messages.items[2].role);
+    try std.testing.expectEqual(AgentMessage.ToolStatus.completed, agent_state.messages.items[2].tool_status);
+}
+
+test "replaySessionFromString replays multi-file custom apply_patch tool calls into diff messages" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const log =
+        \\{"timestamp":"2026-04-07T14:28:32.593Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Apply the tab-panel fixes."}]}}
+        \\{"timestamp":"2026-04-07T14:28:57.480Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call-apply-patch-2","name":"apply_patch","input":"*** Begin Patch\n*** Add File: src/testing/new_case.zig\n+test \"new case\" {}\n*** Update File: src/modes/agent_mode.zig\n-const mode_name = \"agent\";\n+const mode_name = \"agent_panel\";\n*** Delete File: src/testing/old_case.zig\n-test \"old case\" {}\n*** End Patch\n"}}
+        \\{"timestamp":"2026-04-07T14:28:57.541Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-apply-patch-2","output":"{\"output\":\"Success. Updated the following files:\\nA src/testing/new_case.zig\\nM src/modes/agent_mode.zig\\nD src/testing/old_case.zig\\n\"}"}}
+    ;
+
+    _ = try replaySessionFromString(allocator, &agent_state, log);
+
+    try std.testing.expectEqual(@as(usize, 5), agent_state.messages.items.len);
+
+    try std.testing.expectEqual(AgentMessage.Role.user, agent_state.messages.items[0].role);
+
+    try std.testing.expectEqual(AgentMessage.Role.diff, agent_state.messages.items[1].role);
+    try std.testing.expectEqualStrings("Add src/testing/new_case.zig", agent_state.messages.items[1].content);
+    try std.testing.expectEqualStrings("src/testing/new_case.zig", agent_state.messages.items[1].diff_path.?);
+    try std.testing.expectEqualStrings("", agent_state.messages.items[1].diff_old.?);
+    try std.testing.expectEqualStrings("test \"new case\" {}", agent_state.messages.items[1].diff_new.?);
+
+    try std.testing.expectEqual(AgentMessage.Role.diff, agent_state.messages.items[2].role);
+    try std.testing.expectEqualStrings("Edit src/modes/agent_mode.zig", agent_state.messages.items[2].content);
+    try std.testing.expectEqualStrings("src/modes/agent_mode.zig", agent_state.messages.items[2].diff_path.?);
+    try std.testing.expectEqualStrings("const mode_name = \"agent\";", agent_state.messages.items[2].diff_old.?);
+    try std.testing.expectEqualStrings("const mode_name = \"agent_panel\";", agent_state.messages.items[2].diff_new.?);
+
+    try std.testing.expectEqual(AgentMessage.Role.diff, agent_state.messages.items[3].role);
+    try std.testing.expectEqualStrings("Delete src/testing/old_case.zig", agent_state.messages.items[3].content);
+    try std.testing.expectEqualStrings("src/testing/old_case.zig", agent_state.messages.items[3].diff_path.?);
+    try std.testing.expectEqualStrings("test \"old case\" {}", agent_state.messages.items[3].diff_old.?);
+    try std.testing.expectEqualStrings("", agent_state.messages.items[3].diff_new.?);
+
+    try std.testing.expectEqual(AgentMessage.Role.tool, agent_state.messages.items[4].role);
+    try std.testing.expectEqual(AgentMessage.ToolStatus.completed, agent_state.messages.items[4].tool_status);
+    try std.testing.expectEqualStrings("call-apply-patch-2", agent_state.messages.items[4].tool_call_id.?);
 }
 
 test "previewPendingQuestionResolution applies recorded codex answers to pending question" {
