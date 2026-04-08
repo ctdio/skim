@@ -108,6 +108,26 @@ test "snapshot: codex_user_input_single_question" {
     try snapshot.expectSnapshot(allocator, "codex_user_input_single_question", text);
 }
 
+test "codex thinking chunks render into chat state" {
+    const allocator = std.testing.allocator;
+    var agent_state = approval_root.AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const codex_event = approval_root.CodexManager.CodexEvent{ .reasoning_delta = .{
+        .thread_id = "thread-1",
+        .turn_id = "turn-1",
+        .item_id = "reasoning-1",
+        .delta = "Considering options...",
+    } };
+    const agent_event = approval_root.codexEventToAgentEvent(codex_event) orelse return error.TestUnexpectedResult;
+
+    approval_root.processAgentEvent(&agent_state, agent_event);
+
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(approval_root.AgentMessage.Role.thinking, agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Considering options...", agent_state.messages.items[0].content);
+}
+
 test "snapshot: codex_user_input_multiple_questions" {
     const allocator = std.testing.allocator;
     var ctx = try harness.createTestContext(allocator, 70, 14);

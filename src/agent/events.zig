@@ -105,7 +105,9 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
         .completed_plan_message => |text| {
             addCompletedPlanMessage(agent_state, text) catch {};
         },
-        .thinking_chunk => {},
+        .thinking_chunk => |text| {
+            agent_state.appendToLastThinkingMessage(text) catch {};
+        },
         .tool_call => |tc| {
             agent_state.addToolMessage(
                 tc.tool_call_id,
@@ -1091,14 +1093,16 @@ test "processAgentEvent: apply_patch tool call creates diff messages for multipl
     }
 }
 
-test "processAgentEvent: thinking chunk does not add a chat message" {
+test "processAgentEvent: thinking chunk appends a thinking chat message" {
     const allocator = std.testing.allocator;
     var agent_state = AgentState.init(allocator, .right);
     defer agent_state.deinit();
 
     processAgentEvent(&agent_state, .{ .thinking_chunk = "Considering options..." });
 
-    try std.testing.expectEqual(@as(usize, 0), agent_state.messages.items.len);
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(Message.Role.thinking, agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Considering options...", agent_state.messages.items[0].content);
 }
 
 test "codexEventToAgentEvent: item_completed mcp_tool_call maps to tool_update" {
