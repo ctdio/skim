@@ -3503,6 +3503,78 @@ test "openSplit preserves vim mode when tabs reallocate" {
     try std.testing.expectEqual(state.InputEditor.VimMode.visual, app.tab_manager.?.activeTab().?.agent_state.input.vim.vim_mode);
 }
 
+test "openSplit auto-equalizes a skewed layout" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = std.mem.zeroes(@FieldType(App, "state")),
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    const left_id = (try app.tab_manager.?.createTab("Left")).id;
+    const right_id = (try app.tab_manager.?.createHiddenTab("Right")).id;
+    try std.testing.expect(try app.tab_manager.?.splitFocusedPane(.vertical, right_id));
+    try std.testing.expect(app.tab_manager.?.resizeFocusedPane(.wider));
+
+    try openSplit(&app, .horizontal);
+
+    try std.testing.expect(app.state.pending_tab_for_selection != null);
+    const right_bottom_id = app.state.pending_tab_for_selection.?;
+    var layout = try app.tab_manager.?.collectPaneLayout(allocator, 81, 25);
+    defer layout.deinit();
+
+    var left_width: ?usize = null;
+    var right_width: ?usize = null;
+    var right_height: ?usize = null;
+    var right_bottom_height: ?usize = null;
+    for (layout.panes.items) |pane| {
+        if (pane.tab_id == left_id) {
+            left_width = pane.width;
+        } else if (pane.tab_id == right_id) {
+            right_width = pane.width;
+            right_height = pane.height;
+        } else if (pane.tab_id == right_bottom_id) {
+            right_bottom_height = pane.height;
+        }
+    }
+
+    try std.testing.expectEqual(left_width.?, right_width.?);
+    try std.testing.expectEqual(right_height.?, right_bottom_height.?);
+}
+
 test "ctrl-w = equalizes agent pane sizes" {
     const allocator = std.testing.allocator;
 

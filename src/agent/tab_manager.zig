@@ -588,7 +588,11 @@ pub const TabManager = struct {
         }
 
         self.focused_pane_id = new_leaf_id;
-        return self.focusPaneById(new_leaf_id);
+        if (!self.focusPaneById(new_leaf_id)) {
+            return false;
+        }
+        _ = self.equalizePaneSizes();
+        return true;
     }
 
     pub fn showTabInFocusedPane(self: *TabManager, tab_id: u32) void {
@@ -1279,6 +1283,29 @@ test "TabManager: equalize pane sizes restores balanced nested layout" {
     try std.testing.expect(skewed.panes.items[1].height != skewed.panes.items[2].height);
 
     try std.testing.expect(mgr.equalizePaneSizes());
+
+    var leveled = try mgr.collectPaneLayout(allocator, 81, 25);
+    defer leveled.deinit();
+    try std.testing.expectEqual(leveled.panes.items[0].width, leveled.panes.items[1].width);
+    try std.testing.expectEqual(leveled.panes.items[1].height, leveled.panes.items[2].height);
+}
+
+test "TabManager: split auto-equalizes a skewed layout" {
+    const allocator = std.testing.allocator;
+    var mgr = TabManager.init(allocator, .right);
+    defer mgr.deinit();
+
+    _ = try mgr.createTab("Left");
+    const right = try mgr.createHiddenTab("Right");
+    try std.testing.expect(try mgr.splitFocusedPane(.vertical, right.id));
+    try std.testing.expect(mgr.resizeFocusedPane(.wider));
+
+    var skewed = try mgr.collectPaneLayout(allocator, 81, 25);
+    defer skewed.deinit();
+    try std.testing.expect(skewed.panes.items[0].width != skewed.panes.items[1].width);
+
+    const right_bottom = try mgr.createHiddenTab("Right Bottom");
+    try std.testing.expect(try mgr.splitFocusedPane(.horizontal, right_bottom.id));
 
     var leveled = try mgr.collectPaneLayout(allocator, 81, 25);
     defer leveled.deinit();
