@@ -2560,10 +2560,16 @@ pub const AgentState = struct {
             const owned_desc = try self.allocator.dupe(u8, local_cmd.description);
             errdefer self.allocator.free(owned_desc);
 
+            const owned_hint: ?[]const u8 = if (local_cmd.input_hint) |hint|
+                try self.allocator.dupe(u8, hint)
+            else
+                null;
+            errdefer if (owned_hint) |hint| self.allocator.free(hint);
+
             try self.available_commands.append(self.allocator, .{
                 .name = owned_name,
                 .description = owned_desc,
-                .input_hint = null,
+                .input_hint = owned_hint,
             });
         }
     }
@@ -3734,6 +3740,25 @@ test "getTextForMessage returns empty for invalid index" {
     defer allocator.free(text);
 
     try std.testing.expectEqualStrings("", text);
+}
+
+test "addLocalSlashCommands preserves local command input hints" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    try agent_state.addLocalSlashCommands();
+
+    for (agent_state.available_commands.items) |cmd| {
+        if (std.mem.eql(u8, cmd.name, "plan")) {
+            try std.testing.expect(cmd.input_hint != null);
+            try std.testing.expectEqualStrings("show | hide | expand | collapse | status", cmd.input_hint.?);
+            return;
+        }
+    }
+
+    return error.TestUnexpectedResult;
 }
 
 test "SubagentInfo deinit frees all fields" {

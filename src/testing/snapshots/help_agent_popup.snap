@@ -16,5 +16,7 @@
 │  Ctrl-w v / s   │ Vertical / horizontal split                        │
 │  Ctrl-w c / o   │ Close pane / only pane                             │
 │  Ctrl-w H/J/K/L │ Move pane to edge                                  │
+│  Ctrl-w =       │ Equalize pane sizes                                │
+│  Space s        │ Toggle diff view                                   │
 │                                                                      │
 ╰───────────────────────── ? or Esc to close ──────────────────────────╯

@@ -422,6 +422,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
                 // Check if this is a local command (handled by skim, not agent)
                 if (state.AgentState.isLocalSlashCommand(cmd.name)) {
+                    const command_text = try buildSlashCommandText(app.allocator, cmd.name, args);
+                    defer app.allocator.free(command_text);
+                    try agent_state.addMessage(.user, command_text);
+
                     // Handle local commands client-side with arguments
                     try handleLocalCommand(app, agent_state, cmd.name, args);
 
@@ -433,22 +437,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 }
 
                 // Build full command text for agent commands, including any arguments
-                var cmd_text: std.ArrayList(u8) = .{};
-                defer cmd_text.deinit(app.allocator);
-
-                try cmd_text.append(app.allocator, '/');
-                try cmd_text.appendSlice(app.allocator, cmd.name);
-
-                // Append arguments if present
-                if (args.len > 0) {
-                    try cmd_text.append(app.allocator, ' ');
-                    try cmd_text.appendSlice(app.allocator, args);
-                }
-
-                const raw_text = try cmd_text.toOwnedSlice(app.allocator);
-                defer app.allocator.free(raw_text);
-
-                const text = std.mem.trim(u8, raw_text, &std.ascii.whitespace);
+                const text = try buildSlashCommandText(app.allocator, cmd.name, args);
+                defer app.allocator.free(text);
 
                 // Add to message history
                 try agent_state.addMessage(.user, text);
@@ -842,6 +832,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                     }
                     return;
                 },
+                '=' => {
+                    if (tm.equalizePaneSizes()) {
+                        app.needs_render = true;
+                    }
+                    return;
+                },
                 else => return,
             }
         }
@@ -1015,6 +1011,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                     const cmd_name = extractSlashCommandName(text);
                     if (cmd_name.len > 0 and state.AgentState.isLocalSlashCommand(cmd_name)) {
                         const args = extractCommandArgs(text, cmd_name);
+                        const command_text = try buildSlashCommandText(app.allocator, cmd_name, args);
+                        defer app.allocator.free(command_text);
+                        try agent_state.addMessage(.user, command_text);
                         try handleLocalCommand(app, agent_state, cmd_name, args);
                         agent_state.input.clear();
                         agent_state.hideSlashMenu();
@@ -1513,6 +1512,22 @@ fn extractSlashCommandName(input: []const u8) []const u8 {
     return after_slash;
 }
 
+fn buildSlashCommandText(allocator: std.mem.Allocator, command_name: []const u8, args: []const u8) ![]u8 {
+    var cmd_text: std.ArrayList(u8) = .{};
+    defer cmd_text.deinit(allocator);
+
+    try cmd_text.append(allocator, '/');
+    try cmd_text.appendSlice(allocator, command_name);
+
+    const trimmed_args = std.mem.trim(u8, args, &std.ascii.whitespace);
+    if (trimmed_args.len > 0) {
+        try cmd_text.append(allocator, ' ');
+        try cmd_text.appendSlice(allocator, trimmed_args);
+    }
+
+    return cmd_text.toOwnedSlice(allocator);
+}
+
 fn toggleFastServiceTier(current_service_tier: ?codex_protocol.ServiceTier) codex_protocol.ServiceTier {
     const service_tier = current_service_tier orelse .flex;
     return if (service_tier == .fast) .flex else .fast;
@@ -1591,9 +1606,6 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
                 try agent_state.addMessage(.system, "Failed to create new session");
                 return;
             };
-            try agent_state.addMessage(.system, "Session cleared. Starting fresh.");
-        } else {
-            try agent_state.addMessage(.system, "Chat cleared. (No agent connected)");
         }
         return;
     }
@@ -1623,7 +1635,6 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
             // Model selection mode will handle the preselection
         }
 
-        try agent_state.addMessage(.system, "Switching to model selection...");
         return;
     }
 
@@ -1641,8 +1652,6 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
             }
         } else if (std.mem.eql(u8, trimmed_args, "expand") or std.mem.eql(u8, trimmed_args, "collapse")) {
             agent_state.togglePlanExpanded();
-            const expand_status = if (agent_state.plan.expanded) "Plan expanded" else "Plan collapsed";
-            try agent_state.addMessage(.system, expand_status);
             return;
         } else if (std.mem.eql(u8, trimmed_args, "status")) {
             const status = if (agent_state.plan.visible) "Plan is visible" else "Plan is hidden";
@@ -1652,9 +1661,6 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
             try agent_state.addMessage(.system, "Invalid plan option. Use: /plan, /plan show, /plan hide, /plan expand, or /plan status");
             return;
         }
-
-        const status = if (agent_state.plan.visible) "Plan shown" else "Plan hidden";
-        try agent_state.addMessage(.system, status);
         return;
     }
 
@@ -1666,8 +1672,6 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
                     if (trimmed_args.len == 0) {
                         const next_service_tier = toggleFastServiceTier(cm.service_tier);
                         cm.setServiceTier(next_service_tier);
-                        const status = if (next_service_tier == .fast) "Fast mode enabled" else "Fast mode disabled";
-                        try agent_state.addMessage(.system, status);
                         return;
                     }
 
@@ -1676,7 +1680,6 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
                         std.mem.eql(u8, trimmed_args, "flex"))
                     {
                         cm.setServiceTier(.flex);
-                        try agent_state.addMessage(.system, "Fast mode disabled");
                         return;
                     }
 
@@ -1720,9 +1723,6 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
 
                     if (codex_protocol.ReasoningEffort.fromString(effort_text)) |effort| {
                         cm.setReasoningEffort(effort);
-                        var confirm_buf: [96]u8 = undefined;
-                        const confirm = std.fmt.bufPrint(&confirm_buf, "Thinking effort set to: {s}", .{effort.toString()}) catch "Thinking effort updated";
-                        try agent_state.addMessage(.system, confirm);
                     } else {
                         try agent_state.addMessage(.system, "Invalid thinking effort. Use: low, medium, high, or xhigh");
                     }
@@ -1756,7 +1756,6 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
                         app.state.permission_selection = if (cm.approval_policy == .never) 1 else 0;
                     }
                     app.mode = .permission_selection;
-                    try agent_state.addMessage(.system, "Switching to permission mode selection...");
                     return;
                 },
                 .acp, .opencode => {
@@ -3163,6 +3162,59 @@ test "ESC interrupts active Codex turn in normal mode" {
     try std.testing.expectEqualStrings("Interrupted", tab.agent_state.messages.items[0].content);
 }
 
+test "typed local slash command records the command without a success system message" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    tab.agent_state.input.vim.vim_mode = .insert;
+    tab.agent_state.input.setText("/plan hide");
+
+    try handleKey(&app, .{ .codepoint = vaxis.Key.enter });
+
+    try std.testing.expect(!tab.agent_state.plan.visible);
+    try std.testing.expectEqual(@as(usize, 1), tab.agent_state.messages.items.len);
+    try std.testing.expectEqual(state.Message.Role.user, tab.agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("/plan hide", tab.agent_state.messages.items[0].content);
+}
+
 test "q exits debug replay session" {
     const allocator = std.testing.allocator;
 
@@ -3449,6 +3501,76 @@ test "openSplit preserves vim mode when tabs reallocate" {
     try std.testing.expectEqual(App.Mode.agent_selection, app.mode);
     try std.testing.expect(app.state.pending_tab_for_selection != null);
     try std.testing.expectEqual(state.InputEditor.VimMode.visual, app.tab_manager.?.activeTab().?.agent_state.input.vim.vim_mode);
+}
+
+test "ctrl-w = equalizes agent pane sizes" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = std.mem.zeroes(@FieldType(App, "state")),
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    const left_id = (try app.tab_manager.?.createTab("Left")).id;
+    const right_top_id = (try app.tab_manager.?.createHiddenTab("Right Top")).id;
+    try std.testing.expect(try app.tab_manager.?.splitFocusedPane(.vertical, right_top_id));
+
+    const right_bottom_id = (try app.tab_manager.?.createHiddenTab("Right Bottom")).id;
+    try std.testing.expect(try app.tab_manager.?.splitFocusedPane(.horizontal, right_bottom_id));
+
+    try std.testing.expect(app.tab_manager.?.resizeFocusedPane(.wider));
+    try std.testing.expect(app.tab_manager.?.resizeFocusedPane(.shorter));
+
+    var skewed = try app.tab_manager.?.collectPaneLayout(allocator, 81, 25);
+    defer skewed.deinit();
+    try std.testing.expect(skewed.panes.items[0].width != skewed.panes.items[1].width);
+    try std.testing.expect(skewed.panes.items[1].height != skewed.panes.items[2].height);
+
+    app.tab_manager.?.getTab(app.tab_manager.?.findTabById(left_id).?).?.agent_state.input.vim.vim_mode = .normal;
+    app.tab_manager.?.getTab(app.tab_manager.?.findTabById(right_top_id).?).?.agent_state.input.vim.vim_mode = .normal;
+    app.tab_manager.?.getTab(app.tab_manager.?.findTabById(right_bottom_id).?).?.agent_state.input.vim.vim_mode = .normal;
+
+    try handleKey(&app, .{ .codepoint = 'w', .mods = .{ .ctrl = true } });
+    try handleKey(&app, .{ .codepoint = '=' });
+
+    var leveled = try app.tab_manager.?.collectPaneLayout(allocator, 81, 25);
+    defer leveled.deinit();
+    try std.testing.expect(app.needs_render);
+    try std.testing.expectEqual(leveled.panes.items[0].width, leveled.panes.items[1].width);
+    try std.testing.expectEqual(leveled.panes.items[1].height, leveled.panes.items[2].height);
 }
 
 /// Execute an agent command palette action

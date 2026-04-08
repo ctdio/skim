@@ -265,6 +265,29 @@ test "renderAgentPanel uses plain background for question prompt input area" {
     try std.testing.expectEqual(@as(harness.Cell.Color, .default), cell.style.bg);
 }
 
+test "snapshot: agent_slash_menu_shows_command_details" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 80, 18);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    try tab.agent_state.addLocalSlashCommands();
+    tab.agent_state.input.vim.vim_mode = .insert;
+    tab.agent_state.input.setText("/pl");
+    tab.agent_state.showSlashMenu();
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "agent_slash_menu_shows_command_details", text);
+}
+
 test "renderAgentPanel handles nested split panes in a short viewport" {
     const allocator = std.testing.allocator;
 

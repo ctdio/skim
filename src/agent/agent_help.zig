@@ -98,6 +98,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "Ctrl-w v / s", .desc = "Vertical / horizontal split" },
         .{ .key = "Ctrl-w c / o", .desc = "Close pane / only pane" },
         .{ .key = "Ctrl-w H/J/K/L", .desc = "Move pane to edge" },
+        .{ .key = "Ctrl-w =", .desc = "Equalize pane sizes" },
         .{ .key = "Ctrl-w + - < >", .desc = "Resize focused pane" },
         .{ .key = "gb", .desc = "History mode" },
         .{ .key = "gt / gT", .desc = "Next / prev tab" },

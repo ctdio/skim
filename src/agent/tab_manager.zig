@@ -75,6 +75,11 @@ pub const PaneLayoutSnapshot = struct {
     }
 };
 
+const LayoutSpan = struct {
+    columns: usize,
+    rows: usize,
+};
+
 /// A single agent tab containing its own state and manager connection.
 /// The manager field uses a tagged union enforcing mutual exclusivity
 /// between ACP and Opencode protocols at the type level.
@@ -675,6 +680,15 @@ pub const TabManager = struct {
         };
     }
 
+    pub fn equalizePaneSizes(self: *TabManager) bool {
+        const root_id = self.root_node_id orelse return false;
+        if (self.countVisiblePanes() <= 1) return false;
+
+        var changed = false;
+        _ = self.equalizeNodeRecursive(root_id, &changed);
+        return changed;
+    }
+
     pub fn collapseToActivePane(self: *TabManager) bool {
         const focused = self.focused_pane_id orelse return false;
         if (self.countVisiblePanes() <= 1) return false;
@@ -933,6 +947,36 @@ pub const TabManager = struct {
         return false;
     }
 
+    fn equalizeNodeRecursive(self: *TabManager, node_id: usize, changed: *bool) LayoutSpan {
+        const node = &self.layout_nodes.items[node_id];
+        return switch (node.data) {
+            .leaf => .{ .columns = 1, .rows = 1 },
+            .split => |*split| blk: {
+                const first_span = self.equalizeNodeRecursive(split.first, changed);
+                const second_span = self.equalizeNodeRecursive(split.second, changed);
+                const first_units, const second_units = switch (split.orientation) {
+                    .vertical => .{ first_span.columns, second_span.columns },
+                    .horizontal => .{ first_span.rows, second_span.rows },
+                };
+                const ratio = calculateEqualizedRatio(first_units, second_units);
+                if (split.ratio_milli != ratio) {
+                    split.ratio_milli = ratio;
+                    changed.* = true;
+                }
+                break :blk switch (split.orientation) {
+                    .vertical => .{
+                        .columns = first_span.columns + second_span.columns,
+                        .rows = @max(first_span.rows, second_span.rows),
+                    },
+                    .horizontal => .{
+                        .columns = @max(first_span.columns, second_span.columns),
+                        .rows = first_span.rows + second_span.rows,
+                    },
+                };
+            },
+        };
+    }
+
     fn syncActiveToFocusedPane(self: *TabManager) void {
         if (self.focused_pane_id) |leaf_id| {
             _ = self.focusPaneById(leaf_id);
@@ -1058,6 +1102,14 @@ pub const TabManager = struct {
         const a_center = (a_start + a_end) / 2;
         const b_center = (b_start + b_end) / 2;
         return if (a_center > b_center) a_center - b_center else b_center - a_center;
+    }
+
+    fn calculateEqualizedRatio(first_units: usize, second_units: usize) u16 {
+        const total_units = first_units + second_units;
+        if (total_units == 0) return 500;
+
+        const raw_ratio = ((first_units * 1000) + (total_units / 2)) / total_units;
+        return @intCast(std.math.clamp(raw_ratio, @as(usize, 100), @as(usize, 900)));
     }
 };
 
@@ -1204,6 +1256,34 @@ test "TabManager: resize adjusts ancestor ratio" {
     var after = try mgr.collectPaneLayout(allocator, 80, 24);
     defer after.deinit();
     try std.testing.expect(after.panes.items[1].width > before_width);
+}
+
+test "TabManager: equalize pane sizes restores balanced nested layout" {
+    const allocator = std.testing.allocator;
+    var mgr = TabManager.init(allocator, .right);
+    defer mgr.deinit();
+
+    _ = try mgr.createTab("Left");
+    const right_top = try mgr.createHiddenTab("Right Top");
+    try std.testing.expect(try mgr.splitFocusedPane(.vertical, right_top.id));
+
+    const right_bottom = try mgr.createHiddenTab("Right Bottom");
+    try std.testing.expect(try mgr.splitFocusedPane(.horizontal, right_bottom.id));
+
+    try std.testing.expect(mgr.resizeFocusedPane(.wider));
+    try std.testing.expect(mgr.resizeFocusedPane(.shorter));
+
+    var skewed = try mgr.collectPaneLayout(allocator, 81, 25);
+    defer skewed.deinit();
+    try std.testing.expect(skewed.panes.items[0].width != skewed.panes.items[1].width);
+    try std.testing.expect(skewed.panes.items[1].height != skewed.panes.items[2].height);
+
+    try std.testing.expect(mgr.equalizePaneSizes());
+
+    var leveled = try mgr.collectPaneLayout(allocator, 81, 25);
+    defer leveled.deinit();
+    try std.testing.expectEqual(leveled.panes.items[0].width, leveled.panes.items[1].width);
+    try std.testing.expectEqual(leveled.panes.items[1].height, leveled.panes.items[2].height);
 }
 
 test "TabManager: collapse and close focused pane keep layout valid" {

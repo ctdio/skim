@@ -105,8 +105,7 @@ pub fn processAgentEvent(agent_state: *AgentState, event: AgentEvent) void {
         .completed_plan_message => |text| {
             addCompletedPlanMessage(agent_state, text) catch {};
         },
-        .thinking_chunk => {
-        },
+        .thinking_chunk => {},
         .tool_call => |tc| {
             agent_state.addToolMessage(
                 tc.tool_call_id,

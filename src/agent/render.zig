@@ -2253,7 +2253,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
     const visible_count = @min(filtered_count, MAX_SLASH_MENU_VISIBLE);
     const max_scroll = if (filtered_count > visible_count) filtered_count - visible_count else 0;
     const scroll_offset = @min(agent_state.slash_menu.scroll_offset, max_scroll);
-    const menu_height = visible_count + 1; // title row + items
+    const menu_height = visible_count + 2; // title row + items + detail row
     const menu_width = @min(SLASH_MENU_WIDTH, win.width -| 4); // fixed width, capped to window
 
     // Position menu just above the input area (bottom-anchored)
@@ -2299,6 +2299,7 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
 
     // Clamp selection to valid range
     const selection = @min(agent_state.slash_menu.selection, filtered_count - 1);
+    const selected_cmd = &agent_state.available_commands.items[indices[selection]];
 
     // Render command items (with scroll offset applied)
     for (0..visible_count) |i| {
@@ -2361,6 +2362,58 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
             _ = menu_win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
         }
     }
+
+    renderSlashMenuDetail(menu_win, selected_cmd, visible_count + 1, menu_width);
+}
+
+fn renderSlashMenuDetail(menu_win: vaxis.Window, cmd: *const state.OwnedCommand, row: usize, menu_width: usize) void {
+    const detail_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
+    const available_width = if (menu_width > MENU_PADDING * 2) menu_width - (MENU_PADDING * 2) else 0;
+    if (available_width == 0) return;
+
+    var detail_buf: [256]u8 = undefined;
+    const detail = formatSlashMenuDetail(&detail_buf, cmd);
+
+    var truncated_buf: [256]u8 = undefined;
+    const text = truncateSlashMenuDetail(&truncated_buf, detail, available_width);
+
+    var detail_seg = [_]vaxis.Cell.Segment{
+        .{ .text = text, .style = detail_style },
+    };
+    _ = menu_win.print(&detail_seg, .{ .row_offset = @intCast(row), .col_offset = MENU_PADDING });
+}
+
+fn formatSlashMenuDetail(buf: []u8, cmd: *const state.OwnedCommand) []const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+
+    writer.writeByte('/') catch {};
+    writer.writeAll(cmd.name) catch {};
+
+    if (cmd.input_hint) |hint| {
+        if (hint.len > 0) {
+            writer.writeByte(' ') catch {};
+            writer.writeAll(hint) catch {};
+        }
+    }
+
+    if (cmd.description.len > 0) {
+        writer.writeAll("  ") catch {};
+        writer.writeAll(cmd.description) catch {};
+    }
+
+    return stream.getWritten();
+}
+
+fn truncateSlashMenuDetail(buf: []u8, text: []const u8, max_width: usize) []const u8 {
+    if (text.len <= max_width) return text;
+    if (max_width == 0) return "";
+    if (max_width <= 3) return text[0..max_width];
+
+    const prefix_len = max_width - 3;
+    @memcpy(buf[0..prefix_len], text[0..prefix_len]);
+    @memcpy(buf[prefix_len..max_width], "...");
+    return buf[0..max_width];
 }
 
 /// Render file picker menu overlay

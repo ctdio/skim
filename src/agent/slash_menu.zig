@@ -7,17 +7,18 @@ pub const MAX_VISIBLE: usize = 12;
 pub const LocalCommand = struct {
     name: []const u8,
     description: []const u8,
+    input_hint: ?[]const u8 = null,
 };
 
 /// Local slash commands that skim handles (not sent to agent)
 pub const local_commands = [_]LocalCommand{
     .{ .name = "clear", .description = "Clear session and start fresh" },
-    .{ .name = "fast", .description = "Toggle Codex fast mode" },
-    .{ .name = "model", .description = "Switch AI model" },
-    .{ .name = "plan", .description = "Toggle agent plan visibility" },
-    .{ .name = "thinking", .description = "Set Codex thinking effort" },
-    .{ .name = "permissions", .description = "Switch Codex permission mode" },
-    .{ .name = "resume", .description = "Resume previous session" },
+    .{ .name = "fast", .description = "Toggle Codex fast mode", .input_hint = "off | status" },
+    .{ .name = "model", .description = "Open model selection", .input_hint = "[model]" },
+    .{ .name = "plan", .description = "Control the visible plan panel", .input_hint = "show | hide | expand | collapse | status" },
+    .{ .name = "thinking", .description = "Show or set Codex reasoning effort", .input_hint = "low | medium | high | xhigh" },
+    .{ .name = "permissions", .description = "Open Codex approval mode picker", .input_hint = "[default | full]" },
+    .{ .name = "resume", .description = "Open recent sessions" },
 };
 
 /// Check if a command is a local command (handled by skim)
@@ -114,4 +115,10 @@ test "isLocalCommand" {
     try std.testing.expect(isLocalCommand("resume"));
     try std.testing.expect(!isLocalCommand("status"));
     try std.testing.expect(!isLocalCommand("review"));
+}
+
+test "local slash commands expose input hints for configurable commands" {
+    try std.testing.expectEqual(@as(?[]const u8, "show | hide | expand | collapse | status"), local_commands[3].input_hint);
+    try std.testing.expectEqual(@as(?[]const u8, "low | medium | high | xhigh"), local_commands[4].input_hint);
+    try std.testing.expectEqual(@as(?[]const u8, null), local_commands[0].input_hint);
 }

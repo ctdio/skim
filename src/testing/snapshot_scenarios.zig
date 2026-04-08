@@ -1859,7 +1859,7 @@ test "snapshot: help_popup_full" {
 
 test "snapshot: help_agent_popup" {
     const allocator = std.testing.allocator;
-    var ctx = try harness.createTestContext(allocator, 72, 20);
+    var ctx = try harness.createTestContext(allocator, 72, 22);
     defer ctx.deinit();
 
     const win = ctx.window();
@@ -1881,12 +1881,13 @@ test "snapshot: help_agent_popup" {
         help_helpers.binding("Ctrl-w v / s", "Vertical / horizontal split"),
         help_helpers.binding("Ctrl-w c / o", "Close pane / only pane"),
         help_helpers.binding("Ctrl-w H/J/K/L", "Move pane to edge"),
+        help_helpers.binding("Ctrl-w =", "Equalize pane sizes"),
         help_helpers.binding("Space s", "Toggle diff view"),
         help_helpers.binding("Space t", "Cycle model variant"),
         help_helpers.binding("?", "This help"),
     };
 
-    help_helpers.renderHelpPopup(win, " Agent Keybindings ", &bindings, 72, 20);
+    help_helpers.renderHelpPopup(win, " Agent Keybindings ", &bindings, 72, 22);
 
     const text = try ctx.captureToText();
     defer allocator.free(text);
