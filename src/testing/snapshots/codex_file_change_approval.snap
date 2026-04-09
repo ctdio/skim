@@ -5,4 +5,4 @@
    Accept for session
    Decline
    Cancel
-              j/k:navigate  y:accept  Y:session  n:decline  ESC:cancel
+           j/k:navigate  y:accept  Y:session  n:decline  Ctrl-c:cancel

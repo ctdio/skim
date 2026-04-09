@@ -6,7 +6,7 @@ const Color = @import("../rendering/common.zig").Color;
 const FrameChars = @import("../rendering/common.zig").FrameChars;
 const AgentState = @import("state.zig").AgentState;
 
-const KEY_COL_WIDTH: usize = 14; // Fixed width for key column alignment
+const KEY_COL_WIDTH: usize = 18; // Fixed width for key column alignment
 
 /// Render the agent help popup overlay
 pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !void {
@@ -70,7 +70,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     const insert_bindings = [_]Binding{
         .{ .key = "Enter", .desc = "Send prompt" },
         .{ .key = "Ctrl-j", .desc = "Insert newline" },
-        .{ .key = "Esc / Ctrl-c", .desc = "Exit to normal mode" },
+        .{ .key = "Ctrl-c / Esc", .desc = "Exit to normal mode" },
         .{ .key = "/", .desc = "Slash command menu" },
         .{ .key = "@", .desc = "File picker" },
         .{ .key = "!", .desc = "Toggle shell mode" },
@@ -107,7 +107,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "Space s", .desc = "Toggle diff view" },
         .{ .key = "Space t", .desc = "Cycle thinking effort / variant" },
         .{ .key = "Tab", .desc = "Cycle session modes" },
-        .{ .key = "Esc Esc", .desc = "Interrupt agent" },
+        .{ .key = "Ctrl-c", .desc = "Interrupt agent" },
     };
     for (normal_bindings) |b| {
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
@@ -128,7 +128,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "Y", .desc = "Yank entire message" },
         .{ .key = "Space f", .desc = "Resume follow mode" },
         .{ .key = "i", .desc = "Exit to insert" },
-        .{ .key = "Esc / q", .desc = "Exit to normal" },
+        .{ .key = "Ctrl-c / Esc / q", .desc = "Exit to normal" },
     };
     for (history_bindings) |b| {
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
@@ -140,7 +140,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     const visual_bindings = [_]Binding{
         .{ .key = "j / k", .desc = "Extend selection" },
         .{ .key = "y", .desc = "Yank selection" },
-        .{ .key = "Esc / v", .desc = "Exit" },
+        .{ .key = "Ctrl-c / Esc / v", .desc = "Exit" },
     };
     for (visual_bindings) |b| {
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
@@ -153,7 +153,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "j/k / ↑↓", .desc = "Navigate options" },
         .{ .key = "Ctrl-d / u", .desc = "Scroll history" },
         .{ .key = "Enter / y", .desc = "Accept" },
-        .{ .key = "Esc / n", .desc = "Reject" },
+        .{ .key = "Ctrl-c / Esc / n", .desc = "Reject" },
     };
     for (perm_bindings) |b| {
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
@@ -167,7 +167,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
         .{ .key = "↑ / ↓", .desc = "Navigate (palette)" },
         .{ .key = "Tab", .desc = "Insert selected" },
         .{ .key = "Enter", .desc = "Execute" },
-        .{ .key = "Esc", .desc = "Close" },
+        .{ .key = "Ctrl-c / Esc", .desc = "Close" },
     };
     for (menu_bindings) |b| {
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
@@ -225,12 +225,12 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
             "↑"
         else
             "↓";
-        const footer = std.fmt.bufPrint(&footer_buf, " j/k {s} scroll │ ? or Esc to close ", .{arrows}) catch " scroll │ ? to close ";
+        const footer = std.fmt.bufPrint(&footer_buf, " j/k {s} scroll │ ? or Ctrl-c/Esc to close ", .{arrows}) catch " scroll │ ? to close ";
         const footer_x = if (popup_width > footer.len) (popup_width - footer.len) / 2 else 1;
         var footer_seg = [_]vaxis.Cell.Segment{.{ .text = footer, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } }};
         _ = popup_win.print(&footer_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(footer_x) });
     } else {
-        const footer = " ? or Esc to close ";
+        const footer = " ? or Ctrl-c/Esc to close ";
         const footer_x = if (popup_width > footer.len) (popup_width - footer.len) / 2 else 1;
         var footer_seg = [_]vaxis.Cell.Segment{.{ .text = footer, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } }};
         _ = popup_win.print(&footer_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(footer_x) });
@@ -360,7 +360,7 @@ pub fn handleKey(agent_state: *AgentState, key: vaxis.Key) bool {
         }
     }
 
-    if (key.codepoint == 27) {
+    if (key.codepoint == 27 or (key.mods.ctrl and key.codepoint == 'c')) {
         agent_state.help_visible = false;
         agent_state.help_scroll_offset = 0;
         return true;

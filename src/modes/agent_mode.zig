@@ -43,7 +43,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
     // Handle subagent drill-in modal when active (captures all keys)
     if (agent_state.hasSubagentModal()) {
-        if (key.codepoint == 27 or key.codepoint == 'q') { // ESC or q
+        if (isCancelKey(key) or key.codepoint == 'q') { // ESC/Ctrl-C or q
             agent_state.closeSubagentModal();
             app.needs_render = true;
             return;
@@ -361,9 +361,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // Once the prompt is already in normal mode, treat ESC as an immediate
+    // Once the prompt is already in normal mode, treat Ctrl-C as an immediate
     // interrupt while the agent is actively generating.
-    if (key.codepoint == 27 and agent_state.input.vim.vim_mode == .normal) {
+    if (isCtrlC(key) and agent_state.input.vim.vim_mode == .normal and !agent_state.cmd_palette.visible) {
         const tab = if (app.tab_manager) |*tm| tm.activeTab() else null;
         const manager = if (tab) |t| t.manager else null;
         const cancelled = if (manager) |m|
@@ -464,8 +464,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
 
-        // Escape - hide menu (but stay in insert mode)
-        if (key.codepoint == 27) {
+        // Cancel key - hide menu (but stay in insert mode)
+        if (isCancelKey(key)) {
             agent_state.hideSlashMenu();
             app.needs_render = true;
             return;
@@ -498,8 +498,8 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             return;
         }
 
-        // Escape - hide file menu (but stay in insert mode)
-        if (key.codepoint == 27) {
+        // Cancel key - hide file menu (but stay in insert mode)
+        if (isCancelKey(key)) {
             agent_state.file_picker.hide();
             app.needs_render = true;
             return;
@@ -509,13 +509,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     // Handle command palette when visible
     if (agent_state.cmd_palette.visible) {
         if (agent_state.cmd_palette.mode == .rename_input) {
+            if (isCancelKey(key)) {
+                agent_state.cmd_palette.close();
+                app.needs_render = true;
+                return;
+            }
+
             // Rename input mode
             switch (key.codepoint) {
-                27 => { // ESC - cancel rename
-                    agent_state.cmd_palette.close();
-                    app.needs_render = true;
-                    return;
-                },
                 vaxis.Key.enter => {
                     // Confirm rename
                     const new_name = agent_state.cmd_palette.getRenameText();
@@ -547,12 +548,13 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
 
         // Search mode
+        if (isCancelKey(key)) {
+            agent_state.cmd_palette.close();
+            app.needs_render = true;
+            return;
+        }
+
         switch (key.codepoint) {
-            27 => { // ESC - close palette
-                agent_state.cmd_palette.close();
-                app.needs_render = true;
-                return;
-            },
             vaxis.Key.enter => {
                 // Execute selected command
                 if (agent_state.cmd_palette.getSelectedCommand()) |cmd| {
@@ -981,11 +983,11 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
-    // Escape in shell mode - exit shell mode
-    if (agent_state.isShellMode() and key.codepoint == 27) {
+    // Cancel key in shell mode - exit shell mode
+    if (agent_state.isShellMode() and isCancelKey(key)) {
         agent_state.clearShellMode();
         app.needs_render = true;
-        // Don't return - let normal ESC handling proceed (switches to normal mode)
+        // Don't return - let normal cancel handling proceed (switches to normal mode)
     }
 
     if (agent_state.isAwaitingPlanResponse() and
@@ -1150,7 +1152,7 @@ fn handleDebugReplayKey(app: *App, agent_state: *agent.AgentState, key: vaxis.Ke
     if (!agent_state.hasDebugReplay()) return false;
     if (agent_state.hasSubagentModal()) return false;
 
-    if (key.codepoint == 'q' or key.codepoint == 27) {
+    if (key.codepoint == 'q' or isCancelKey(key)) {
         app.exitActiveDebugReplay();
         return true;
     }
@@ -2018,6 +2020,14 @@ fn handleApprovalKeys(app: *App, agent_state: *state.AgentState, mgr: ManagerHan
     }
 }
 
+fn isCtrlC(key: vaxis.Key) bool {
+    return key.mods.ctrl and key.codepoint == 'c';
+}
+
+fn isCancelKey(key: vaxis.Key) bool {
+    return key.codepoint == 27 or isCtrlC(key);
+}
+
 fn handleAcpPermissionKeys(app: *App, mgr: ManagerHandle, perm: *AcpManager.PendingPermission, key: vaxis.Key) bool {
     const num_options = perm.options.len;
 
@@ -2051,8 +2061,8 @@ fn handleAcpPermissionKeys(app: *App, mgr: ManagerHandle, perm: *AcpManager.Pend
         return true;
     }
 
-    // Escape / n: cancel/reject
-    if (key.codepoint == 27 or key.codepoint == 'n' or key.codepoint == 'N') {
+    // Cancel key / n: cancel/reject
+    if (isCancelKey(key) or key.codepoint == 'n' or key.codepoint == 'N') {
         switch (mgr) {
             .acp => |m| m.cancelPermission() catch |err| {
                 std.log.err("Agent: Failed to cancel permission: {any}", .{err});
@@ -2118,8 +2128,8 @@ fn handleCodexCommandKeys(app: *App, mgr: ManagerHandle, cmd: anytype, key: vaxi
         return true;
     }
 
-    // ESC: cancel (decline + interrupt)
-    if (key.codepoint == 27) {
+    // Cancel key: cancel (decline + interrupt)
+    if (isCancelKey(key)) {
         cancelCodexApproval(mgr);
         app.needs_render = true;
         return true;
@@ -2179,8 +2189,8 @@ fn handleCodexFileChangeKeys(app: *App, mgr: ManagerHandle, fc: anytype, key: va
         return true;
     }
 
-    // ESC: cancel
-    if (key.codepoint == 27) {
+    // Cancel key
+    if (isCancelKey(key)) {
         cancelCodexApproval(mgr);
         app.needs_render = true;
         return true;
@@ -2228,8 +2238,8 @@ fn handleCodexUserInputKeys(app: *App, mgr: ManagerHandle, ui: anytype, key: vax
         return true;
     }
 
-    // ESC: cancel
-    if (key.codepoint == 27) {
+    // Cancel key
+    if (isCancelKey(key)) {
         cancelCodexApproval(mgr);
         app.needs_render = true;
         return true;
@@ -2287,13 +2297,13 @@ fn findDecisionIndex(comptime T: type, decisions: []const T, current: T) usize {
 fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *state.PendingQuestion, key: vaxis.Key) !bool {
     if (pending.questions.len == 0) return false;
 
-    // Confirmation view: only accept enter (submit) or esc/backspace (go back)
+    // Confirmation view: only accept enter (submit) or cancel/backspace (go back)
     if (pending.confirming) {
         if (key.codepoint == vaxis.Key.enter) {
             try submitPendingQuestion(app, agent_state, pending);
             return true;
         }
-        if (key.codepoint == 27 or key.codepoint == vaxis.Key.backspace or
+        if (isCancelKey(key) or key.codepoint == vaxis.Key.backspace or
             (key.codepoint == 'h' and !key.mods.ctrl))
         {
             pending.confirming = false;
@@ -2325,7 +2335,7 @@ fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *sta
             try advanceQuestionOrSubmit(app, agent_state, pending);
             return true;
         }
-        if (key.codepoint == 27) {
+        if (isCancelKey(key)) {
             q_state.custom_active = false;
             app.needs_render = true;
             return true;
@@ -2412,7 +2422,7 @@ fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *sta
         return true;
     }
 
-    if (key.codepoint == 27) {
+    if (isCancelKey(key)) {
         const tab = if (app.tab_manager) |*tm| tm.activeTab() else null;
 
         // For OpenCode: reject the question via the dedicated endpoint
@@ -3100,7 +3110,69 @@ test "buildCodexUserInputAnswers preserves selected option and custom text" {
     try std.testing.expectEqualStrings("Keep the patch small", answers[1]);
 }
 
-test "ESC interrupts active Codex turn in normal mode" {
+test "Ctrl-C interrupts active Codex turn in normal mode" {
+    const allocator = std.testing.allocator;
+
+    var app = App{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame_cache = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+    defer if (app.tab_manager) |*tm| tm.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    const mgr = try tab.createCodexManager();
+
+    const proc = try CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    const transport = try CodexTransport.init(allocator, proc);
+    mgr.process = proc;
+    mgr.transport = transport;
+    mgr.status = .turn_active;
+    mgr.thread_id = "thread-1";
+    mgr.turn_id = try allocator.dupe(u8, "turn-1");
+
+    tab.agent_state.input.vim.vim_mode = .normal;
+
+    try handleKey(&app, .{ .mods = .{ .ctrl = true }, .codepoint = 'c' });
+
+    try std.testing.expect(app.needs_render);
+    try std.testing.expectEqual(@as(usize, 1), tab.agent_state.messages.items.len);
+    try std.testing.expectEqual(state.Message.Role.system, tab.agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Interrupted", tab.agent_state.messages.items[0].content);
+}
+
+test "Esc does not interrupt active Codex turn in normal mode" {
     const allocator = std.testing.allocator;
 
     var app = App{
@@ -3157,9 +3229,7 @@ test "ESC interrupts active Codex turn in normal mode" {
     try handleKey(&app, .{ .codepoint = 27 });
 
     try std.testing.expect(app.needs_render);
-    try std.testing.expectEqual(@as(usize, 1), tab.agent_state.messages.items.len);
-    try std.testing.expectEqual(state.Message.Role.system, tab.agent_state.messages.items[0].role);
-    try std.testing.expectEqualStrings("Interrupted", tab.agent_state.messages.items[0].content);
+    try std.testing.expectEqual(@as(usize, 0), tab.agent_state.messages.items.len);
 }
 
 test "typed local slash command records the command without a success system message" {

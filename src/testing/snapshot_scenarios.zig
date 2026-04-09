@@ -1767,7 +1767,7 @@ test "snapshot: help_keybinding_alignment" {
     help_helpers.renderKeyBinding(win, 1, "Ctrl-d", "Medium key");
     help_helpers.renderKeyBinding(win, 2, "Ctrl-w h/l", "Long key");
     help_helpers.renderKeyBinding(win, 3, "Space b", "With space");
-    help_helpers.renderKeyBinding(win, 4, "Esc Esc", "Double tap");
+    help_helpers.renderKeyBinding(win, 4, "Ctrl-c", "Interrupt");
 
     const text = try ctx.captureToText();
     defer allocator.free(text);
@@ -1871,7 +1871,7 @@ test "snapshot: help_agent_popup" {
         help_helpers.section("INSERT MODE"),
         help_helpers.binding("Enter", "Send prompt"),
         help_helpers.binding("Ctrl-j", "Insert newline"),
-        help_helpers.binding("Esc", "Exit to normal"),
+        help_helpers.binding("Ctrl-c / Esc", "Exit to normal"),
         help_helpers.binding("/", "Slash commands"),
         help_helpers.binding("@", "File picker"),
         help_helpers.blank(),
@@ -1884,6 +1884,7 @@ test "snapshot: help_agent_popup" {
         help_helpers.binding("Ctrl-w =", "Equalize pane sizes"),
         help_helpers.binding("Space s", "Toggle diff view"),
         help_helpers.binding("Space t", "Cycle model variant"),
+        help_helpers.binding("Ctrl-c", "Interrupt agent"),
         help_helpers.binding("?", "This help"),
     };
 

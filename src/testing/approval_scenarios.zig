@@ -128,6 +128,20 @@ test "codex thinking chunks render into chat state" {
     try std.testing.expectEqualStrings("Considering options...", agent_state.messages.items[0].content);
 }
 
+test "codex thinking chunks skip short aggregated duplicates" {
+    const allocator = std.testing.allocator;
+    var agent_state = approval_root.AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    approval_root.processAgentEvent(&agent_state, .{ .thinking_chunk = "Thinking" });
+    approval_root.processAgentEvent(&agent_state, .{ .thinking_chunk = "..." });
+    approval_root.processAgentEvent(&agent_state, .{ .thinking_chunk = "Thinking..." });
+
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(approval_root.AgentMessage.Role.thinking, agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Thinking...", agent_state.messages.items[0].content);
+}
+
 test "snapshot: codex_user_input_multiple_questions" {
     const allocator = std.testing.allocator;
     var ctx = try harness.createTestContext(allocator, 70, 14);

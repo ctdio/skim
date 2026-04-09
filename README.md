@@ -403,7 +403,7 @@ Type `@` in the agent prompt to fuzzy-search and embed file contents:
 | `@` | Open file picker (at word boundary) |
 | `↑`/`↓` or `Ctrl-p`/`Ctrl-n` | Navigate file list |
 | `Enter` or `Tab` | Insert selected file |
-| `ESC` | Close file picker |
+| `Ctrl-C` / `ESC` | Close file picker |
 
 #### Agent Panel Keybindings
 
@@ -424,7 +424,7 @@ The agent panel uses vim-style modal editing.
 |-----|--------|
 | `Enter` | Send prompt to agent |
 | `Ctrl-J` | Insert newline in prompt |
-| `ESC` / `Ctrl-C` | Exit to normal mode |
+| `Ctrl-C` / `ESC` | Exit to normal mode |
 | `/` | Show slash command menu (at prompt start) |
 | `@` | Show file picker (at word boundary) |
 | `!` | Toggle shell command mode (empty input) |
@@ -457,7 +457,7 @@ The agent panel uses vim-style modal editing.
 | `Space+f` | Scroll to bottom, enable follow |
 | `V` | Toggle diff view mode |
 | `Tab` | Cycle session modes |
-| `ESC ESC` | Interrupt agent (double-tap) |
+| `Ctrl-C` | Interrupt agent |
 
 ##### History Mode
 
@@ -476,7 +476,7 @@ Enter with `gb` or `Space+b`. Browse and yank from message history.
 | `Y` | Yank entire current message |
 | `Space+f` | Resume follow mode, exit history |
 | `i` | Exit to insert mode |
-| `ESC` / `q` | Exit to normal mode |
+| `Ctrl-C` / `ESC` / `q` | Exit to normal mode |
 
 ##### Visual Mode
 
@@ -486,7 +486,7 @@ Enter with `v` from history mode.
 |-----|--------|
 | `j` / `k` | Extend selection down/up |
 | `y` | Yank selection to clipboard |
-| `ESC` / `v` | Exit visual mode |
+| `Ctrl-C` / `ESC` / `v` | Exit visual mode |
 
 ##### Permission Prompt
 
@@ -497,7 +497,7 @@ When agent requests permission:
 | `j` / `k` or `Up` / `Down` | Navigate options |
 | `Ctrl-D` / `Ctrl-U` | Scroll message history |
 | `Enter` / `y` | Accept selected option |
-| `ESC` / `n` | Reject/cancel |
+| `Ctrl-C` / `ESC` / `n` | Reject/cancel |
 
 ##### Menus (Slash, File Picker, Command Palette)
 
@@ -506,7 +506,7 @@ When agent requests permission:
 | `Ctrl-N` / `Ctrl-P` | Navigate menu |
 | `Tab` | Insert selected item |
 | `Enter` | Insert and execute |
-| `ESC` | Close menu |
+| `Ctrl-C` / `ESC` | Close menu |
 
 ##### Slash Commands
 
@@ -602,7 +602,7 @@ skim debug replay-codex ~/.codex/sessions/...jsonl --tui
 | `Space` | Play / pause replay |
 | `n` | Step one event |
 | `r` | Restart replay |
-| `q` / `ESC` | Exit replay |
+| `Ctrl-C` / `q` / `ESC` | Exit replay |
 
 This is a good fit for agent-assisted testing:
 - Reproduce a UI bug from a real Codex session without reconnecting to a live agent

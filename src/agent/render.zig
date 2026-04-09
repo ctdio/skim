@@ -1961,21 +1961,14 @@ fn renderStatusArea(win: vaxis.Window, agent_state: *AgentState, is_thinking: bo
         if (show_interrupt_hint) {
             // Position hint after the thinking message (max ~14 chars) + spacing
             const hint_col: usize = 16; // "Generating..." is 13 chars + some padding
-            const pending_esc = agent_state.isPendingEsc();
             const has_queued = agent_state.hasStagedPrompt();
 
-            // Show different hint based on whether first ESC was pressed
-            const hint_text = if (pending_esc)
-                if (has_queued) "(press esc again to interrupt and send queued)" else "(press esc again to interrupt)"
-            else if (has_queued)
-                "(esc to interrupt and send queued)"
+            const hint_text = if (has_queued)
+                "(ctrl-c to interrupt and send queued)"
             else
-                "(esc to interrupt)";
+                "(ctrl-c to interrupt)";
 
-            const hint_style = if (pending_esc)
-                vaxis.Style{ .fg = Color.yellow, .bold = true }
-            else
-                vaxis.Style{ .fg = Color.dim_gray };
+            const hint_style = vaxis.Style{ .fg = Color.dim_gray };
 
             var hint_seg = [_]vaxis.Cell.Segment{
                 .{ .text = hint_text, .style = hint_style },
@@ -3380,7 +3373,7 @@ fn renderAcpPermissionPrompt(win: vaxis.Window, perm: *AcpManager.PendingPermiss
 
     // Footer row with keybindings
     if (row < win.height) {
-        const footer = "j/k:navigate  Enter:confirm  ESC:cancel";
+        const footer = "j/k:navigate  Enter:confirm  Ctrl-c:cancel";
         const kb_style = vaxis.Style{ .fg = Color.dim_gray };
         const kb_col = if (win.width > footer.len) win.width - footer.len else 0;
 
@@ -3456,7 +3449,7 @@ pub fn renderCommandApproval(win: vaxis.Window, cmd: anytype) !void {
 
     // Footer
     if (row < win.height) {
-        const footer = "j/k:navigate  y:accept  Y:session  n:decline  ESC:cancel";
+        const footer = "j/k:navigate  y:accept  Y:session  n:decline  Ctrl-c:cancel";
         renderApprovalFooter(win, row, footer);
     }
 }
@@ -3506,7 +3499,7 @@ pub fn renderFileChangeApproval(win: vaxis.Window, fc: anytype) !void {
 
     // Footer
     if (row < win.height) {
-        const footer = "j/k:navigate  y:accept  Y:session  n:decline  ESC:cancel";
+        const footer = "j/k:navigate  y:accept  Y:session  n:decline  Ctrl-c:cancel";
         renderApprovalFooter(win, row, footer);
     }
 }
@@ -3566,9 +3559,9 @@ pub fn renderUserInputApproval(win: vaxis.Window, ui: anytype) !void {
     // Footer with question navigation hint
     if (row < win.height) {
         const footer = if (ui.questions.len > 1)
-            "j/k:navigate  Tab:next question  Enter:submit  ESC:cancel"
+            "j/k:navigate  Tab:next question  Enter:submit  Ctrl-c:cancel"
         else
-            "j/k:navigate  Enter:submit  ESC:cancel";
+            "j/k:navigate  Enter:submit  Ctrl-c:cancel";
         renderApprovalFooter(win, row, footer);
     }
 }
@@ -3749,7 +3742,7 @@ pub fn renderSubagentModal(win: vaxis.Window, modal: *state.SubagentModalState, 
 
     // Footer with keybindings
     if (modal_height > 2) {
-        const footer = "j/k:scroll  ESC/q:close";
+        const footer = "j/k:scroll  Ctrl-c/Esc/q:close";
         const footer_col: usize = if (modal_width > footer.len + 2) 2 else 0;
         var seg = [_]vaxis.Cell.Segment{
             .{ .text = footer, .style = dim_style },

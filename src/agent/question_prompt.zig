@@ -146,13 +146,13 @@ fn renderQuestionView(allocator: std.mem.Allocator, win: vaxis.Window, pending: 
     if (row < win.height) {
         const footer = if (pending.questions.len > 1)
             (if (question.multiple)
-                "h/l: prev/next  j/k: select  space: toggle  enter: confirm  esc: dismiss"
+                "h/l: prev/next  j/k: select  space: toggle  enter: confirm  ctrl-c: dismiss"
             else
-                "h/l: prev/next  j/k: select  enter: confirm  esc: dismiss")
+                "h/l: prev/next  j/k: select  enter: confirm  ctrl-c: dismiss")
         else if (question.multiple)
-            "j/k: select  space: toggle  enter: confirm  esc: dismiss"
+            "j/k: select  space: toggle  enter: confirm  ctrl-c: dismiss"
         else
-            "j/k: select  enter: confirm  esc: dismiss";
+            "j/k: select  enter: confirm  ctrl-c: dismiss";
         const footer_style = vaxis.Style{ .fg = Color.dim_gray };
         var footer_seg = [_]vaxis.Cell.Segment{.{ .text = footer, .style = footer_style }};
         _ = win.print(&footer_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
@@ -268,7 +268,7 @@ fn renderConfirmationView(allocator: std.mem.Allocator, win: vaxis.Window, pendi
     // Footer
     if (row < win.height) {
         const footer_style = vaxis.Style{ .fg = Color.dim_gray };
-        var footer_seg = [_]vaxis.Cell.Segment{.{ .text = "enter: submit  esc/h: go back", .style = footer_style }};
+        var footer_seg = [_]vaxis.Cell.Segment{.{ .text = "enter: submit  ctrl-c/h: go back", .style = footer_style }};
         _ = win.print(&footer_seg, .{ .row_offset = @intCast(row), .col_offset = 1 });
     }
 }

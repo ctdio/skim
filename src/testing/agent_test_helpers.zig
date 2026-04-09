@@ -763,7 +763,7 @@ pub fn renderSubagentModal(
 
     // Footer
     if (modal_height > 2) {
-        const footer = "j/k:scroll  ESC/q:close";
+        const footer = "j/k:scroll  Ctrl-c/Esc/q:close";
         const footer_col: usize = if (modal_width > footer.len + 2) 2 else 0;
         var seg = [_]vaxis.Cell.Segment{
             .{ .text = footer, .style = dim_style },

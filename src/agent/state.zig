@@ -1326,15 +1326,17 @@ pub const AgentState = struct {
             return;
         }
 
-        // Codex ACP sends both streaming chunks AND a final aggregated chunk
-        // containing all the content. Detect and skip duplicates by checking if the
-        // incoming text is already a suffix of the existing content.
-        // Only check chunks > 100 bytes to avoid false positives with small repeated text.
         const current_content = last.content;
-        if (current_content.len >= text.len and text.len > 100) {
+        if (std.mem.eql(u8, current_content, text)) {
+            return;
+        }
+
+        var text_to_append = text;
+        if (text.len > current_content.len and std.mem.startsWith(u8, text, current_content)) {
+            text_to_append = text[current_content.len..];
+        } else if (current_content.len >= text.len and text.len > 100) {
             const suffix = current_content[current_content.len - text.len ..];
             if (std.mem.eql(u8, suffix, text)) {
-                // Skip duplicate - text already present as suffix
                 return;
             }
         }
@@ -1348,7 +1350,7 @@ pub const AgentState = struct {
         }
 
         // Append new text to buffer (O(1) amortized)
-        try last.content_buffer.appendSlice(self.allocator, text);
+        try last.content_buffer.appendSlice(self.allocator, text_to_append);
 
         // Update content to point to buffer's items
         last.content = last.content_buffer.items;

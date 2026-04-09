@@ -6,7 +6,7 @@
 │ INSERT MODE                                                          │
 │  Enter          │ Send prompt                                        │
 │  Ctrl-j         │ Insert newline                                     │
-│  Esc            │ Exit to normal                                     │
+│  Ctrl-c / Esc   │ Exit to normal                                     │
 │  /              │ Slash commands                                     │
 │  @              │ File picker                                        │
 │                                                                      │

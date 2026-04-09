@@ -2389,8 +2389,14 @@ pub const App = struct {
                     return;
                 },
                 .agent => {
-                    // In agent mode, single Ctrl+C exits history mode.
+                    // In agent mode, single Ctrl+C closes subagent drill-in first,
+                    // then exits history mode.
                     if (self.getActiveAgentState()) |agent_state| {
+                        if (agent_state.hasSubagentModal()) {
+                            agent_state.closeSubagentModal();
+                            self.needs_render = true;
+                            return;
+                        }
                         if (agent_state.isInHistoryMode()) {
                             agent_state.exitHistoryMode();
                             agent_state.input.vim.vim_mode = .normal;
