@@ -64,6 +64,32 @@ pub const ReasoningEffort = enum {
     }
 };
 
+pub const ReasoningSummary = enum {
+    auto,
+    concise,
+    detailed,
+    none,
+
+    pub fn fromString(s: []const u8) ?ReasoningSummary {
+        const map = std.StaticStringMap(ReasoningSummary).initComptime(.{
+            .{ "auto", .auto },
+            .{ "concise", .concise },
+            .{ "detailed", .detailed },
+            .{ "none", .none },
+        });
+        return map.get(s);
+    }
+
+    pub fn toString(self: ReasoningSummary) []const u8 {
+        return switch (self) {
+            .auto => "auto",
+            .concise => "concise",
+            .detailed => "detailed",
+            .none => "none",
+        };
+    }
+};
+
 pub const ServiceTier = enum {
     fast,
     flex,
@@ -346,6 +372,7 @@ pub const ThreadStartParams = struct {
     cwd: ?[]const u8 = null,
     approval_policy: ?ApprovalPolicy = null,
     reasoning_effort: ?ReasoningEffort = null,
+    summary: ?ReasoningSummary = null,
     service_tier: ?ServiceTier = null,
     input: ?[]InputItem = null,
 };
@@ -393,6 +420,7 @@ pub const ThreadListResult = struct {
 pub const TurnStartParams = struct {
     thread_id: []const u8,
     reasoning_effort: ?ReasoningEffort = null,
+    summary: ?ReasoningSummary = null,
     service_tier: ?ServiceTier = null,
     collaboration_mode: ?CollaborationMode = null,
     collaboration_mode_model: ?[]const u8 = null,

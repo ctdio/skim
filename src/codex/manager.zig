@@ -5,6 +5,9 @@ const transport_mod = @import("transport.zig");
 const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
 
+// Codex only emits text-bearing reasoning notifications when summaries are requested.
+const streamed_reasoning_summary: protocol.ReasoningSummary = .detailed;
+
 // =============================================================================
 // Codex Manager
 // =============================================================================
@@ -333,6 +336,7 @@ pub const CodexManager = struct {
             .cwd = cwd,
             .approval_policy = self.requested_approval_policy,
             .reasoning_effort = self.requested_reasoning_effort,
+            .summary = streamed_reasoning_summary,
             .service_tier = self.requested_service_tier,
         }) catch return error.ThreadStartFailed;
         defer self.allocator.free(msg);
@@ -456,6 +460,7 @@ pub const CodexManager = struct {
         const msg = encoder.encodeTurnStart(req_id.number, .{
             .thread_id = thread_id,
             .reasoning_effort = self.requested_reasoning_effort,
+            .summary = streamed_reasoning_summary,
             .service_tier = self.requested_service_tier,
             .collaboration_mode = self.requested_collaboration_mode,
             .collaboration_mode_model = self.current_model orelse self.model,
@@ -1564,6 +1569,7 @@ pub const CodexManager = struct {
         const Method = enum {
             agent_message_delta,
             reasoning_delta,
+            reasoning_summary_part_added,
             command_output_delta,
             item_started,
             item_completed,
@@ -1576,6 +1582,8 @@ pub const CodexManager = struct {
         const method_map = std.StaticStringMap(Method).initComptime(.{
             .{ "item/agentMessage/delta", .agent_message_delta },
             .{ "item/reasoning/summaryTextDelta", .reasoning_delta },
+            .{ "item/reasoning/summaryPartAdded", .reasoning_summary_part_added },
+            .{ "item/reasoning/textDelta", .reasoning_delta },
             .{ "item/commandExecution/outputDelta", .command_output_delta },
             .{ "item/started", .item_started },
             .{ "item/completed", .item_completed },
@@ -1596,6 +1604,7 @@ pub const CodexManager = struct {
         return switch (variant) {
             .agent_message_delta => self.parseDeltaEvent(json, .text_delta),
             .reasoning_delta => self.parseDeltaEvent(json, .reasoning_delta),
+            .reasoning_summary_part_added => self.parseReasoningSummaryPartAdded(json),
             .command_output_delta => self.parseDeltaEvent(json, .command_output_delta),
             .item_started => self.parseItemEvent(json, .item_started),
             .item_completed => self.parseItemEvent(json, .item_completed),
@@ -1653,6 +1662,46 @@ pub const CodexManager = struct {
             .reasoning_delta => .{ .reasoning_delta = event },
             .command_output_delta => .{ .command_output_delta = event },
         };
+    }
+
+    fn parseReasoningSummaryPartAdded(self: *CodexManager, json: []const u8) ?CodexEvent {
+        const RawSummaryPart = struct {
+            threadId: ?[]const u8 = null,
+            turnId: ?[]const u8 = null,
+            itemId: ?[]const u8 = null,
+            summaryIndex: ?usize = null,
+        };
+
+        const parsed = std.json.parseFromSlice(RawSummaryPart, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+        }) catch return null;
+        defer parsed.deinit();
+
+        const r = parsed.value;
+        const summary_index = r.summaryIndex orelse return null;
+        if (summary_index == 0) return null;
+
+        if (r.turnId) |tid| {
+            if (self.turn_id == null) {
+                self.turn_id = self.allocator.dupe(u8, tid) catch null;
+            }
+        }
+
+        const owned_thread_id = self.allocator.dupe(u8, r.threadId orelse "") catch return null;
+        errdefer self.allocator.free(owned_thread_id);
+        const owned_turn_id = self.allocator.dupe(u8, r.turnId orelse "") catch return null;
+        errdefer self.allocator.free(owned_turn_id);
+        const owned_item_id = self.allocator.dupe(u8, r.itemId orelse "") catch return null;
+        errdefer self.allocator.free(owned_item_id);
+        const owned_delta = self.allocator.dupe(u8, "\n\n") catch return null;
+        errdefer self.allocator.free(owned_delta);
+
+        return .{ .reasoning_delta = .{
+            .thread_id = owned_thread_id,
+            .turn_id = owned_turn_id,
+            .item_id = owned_item_id,
+            .delta = owned_delta,
+        } };
     }
 
     const ItemTag = enum { item_started, item_completed };
@@ -2217,6 +2266,58 @@ test "processMessage with reasoning delta returns reasoning_delta" {
     try std.testing.expect(event != null);
     try std.testing.expect(event.? == .reasoning_delta);
     try std.testing.expectEqualStrings("Thinking...", event.?.reasoning_delta.delta);
+}
+
+test "processMessage with reasoning text delta returns reasoning_delta" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/reasoning/textDelta","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-2","contentIndex":0,"delta":"Let me inspect the render path."}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .reasoning_delta);
+    try std.testing.expectEqualStrings("Let me inspect the render path.", event.?.reasoning_delta.delta);
+}
+
+test "processMessage with reasoning summary part added inserts separator delta" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/reasoning/summaryPartAdded","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-2","summaryIndex":1}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(event != null);
+    try std.testing.expect(event.? == .reasoning_delta);
+    try std.testing.expectEqualStrings("\n\n", event.?.reasoning_delta.delta);
+}
+
+test "processMessage with first reasoning summary part added does not emit separator" {
+    var manager = CodexManager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var decoder = codec.Decoder.init(std.testing.allocator);
+    const json =
+        \\{"method":"item/reasoning/summaryPartAdded","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-2","summaryIndex":0}}
+    ;
+    var msg = try decoder.decode(json);
+    defer msg.deinit(std.testing.allocator);
+
+    var event = manager.processMessage(msg);
+    defer if (event) |*e| manager.deinitEvent(e);
+    try std.testing.expect(event == null);
 }
 
 test "processMessage with item/started returns item_started" {

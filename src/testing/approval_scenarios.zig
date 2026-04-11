@@ -142,6 +142,91 @@ test "codex thinking chunks skip short aggregated duplicates" {
     try std.testing.expectEqualStrings("Thinking...", agent_state.messages.items[0].content);
 }
 
+test "snapshot: codex_reasoning_text_delta_panel" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 80, 16);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    const mgr = try tab.createCodexManager();
+
+    const proc = try approval_root.CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    mgr.process = proc;
+    mgr.transport = try approval_root.CodexTransport.init(allocator, proc);
+    mgr.status = .thread_active;
+    tab.agent_state.visible = true;
+    app.mode = .agent;
+
+    var decoder = approval_root.CodexCodec.Decoder.init(allocator);
+    const json =
+        \\{"method":"item/reasoning/textDelta","params":{"threadId":"t1","turnId":"turn-1","itemId":"reasoning-1","contentIndex":0,"delta":"Inspecting the render path before changing the panel."}}
+    ;
+    const msg = try decoder.decode(json);
+    try mgr.transport.?.pending_messages.append(allocator, msg);
+
+    const result = tab.manager.?.pollEvents(allocator, &tab.agent_state);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expectEqual(approval_root.CodexManager.Status.turn_active, mgr.status);
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "Inspecting the render path before changing the panel.") != null);
+    try snapshot.expectSnapshot(allocator, "codex_reasoning_text_delta_panel", text);
+}
+
+test "snapshot: codex_reasoning_summary_panel" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 90, 18);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Tab 1");
+    const mgr = try tab.createCodexManager();
+
+    const proc = try approval_root.CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    mgr.process = proc;
+    mgr.transport = try approval_root.CodexTransport.init(allocator, proc);
+    mgr.status = .thread_active;
+    tab.agent_state.visible = true;
+    app.mode = .agent;
+
+    var decoder = approval_root.CodexCodec.Decoder.init(allocator);
+    const messages = [_][]const u8{
+        "{\"method\":\"item/reasoning/summaryPartAdded\",\"params\":{\"threadId\":\"t1\",\"turnId\":\"turn-1\",\"itemId\":\"reasoning-1\",\"summaryIndex\":0}}",
+        "{\"method\":\"item/reasoning/summaryTextDelta\",\"params\":{\"threadId\":\"t1\",\"turnId\":\"turn-1\",\"itemId\":\"reasoning-1\",\"summaryIndex\":0,\"delta\":\"**Comparing options**\\n\\nStart with the risk profile.\"}}",
+        "{\"method\":\"item/reasoning/summaryPartAdded\",\"params\":{\"threadId\":\"t1\",\"turnId\":\"turn-1\",\"itemId\":\"reasoning-1\",\"summaryIndex\":1}}",
+        "{\"method\":\"item/reasoning/summaryTextDelta\",\"params\":{\"threadId\":\"t1\",\"turnId\":\"turn-1\",\"itemId\":\"reasoning-1\",\"summaryIndex\":1,\"delta\":\"**Choosing a default**\\n\\nPrefer the safer migration path.\"}}",
+    };
+
+    for (messages) |json| {
+        const msg = try decoder.decode(json);
+        try mgr.transport.?.pending_messages.append(allocator, msg);
+    }
+
+    const result = tab.manager.?.pollEvents(allocator, &tab.agent_state);
+    try std.testing.expectEqual(@as(usize, 3), result.count);
+    try std.testing.expectEqual(approval_root.CodexManager.Status.turn_active, mgr.status);
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "Comparing options") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Choosing a default") != null);
+    try snapshot.expectSnapshot(allocator, "codex_reasoning_summary_panel", text);
+}
+
 test "snapshot: codex_user_input_multiple_questions" {
     const allocator = std.testing.allocator;
     var ctx = try harness.createTestContext(allocator, 70, 14);

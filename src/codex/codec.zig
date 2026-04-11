@@ -161,6 +161,11 @@ pub const Encoder = struct {
             try writer.print("\"reasoningEffort\":{f}", .{std.json.fmt(effort.toString(), .{})});
             first = false;
         }
+        if (params.summary) |summary| {
+            if (!first) try writer.writeByte(',');
+            try writer.print("\"summary\":{f}", .{std.json.fmt(summary.toString(), .{})});
+            first = false;
+        }
         if (params.service_tier) |service_tier| {
             if (!first) try writer.writeByte(',');
             try writer.print("\"serviceTier\":{f}", .{std.json.fmt(service_tier.toString(), .{})});
@@ -244,6 +249,9 @@ pub const Encoder = struct {
         });
         if (params.reasoning_effort) |effort| {
             try writer.print(",\"effort\":{f}", .{std.json.fmt(effort.toString(), .{})});
+        }
+        if (params.summary) |summary| {
+            try writer.print(",\"summary\":{f}", .{std.json.fmt(summary.toString(), .{})});
         }
         if (params.service_tier) |service_tier| {
             try writer.print(",\"serviceTier\":{f}", .{std.json.fmt(service_tier.toString(), .{})});
@@ -1201,6 +1209,7 @@ test "encode thread start" {
         .cwd = "/home/user/projects/skim",
         .approval_policy = .on_request,
         .reasoning_effort = .medium,
+        .summary = .detailed,
         .service_tier = .fast,
         .input = &text_input,
     });
@@ -1212,6 +1221,7 @@ test "encode thread start" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"model\":\"gpt-5.1-codex-mini\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"approvalPolicy\":\"on-request\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"reasoningEffort\":\"medium\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"summary\":\"detailed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"serviceTier\":\"fast\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"input\":[") != null);
 }
@@ -1226,6 +1236,7 @@ test "encode turn start" {
     const result = try encoder.encodeTurnStart(5, .{
         .thread_id = "019c6c65-9df2-7003-b62e-9ab034e6d054",
         .reasoning_effort = .low,
+        .summary = .detailed,
         .service_tier = .fast,
         .collaboration_mode = .plan,
         .collaboration_mode_model = "gpt-5.4",
@@ -1238,6 +1249,7 @@ test "encode turn start" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\"method\":\"turn/start\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"threadId\":\"019c6c65-9df2-7003-b62e-9ab034e6d054\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"effort\":\"low\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"summary\":\"detailed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"serviceTier\":\"fast\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"collaborationMode\":{\"mode\":\"plan\",\"settings\":{\"model\":\"gpt-5.4\"}}") != null);
 }

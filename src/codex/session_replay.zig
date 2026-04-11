@@ -211,6 +211,15 @@ fn replayResponseItem(allocator: std.mem.Allocator, agent_state: *AgentState, pa
         return;
     }
 
+    if (std.mem.eql(u8, payload_type, "reasoning")) {
+        const text = try extractReasoningText(allocator, payload);
+        defer allocator.free(text);
+
+        if (text.len == 0) return;
+        replayAgentEvent(agent_state, .{ .thinking_chunk = text });
+        return;
+    }
+
     if (std.mem.eql(u8, payload_type, "function_call")) {
         const call_id = getObjectString(payload, "call_id") orelse return;
         const name = getObjectString(payload, "name") orelse return;
@@ -386,6 +395,53 @@ fn extractMessageText(allocator: std.mem.Allocator, blocks: []const std.json.Val
     return result.toOwnedSlice(allocator);
 }
 
+fn extractReasoningText(allocator: std.mem.Allocator, payload: std.json.ObjectMap) ![]const u8 {
+    var result: std.ArrayList(u8) = .{};
+    defer result.deinit(allocator);
+
+    if (getObjectValue(payload, "summary")) |summary_value| {
+        if (summary_value == .array) {
+            try appendReasoningBlocks(allocator, &result, summary_value.array.items);
+        }
+    }
+
+    if (getObjectValue(payload, "content")) |content_value| {
+        if (content_value == .array) {
+            try appendReasoningBlocks(allocator, &result, content_value.array.items);
+        }
+    }
+
+    return result.toOwnedSlice(allocator);
+}
+
+fn appendReasoningBlocks(
+    allocator: std.mem.Allocator,
+    result: *std.ArrayList(u8),
+    blocks: []const std.json.Value,
+) !void {
+    for (blocks) |block| {
+        if (block != .object) continue;
+
+        const block_type = getObjectString(block.object, "type") orelse continue;
+        if (!isReasoningTextBlock(block_type)) continue;
+
+        const text = getObjectString(block.object, "text") orelse continue;
+        if (text.len == 0) continue;
+
+        if (result.items.len > 0) {
+            try result.append(allocator, '\n');
+        }
+        try result.appendSlice(allocator, text);
+    }
+}
+
+fn isReasoningTextBlock(block_type: []const u8) bool {
+    return std.mem.eql(u8, block_type, "summary_text") or
+        std.mem.eql(u8, block_type, "reasoning_text") or
+        std.mem.eql(u8, block_type, "output_text") or
+        std.mem.eql(u8, block_type, "text");
+}
+
 fn shouldDisplayUserMessage(text: []const u8) bool {
     const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
     if (trimmed.len == 0) return false;
@@ -498,6 +554,23 @@ test "replaySessionFromString replays codex session items into agent state" {
     try std.testing.expectEqualStrings("<proposed_plan>\n# Split Panes\n\n## Summary\n- Add panes\n- Keep tabs\n</proposed_plan>", agent_state.messages.items[3].content);
     try std.testing.expectEqual(@as(u64, 107551), agent_state.codex_token_usage.?.total_tokens);
     try std.testing.expectEqual(@as(f64, 53.0), agent_state.codex_rate_limits.?.primary_used_percent);
+}
+
+test "replaySessionFromString replays reasoning summary items into thinking messages" {
+    const allocator = std.testing.allocator;
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const log =
+        \\{"timestamp":"2026-02-27T04:09:07.545Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"**Planning parallel git status and diff**"}],"content":null,"encrypted_content":"opaque"}}
+    ;
+
+    _ = try replaySessionFromString(allocator, &agent_state, log);
+
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(AgentMessage.Role.thinking, agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("**Planning parallel git status and diff**", agent_state.messages.items[0].content);
 }
 
 test "replaySessionFromString skips internal transcript noise" {
