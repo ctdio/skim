@@ -306,7 +306,7 @@ pub const ChatLineMap = struct {
                         try self.addToolHeader(&global_line, msg_idx, msg);
 
                         // Tool result if completed/failed
-                        if (msg.tool_status == .completed or msg.tool_status == .failed) {
+                        if (shouldRenderToolResult(msg)) {
                             try self.addToolResult(&global_line, msg_idx, msg);
                         }
                     }
@@ -351,14 +351,16 @@ pub const ChatLineMap = struct {
             }
 
             // Spacer between messages
-            try self.records.append(self.allocator, .{
-                .global_line = global_line,
-                .line_type = .spacer,
-                .text = "",
-                .style = .{},
-                .indent = 0,
-            });
-            global_line += 1;
+            if (shouldAddSpacerAfterMessage(messages, msg_idx)) {
+                try self.records.append(self.allocator, .{
+                    .global_line = global_line,
+                    .line_type = .spacer,
+                    .text = "",
+                    .style = .{},
+                    .indent = 0,
+                });
+                global_line += 1;
+            }
         }
     }
 
@@ -398,6 +400,10 @@ pub const ChatLineMap = struct {
             for (self.message_count..messages.len) |msg_idx| {
                 const msg = &messages[msg_idx];
 
+                if (shouldCompactWithPreviousRead(messages, msg_idx)) {
+                    removeTrailingSpacer(self, &global_line);
+                }
+
                 // Track where the last message starts (for O(1) streaming updates)
                 self.last_msg_start_idx = self.records.items.len;
                 self.last_msg_strings_start = self.strings.items.len;
@@ -413,7 +419,7 @@ pub const ChatLineMap = struct {
                             try self.addSubagentBlock(&global_line, msg_idx, msg.*);
                         } else {
                             try self.addToolHeader(&global_line, msg_idx, msg.*);
-                            if (msg.tool_status == .completed or msg.tool_status == .failed) {
+                            if (shouldRenderToolResult(msg.*)) {
                                 try self.addToolResult(&global_line, msg_idx, msg.*);
                             }
                         }
@@ -442,14 +448,16 @@ pub const ChatLineMap = struct {
                 }
 
                 // Spacer
-                try self.records.append(self.allocator, .{
-                    .global_line = global_line,
-                    .line_type = .spacer,
-                    .text = "",
-                    .style = .{},
-                    .indent = 0,
-                });
-                global_line += 1;
+                if (shouldAddSpacerAfterMessage(messages, msg_idx)) {
+                    try self.records.append(self.allocator, .{
+                        .global_line = global_line,
+                        .line_type = .spacer,
+                        .text = "",
+                        .style = .{},
+                        .indent = 0,
+                    });
+                    global_line += 1;
+                }
             }
 
             self.message_count = messages.len;
@@ -522,9 +530,13 @@ pub const ChatLineMap = struct {
             // Shrink records to remove last message
             self.records.shrinkRetainingCapacity(idx);
 
+            if (shouldCompactWithPreviousRead(messages, last_msg_idx)) {
+                removeTrailingSpacer(self, null);
+            }
+
             // Re-add the last message
-            var global_line: usize = if (idx > 0)
-                self.records.items[idx - 1].global_line + 1
+            var global_line: usize = if (self.records.items.len > 0)
+                self.records.items[self.records.items.len - 1].global_line + 1
             else
                 0;
 
@@ -536,7 +548,7 @@ pub const ChatLineMap = struct {
                             try self.addSubagentBlock(&global_line, last_msg_idx, msg.*);
                         } else {
                             try self.addToolHeader(&global_line, last_msg_idx, msg.*);
-                            if (msg.tool_status == .completed or msg.tool_status == .failed) {
+                            if (shouldRenderToolResult(msg.*)) {
                                 try self.addToolResult(&global_line, last_msg_idx, msg.*);
                             }
                         }
@@ -576,13 +588,15 @@ pub const ChatLineMap = struct {
             }
 
             // Spacer
-            try self.records.append(self.allocator, .{
-                .global_line = global_line,
-                .line_type = .spacer,
-                .text = "",
-                .style = .{},
-                .indent = 0,
-            });
+            if (shouldAddSpacerAfterMessage(messages, last_msg_idx)) {
+                try self.records.append(self.allocator, .{
+                    .global_line = global_line,
+                    .line_type = .spacer,
+                    .text = "",
+                    .style = .{},
+                    .indent = 0,
+                });
+            }
         } else {
             // Message not found, rebuild
             try self.build(messages, wrap_width, diff_view_mode, highlighter, self.expanded_user_messages);
@@ -636,6 +650,67 @@ pub const ChatLineMap = struct {
         }
 
         return false;
+    }
+
+    fn shouldRenderToolResult(msg: Message) bool {
+        if (isReadTool(msg.tool_name)) return false;
+        return msg.tool_status == .completed or msg.tool_status == .failed;
+    }
+
+    fn shouldAddSpacerAfterMessage(messages: []const Message, msg_idx: usize) bool {
+        return !shouldCompactWithNextRead(messages, msg_idx);
+    }
+
+    fn shouldCompactWithNextRead(messages: []const Message, msg_idx: usize) bool {
+        const msg = messages[msg_idx];
+        if (!isCompactableReadTool(msg, messages)) return false;
+
+        var next_idx = msg_idx + 1;
+        while (next_idx < messages.len) : (next_idx += 1) {
+            const next_msg = messages[next_idx];
+            if (next_msg.role != .tool) return false;
+            if (shouldSkipToolForDiff(next_msg, messages)) continue;
+            if (next_msg.subagent_info != null) return false;
+            return isReadTool(next_msg.tool_name);
+        }
+
+        return false;
+    }
+
+    fn shouldCompactWithPreviousRead(messages: []const Message, msg_idx: usize) bool {
+        const msg = messages[msg_idx];
+        if (!isCompactableReadTool(msg, messages)) return false;
+
+        var idx = msg_idx;
+        while (idx > 0) {
+            idx -= 1;
+            const prev_msg = messages[idx];
+            if (prev_msg.role != .tool) return false;
+            if (shouldSkipToolForDiff(prev_msg, messages)) continue;
+            if (prev_msg.subagent_info != null) return false;
+            return isReadTool(prev_msg.tool_name);
+        }
+
+        return false;
+    }
+
+    fn isCompactableReadTool(msg: Message, messages: []const Message) bool {
+        if (msg.role != .tool) return false;
+        if (msg.subagent_info != null) return false;
+        if (!isReadTool(msg.tool_name)) return false;
+        if (shouldSkipToolForDiff(msg, messages)) return false;
+        return true;
+    }
+
+    fn removeTrailingSpacer(self: *ChatLineMap, global_line: ?*usize) void {
+        if (self.records.items.len == 0) return;
+        const last_idx = self.records.items.len - 1;
+        if (self.records.items[last_idx].line_type != .spacer) return;
+
+        self.records.shrinkRetainingCapacity(last_idx);
+        if (global_line) |line| {
+            line.* -|= 1;
+        }
     }
 
     /// Check if a message's markdown parse tree contains a complete table.
@@ -785,6 +860,27 @@ pub const ChatLineMap = struct {
         // Text uses default color (icon is colored by render.zig)
         const text_style: vaxis.Style = .{};
 
+        if (isReadTool(msg.tool_name)) {
+            const read_target = try extractReadDisplayTarget(self.allocator, msg);
+            defer if (read_target) |target| self.allocator.free(target);
+
+            const header_text = if (read_target) |target|
+                try std.fmt.allocPrint(self.allocator, "{s} Read({s})", .{ status_icon, target })
+            else
+                try std.fmt.allocPrint(self.allocator, "{s} Read", .{status_icon});
+            try self.strings.append(self.allocator, header_text);
+
+            try self.records.append(self.allocator, .{
+                .global_line = global_line.*,
+                .line_type = .{ .tool_header = .{ .msg_idx = msg_idx } },
+                .text = header_text,
+                .style = text_style,
+                .indent = 1,
+            });
+            global_line.* += 1;
+            return;
+        }
+
         // Handle tool command with smart wrapping
         if (msg.tool_command) |cmd| {
             // For multiline commands, extract first line only
@@ -871,31 +967,6 @@ pub const ChatLineMap = struct {
             {
                 return;
             }
-        }
-
-        // Read tools get a minimal one-line summary instead of full output
-        if (isReadTool(msg.tool_name)) {
-            if (msg.tool_stdout) |stdout| {
-                if (stdout.len > 0) {
-                    const line_count = countLines(stdout);
-                    const summary = if (line_count == 1)
-                        try self.allocator.dupe(u8, "↳ (1 line)")
-                    else
-                        try std.fmt.allocPrint(self.allocator, "↳ ({d} lines)", .{line_count});
-                    try self.strings.append(self.allocator, summary);
-
-                    try self.records.append(self.allocator, .{
-                        .global_line = global_line.*,
-                        .line_type = .{ .tool_result = .{ .msg_idx = msg_idx } },
-                        .text = summary,
-                        .style = .{ .fg = Color.dim_gray },
-                        .indent = 1,
-                    });
-                    global_line.* += 1;
-                    return;
-                }
-            }
-            // Fall through to the "No content" fallback below
         }
 
         const max_output_lines = 8;
@@ -1009,17 +1080,101 @@ pub const ChatLineMap = struct {
     fn isReadTool(name: ?[]const u8) bool {
         const n = name orelse return false;
         return std.mem.startsWith(u8, n, "mcp__acp__Read") or
-            std.ascii.eqlIgnoreCase(n, "Read");
+            std.ascii.eqlIgnoreCase(n, "Read") or
+            std.ascii.eqlIgnoreCase(n, "read") or
+            std.ascii.eqlIgnoreCase(n, "read_file") or
+            std.ascii.eqlIgnoreCase(n, "readfile") or
+            std.ascii.eqlIgnoreCase(n, "read_text_file") or
+            std.ascii.eqlIgnoreCase(n, "fs/read_text_file") or
+            std.ascii.eqlIgnoreCase(n, "fs/read_file");
     }
 
-    fn countLines(text: []const u8) usize {
-        var count: usize = 0;
-        var iter = std.mem.splitScalar(u8, text, '\n');
-        while (iter.next()) |line| {
-            if (line.len == 0 and iter.peek() == null) continue;
-            count += 1;
+    fn extractReadDisplayTarget(allocator: Allocator, msg: Message) !?[]const u8 {
+        if (msg.tool_command) |cmd| {
+            if (try extractReadTargetFromCommand(allocator, cmd)) |target| {
+                return target;
+            }
         }
-        return count;
+
+        if (extractReadTargetFromTitle(msg.content)) |target| {
+            return @as([]const u8, try allocator.dupe(u8, target));
+        }
+
+        return null;
+    }
+
+    fn extractReadTargetFromCommand(allocator: Allocator, command: []const u8) !?[]const u8 {
+        const trimmed = std.mem.trim(u8, command, &std.ascii.whitespace);
+        if (trimmed.len == 0) return null;
+
+        if (trimmed[0] == '{') {
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{
+                .ignore_unknown_fields = true,
+                .allocate = .alloc_always,
+            }) catch return null;
+            defer parsed.deinit();
+
+            if (extractReadPathFromJsonValue(parsed.value)) |path| {
+                return @as([]const u8, try allocator.dupe(u8, path));
+            }
+            return null;
+        }
+
+        const first_line = if (std.mem.indexOfScalar(u8, trimmed, '\n')) |newline_idx|
+            trimmed[0..newline_idx]
+        else
+            trimmed;
+        if (first_line.len == 0) return null;
+
+        return @as([]const u8, try allocator.dupe(u8, first_line));
+    }
+
+    fn extractReadPathFromJsonValue(value: std.json.Value) ?[]const u8 {
+        switch (value) {
+            .object => |obj| {
+                const direct_keys = [_][]const u8{ "file_path", "path", "filepath", "filename", "file" };
+                for (direct_keys) |key| {
+                    if (obj.get(key)) |field| {
+                        if (field == .string and field.string.len > 0) {
+                            return field.string;
+                        }
+                    }
+                }
+
+                const nested_keys = [_][]const u8{ "input", "arguments", "args", "params", "value" };
+                for (nested_keys) |key| {
+                    if (obj.get(key)) |child| {
+                        if (extractReadPathFromJsonValue(child)) |path| {
+                            return path;
+                        }
+                    }
+                }
+            },
+            .array => |arr| {
+                for (arr.items) |item| {
+                    if (extractReadPathFromJsonValue(item)) |path| {
+                        return path;
+                    }
+                }
+            },
+            else => {},
+        }
+
+        return null;
+    }
+
+    fn extractReadTargetFromTitle(title: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, title, &std.ascii.whitespace);
+        if (trimmed.len < 7) return null;
+        if (trimmed[trimmed.len - 1] != ')') return null;
+
+        const open_idx = std.mem.indexOfScalar(u8, trimmed, '(') orelse return null;
+        const prefix = std.mem.trim(u8, trimmed[0..open_idx], &std.ascii.whitespace);
+        if (!std.ascii.eqlIgnoreCase(prefix, "Read")) return null;
+
+        const inner = std.mem.trim(u8, trimmed[open_idx + 1 .. trimmed.len - 1], &std.ascii.whitespace);
+        if (inner.len == 0) return null;
+        return inner;
     }
 
     /// Braille spinner characters for subagent running animation
@@ -2605,6 +2760,96 @@ test "non-task tool message produces tool_header not subagent block" {
     try std.testing.expect(records.len >= 2);
     try std.testing.expect(records[0].line_type == .tool_header);
     try std.testing.expect(records[1].line_type == .tool_result);
+}
+
+test "read tool message renders as single compact header" {
+    const allocator = std.testing.allocator;
+    var line_map = ChatLineMap.init(allocator);
+    defer line_map.deinit();
+
+    var messages = [_]Message{.{
+        .role = .tool,
+        .content = "read_file",
+        .timestamp = 0,
+        .tool_name = "read_file",
+        .tool_command = "{\"file_path\":\"src/main.zig\",\"offset\":1,\"limit\":200}",
+        .tool_status = .completed,
+        .tool_stdout = "line 1\nline 2",
+    }};
+
+    try line_map.build(&messages, 80, .unified, null, null);
+
+    const records = line_map.records.items;
+    try std.testing.expectEqual(@as(usize, 2), records.len);
+    try std.testing.expect(records[0].line_type == .tool_header);
+    try std.testing.expect(std.mem.indexOf(u8, records[0].text, "Read(src/main.zig)") != null);
+    try std.testing.expect(records[1].line_type == .spacer);
+
+    for (records) |record| {
+        try std.testing.expect(record.line_type != .tool_result);
+    }
+}
+
+test "read tool header extracts target from title when command is missing" {
+    const allocator = std.testing.allocator;
+    var line_map = ChatLineMap.init(allocator);
+    defer line_map.deinit();
+
+    var messages = [_]Message{.{
+        .role = .tool,
+        .content = "Read(build.zig)",
+        .timestamp = 0,
+        .tool_name = "Read",
+        .tool_status = .completed,
+    }};
+
+    try line_map.build(&messages, 80, .unified, null, null);
+
+    const records = line_map.records.items;
+    try std.testing.expectEqual(@as(usize, 2), records.len);
+    try std.testing.expect(records[0].line_type == .tool_header);
+    try std.testing.expect(std.mem.indexOf(u8, records[0].text, "Read(build.zig)") != null);
+}
+
+test "consecutive read tools compact into a dense block" {
+    const allocator = std.testing.allocator;
+    var line_map = ChatLineMap.init(allocator);
+    defer line_map.deinit();
+
+    var messages = [_]Message{
+        .{
+            .role = .tool,
+            .content = "read_file",
+            .timestamp = 0,
+            .tool_name = "read_file",
+            .tool_command = "{\"path\":\"src/agent/state.zig\"}",
+            .tool_status = .completed,
+            .tool_stdout = "state content",
+        },
+        .{
+            .role = .tool,
+            .content = "read_file",
+            .timestamp = 0,
+            .tool_name = "read_file",
+            .tool_command = "{\"file_path\":\"src/agent/render.zig\"}",
+            .tool_status = .completed,
+            .tool_stdout = "render content",
+        },
+    };
+
+    try line_map.build(&messages, 80, .unified, null, null);
+
+    const records = line_map.records.items;
+    try std.testing.expectEqual(@as(usize, 3), records.len);
+    try std.testing.expect(records[0].line_type == .tool_header);
+    try std.testing.expect(records[1].line_type == .tool_header);
+    try std.testing.expect(records[2].line_type == .spacer);
+    try std.testing.expect(std.mem.indexOf(u8, records[0].text, "src/agent/state.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, records[1].text, "src/agent/render.zig") != null);
+
+    for (records) |record| {
+        try std.testing.expect(record.line_type != .tool_result);
+    }
 }
 
 test "formatTokenCount formats small, thousands, millions" {

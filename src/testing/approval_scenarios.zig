@@ -533,6 +533,46 @@ test "snapshot: codex_replay_in_progress_panel" {
     try snapshot.expectSnapshot(allocator, "codex_replay_in_progress_panel", text);
 }
 
+test "snapshot: codex_replay_read_tools_compact_panel" {
+    const allocator = std.testing.allocator;
+
+    var app = try initRenderTestApp(allocator);
+    defer deinitRenderTestApp(&app);
+
+    var ctx = try harness.createTestContext(allocator, 100, 20);
+    defer ctx.deinit();
+
+    const tab = try app.tab_manager.?.createTab("Replay");
+    const mgr = try tab.createCodexManager();
+    mgr.status = .thread_active;
+    tab.agent_state.visible = true;
+    app.mode = .agent;
+
+    const log =
+        \\{"timestamp":"2026-04-12T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Read the key files before planning."}]}}
+        \\{"timestamp":"2026-04-12T10:00:01.000Z","type":"response_item","payload":{"type":"function_call","name":"read_file","arguments":"{\"file_path\":\"src/agent/state.zig\"}","call_id":"call-read-1"}}
+        \\{"timestamp":"2026-04-12T10:00:01.200Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-read-1","output":"state snippet"}}
+        \\{"timestamp":"2026-04-12T10:00:01.300Z","type":"response_item","payload":{"type":"function_call","name":"read_file","arguments":"{\"file_path\":\"src/agent/render.zig\"}","call_id":"call-read-2"}}
+        \\{"timestamp":"2026-04-12T10:00:01.500Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-read-2","output":"render snippet"}}
+        \\{"timestamp":"2026-04-12T10:00:01.600Z","type":"response_item","payload":{"type":"function_call","name":"read_file","arguments":"{\"file_path\":\"src/agent/chat_line_map.zig\"}","call_id":"call-read-3"}}
+        \\{"timestamp":"2026-04-12T10:00:01.800Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-read-3","output":"line map snippet"}}
+        \\{"timestamp":"2026-04-12T10:00:02.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Read pass complete. I can plan the change now.","phase":"commentary","memory_citation":null}}
+    ;
+
+    const summary = try codex_replay.replaySessionFromString(allocator, &tab.agent_state, log);
+    mgr.status = summary.manager_status;
+
+    try approval_root.renderAgentPanel(&app, ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "Read(src/agent/state.zig)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Read(src/agent/render.zig)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Read(src/agent/chat_line_map.zig)") != null);
+    try snapshot.expectSnapshot(allocator, "codex_replay_read_tools_compact_panel", text);
+}
+
 test "snapshot: codex_replay_apply_patch_diff_panel" {
     const allocator = std.testing.allocator;
 

@@ -15,6 +15,7 @@ const processAgentEvent = @import("events.zig").processAgentEvent;
 const acpMessageToAgentEvent = @import("events.zig").acpMessageToAgentEvent;
 const opencodeEventToAgentEvent = @import("events.zig").opencodeEventToAgentEvent;
 const codexEventToAgentEvent = @import("events.zig").codexEventToAgentEvent;
+const git_parser = @import("../git/parser.zig");
 pub const ManagerHandle = union(enum) {
     acp: *AcpManager,
     opencode: *OpencodeManager,
@@ -495,6 +496,7 @@ fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResul
         if (m.processMessage(msg)) |codex_event| {
             var event_to_free = codex_event;
             defer m.deinitEvent(&event_to_free);
+            var skip_generic_conversion = false;
 
             // Update manager status based on event type
             switch (event_to_free) {
@@ -523,7 +525,17 @@ fn pollCodex(m: *CodexManager, agent_state: *AgentState) ManagerHandle.PollResul
                         }
                     }
                 },
+                .item_completed => {
+                    if (maybeApplyCodexFileChange(agent_state, event_to_free)) {
+                        skip_generic_conversion = true;
+                        count += 1;
+                    }
+                },
                 else => {},
+            }
+
+            if (skip_generic_conversion) {
+                continue;
             }
 
             // Convert to AgentEvent and process inline while data is alive
@@ -623,6 +635,144 @@ fn convertCodexUserInputPrompt(allocator: Allocator, approval: *const CodexManag
     return .{ .question_prompt = .{
         .questions = questions,
     } };
+}
+
+fn maybeApplyCodexFileChange(agent_state: *AgentState, event: CodexManager.CodexEvent) bool {
+    const item_event = switch (event) {
+        .item_completed => |item| item,
+        else => return false,
+    };
+    const file_change = switch (item_event.item) {
+        .file_change => |fc| fc,
+        else => return false,
+    };
+
+    const diff_text = file_change.diff orelse return false;
+    const fallback_path = file_change.path orelse return false;
+    const normalized_diff = normalizeCodexDiff(agent_state.allocator, diff_text) catch |err| {
+        std.log.debug("maybeApplyCodexFileChange: failed to normalize diff for {s}: {}", .{ fallback_path, err });
+        return false;
+    };
+    defer if (normalized_diff.owned_text) |owned| agent_state.allocator.free(owned);
+
+    const files = git_parser.parse(agent_state.allocator, normalized_diff.text) catch |err| {
+        std.log.debug("maybeApplyCodexFileChange: failed to parse diff for {s}: {}", .{ fallback_path, err });
+        return false;
+    };
+    defer {
+        for (files) |*file| {
+            file.deinit(agent_state.allocator);
+        }
+        agent_state.allocator.free(files);
+    }
+
+    var applied_any = false;
+    for (files) |file| {
+        const display_path = resolveCodexFileChangePath(file, fallback_path);
+        const title = buildCodexFileChangeTitle(agent_state.allocator, file, display_path) catch continue;
+        defer agent_state.allocator.free(title);
+
+        const old_new = buildOldNewFromUnifiedDiff(agent_state.allocator, file) catch |err| {
+            std.log.debug("maybeApplyCodexFileChange: failed to build old/new text for {s}: {}", .{ display_path, err });
+            continue;
+        };
+        defer agent_state.allocator.free(old_new.old_text);
+        defer agent_state.allocator.free(old_new.new_text);
+
+        agent_state.addDiffMessage(
+            file_change.id,
+            title,
+            display_path,
+            old_new.old_text,
+            old_new.new_text,
+        ) catch |err| {
+            std.log.err("maybeApplyCodexFileChange: failed to add diff for {s}: {any}", .{ display_path, err });
+            continue;
+        };
+
+        applied_any = true;
+    }
+
+    return applied_any;
+}
+
+fn normalizeCodexDiff(allocator: Allocator, diff_text: []const u8) !struct {
+    text: []const u8,
+    owned_text: ?[]u8,
+} {
+    if (std.mem.indexOfScalar(u8, diff_text, 0x1B) != null) {
+        const stripped = try git_parser.stripAnsi(allocator, diff_text);
+        return .{
+            .text = stripped,
+            .owned_text = stripped,
+        };
+    }
+
+    return .{
+        .text = diff_text,
+        .owned_text = null,
+    };
+}
+
+fn resolveCodexFileChangePath(file: git_parser.FileDiff, fallback_path: []const u8) []const u8 {
+    if (file.new_path.len > 0) return file.new_path;
+    if (file.old_path.len > 0) return file.old_path;
+    return fallback_path;
+}
+
+fn buildCodexFileChangeTitle(allocator: Allocator, file: git_parser.FileDiff, path: []const u8) ![]const u8 {
+    const action = if (file.old_path.len == 0 and file.new_path.len > 0)
+        "Add"
+    else if (file.new_path.len == 0 and file.old_path.len > 0)
+        "Delete"
+    else
+        "Edit";
+
+    return std.fmt.allocPrint(allocator, "{s} {s}", .{ action, path });
+}
+
+fn buildOldNewFromUnifiedDiff(allocator: Allocator, file: git_parser.FileDiff) !struct {
+    old_text: []const u8,
+    new_text: []const u8,
+} {
+    var old_lines: std.ArrayList([]const u8) = .{};
+    defer old_lines.deinit(allocator);
+    var new_lines: std.ArrayList([]const u8) = .{};
+    defer new_lines.deinit(allocator);
+
+    for (file.hunks) |hunk| {
+        for (hunk.lines) |line| {
+            switch (line.line_type) {
+                .context => {
+                    try old_lines.append(allocator, line.content);
+                    try new_lines.append(allocator, line.content);
+                },
+                .delete => try old_lines.append(allocator, line.content),
+                .add => try new_lines.append(allocator, line.content),
+            }
+        }
+    }
+
+    return .{
+        .old_text = try joinDiffLines(allocator, old_lines.items),
+        .new_text = try joinDiffLines(allocator, new_lines.items),
+    };
+}
+
+fn joinDiffLines(allocator: Allocator, lines: []const []const u8) ![]const u8 {
+    if (lines.len == 0) {
+        return allocator.dupe(u8, "");
+    }
+
+    var output: std.ArrayList(u8) = .{};
+    errdefer output.deinit(allocator);
+
+    for (lines, 0..) |line, idx| {
+        if (idx > 0) try output.append(allocator, '\n');
+        try output.appendSlice(allocator, line);
+    }
+
+    return output.toOwnedSlice(allocator);
 }
 
 test "pollCodex batches large delta bursts across frames" {
@@ -733,4 +883,90 @@ test "pollCodex routes user input approvals through question prompt state" {
     try std.testing.expectEqual(@as(usize, 2), pending.questions[1].options.len);
     try std.testing.expectEqual(@as(usize, 1), pending.questions[1].custom_index.?);
     try std.testing.expectEqualStrings("Type your own answer", pending.questions[1].options[1].label);
+}
+
+test "pollCodex renders completed file changes as diff messages" {
+    const allocator = std.testing.allocator;
+
+    var manager = CodexManager.init(allocator);
+    defer manager.deinit();
+
+    const proc = try CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    const transport = try CodexTransport.init(allocator, proc);
+    manager.process = proc;
+    manager.transport = transport;
+    manager.status = .turn_active;
+
+    var decoder = CodexCodec.Decoder.init(allocator);
+    const started_json =
+        \\{"method":"item/started","params":{"threadId":"t1","turnId":"turn-1","item":{"type":"fileChange","id":"fc-1","path":"src/example.zig","status":"modified"}}}
+    ;
+    const completed_json =
+        \\{"method":"item/completed","params":{"threadId":"t1","turnId":"turn-1","item":{"type":"fileChange","id":"fc-1","path":"src/example.zig","diff":"--- src/example.zig\n+++ src/example.zig\n@@ -1,2 +1,2 @@\n const x = 1;\n-const y = 2;\n+const y = 3;\n","status":"modified"}}}
+    ;
+
+    const started_msg = try decoder.decode(started_json);
+    try transport.pending_messages.append(allocator, started_msg);
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    const started_result = pollCodex(&manager, &agent_state);
+    try std.testing.expectEqual(@as(usize, 1), started_result.count);
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqualStrings("src/example.zig", agent_state.messages.items[0].content);
+    try std.testing.expectEqual(.tool, agent_state.messages.items[0].role);
+
+    const completed_msg = try decoder.decode(completed_json);
+    try transport.pending_messages.append(allocator, completed_msg);
+
+    const completed_result = pollCodex(&manager, &agent_state);
+    try std.testing.expectEqual(@as(usize, 1), completed_result.count);
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(.diff, agent_state.messages.items[0].role);
+    try std.testing.expectEqualStrings("Edit src/example.zig", agent_state.messages.items[0].content);
+    try std.testing.expectEqualStrings("src/example.zig", agent_state.messages.items[0].diff_path.?);
+    try std.testing.expectEqualStrings("const x = 1;\nconst y = 2;", agent_state.messages.items[0].diff_old.?);
+    try std.testing.expectEqualStrings("const x = 1;\nconst y = 3;", agent_state.messages.items[0].diff_new.?);
+}
+
+test "pollCodex falls back to tool updates for unparsable file changes" {
+    const allocator = std.testing.allocator;
+
+    var manager = CodexManager.init(allocator);
+    defer manager.deinit();
+
+    const proc = try CodexProcess.spawnRaw(allocator, &.{"/bin/cat"});
+    const transport = try CodexTransport.init(allocator, proc);
+    manager.process = proc;
+    manager.transport = transport;
+    manager.status = .turn_active;
+
+    var decoder = CodexCodec.Decoder.init(allocator);
+    const started_json =
+        \\{"method":"item/started","params":{"threadId":"t1","turnId":"turn-1","item":{"type":"fileChange","id":"fc-2","path":"src/example.zig","status":"modified"}}}
+    ;
+    const completed_json =
+        \\{"method":"item/completed","params":{"threadId":"t1","turnId":"turn-1","item":{"type":"fileChange","id":"fc-2","path":"src/example.zig","diff":"not actually a diff","status":"modified"}}}
+    ;
+
+    const started_msg = try decoder.decode(started_json);
+    try transport.pending_messages.append(allocator, started_msg);
+
+    var agent_state = AgentState.init(allocator, .right);
+    defer agent_state.deinit();
+
+    _ = pollCodex(&manager, &agent_state);
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(.tool, agent_state.messages.items[0].role);
+
+    const completed_msg = try decoder.decode(completed_json);
+    try transport.pending_messages.append(allocator, completed_msg);
+
+    const completed_result = pollCodex(&manager, &agent_state);
+    try std.testing.expectEqual(@as(usize, 1), completed_result.count);
+    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
+    try std.testing.expectEqual(.tool, agent_state.messages.items[0].role);
+    try std.testing.expectEqual(.completed, agent_state.messages.items[0].tool_status);
+    try std.testing.expectEqualStrings("not actually a diff", agent_state.messages.items[0].tool_stdout.?);
 }
