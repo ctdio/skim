@@ -376,8 +376,8 @@ pub const App = struct {
 
     const State = struct {
         diff_source: DiffSource,
-        pager_mode: bool, // True when reading diff from stdin (disables git-dependent features)
-        git_repo_root: []const u8, // Absolute path to git repository root
+        pager_mode: bool, // True when the current diff comes from stdin and cannot be refreshed from git
+        git_repo_root: []const u8, // Git repository root, or current directory while viewing stdin input
         files: []parser.FileDiff,
         file_diff_stats: []StateHelpers.FileDiffStats,
         file_line_counts: []usize,
@@ -1630,6 +1630,22 @@ pub const App = struct {
                 tab.autoNameFromPrompt(prompt) catch {};
             }
         }
+    }
+
+    fn ensureGitRepositoryContext(self: *App) !bool {
+        if (!self.state.pager_mode) return true;
+
+        const git_repo_root = git.getRepoRoot(self.allocator) catch |err| switch (err) {
+            error.GitCommandFailed => {
+                self.showStatusMessage("Git-backed diffs require a git repository");
+                return false;
+            },
+            else => return err,
+        };
+
+        self.allocator.free(self.state.git_repo_root);
+        self.state.git_repo_root = git_repo_root;
+        return true;
     }
 
     pub fn refresh(self: *App) !void {
@@ -3596,8 +3612,7 @@ pub const App = struct {
     }
 
     pub fn startBranchSelection(self: *App) !void {
-        // Disabled in pager mode
-        if (self.state.pager_mode) return;
+        if (!try self.ensureGitRepositoryContext()) return;
 
         // Free old branch list
         for (self.state.branch_list) |branch| {
@@ -3671,8 +3686,7 @@ pub const App = struct {
     const COMMIT_BATCH_SIZE: usize = 50;
 
     pub fn startCommitSelection(self: *App) !void {
-        // Disabled in pager mode
-        if (self.state.pager_mode) return;
+        if (!try self.ensureGitRepositoryContext()) return;
 
         // Free old commit list
         for (self.state.commit_list.items) |*commit| {
@@ -3834,6 +3848,7 @@ pub const App = struct {
         }
 
         // Go back to normal mode and refresh
+        self.state.pager_mode = false;
         self.mode = .normal;
         try self.refresh();
     }
@@ -4135,8 +4150,7 @@ pub const App = struct {
     }
 
     pub fn startGraphiteStack(self: *App) !void {
-        // Disabled in pager mode
-        if (self.state.pager_mode) return;
+        if (!try self.ensureGitRepositoryContext()) return;
 
         self.ensureGraphiteDetected();
 
@@ -4222,6 +4236,7 @@ pub const App = struct {
         self.state.graphite_stack.?.current_idx = idx;
 
         // Go back to normal mode and refresh
+        self.state.pager_mode = false;
         self.mode = .normal;
         try self.refresh();
     }
@@ -4261,8 +4276,7 @@ pub const App = struct {
     }
 
     pub fn switchDiffMode(self: *App, mode: command_palette.DiffMode) !void {
-        // Disabled in pager mode
-        if (self.state.pager_mode) return;
+        if (!try self.ensureGitRepositoryContext()) return;
 
         // Free old diff_source if needed
         switch (self.state.diff_source) {
@@ -4297,6 +4311,7 @@ pub const App = struct {
         };
 
         // Refresh to load new diff
+        self.state.pager_mode = false;
         try self.refresh();
     }
 
@@ -7371,4 +7386,127 @@ test "search highlighting - across syntax segments" {
     try std.testing.expectEqualStrings("function", result[0].text);
     try std.testing.expect(result[0].style.bold);
     // Search highlight should override syntax highlighting
+}
+
+test "stdin-backed app can switch to staged diff" {
+    const allocator = std.testing.allocator;
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch unreachable;
+
+    try setupGitRepoWithWorkingAndStagedChanges(allocator, tmp.dir);
+
+    var app = try initPagerModeAppFromWorkingDiff(allocator);
+    defer app.deinit();
+
+    try std.testing.expect(app.state.pager_mode);
+    try std.testing.expect(app.state.diff_source == .stdin);
+    try std.testing.expect(diffContainsLine(app.state.files, "working line"));
+    try std.testing.expect(!diffContainsLine(app.state.files, "staged line"));
+
+    try app.switchDiffMode(.staged);
+
+    try std.testing.expect(!app.state.pager_mode);
+    try std.testing.expect(app.state.diff_source == .working_dir);
+    try std.testing.expect(app.state.diff_source.working_dir.staged);
+    try std.testing.expect(diffContainsLine(app.state.files, "staged line"));
+    try std.testing.expect(!diffContainsLine(app.state.files, "working line"));
+}
+
+test "stdin-backed app can open commit selection" {
+    const allocator = std.testing.allocator;
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch unreachable;
+
+    try setupGitRepoWithWorkingAndStagedChanges(allocator, tmp.dir);
+
+    var app = try initPagerModeAppFromWorkingDiff(allocator);
+    defer app.deinit();
+
+    try std.testing.expect(app.state.pager_mode);
+    try std.testing.expect(app.mode == .normal);
+
+    try app.startCommitSelection();
+
+    try std.testing.expect(app.state.pager_mode);
+    try std.testing.expect(app.mode == .commit_selection);
+    try std.testing.expect(app.state.commit_list.items.len > 0);
+}
+
+fn setupGitRepoWithWorkingAndStagedChanges(allocator: Allocator, dir: std.fs.Dir) !void {
+    try runTestCommand(allocator, &.{ "git", "init", "-q" });
+    try runTestCommand(allocator, &.{ "git", "config", "user.email", "skim-test@example.com" });
+    try runTestCommand(allocator, &.{ "git", "config", "user.name", "Skim Test" });
+
+    try dir.writeFile(.{ .sub_path = "demo.txt", .data = "base\n" });
+    try runTestCommand(allocator, &.{ "git", "add", "demo.txt" });
+    try runTestCommand(allocator, &.{ "git", "commit", "-q", "-m", "base" });
+
+    try dir.writeFile(.{ .sub_path = "demo.txt", .data = "base\nstaged line\n" });
+    try runTestCommand(allocator, &.{ "git", "add", "demo.txt" });
+
+    try dir.writeFile(.{ .sub_path = "demo.txt", .data = "base\nstaged line\nworking line\n" });
+}
+
+fn initPagerModeAppFromWorkingDiff(allocator: Allocator) !App {
+    const diff_result = try git.getDiffWithUntracked(allocator, .{ .working_dir = .{ .staged = false } });
+    defer diff_result.deinit(allocator);
+
+    const files = try parser.parse(allocator, diff_result.diff_text);
+    errdefer {
+        for (files) |*file| {
+            file.deinit(allocator);
+        }
+        allocator.free(files);
+    }
+
+    parser.markUntrackedFiles(files, diff_result.untracked_paths);
+    return App.initForRenderBench(allocator, files);
+}
+
+fn diffContainsLine(files: []const parser.FileDiff, expected: []const u8) bool {
+    for (files) |file| {
+        for (file.hunks) |hunk| {
+            for (hunk.lines) |line| {
+                if (std.mem.eql(u8, line.content, expected)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+fn runTestCommand(allocator: Allocator, argv: []const []const u8) !void {
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv,
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| {
+            if (code == 0) return;
+        },
+        else => {},
+    }
+
+    std.debug.print("command failed\nstdout:\n{s}\nstderr:\n{s}\n", .{ result.stdout, result.stderr });
+    return error.TestUnexpectedResult;
 }

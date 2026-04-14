@@ -108,6 +108,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             } };
 
             // Go back to normal mode and refresh
+            app.state.pager_mode = false;
             app.mode = .normal;
             try app.refresh();
         },
