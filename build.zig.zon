@@ -5,10 +5,11 @@
     .minimum_zig_version = "0.15.1",
 
     .dependencies = .{
-        // TUI library - use main branch for Zig 0.15 support
+        // TUI library - pinned to last Zig 0.15.1-compatible commit before
+        // uucode 0.2.0/Zig 0.16 migration on main
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis#main",
-            .hash = "12202d749c8bbeb60229b288857f6ade589090a300cee8d64b81c9b8d8ea87947deb",
+            .url = "git+https://github.com/rockorager/libvaxis#1b407050ac700fe3c2db8b14c287252088ce8f7d",
+            .hash = "vaxis-0.5.1-BWNV_DalCQA3qQzAHjsNuYuoLt_lut3TmN-iGkC9xJoo",
         },
 
         // Official tree-sitter Zig bindings (latest commit with Zig 0.15 support)
