@@ -15,6 +15,7 @@ pub const Cell = vaxis.Cell;
 pub const TestContext = struct {
     allocator: std.mem.Allocator,
     screen: Screen,
+    unicode: vaxis.Unicode,
     arena: std.heap.ArenaAllocator,
 
     /// Returns a Window that covers the entire screen.
@@ -27,6 +28,7 @@ pub const TestContext = struct {
             .width = self.screen.width,
             .height = self.screen.height,
             .screen = &self.screen,
+            .unicode = &self.unicode,
         };
     }
 
@@ -190,6 +192,7 @@ pub const TestContext = struct {
     pub fn deinit(self: *TestContext) void {
         self.arena.deinit();
         self.screen.deinit(self.allocator);
+        self.unicode.deinit(self.allocator);
     }
 };
 
@@ -310,15 +313,20 @@ fn writeColorCodes(
 
 /// Creates a test context with a mock screen of the given dimensions.
 pub fn createTestContext(allocator: std.mem.Allocator, cols: u16, rows: u16) !TestContext {
-    const screen = try Screen.init(allocator, .{
+    var screen = try Screen.init(allocator, .{
         .cols = cols,
         .rows = rows,
         .x_pixel = 0,
         .y_pixel = 0,
     });
+    errdefer screen.deinit(allocator);
+
+    const unicode = try vaxis.Unicode.init(allocator);
+
     return .{
         .allocator = allocator,
         .screen = screen,
+        .unicode = unicode,
         .arena = std.heap.ArenaAllocator.init(allocator),
     };
 }

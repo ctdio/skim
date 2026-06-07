@@ -5,6 +5,7 @@ const blame = @import("../git/blame.zig");
 const comments = @import("../comments/store.zig");
 const rendering_common = @import("common.zig");
 const state_helpers = @import("../state.zig");
+const gwidth = @import("width.zig").gwidth;
 
 const App = @import("../app.zig").App;
 const StateHelpers = state_helpers.StateHelpers;
@@ -26,7 +27,7 @@ pub const RenderUtils = struct {
             const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
             const char_end = @min(byte_pos + char_len, text.len);
             const grapheme = text[byte_pos..char_end];
-            width += vaxis.gwidth.gwidth(grapheme, .unicode);
+            width += gwidth(grapheme);
             byte_pos = char_end;
         }
 
@@ -60,7 +61,7 @@ pub const RenderUtils = struct {
             const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
             const char_end = @min(byte_pos + char_len, text.len);
             const grapheme = text[byte_pos..char_end];
-            const char_width = vaxis.gwidth.gwidth(grapheme, .unicode);
+            const char_width = gwidth(grapheme);
 
             // Check if adding this character would exceed max_width
             if (width + char_width > max_width) break;

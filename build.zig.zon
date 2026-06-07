@@ -5,11 +5,14 @@
     .minimum_zig_version = "0.15.1",
 
     .dependencies = .{
-        // TUI library - pinned to last Zig 0.15.1-compatible commit before
-        // uucode 0.2.0/Zig 0.16 migration on main
+        // TUI library - pinned to 3c92fc0, the last zg-based vaxis commit before
+        // it swapped zg for uucode (commit 8173272), which requires Zig 0.16.
+        // Do not move forward: every uucode-based vaxis (the 2-arg gwidth API)
+        // needs 0.16. This zg-based vaxis uses the 3-arg gwidth(str, method, *DisplayWidth)
+        // and a Window.unicode field; see src/rendering/width.zig.
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis#1b407050ac700fe3c2db8b14c287252088ce8f7d",
-            .hash = "vaxis-0.5.1-BWNV_DalCQA3qQzAHjsNuYuoLt_lut3TmN-iGkC9xJoo",
+            .url = "git+https://github.com/rockorager/libvaxis#3c92fc0707c0f36aedec962a6d72b23dc8b4a73c",
+            .hash = "vaxis-0.5.1-BWNV_OYfCQBBo1PklOOCtz6w9GB3LNPQjbkmXA-_w--_",
         },
 
         // Official tree-sitter Zig bindings (latest commit with Zig 0.15 support)

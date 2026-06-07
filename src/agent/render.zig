@@ -27,6 +27,7 @@ const render_plan = @import("render_plan.zig");
 // Import skim's color palette for consistent styling
 const rendering_common = @import("../rendering/common.zig");
 const Color = rendering_common.Color;
+const gwidth = @import("../rendering/width.zig").gwidth;
 
 // Import utilities for word-aware wrapping and dialog rendering
 const rendering_utils = @import("../rendering/utils.zig");
@@ -90,7 +91,7 @@ fn safePrint(win: vaxis.Window, text: []const u8, style: vaxis.Style, row: usize
         const seq = text[i .. i + seq_len];
         if (std.unicode.utf8ValidateSlice(seq)) {
             // Valid sequence - print it with proper display width
-            const char_width = vaxis.gwidth.gwidth(seq, .unicode);
+            const char_width = gwidth(seq);
             win.writeCell(@intCast(col), @intCast(row), .{
                 .char = .{ .grapheme = seq, .width = @intCast(char_width) },
                 .style = style,
@@ -152,7 +153,7 @@ fn renderTextWithMarkdown(
             const char_len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
             const char_end = @min(i + char_len, text.len);
             const char_slice = text[i..char_end];
-            const char_width = vaxis.gwidth.gwidth(char_slice, .unicode);
+            const char_width = gwidth(char_slice);
 
             // Get the style for this character position based on markdown AST
             const md_style = getMarkdownStyleAtPosition(md_parser, start_offset + i);
@@ -353,7 +354,7 @@ fn printWithHighlights(
             const char_len = std.unicode.utf8ByteSequenceLength(text[text_pos]) catch 1;
             const end = @min(text_pos + char_len, text.len);
             const char_slice = text[text_pos..end];
-            const char_width = vaxis.gwidth.gwidth(char_slice, .unicode);
+            const char_width = gwidth(char_slice);
 
             win.writeCell(@intCast(col), @intCast(row), .{
                 .char = .{ .grapheme = char_slice, .width = @intCast(char_width) },
@@ -378,7 +379,7 @@ fn printWithHighlights(
                 const char_len = std.unicode.utf8ByteSequenceLength(text[text_pos]) catch 1;
                 const end = @min(text_pos + char_len, text.len);
                 const char_slice = text[text_pos..end];
-                const char_width = vaxis.gwidth.gwidth(char_slice, .unicode);
+                const char_width = gwidth(char_slice);
 
                 win.writeCell(@intCast(col), @intCast(row), .{
                     .char = .{ .grapheme = char_slice, .width = @intCast(char_width) },
@@ -395,7 +396,7 @@ fn printWithHighlights(
         const char_len = std.unicode.utf8ByteSequenceLength(text[text_pos]) catch 1;
         const end = @min(text_pos + char_len, text.len);
         const char_slice = text[text_pos..end];
-        const char_width = vaxis.gwidth.gwidth(char_slice, .unicode);
+        const char_width = gwidth(char_slice);
 
         win.writeCell(@intCast(col), @intCast(row), .{
             .char = .{ .grapheme = char_slice, .width = @intCast(char_width) },
@@ -2739,7 +2740,7 @@ fn renderInputArea(
                         const grapheme = chunk[byte_idx..char_end];
 
                         // Calculate display width for this grapheme
-                        const char_width = vaxis.gwidth.gwidth(grapheme, .unicode);
+                        const char_width = gwidth(grapheme);
 
                         const abs_pos = segment_start + byte_idx;
                         const in_selection = in_visual_mode and abs_pos >= sel_start and abs_pos <= sel_end;
@@ -2806,7 +2807,7 @@ fn renderInputArea(
                             const seq_len = std.unicode.utf8ByteSequenceLength(chunk[byte_pos]) catch 1;
                             const char_end = @min(byte_pos + seq_len, chunk.len);
                             const grapheme = chunk[byte_pos..char_end];
-                            cursor_display_offset += vaxis.gwidth.gwidth(grapheme, .unicode);
+                            cursor_display_offset += gwidth(grapheme);
                             byte_pos = char_end;
                         }
                         const cursor_col = input_col + cursor_display_offset;

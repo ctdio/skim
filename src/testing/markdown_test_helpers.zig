@@ -496,6 +496,9 @@ test "renderMarkdown - simple table" {
     var screen = try vaxis.Screen.init(allocator, .{ .cols = 80, .rows = 10, .x_pixel = 0, .y_pixel = 0 });
     defer screen.deinit(allocator);
 
+    const unicode = try vaxis.Unicode.init(allocator);
+    defer unicode.deinit(allocator);
+
     const win = vaxis.Window{
         .x_off = 0,
         .y_off = 0,
@@ -504,6 +507,7 @@ test "renderMarkdown - simple table" {
         .width = 80,
         .height = 10,
         .screen = &screen,
+        .unicode = &unicode,
     };
 
     const table_md =

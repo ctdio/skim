@@ -8,8 +8,7 @@
 
 const std = @import("std");
 const ts = @import("tree-sitter");
-const vaxis = @import("vaxis");
-const gwidth = vaxis.gwidth;
+const gwidth = @import("width.zig").gwidth;
 const types = @import("types.zig");
 const colors_mod = @import("colors.zig");
 const parser_mod = @import("parser.zig");
@@ -583,7 +582,7 @@ fn displayWidth(text: []const u8) usize {
         const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
         const char_end = @min(byte_pos + char_len, text.len);
         const grapheme = text[byte_pos..char_end];
-        width += gwidth.gwidth(grapheme, .unicode);
+        width += gwidth(grapheme);
         byte_pos = char_end;
     }
 
@@ -603,7 +602,7 @@ fn sliceByDisplayWidth(text: []const u8, max_width: usize) []const u8 {
         const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
         const char_end = @min(byte_pos + char_len, text.len);
         const grapheme = text[byte_pos..char_end];
-        const char_width = gwidth.gwidth(grapheme, .unicode);
+        const char_width = gwidth(grapheme);
 
         // Check if adding this character would exceed max_width
         if (width + char_width > max_width) break;
