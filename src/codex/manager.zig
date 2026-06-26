@@ -5,9 +5,6 @@ const transport_mod = @import("transport.zig");
 const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
 
-// Codex only emits text-bearing reasoning notifications when summaries are requested.
-const streamed_reasoning_summary: protocol.ReasoningSummary = .detailed;
-
 // =============================================================================
 // Codex Manager
 // =============================================================================
@@ -336,7 +333,7 @@ pub const CodexManager = struct {
             .cwd = cwd,
             .approval_policy = self.requested_approval_policy,
             .reasoning_effort = self.requested_reasoning_effort,
-            .summary = streamed_reasoning_summary,
+            .summary = reasoningSummaryForModel(model),
             .service_tier = self.requested_service_tier,
         }) catch return error.ThreadStartFailed;
         defer self.allocator.free(msg);
@@ -460,7 +457,7 @@ pub const CodexManager = struct {
         const msg = encoder.encodeTurnStart(req_id.number, .{
             .thread_id = thread_id,
             .reasoning_effort = self.requested_reasoning_effort,
-            .summary = streamed_reasoning_summary,
+            .summary = reasoningSummaryForModel(self.current_model orelse self.model),
             .service_tier = self.requested_service_tier,
             .collaboration_mode = self.requested_collaboration_mode,
             .collaboration_mode_model = self.current_model orelse self.model,
@@ -748,6 +745,17 @@ pub const CodexManager = struct {
     pub fn setServiceTier(self: *CodexManager, service_tier: protocol.ServiceTier) void {
         self.requested_service_tier = service_tier;
         self.service_tier = service_tier;
+    }
+
+    /// Pick the reasoning summary variant to request for a given model.
+    /// Codex only emits text-bearing reasoning summaries when one is requested,
+    /// so prefer `.detailed`. Some fast models (e.g. gpt-5.3-codex-spark)
+    /// silently return an empty turn when `detailed` is sent, so fall back to
+    /// `.auto` for those.
+    fn reasoningSummaryForModel(model: ?[]const u8) protocol.ReasoningSummary {
+        const name = model orelse return .detailed;
+        if (std.mem.indexOf(u8, name, "spark") != null) return .auto;
+        return .detailed;
     }
 
     /// Check if Codex collaboration modes are available.
@@ -2776,6 +2784,18 @@ test "setServiceTier stores service tier" {
     manager.setServiceTier(.flex);
     try std.testing.expect(manager.service_tier.? == .flex);
     try std.testing.expect(manager.requested_service_tier.? == .flex);
+}
+
+test "reasoning summary is detailed for standard models" {
+    try std.testing.expect(CodexManager.reasoningSummaryForModel("gpt-5.5-codex") == .detailed);
+}
+
+test "reasoning summary falls back to auto for spark" {
+    try std.testing.expect(CodexManager.reasoningSummaryForModel("gpt-5.3-codex-spark") == .auto);
+}
+
+test "reasoning summary is detailed when model is unknown" {
+    try std.testing.expect(CodexManager.reasoningSummaryForModel(null) == .detailed);
 }
 
 test "cycleToNextMode stores collaboration mode" {
