@@ -40,6 +40,7 @@ const model_selection_mode = @import("modes/model_selection_mode.zig");
 const permission_selection_mode = @import("modes/permission_selection_mode.zig");
 const agent_selection_mode = @import("modes/agent_selection_mode.zig");
 const session_picker_mode = @import("modes/session_picker_mode.zig");
+const pr_review_mode = @import("modes/pr_review_mode.zig");
 const agent_mode = @import("modes/agent_mode.zig");
 const agent = @import("agent/agent.zig");
 const agent_state_mod = @import("agent/state.zig");
@@ -51,6 +52,7 @@ const acp = @import("acp/acp.zig");
 const opencode = @import("opencode/opencode.zig");
 const opencode_session_replay = @import("opencode/session_replay.zig");
 const codex_mod = @import("codex/codex.zig");
+const pr = @import("pr/pr.zig");
 
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
@@ -191,6 +193,66 @@ pub const PendingSubagentFetch = struct {
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     messages: ?[]opencode.Client.ModalMessage = null,
     error_message: ?[]const u8 = null, // String literal, not owned
+};
+
+/// Thread-safe handoff of a background `gh pr list` fetch to the main loop.
+/// Worker writes the parsed list (or a failure flag) under the mutex; the main
+/// loop polls `ready` and consumes it. The list arena is built with c_allocator
+/// so it survives the thread boundary independent of the App allocator.
+const PendingPrFetch = struct {
+    mutex: std.Thread.Mutex = .{},
+    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    result: ?pr.PullRequestList = null,
+    failed: bool = false,
+};
+
+/// State for the native PR review picker (the `pr_review` mode). Mirrors the
+/// standalone picker's fields but lives on App.state so it integrates with the
+/// modal loop. All fields default, so it stays out of the State init literal.
+const PrReviewState = struct {
+    list: ?pr.PullRequestList = null,
+    filtered: std.ArrayList(usize) = .{},
+    selection: usize = 0,
+    scroll: usize = 0,
+
+    query_buf: [256]u8 = undefined,
+    query_len: usize = 0,
+
+    // Pinned author filter, layered on top of the text query.
+    author_buf: [256]u8 = undefined,
+    author_len: usize = 0,
+
+    message_buf: [256]u8 = undefined,
+    message_len: usize = 0,
+
+    // Author-filter overlay.
+    picking_author: bool = false,
+    author_list: []pr.authors.AuthorCount = &.{},
+    author_filtered: std.ArrayList(usize) = .{},
+    author_selection: usize = 0,
+    author_scroll: usize = 0,
+    author_query_buf: [256]u8 = undefined,
+    author_query_len: usize = 0,
+
+    fn query(self: *const PrReviewState) []const u8 {
+        return self.query_buf[0..self.query_len];
+    }
+
+    fn authorFilter(self: *const PrReviewState) []const u8 {
+        return self.author_buf[0..self.author_len];
+    }
+
+    fn authorQuery(self: *const PrReviewState) []const u8 {
+        return self.author_query_buf[0..self.author_query_len];
+    }
+
+    fn message(self: *const PrReviewState) []const u8 {
+        return self.message_buf[0..self.message_len];
+    }
+
+    fn items(self: *const PrReviewState) []const pr.PullRequest {
+        return if (self.list) |*l| l.items else &.{};
+    }
 };
 
 /// Case-insensitive substring search
@@ -343,6 +405,14 @@ pub const App = struct {
     profile_active_frame: bool, // True when current render should be profiled
     profile_counters: RenderProfileCounters,
 
+    // PR review picker (native `skim pr` / `:pr`). Defaulted so the init
+    // literals below need no changes.
+    pr_only: bool = false, // Booted directly into the PR picker (`skim pr`)
+    pr_fetch: PendingPrFetch = .{}, // Thread-safe result of the background PR load
+    pr_fetch_in_flight: bool = false, // A background PR load is running
+    pr_fetch_thread: ?std.Thread = null, // Joined on consume / at deinit
+    pr_cache_key: ?[]const u8 = null, // Per-repo cache key (owned)
+
     pub const Mode = @import("mode.zig").Mode;
 
     // Character find commands for NORMAL mode (f/t/F/T)
@@ -453,6 +523,9 @@ pub const App = struct {
         // Tab waiting for agent selection (after :new_tab)
         pending_tab_for_selection: ?u32,
 
+        // PR review picker state (defaulted, so it stays out of the init literal)
+        pr: PrReviewState = .{},
+
         const ViewMode = enum {
             unified,
             side_by_side,
@@ -506,6 +579,7 @@ pub const App = struct {
     pub fn init(allocator: Allocator, config: anytype) !App {
         const log = std.log.scoped(.app_init);
         const is_agent_only = if (@hasField(@TypeOf(config), "agent_only")) config.agent_only else false;
+        const is_pr_only = if (@hasField(@TypeOf(config), "pr_only")) config.pr_only else false;
 
         const profile_render = if (profiling_enabled) readEnvBool(allocator, "SKIM_PROFILE_RENDER") else false;
         const profile_every_n = if (profiling_enabled) readEnvU32(allocator, "SKIM_PROFILE_RENDER_EVERY", 30) else 0;
@@ -526,7 +600,7 @@ pub const App = struct {
 
         // Load and parse diff BEFORE initializing TUI
         // This ensures git errors print correctly (TUI puts terminal in raw mode)
-        const files = if (is_agent_only) blk: {
+        const files = if (is_agent_only or is_pr_only) blk: {
             break :blk try allocator.alloc(parser.FileDiff, 0);
         } else if (is_pager_mode) blk: {
             // Pager mode: parse directly from stdin content
@@ -642,7 +716,7 @@ pub const App = struct {
             },
         };
 
-        const app = App{
+        var app = App{
             .allocator = allocator,
             .vx = vx,
             .tty = tty,
@@ -755,6 +829,8 @@ pub const App = struct {
             .profile_active_frame = false,
             .profile_counters = .{},
         };
+
+        app.pr_only = is_pr_only;
 
         // Graphite detection is lazy - happens on first access to avoid blocking startup
         // Main loop will spawn background thread to highlight initial file
@@ -1174,6 +1250,16 @@ pub const App = struct {
         if (self.state.graphite_stack) |*stack| {
             stack.deinit(self.allocator);
         }
+        // Clean up PR review state (join any in-flight loader first so its
+        // worker can't write into freed state).
+        if (self.pr_fetch_thread) |t| t.join();
+        self.pr_fetch_thread = null;
+        if (self.pr_fetch.result) |*list| list.deinit();
+        if (self.state.pr.list) |*list| list.deinit();
+        self.state.pr.filtered.deinit(self.allocator);
+        if (self.state.pr.author_list.len > 0) self.allocator.free(self.state.pr.author_list);
+        self.state.pr.author_filtered.deinit(self.allocator);
+        if (self.pr_cache_key) |k| self.allocator.free(k);
         // Clean up TUI server and session
         if (self.session_manager) |*sm| {
             sm.removeSession();
@@ -1847,6 +1933,15 @@ pub const App = struct {
             };
         }
 
+        // If launched as `skim pr`, open straight into the PR picker and kick off
+        // the background load so the first frame shows the cached/loading list.
+        if (self.pr_only) {
+            self.mode = .pr_review;
+            self.startPrListLoad() catch |err| {
+                std.log.err("Failed to start PR load: {any}", .{err});
+            };
+        }
+
         var first_render = true;
         var last_shimmer_render: i64 = 0;
 
@@ -1866,7 +1961,8 @@ pub const App = struct {
             // Check if a connection thread is running (need to poll for completion)
             const connecting = self.pending_connection != null;
             const blame_active = self.pending_blame_ready.load(.acquire) or self.blame_requests_in_flight.count() > 0;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active;
+            const pr_active = self.pr_fetch.ready.load(.acquire) or self.pr_fetch_in_flight;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -2001,6 +2097,7 @@ pub const App = struct {
             // Poll subagent fetch result (worker thread -> main thread)
             self.pollSubagentFetch();
             self.pollPendingBlameResults();
+            self.pollPendingPrFetch();
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
@@ -2415,6 +2512,20 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
+                .pr_review => {
+                    // Ctrl+C is a back button, peeling one layer at a time:
+                    // author overlay -> list, then list -> the diff being
+                    // reviewed (or quit if `skim pr` has nothing behind it).
+                    if (self.state.pr.picking_author) {
+                        self.closePrAuthorPicker();
+                    } else if (self.pr_only) {
+                        self.should_quit = true;
+                    } else {
+                        self.mode = .normal;
+                    }
+                    self.needs_render = true;
+                    return;
+                },
                 .agent => {
                     // In agent mode, single Ctrl+C closes subagent drill-in first,
                     // then exits history mode.
@@ -2451,6 +2562,7 @@ pub const App = struct {
             .permission_selection => try permission_selection_mode.handleKey(self, key),
             .agent_selection => try agent_selection_mode.handleKey(self, key),
             .session_picker => try session_picker_mode.handleKey(self, key),
+            .pr_review => try pr_review_mode.handleKey(self, key),
             .agent => try agent_mode.handleKey(self, key),
         }
     }
@@ -3619,6 +3731,10 @@ pub const App = struct {
             .select_commit => {
                 try self.startCommitSelection();
             },
+            .enter_pr_review => {
+                try self.startPrListLoad();
+                self.mode = .pr_review;
+            },
         }
     }
 
@@ -4203,6 +4319,357 @@ pub const App = struct {
         if (graphite.getGraphiteStack(self.allocator) catch null) |stack| {
             self.state.graphite_stack = stack;
         }
+    }
+
+    // =========================================================================
+    // PR Review (native `skim pr` / `:pr`)
+    // =========================================================================
+
+    /// Begin (or restart) a background load of the open PR list. Paints the
+    /// last-known cached list instantly (stale-while-revalidate), then refreshes
+    /// off-thread so a slow `gh` never freezes the UI.
+    pub fn startPrListLoad(self: *App) !void {
+        if (self.pr_fetch_in_flight) return;
+        if (self.pr_cache_key == null) self.pr_cache_key = pr.cache.keyFor(self.allocator);
+        self.loadPrsFromCache();
+        self.pr_fetch_in_flight = true;
+        self.setPrMessage("");
+        self.pr_fetch_thread = std.Thread.spawn(.{}, prFetchWorker, .{self}) catch {
+            self.pr_fetch_in_flight = false;
+            self.setPrMessage("failed to start PR loader");
+            return;
+        };
+    }
+
+    fn prFetchWorker(self: *App) void {
+        const ca = std.heap.c_allocator;
+        var failed = false;
+        var list: ?pr.PullRequestList = null;
+        if (pr.github.listPullRequestsRaw(ca)) |raw| {
+            defer ca.free(raw);
+            if (self.pr_cache_key) |key| pr.cache.write(ca, key, raw) catch {};
+            if (pr.parse.parse(ca, raw)) |parsed| {
+                list = parsed;
+            } else |_| {
+                failed = true;
+            }
+        } else |_| {
+            failed = true;
+        }
+
+        self.pr_fetch.mutex.lock();
+        if (self.pr_fetch.result) |*stale| stale.deinit();
+        self.pr_fetch.result = list;
+        self.pr_fetch.failed = failed;
+        self.pr_fetch.mutex.unlock();
+        self.pr_fetch.ready.store(true, .release);
+    }
+
+    fn pollPendingPrFetch(self: *App) void {
+        if (!self.pr_fetch.ready.load(.acquire)) return;
+
+        self.pr_fetch.mutex.lock();
+        const maybe = self.pr_fetch.result;
+        const failed = self.pr_fetch.failed;
+        self.pr_fetch.result = null;
+        self.pr_fetch.failed = false;
+        self.pr_fetch.mutex.unlock();
+        self.pr_fetch.ready.store(false, .release);
+
+        if (self.pr_fetch_thread) |t| {
+            t.join();
+            self.pr_fetch_thread = null;
+        }
+        self.pr_fetch_in_flight = false;
+
+        if (maybe) |list| {
+            if (self.state.pr.list) |*old| old.deinit();
+            self.state.pr.list = list;
+            self.rebuildPrFilter();
+            // The author overlay aliases the arena we just freed; rebuild it
+            // against the fresh PRs before anything reads it.
+            if (self.state.pr.picking_author) self.refreshPrAuthorList();
+            self.setPrMessage("");
+        } else if (failed) {
+            self.setPrMessage("failed to load PRs — is gh installed and authenticated?");
+        }
+        self.needs_render = true;
+    }
+
+    fn loadPrsFromCache(self: *App) void {
+        const key = self.pr_cache_key orelse return;
+        const raw = (pr.cache.read(self.allocator, key) catch return) orelse return;
+        defer self.allocator.free(raw);
+        const list = pr.parse.parse(self.allocator, raw) catch return;
+        if (self.state.pr.list) |*old| old.deinit();
+        self.state.pr.list = list;
+        self.rebuildPrFilter();
+    }
+
+    /// Review the highlighted PR natively: fetch its head + base into local refs
+    /// (no worktree) and swap the diff to `origin/<base>...refs/skim/pr-<n>`.
+    pub fn reviewSelectedPr(self: *App) !void {
+        const pull = self.selectedPr() orelse return;
+        try self.selectPullRequest(pull);
+    }
+
+    pub fn selectPullRequest(self: *App, pull: pr.PullRequest) !void {
+        self.setPrMessage("");
+
+        const head_ref_name = pr.github.fetchRef(self.allocator, .{
+            .number = pull.number,
+            .base_ref = pull.base_ref,
+        }) catch {
+            self.setPrMessage("fetch failed — is gh/git authenticated?");
+            self.needs_render = true;
+            return;
+        };
+        defer self.allocator.free(head_ref_name);
+
+        const ref2 = try self.allocator.dupe(u8, head_ref_name);
+        errdefer self.allocator.free(ref2);
+        const ref1 = if (pull.base_ref.len > 0)
+            try std.fmt.allocPrint(self.allocator, "origin/{s}", .{pull.base_ref})
+        else
+            try self.allocator.dupe(u8, "HEAD");
+        errdefer self.allocator.free(ref1);
+
+        // Free old diff_source
+        switch (self.state.diff_source) {
+            .working_dir, .stdin => {},
+            .single_ref => |sr| self.allocator.free(sr.ref),
+            .two_refs => |tr| {
+                self.allocator.free(tr.ref1);
+                self.allocator.free(tr.ref2);
+            },
+        }
+
+        self.state.diff_source = DiffSource{ .two_refs = .{
+            .ref1 = ref1,
+            .ref2 = ref2,
+            .use_merge_base = true,
+        } };
+
+        self.state.pager_mode = false;
+        self.mode = .normal;
+        try self.refresh();
+    }
+
+    pub fn rebuildPrFilter(self: *App) void {
+        const p = &self.state.pr;
+        p.filtered.clearRetainingCapacity();
+        const list = p.list orelse return;
+        for (list.items, 0..) |pull, i| {
+            if (pr.filter.matchesFilters(pull, p.query(), p.authorFilter())) {
+                p.filtered.append(self.allocator, i) catch {};
+            }
+        }
+        if (p.filtered.items.len == 0) {
+            p.selection = 0;
+        } else if (p.selection >= p.filtered.items.len) {
+            p.selection = p.filtered.items.len - 1;
+        }
+    }
+
+    pub fn prMove(self: *App, delta: isize) void {
+        const p = &self.state.pr;
+        const len = p.filtered.items.len;
+        if (len == 0) return;
+        const cur: isize = @intCast(p.selection);
+        const max: isize = @intCast(len - 1);
+        p.selection = @intCast(std.math.clamp(cur + delta, 0, max));
+    }
+
+    /// Keep the selected row within the visible window. `rows` is the list
+    /// viewport height (window height minus header and status rows).
+    pub fn clampPrScroll(self: *App, rows: usize) void {
+        const p = &self.state.pr;
+        if (rows == 0) return;
+        if (p.picking_author) {
+            if (p.author_selection < p.author_scroll) {
+                p.author_scroll = p.author_selection;
+            } else if (p.author_selection >= p.author_scroll + rows) {
+                p.author_scroll = p.author_selection - rows + 1;
+            }
+            return;
+        }
+        if (p.selection < p.scroll) {
+            p.scroll = p.selection;
+        } else if (p.selection >= p.scroll + rows) {
+            p.scroll = p.selection - rows + 1;
+        }
+    }
+
+    pub fn selectedPr(self: *const App) ?pr.PullRequest {
+        const p = &self.state.pr;
+        if (p.filtered.items.len == 0) return null;
+        const list = p.list orelse return null;
+        if (p.selection >= p.filtered.items.len) return null;
+        return list.items[p.filtered.items[p.selection]];
+    }
+
+    /// Esc peels back one layer at a time: query, then the pinned author, then
+    /// leave — so a stray Esc never drops you out with filters still applied.
+    pub fn prClearOrLeave(self: *App) void {
+        const p = &self.state.pr;
+        if (p.query_len > 0) {
+            p.query_len = 0;
+            self.rebuildPrFilter();
+        } else if (p.author_len > 0) {
+            p.author_len = 0;
+            self.rebuildPrFilter();
+        } else if (self.pr_only) {
+            self.should_quit = true;
+        } else {
+            self.mode = .normal;
+        }
+    }
+
+    pub fn prAppendQueryChar(self: *App, c: u8) void {
+        const p = &self.state.pr;
+        if (p.query_len < p.query_buf.len) {
+            p.query_buf[p.query_len] = c;
+            p.query_len += 1;
+            self.rebuildPrFilter();
+        }
+    }
+
+    pub fn prBackspaceQuery(self: *App) void {
+        const p = &self.state.pr;
+        if (p.query_len > 0) p.query_len -= 1;
+        self.rebuildPrFilter();
+    }
+
+    pub fn openPrInBrowser(self: *App) void {
+        const pull = self.selectedPr() orelse return;
+        var buf: [16]u8 = undefined;
+        const num = std.fmt.bufPrint(&buf, "{d}", .{pull.number}) catch return;
+        var child = std.process.Child.init(&.{ "gh", "pr", "view", num, "--web" }, self.allocator);
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        child.spawn() catch return;
+        _ = child.wait() catch {};
+    }
+
+    pub fn prView(self: *const App) pr.render.View {
+        const p = &self.state.pr;
+        return .{
+            .prs = p.items(),
+            .filtered = p.filtered.items,
+            .selected = p.selection,
+            .scroll = p.scroll,
+            .loading = self.pr_fetch_in_flight,
+            .query = p.query(),
+            .message = p.message(),
+            .author_filter = p.authorFilter(),
+            .picking_author = p.picking_author,
+            .authors = p.author_list,
+            .author_filtered = p.author_filtered.items,
+            .author_selected = p.author_selection,
+            .author_scroll = p.author_scroll,
+            .author_query = p.authorQuery(),
+        };
+    }
+
+    fn setPrMessage(self: *App, text: []const u8) void {
+        const p = &self.state.pr;
+        const n = @min(text.len, p.message_buf.len);
+        @memcpy(p.message_buf[0..n], text[0..n]);
+        p.message_len = n;
+    }
+
+    // --- author filter overlay -----------------------------------------------
+
+    pub fn openPrAuthorPicker(self: *App) void {
+        if (self.state.pr.list == null) return;
+        const p = &self.state.pr;
+        p.author_query_len = 0;
+        p.author_selection = 0;
+        p.author_scroll = 0;
+        p.picking_author = true;
+        self.refreshPrAuthorList();
+    }
+
+    fn refreshPrAuthorList(self: *App) void {
+        const p = &self.state.pr;
+        const list = p.list orelse return;
+        self.freePrAuthors();
+        p.author_list = pr.authors.distinct(self.allocator, list.items) catch {
+            self.closePrAuthorPicker();
+            return;
+        };
+        self.rebuildPrAuthorFilter();
+    }
+
+    pub fn applySelectedPrAuthor(self: *App) void {
+        const p = &self.state.pr;
+        if (p.author_filtered.items.len == 0) {
+            self.closePrAuthorPicker();
+            return;
+        }
+        const login = p.author_list[p.author_filtered.items[p.author_selection]].login;
+        const n = @min(login.len, p.author_buf.len);
+        @memcpy(p.author_buf[0..n], login[0..n]);
+        p.author_len = n;
+
+        self.closePrAuthorPicker();
+        p.selection = 0;
+        p.scroll = 0;
+        self.rebuildPrFilter();
+    }
+
+    pub fn closePrAuthorPicker(self: *App) void {
+        const p = &self.state.pr;
+        p.picking_author = false;
+        self.freePrAuthors();
+        p.author_query_len = 0;
+    }
+
+    pub fn rebuildPrAuthorFilter(self: *App) void {
+        const p = &self.state.pr;
+        p.author_filtered.clearRetainingCapacity();
+        for (p.author_list, 0..) |a, i| {
+            if (pr.authors.matchesQuery(a.login, p.authorQuery())) {
+                p.author_filtered.append(self.allocator, i) catch {};
+            }
+        }
+        if (p.author_filtered.items.len == 0) {
+            p.author_selection = 0;
+        } else if (p.author_selection >= p.author_filtered.items.len) {
+            p.author_selection = p.author_filtered.items.len - 1;
+        }
+    }
+
+    pub fn prAuthorMove(self: *App, delta: isize) void {
+        const p = &self.state.pr;
+        const len = p.author_filtered.items.len;
+        if (len == 0) return;
+        const cur: isize = @intCast(p.author_selection);
+        const max: isize = @intCast(len - 1);
+        p.author_selection = @intCast(std.math.clamp(cur + delta, 0, max));
+    }
+
+    pub fn prAppendAuthorQueryChar(self: *App, c: u8) void {
+        const p = &self.state.pr;
+        if (p.author_query_len < p.author_query_buf.len) {
+            p.author_query_buf[p.author_query_len] = c;
+            p.author_query_len += 1;
+            self.rebuildPrAuthorFilter();
+        }
+    }
+
+    pub fn prBackspaceAuthorQuery(self: *App) void {
+        const p = &self.state.pr;
+        if (p.author_query_len > 0) p.author_query_len -= 1;
+        self.rebuildPrAuthorFilter();
+    }
+
+    fn freePrAuthors(self: *App) void {
+        const p = &self.state.pr;
+        if (p.author_list.len > 0) self.allocator.free(p.author_list);
+        p.author_list = &.{};
+        p.author_filtered.clearRetainingCapacity();
     }
 
     pub fn selectGraphiteStackBranch(self: *App, idx: usize) !void {
@@ -5206,6 +5673,18 @@ pub const App = struct {
                 if (timer_opt) |*timer| overlay_ns += timer.read();
             } else {
                 try UI.renderGraphiteStackDialog(self, win);
+            }
+        }
+
+        // Render the PR picker full-screen if in pr_review mode (it clears the
+        // window, so it overlays whatever diff was underneath).
+        if (self.mode == .pr_review) {
+            if (profile_frame) {
+                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                try UI.renderPrReviewDialog(self, win);
+                if (timer_opt) |*timer| overlay_ns += timer.read();
+            } else {
+                try UI.renderPrReviewDialog(self, win);
             }
         }
 

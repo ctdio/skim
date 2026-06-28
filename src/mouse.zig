@@ -34,6 +34,7 @@ pub fn wheelKeyForMode(mode: Mode, down: bool) ?u21 {
         .graphite_stack,
         .agent_selection,
         .agent,
+        .pr_review,
         => if (down) vaxis.Key.down else vaxis.Key.up,
 
         // Text-input modes and any surface without meaningful vertical scroll
@@ -66,6 +67,7 @@ test "wheelKeyForMode routes each scrollable surface to its bound key" {
     try std.testing.expectEqual(@as(?u21, K.down), wheelKeyForMode(.commit_selection, true));
     try std.testing.expectEqual(@as(?u21, K.down), wheelKeyForMode(.graphite_stack, true));
     try std.testing.expectEqual(@as(?u21, K.down), wheelKeyForMode(.agent_selection, true));
+    try std.testing.expectEqual(@as(?u21, K.down), wheelKeyForMode(.pr_review, true));
 
     // Text-input modes ignore the wheel.
     try std.testing.expectEqual(@as(?u21, null), wheelKeyForMode(.comment, true));

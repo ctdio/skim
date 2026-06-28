@@ -39,6 +39,7 @@ pub const CommandAction = union(enum) {
     switch_diff_mode: DiffMode,
     switch_agent: void,
     select_commit: void,
+    enter_pr_review: void,
 };
 
 pub const Command = struct {
@@ -245,6 +246,18 @@ pub const CommandPaletteState = struct {
             .aliases = &[_][]const u8{ ":dc", ":commit" },
             .description = "Diff against a specific commit",
             .action = .select_commit,
+            .category = .diff,
+            .owns_display_name = false,
+            .additions = 0,
+            .deletions = 0,
+        });
+
+        try self.commands.append(self.allocator, .{
+            .name = "Review Pull Request...",
+            .display_name = "Review Pull Request...",
+            .aliases = &[_][]const u8{ ":pr", ":prs" },
+            .description = "Browse and review open pull requests",
+            .action = .enter_pr_review,
             .category = .diff,
             .owns_display_name = false,
             .additions = 0,

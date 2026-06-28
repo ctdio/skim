@@ -8,6 +8,7 @@ const sessions = @import("acp/sessions.zig");
 
 const App = @import("app.zig").App;
 const graphite = @import("git/graphite.zig");
+const pr = @import("pr/pr.zig");
 const Color = rendering_common.Color;
 const Layout = rendering_common.Layout;
 const FrameChars = rendering_common.FrameChars;
@@ -725,6 +726,14 @@ pub const UI = struct {
             .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
+    }
+
+    /// Full-screen PR picker. Reuses the pure PR renderer, which clears the
+    /// window first, so it overlays whatever diff sat underneath.
+    pub fn renderPrReviewDialog(app: *App, win: vaxis.Window) !void {
+        const rows: usize = if (win.height > 2) win.height - 2 else 0;
+        app.clampPrScroll(rows);
+        pr.render.draw(win, app.prView());
     }
 
     pub fn renderModelSelectionDialog(app: *App, win: vaxis.Window) !void {
@@ -1462,6 +1471,7 @@ pub const UI = struct {
             .permission_selection => "-- PERMISSION MODE --",
             .agent_selection => "-- AGENT SELECTION --",
             .session_picker => "-- RESUME SESSION --",
+            .pr_review => "-- PR REVIEW --",
             .agent => blk: {
                 // Show vim mode when in agent mode
                 if (app.getActiveAgentStateConst()) |agent_state| {
@@ -1510,6 +1520,7 @@ pub const UI = struct {
             .permission_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .agent_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .session_picker => "j/k:Move  |  Enter:Load  |  ESC:Cancel",
+            .pr_review => "^n/^p:Move  |  Enter:Review  |  ^a:Author  |  ^r:Refresh  |  ESC:Back",
             .agent => blk: {
                 if (app.getActiveAgentStateConst()) |agent_state| {
                     break :blk switch (agent_state.input.vim.vim_mode) {

@@ -254,6 +254,20 @@ pub fn build(b: *std.Build) void {
     const run_codex_tests = b.addRunArtifact(codex_tests);
     test_step.dependOn(&run_codex_tests.step);
 
+    // PR module tests
+    const pr_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pr/pr.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    pr_tests.root_module.addImport("vaxis", vaxis);
+    pr_tests.root_module.addImport("build_options", build_options_module);
+    pr_tests.linkLibC();
+    const run_pr_tests = b.addRunArtifact(pr_tests);
+    test_step.dependOn(&run_pr_tests.step);
+
     // Markdown module tests
     const markdown_tests = b.addTest(.{
         .root_module = b.createModule(.{

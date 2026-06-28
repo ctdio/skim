@@ -55,6 +55,10 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[1], "comment")) {
             // Legacy: `skim comment` -> `skim session comment`
             return runCommentCommand(allocator, args);
+        } else if (std.mem.eql(u8, args[1], "pr")) {
+            logging.init(.tui);
+            defer logging.deinit();
+            return runPrCommand(allocator, args);
         } else if (std.mem.eql(u8, args[1], "mcp")) {
             logging.init(.mcp);
             defer logging.deinit();
@@ -187,6 +191,74 @@ pub fn main() !void {
 // =============================================================================
 // Subcommand Handlers
 // =============================================================================
+
+fn runPrCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var i: usize = 2;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
+            try printPrHelp();
+            return;
+        }
+        std.debug.print("Unknown option: {s}\n", .{args[i]});
+        try printPrHelp();
+        std.process.exit(1);
+    }
+
+    logging.init(.tui);
+    defer logging.deinit();
+
+    std.log.info("TUI starting up (PR review mode)", .{});
+
+    const config = Config{
+        .allocator = allocator,
+        .diff_source = .{ .working_dir = .{ .staged = false } },
+        .stdin_content = null,
+        .mcp_port = null,
+        .serve_port = null,
+        .agent_only = false,
+        .pr_only = true,
+    };
+    defer config.deinit();
+
+    var app = App.init(allocator, config) catch |err| {
+        switch (err) {
+            error.GitCommandFailed => std.process.exit(1),
+            else => return err,
+        }
+    };
+    defer app.deinit();
+
+    try app.run();
+}
+
+fn printPrHelp() !void {
+    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    defer file_writer.interface.flush() catch {};
+    try file_writer.interface.writeAll(
+        \\skim pr - Browse open pull requests and review them
+        \\
+        \\USAGE:
+        \\    skim pr
+        \\
+        \\Lists open PRs (via the GitHub CLI, `gh`) in an interactive picker.
+        \\Selecting one fetches its head and opens skim on the PR's diff.
+        \\
+        \\KEYS:
+        \\    (type)               filter by author, title, or branch
+        \\    ctrl-n / ctrl-j      move down
+        \\    ctrl-p / ctrl-k      move up
+        \\    ctrl-d / ctrl-u      half-page down / up
+        \\    ctrl-a               filter by author
+        \\    ctrl-r               refresh the PR list
+        \\    ctrl-o               open the selected PR in the browser
+        \\    enter                review the selected PR
+        \\    esc                  back: clear search, then author filter, then exit
+        \\    ctrl-c               back: author overlay -> list, then exit
+        \\
+        \\Requires the GitHub CLI (`gh`) on PATH, authenticated for the repo.
+        \\
+    );
+}
 
 fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var stdio_mode = false;
@@ -340,6 +412,7 @@ const Config = struct {
     mcp_port: ?u16, // Port to connect to MCP server
     serve_port: ?u16, // Port to run MCP server on
     agent_only: bool, // Start in agent-only mode (no diff view)
+    pr_only: bool = false, // Start in PR picker mode (`skim pr`)
 
     fn deinit(self: *const Config) void {
         // Free stdin_content if we own it
@@ -482,6 +555,7 @@ fn printHelp(_: std.mem.Allocator) !void {
         \\    skim [OPTIONS] [<ref> | <ref1> <ref2> | <ref1>..<ref2> | <ref1>...<ref2>]
         \\    skim diff [OPTIONS] [<refs>]
         \\    skim debug <command> [options]
+        \\    skim pr
         \\    skim agent
         \\    skim mcp
         \\
@@ -492,6 +566,7 @@ fn printHelp(_: std.mem.Allocator) !void {
         \\    sessions           List running skim sessions
         \\    context            Get diff context from a running session
         \\    comment            Manage comments in a running session
+        \\    pr                 Browse open pull requests and review them
         \\    agent              Start the AI agent panel directly (ACP mode)
         \\    mcp                Run as MCP adapter (for Claude Desktop, Cursor, etc.)
         \\
@@ -554,7 +629,7 @@ fn printVersion() !void {
 /// Check if arg is a skim subcommand (not a git diff flag)
 fn isSkimSubcommand(arg: []const u8) bool {
     const subcommands = [_][]const u8{
-        "session", "debug", "print", "sessions", "context", "comment", "mcp", "diff", "agent",
+        "session", "debug", "print", "sessions", "context", "comment", "mcp", "diff", "agent", "pr",
     };
     for (subcommands) |cmd| {
         if (std.mem.eql(u8, arg, cmd)) return true;

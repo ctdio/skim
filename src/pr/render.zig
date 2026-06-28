@@ -1,0 +1,515 @@
+//! Renders the PR picker into a vaxis window: a header line, the scrollable PR
+//! list, and a status/search bar. Pure drawing — it reads a `View` snapshot and
+//! never mutates app state.
+
+const std = @import("std");
+const vaxis = @import("vaxis");
+const parse = @import("parse.zig");
+const authors = @import("authors.zig");
+
+const PullRequest = parse.PullRequest;
+const CiStatus = parse.CiStatus;
+const AuthorCount = authors.AuthorCount;
+const Style = vaxis.Cell.Style;
+
+const digit_graphemes = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+
+pub const View = struct {
+    prs: []const PullRequest,
+    filtered: []const usize,
+    selected: usize,
+    scroll: usize,
+    loading: bool,
+    query: []const u8,
+    message: []const u8,
+    author_filter: []const u8 = "",
+
+    // Author-filter overlay.
+    picking_author: bool = false,
+    authors: []const AuthorCount = &.{},
+    author_filtered: []const usize = &.{},
+    author_selected: usize = 0,
+    author_scroll: usize = 0,
+    author_query: []const u8 = "",
+};
+
+const LineWriter = struct {
+    win: vaxis.Window,
+    row: u16,
+    col: u16,
+    style: Style,
+
+    fn init(win: vaxis.Window, row: u16, style: Style) LineWriter {
+        return initAt(win, row, 0, style);
+    }
+
+    fn initAt(win: vaxis.Window, row: u16, col: u16, style: Style) LineWriter {
+        return .{
+            .win = win,
+            .row = row,
+            .col = col,
+            .style = style,
+        };
+    }
+
+    fn text(self: *LineWriter, value: []const u8) void {
+        var iter = self.win.unicode.graphemeIterator(value);
+        while (iter.next()) |item| {
+            const bytes = item.bytes(value);
+            if (std.mem.eql(u8, bytes, "\n")) return;
+            self.grapheme(bytes);
+        }
+    }
+
+    fn styledText(self: *LineWriter, value: []const u8, style: Style) void {
+        const old_style = self.style;
+        self.style = style;
+        self.text(value);
+        self.style = old_style;
+    }
+
+    fn unsigned(self: *LineWriter, value: u64) void {
+        var divisor: u64 = 1;
+        while (value / divisor >= 10) {
+            divisor *= 10;
+        }
+
+        var remaining_divisor = divisor;
+        while (remaining_divisor > 0) : (remaining_divisor /= 10) {
+            const digit: usize = @intCast((value / remaining_divisor) % 10);
+            self.grapheme(digit_graphemes[digit]);
+        }
+    }
+
+    fn styledUnsigned(self: *LineWriter, value: u64, style: Style) void {
+        const old_style = self.style;
+        self.style = style;
+        self.unsigned(value);
+        self.style = old_style;
+    }
+
+    fn grapheme(self: *LineWriter, value: []const u8) void {
+        const width = self.win.gwidth(value);
+        if (width == 0) return;
+        if (width > self.win.width - self.col) {
+            self.col = self.win.width;
+            return;
+        }
+        self.win.writeCell(self.col, self.row, .{
+            .char = .{ .grapheme = value, .width = @intCast(width) },
+            .style = self.style,
+        });
+        self.col += width;
+    }
+};
+
+pub fn draw(win: vaxis.Window, view: View) void {
+    win.clear();
+    if (win.height < 2 or win.width == 0) return;
+
+    if (view.picking_author) {
+        drawAuthorPicker(win, view);
+        return;
+    }
+
+    drawHeader(win, view);
+
+    const list_top: u16 = 1;
+    const list_bottom: u16 = win.height - 1; // exclusive; last row is the status bar
+
+    if (view.loading and view.filtered.len == 0) {
+        drawCentered(win, list_top, "Loading pull requests…");
+    } else if (view.filtered.len == 0) {
+        const empty = if (view.query.len > 0 or view.author_filter.len > 0) "No PRs match." else "No open pull requests.";
+        drawCentered(win, list_top, empty);
+    } else {
+        var row: u16 = list_top;
+        var i: usize = view.scroll;
+        while (i < view.filtered.len and row < list_bottom) : ({
+            i += 1;
+            row += 1;
+        }) {
+            const pr = view.prs[view.filtered[i]];
+            drawRow(win, row, pr, i == view.selected);
+        }
+    }
+
+    drawStatusBar(win, view);
+}
+
+fn drawHeader(win: vaxis.Window, view: View) void {
+    var writer = LineWriter.init(win, 0, .{});
+    writer.styledText(" skim pr", .{ .bold = true });
+    writer.styledText("  ", mutedStyle(false));
+    writer.styledUnsigned(view.prs.len, mutedStyle(false));
+    writer.styledText(" open pull request", mutedStyle(false));
+    if (view.prs.len != 1) writer.styledText("s", mutedStyle(false));
+    if (view.author_filter.len > 0) {
+        writer.styledText("  @", accentStyle());
+        writer.styledText(view.author_filter, accentStyle());
+    }
+}
+
+fn drawRow(win: vaxis.Window, row: u16, pr: PullRequest, selected: bool) void {
+    const base_style = rowStyle(selected, .{});
+    const meta_style = rowStyle(selected, mutedStyle(false));
+    const status_style = rowStyle(selected, .{ .fg = ciColor(pr.ci) });
+    const draft_style = rowStyle(selected, .{ .fg = .{ .index = 3 } });
+    const author_style = rowStyle(selected, .{ .fg = .{ .index = 6 } }); // cyan
+
+    if (selected) fillRow(win, row, base_style);
+
+    // Author leads the row (right after the number) so it stays visible even
+    // when a long title/branch would otherwise push it off the right edge.
+    var writer = LineWriter.init(win, row, base_style);
+    writer.text("  ");
+    writer.styledText(ciGlyph(pr.ci), status_style);
+    writer.text("  ");
+    writer.styledText("#", meta_style);
+    writer.styledUnsigned(pr.number, meta_style);
+    writer.styledText("  @", meta_style);
+    writer.styledText(pr.author, author_style);
+    writer.text("  ");
+    writer.text(pr.title);
+    writer.styledText("  ", meta_style);
+    writer.styledText(pr.base_ref, meta_style);
+    writer.styledText("←", meta_style);
+    writer.styledText(pr.head_ref, meta_style);
+    if (pr.is_draft) {
+        writer.styledText("  draft", draft_style);
+    }
+}
+
+fn drawStatusBar(win: vaxis.Window, view: View) void {
+    const row = win.height - 1;
+    const muted = Style{ .fg = .{ .index = 8 } };
+
+    // The status row is the live search prompt: the query is always editable.
+    var writer = LineWriter.init(win, row, muted);
+    writer.styledText(" > ", muted);
+    writer.text(view.query);
+
+    writer.styledText("  ", muted);
+    writer.styledUnsigned(if (view.filtered.len == 0) @as(usize, 0) else view.selected + 1, muted);
+    writer.styledText("/", muted);
+    writer.styledUnsigned(view.filtered.len, muted);
+
+    if (view.message.len > 0) {
+        writer.styledText("  ", muted);
+        writer.styledText(view.message, muted);
+    } else {
+        writer.styledText("  enter review · ^a author · ^r refresh · ^o open · ^c quit", muted);
+    }
+    if (view.loading) writer.styledText("  · loading…", muted);
+}
+
+fn drawAuthorPicker(win: vaxis.Window, view: View) void {
+    var header = LineWriter.init(win, 0, .{});
+    header.styledText(" filter by author", .{ .bold = true });
+    header.styledText("  ", mutedStyle(false));
+    header.styledUnsigned(view.author_filtered.len, mutedStyle(false));
+
+    const list_top: u16 = 1;
+    const list_bottom: u16 = win.height - 1;
+
+    if (view.author_filtered.len == 0) {
+        drawCentered(win, list_top, "No matching authors.");
+    } else {
+        var row: u16 = list_top;
+        var i: usize = view.author_scroll;
+        while (i < view.author_filtered.len and row < list_bottom) : ({
+            i += 1;
+            row += 1;
+        }) {
+            const author = view.authors[view.author_filtered[i]];
+            drawAuthorRow(win, row, author, i == view.author_selected);
+        }
+    }
+
+    const muted = Style{ .fg = .{ .index = 8 } };
+    var prompt = LineWriter.init(win, win.height - 1, muted);
+    prompt.styledText(" > ", muted);
+    prompt.text(view.author_query);
+    prompt.styledText("  enter apply · esc cancel · ^n/^p move", muted);
+}
+
+fn drawAuthorRow(win: vaxis.Window, row: u16, author: AuthorCount, selected: bool) void {
+    const base_style = rowStyle(selected, .{});
+    const meta_style = rowStyle(selected, mutedStyle(false));
+
+    if (selected) fillRow(win, row, base_style);
+
+    var writer = LineWriter.init(win, row, base_style);
+    writer.text("  @");
+    writer.text(author.login);
+    writer.styledText("  (", meta_style);
+    writer.styledUnsigned(author.count, meta_style);
+    writer.styledText(")", meta_style);
+}
+
+fn drawCentered(win: vaxis.Window, row: u16, label: []const u8) void {
+    const text_width = win.gwidth(label);
+    const col: u16 = if (text_width < win.width) (win.width - text_width) / 2 else 0;
+    var writer = LineWriter.initAt(win, row, col, .{ .fg = .{ .index = 8 } });
+    writer.text(label);
+}
+
+fn ciGlyph(ci: CiStatus) []const u8 {
+    return switch (ci) {
+        .none => " ",
+        .pending => "•",
+        .success => "✓",
+        .failure => "✗",
+    };
+}
+
+fn ciColor(ci: CiStatus) vaxis.Cell.Color {
+    return switch (ci) {
+        .none => .default,
+        .pending => .{ .index = 3 }, // yellow
+        .success => .{ .index = 2 }, // green
+        .failure => .{ .index = 1 }, // red
+    };
+}
+
+fn mutedStyle(selected: bool) Style {
+    return rowStyle(selected, .{ .fg = .{ .index = 8 } });
+}
+
+fn accentStyle() Style {
+    return .{ .fg = .{ .index = 4 }, .bold = true };
+}
+
+fn rowStyle(selected: bool, style: Style) Style {
+    var out = style;
+    out.reverse = selected;
+    return out;
+}
+
+fn fillRow(win: vaxis.Window, row: u16, style: Style) void {
+    var col: u16 = 0;
+    while (col < win.width) : (col += 1) {
+        win.writeCell(col, row, .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = style,
+        });
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+
+fn testPr(params: struct {
+    title: []const u8,
+    author: []const u8 = "octocat",
+    head_ref: []const u8 = "feature",
+    base_ref: []const u8 = "main",
+    number: u32 = 1,
+    is_draft: bool = false,
+    ci: CiStatus = .none,
+}) PullRequest {
+    return .{
+        .number = params.number,
+        .title = params.title,
+        .author = params.author,
+        .head_ref = params.head_ref,
+        .base_ref = params.base_ref,
+        .is_draft = params.is_draft,
+        .updated_at = "",
+        .url = "",
+        .ci = params.ci,
+    };
+}
+
+/// Minimal vaxis backing for testing `draw` against real cells. Mirrors the
+/// shared test harness but stays inside the pr module path (vaxis only), since
+/// `render.zig` cannot import `../testing`.
+const TestScreen = struct {
+    screen: vaxis.Screen,
+    unicode: vaxis.Unicode,
+
+    fn init(cols: u16, rows: u16) !TestScreen {
+        var screen = try vaxis.Screen.init(testing.allocator, .{
+            .cols = cols,
+            .rows = rows,
+            .x_pixel = 0,
+            .y_pixel = 0,
+        });
+        errdefer screen.deinit(testing.allocator);
+        const unicode = try vaxis.Unicode.init(testing.allocator);
+        return .{ .screen = screen, .unicode = unicode };
+    }
+
+    fn deinit(self: *TestScreen) void {
+        self.screen.deinit(testing.allocator);
+        self.unicode.deinit(testing.allocator);
+    }
+
+    fn window(self: *TestScreen) vaxis.Window {
+        return .{
+            .x_off = 0,
+            .y_off = 0,
+            .parent_x_off = 0,
+            .parent_y_off = 0,
+            .width = self.screen.width,
+            .height = self.screen.height,
+            .screen = &self.screen,
+            .unicode = &self.unicode,
+        };
+    }
+};
+
+fn rowContains(screen: vaxis.Screen, row: u16, needle: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    var len: usize = 0;
+    var col: u16 = 0;
+    while (col < screen.width) : (col += 1) {
+        const cell = screen.readCell(col, row) orelse continue;
+        const g = cell.char.grapheme;
+        if (len + g.len > buf.len) break;
+        @memcpy(buf[len .. len + g.len], g);
+        len += g.len;
+    }
+    return std.mem.indexOf(u8, buf[0..len], needle) != null;
+}
+
+fn expectColor(actual: vaxis.Cell.Color, expected: vaxis.Cell.Color) !void {
+    try testing.expect(vaxis.Cell.Color.eql(actual, expected));
+}
+
+test "draw: clips long PR rows without spilling into following rows" {
+    var ts = try TestScreen.init(24, 4);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{
+        testPr(.{ .title = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }),
+    };
+    const filtered = [_]usize{0};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 1,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+    });
+
+    var col: u16 = 0;
+    while (col < ts.screen.width) : (col += 1) {
+        const cell = ts.screen.readCell(col, 2) orelse return error.MissingCell;
+        if (cell.default) continue;
+        try testing.expectEqualStrings(" ", cell.char.grapheme);
+    }
+}
+
+test "draw: does not mark row cells as terminal-wrapped" {
+    var ts = try TestScreen.init(16, 3);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{testPr(.{ .title = "short" })};
+    const filtered = [_]usize{0};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 0,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+    });
+
+    for (ts.screen.buf) |cell| {
+        try testing.expect(!cell.wrapped);
+    }
+}
+
+test "draw: colors CI as an accent without tinting the whole row" {
+    var ts = try TestScreen.init(40, 3);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{testPr(.{ .title = "Ready to merge", .ci = .success })};
+    const filtered = [_]usize{0};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 1,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+    });
+
+    // Layout: "  ✓  #1  @octocat  Ready to merge" — author leads, title follows.
+    const status_cell = ts.screen.readCell(2, 1) orelse return error.MissingCell;
+    const author_cell = ts.screen.readCell(10, 1) orelse return error.MissingCell;
+    const title_cell = ts.screen.readCell(19, 1) orelse return error.MissingCell;
+
+    try expectColor(status_cell.style.fg, ciColor(.success));
+    try expectColor(author_cell.style.fg, .{ .index = 6 });
+    try testing.expectEqualStrings("o", author_cell.char.grapheme);
+    try expectColor(title_cell.style.fg, .default);
+    try testing.expectEqualStrings("R", title_cell.char.grapheme);
+}
+
+test "draw: header shows the active author filter as a chip" {
+    var ts = try TestScreen.init(40, 3);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{testPr(.{ .title = "Ready", .author = "alice" })};
+    const filtered = [_]usize{0};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 0,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+        .author_filter = "alice",
+    });
+
+    try testing.expect(rowContains(ts.screen, 0, "@alice"));
+}
+
+test "draw: author picker lists authors with counts over the PR list" {
+    var ts = try TestScreen.init(40, 6);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{testPr(.{ .title = "hidden while picking" })};
+    const filtered = [_]usize{0};
+    const author_list = [_]AuthorCount{
+        .{ .login = "alice", .count = 3 },
+        .{ .login = "bob", .count = 1 },
+    };
+    const author_filtered = [_]usize{ 0, 1 };
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 0,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+        .picking_author = true,
+        .authors = &author_list,
+        .author_filtered = &author_filtered,
+        .author_selected = 0,
+        .author_scroll = 0,
+        .author_query = "",
+    });
+
+    try testing.expect(rowContains(ts.screen, 0, "filter by author"));
+    try testing.expect(rowContains(ts.screen, 1, "@alice"));
+    try testing.expect(rowContains(ts.screen, 1, "(3)"));
+    try testing.expect(rowContains(ts.screen, 2, "@bob"));
+    try testing.expect(!rowContains(ts.screen, 1, "hidden while picking"));
+}

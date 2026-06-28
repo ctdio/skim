@@ -20,4 +20,5 @@ pub const Mode = enum {
     permission_selection, // Codex permission mode menu
     agent_selection, // Agent selection menu (before connecting)
     session_picker, // Session picker for /resume command
+    pr_review, // Pull request picker (native PR review)
 };
