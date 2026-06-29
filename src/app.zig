@@ -215,6 +215,10 @@ const PrReviewState = struct {
     selection: usize = 0,
     scroll: usize = 0,
 
+    // Forge-native stacked-PR grouping (rebuilt whenever `list` changes).
+    analysis: ?pr.stack.Analysis = null,
+    order: []usize = &.{}, // stack-grouped display order over list.items (owned)
+
     query_buf: [256]u8 = undefined,
     query_len: usize = 0,
 
@@ -1256,6 +1260,8 @@ pub const App = struct {
         self.pr_fetch_thread = null;
         if (self.pr_fetch.result) |*list| list.deinit();
         if (self.state.pr.list) |*list| list.deinit();
+        if (self.state.pr.analysis) |*a| a.deinit(self.allocator);
+        if (self.state.pr.order.len > 0) self.allocator.free(self.state.pr.order);
         self.state.pr.filtered.deinit(self.allocator);
         if (self.state.pr.author_list.len > 0) self.allocator.free(self.state.pr.author_list);
         self.state.pr.author_filtered.deinit(self.allocator);
@@ -4385,6 +4391,7 @@ pub const App = struct {
         if (maybe) |list| {
             if (self.state.pr.list) |*old| old.deinit();
             self.state.pr.list = list;
+            self.rebuildPrStacks();
             self.rebuildPrFilter();
             // The author overlay aliases the arena we just freed; rebuild it
             // against the fresh PRs before anything reads it.
@@ -4403,7 +4410,28 @@ pub const App = struct {
         const list = pr.parse.parse(self.allocator, raw) catch return;
         if (self.state.pr.list) |*old| old.deinit();
         self.state.pr.list = list;
+        self.rebuildPrStacks();
         self.rebuildPrFilter();
+    }
+
+    /// Recompute the stacked-PR grouping for the current list. Stack data is
+    /// purely index-based, so it's cheap to rebuild and independent of the
+    /// list's string arena.
+    fn rebuildPrStacks(self: *App) void {
+        const p = &self.state.pr;
+        if (p.analysis) |*a| a.deinit(self.allocator);
+        p.analysis = null;
+        if (p.order.len > 0) self.allocator.free(p.order);
+        p.order = &.{};
+
+        const list = p.list orelse return;
+        var analysis = pr.stack.analyze(self.allocator, list.items) catch return;
+        const order = pr.stack.displayOrder(self.allocator, list.items, analysis) catch {
+            analysis.deinit(self.allocator);
+            return;
+        };
+        p.analysis = analysis;
+        p.order = order;
     }
 
     /// Review the highlighted PR natively: fetch its head + base into local refs
@@ -4459,9 +4487,20 @@ pub const App = struct {
         const p = &self.state.pr;
         p.filtered.clearRetainingCapacity();
         const list = p.list orelse return;
-        for (list.items, 0..) |pull, i| {
-            if (pr.filter.matchesFilters(pull, p.query(), p.authorFilter())) {
-                p.filtered.append(self.allocator, i) catch {};
+        // Walk the stack-grouped order when available so stacked PRs stay
+        // contiguous (and their connector glyphs connect); otherwise fall back
+        // to the list's natural order.
+        if (p.order.len == list.items.len) {
+            for (p.order) |idx| {
+                if (pr.filter.matchesFilters(list.items[idx], p.query(), p.authorFilter())) {
+                    p.filtered.append(self.allocator, idx) catch {};
+                }
+            }
+        } else {
+            for (list.items, 0..) |pull, i| {
+                if (pr.filter.matchesFilters(pull, p.query(), p.authorFilter())) {
+                    p.filtered.append(self.allocator, i) catch {};
+                }
             }
         }
         if (p.filtered.items.len == 0) {
@@ -4569,6 +4608,7 @@ pub const App = struct {
             .author_selected = p.author_selection,
             .author_scroll = p.author_scroll,
             .author_query = p.authorQuery(),
+            .analysis = if (p.analysis) |*a| a else null,
         };
     }
 

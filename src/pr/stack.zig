@@ -13,6 +13,16 @@ const parse = @import("parse.zig");
 
 const PullRequest = parse.PullRequest;
 
+/// Where a PR sits in its stack, for drawing the connector glyph in the list.
+/// `none` = standalone (a single-PR "stack"); the rest assume stack members are
+/// rendered contiguously tip-first (see `displayOrder`).
+pub const Mark = enum {
+    none,
+    top, // the tip of the stack
+    middle,
+    bottom, // the trunk-side base of the stack
+};
+
 /// Per-PR placement within its stack, indexed in lockstep with the input PRs.
 pub const Analysis = struct {
     /// Stack id each PR belongs to (PRs sharing an id are one connected stack).
@@ -36,7 +46,52 @@ pub const Analysis = struct {
     pub fn isStacked(self: *const Analysis, index: usize) bool {
         return self.heights[self.stack_of[index]] > 1;
     }
+
+    /// The connector glyph this PR should show, assuming the stack is rendered
+    /// contiguously tip-first.
+    pub fn markOf(self: *const Analysis, index: usize) Mark {
+        const height = self.heights[self.stack_of[index]];
+        if (height <= 1) return .none;
+        const depth = self.depth_of[index];
+        if (depth == height - 1) return .top;
+        if (depth == 0) return .bottom;
+        return .middle;
+    }
 };
+
+/// A display order over `prs` that keeps each stack's members contiguous and
+/// tip-first (highest depth first), with stacks appearing at the position of
+/// their earliest member in the input. Standalone PRs keep their relative
+/// order. Caller owns the returned slice. This is what makes the connector
+/// glyphs read as a connected stack.
+pub fn displayOrder(allocator: std.mem.Allocator, prs: []const PullRequest, analysis: Analysis) ![]usize {
+    const n = prs.len;
+    var out = try allocator.alloc(usize, n);
+    errdefer allocator.free(out);
+    var emitted = try allocator.alloc(bool, n);
+    defer allocator.free(emitted);
+    @memset(emitted, false);
+
+    var w: usize = 0;
+    for (0..n) |i| {
+        if (emitted[i]) continue;
+        const sid = analysis.stack_of[i];
+        // Drain this stack's members, deepest (tip) first. Stacks are tiny, so
+        // the repeated max-scan is cheap and keeps the logic obvious.
+        while (true) {
+            var best: ?usize = null;
+            for (0..n) |j| {
+                if (emitted[j] or analysis.stack_of[j] != sid) continue;
+                if (best == null or analysis.depth_of[j] > analysis.depth_of[best.?]) best = j;
+            }
+            const b = best orelse break;
+            out[w] = b;
+            w += 1;
+            emitted[b] = true;
+        }
+    }
+    return out;
+}
 
 /// Group `prs` into stacks by their base->head relationships. Caller owns the
 /// returned analysis. Robust to cycles (a malformed base/head loop degrades to
@@ -267,4 +322,67 @@ test "analyze: empty list yields empty analysis" {
     defer a.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), a.stack_of.len);
     try testing.expectEqual(@as(usize, 0), a.heights.len);
+}
+
+test "markOf: tip/middle/bottom for a stack, none for standalone" {
+    const prs = [_]PullRequest{
+        samplePr(.{ .number = 10, .head = "feat", .base = "main" }), // bottom
+        samplePr(.{ .number = 11, .head = "feat2", .base = "feat" }), // middle
+        samplePr(.{ .number = 12, .head = "feat3", .base = "feat2" }), // tip
+        samplePr(.{ .number = 7, .head = "solo", .base = "main" }), // standalone
+    };
+    var a = try analyze(testing.allocator, &prs);
+    defer a.deinit(testing.allocator);
+
+    try testing.expectEqual(Mark.bottom, a.markOf(0));
+    try testing.expectEqual(Mark.middle, a.markOf(1));
+    try testing.expectEqual(Mark.top, a.markOf(2));
+    try testing.expectEqual(Mark.none, a.markOf(3));
+}
+
+test "displayOrder: groups a stack contiguously, tip first" {
+    // Input is bottom->tip; display should be tip->bottom and contiguous.
+    const prs = [_]PullRequest{
+        samplePr(.{ .number = 10, .head = "feat", .base = "main" }),
+        samplePr(.{ .number = 11, .head = "feat2", .base = "feat" }),
+        samplePr(.{ .number = 12, .head = "feat3", .base = "feat2" }),
+    };
+    var a = try analyze(testing.allocator, &prs);
+    defer a.deinit(testing.allocator);
+
+    const order = try displayOrder(testing.allocator, &prs, a);
+    defer testing.allocator.free(order);
+    try testing.expectEqualSlices(usize, &.{ 2, 1, 0 }, order);
+}
+
+test "displayOrder: standalone PRs keep their relative order" {
+    const prs = [_]PullRequest{
+        samplePr(.{ .number = 1, .head = "a", .base = "main" }),
+        samplePr(.{ .number = 2, .head = "b", .base = "main" }),
+        samplePr(.{ .number = 3, .head = "c", .base = "main" }),
+    };
+    var a = try analyze(testing.allocator, &prs);
+    defer a.deinit(testing.allocator);
+
+    const order = try displayOrder(testing.allocator, &prs, a);
+    defer testing.allocator.free(order);
+    try testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, order);
+}
+
+test "displayOrder: a stack surfaces at its earliest member, standalone interleaved" {
+    // #9 standalone, then a 2-PR stack whose earliest member (the base) is at
+    // index 1; the tip at index 2 is pulled up under it.
+    const prs = [_]PullRequest{
+        samplePr(.{ .number = 9, .head = "solo", .base = "main" }),
+        samplePr(.{ .number = 10, .head = "feat", .base = "main" }),
+        samplePr(.{ .number = 11, .head = "feat2", .base = "feat" }),
+        samplePr(.{ .number = 8, .head = "solo2", .base = "main" }),
+    };
+    var a = try analyze(testing.allocator, &prs);
+    defer a.deinit(testing.allocator);
+
+    const order = try displayOrder(testing.allocator, &prs, a);
+    defer testing.allocator.free(order);
+    // 9 (solo), then stack tip 11 then base 10, then 8 (solo).
+    try testing.expectEqualSlices(usize, &.{ 0, 2, 1, 3 }, order);
 }

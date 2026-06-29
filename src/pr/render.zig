@@ -6,6 +6,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const parse = @import("parse.zig");
 const authors = @import("authors.zig");
+const stack = @import("stack.zig");
 
 const PullRequest = parse.PullRequest;
 const CiStatus = parse.CiStatus;
@@ -23,6 +24,11 @@ pub const View = struct {
     query: []const u8,
     message: []const u8,
     author_filter: []const u8 = "",
+
+    // Stacked-PR analysis (indexed by PR index). When present, rows show a
+    // connector glyph; pair it with a stack-grouped `filtered` order so the
+    // glyphs read as a connected stack.
+    analysis: ?*const stack.Analysis = null,
 
     // Author-filter overlay.
     picking_author: bool = false,
@@ -129,8 +135,9 @@ pub fn draw(win: vaxis.Window, view: View) void {
             i += 1;
             row += 1;
         }) {
-            const pr = view.prs[view.filtered[i]];
-            drawRow(win, row, pr, i == view.selected);
+            const idx = view.filtered[i];
+            const mark = if (view.analysis) |a| a.markOf(idx) else stack.Mark.none;
+            drawRow(win, row, view.prs[idx], i == view.selected, mark);
         }
     }
 
@@ -150,7 +157,7 @@ fn drawHeader(win: vaxis.Window, view: View) void {
     }
 }
 
-fn drawRow(win: vaxis.Window, row: u16, pr: PullRequest, selected: bool) void {
+fn drawRow(win: vaxis.Window, row: u16, pr: PullRequest, selected: bool, mark: stack.Mark) void {
     const base_style = rowStyle(selected, .{});
     const meta_style = rowStyle(selected, mutedStyle(false));
     const status_style = rowStyle(selected, .{ .fg = ciColor(pr.ci) });
@@ -159,10 +166,12 @@ fn drawRow(win: vaxis.Window, row: u16, pr: PullRequest, selected: bool) void {
 
     if (selected) fillRow(win, row, base_style);
 
-    // Author leads the row (right after the number) so it stays visible even
-    // when a long title/branch would otherwise push it off the right edge.
+    // A two-column connector glyph leads the row so stacked PRs read as a
+    // bracketed group; standalone PRs just get the matching indent.
+    // Author follows (right after the number) so it stays visible even when a
+    // long title/branch would otherwise push it off the right edge.
     var writer = LineWriter.init(win, row, base_style);
-    writer.text("  ");
+    writer.styledText(stackGlyph(mark), meta_style);
     writer.styledText(ciGlyph(pr.ci), status_style);
     writer.text("  ");
     writer.styledText("#", meta_style);
@@ -260,6 +269,17 @@ fn ciGlyph(ci: CiStatus) []const u8 {
         .pending => "•",
         .success => "✓",
         .failure => "✗",
+    };
+}
+
+/// Two-column stack connector: `┌`/`│`/`└` bracket a stack top-to-bottom; a
+/// standalone PR gets a blank indent so every row's content still aligns.
+fn stackGlyph(mark: stack.Mark) []const u8 {
+    return switch (mark) {
+        .none => "  ",
+        .top => "┌ ",
+        .middle => "│ ",
+        .bottom => "└ ",
     };
 }
 
@@ -456,6 +476,59 @@ test "draw: colors CI as an accent without tinting the whole row" {
     try testing.expectEqualStrings("o", author_cell.char.grapheme);
     try expectColor(title_cell.style.fg, .default);
     try testing.expectEqualStrings("R", title_cell.char.grapheme);
+}
+
+test "draw: stacked PRs show connector glyphs tip-to-bottom" {
+    var ts = try TestScreen.init(60, 6);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{
+        testPr(.{ .number = 10, .title = "bottom", .head_ref = "feat", .base_ref = "main" }),
+        testPr(.{ .number = 11, .title = "tip", .head_ref = "feat2", .base_ref = "feat" }),
+    };
+    var analysis = try stack.analyze(testing.allocator, &prs);
+    defer analysis.deinit(testing.allocator);
+
+    // Tip-first display order: index 1 (tip) then index 0 (bottom).
+    const filtered = [_]usize{ 1, 0 };
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 99,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+        .analysis = &analysis,
+    });
+
+    try testing.expect(rowContains(ts.screen, 1, "┌"));
+    try testing.expect(rowContains(ts.screen, 2, "└"));
+}
+
+test "draw: standalone PRs get no connector glyph" {
+    var ts = try TestScreen.init(60, 4);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{testPr(.{ .number = 7, .title = "solo", .head_ref = "x", .base_ref = "main" })};
+    var analysis = try stack.analyze(testing.allocator, &prs);
+    defer analysis.deinit(testing.allocator);
+
+    const filtered = [_]usize{0};
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 99,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+        .analysis = &analysis,
+    });
+
+    try testing.expect(!rowContains(ts.screen, 1, "┌"));
+    try testing.expect(!rowContains(ts.screen, 1, "│"));
+    try testing.expect(!rowContains(ts.screen, 1, "└"));
 }
 
 test "draw: header shows the active author filter as a chip" {
