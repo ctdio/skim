@@ -20,6 +20,8 @@ pub const Placement = thread_anchor.Placement;
 pub const BucketReason = thread_anchor.BucketReason;
 pub const anchorThreads = thread_anchor.anchorThreads;
 pub const countUnplaced = thread_anchor.countUnplaced;
+pub const deriveGithubCoords = thread_anchor.deriveGithubCoords;
+pub const GithubCoords = thread_anchor.GithubCoords;
 
 pub const ReviewThread = review_parse.ReviewThread;
 pub const ReviewComment = review_parse.ReviewComment;

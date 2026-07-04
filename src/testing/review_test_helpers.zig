@@ -17,6 +17,7 @@ const snapshot = review.snapshot;
 
 const anchorThreads = review.anchorThreads;
 const countUnplaced = review.countUnplaced;
+const deriveGithubCoords = review.deriveGithubCoords;
 const BucketReason = review.BucketReason;
 const ReviewComment = review.ReviewComment;
 const ReviewState = review.ReviewState;
@@ -209,6 +210,36 @@ test "anchorThreads: two threads on the same coordinate both anchor inline in or
     try testing.expectEqual(anchored[0].placement.inline_line.line_idx, anchored[1].placement.inline_line.line_idx);
     try testing.expectEqual(@as(usize, 0), anchored[0].thread_idx);
     try testing.expectEqual(@as(usize, 1), anchored[1].thread_idx);
+}
+
+// =============================================================================
+// thread_anchor: deriveGithubCoords (pure skim→GitHub inverse, AD-6)
+// =============================================================================
+
+test "deriveGithubCoords: add line -> right side, new_lineno" {
+    const coords = deriveGithubCoords(makeLine(.add, "added", null, 42)).?;
+    try testing.expectEqual(review_parse.Side.right, coords.side);
+    try testing.expectEqual(@as(u32, 42), coords.line_no);
+}
+
+test "deriveGithubCoords: context line -> right side, new_lineno" {
+    const coords = deriveGithubCoords(makeLine(.context, "ctx", 40, 42)).?;
+    try testing.expectEqual(review_parse.Side.right, coords.side);
+    try testing.expectEqual(@as(u32, 42), coords.line_no);
+}
+
+test "deriveGithubCoords: delete line -> left side, old_lineno" {
+    const coords = deriveGithubCoords(makeLine(.delete, "removed", 40, null)).?;
+    try testing.expectEqual(review_parse.Side.left, coords.side);
+    try testing.expectEqual(@as(u32, 40), coords.line_no);
+}
+
+test "deriveGithubCoords: delete line missing old_lineno refuses (null)" {
+    try testing.expect(deriveGithubCoords(makeLine(.delete, "removed", null, null)) == null);
+}
+
+test "deriveGithubCoords: add line missing new_lineno refuses (null)" {
+    try testing.expect(deriveGithubCoords(makeLine(.add, "added", null, null)) == null);
 }
 
 // =============================================================================
@@ -452,6 +483,19 @@ test "snapshot: thread_draft_badge" {
         .thread = &thread,
         .is_bucketed = false,
         .expanded = true,
+    });
+}
+
+test "snapshot: thread_posting_placeholder" {
+    var thread = makeThread(.{ .path = "src/x.zig", .line = 11, .side = .right });
+    var cmts = [_]ReviewComment{makeComment(.{ .author = "me", .body = "optimistic draft", .review_state = .pending })};
+    thread.comments = &cmts;
+
+    try renderThreadSnapshot("thread_posting_placeholder", .{
+        .thread = &thread,
+        .is_bucketed = false,
+        .expanded = true,
+        .posting = true,
     });
 }
 

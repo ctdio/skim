@@ -93,6 +93,16 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, subcmd, "pr-comment")) {
+        try runPrComment(allocator, args);
+        return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "pr-discard")) {
+        try runPrDiscard(allocator, args);
+        return;
+    }
+
     if (std.mem.eql(u8, subcmd, "--help") or std.mem.eql(u8, subcmd, "-h")) {
         try printHelp();
         return;
@@ -185,6 +195,231 @@ fn runPrAnchor(allocator: Allocator, args: []const []const u8) !void {
 
     const ok = try printPrAnchor(details, files, anchored);
     if (!ok) std.process.exit(1);
+}
+
+/// `skim debug pr-comment <number|url> --path P --line N --side left|right
+/// [--start-line N] [--start-side left|right] --body TEXT`: post a draft review
+/// thread through the SAME `github.zig`/`review_parse.zig` write cores the TUI
+/// uses (AD-2). Reuses the viewer's existing pending review if present, else
+/// creates one first. Prints the created thread's id + first comment.
+fn runPrComment(allocator: Allocator, args: []const []const u8) !void {
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+
+    const opts = parsePrCommentArgs(args) catch |err| {
+        try stderr_writer.interface.print("pr-comment: {s}\n", .{prCommentErrMsg(err)});
+        stderr_writer.interface.writeAll("Usage: skim debug pr-comment <number|url> --path P --line N --side left|right [--start-line N] [--start-side left|right] --body TEXT\n") catch {};
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+
+    const raw = try fetchReviewJson(allocator, args, "pr-comment");
+    defer allocator.free(raw);
+
+    var data = review_parse.parsePrDetails(allocator, raw) catch {
+        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer data.deinit();
+    const details = data.details;
+
+    // Reuse the viewer's pending review, else create one (mirrors the TUI).
+    const review_id = if (details.pending_review_id) |id|
+        try allocator.dupe(u8, id)
+    else
+        try createReviewOrExit(allocator, details.pr_node_id, details.head_ref_oid);
+    defer allocator.free(review_id);
+
+    const thread_fetch = github.addReviewThread(allocator, .{
+        .review_id = review_id,
+        .path = opts.path,
+        .line = opts.line,
+        .side = opts.side,
+        .start_line = opts.start_line,
+        .start_side = opts.start_side,
+        .body = opts.body,
+    }) catch {
+        try stderr_writer.interface.writeAll("Failed to run gh api graphql (addPullRequestReviewThread).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    const thread_raw = switch (thread_fetch) {
+        .failed => |kind| {
+            try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
+            stderr_writer.interface.flush() catch {};
+            std.process.exit(1);
+        },
+        .ok => |bytes| bytes,
+    };
+    defer allocator.free(thread_raw);
+
+    var created = review_parse.parseCreatedThread(allocator, thread_raw, details.viewer_login) catch {
+        try stderr_writer.interface.writeAll("Post returned no thread (bad path/line or a GraphQL error).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer created.deinit();
+
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+    const t = created.thread;
+    try w.print("Posted draft thread to review {s}\n", .{review_id});
+    try w.print("  thread: {s}  {s}:{?d} [{s}]  ({d} comment{s})\n", .{
+        t.id,           t.path,                               t.line, sideLabel(t.side),
+        t.comments.len, if (t.comments.len == 1) "" else "s",
+    });
+    if (t.comments.len > 0) try w.print("  body: {s}\n", .{t.comments[0].body});
+}
+
+/// `skim debug pr-discard <number|url>`: discard the viewer's pending review via
+/// the same `github.deletePendingReview` core the TUI uses (AD-2). No-op (exit 0)
+/// when there is no pending review.
+fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+
+    const raw = try fetchReviewJson(allocator, args, "pr-discard");
+    defer allocator.free(raw);
+
+    var data = review_parse.parsePrDetails(allocator, raw) catch {
+        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer data.deinit();
+
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+
+    const review_id = data.details.pending_review_id orelse {
+        try w.writeAll("No pending review to discard.\n");
+        return;
+    };
+
+    const fetch = github.deletePendingReview(allocator, review_id) catch {
+        try stderr_writer.interface.writeAll("Failed to run gh api graphql (deletePullRequestReview).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    switch (fetch) {
+        .failed => |kind| {
+            try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
+            stderr_writer.interface.flush() catch {};
+            std.process.exit(1);
+        },
+        .ok => |bytes| allocator.free(bytes),
+    }
+    try w.print("Discarded pending review {s}\n", .{review_id});
+}
+
+/// Create a pending review and return its id, or exit non-zero with a diagnostic.
+fn createReviewOrExit(allocator: Allocator, pr_node_id: []const u8, commit_oid: []const u8) ![]u8 {
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const fetch = github.createPendingReview(allocator, pr_node_id, commit_oid) catch {
+        try stderr_writer.interface.writeAll("Failed to run gh api graphql (addPullRequestReview).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    const raw = switch (fetch) {
+        .failed => |kind| {
+            try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
+            stderr_writer.interface.flush() catch {};
+            std.process.exit(1);
+        },
+        .ok => |bytes| bytes,
+    };
+    defer allocator.free(raw);
+    return review_parse.parseCreatedReviewId(allocator, raw) catch {
+        try stderr_writer.interface.writeAll("Could not read the created review id from gh.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+}
+
+const PrCommentError = error{
+    MissingPath,
+    MissingLine,
+    MissingSide,
+    MissingBody,
+    InvalidLine,
+    InvalidSide,
+    MissingValue,
+    UnknownFlag,
+};
+
+const PrCommentOpts = struct {
+    path: []const u8,
+    line: u32,
+    side: review_parse.Side,
+    start_line: ?u32,
+    start_side: review_parse.Side,
+    body: []const u8,
+};
+
+/// Parse pr-comment flags from `args` (positional PR arg at index 3, flags after).
+/// Borrows slices from `args` — no allocation, valid for the process lifetime.
+fn parsePrCommentArgs(args: []const []const u8) PrCommentError!PrCommentOpts {
+    var path: ?[]const u8 = null;
+    var line: ?u32 = null;
+    var side: ?review_parse.Side = null;
+    var start_line: ?u32 = null;
+    var start_side: review_parse.Side = .right;
+    var body: ?[]const u8 = null;
+
+    var i: usize = 4; // args[3] is the PR number/url (validated by fetchReviewJson)
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--path")) {
+            path = try nextValue(args, &i);
+        } else if (std.mem.eql(u8, arg, "--line")) {
+            line = std.fmt.parseInt(u32, try nextValue(args, &i), 10) catch return PrCommentError.InvalidLine;
+        } else if (std.mem.eql(u8, arg, "--side")) {
+            side = parseSideArg(try nextValue(args, &i)) orelse return PrCommentError.InvalidSide;
+        } else if (std.mem.eql(u8, arg, "--start-line")) {
+            start_line = std.fmt.parseInt(u32, try nextValue(args, &i), 10) catch return PrCommentError.InvalidLine;
+        } else if (std.mem.eql(u8, arg, "--start-side")) {
+            start_side = parseSideArg(try nextValue(args, &i)) orelse return PrCommentError.InvalidSide;
+        } else if (std.mem.eql(u8, arg, "--body")) {
+            body = try nextValue(args, &i);
+        } else {
+            return PrCommentError.UnknownFlag;
+        }
+    }
+
+    return .{
+        .path = path orelse return PrCommentError.MissingPath,
+        .line = line orelse return PrCommentError.MissingLine,
+        .side = side orelse return PrCommentError.MissingSide,
+        .start_line = start_line,
+        .start_side = start_side,
+        .body = body orelse return PrCommentError.MissingBody,
+    };
+}
+
+fn nextValue(args: []const []const u8, i: *usize) PrCommentError![]const u8 {
+    if (i.* + 1 >= args.len) return PrCommentError.MissingValue;
+    i.* += 1;
+    return args[i.*];
+}
+
+fn parseSideArg(s: []const u8) ?review_parse.Side {
+    if (std.ascii.eqlIgnoreCase(s, "left")) return .left;
+    if (std.ascii.eqlIgnoreCase(s, "right")) return .right;
+    return null;
+}
+
+fn prCommentErrMsg(err: PrCommentError) []const u8 {
+    return switch (err) {
+        PrCommentError.MissingPath => "missing --path",
+        PrCommentError.MissingLine => "missing --line",
+        PrCommentError.MissingSide => "missing --side",
+        PrCommentError.MissingBody => "missing --body",
+        PrCommentError.InvalidLine => "--line/--start-line must be a positive integer",
+        PrCommentError.InvalidSide => "--side/--start-side must be 'left' or 'right'",
+        PrCommentError.MissingValue => "a flag is missing its value",
+        PrCommentError.UnknownFlag => "unknown flag",
+    };
 }
 
 /// Shared arg → gh review-data resolution for pr-view/pr-anchor. Returns the
@@ -595,6 +830,16 @@ fn printHelp() !void {
         \\    replay-opencode <session.log>   Render a saved Opencode SSE event log
         \\    pr-view <number|url>            Fetch + print a PR's GitHub review data
         \\    pr-anchor <number|url>          Fetch a PR + anchor its review threads to the diff
+        \\    pr-comment <number|url> ...     Post a draft review thread (see options below)
+        \\    pr-discard <number|url>         Discard the viewer's pending review
+        \\
+        \\PR-COMMENT OPTIONS:
+        \\    --path P                        File path the comment targets (required)
+        \\    --line N                        Line number the thread anchors to (required)
+        \\    --side left|right               Diff side of --line (required)
+        \\    --start-line N                  First line of a multi-line range (optional)
+        \\    --start-side left|right         Diff side of --start-line (default: right)
+        \\    --body TEXT                     Comment body (required)
         \\
         \\EXAMPLES:
         \\    skim debug replay-acp ~/.claude/projects/.../session.jsonl --tui
@@ -603,6 +848,8 @@ fn printHelp() !void {
         \\    skim debug pr-view 26015
         \\    skim debug pr-view https://github.com/owner/repo/pull/42
         \\    skim debug pr-anchor 26015
+        \\    skim debug pr-comment 42 --path src/x.zig --line 10 --side right --body "nit: rename"
+        \\    skim debug pr-discard 42
         \\
     );
 }

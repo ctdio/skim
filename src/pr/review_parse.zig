@@ -153,6 +153,59 @@ pub const PrViewMeta = struct {
     }
 };
 
+/// Extract the created review id from an `addPullRequestReview` mutation
+/// response. Detects the `{"errors":[...]}` envelope (present even alongside
+/// `data`) before reading. Returned bytes are owned by `allocator`.
+pub fn parseCreatedReviewId(allocator: std.mem.Allocator, json_bytes: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidPayload;
+    // Pure layer: surface the GraphQL error as a distinct error; the IO/controller
+    // shell logs (mirrors `parse.zig`, which never logs).
+    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
+    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const add = objField(data, "addPullRequestReview") orelse return error.InvalidPayload;
+    const review = objField(add, "pullRequestReview") orelse return error.MissingReviewId;
+    const id = strField(review, "id") orelse return error.MissingReviewId;
+    if (id.len == 0) return error.MissingReviewId;
+    return allocator.dupe(u8, id);
+}
+
+/// Owns a single `ReviewThread` parsed from an `addPullRequestReviewThread`
+/// mutation response, plus the arena backing its strings. Free with `deinit`.
+pub const CreatedThread = struct {
+    arena: std.heap.ArenaAllocator,
+    thread: ReviewThread,
+
+    pub fn deinit(self: *CreatedThread) void {
+        self.arena.deinit();
+    }
+};
+
+/// Parse the `thread` node from an `addPullRequestReviewThread` response into a
+/// `ReviewThread`, reusing the SAME node parser as the fetch path (the mutation
+/// selection byte-mirrors the fetch query's thread nodes). Two distinct failure
+/// shapes GitHub returns from a bad write are handled explicitly: the
+/// `{"errors":[...]}` envelope (→ `error.GraphqlError`) and a `thread: null`
+/// with no errors (a bad path — → `error.ThreadCreationFailed`).
+pub fn parseCreatedThread(allocator: std.mem.Allocator, json_bytes: []const u8, viewer_login: []const u8) !CreatedThread {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidPayload;
+    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
+    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const add = objField(data, "addPullRequestReviewThread") orelse return error.InvalidPayload;
+    // A bad path yields `thread: null` (JSON null / absent) with no errors
+    // envelope — objField returns null for both, so this is the failure branch.
+    const node = objField(add, "thread") orelse return error.ThreadCreationFailed;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    var truncated = false;
+    const thread = try parseThreadNode(arena.allocator(), node, viewer_login, &truncated);
+    return .{ .arena = arena, .thread = thread };
+}
+
 pub fn parsePrView(allocator: std.mem.Allocator, json_bytes: []const u8) !PrViewMeta {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
@@ -269,23 +322,44 @@ fn parseThreads(a: std.mem.Allocator, pull_request: std.json.ObjectMap, viewer_l
     var count: usize = 0;
     for (nodes) |node| {
         if (node != .object) continue;
-        const obj = node.object;
-        list[count] = .{
-            .id = try dupe(a, strField(obj, "id") orelse ""),
-            .path = try dupe(a, strField(obj, "path") orelse ""),
-            .line = optU32Field(obj, "line"),
-            .start_line = optU32Field(obj, "startLine"),
-            .original_line = optU32Field(obj, "originalLine"),
-            .side = sideFrom(strField(obj, "diffSide") orelse ""),
-            .start_side = sideFrom(strField(obj, "startDiffSide") orelse ""),
-            .is_resolved = boolField(obj, "isResolved"),
-            .is_outdated = boolField(obj, "isOutdated"),
-            .subject_type = subjectTypeFrom(strField(obj, "subjectType") orelse ""),
-            .comments = try parseComments(a, obj, viewer_login, truncated),
-        };
+        list[count] = try parseThreadNode(a, node.object, viewer_login, truncated);
         count += 1;
     }
     return list[0..count];
+}
+
+/// Parse one `reviewThreads.nodes[*]` object (or the byte-identical
+/// `addPullRequestReviewThread.thread` node) into a `ReviewThread`. The single
+/// source of truth for thread-node shape, shared by the fetch and mutation paths.
+fn parseThreadNode(a: std.mem.Allocator, obj: std.json.ObjectMap, viewer_login: []const u8, truncated: *bool) !ReviewThread {
+    return .{
+        .id = try dupe(a, strField(obj, "id") orelse ""),
+        .path = try dupe(a, strField(obj, "path") orelse ""),
+        .line = optU32Field(obj, "line"),
+        .start_line = optU32Field(obj, "startLine"),
+        .original_line = optU32Field(obj, "originalLine"),
+        .side = sideFrom(strField(obj, "diffSide") orelse ""),
+        .start_side = sideFrom(strField(obj, "startDiffSide") orelse ""),
+        .is_resolved = boolField(obj, "isResolved"),
+        .is_outdated = boolField(obj, "isOutdated"),
+        .subject_type = subjectTypeFrom(strField(obj, "subjectType") orelse ""),
+        .comments = try parseComments(a, obj, viewer_login, truncated),
+    };
+}
+
+/// If `root` carries a non-empty GraphQL `errors` array, return the first
+/// error's message. GitHub returns HTTP 200 with `{"errors":[...], "data":…}`
+/// for write failures like a duplicate pending review, so callers must check
+/// this even when `data` is present.
+fn graphqlErrorMessage(root: std.json.Value) ?[]const u8 {
+    if (root != .object) return null;
+    const errors = root.object.get("errors") orelse return null;
+    if (errors != .array or errors.array.items.len == 0) return null;
+    const first = errors.array.items[0];
+    if (first != .object) return "GraphQL error";
+    const msg = first.object.get("message") orelse return "GraphQL error";
+    if (msg != .string) return "GraphQL error";
+    return msg.string;
 }
 
 fn parseComments(a: std.mem.Allocator, thread: std.json.ObjectMap, viewer_login: []const u8, truncated: *bool) ![]ReviewComment {
@@ -642,6 +716,104 @@ test "parsePrView: extracts base_ref and metadata from gh pr view output" {
 
 test "parsePrView: rejects invalid JSON" {
     try testing.expectError(error.SyntaxError, parsePrView(testing.allocator, "{bad"));
+}
+
+// =============================================================================
+// Mutation-response parsers — canned data captured live via `gh api graphql`
+// against a scratch PR on 2026-07-04 (see phase-03 captured/*.json fixtures).
+// =============================================================================
+
+const mutation_add_review =
+    \\{"data":{"addPullRequestReview":{"pullRequestReview":{"id":"PRR_kwDOQOqc088AAAABE_3crg","state":"PENDING"}}}}
+;
+
+const mutation_add_thread =
+    \\{"data":{"addPullRequestReviewThread":{"thread":{"id":"PRRT_kwDOQOqc086OXy_S","isResolved":false,"isOutdated":false,"line":655,"startLine":655,"originalLine":655,"diffSide":"RIGHT","startDiffSide":null,"path":"README.md","subjectType":"LINE","comments":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PRRC_kwDOQOqc087SC5gz","databaseId":3523975219,"author":{"login":"ctdio"},"body":"harness single-line \"quote\" %s émoji 🎉\nsecond line with `backtick` & <html>","createdAt":"2026-07-04T23:02:51Z","diffHunk":"@@ -652,3 +652,8 @@ Built with:\n ## License\n \n MIT\n+harness-line-1","pullRequestReview":{"id":"PRR_kwDOQOqc088AAAABE_3crg","state":"PENDING"},"replyTo":null}]}}}}}
+;
+
+const mutation_add_thread_range =
+    \\{"data":{"addPullRequestReviewThread":{"thread":{"id":"PRRT_kwDOQOqc086OXy_i","isResolved":false,"isOutdated":false,"line":658,"startLine":656,"originalLine":658,"diffSide":"RIGHT","startDiffSide":"RIGHT","path":"README.md","subjectType":"LINE","comments":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PRRC_kwDOQOqc087SC5hH","databaseId":3523975239,"author":{"login":"ctdio"},"body":"multi\nline range body \"with quotes\" 100% 🚀","createdAt":"2026-07-04T23:02:52Z","diffHunk":"@@ -652,3 +652,8 @@ Built with:\n ## License\n \n MIT\n+harness-line-1\n+harness-line-2\n+harness-line-3\n+harness-line-4","pullRequestReview":{"id":"PRR_kwDOQOqc088AAAABE_3crg","state":"PENDING"},"replyTo":null}]}}}}}
+;
+
+const mutation_error_envelope =
+    \\{"data":{"addPullRequestReview":null},"errors":[{"type":"UNPROCESSABLE","path":["addPullRequestReview"],"locations":[{"line":2,"column":7}],"message":"User can only have one pending review per pull request"}]}
+;
+
+const mutation_null_thread =
+    \\{"data":{"addPullRequestReviewThread":{"thread":null}}}
+;
+
+const mutation_delete_review =
+    \\{"data":{"deletePullRequestReview":{"pullRequestReview":{"id":"PRR_kwDOQOqc088AAAABE_3crg","state":"PENDING"}}}}
+;
+
+test "parseCreatedReviewId: extracts the created PENDING review id" {
+    const id = try parseCreatedReviewId(testing.allocator, mutation_add_review);
+    defer testing.allocator.free(id);
+    try testing.expectEqualStrings("PRR_kwDOQOqc088AAAABE_3crg", id);
+}
+
+test "parseCreatedReviewId: reuses on the delete-review response shape" {
+    // deletePullRequestReview returns the same pullRequestReview{id} shape, but
+    // under a different mutation key — parseCreatedReviewId only knows the
+    // add key, so this must fail cleanly (delete has its own dedicated call).
+    try testing.expectError(error.InvalidPayload, parseCreatedReviewId(testing.allocator, mutation_delete_review));
+}
+
+test "parseCreatedReviewId: detects the GraphQL error envelope (HTTP 200)" {
+    try testing.expectError(error.GraphqlError, parseCreatedReviewId(testing.allocator, mutation_error_envelope));
+}
+
+test "parseCreatedReviewId: missing review id errors cleanly" {
+    try testing.expectError(error.MissingReviewId, parseCreatedReviewId(testing.allocator, "{\"data\":{\"addPullRequestReview\":{\"pullRequestReview\":{\"state\":\"PENDING\"}}}}"));
+}
+
+test "parseCreatedThread: full node parses to ReviewThread with hostile body byte-exact" {
+    var created = try parseCreatedThread(testing.allocator, mutation_add_thread, "ctdio");
+    defer created.deinit();
+    const t = created.thread;
+
+    try testing.expectEqualStrings("PRRT_kwDOQOqc086OXy_S", t.id);
+    try testing.expectEqualStrings("README.md", t.path);
+    try testing.expectEqual(@as(?u32, 655), t.line);
+    try testing.expectEqual(Side.right, t.side);
+    try testing.expect(!t.is_resolved);
+    try testing.expect(!t.is_outdated);
+    try testing.expectEqual(@as(usize, 1), t.comments.len);
+    const c = t.comments[0];
+    try testing.expectEqualStrings("PRRC_kwDOQOqc087SC5gz", c.id);
+    try testing.expectEqualStrings("ctdio", c.author);
+    try testing.expectEqual(ReviewState.pending, c.review_state);
+    try testing.expect(c.is_mine); // viewer == author
+    try testing.expectEqualStrings("harness single-line \"quote\" %s émoji \u{1F389}\nsecond line with `backtick` & <html>", c.body);
+    try testing.expectEqualStrings("PRR_kwDOQOqc088AAAABE_3crg", c.review_id);
+}
+
+test "parseCreatedThread: range variant carries startLine and startSide" {
+    var created = try parseCreatedThread(testing.allocator, mutation_add_thread_range, "ctdio");
+    defer created.deinit();
+    const t = created.thread;
+    try testing.expectEqual(@as(?u32, 658), t.line);
+    try testing.expectEqual(@as(?u32, 656), t.start_line);
+    try testing.expectEqual(Side.right, t.side);
+    try testing.expectEqual(Side.right, t.start_side);
+}
+
+test "parseCreatedThread: thread:null (bad path) is a distinct failure" {
+    try testing.expectError(error.ThreadCreationFailed, parseCreatedThread(testing.allocator, mutation_null_thread, "ctdio"));
+}
+
+test "parseCreatedThread: detects the GraphQL error envelope" {
+    const err_body =
+        \\{"data":{"addPullRequestReviewThread":null},"errors":[{"message":"Something failed"}]}
+    ;
+    try testing.expectError(error.GraphqlError, parseCreatedThread(testing.allocator, err_body, "ctdio"));
+}
+
+test "parseCreatedThread: is_mine false when viewer differs from author" {
+    var created = try parseCreatedThread(testing.allocator, mutation_add_thread, "someone-else");
+    defer created.deinit();
+    try testing.expect(!created.thread.comments[0].is_mine);
 }
 
 test "parsePrDetails: unicode and CRLF bodies survive byte-exact" {

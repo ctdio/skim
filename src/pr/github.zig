@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const parse = @import("parse.zig");
+const review_parse = @import("review_parse.zig");
 
 pub const Error = error{ GhCommandFailed, GhNotFound };
 
@@ -305,6 +306,157 @@ pub fn fetchPrByNumber(allocator: std.mem.Allocator, number: u32) !GhFetch {
     return runGhCapture(allocator, &argv, "gh pr view");
 }
 
+// =============================================================================
+// Write path (pending-review mutations)
+// =============================================================================
+
+/// Thread-node selection for the addPullRequestReviewThread response. Byte-mirrors
+/// `review_query`'s `reviewThreads.nodes` shape so `review_parse.parseCreatedThread`
+/// reuses the SAME node parser as the fetch path.
+const thread_node_selection =
+    \\thread {
+    \\  id
+    \\  isResolved
+    \\  isOutdated
+    \\  line
+    \\  startLine
+    \\  originalLine
+    \\  diffSide
+    \\  startDiffSide
+    \\  path
+    \\  subjectType
+    \\  comments(first: 50) {
+    \\    totalCount
+    \\    pageInfo { hasNextPage }
+    \\    nodes {
+    \\      id
+    \\      databaseId
+    \\      author { login }
+    \\      body
+    \\      createdAt
+    \\      diffHunk
+    \\      pullRequestReview { id state }
+    \\      replyTo { id }
+    \\    }
+    \\  }
+    \\}
+;
+
+const create_review_mutation =
+    \\mutation ($prId: ID!, $oid: GitObjectID!) {
+    \\  addPullRequestReview(input: {pullRequestId: $prId, commitOID: $oid}) {
+    \\    pullRequestReview { id state }
+    \\  }
+    \\}
+;
+
+const add_thread_mutation =
+    \\mutation ($rid: ID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
+    \\  addPullRequestReviewThread(input: {pullRequestReviewId: $rid, path: $path, line: $line, side: $side, body: $body}) {
+    ++ "\n" ++ thread_node_selection ++ "\n" ++
+    \\  }
+    \\}
+;
+
+const add_thread_range_mutation =
+    \\mutation ($rid: ID!, $path: String!, $line: Int!, $side: DiffSide!, $sl: Int!, $ss: DiffSide!, $body: String!) {
+    \\  addPullRequestReviewThread(input: {pullRequestReviewId: $rid, path: $path, line: $line, side: $side, startLine: $sl, startSide: $ss, body: $body}) {
+    ++ "\n" ++ thread_node_selection ++ "\n" ++
+    \\  }
+    \\}
+;
+
+const delete_review_mutation =
+    \\mutation ($id: ID!) {
+    \\  deletePullRequestReview(input: {pullRequestReviewId: $id}) {
+    \\    pullRequestReview { id state }
+    \\  }
+    \\}
+;
+
+/// Params for `addReviewThread`. `start_line == null` posts a single-line
+/// comment; otherwise a multi-line range (start..line).
+pub const AddThreadParams = struct {
+    review_id: []const u8,
+    path: []const u8,
+    line: u32,
+    side: review_parse.Side,
+    start_line: ?u32 = null,
+    start_side: review_parse.Side = .right,
+    body: []const u8,
+};
+
+/// Create a PENDING review (event omitted → PENDING per GitHub). Returns the raw
+/// mutation JSON (parse the id with `review_parse.parseCreatedReviewId`).
+pub fn createPendingReview(allocator: std.mem.Allocator, pr_node_id: []const u8, commit_oid: []const u8) !GhFetch {
+    const argv = try buildCreateReviewArgs(allocator, pr_node_id, commit_oid);
+    defer freeArgv(allocator, argv);
+    return runGhCapture(allocator, argv, "gh api graphql (addPullRequestReview)");
+}
+
+/// Post a review thread (line or range) to an existing pending review. Returns
+/// the raw mutation JSON (parse with `review_parse.parseCreatedThread`). The
+/// body is passed as a `-f body=<text>` argv element — no shell interpolation,
+/// so multi-line / quote / `%` / emoji bodies are safe by construction.
+pub fn addReviewThread(allocator: std.mem.Allocator, params: AddThreadParams) !GhFetch {
+    const argv = try buildAddThreadArgs(allocator, params);
+    defer freeArgv(allocator, argv);
+    return runGhCapture(allocator, argv, "gh api graphql (addPullRequestReviewThread)");
+}
+
+/// Discard a pending review. Returns the raw mutation JSON (parse the deleted
+/// id with `review_parse.parseCreatedReviewId`-style access is not needed —
+/// callers only check success). Used by `skim debug pr-discard` (TUI discard
+/// UI lands in phase 5).
+pub fn deletePendingReview(allocator: std.mem.Allocator, review_id: []const u8) !GhFetch {
+    const argv = try buildDeleteReviewArgs(allocator, review_id);
+    defer freeArgv(allocator, argv);
+    return runGhCapture(allocator, argv, "gh api graphql (deletePullRequestReview)");
+}
+
+fn buildCreateReviewArgs(allocator: std.mem.Allocator, pr_node_id: []const u8, commit_oid: []const u8) ![][]const u8 {
+    return buildGraphqlArgv(allocator, create_review_mutation, &.{
+        .{ .key = "prId", .value = pr_node_id },
+        .{ .key = "oid", .value = commit_oid },
+    }, &.{});
+}
+
+fn buildAddThreadArgs(allocator: std.mem.Allocator, params: AddThreadParams) ![][]const u8 {
+    if (params.start_line) |sl| {
+        return buildGraphqlArgv(allocator, add_thread_range_mutation, &.{
+            .{ .key = "rid", .value = params.review_id },
+            .{ .key = "path", .value = params.path },
+            .{ .key = "side", .value = sideArg(params.side) },
+            .{ .key = "ss", .value = sideArg(params.start_side) },
+            .{ .key = "body", .value = params.body },
+        }, &.{
+            .{ .key = "line", .value = @intCast(params.line) },
+            .{ .key = "sl", .value = @intCast(sl) },
+        });
+    }
+    return buildGraphqlArgv(allocator, add_thread_mutation, &.{
+        .{ .key = "rid", .value = params.review_id },
+        .{ .key = "path", .value = params.path },
+        .{ .key = "side", .value = sideArg(params.side) },
+        .{ .key = "body", .value = params.body },
+    }, &.{
+        .{ .key = "line", .value = @intCast(params.line) },
+    });
+}
+
+fn buildDeleteReviewArgs(allocator: std.mem.Allocator, review_id: []const u8) ![][]const u8 {
+    return buildGraphqlArgv(allocator, delete_review_mutation, &.{
+        .{ .key = "id", .value = review_id },
+    }, &.{});
+}
+
+fn sideArg(side: review_parse.Side) []const u8 {
+    return switch (side) {
+        .left => "LEFT",
+        .right => "RIGHT",
+    };
+}
+
 /// Classify a gh failure from its exit code + stderr. Pure — string-matches the
 /// real stderr forms gh 2.45.0 emits (see check-gh-errors.sh). Never sees the
 /// missing-binary case (that surfaces as spawn error.FileNotFound -> not_installed).
@@ -576,6 +728,72 @@ test "classifyGhFailure: network" {
 
 test "classifyGhFailure: unknown falls through to other" {
     try testing.expectEqual(GhErrorKind.other, classifyGhFailure(1, "some unexpected message"));
+}
+
+fn argvContains(argv: []const []const u8, needle: []const u8) bool {
+    for (argv) |a| {
+        if (std.mem.eql(u8, a, needle)) return true;
+    }
+    return false;
+}
+
+test "buildCreateReviewArgs: carries pullRequestId + commitOID, omits event" {
+    const argv = try buildCreateReviewArgs(testing.allocator, "PR_node", "deadbeef");
+    defer freeArgv(testing.allocator, argv);
+    try testing.expect(argvContains(argv, "prId=PR_node"));
+    try testing.expect(argvContains(argv, "oid=deadbeef"));
+    // event must never be sent — sending one submits the review immediately.
+    for (argv) |a| try testing.expect(!std.mem.startsWith(u8, a, "event="));
+    // The query itself must not mention an event.
+    try testing.expect(std.mem.indexOf(u8, argv[4], "event") == null);
+}
+
+test "buildAddThreadArgs: hostile single-line body survives verbatim as -f body=" {
+    const hostile = "line one \"quote\" %s émoji 🎉\nsecond `backtick` & <html>";
+    const argv = try buildAddThreadArgs(testing.allocator, .{
+        .review_id = "PRR_1",
+        .path = "README.md",
+        .line = 655,
+        .side = .right,
+        .body = hostile,
+    });
+    defer freeArgv(testing.allocator, argv);
+
+    const expected_body = "body=" ++ "line one \"quote\" %s émoji 🎉\nsecond `backtick` & <html>";
+    try testing.expect(argvContains(argv, expected_body));
+    try testing.expect(argvContains(argv, "path=README.md"));
+    try testing.expect(argvContains(argv, "side=RIGHT"));
+    try testing.expect(argvContains(argv, "line=655"));
+    try testing.expect(argvContains(argv, "rid=PRR_1"));
+    // single-line → no startLine / startSide
+    for (argv) |a| {
+        try testing.expect(!std.mem.startsWith(u8, a, "sl="));
+        try testing.expect(!std.mem.startsWith(u8, a, "ss="));
+    }
+}
+
+test "buildAddThreadArgs: range variant carries startLine + startSide" {
+    const argv = try buildAddThreadArgs(testing.allocator, .{
+        .review_id = "PRR_1",
+        .path = "README.md",
+        .line = 658,
+        .side = .right,
+        .start_line = 656,
+        .start_side = .left,
+        .body = "range",
+    });
+    defer freeArgv(testing.allocator, argv);
+    try testing.expect(argvContains(argv, "line=658"));
+    try testing.expect(argvContains(argv, "sl=656"));
+    try testing.expect(argvContains(argv, "ss=LEFT"));
+    try testing.expect(argvContains(argv, "side=RIGHT"));
+}
+
+test "buildDeleteReviewArgs: carries the review id" {
+    const argv = try buildDeleteReviewArgs(testing.allocator, "PRR_del");
+    defer freeArgv(testing.allocator, argv);
+    try testing.expect(argvContains(argv, "id=PRR_del"));
+    try testing.expect(std.mem.indexOf(u8, argv[4], "deletePullRequestReview") != null);
 }
 
 test "buildGraphqlArgv: mirrors gh api graphql -f/-F shape" {

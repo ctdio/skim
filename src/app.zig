@@ -1476,7 +1476,7 @@ pub const App = struct {
             const connecting = self.pending_connection != null;
             const blame_active = self.blame.isActive();
             const pr_active = self.state.pr.fetch.ready.load(.acquire) or self.state.pr.fetch_in_flight;
-            const review_active = self.state.review.entry.ready.load(.acquire) or self.state.review.entry_in_flight;
+            const review_active = self.state.review.entry.ready.load(.acquire) or self.state.review.entry_in_flight or review_controller.hasPostingWork(&self.state.review);
             const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active and !review_active;
             if (should_poll) {
                 loop.pollEvent();
@@ -1619,6 +1619,7 @@ pub const App = struct {
             if (blame_ctrl.pollPending(&self.blame, self.profile_render)) self.needs_render = true;
             if (pr_controller.pollPendingFetch(&self.state.pr, self.allocator)) self.needs_render = true;
             self.pollReviewEntry();
+            self.pollReviewMutations();
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
@@ -2671,6 +2672,25 @@ pub const App = struct {
         }
     }
 
+    /// Consume a completed draft-post mutation. On success the placeholder became
+    /// a real server thread, so re-anchor + rebuild the LineMap; on failure surface
+    /// the classified error (the body is stashed for the next comment-open).
+    fn pollReviewMutations(self: *App) void {
+        switch (review_controller.pollMutations(&self.state.review, self.allocator)) {
+            .none => {},
+            .posted => {
+                self.rebuildReviewLineMap();
+                self.showStatusMessage("draft comment posted");
+                self.needs_render = true;
+            },
+            .failed => |kind| {
+                self.rebuildReviewLineMap();
+                self.showStatusMessage(pr.github.kindMessage(kind));
+                self.needs_render = true;
+            },
+        }
+    }
+
     /// Swap the diff to the fetched PR refs and refresh. `head_ref` is the local
     /// ref from `git fetch` (e.g. `refs/skim/pr-42`); `base_ref` is the base
     /// branch name (empty → diff against HEAD).
@@ -2720,7 +2740,14 @@ pub const App = struct {
             review_controller.freeAnchored(&self.state.review, self.allocator);
             return;
         }
-        const anchored = thread_anchor.anchorThreads(self.allocator, self.state.review.threads.items, files) catch {
+        // Anchors reference threads by positional index; a transient view over the
+        // session's SessionThread list feeds the pure anchorer (AD-4/AD-6).
+        const view = review_controller.threadDataView(&self.state.review, self.allocator) catch {
+            review_controller.freeAnchored(&self.state.review, self.allocator);
+            return;
+        };
+        defer self.allocator.free(view);
+        const anchored = thread_anchor.anchorThreads(self.allocator, view, files) catch {
             review_controller.freeAnchored(&self.state.review, self.allocator);
             return;
         };
@@ -2730,7 +2757,7 @@ pub const App = struct {
     /// Re-anchor against the current diff and rebuild the LineMap in place. Used
     /// after a review refetch (`r`), which replaces threads without touching the
     /// diff files, so `refresh()` would be wasteful — only the thread records change.
-    fn rebuildReviewLineMap(self: *App) void {
+    pub fn rebuildReviewLineMap(self: *App) void {
         self.reanchorReview(self.state.files);
         const rebuilt = line_map.LineMap.build(
             self.allocator,

@@ -1732,6 +1732,35 @@ pub const UI = struct {
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, stack_pos), .style = .{ .fg = Color.magenta } });
             }
 
+            // Active PR review session: number, draft count, comment target, and
+            // any in-flight draft posts.
+            if (pr.review_controller.isActive(&app.state.review)) {
+                var pr_buf: [48]u8 = undefined;
+                const pr_seg = try std.fmt.bufPrint(&pr_buf, "  PR #{d}", .{app.state.review.number});
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, pr_seg), .style = .{ .fg = Color.cyan, .bold = true } });
+
+                const drafts = pr.review_controller.draftCount(&app.state.review);
+                if (drafts > 0) {
+                    var draft_buf: [32]u8 = undefined;
+                    const draft_seg = try std.fmt.bufPrint(&draft_buf, " │ drafts:{d}", .{drafts});
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, draft_seg), .style = .{ .fg = Color.yellow } });
+                }
+
+                const target_github = app.state.review.comment_target == .github;
+                const target_seg = if (target_github) " │ →GH" else " │ →local";
+                try segments.append(app.allocator, .{
+                    .text = try RenderUtils.copyFrameText(app, target_seg),
+                    .style = .{ .fg = if (target_github) Color.green else Color.dim, .bold = target_github },
+                });
+
+                const posting = pr.review_controller.postingCount(&app.state.review);
+                if (posting > 0) {
+                    var post_buf: [32]u8 = undefined;
+                    const post_seg = try std.fmt.bufPrint(&post_buf, " │ posting…({d})", .{posting});
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, post_seg), .style = .{ .fg = Color.magenta } });
+                }
+            }
+
             // Only show hunk view mode indicator in unified view (where filtering applies)
             if (app.state.view_mode == .unified) {
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " ["), .style = .{} });

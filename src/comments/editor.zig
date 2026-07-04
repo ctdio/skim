@@ -8,6 +8,10 @@ const vim_editor = @import("../editor/vim_editor.zig");
 pub const CommentEditor = struct {
     pub const VimEditor = vim_editor.VimEditor(4096);
 
+    /// Where a saved comment is written: a local skim comment, or a GitHub draft
+    /// review comment posted to the active PR session (AD-7).
+    pub const Target = enum { local, github };
+
     /// Active comment input state.
     /// Contains comment-specific targeting info plus embedded vim state.
     pub const State = struct {
@@ -18,6 +22,8 @@ pub const CommentEditor = struct {
         target_end_hunk_idx: ?usize,
         target_end_line_idx: ?usize,
         editing_comment_idx: ?usize,
+        // Destination of the saved comment (set when the editor is opened).
+        target: Target = .local,
 
         // Embedded vim state
         vim: VimEditor.State,

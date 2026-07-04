@@ -13,6 +13,9 @@ const line_map = @import("../line_map.zig");
 const clipboard = @import("../clipboard.zig");
 const navigation = @import("../navigation.zig");
 const hunk_view = @import("../hunk_view.zig");
+const thread_anchor = @import("../pr/thread_anchor.zig");
+const review_controller = @import("../pr/review_controller.zig");
+const parser = @import("../git/parser.zig");
 
 const Navigation = navigation.Navigation;
 
@@ -77,6 +80,13 @@ pub const CommentController = struct {
             },
         }
 
+        // New comments follow the active comment target (GitHub draft vs local);
+        // editing an existing local comment is always a local edit.
+        const target: comment_editor.CommentEditor.Target = if (existing_comment_idx == null and review_controller.githubTargetActive(&app.state.review))
+            .github
+        else
+            .local;
+
         // Initialize input buffer
         var input = comment_editor.CommentEditor.State{
             .target_file_path = file_path,
@@ -85,6 +95,7 @@ pub const CommentController = struct {
             .target_end_hunk_idx = null, // Single-line comment
             .target_end_line_idx = null, // Single-line comment
             .editing_comment_idx = existing_comment_idx,
+            .target = target,
             .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
         };
 
@@ -93,6 +104,14 @@ pub const CommentController = struct {
             if (app.state.comment_store.getComment(idx)) |comment| {
                 input.vim.setText(comment.text);
                 input.vim.cursor_pos = input.vim.text_len; // Start cursor at end
+            }
+        } else if (target == .github) {
+            // Draft safety (NFR-2): pre-fill a previously failed post so its text
+            // is never lost.
+            if (review_controller.takeFailedDraft(&app.state.review)) |text| {
+                defer app.allocator.free(text);
+                input.vim.setText(text);
+                input.vim.cursor_pos = input.vim.text_len;
             }
         }
 
@@ -136,16 +155,27 @@ pub const CommentController = struct {
         // Check if selection is a single line
         const is_single_line = (start_line == end_line);
 
+        const target: comment_editor.CommentEditor.Target = if (review_controller.githubTargetActive(&app.state.review)) .github else .local;
+
         // Initialize input buffer for range comment
-        const input = comment_editor.CommentEditor.State{
+        var input = comment_editor.CommentEditor.State{
             .target_file_path = file_path,
             .target_hunk_idx = start_code.hunk_idx,
             .target_line_idx = start_code.line_idx_in_hunk,
             .target_end_hunk_idx = if (is_single_line) null else end_code.hunk_idx,
             .target_end_line_idx = if (is_single_line) null else end_code.line_idx_in_hunk,
             .editing_comment_idx = null, // Always creating new comment from visual mode
+            .target = target,
             .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
         };
+
+        if (target == .github) {
+            if (review_controller.takeFailedDraft(&app.state.review)) |text| {
+                defer app.allocator.free(text);
+                input.vim.setText(text);
+                input.vim.cursor_pos = input.vim.text_len;
+            }
+        }
 
         app.state.active_comment_input = input;
         app.mode = .comment;
@@ -191,6 +221,12 @@ pub const CommentController = struct {
             return false;
         }
         const line = &hunk.lines[input.target_line_idx];
+
+        // GitHub draft target: post an optimistic thread rather than storing a
+        // local comment (AD-7). Editing existing comments stays local.
+        if (input.target == .github) {
+            return postDraftComment(app, .{ .input = input, .file = file, .line = line, .comment_text = comment_text });
+        }
 
         // Track the comment index for cursor positioning after save
         var saved_comment_idx: usize = undefined;
@@ -474,6 +510,70 @@ pub const CommentController = struct {
         } else {
             app.state.expanded_comments.put(comment_idx, {}) catch {};
         }
+    }
+
+    /// Post the editor's contents as an optimistic GitHub draft thread (AD-6/7).
+    /// Derives `(side, line)` from the diff line, handles single-line and range
+    /// selections, then re-anchors + rebuilds so the placeholder renders. On a
+    /// malformed line (no derivable coordinates) it refuses and keeps the editor.
+    fn postDraftComment(app: *App, ctx: struct {
+        input: comment_editor.CommentEditor.State,
+        file: *const parser.FileDiff,
+        line: *const parser.Line,
+        comment_text: []const u8,
+    }) !bool {
+        const input = ctx.input;
+        // `ctx.line` is the selection's first line (target_line_idx).
+        const first_coords = thread_anchor.deriveGithubCoords(ctx.line.*) orelse {
+            app.showStatusMessage("cannot post a draft on this line");
+            return false;
+        };
+
+        var post_line = first_coords.line_no;
+        var post_side = first_coords.side;
+        var start_line: ?u32 = null;
+        var start_side = first_coords.side;
+
+        // Range selection: GitHub anchors the thread to the LAST line and carries
+        // the first line as `startLine` (target_end_* holds the later line).
+        if (input.target_end_hunk_idx) |end_hunk_idx| {
+            if (input.target_end_line_idx) |end_line_idx| {
+                if (end_hunk_idx >= ctx.file.hunks.len) {
+                    app.showStatusMessage("Comment range hunk not found");
+                    return false;
+                }
+                const end_hunk = &ctx.file.hunks[end_hunk_idx];
+                if (end_line_idx >= end_hunk.lines.len) {
+                    app.showStatusMessage("Comment range line not found");
+                    return false;
+                }
+                const last_coords = thread_anchor.deriveGithubCoords(end_hunk.lines[end_line_idx]) orelse {
+                    app.showStatusMessage("cannot post a draft on this range");
+                    return false;
+                };
+                start_line = first_coords.line_no;
+                start_side = first_coords.side;
+                post_line = last_coords.line_no;
+                post_side = last_coords.side;
+            }
+        }
+
+        review_controller.startPostThread(&app.state.review, app.allocator, .{
+            .path = input.target_file_path,
+            .line = post_line,
+            .side = post_side,
+            .start_line = start_line,
+            .start_side = start_side,
+            .body = ctx.comment_text,
+        }) catch |err| {
+            std.log.err("failed to start draft post: {any}", .{err});
+            app.showStatusMessage("failed to post draft comment");
+            return false;
+        };
+
+        app.rebuildReviewLineMap();
+        app.showStatusMessage("posting draft comment…");
+        return true;
     }
 
     fn findFileIndexByPath(app: *App, target_path: []const u8) ?usize {

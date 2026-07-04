@@ -1650,11 +1650,12 @@ pub const RenderUtils = struct {
         else
             null;
         return .{
-            .thread = &session.threads.items[thread_idx],
+            .thread = &session.threads.items[thread_idx].data,
             .is_bucketed = is_bucket,
             .bucket_reason = reason,
             .expanded = review_controller.isThreadExpanded(session, thread_idx),
             .is_cursor = is_cursor,
+            .posting = session.threads.items[thread_idx].posting,
             .target_line_content = threadTargetLine(app, thread_idx, is_bucket),
         };
     }

@@ -417,11 +417,27 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         'o' => try toggleExpandUnderCursor(app), // Toggle comment/thread expand/collapse
         'B' => app.toggleBlame(), // Toggle git blame in gutter
         'S' => try app.startGraphiteStack(), // Open graphite stack picker
+        'C' => toggleCommentTarget(app), // Toggle new-comment target (GitHub draft ⇄ local)
         else => {
             // Reset count prefix on any other key
             app.state.count_prefix = null;
         },
     }
+}
+
+/// Toggle where new comments are written for the active PR review session. No-op
+/// (with a hint) when no session is active.
+fn toggleCommentTarget(app: *App) void {
+    if (!review_controller.isActive(&app.state.review)) {
+        app.showStatusMessage("no active PR review session");
+        return;
+    }
+    const target = review_controller.toggleCommentTarget(&app.state.review);
+    app.showStatusMessage(switch (target) {
+        .github => "new comments → GitHub draft review",
+        .local => "new comments → local (skim)",
+    });
+    app.needs_render = true;
 }
 
 /// Route the `o` key to the right expand/collapse target based on the record

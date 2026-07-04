@@ -35,6 +35,26 @@ pub fn anchorThreads(
     return result;
 }
 
+pub const GithubCoords = struct { side: review_parse.Side, line_no: u32 };
+
+/// Map a diff line to the GitHub `(side, line)` a new comment should target
+/// (AD-6, the pure skim→GitHub inverse of the anchoring above). A delete line
+/// belongs to the LEFT (old) side; add/context lines to the RIGHT (new) side.
+/// Returns null only when the required line number is absent (a malformed diff,
+/// e.g. a delete line with no `old_lineno`) — callers refuse rather than panic.
+pub fn deriveGithubCoords(line: parser.Line) ?GithubCoords {
+    switch (line.line_type) {
+        .delete => {
+            const l = line.old_lineno orelse return null;
+            return .{ .side = .left, .line_no = l };
+        },
+        .add, .context => {
+            const l = line.new_lineno orelse return null;
+            return .{ .side = .right, .line_no = l };
+        },
+    }
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
