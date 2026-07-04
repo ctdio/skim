@@ -12,6 +12,8 @@ const DiffSource = @import("../git/diff.zig").DiffSource;
 const logging = @import("../logging.zig");
 const opencode_replay = @import("../opencode/session_replay.zig");
 const harness = @import("../testing/harness.zig");
+const github = @import("../pr/github.zig");
+const review_parse = @import("../pr/review_parse.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -78,6 +80,11 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, subcmd, "pr-view")) {
+        try runPrView(allocator, args);
+        return;
+    }
+
     if (std.mem.eql(u8, subcmd, "--help") or std.mem.eql(u8, subcmd, "-h")) {
         try printHelp();
         return;
@@ -88,6 +95,151 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
     try stderr_writer.interface.print("Unknown debug subcommand: {s}\n", .{subcmd});
     try stderr_writer.interface.writeAll("Use 'skim debug --help' for usage.\n");
     std.process.exit(1);
+}
+
+/// `skim debug pr-view <number|url>`: fetch + parse a PR's full review payload
+/// through the SAME `github.zig`/`review_parse.zig` functions the TUI uses
+/// (AD-2), and print a human-readable summary. Exits non-zero on any failure.
+fn runPrView(allocator: Allocator, args: []const []const u8) !void {
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+
+    if (args.len < 4) {
+        try stderr_writer.interface.writeAll("pr-view requires a PR number or github.com PR URL.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    }
+
+    const arg = args[3];
+    const request = github.parsePrArg(arg) catch {
+        try stderr_writer.interface.print("Invalid PR argument '{s}' — expected a number or a github.com PR URL.\n", .{arg});
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+
+    const origin = github.getOriginOwnerRepo(allocator) catch {
+        try stderr_writer.interface.writeAll("Could not resolve the origin remote (run inside a GitHub repo clone).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer allocator.free(origin.owner);
+    defer allocator.free(origin.repo);
+
+    const number = switch (request) {
+        .number => |n| n,
+        .url => |u| blk: {
+            if (!std.mem.eql(u8, origin.owner, u.owner) or !std.mem.eql(u8, origin.repo, u.repo)) {
+                try stderr_writer.interface.print(
+                    "URL points at {s}/{s} but the origin remote is {s}/{s}.\n",
+                    .{ u.owner, u.repo, origin.owner, origin.repo },
+                );
+                stderr_writer.interface.flush() catch {};
+                std.process.exit(1);
+            }
+            break :blk u.number;
+        },
+    };
+
+    const fetch = github.fetchReviewData(allocator, origin, number) catch {
+        try stderr_writer.interface.writeAll("Failed to run gh api graphql.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+
+    const raw = switch (fetch) {
+        .failed => |kind| {
+            try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
+            stderr_writer.interface.flush() catch {};
+            std.process.exit(1);
+        },
+        .ok => |bytes| bytes,
+    };
+    defer allocator.free(raw);
+
+    var data = review_parse.parsePrDetails(allocator, raw) catch {
+        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer data.deinit();
+
+    try printPrView(data.details);
+}
+
+fn printPrView(details: review_parse.PrDetails) !void {
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+
+    try w.print("PR #{d}: {s}\n", .{ details.number, details.title });
+    try w.print("author: {s}  draft: {}  decision: {s}  rollup: {s}  viewer: {s}\n", .{
+        details.author,
+        details.is_draft,
+        if (details.review_decision.len > 0) details.review_decision else "-",
+        rollupLabel(details.rollup),
+        details.viewer_login,
+    });
+    try w.print("base: {s}  head: {s}  node: {s}\n", .{ details.base_ref, details.head_ref, details.pr_node_id });
+    if (details.truncated) try w.writeAll("WARNING: results truncated — showing first page only\n");
+    if (details.pending_review_id) |id| try w.print("pending review: {s}\n", .{id});
+    try w.print("checks: {d}  reviews: {d}  threads: {d}\n", .{ details.checks.len, details.reviews.len, details.threads.len });
+
+    try w.writeAll("\nReviews:\n");
+    for (details.reviews) |r| {
+        try w.print("  - {s} [{s}] {s}\n", .{ r.author, reviewStateLabel(r.state), r.submitted_at });
+    }
+
+    try w.writeAll("\nThreads:\n");
+    for (details.threads) |t| {
+        const shown_line: ?u32 = t.line orelse t.original_line;
+        try w.print("  - {s}:{?d} [{s}] {s}{s} ({d} comments)\n", .{
+            t.path,
+            shown_line,
+            sideLabel(t.side),
+            if (t.is_resolved) "resolved" else "open",
+            if (t.is_outdated) " outdated" else "",
+            t.comments.len,
+        });
+        if (t.comments.len > 0) {
+            const c = t.comments[0];
+            try w.print("      first by {s}: {s}\n", .{ c.author, previewLine(c.body) });
+        }
+    }
+}
+
+fn rollupLabel(state: review_parse.RollupState) []const u8 {
+    return switch (state) {
+        .success => "success",
+        .failure => "failure",
+        .pending => "pending",
+        .err => "error",
+        .none => "none",
+    };
+}
+
+fn reviewStateLabel(state: review_parse.ReviewState) []const u8 {
+    return switch (state) {
+        .pending => "pending",
+        .commented => "commented",
+        .approved => "approved",
+        .changes_requested => "changes_requested",
+        .dismissed => "dismissed",
+        .unknown => "unknown",
+    };
+}
+
+fn sideLabel(side: review_parse.Side) []const u8 {
+    return switch (side) {
+        .left => "left",
+        .right => "right",
+    };
+}
+
+/// First line of a comment body, capped, for a one-line preview.
+fn previewLine(body: []const u8) []const u8 {
+    var end = body.len;
+    if (std.mem.indexOfAny(u8, body, "\r\n")) |nl| end = @min(end, nl);
+    if (end > 60) end = 60;
+    return body[0..end];
 }
 
 fn runReplayCommand(allocator: Allocator, args: []const []const u8, command: ReplayCommand) !void {
@@ -283,11 +435,14 @@ fn printHelp() !void {
         \\    replay-acp <session.jsonl>      Render a saved ACP/Claude session transcript
         \\    replay-codex <session.jsonl>    Render a saved Codex JSONL session
         \\    replay-opencode <session.log>   Render a saved Opencode SSE event log
+        \\    pr-view <number|url>            Fetch + print a PR's GitHub review data
         \\
         \\EXAMPLES:
         \\    skim debug replay-acp ~/.claude/projects/.../session.jsonl --tui
         \\    skim debug replay-codex ~/.codex/sessions/...jsonl
         \\    skim debug replay-opencode ~/.skim/opencode/events/ses_...log --tui
+        \\    skim debug pr-view 26015
+        \\    skim debug pr-view https://github.com/owner/repo/pull/42
         \\
     );
 }

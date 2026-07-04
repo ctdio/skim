@@ -359,7 +359,10 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 try hunk_view.cycleHunkViewMode(app);
             }
         },
-        'r' => try app.refresh(),
+        'r' => {
+            try app.refresh();
+            app.startReviewRefetch();
+        },
         'y' => try CommentController.yankCurrentCommentToClipboard(app),
         'Y' => try CommentController.yankAllCommentsToClipboard(app),
         'd' => try CommentController.deleteCommentUnderCursor(app),
@@ -538,7 +541,10 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
                 3 => try app.startBranchSelection(),
                 4 => try app.startCommitSelection(),
                 5 => try app.startGraphiteStack(), // Lazy detection happens here
-                6 => try app.refresh(),
+                6 => {
+                    try app.refresh();
+                    app.startReviewRefetch();
+                },
                 7 => app.should_quit = true,
                 else => {},
             }

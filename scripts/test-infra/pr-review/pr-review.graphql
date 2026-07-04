@@ -1,0 +1,105 @@
+query ($owner: String!, $name: String!, $number: Int!) {
+  viewer {
+    login
+  }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+      number
+      title
+      body
+      author {
+        login
+      }
+      isDraft
+      baseRefName
+      headRefName
+      headRefOid
+      reviewDecision
+      statusCheckRollup {
+        state
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+              contexts(first: 50) {
+                pageInfo {
+                  hasNextPage
+                }
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    status
+                    conclusion
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      reviews(first: 50) {
+        pageInfo {
+          hasNextPage
+        }
+        nodes {
+          id
+          state
+          author {
+            login
+          }
+          body
+          submittedAt
+        }
+      }
+      reviewThreads(first: 100) {
+        totalCount
+        pageInfo {
+          hasNextPage
+        }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          line
+          startLine
+          originalLine
+          diffSide
+          startDiffSide
+          path
+          subjectType
+          comments(first: 50) {
+            totalCount
+            pageInfo {
+              hasNextPage
+            }
+            nodes {
+              id
+              databaseId
+              author {
+                login
+              }
+              body
+              createdAt
+              diffHunk
+              pullRequestReview {
+                id
+                state
+              }
+              replyTo {
+                id
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

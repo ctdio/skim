@@ -53,6 +53,7 @@ const opencode = @import("opencode/opencode.zig");
 const codex_mod = @import("codex/codex.zig");
 const pr = @import("pr/pr.zig");
 const pr_controller = @import("pr/controller.zig");
+const review_controller = @import("pr/review_controller.zig");
 const subagent_fetch = @import("agent/subagent_fetch.zig");
 const hunk_view = @import("hunk_view.zig");
 
@@ -315,6 +316,12 @@ pub const App = struct {
 
         // PR review picker state (defaulted, so it stays out of the init literal)
         pr: pr_controller.PrReviewState = .{},
+
+        // Native GitHub PR review session (async entry + review data). Defaulted.
+        review: review_controller.ReviewSession = .{},
+
+        // Boot straight into this PR number when set (`skim pr <n|url>`).
+        pr_boot_number: ?u32 = null,
 
         const ViewMode = enum {
             unified,
@@ -595,6 +602,7 @@ pub const App = struct {
         };
 
         app.state.pr.pr_only = is_pr_only;
+        app.state.pr_boot_number = if (@hasField(@TypeOf(config), "pr_request")) config.pr_request else null;
 
         // Graphite detection is lazy - happens on first access to avoid blocking startup
         // Main loop will spawn background thread to highlight initial file
@@ -949,6 +957,8 @@ pub const App = struct {
         // Clean up PR review state (joins any in-flight loader first so its
         // worker can't write into freed state).
         pr_controller.deinitState(&self.state.pr, self.allocator);
+        // Clean up native GitHub review session (joins its in-flight worker too).
+        review_controller.deinitState(&self.state.review, self.allocator);
         // Clean up TUI server and session
         if (self.session_manager) |*sm| {
             sm.removeSession();
@@ -1418,11 +1428,22 @@ pub const App = struct {
 
         // If launched as `skim pr`, open straight into the PR picker and kick off
         // the background load so the first frame shows the cached/loading list.
+        // `skim pr <n|url>` instead enters that PR directly, off-thread.
         if (self.state.pr.pr_only) {
             self.mode = .pr_review;
-            pr_controller.startListLoad(&self.state.pr, self.allocator) catch |err| {
-                std.log.err("Failed to start PR load: {any}", .{err});
-            };
+            if (self.state.pr_boot_number) |number| {
+                var msg_buf: [64]u8 = undefined;
+                const loading = std.fmt.bufPrint(&msg_buf, "Loading PR #{d}…", .{number}) catch "Loading PR…";
+                pr_controller.setMessage(&self.state.pr, loading);
+                review_controller.startEnterPr(&self.state.review, self.allocator, .{ .number = number }) catch |err| {
+                    std.log.err("Failed to start PR entry: {any}", .{err});
+                    pr_controller.setMessage(&self.state.pr, "failed to start PR entry");
+                };
+            } else {
+                pr_controller.startListLoad(&self.state.pr, self.allocator) catch |err| {
+                    std.log.err("Failed to start PR load: {any}", .{err});
+                };
+            }
         }
 
         var first_render = true;
@@ -1445,7 +1466,8 @@ pub const App = struct {
             const connecting = self.pending_connection != null;
             const blame_active = self.blame.isActive();
             const pr_active = self.state.pr.fetch.ready.load(.acquire) or self.state.pr.fetch_in_flight;
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active;
+            const review_active = self.state.review.entry.ready.load(.acquire) or self.state.review.entry_in_flight;
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active and !review_active;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -1586,6 +1608,7 @@ pub const App = struct {
             subagent_fetch.pollSubagentFetch(self);
             if (blame_ctrl.pollPending(&self.blame, self.profile_render)) self.needs_render = true;
             if (pr_controller.pollPendingFetch(&self.state.pr, self.allocator)) self.needs_render = true;
+            self.pollReviewEntry();
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
@@ -2575,17 +2598,6 @@ pub const App = struct {
     // PR Review (native `skim pr` / `:pr`)
     // =========================================================================
 
-    /// Force an immediate synchronous repaint from inside an event handler, so a
-    /// loading indicator lands on screen before a blocking operation freezes the
-    /// event loop. No-op (and never fails) in headless mode.
-    fn renderNow(self: *App) void {
-        const vx = &(self.vx orelse return);
-        const tty = &(self.tty orelse return);
-        const win = vx.window();
-        frame.render(self, win) catch return;
-        vx.render(tty.writer()) catch return;
-    }
-
     /// Review the highlighted PR natively: fetch its head + base into local refs
     /// (no worktree) and swap the diff to `origin/<base>...refs/skim/pr-<n>`.
     pub fn reviewSelectedPr(self: *App) !void {
@@ -2593,34 +2605,70 @@ pub const App = struct {
         try self.selectPullRequest(pull);
     }
 
+    /// Begin reviewing a PR selected from the picker. Kicks off the async entry
+    /// worker (git fetch + gh review fetch) off-thread and returns immediately —
+    /// the main loop's `pollReviewEntry` swaps the diff once the fetch lands, so
+    /// the picker never freezes. Stays in `.pr_review` mode (with a "Loading…"
+    /// message) until entry completes.
     pub fn selectPullRequest(self: *App, pull: pr.PullRequest) !void {
-        // Fetching the PR's refs blocks the event loop on a network `git fetch`,
-        // so paint a loading indicator first — otherwise the picker just freezes
-        // between Enter and the diff appearing.
         var msg_buf: [64]u8 = undefined;
         const loading = std.fmt.bufPrint(&msg_buf, "Loading PR #{d}…", .{pull.number}) catch "Loading PR…";
         pr_controller.setMessage(&self.state.pr, loading);
-        self.renderNow();
 
-        const head_ref_name = pr.github.fetchRef(self.allocator, .{
+        review_controller.startEnterPr(&self.state.review, self.allocator, .{
             .number = pull.number,
             .base_ref = pull.base_ref,
+            .title = pull.title,
+            .url = pull.url,
         }) catch {
-            pr_controller.setMessage(&self.state.pr, "fetch failed — is gh/git authenticated?");
-            self.needs_render = true;
-            return;
+            pr_controller.setMessage(&self.state.pr, "failed to start PR entry");
         };
-        defer self.allocator.free(head_ref_name);
+        self.needs_render = true;
+    }
 
-        const ref2 = try self.allocator.dupe(u8, head_ref_name);
+    /// Consume a completed PR entry/refetch from the review worker. On entry,
+    /// swaps the diff source to `origin/<base>...refs/skim/pr-<n>`; on graceful
+    /// degradation (git ok, gh failed) still enters and surfaces the reason.
+    fn pollReviewEntry(self: *App) void {
+        switch (review_controller.pollPending(&self.state.review, self.allocator)) {
+            .none => {},
+            .entered => |info| {
+                defer self.allocator.free(info.head_ref);
+                defer self.allocator.free(info.base_ref);
+                self.enterReviewDiff(info.head_ref, info.base_ref) catch |err| {
+                    std.log.err("Failed to enter PR diff: {any}", .{err});
+                    pr_controller.setMessage(&self.state.pr, "failed to open PR diff");
+                    self.needs_render = true;
+                    return;
+                };
+                if (info.gh_error) |kind| {
+                    self.showStatusMessage(pr.github.kindMessage(kind));
+                }
+                self.needs_render = true;
+            },
+            .refreshed => |gh_error| {
+                if (gh_error) |kind| self.showStatusMessage(pr.github.kindMessage(kind));
+                self.needs_render = true;
+            },
+            .fetch_failed => {
+                pr_controller.setMessage(&self.state.pr, "fetch failed — is gh/git authenticated?");
+                self.needs_render = true;
+            },
+        }
+    }
+
+    /// Swap the diff to the fetched PR refs and refresh. `head_ref` is the local
+    /// ref from `git fetch` (e.g. `refs/skim/pr-42`); `base_ref` is the base
+    /// branch name (empty → diff against HEAD).
+    fn enterReviewDiff(self: *App, head_ref: []const u8, base_ref: []const u8) !void {
+        const ref2 = try self.allocator.dupe(u8, head_ref);
         errdefer self.allocator.free(ref2);
-        const ref1 = if (pull.base_ref.len > 0)
-            try std.fmt.allocPrint(self.allocator, "origin/{s}", .{pull.base_ref})
+        const ref1 = if (base_ref.len > 0)
+            try std.fmt.allocPrint(self.allocator, "origin/{s}", .{base_ref})
         else
             try self.allocator.dupe(u8, "HEAD");
         errdefer self.allocator.free(ref1);
 
-        // Free old diff_source
         switch (self.state.diff_source) {
             .working_dir, .stdin => {},
             .single_ref => |sr| self.allocator.free(sr.ref),
@@ -2640,6 +2688,14 @@ pub const App = struct {
         self.state.pager_mode = false;
         self.mode = .normal;
         try self.refresh();
+    }
+
+    /// Re-fetch review data for the active session (bound to the `r` refresh).
+    /// No-op when no session is active or a fetch is already running.
+    pub fn startReviewRefetch(self: *App) void {
+        review_controller.startRefetch(&self.state.review, self.allocator) catch |err| {
+            std.log.warn("Failed to start review refetch: {any}", .{err});
+        };
     }
 
     /// Esc peels back one layer at a time: query, then the pinned author, then

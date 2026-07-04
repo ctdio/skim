@@ -6,6 +6,7 @@ const McpServer = @import("mcp/server.zig").McpServer;
 const adapter = @import("mcp/adapter.zig");
 const logging = @import("logging.zig");
 const cli = @import("cli/mod.zig");
+const github = @import("pr/github.zig");
 
 /// Override std.log to use file-based logging
 pub const std_options = std.Options{
@@ -193,15 +194,30 @@ pub fn main() !void {
 // =============================================================================
 
 fn runPrCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var pr_request: ?u32 = null;
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             try printPrHelp();
             return;
         }
-        std.debug.print("Unknown option: {s}\n", .{args[i]});
-        try printPrHelp();
-        std.process.exit(1);
+        if (arg.len > 0 and arg[0] == '-') {
+            std.debug.print("Unknown option: {s}\n", .{arg});
+            try printPrHelp();
+            std.process.exit(1);
+        }
+        if (pr_request != null) {
+            std.debug.print("skim pr: invalid usage — at most one PR number or URL\n", .{});
+            try printPrHelp();
+            std.process.exit(1);
+        }
+        const request = github.parsePrArg(arg) catch {
+            std.debug.print("skim pr: invalid PR argument '{s}' — expected a number or a github.com PR URL\n", .{arg});
+            try printPrHelp();
+            std.process.exit(1);
+        };
+        pr_request = resolvePrRequest(allocator, request);
     }
 
     logging.init(.tui);
@@ -217,6 +233,7 @@ fn runPrCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .serve_port = null,
         .agent_only = false,
         .pr_only = true,
+        .pr_request = pr_request,
     };
     defer config.deinit();
 
@@ -238,10 +255,12 @@ fn printPrHelp() !void {
         \\skim pr - Browse open pull requests and review them
         \\
         \\USAGE:
-        \\    skim pr
+        \\    skim pr [<number|url>]
         \\
-        \\Lists open PRs (via the GitHub CLI, `gh`) in an interactive picker.
-        \\Selecting one fetches its head and opens skim on the PR's diff.
+        \\With no argument, lists open PRs (via the GitHub CLI, `gh`) in an
+        \\interactive picker. Selecting one fetches its head and opens skim on the
+        \\PR's diff. Given a PR number or a github.com PR URL, opens straight into
+        \\that PR's diff. A URL must point at the origin remote's repository.
         \\
         \\KEYS:
         \\    (type)               filter by author, title, or branch
@@ -258,6 +277,31 @@ fn printPrHelp() !void {
         \\Requires the GitHub CLI (`gh`) on PATH, authenticated for the repo.
         \\
     );
+}
+
+/// Reduce a `PrRequest` to a PR number, validating a URL's owner/repo against
+/// the origin remote (eager, so the error lands before the TUI starts). Exits
+/// with a clear message on mismatch or when origin can't be resolved.
+fn resolvePrRequest(allocator: std.mem.Allocator, request: github.PrRequest) u32 {
+    switch (request) {
+        .number => |n| return n,
+        .url => |u| {
+            const origin = github.getOriginOwnerRepo(allocator) catch {
+                std.debug.print("skim pr: could not resolve the origin remote to validate the PR URL\n", .{});
+                std.process.exit(1);
+            };
+            defer allocator.free(origin.owner);
+            defer allocator.free(origin.repo);
+            if (!std.mem.eql(u8, origin.owner, u.owner) or !std.mem.eql(u8, origin.repo, u.repo)) {
+                std.debug.print(
+                    "skim pr: URL points at {s}/{s} but the origin remote is {s}/{s}\n",
+                    .{ u.owner, u.repo, origin.owner, origin.repo },
+                );
+                std.process.exit(1);
+            }
+            return u.number;
+        },
+    }
 }
 
 fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -413,6 +457,7 @@ const Config = struct {
     serve_port: ?u16, // Port to run MCP server on
     agent_only: bool, // Start in agent-only mode (no diff view)
     pr_only: bool = false, // Start in PR picker mode (`skim pr`)
+    pr_request: ?u32 = null, // Boot directly into this PR number (`skim pr <n|url>`)
 
     fn deinit(self: *const Config) void {
         // Free stdin_content if we own it
