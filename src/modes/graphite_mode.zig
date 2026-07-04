@@ -4,7 +4,7 @@ const App = @import("../app.zig").App;
 
 /// Handle keyboard input when in graphite stack selection mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
-    const stack = app.state.graphite_stack orelse {
+    const stack = app.state.graphite.stack orelse {
         // No stack - go back to normal mode
         app.mode = .normal;
         return;
@@ -22,12 +22,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         switch (key.codepoint) {
             'n' => {
                 // Next (down) - move toward parent
-                app.state.graphite_stack_selection = if (app.state.graphite_stack_selection == 0) branch_count - 1 else app.state.graphite_stack_selection - 1;
+                app.state.graphite.selection = if (app.state.graphite.selection == 0) branch_count - 1 else app.state.graphite.selection - 1;
                 return;
             },
             'p' => {
                 // Previous (up) - move toward child/tip
-                app.state.graphite_stack_selection = (app.state.graphite_stack_selection + 1) % branch_count;
+                app.state.graphite.selection = (app.state.graphite.selection + 1) % branch_count;
                 return;
             },
             else => {},
@@ -37,11 +37,11 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     // Handle arrow keys
     // Down moves toward parent (trunk), up moves toward child (tip)
     if (key.codepoint == vaxis.Key.down) {
-        app.state.graphite_stack_selection = if (app.state.graphite_stack_selection == 0) branch_count - 1 else app.state.graphite_stack_selection - 1;
+        app.state.graphite.selection = if (app.state.graphite.selection == 0) branch_count - 1 else app.state.graphite.selection - 1;
         return;
     }
     if (key.codepoint == vaxis.Key.up) {
-        app.state.graphite_stack_selection = (app.state.graphite_stack_selection + 1) % branch_count;
+        app.state.graphite.selection = (app.state.graphite.selection + 1) % branch_count;
         return;
     }
 
@@ -49,17 +49,17 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     switch (key.codepoint) {
         'j' => {
             // j (down) - move toward parent/trunk
-            app.state.graphite_stack_selection = if (app.state.graphite_stack_selection == 0) branch_count - 1 else app.state.graphite_stack_selection - 1;
+            app.state.graphite.selection = if (app.state.graphite.selection == 0) branch_count - 1 else app.state.graphite.selection - 1;
         },
         'k' => {
             // k (up) - move toward child/tip
-            app.state.graphite_stack_selection = (app.state.graphite_stack_selection + 1) % branch_count;
+            app.state.graphite.selection = (app.state.graphite.selection + 1) % branch_count;
         },
         27 => { // ESC key
             app.mode = .normal;
         },
         '\r' => { // Enter key - select branch and view its diff
-            try app.selectGraphiteStackBranch(app.state.graphite_stack_selection);
+            try app.selectGraphiteStackBranch(app.state.graphite.selection);
         },
         'q' => { // q to quit stack picker
             app.mode = .normal;

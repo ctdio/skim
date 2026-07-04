@@ -1,29 +1,28 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const git = @import("git/diff.zig");
-const blame = @import("git/blame.zig");
+const blame_ctrl = @import("git/blame_controller.zig");
 const parser = @import("git/parser.zig");
 const syntax = @import("highlighting/core.zig");
 const comments = @import("comments/store.zig");
 const line_map = @import("line_map.zig");
+const folds = @import("folds.zig");
 const tui_server = @import("mcp/tui_server.zig");
 const session_mgr = @import("mcp/session.zig");
+const mcp_handlers = @import("mcp/handlers.zig");
 const navigation = @import("navigation.zig");
 const mouse = @import("mouse.zig");
 const search = @import("search.zig");
 const clipboard = @import("clipboard.zig");
 const rendering_common = @import("rendering/common.zig");
 const render_utils = @import("rendering/utils.zig");
-const render_unified = @import("rendering/unified.zig");
-const render_side_by_side = @import("rendering/side_by_side.zig");
+const frame = @import("rendering/frame.zig");
 const state_helpers = @import("state.zig");
 const ui_components = @import("ui.zig");
 const editor = @import("editor.zig");
 const comment_editor = @import("comments/editor.zig");
 const command_palette = @import("command_palette.zig");
 const help = @import("help.zig");
-const acp_session_replay = @import("acp/session_replay.zig");
-const codex_session_replay = @import("codex/session_replay.zig");
 const codex_manager = @import("codex/manager.zig");
 
 // Mode handlers
@@ -43,25 +42,25 @@ const session_picker_mode = @import("modes/session_picker_mode.zig");
 const pr_review_mode = @import("modes/pr_review_mode.zig");
 const agent_mode = @import("modes/agent_mode.zig");
 const agent = @import("agent/agent.zig");
-const agent_state_mod = @import("agent/state.zig");
+const debug_replay_controller = @import("agent/debug_replay_controller.zig");
 const sessions = @import("acp/sessions.zig");
 const app_config = @import("config.zig");
 const build_options = @import("build_options");
-const graphite = @import("git/graphite.zig");
+const graphite_controller = @import("git/graphite_controller.zig");
 const acp = @import("acp/acp.zig");
+const connect = @import("acp/connect.zig");
 const opencode = @import("opencode/opencode.zig");
-const opencode_session_replay = @import("opencode/session_replay.zig");
 const codex_mod = @import("codex/codex.zig");
 const pr = @import("pr/pr.zig");
+const pr_controller = @import("pr/controller.zig");
+const subagent_fetch = @import("agent/subagent_fetch.zig");
+const hunk_view = @import("hunk_view.zig");
 
 const DiffSource = git.DiffSource;
 const Navigation = navigation.Navigation;
 const RenderUtils = render_utils.RenderUtils;
-const UnifiedRenderer = render_unified.UnifiedRenderer;
-const SideBySideRenderer = render_side_by_side.SideBySideRenderer;
 const StateHelpers = state_helpers.StateHelpers;
 const AsyncHighlightJob = state_helpers.AsyncHighlightJob;
-const UI = ui_components.UI;
 const DividerPosition = ui_components.DividerPosition;
 
 const Allocator = std.mem.Allocator;
@@ -69,7 +68,6 @@ const Vaxis = vaxis.Vaxis;
 const Event = vaxis.Event;
 
 // Use centralized definitions from rendering/common.zig
-const Color = rendering_common.Color;
 const Layout = rendering_common.Layout;
 const FrameChars = rendering_common.FrameChars;
 const profiling_enabled = build_options.enable_profile;
@@ -82,200 +80,16 @@ const HunkKey = struct {
     hunk_idx: usize,
 };
 
-/// Packed key for fold state HashMap
-/// Bit 63: 0 = file fold, 1 = hunk fold
-/// Bits 0-30: file_idx (for files) or file_idx (for hunks)
-/// Bits 31-62: hunk_idx (for hunks, 0 for files)
-pub const FoldKey = struct {
-    pub fn fileKey(file_idx: usize) u64 {
-        return @as(u64, @intCast(file_idx)); // Bit 63 = 0 indicates file
-    }
-
-    pub fn hunkKey(file_idx: usize, hunk_idx: usize) u64 {
-        // Set bit 63 to indicate hunk, pack file_idx in low bits, hunk_idx in mid bits
-        return (@as(u64, 1) << 63) | (@as(u64, @intCast(hunk_idx)) << 31) | @as(u64, @intCast(file_idx));
-    }
-};
-
-/// Anchor for preserving viewport position across LineMap rebuilds.
-/// Captures position relative to a stable reference (file/hunk header).
-const ViewportAnchor = struct {
-    file_idx: usize,
-    hunk_idx: ?usize, // null = anchor to file header
-    scroll_offset_from_anchor: isize,
-    cursor_offset_from_anchor: isize,
-};
-
 const PendingJob = struct {
     file_path: []const u8, // Owned file path used by worker
     content: []const u8, // Owned NEW hunk content
     old_content: []const u8, // Owned OLD hunk content
 };
 
-const PendingBlameResult = struct {
-    path: []const u8, // Owned by c_allocator
-    blame_data: ?blame.BlameData,
-    duration_ns: u64,
-};
-
-const BlameFetchContext = struct {
-    app: *App,
-    path: []const u8, // Owned by c_allocator
-
-    pub fn deinit(self: *BlameFetchContext) void {
-        std.heap.c_allocator.free(self.path);
-        std.heap.c_allocator.destroy(self);
-    }
-};
-
 // Static buffer for vaxis Tty writer (must persist for lifetime of Tty)
 var tty_static_buffer: [4096]u8 = undefined;
 
-/// Context for ACP connection thread
-pub const AcpConnectContext = struct {
-    app: *App,
-    cwd: []const u8,
-    agent: ?*const acp.AgentInfo, // Selected agent to connect to (null = use discovery)
-    tab_id: u32, // Target tab ID for the connection
-};
-
-/// Context for Opencode connection thread
-pub const OpencodeConnectContext = struct {
-    mgr: *opencode.OpencodeManager,
-    opencode_path: []const u8,
-    port: u16,
-    cwd: ?[]const u8,
-};
-
-/// Context for Codex connection thread
-pub const CodexConnectContext = struct {
-    allocator: Allocator,
-    mgr: *codex_mod.CodexManager,
-    command: []const u8,
-    args: ?[]const []const u8,
-    cwd: ?[]const u8,
-    model: ?[]const u8,
-    mode: ?[]const u8,
-    approval_policy: ?[]const u8,
-    sandbox_mode: ?[]const u8,
-    web_search: bool,
-};
-
-/// Unified pending connection state (replaces separate ACP/Opencode fields)
-pub const PendingConnection = struct {
-    thread: std.Thread,
-    tab_id: u32,
-    ctx: ConnectContext,
-
-    pub const ConnectContext = union(enum) {
-        acp: *AcpConnectContext,
-        opencode: *OpencodeConnectContext,
-        codex: *CodexConnectContext,
-    };
-};
-
-/// Context for subagent modal fetch thread
-pub const SubagentFetchContext = struct {
-    app: *App,
-    base_url: []const u8, // Owned copy
-    session_id: []const u8, // Owned copy
-
-    pub fn deinit(self: *SubagentFetchContext, allocator: std.mem.Allocator) void {
-        allocator.free(self.base_url);
-        allocator.free(self.session_id);
-    }
-};
-
-/// Thread-safe pending result from subagent fetch worker.
-/// Worker writes under mutex, main loop polls via atomic flag.
-pub const PendingSubagentFetch = struct {
-    mutex: std.Thread.Mutex = .{},
-    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    messages: ?[]opencode.Client.ModalMessage = null,
-    error_message: ?[]const u8 = null, // String literal, not owned
-};
-
-/// Thread-safe handoff of a background `gh pr list` fetch to the main loop.
-/// Worker writes the parsed list (or a failure flag) under the mutex; the main
-/// loop polls `ready` and consumes it. The list arena is built with c_allocator
-/// so it survives the thread boundary independent of the App allocator.
-const PendingPrFetch = struct {
-    mutex: std.Thread.Mutex = .{},
-    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    result: ?pr.PullRequestList = null,
-    failed: bool = false,
-};
-
-/// State for the native PR review picker (the `pr_review` mode). Mirrors the
-/// standalone picker's fields but lives on App.state so it integrates with the
-/// modal loop. All fields default, so it stays out of the State init literal.
-const PrReviewState = struct {
-    list: ?pr.PullRequestList = null,
-    filtered: std.ArrayList(usize) = .{},
-    selection: usize = 0,
-    scroll: usize = 0,
-
-    // Forge-native stacked-PR grouping (rebuilt whenever `list` changes).
-    analysis: ?pr.stack.Analysis = null,
-    order: []usize = &.{}, // stack-grouped display order over list.items (owned)
-
-    query_buf: [256]u8 = undefined,
-    query_len: usize = 0,
-
-    // Pinned author filter, layered on top of the text query.
-    author_buf: [256]u8 = undefined,
-    author_len: usize = 0,
-
-    message_buf: [256]u8 = undefined,
-    message_len: usize = 0,
-
-    // Author-filter overlay.
-    picking_author: bool = false,
-    author_list: []pr.authors.AuthorCount = &.{},
-    author_filtered: std.ArrayList(usize) = .{},
-    author_selection: usize = 0,
-    author_scroll: usize = 0,
-    author_query_buf: [256]u8 = undefined,
-    author_query_len: usize = 0,
-
-    fn query(self: *const PrReviewState) []const u8 {
-        return self.query_buf[0..self.query_len];
-    }
-
-    fn authorFilter(self: *const PrReviewState) []const u8 {
-        return self.author_buf[0..self.author_len];
-    }
-
-    fn authorQuery(self: *const PrReviewState) []const u8 {
-        return self.author_query_buf[0..self.author_query_len];
-    }
-
-    fn message(self: *const PrReviewState) []const u8 {
-        return self.message_buf[0..self.message_len];
-    }
-
-    fn items(self: *const PrReviewState) []const pr.PullRequest {
-        return if (self.list) |*l| l.items else &.{};
-    }
-};
-
 /// Case-insensitive substring search
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-
-    const end = haystack.len - needle.len + 1;
-    outer: for (0..end) |i| {
-        for (0..needle.len) |j| {
-            const h = std.ascii.toLower(haystack[i + j]);
-            const n = std.ascii.toLower(needle[j]);
-            if (h != n) continue :outer;
-        }
-        return true;
-    }
-    return false;
-}
-
 fn parseEnvBool(value: []const u8) bool {
     if (value.len == 0) return true;
     if (std.mem.eql(u8, value, "1")) return true;
@@ -392,14 +206,10 @@ pub const App = struct {
     needs_async_highlight: bool, // Flag to trigger async highlighting for current file
     tui_server: ?tui_server.TuiServer, // TCP server for CLI/MCP connections
     session_manager: ?session_mgr.SessionManager, // Session file management
-    blame_cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
-    pending_blame_results: std.ArrayListUnmanaged(PendingBlameResult),
-    pending_blame_mutex: std.Thread.Mutex,
-    pending_blame_ready: std.atomic.Value(bool),
-    blame_requests_in_flight: std.StringHashMapUnmanaged(void),
-    pending_connection: ?PendingConnection, // Background connection thread (ACP or Opencode)
+    blame: blame_ctrl.Blame, // git-blame gutter sub-state (cache + async fetch machinery)
+    pending_connection: ?connect.PendingConnection, // Background connection thread (ACP or Opencode)
     pending_agent_connect_idx: ?usize, // Selected agent index queued to start after the next render
-    pending_subagent_fetch: PendingSubagentFetch, // Thread-safe result from subagent fetch worker
+    pending_subagent_fetch: subagent_fetch.PendingSubagentFetch, // Thread-safe result from subagent fetch worker
     in_bracketed_paste: bool, // Whether we're currently receiving bracketed paste input
     agent_only: bool, // Start in agent-only mode (no diff view)
     tab_manager: ?agent.TabManager, // Multi-tab agent manager
@@ -408,14 +218,6 @@ pub const App = struct {
     profile_frame_counter: u64, // Incremented on each rendered frame
     profile_active_frame: bool, // True when current render should be profiled
     profile_counters: RenderProfileCounters,
-
-    // PR review picker (native `skim pr` / `:pr`). Defaulted so the init
-    // literals below need no changes.
-    pr_only: bool = false, // Booted directly into the PR picker (`skim pr`)
-    pr_fetch: PendingPrFetch = .{}, // Thread-safe result of the background PR load
-    pr_fetch_in_flight: bool = false, // A background PR load is running
-    pr_fetch_thread: ?std.Thread = null, // Joined on consume / at deinit
-    pr_cache_key: ?[]const u8 = null, // Per-repo cache key (owned)
 
     pub const Mode = @import("mode.zig").Mode;
 
@@ -463,23 +265,13 @@ pub const App = struct {
         pending_bracket: bool, // Waiting for second character after [ (like [h)
         pending_close_bracket: bool, // Waiting for second character after ] (like ]h)
         empty_menu_selection: usize, // Selected index in empty state menu (0 = working, 1 = staged, 2 = main, 3 = branch, 4 = refresh, 5 = quit)
-        branch_list: [][]const u8, // List of available branches for selection
-        branch_selection: usize, // Selected branch index in branch selection menu
-        branch_search_query: [256]u8, // Search query buffer for filtering branches
-        branch_search_len: usize, // Length of search query
-        filtered_branches: std.ArrayList(usize), // Indices of branches matching search query
         help_scroll_offset: usize, // Scroll position in help overlay
 
-        // Commit selection state
-        commit_list: std.ArrayList(git.CommitInfo), // Loaded commits
-        commit_selection: usize, // Selected index in commit selection menu
-        commit_search_query: [256]u8, // Search query buffer for filtering commits
-        commit_search_len: usize, // Length of search query
-        filtered_commits: std.ArrayList(usize), // Indices of commits matching search query
-        commits_loaded_count: usize, // Total commits loaded (for lazy loading)
-        commits_loading: bool, // Whether commits are being loaded
-        selected_commit_for_diff: ?git.CommitInfo, // Commit selected for diff mode submenu (owned copy)
-        commit_diff_mode_selection: usize, // 0 = HEAD vs commit, 1 = commit vs parent
+        // Branch selection state (loaded list, filtering)
+        branch_select: branch_selection_mode.BranchSelectState = .{},
+
+        // Commit selection state (loading, filtering, diff-mode submenu)
+        commit_select: commit_selection_mode.CommitSelectState = .{},
 
         // Session picker state (for /resume command)
         session_list: []sessions.SessionInfo, // Discovered sessions
@@ -508,16 +300,10 @@ pub const App = struct {
         branch_stats_cache: std.AutoHashMap(usize, git.DiffStats), // branch_idx -> stats
 
         // Graphite stack state (lazy-loaded to avoid blocking startup)
-        graphite_detected: bool, // Has graphite detection been performed?
-        graphite_available: bool, // Is gt CLI installed?
-        graphite_stack: ?graphite.GraphiteStack, // Current stack (null if not graphite repo)
-        graphite_stack_selection: usize, // Selected index in stack picker
+        graphite: graphite_controller.GraphiteState = .{},
 
         // Model selection state
-        model_selection: usize, // Selected index in model picker (within filtered list)
-        model_filter_query: [256]u8, // Search query for filtering models
-        model_filter_len: usize, // Length of search query
-        model_filtered_indices: std.ArrayList(usize), // Indices of models matching filter
+        model_select: model_selection_mode.ModelSelectState = .{},
         permission_selection: usize, // Selected index in permission mode picker
 
         // Agent selection state (for choosing which agent to connect to)
@@ -528,7 +314,7 @@ pub const App = struct {
         pending_tab_for_selection: ?u32,
 
         // PR review picker state (defaulted, so it stays out of the init literal)
-        pr: PrReviewState = .{},
+        pr: pr_controller.PrReviewState = .{},
 
         const ViewMode = enum {
             unified,
@@ -755,21 +541,7 @@ pub const App = struct {
                 .pending_bracket = false,
                 .pending_close_bracket = false,
                 .empty_menu_selection = 0,
-                .branch_list = &[_][]const u8{},
-                .branch_selection = 0,
-                .branch_search_query = undefined,
-                .branch_search_len = 0,
-                .filtered_branches = .{},
                 .help_scroll_offset = 0,
-                .commit_list = .{},
-                .commit_selection = 0,
-                .commit_search_query = undefined,
-                .commit_search_len = 0,
-                .filtered_commits = .{},
-                .commits_loaded_count = 0,
-                .commits_loading = false,
-                .selected_commit_for_diff = null,
-                .commit_diff_mode_selection = 0,
                 .session_list = &[_]sessions.SessionInfo{},
                 .session_selection = 0,
                 .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
@@ -786,14 +558,6 @@ pub const App = struct {
                 .main_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
                 .default_branch_name = null,
                 .branch_stats_cache = std.AutoHashMap(usize, git.DiffStats).init(allocator),
-                .graphite_detected = false, // Lazy detection on first access
-                .graphite_available = false,
-                .graphite_stack = null,
-                .graphite_stack_selection = 0,
-                .model_selection = 0,
-                .model_filter_query = [_]u8{0} ** 256,
-                .model_filter_len = 0,
-                .model_filtered_indices = .{},
                 .permission_selection = 0,
                 .configured_agents = null, // Loaded when agent panel opens
                 .agent_selection_idx = 0,
@@ -816,11 +580,7 @@ pub const App = struct {
             .needs_async_highlight = true, // Start with highlighting needed for first file
             .tui_server = null,
             .session_manager = null,
-            .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
-            .pending_blame_results = .{},
-            .pending_blame_mutex = .{},
-            .pending_blame_ready = std.atomic.Value(bool).init(false),
-            .blame_requests_in_flight = .{},
+            .blame = blame_ctrl.Blame.init(allocator),
             .pending_connection = null,
             .pending_agent_connect_idx = null,
             .pending_subagent_fetch = .{},
@@ -834,7 +594,7 @@ pub const App = struct {
             .profile_counters = .{},
         };
 
-        app.pr_only = is_pr_only;
+        app.state.pr.pr_only = is_pr_only;
 
         // Graphite detection is lazy - happens on first access to avoid blocking startup
         // Main loop will spawn background thread to highlight initial file
@@ -948,21 +708,7 @@ pub const App = struct {
                 .pending_bracket = false,
                 .pending_close_bracket = false,
                 .empty_menu_selection = 0,
-                .branch_list = &[_][]const u8{},
-                .branch_selection = 0,
-                .branch_search_query = undefined,
-                .branch_search_len = 0,
-                .filtered_branches = .{},
                 .help_scroll_offset = 0,
-                .commit_list = .{},
-                .commit_selection = 0,
-                .commit_search_query = undefined,
-                .commit_search_len = 0,
-                .filtered_commits = .{},
-                .commits_loaded_count = 0,
-                .commits_loading = false,
-                .selected_commit_for_diff = null,
-                .commit_diff_mode_selection = 0,
                 .session_list = &[_]sessions.SessionInfo{},
                 .session_selection = 0,
                 .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
@@ -979,14 +725,6 @@ pub const App = struct {
                 .main_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
                 .default_branch_name = null,
                 .branch_stats_cache = std.AutoHashMap(usize, git.DiffStats).init(allocator),
-                .graphite_detected = false,
-                .graphite_available = false,
-                .graphite_stack = null,
-                .graphite_stack_selection = 0,
-                .model_selection = 0,
-                .model_filter_query = [_]u8{0} ** 256,
-                .model_filter_len = 0,
-                .model_filtered_indices = .{},
                 .permission_selection = 0,
                 .configured_agents = null,
                 .agent_selection_idx = 0,
@@ -1009,11 +747,7 @@ pub const App = struct {
             .needs_async_highlight = false, // No async highlighting in headless mode
             .tui_server = null,
             .session_manager = null,
-            .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
-            .pending_blame_results = .{},
-            .pending_blame_mutex = .{},
-            .pending_blame_ready = std.atomic.Value(bool).init(false),
-            .blame_requests_in_flight = .{},
+            .blame = blame_ctrl.Blame.init(allocator),
             .pending_connection = null,
             .pending_agent_connect_idx = null,
             .pending_subagent_fetch = .{},
@@ -1091,21 +825,7 @@ pub const App = struct {
                 .pending_bracket = false,
                 .pending_close_bracket = false,
                 .empty_menu_selection = 0,
-                .branch_list = &[_][]const u8{},
-                .branch_selection = 0,
-                .branch_search_query = undefined,
-                .branch_search_len = 0,
-                .filtered_branches = .{},
                 .help_scroll_offset = 0,
-                .commit_list = .{},
-                .commit_selection = 0,
-                .commit_search_query = undefined,
-                .commit_search_len = 0,
-                .filtered_commits = .{},
-                .commits_loaded_count = 0,
-                .commits_loading = false,
-                .selected_commit_for_diff = null,
-                .commit_diff_mode_selection = 0,
                 .session_list = &[_]sessions.SessionInfo{},
                 .session_selection = 0,
                 .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
@@ -1122,14 +842,6 @@ pub const App = struct {
                 .main_stats = git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 },
                 .default_branch_name = null,
                 .branch_stats_cache = std.AutoHashMap(usize, git.DiffStats).init(allocator),
-                .graphite_detected = false,
-                .graphite_available = false,
-                .graphite_stack = null,
-                .graphite_stack_selection = 0,
-                .model_selection = 0,
-                .model_filter_query = [_]u8{0} ** 256,
-                .model_filter_len = 0,
-                .model_filtered_indices = .{},
                 .permission_selection = 0,
                 .configured_agents = null,
                 .agent_selection_idx = 0,
@@ -1152,11 +864,7 @@ pub const App = struct {
             .needs_async_highlight = false,
             .tui_server = null,
             .session_manager = null,
-            .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
-            .pending_blame_results = .{},
-            .pending_blame_mutex = .{},
-            .pending_blame_ready = std.atomic.Value(bool).init(false),
-            .blame_requests_in_flight = .{},
+            .blame = blame_ctrl.Blame.init(allocator),
             .pending_connection = null,
             .pending_agent_connect_idx = null,
             .pending_subagent_fetch = .{},
@@ -1226,46 +934,21 @@ pub const App = struct {
         self.state.comment_store.deinit();
         self.state.search_state.deinit();
         self.state.command_palette_state.deinit();
-        // Free branch list
-        for (self.state.branch_list) |branch| {
-            self.allocator.free(branch);
-        }
-        self.allocator.free(self.state.branch_list);
-        self.state.filtered_branches.deinit(self.allocator);
-        // Free commit list
-        for (self.state.commit_list.items) |*commit| {
-            commit.deinit(self.allocator);
-        }
-        self.state.commit_list.deinit(self.allocator);
-        self.state.filtered_commits.deinit(self.allocator);
-        // Free selected commit for diff mode
-        if (self.state.selected_commit_for_diff) |*commit| {
-            commit.deinit(self.allocator);
-        }
+        self.state.branch_select.deinit(self.allocator);
+        self.state.commit_select.deinit(self.allocator);
         self.state.expanded_comments.deinit();
         self.state.collapsed_folds.deinit();
         self.state.branch_stats_cache.deinit();
-        self.state.model_filtered_indices.deinit(self.allocator);
+        self.state.model_select.deinit(self.allocator);
         // Clean up cached default branch name
         if (self.state.default_branch_name) |name| {
             self.allocator.free(name);
         }
         // Clean up graphite stack
-        if (self.state.graphite_stack) |*stack| {
-            stack.deinit(self.allocator);
-        }
-        // Clean up PR review state (join any in-flight loader first so its
+        self.state.graphite.deinit(self.allocator);
+        // Clean up PR review state (joins any in-flight loader first so its
         // worker can't write into freed state).
-        if (self.pr_fetch_thread) |t| t.join();
-        self.pr_fetch_thread = null;
-        if (self.pr_fetch.result) |*list| list.deinit();
-        if (self.state.pr.list) |*list| list.deinit();
-        if (self.state.pr.analysis) |*a| a.deinit(self.allocator);
-        if (self.state.pr.order.len > 0) self.allocator.free(self.state.pr.order);
-        self.state.pr.filtered.deinit(self.allocator);
-        if (self.state.pr.author_list.len > 0) self.allocator.free(self.state.pr.author_list);
-        self.state.pr.author_filtered.deinit(self.allocator);
-        if (self.pr_cache_key) |k| self.allocator.free(k);
+        pr_controller.deinitState(&self.state.pr, self.allocator);
         // Clean up TUI server and session
         if (self.session_manager) |*sm| {
             sm.removeSession();
@@ -1291,19 +974,7 @@ pub const App = struct {
             tm.deinit();
         }
         // Clean up blame cache
-        var blame_iter = self.blame_cache.iterator();
-        while (blame_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            entry.value_ptr.deinit();
-        }
-        self.blame_cache.deinit();
-        self.drainPendingBlameResults();
-        self.pending_blame_results.deinit(std.heap.c_allocator);
-        var in_flight_iter = self.blame_requests_in_flight.keyIterator();
-        while (in_flight_iter.next()) |key| {
-            self.allocator.free(key.*);
-        }
-        self.blame_requests_in_flight.deinit(self.allocator);
+        self.blame.deinit();
         self.syntax_highlighter.deinit();
         // Only deinit vx/tty in TUI mode (not headless)
         if (self.vx) |*vx| {
@@ -1367,44 +1038,6 @@ pub const App = struct {
         if (self.last_ctrl_c == 0) return false;
         const now: i64 = @intCast(std.time.nanoTimestamp());
         return (now - self.last_ctrl_c) < App.CTRL_C_TIMEOUT_NS;
-    }
-
-    /// Update the filtered model indices based on the current filter query
-    /// Works with both ACP and OpenCode managers
-    pub fn updateModelFilter(self: *App) void {
-        // Clear existing filtered indices
-        self.state.model_filtered_indices.clearRetainingCapacity();
-
-        const query = self.state.model_filter_query[0..self.state.model_filter_len];
-
-        if (self.getActiveManager()) |mgr| {
-            const count = mgr.getModelCount();
-            if (query.len == 0) {
-                for (0..count) |i| {
-                    self.state.model_filtered_indices.append(self.allocator, i) catch {};
-                }
-            } else {
-                for (0..count) |i| {
-                    const model = mgr.getModelInfo(i);
-                    if (containsIgnoreCase(model.name, query) or containsIgnoreCase(model.model_id, query)) {
-                        self.state.model_filtered_indices.append(self.allocator, i) catch {};
-                    }
-                }
-            }
-        }
-
-        // Reset selection to 0 if current selection is out of bounds
-        if (self.state.model_selection >= self.state.model_filtered_indices.items.len) {
-            self.state.model_selection = 0;
-        }
-    }
-
-    /// Reset model filter state (called when entering model selection mode)
-    pub fn resetModelFilter(self: *App) void {
-        self.state.model_filter_query = [_]u8{0} ** 256;
-        self.state.model_filter_len = 0;
-        self.state.model_selection = 0;
-        self.updateModelFilter();
     }
 
     /// Check if agent panel is in full-screen mode
@@ -1496,15 +1129,6 @@ pub const App = struct {
         return false;
     }
 
-    pub fn queueSelectedAgentConnection(self: *App) void {
-        const agents = self.state.configured_agents orelse return;
-        if (self.state.agent_selection_idx >= agents.len) return;
-
-        self.pending_agent_connect_idx = self.state.agent_selection_idx;
-        self.mode = .agent;
-        self.needs_render = true;
-    }
-
     pub fn getPendingAgentInfo(self: *const App) ?*const acp.AgentInfo {
         const idx = self.pending_agent_connect_idx orelse return null;
         const agents = self.state.configured_agents orelse return null;
@@ -1522,43 +1146,23 @@ pub const App = struct {
         return false;
     }
 
-    pub fn hasActiveDebugReplay(self: *const App) bool {
-        if (self.getActiveAgentStateConst()) |agent_state| {
-            return agent_state.hasDebugReplay();
-        }
-        return false;
+    /// Thin forwarder: steps the active debug replay, wiring app-level services
+    /// into the controller. Retained because many call sites (tests, agent mode)
+    /// only hold an `*App`.
+    pub fn stepActiveDebugReplay(self: *App) !bool {
+        return debug_replay_controller.step(.{
+            .allocator = self.allocator,
+            .agent_state = self.getActiveAgentState(),
+            .manager = self.getActiveManager(),
+            .needs_render = &self.needs_render,
+        });
     }
 
-    pub fn isActiveDebugReplayPlaying(self: *const App) bool {
-        if (self.getActiveAgentStateConst()) |agent_state| {
-            return agent_state.isDebugReplayPlaying();
-        }
-        return false;
-    }
-
-    pub fn toggleActiveDebugReplayPlaying(self: *App) bool {
-        const agent_state = self.getActiveAgentState() orelse return false;
-        const playing = agent_state.toggleDebugReplayPlaying();
-        self.needs_render = true;
-        return playing;
-    }
-
-    pub fn restartActiveDebugReplay(self: *App) void {
-        const agent_state = self.getActiveAgentState() orelse return;
-        agent_state.restartDebugReplay();
-        if (agent_state.getDebugReplayConst()) |replay| {
-            self.syncActiveDebugReplayManagerStatus(replay.manager_status);
-        }
-        self.needs_render = true;
-    }
-
+    /// Thin forwarder: tears down the active replay via the controller, then
+    /// applies the app-lifecycle side effects (quit / panel visibility / mode).
     pub fn exitActiveDebugReplay(self: *App) void {
         const agent_state = self.getActiveAgentState() orelse return;
-        const quit_app = if (agent_state.getDebugReplayConst()) |replay| replay.exit_quits_app else false;
-
-        agent_state.clearDebugReplay();
-        agent_state.exitHistoryMode();
-        agent_state.input.vim.vim_mode = .normal;
+        const quit_app = debug_replay_controller.exit(agent_state);
 
         if (quit_app) {
             self.should_quit = true;
@@ -1571,133 +1175,6 @@ pub const App = struct {
         agent_state.visible = false;
         self.mode = .normal;
         self.needs_render = true;
-    }
-
-    pub fn stepActiveDebugReplay(self: *App) !bool {
-        const agent_state = self.getActiveAgentState() orelse return false;
-        const replay = agent_state.getDebugReplay() orelse return false;
-        if (replay.isComplete()) {
-            replay.playing = false;
-            return false;
-        }
-
-        const current_line = replay.lines[replay.current_index];
-
-        if (replay.kind == .codex and !replay.previewing_current_line) {
-            if (try codex_session_replay.previewPendingQuestionResolution(self.allocator, agent_state, current_line)) {
-                replay.previewing_current_line = true;
-                replay.step_delay_override_ms = agent_state_mod.debug_replay_question_answer_preview_linger_ms;
-                replay.last_step_ms = std.time.milliTimestamp();
-                self.syncActiveDebugReplayManagerStatus(replay.manager_status);
-                if (!agent_state.isInHistoryMode() and agent_state.messages.items.len > 0) {
-                    agent_state.enterHistoryMode();
-                }
-                self.needs_render = true;
-                return true;
-            }
-        }
-
-        switch (replay.kind) {
-            .acp => {
-                var summary = acp_session_replay.ReplaySummary{
-                    .manager_status = switch (replay.manager_status) {
-                        .acp => |status| status,
-                        else => .session_active,
-                    },
-                };
-                try acp_session_replay.replaySessionLine(
-                    self.allocator,
-                    agent_state,
-                    current_line,
-                    &summary,
-                );
-                replay.manager_status = .{ .acp = summary.manager_status };
-            },
-            .opencode => {
-                const mgr_handle = self.getActiveManager() orelse return false;
-                switch (mgr_handle) {
-                    .opencode => |mgr| {
-                        try opencode_session_replay.replaySessionLine(mgr, current_line);
-                        _ = mgr_handle.pollEvents(self.allocator, agent_state);
-                        replay.manager_status = .{ .opencode = mgr.status };
-                    },
-                    else => return false,
-                }
-            },
-            .codex => {
-                var summary = codex_session_replay.ReplaySummary{
-                    .manager_status = switch (replay.manager_status) {
-                        .codex => |status| status,
-                        else => .thread_active,
-                    },
-                };
-                try codex_session_replay.replaySessionLine(
-                    self.allocator,
-                    agent_state,
-                    current_line,
-                    &summary,
-                );
-                replay.manager_status = .{ .codex = summary.manager_status };
-            },
-        }
-
-        replay.previewing_current_line = false;
-        replay.current_index += 1;
-        replay.step_delay_override_ms = switch (replay.kind) {
-            .codex => if (codex_session_replay.lineStartsRequestUserInput(self.allocator, current_line))
-                agent_state_mod.debug_replay_question_prompt_linger_ms
-            else
-                null,
-            else => null,
-        };
-        replay.last_step_ms = std.time.milliTimestamp();
-        if (replay.isComplete()) {
-            replay.playing = false;
-        }
-
-        self.syncActiveDebugReplayManagerStatus(replay.manager_status);
-        if (!agent_state.isInHistoryMode() and agent_state.messages.items.len > 0) {
-            agent_state.enterHistoryMode();
-        }
-        self.needs_render = true;
-        return true;
-    }
-
-    pub fn advanceDebugReplayIfDue(self: *App) void {
-        const agent_state = self.getActiveAgentState() orelse return;
-        const replay = agent_state.getDebugReplay() orelse return;
-        if (!replay.playing or replay.isComplete()) return;
-
-        const now = std.time.milliTimestamp();
-        const step_delay_ms = replay.step_delay_override_ms orelse replay.step_interval_ms;
-        if (now - replay.last_step_ms < step_delay_ms) return;
-
-        _ = self.stepActiveDebugReplay() catch |err| {
-            std.log.err("Failed to advance debug replay: {any}", .{err});
-            if (agent_state.getDebugReplay()) |active_replay| {
-                active_replay.playing = false;
-            }
-            return;
-        };
-    }
-
-    fn syncActiveDebugReplayManagerStatus(self: *App, status: agent_state_mod.DebugReplayManagerStatus) void {
-        if (self.getActiveManager()) |mgr| {
-            switch (mgr) {
-                .acp => |acp_mgr| switch (status) {
-                    .acp => |acp_status| acp_mgr.status = acp_status,
-                    else => {},
-                },
-                .opencode => |opencode_mgr| switch (status) {
-                    .opencode => |opencode_status| opencode_mgr.status = opencode_status,
-                    else => {},
-                },
-                .codex => |codex_mgr| switch (status) {
-                    .codex => |codex_status| codex_mgr.status = codex_status,
-                    else => {},
-                },
-            }
-        }
     }
 
     /// Auto-name the active tab from the user's first prompt
@@ -1782,7 +1259,7 @@ pub const App = struct {
         self.freeFileCaches();
 
         // Rebuild line map with new files (preserve hunk view mode and fold state)
-        const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
+        const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store, hunk_view.convertHunkViewMode(self), hunk_view.shouldApplyHunkFiltering(self), &self.state.collapsed_folds);
         errdefer {
             // If LineMap.build failed, clean up new_files since old state is already freed
             for (new_files) |*file| {
@@ -1816,10 +1293,10 @@ pub const App = struct {
         self.state.branch_stats_cache.clearRetainingCapacity();
 
         // Refresh graphite stack (branch state may have changed)
-        self.refreshGraphiteStack();
+        graphite_controller.refreshStack(&self.state.graphite, self.allocator);
 
         // Keep external session discovery metadata in sync with the current diff.
-        self.syncSessionMetadata();
+        mcp_handlers.syncSessionMetadata(self);
     }
 
     /// Stage the current file (git add) and refresh the view
@@ -1906,7 +1383,7 @@ pub const App = struct {
         try vx.setMouseMode(writer, true);
 
         // Start TUI server for CLI/MCP connections
-        self.startTuiServer() catch |err| {
+        mcp_handlers.startTuiServer(self) catch |err| {
             std.log.warn("Failed to start TUI server: {any}", .{err});
         };
 
@@ -1934,16 +1411,16 @@ pub const App = struct {
             }
 
             // Start ACP session
-            self.startAcpSession() catch |err| {
+            connect.startAcpSession(self) catch |err| {
                 std.log.err("Failed to start ACP session: {any}", .{err});
             };
         }
 
         // If launched as `skim pr`, open straight into the PR picker and kick off
         // the background load so the first frame shows the cached/loading list.
-        if (self.pr_only) {
+        if (self.state.pr.pr_only) {
             self.mode = .pr_review;
-            self.startPrListLoad() catch |err| {
+            pr_controller.startListLoad(&self.state.pr, self.allocator) catch |err| {
                 std.log.err("Failed to start PR load: {any}", .{err});
             };
         }
@@ -1961,13 +1438,13 @@ pub const App = struct {
             const stats_loading = self.state.menu_stats_loading;
             // Check all tabs for manager activity (ACP or OpenCode)
             const manager_active = self.hasAnyManagerActivity();
-            const replay_playing = self.isActiveDebugReplayPlaying();
+            const replay_playing = debug_replay_controller.isPlaying(self.getActiveAgentStateConst());
             // Check if a shell command is running (needs streaming output) - check all tabs
             const shell_cmd_running = self.hasAnyRunningShellCommand();
             // Check if a connection thread is running (need to poll for completion)
             const connecting = self.pending_connection != null;
-            const blame_active = self.pending_blame_ready.load(.acquire) or self.blame_requests_in_flight.count() > 0;
-            const pr_active = self.pr_fetch.ready.load(.acquire) or self.pr_fetch_in_flight;
+            const blame_active = self.blame.isActive();
+            const pr_active = self.state.pr.fetch.ready.load(.acquire) or self.state.pr.fetch_in_flight;
             const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active;
             if (should_poll) {
                 loop.pollEvent();
@@ -1984,7 +1461,12 @@ pub const App = struct {
             // When not blocking (acp_active, mcp_active, etc.), events are still
             // captured by the vaxis reader thread and available via tryEvent()
 
-            self.advanceDebugReplayIfDue();
+            debug_replay_controller.advanceIfDue(.{
+                .allocator = self.allocator,
+                .agent_state = self.getActiveAgentState(),
+                .manager = self.getActiveManager(),
+                .needs_render = &self.needs_render,
+            });
 
             // Check if we need to suspend for editor
             if (self.should_suspend_for_editor) {
@@ -2072,7 +1554,7 @@ pub const App = struct {
                 } else false;
 
                 if (self.pending_connection != null or has_any_manager) {
-                    self.pollAllManagers();
+                    connect.pollAllManagers(self);
                 }
             }
 
@@ -2101,9 +1583,9 @@ pub const App = struct {
             }
 
             // Poll subagent fetch result (worker thread -> main thread)
-            self.pollSubagentFetch();
-            self.pollPendingBlameResults();
-            self.pollPendingPrFetch();
+            subagent_fetch.pollSubagentFetch(self);
+            if (blame_ctrl.pollPending(&self.blame, self.profile_render)) self.needs_render = true;
+            if (pr_controller.pollPendingFetch(&self.state.pr, self.allocator)) self.needs_render = true;
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
@@ -2115,7 +1597,7 @@ pub const App = struct {
 
                     if (self.profile_active_frame) {
                         var render_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try self.render(win);
+                        try frame.render(self, win);
                         const render_ns: u64 = if (render_timer_opt) |*timer| timer.read() else 0;
 
                         var vx_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
@@ -2127,13 +1609,13 @@ pub const App = struct {
                             .{ self.profile_frame_counter, render_ns, vx_ns, had_events, self.needs_render, self.pending_highlight_jobs.count() },
                         );
                     } else {
-                        try self.render(win);
+                        try frame.render(self, win);
                         try vx.render(tty.writer());
                     }
 
                     self.profile_active_frame = false;
                 } else {
-                    try self.render(win);
+                    try frame.render(self, win);
                     try vx.render(tty.writer());
                 }
                 // Don't clear needs_render if we're about to suspend for editor
@@ -2144,7 +1626,7 @@ pub const App = struct {
             }
 
             if (self.pending_agent_connect_idx != null) {
-                self.startQueuedAgentConnection() catch |err| {
+                connect.startQueuedAgentConnection(self) catch |err| {
                     std.log.err("Failed to start queued agent connection: {any}", .{err});
                     self.pending_agent_connect_idx = null;
                     self.showStatusMessage("Failed to start connection");
@@ -2330,7 +1812,7 @@ pub const App = struct {
             }
 
             if (self.state.show_blame) {
-                self.requestBlameForViewport();
+                blame_ctrl.requestBlameForViewport(&self.blame, self.blameViewportParams());
             }
         }
 
@@ -2460,15 +1942,15 @@ pub const App = struct {
                 },
                 .branch_selection => {
                     self.mode = .normal;
-                    self.state.branch_search_len = 0;
-                    self.state.filtered_branches.clearRetainingCapacity();
+                    self.state.branch_select.search_len = 0;
+                    self.state.branch_select.filtered.clearRetainingCapacity();
                     self.needs_render = true;
                     return;
                 },
                 .commit_selection => {
                     self.mode = .normal;
-                    self.state.commit_search_len = 0;
-                    self.state.filtered_commits.clearRetainingCapacity();
+                    self.state.commit_select.search_len = 0;
+                    self.state.commit_select.filtered.clearRetainingCapacity();
                     self.needs_render = true;
                     return;
                 },
@@ -2476,9 +1958,9 @@ pub const App = struct {
                     // Go back to commit selection
                     self.mode = .commit_selection;
                     // Free the selected commit
-                    if (self.state.selected_commit_for_diff) |*commit| {
+                    if (self.state.commit_select.selected_for_diff) |*commit| {
                         commit.deinit(self.allocator);
-                        self.state.selected_commit_for_diff = null;
+                        self.state.commit_select.selected_for_diff = null;
                     }
                     self.needs_render = true;
                     return;
@@ -2523,8 +2005,8 @@ pub const App = struct {
                     // author overlay -> list, then list -> the diff being
                     // reviewed (or quit if `skim pr` has nothing behind it).
                     if (self.state.pr.picking_author) {
-                        self.closePrAuthorPicker();
-                    } else if (self.pr_only) {
+                        pr_controller.closeAuthorPicker(&self.state.pr, self.allocator);
+                    } else if (self.state.pr.pr_only) {
                         self.should_quit = true;
                     } else {
                         self.mode = .normal;
@@ -2575,7 +2057,7 @@ pub const App = struct {
 
     pub fn toggleViewMode(self: *App) void {
         // Capture viewport anchor before toggle (anchor to viewport top for stable view)
-        const anchor = self.captureViewportAnchor(self.state.global_scroll_offset);
+        const anchor = hunk_view.captureViewportAnchor(self, self.state.global_scroll_offset);
 
         // Toggle view mode
         self.state.view_mode = switch (self.state.view_mode) {
@@ -2591,8 +2073,8 @@ pub const App = struct {
             self.allocator,
             self.state.files,
             &self.state.comment_store,
-            self.convertHunkViewMode(),
-            self.shouldApplyHunkFiltering(),
+            hunk_view.convertHunkViewMode(self),
+            hunk_view.shouldApplyHunkFiltering(self),
             &self.state.collapsed_folds,
         ) catch |err| {
             std.log.err("Failed to rebuild LineMap on view toggle: {any}", .{err});
@@ -2600,7 +2082,7 @@ pub const App = struct {
         };
 
         // Restore viewport position from anchor
-        _ = self.restoreViewportFromAnchor(anchor);
+        _ = hunk_view.restoreViewportFromAnchor(self, anchor);
     }
 
     pub fn toggleBlame(self: *App) void {
@@ -2611,8 +2093,20 @@ pub const App = struct {
         self.needs_render = true;
 
         if (self.state.show_blame) {
-            self.requestBlameForViewport();
+            blame_ctrl.requestBlameForViewport(&self.blame, self.blameViewportParams());
         }
+    }
+
+    /// Build the viewport snapshot the blame controller needs to prefetch blame.
+    fn blameViewportParams(self: *App) blame_ctrl.ViewportParams {
+        return .{
+            .show_blame = self.state.show_blame,
+            .pager_mode = self.state.pager_mode,
+            .files = self.state.files,
+            .viewport_height = self.state.viewport_height,
+            .global_scroll_offset = self.state.global_scroll_offset,
+            .line_map = &self.state.line_map,
+        };
     }
 
     /// Toggle the agent chat panel visibility and focus
@@ -2654,335 +2148,11 @@ pub const App = struct {
             else
                 false;
             if (!has_active_agent) {
-                try self.startAcpSession();
+                try connect.startAcpSession(self);
             }
         }
 
         self.needs_render = true;
-    }
-
-    /// Submit async blame requests for files near the current viewport.
-    fn requestBlameForViewport(self: *App) void {
-        if (!self.state.show_blame or self.state.pager_mode or self.state.files.len == 0) return;
-
-        const viewport_height = @max(self.state.viewport_height, 1);
-        const scroll_line = self.state.global_scroll_offset;
-        const visible_end = scroll_line + viewport_height;
-        const start_file_idx = self.state.line_map.getFileIndexForLine(scroll_line) orelse 0;
-        const buffer_lines = viewport_height;
-        const max_files_per_pass: usize = 2;
-
-        var submitted: usize = 0;
-        var file_idx = start_file_idx;
-        while (file_idx < self.state.files.len) : (file_idx += 1) {
-            if (submitted >= max_files_per_pass) break;
-
-            if (self.state.line_map.getFileHeaderLine(file_idx)) |file_header_line| {
-                if (file_header_line > visible_end + buffer_lines) break;
-            }
-
-            const file = &self.state.files[file_idx];
-            if (file.is_untracked) continue;
-
-            const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-            if (self.blame_cache.contains(file_path) or self.blame_requests_in_flight.contains(file_path)) continue;
-
-            self.startAsyncBlameFetch(file_path) catch continue;
-            submitted += 1;
-        }
-    }
-
-    fn startAsyncBlameFetch(self: *App, file_path: []const u8) !void {
-        const key = try self.allocator.dupe(u8, file_path);
-        errdefer self.allocator.free(key);
-
-        try self.blame_requests_in_flight.put(self.allocator, key, {});
-        errdefer if (self.blame_requests_in_flight.fetchRemove(file_path)) |entry| {
-            self.allocator.free(entry.key);
-        };
-
-        const ctx = try std.heap.c_allocator.create(BlameFetchContext);
-        errdefer std.heap.c_allocator.destroy(ctx);
-
-        ctx.* = .{
-            .app = self,
-            .path = std.heap.c_allocator.dupe(u8, file_path) catch {
-                if (self.blame_requests_in_flight.fetchRemove(file_path)) |entry| {
-                    self.allocator.free(entry.key);
-                }
-                return error.OutOfMemory;
-            },
-        };
-        errdefer ctx.deinit();
-
-        const thread = try std.Thread.spawn(.{}, blameFetchWorker, .{ctx});
-        thread.detach();
-    }
-
-    fn blameFetchWorker(ctx: *BlameFetchContext) void {
-        var timer = std.time.Timer.start() catch null;
-        const blame_data = blame.getBlame(std.heap.c_allocator, ctx.path, null) catch null;
-        const duration_ns: u64 = if (timer) |*t| t.read() else 0;
-
-        const result = PendingBlameResult{
-            .path = ctx.path,
-            .blame_data = blame_data,
-            .duration_ns = duration_ns,
-        };
-
-        ctx.app.pending_blame_mutex.lock();
-        ctx.app.pending_blame_results.append(std.heap.c_allocator, result) catch {
-            ctx.app.pending_blame_mutex.unlock();
-            if (result.blame_data) |data| {
-                var owned_data = data;
-                owned_data.deinit();
-            }
-            ctx.deinit();
-            return;
-        };
-        ctx.app.pending_blame_mutex.unlock();
-        ctx.app.pending_blame_ready.store(true, .release);
-
-        std.heap.c_allocator.destroy(ctx);
-    }
-
-    fn pollPendingBlameResults(self: *App) void {
-        if (!self.pending_blame_ready.load(.acquire)) return;
-
-        self.pending_blame_mutex.lock();
-        var results = self.pending_blame_results;
-        self.pending_blame_results = .{};
-        self.pending_blame_mutex.unlock();
-        self.pending_blame_ready.store(false, .release);
-
-        defer results.deinit(std.heap.c_allocator);
-
-        for (results.items) |result| {
-            if (self.blame_requests_in_flight.fetchRemove(result.path)) |entry| {
-                self.allocator.free(entry.key);
-            }
-
-            if (result.blame_data) |blame_data| {
-                if (self.blame_cache.contains(result.path)) {
-                    var data = blame_data;
-                    data.deinit();
-                    std.heap.c_allocator.free(result.path);
-                    continue;
-                }
-
-                const owned_key = self.allocator.dupe(u8, result.path) catch {
-                    var data = blame_data;
-                    data.deinit();
-                    std.heap.c_allocator.free(result.path);
-                    continue;
-                };
-
-                self.blame_cache.put(owned_key, blame_data) catch {
-                    self.allocator.free(owned_key);
-                    var data = blame_data;
-                    data.deinit();
-                    std.heap.c_allocator.free(result.path);
-                    continue;
-                };
-
-                if (self.profile_render) {
-                    std.log.scoped(.profile_blame).debug(
-                        "loaded blame: path={s} duration_ns={d} cached={d} in_flight={d}",
-                        .{ result.path, result.duration_ns, self.blame_cache.count(), self.blame_requests_in_flight.count() },
-                    );
-                }
-            }
-
-            std.heap.c_allocator.free(result.path);
-        }
-        self.needs_render = true;
-    }
-
-    fn drainPendingBlameResults(self: *App) void {
-        self.pending_blame_mutex.lock();
-        defer self.pending_blame_mutex.unlock();
-
-        for (self.pending_blame_results.items) |result| {
-            if (result.blame_data) |data| {
-                var owned_data = data;
-                owned_data.deinit();
-            }
-            std.heap.c_allocator.free(result.path);
-        }
-        self.pending_blame_results.clearRetainingCapacity();
-        self.pending_blame_ready.store(false, .release);
-    }
-
-    /// Get blame info for a specific file line (returns null if not available)
-    pub fn getBlameForLine(self: *App, file_path: []const u8, lineno: u32) ?*const blame.BlameLine {
-        const data = self.blame_cache.get(file_path) orelse return null;
-        return data.getLine(lineno);
-    }
-
-    pub fn cycleHunkViewModePrev(self: *App) !void {
-        // Only apply in unified mode
-        if (!self.shouldApplyHunkFiltering()) return;
-
-        // Capture anchor based on cursor position (for hunk cycling, cursor is the reference)
-        const anchor = self.captureViewportAnchor(self.state.global_cursor_line);
-
-        // Cycle to previous mode
-        self.state.hunk_view_mode = self.state.hunk_view_mode.prev();
-
-        // Rebuild LineMap
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-
-        // Restore positions from anchor
-        _ = self.restoreViewportFromAnchor(anchor);
-    }
-
-    pub fn cycleHunkViewMode(self: *App) !void {
-        // Only apply in unified mode
-        if (!self.shouldApplyHunkFiltering()) return;
-
-        // Capture anchor based on cursor position (for hunk cycling, cursor is the reference)
-        const anchor = self.captureViewportAnchor(self.state.global_cursor_line);
-
-        // Cycle to next mode
-        self.state.hunk_view_mode = self.state.hunk_view_mode.next();
-
-        // Rebuild LineMap to reflect new filtering
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-
-        // Restore positions from anchor
-        _ = self.restoreViewportFromAnchor(anchor);
-    }
-
-    // Helper: Find the global line number of a hunk header
-    fn findHunkHeaderLine(self: *App, file_idx: usize, hunk_idx: usize) ?usize {
-        for (self.state.line_map.records) |*record| {
-            if (record.file_idx == file_idx and record.line_type == .hunk_header) {
-                if (record.line_type.hunk_header.hunk_idx == hunk_idx) {
-                    return record.global_line;
-                }
-            }
-        }
-        return null;
-    }
-
-    // Helper: Find the global line number of a specific code line
-    fn findCodeLine(self: *App, file_idx: usize, hunk_idx: usize, line_idx_in_hunk: usize) ?usize {
-        for (self.state.line_map.records) |*record| {
-            if (record.file_idx == file_idx and record.line_type == .code_line) {
-                const code_info = record.line_type.code_line;
-                if (code_info.hunk_idx == hunk_idx and code_info.line_idx_in_hunk == line_idx_in_hunk) {
-                    return record.global_line;
-                }
-            }
-        }
-        return null;
-    }
-
-    /// Capture viewport anchor for preserving position across LineMap rebuilds.
-    /// Uses the viewport top (global_scroll_offset) as reference by default.
-    /// Pass a specific reference_line to anchor from a different position (e.g., cursor).
-    fn captureViewportAnchor(self: *App, reference_line: usize) ?ViewportAnchor {
-        const record = self.state.line_map.getLineRecord(reference_line) orelse return null;
-
-        var anchor_line: ?usize = null;
-        var anchor_file: usize = record.file_idx;
-        var anchor_hunk: ?usize = null;
-
-        switch (record.line_type) {
-            .file_header => {
-                anchor_line = reference_line;
-                anchor_hunk = null;
-            },
-            .hunk_header => |hunk_info| {
-                anchor_line = reference_line;
-                anchor_hunk = hunk_info.hunk_idx;
-            },
-            .code_line => |code_info| {
-                anchor_line = self.findHunkHeaderLine(record.file_idx, code_info.hunk_idx);
-                anchor_hunk = code_info.hunk_idx;
-            },
-            .comment_line => |comment_info| {
-                anchor_line = self.findHunkHeaderLine(record.file_idx, comment_info.parent_hunk_idx);
-                anchor_hunk = comment_info.parent_hunk_idx;
-            },
-            .spacer => |spacer_info| {
-                const next_file_idx = if (spacer_info.is_header_spacer)
-                    spacer_info.after_file_idx
-                else
-                    spacer_info.after_file_idx + 1;
-
-                anchor_file = next_file_idx;
-                anchor_line = self.state.line_map.getFileHeaderLine(next_file_idx);
-                anchor_hunk = null;
-            },
-        }
-
-        const anc_line = anchor_line orelse return null;
-        return ViewportAnchor{
-            .file_idx = anchor_file,
-            .hunk_idx = anchor_hunk,
-            .scroll_offset_from_anchor = @as(isize, @intCast(self.state.global_scroll_offset)) - @as(isize, @intCast(anc_line)),
-            .cursor_offset_from_anchor = @as(isize, @intCast(self.state.global_cursor_line)) - @as(isize, @intCast(anc_line)),
-        };
-    }
-
-    /// Restore viewport position from anchor after LineMap rebuild.
-    /// Returns true if anchor was found and positions restored, false if fallback clamping was used.
-    fn restoreViewportFromAnchor(self: *App, anchor: ?ViewportAnchor) bool {
-        const total_lines = self.getTotalGlobalLines();
-        if (total_lines == 0) {
-            self.state.global_cursor_line = 0;
-            self.state.global_scroll_offset = 0;
-            return false;
-        }
-
-        if (anchor) |anc| {
-            if (anc.file_idx < self.state.files.len) {
-                // Find anchor line in new LineMap
-                const new_anchor_line = if (anc.hunk_idx) |hunk_idx|
-                    self.findHunkHeaderLine(anc.file_idx, hunk_idx)
-                else
-                    self.state.line_map.getFileHeaderLine(anc.file_idx);
-
-                if (new_anchor_line) |anchor_line| {
-                    // Restore cursor position
-                    const target_cursor_signed = @as(isize, @intCast(anchor_line)) + anc.cursor_offset_from_anchor;
-                    const target_cursor = if (target_cursor_signed < 0) 0 else @as(usize, @intCast(target_cursor_signed));
-                    self.state.global_cursor_line = @min(target_cursor, total_lines - 1);
-
-                    // Restore scroll position
-                    const target_scroll_signed = @as(isize, @intCast(anchor_line)) + anc.scroll_offset_from_anchor;
-                    const target_scroll = if (target_scroll_signed < 0) 0 else @as(usize, @intCast(target_scroll_signed));
-                    self.state.global_scroll_offset = target_scroll;
-
-                    Navigation.clampScrollOffset(self);
-                    return true;
-                }
-            }
-        }
-
-        // Fallback: clamp positions if anchor restoration failed
-        if (self.state.global_cursor_line >= total_lines) {
-            self.state.global_cursor_line = total_lines - 1;
-        }
-        Navigation.clampScrollOffset(self);
-        return false;
-    }
-
-    // Convert App.State.HunkViewMode to LineMap.HunkViewMode
-    fn convertHunkViewMode(self: *App) line_map.LineMap.HunkViewMode {
-        return switch (self.state.hunk_view_mode) {
-            .all => .all,
-            .old => .old,
-            .new => .new,
-        };
-    }
-
-    // Check if hunk view mode filtering should be applied (only in unified view)
-    fn shouldApplyHunkFiltering(self: *App) bool {
-        return self.state.view_mode == .unified;
     }
 
     pub fn getTotalGlobalLines(self: *App) usize {
@@ -3074,460 +2244,6 @@ pub const App = struct {
                 }
             },
         }
-    }
-
-    pub fn startCommentInput(self: *App) !void {
-        // Get line record from LineMap
-        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
-
-        if (record.file_idx >= self.state.files.len) return;
-        const file = &self.state.files[record.file_idx];
-        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-        var target_hunk_idx: usize = undefined;
-        var target_line_idx: usize = undefined;
-        var existing_comment_idx: ?usize = null;
-
-        switch (record.line_type) {
-            .file_header, .hunk_header, .spacer => {
-                // Can't comment on these line types
-                return;
-            },
-            .code_line => |code| {
-                // Check if there's already a comment on this code line
-                target_hunk_idx = code.hunk_idx;
-                target_line_idx = code.line_idx_in_hunk;
-
-                // First check if there's an existing comment in the store
-                existing_comment_idx = self.state.comment_store.findCommentAt(
-                    file_path,
-                    target_hunk_idx,
-                    target_line_idx,
-                );
-
-                // If we found an existing comment, move cursor to the comment line
-                if (existing_comment_idx != null) {
-                    // Find the comment line in the LineMap (it should be right after this code line)
-                    const total_lines = self.state.line_map.getTotalLines();
-                    var search_line = self.state.global_cursor_line + 1;
-                    while (search_line < total_lines) : (search_line += 1) {
-                        if (self.state.line_map.getLineRecord(search_line)) |search_record| {
-                            if (search_record.line_type == .comment_line) {
-                                const comment_info = search_record.line_type.comment_line;
-                                if (comment_info.comment_idx == existing_comment_idx.?) {
-                                    // Found the comment line - move cursor to it
-                                    self.state.global_cursor_line = search_line;
-                                    break;
-                                }
-                            } else if (search_record.line_type != .spacer) {
-                                // Reached a non-spacer, non-comment line - stop searching
-                                break;
-                            }
-                        }
-                    }
-                }
-            },
-            .comment_line => |comment_info| {
-                // User pressed Enter on the comment line itself - edit that comment
-                target_hunk_idx = comment_info.parent_hunk_idx;
-                target_line_idx = comment_info.parent_line_idx;
-                existing_comment_idx = comment_info.comment_idx;
-            },
-        }
-
-        // Initialize input buffer
-        var input = comment_editor.CommentEditor.State{
-            .target_file_path = file_path,
-            .target_hunk_idx = target_hunk_idx,
-            .target_line_idx = target_line_idx,
-            .target_end_hunk_idx = null, // Single-line comment
-            .target_end_line_idx = null, // Single-line comment
-            .editing_comment_idx = existing_comment_idx,
-            .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
-        };
-
-        // If editing existing comment, load its text
-        if (existing_comment_idx) |idx| {
-            if (self.state.comment_store.getComment(idx)) |comment| {
-                input.vim.setText(comment.text);
-                input.vim.cursor_pos = input.vim.text_len; // Start cursor at end
-            }
-        }
-
-        self.state.active_comment_input = input;
-        self.mode = .comment;
-    }
-
-    pub fn startCommentInputForVisualSelection(self: *App) !void {
-        // Get visual selection range
-        const selection = self.getVisualSelection() orelse return;
-        const start_line = selection.start;
-        const end_line = selection.end;
-
-        // Get records for start and end lines
-        const start_record = self.state.line_map.getLineRecord(start_line) orelse return;
-        const end_record = self.state.line_map.getLineRecord(end_line) orelse return;
-
-        // Selection must be within the same file
-        if (start_record.file_idx != end_record.file_idx) {
-            return; // Can't comment across multiple files
-        }
-
-        // Can only comment on code lines
-        if (start_record.line_type != .code_line or end_record.line_type != .code_line) {
-            return;
-        }
-
-        const start_code = start_record.line_type.code_line;
-        const end_code = end_record.line_type.code_line;
-
-        // Selection must be within the same hunk
-        if (start_code.hunk_idx != end_code.hunk_idx) {
-            return; // Can't comment across multiple hunks
-        }
-
-        // Get file information from start line
-        if (start_record.file_idx >= self.state.files.len) return;
-        const file = &self.state.files[start_record.file_idx];
-        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-        // Check if selection is a single line
-        const is_single_line = (start_line == end_line);
-
-        // Initialize input buffer for range comment
-        const input = comment_editor.CommentEditor.State{
-            .target_file_path = file_path,
-            .target_hunk_idx = start_code.hunk_idx,
-            .target_line_idx = start_code.line_idx_in_hunk,
-            .target_end_hunk_idx = if (is_single_line) null else end_code.hunk_idx,
-            .target_end_line_idx = if (is_single_line) null else end_code.line_idx_in_hunk,
-            .editing_comment_idx = null, // Always creating new comment from visual mode
-            .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
-        };
-
-        self.state.active_comment_input = input;
-        self.mode = .comment;
-
-        // Move cursor to the end of the range (lowest selection point) where the comment will appear
-        self.state.global_cursor_line = end_line;
-
-        // Ensure the comment box is visible on screen
-        // Use extra padding to account for comment box height (starts with ~4 lines minimum)
-        Navigation.ensureCommentBoxVisible(self);
-
-        // Exit visual mode
-        self.state.visual_anchor = null;
-    }
-
-    pub fn saveCurrentComment(self: *App) !bool {
-        if (self.state.active_comment_input == null) return false;
-
-        const input = self.state.active_comment_input.?;
-        if (input.vim.text_len == 0) {
-            // Empty comment - delete if editing existing, otherwise do nothing
-            if (input.editing_comment_idx) |idx| {
-                try self.state.comment_store.deleteComment(idx);
-            }
-            return true;
-        }
-
-        const comment_text = input.vim.text_buffer[0..input.vim.text_len];
-
-        // Get line context for the comment
-        const file_idx = self.findFileIndexByPath(input.target_file_path) orelse {
-            self.showStatusMessage("Comment target file not found");
-            return false;
-        };
-        const file = &self.state.files[file_idx];
-        if (input.target_hunk_idx >= file.hunks.len) {
-            self.showStatusMessage("Comment target hunk not found");
-            return false;
-        }
-        const hunk = &file.hunks[input.target_hunk_idx];
-        if (input.target_line_idx >= hunk.lines.len) {
-            self.showStatusMessage("Comment target line not found");
-            return false;
-        }
-        const line = &hunk.lines[input.target_line_idx];
-
-        // Track the comment index for cursor positioning after save
-        var saved_comment_idx: usize = undefined;
-
-        if (input.editing_comment_idx) |idx| {
-            // Update existing comment
-            try self.state.comment_store.updateComment(idx, comment_text);
-            saved_comment_idx = idx;
-        } else {
-            // Check if this is a range comment
-            if (input.target_end_hunk_idx != null and input.target_end_line_idx != null) {
-                const end_hunk_idx = input.target_end_hunk_idx.?;
-                const end_line_idx = input.target_end_line_idx.?;
-                if (end_hunk_idx >= file.hunks.len) {
-                    self.showStatusMessage("Comment range hunk not found");
-                    return false;
-                }
-                const end_hunk = &file.hunks[end_hunk_idx];
-                if (end_line_idx >= end_hunk.lines.len) {
-                    self.showStatusMessage("Comment range line not found");
-                    return false;
-                }
-                // Add range comment
-                try self.state.comment_store.addRangeComment(
-                    input.target_file_path,
-                    input.target_hunk_idx,
-                    input.target_line_idx,
-                    end_hunk_idx,
-                    end_line_idx,
-                    comment_text,
-                    line.line_type,
-                    line.content,
-                    line.old_lineno,
-                    line.new_lineno,
-                );
-            } else {
-                // Add single-line comment
-                try self.state.comment_store.addComment(
-                    input.target_file_path,
-                    input.target_hunk_idx,
-                    input.target_line_idx,
-                    comment_text,
-                    line.line_type,
-                    line.content,
-                    line.old_lineno,
-                    line.new_lineno,
-                );
-            }
-            // New comment is at the end of the list
-            saved_comment_idx = self.state.comment_store.comments.items.len - 1;
-        }
-
-        // Rebuild LineMap since comment count changed
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-
-        // Move cursor to the saved comment so it can be easily yanked
-        if (self.state.line_map.findLineByCommentIdx(saved_comment_idx)) |comment_line| {
-            self.state.global_cursor_line = comment_line;
-        }
-        return true;
-    }
-
-    fn findFileIndexByPath(self: *App, target_path: []const u8) ?usize {
-        if (target_path.len == 0) return null;
-        for (self.state.files, 0..) |file, idx| {
-            if (std.mem.eql(u8, file.new_path, target_path) or std.mem.eql(u8, file.old_path, target_path)) {
-                return idx;
-            }
-        }
-        return null;
-    }
-
-    pub fn yankCurrentCommentToClipboard(self: *App) !void {
-        // Get line record from LineMap
-        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
-
-        switch (record.line_type) {
-            .comment_line => |comment_info| {
-                // Generate export with context (10 lines before, 10 lines after for LLM context)
-                const output = try self.state.comment_store.exportSingleCommentWithContext(
-                    self.allocator,
-                    comment_info.comment_idx,
-                    self.state.files,
-                    10, // lines before
-                    10, // lines after
-                );
-                defer self.allocator.free(output);
-
-                try clipboard.copyToClipboard(self.allocator, output);
-            },
-            else => {}, // Not on a comment line, do nothing
-        }
-    }
-
-    pub fn yankAllCommentsToClipboard(self: *App) !void {
-        // Generate export with context (10 lines before, 10 lines after for LLM context)
-        const output = try self.state.comment_store.exportWithContext(
-            self.allocator,
-            self.state.files,
-            10, // lines before
-            10, // lines after
-        );
-        defer self.allocator.free(output);
-
-        try clipboard.copyToClipboard(self.allocator, output);
-    }
-
-    /// Yank all comments and send to agent panel input
-    pub fn yankCommentsToAgent(self: *App) !void {
-        // Generate export with context (10 lines before, 10 lines after for LLM context)
-        const output = try self.state.comment_store.exportWithContext(
-            self.allocator,
-            self.state.files,
-            10, // lines before
-            10, // lines after
-        );
-        defer self.allocator.free(output);
-
-        if (output.len == 0) {
-            self.showStatusMessage("No comments to send");
-            return;
-        }
-
-        // Open agent panel if not already open
-        if (!self.isAgentPanelVisible()) {
-            try self.toggleAgentPanel();
-        }
-
-        // Set the input text in the active agent state
-        if (self.getActiveAgentState()) |agent_state| {
-            agent_state.input.setText(output);
-            // Switch to insert mode so user can add context
-            agent_state.input.vim.vim_mode = .insert;
-            // Move cursor to end
-            agent_state.input.vim.cursor_pos = agent_state.input.vim.text_len;
-        }
-
-        self.needs_render = true;
-    }
-
-    pub fn deleteCommentUnderCursor(self: *App) !void {
-        // Get line record from LineMap
-        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
-
-        switch (record.line_type) {
-            .comment_line => |comment_info| {
-                const parent_file_idx = record.file_idx;
-                const parent_hunk_idx = comment_info.parent_hunk_idx;
-                const parent_line_idx = comment_info.parent_line_idx;
-
-                // Capture positions BEFORE deletion
-                const old_parent_pos = self.findCodeLine(parent_file_idx, parent_hunk_idx, parent_line_idx);
-                const old_scroll = self.state.global_scroll_offset;
-                const comment_line = self.state.global_cursor_line; // cursor is on the comment
-
-                // Delete the comment
-                try self.state.comment_store.deleteComment(comment_info.comment_idx);
-
-                // Rebuild LineMap since comment count changed
-                self.state.line_map.deinit();
-                self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-
-                const total_lines = self.getTotalGlobalLines();
-                if (total_lines == 0) {
-                    self.state.global_cursor_line = 0;
-                    self.state.global_scroll_offset = 0;
-                    return;
-                }
-
-                // Find parent in new LineMap (position unchanged since it's above the deleted comment)
-                if (self.findCodeLine(parent_file_idx, parent_hunk_idx, parent_line_idx)) |new_parent_line| {
-                    self.state.global_cursor_line = new_parent_line;
-
-                    // Determine scroll position based on where scroll was relative to parent/comment
-                    if (old_parent_pos) |parent_pos| {
-                        if (old_scroll <= parent_pos) {
-                            // Scroll was at or before parent - content at scroll unchanged
-                            self.state.global_scroll_offset = old_scroll;
-                        } else if (old_scroll <= comment_line) {
-                            // Scroll was between parent and comment (or on comment)
-                            // Show parent at top (cursor is there anyway)
-                            self.state.global_scroll_offset = new_parent_line;
-                        } else {
-                            // Scroll was AFTER the comment - content shifted up by 1
-                            // Reduce scroll by 1 to show same visual content
-                            self.state.global_scroll_offset = if (old_scroll > 0) old_scroll - 1 else 0;
-                        }
-                    } else {
-                        // Couldn't find old parent, keep scroll at same position minus 1
-                        self.state.global_scroll_offset = if (old_scroll > 0) old_scroll - 1 else 0;
-                    }
-
-                    // Clamp to valid range
-                    if (self.state.global_scroll_offset >= total_lines) {
-                        self.state.global_scroll_offset = total_lines - 1;
-                    }
-                } else {
-                    // Fallback: keep cursor and scroll in valid range
-                    self.state.global_cursor_line = @min(self.state.global_cursor_line, total_lines - 1);
-                    self.state.global_scroll_offset = @min(old_scroll, total_lines - 1);
-                }
-
-                Navigation.clampScrollOffset(self);
-            },
-            else => {
-                // Not on a comment line - do nothing
-                return;
-            },
-        }
-    }
-
-    pub fn toggleCommentUnderCursorExpanded(self: *App) void {
-        // Get line record from LineMap
-        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
-
-        switch (record.line_type) {
-            .comment_line => |comment_info| {
-                self.toggleCommentExpanded(comment_info.comment_idx);
-                self.needs_render = true;
-            },
-            else => {
-                // Not on a comment line - do nothing
-                return;
-            },
-        }
-    }
-
-    pub fn clearAllComments(self: *App) !void {
-        // Count comments above the current scroll position (these affect viewport)
-        var comments_above_scroll: usize = 0;
-        var comments_above_cursor: usize = 0;
-        for (self.state.line_map.records) |*record| {
-            if (record.line_type == .comment_line) {
-                if (record.global_line < self.state.global_scroll_offset) {
-                    comments_above_scroll += 1;
-                }
-                if (record.global_line < self.state.global_cursor_line) {
-                    comments_above_cursor += 1;
-                }
-            }
-        }
-
-        self.state.comment_store.clearAll();
-
-        // Rebuild LineMap since comment count changed
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-
-        // Adjust scroll and cursor to account for removed comments above them
-        const total_lines = self.getTotalGlobalLines();
-        if (total_lines == 0) {
-            self.state.global_scroll_offset = 0;
-            self.state.global_cursor_line = 0;
-            return;
-        }
-
-        // Reduce positions by the number of comments that were above them
-        if (self.state.global_scroll_offset >= comments_above_scroll) {
-            self.state.global_scroll_offset -= comments_above_scroll;
-        } else {
-            self.state.global_scroll_offset = 0;
-        }
-
-        if (self.state.global_cursor_line >= comments_above_cursor) {
-            self.state.global_cursor_line -= comments_above_cursor;
-        } else {
-            self.state.global_cursor_line = 0;
-        }
-
-        // Clamp to valid range
-        if (self.state.global_scroll_offset >= total_lines) {
-            self.state.global_scroll_offset = total_lines - 1;
-        }
-        if (self.state.global_cursor_line >= total_lines) {
-            self.state.global_cursor_line = total_lines - 1;
-        }
-
-        Navigation.clampScrollOffset(self);
     }
 
     pub fn openInEditor(self: *App) !void {
@@ -3730,7 +2446,7 @@ pub const App = struct {
                     }
                 }
                 // Reload agents and show selection
-                self.state.configured_agents = self.loadConfiguredAgents();
+                self.state.configured_agents = connect.loadConfiguredAgents(self);
                 self.state.agent_selection_idx = 0;
                 self.mode = .agent_selection;
             },
@@ -3738,200 +2454,43 @@ pub const App = struct {
                 try self.startCommitSelection();
             },
             .enter_pr_review => {
-                try self.startPrListLoad();
+                try pr_controller.startListLoad(&self.state.pr, self.allocator);
                 self.mode = .pr_review;
             },
         }
     }
 
+    /// Open the branch picker. Thin cross-cutting forwarder: gates on git repo
+    /// context, resets/loads the sub-state via the controller, then owns the
+    /// App mode transition.
     pub fn startBranchSelection(self: *App) !void {
         if (!try self.ensureGitRepositoryContext()) return;
 
-        // Free old branch list
-        for (self.state.branch_list) |branch| {
-            self.allocator.free(branch);
-        }
-        self.allocator.free(self.state.branch_list);
-
-        // Fetch branches
-        self.state.branch_list = try git.getBranches(self.allocator);
-        self.state.branch_selection = 0;
-        self.state.branch_search_len = 0;
-
-        // Initialize filtered list with all branches
-        try self.filterBranches();
+        try branch_selection_mode.start(&self.state.branch_select, self.allocator);
 
         self.mode = .branch_selection;
-    }
-
-    pub fn filterBranches(self: *App) !void {
-        self.state.filtered_branches.clearRetainingCapacity();
-
-        const query = self.state.branch_search_query[0..self.state.branch_search_len];
-
-        // If no query, show all branches
-        if (query.len == 0) {
-            for (self.state.branch_list, 0..) |_, idx| {
-                try self.state.filtered_branches.append(self.allocator, idx);
-            }
-            return;
-        }
-
-        // Case-insensitive search
-        for (self.state.branch_list, 0..) |branch, idx| {
-            if (self.matchesBranchQuery(branch, query)) {
-                try self.state.filtered_branches.append(self.allocator, idx);
-            }
-        }
-
-        // Clamp selection to filtered list
-        if (self.state.filtered_branches.items.len > 0 and self.state.branch_selection >= self.state.filtered_branches.items.len) {
-            self.state.branch_selection = self.state.filtered_branches.items.len - 1;
-        }
-    }
-
-    fn matchesBranchQuery(self: *App, branch: []const u8, query: []const u8) bool {
-        _ = self;
-        // Simple case-insensitive substring match
-        if (branch.len < query.len) return false;
-
-        var i: usize = 0;
-        while (i <= branch.len - query.len) : (i += 1) {
-            var matches = true;
-            for (query, 0..) |qc, j| {
-                const bc = branch[i + j];
-                const qc_lower = if (qc >= 'A' and qc <= 'Z') qc + 32 else qc;
-                const bc_lower = if (bc >= 'A' and bc <= 'Z') bc + 32 else bc;
-                if (qc_lower != bc_lower) {
-                    matches = false;
-                    break;
-                }
-            }
-            if (matches) return true;
-        }
-        return false;
     }
 
     // =========================================================================
     // Commit Selection
     // =========================================================================
 
-    const COMMIT_BATCH_SIZE: usize = 50;
-
+    /// Open the commit picker. Thin cross-cutting forwarder: gates on git repo
+    /// context, resets/loads the sub-state via the controller, then owns the
+    /// App mode transition.
     pub fn startCommitSelection(self: *App) !void {
         if (!try self.ensureGitRepositoryContext()) return;
 
-        // Free old commit list
-        for (self.state.commit_list.items) |*commit| {
-            commit.deinit(self.allocator);
-        }
-        self.state.commit_list.clearRetainingCapacity();
-
-        // Reset state
-        self.state.commit_selection = 0;
-        self.state.commit_search_len = 0;
-        self.state.commits_loaded_count = 0;
-        self.state.commits_loading = false;
-
-        // Load first batch of commits
-        try self.loadMoreCommits();
-
-        // Initialize filtered list
-        try self.filterCommits();
+        try commit_selection_mode.start(&self.state.commit_select, self.allocator);
 
         self.mode = .commit_selection;
     }
 
-    pub fn loadMoreCommits(self: *App) !void {
-        if (self.state.commits_loading) return;
-
-        self.state.commits_loading = true;
-        defer self.state.commits_loading = false;
-
-        const new_commits = git.getCommits(self.allocator, self.state.commits_loaded_count, COMMIT_BATCH_SIZE) catch |err| {
-            std.log.err("Failed to load commits: {}", .{err});
-            return;
-        };
-        errdefer {
-            for (new_commits) |*c| c.deinit(self.allocator);
-            self.allocator.free(new_commits);
-        }
-
-        // Append to commit list
-        for (new_commits) |commit| {
-            try self.state.commit_list.append(self.allocator, commit);
-        }
-        self.allocator.free(new_commits);
-
-        self.state.commits_loaded_count += COMMIT_BATCH_SIZE;
-
-        // Update filtered list
-        try self.filterCommits();
-    }
-
-    pub fn filterCommits(self: *App) !void {
-        self.state.filtered_commits.clearRetainingCapacity();
-
-        const query = self.state.commit_search_query[0..self.state.commit_search_len];
-
-        // If no query, show all commits
-        if (query.len == 0) {
-            for (self.state.commit_list.items, 0..) |_, idx| {
-                try self.state.filtered_commits.append(self.allocator, idx);
-            }
-        } else {
-            // Filter by hash, subject, author (case-insensitive)
-            for (self.state.commit_list.items, 0..) |commit, idx| {
-                if (self.matchesCommitQuery(commit, query)) {
-                    try self.state.filtered_commits.append(self.allocator, idx);
-                }
-            }
-        }
-
-        // Clamp selection to filtered list
-        if (self.state.filtered_commits.items.len > 0 and self.state.commit_selection >= self.state.filtered_commits.items.len) {
-            self.state.commit_selection = self.state.filtered_commits.items.len - 1;
-        }
-    }
-
-    fn matchesCommitQuery(self: *App, commit: git.CommitInfo, query: []const u8) bool {
-        _ = self;
-        // Case-insensitive substring match on hash, subject, author
-        return containsIgnoreCase(commit.hash, query) or
-            containsIgnoreCase(commit.short_hash, query) or
-            containsIgnoreCase(commit.subject, query) or
-            containsIgnoreCase(commit.author, query);
-    }
-
-    /// Select a commit and show diff mode submenu
-    pub fn selectCommitForDiff(self: *App) !void {
-        const filtered_count = self.state.filtered_commits.items.len;
-        if (filtered_count == 0) return;
-
-        const filtered_idx = self.state.filtered_commits.items[self.state.commit_selection];
-        const commit = self.state.commit_list.items[filtered_idx];
-
-        // Free any existing selected commit
-        if (self.state.selected_commit_for_diff) |*old_commit| {
-            old_commit.deinit(self.allocator);
-        }
-
-        // Make a copy of the selected commit
-        self.state.selected_commit_for_diff = .{
-            .hash = try self.allocator.dupe(u8, commit.hash),
-            .short_hash = try self.allocator.dupe(u8, commit.short_hash),
-            .subject = try self.allocator.dupe(u8, commit.subject),
-            .author = try self.allocator.dupe(u8, commit.author),
-            .date = try self.allocator.dupe(u8, commit.date),
-        };
-
-        self.state.commit_diff_mode_selection = 0;
-        self.mode = .commit_diff_mode;
-    }
-
-    /// Apply the selected diff mode with the chosen commit
+    /// Apply the selected diff mode with the chosen commit. Cross-cutting:
+    /// rebuilds `state.diff_source` and drives an App refresh, so it stays here
+    /// rather than in the commit-selection controller.
     pub fn applyCommitDiff(self: *App) !void {
-        const commit = self.state.selected_commit_for_diff orelse return;
+        const commit = self.state.commit_select.selected_for_diff orelse return;
 
         // Free old diff_source if needed
         switch (self.state.diff_source) {
@@ -3945,7 +2504,7 @@ pub const App = struct {
             },
         }
 
-        if (self.state.commit_diff_mode_selection == 0) {
+        if (self.state.commit_select.diff_mode_selection == 0) {
             // Option 0: HEAD vs selected commit (changes from commit to HEAD)
             const commit_ref = try self.allocator.dupe(u8, commit.hash);
             errdefer self.allocator.free(commit_ref);
@@ -3975,9 +2534,9 @@ pub const App = struct {
         }
 
         // Free the selected commit
-        if (self.state.selected_commit_for_diff) |*c| {
+        if (self.state.commit_select.selected_for_diff) |*c| {
             c.deinit(self.allocator);
-            self.state.selected_commit_for_diff = null;
+            self.state.commit_select.selected_for_diff = null;
         }
 
         // Go back to normal mode and refresh
@@ -3986,308 +2545,16 @@ pub const App = struct {
         try self.refresh();
     }
 
-    // Menu stats async fetching
-
-    /// Context passed to the stats fetching thread
-    const MenuStatsContext = struct {
-        app: *App,
-    };
-
-    /// Start async fetching of menu stats (non-blocking)
-    /// Call this on first render of empty menu, then check menu_stats_cached on subsequent renders
-    pub fn startMenuStatsFetch(self: *App) void {
-        if (self.state.menu_stats_cached or self.state.menu_stats_loading) return;
-
-        self.state.menu_stats_loading = true;
-
-        // Spawn detached thread to fetch stats
-        const thread = std.Thread.spawn(.{}, menuStatsFetchWorker, .{self}) catch {
-            // If thread spawn fails, fall back to sync fetch
-            self.state.menu_stats_loading = false;
-            self.fetchMenuStatsSync();
-            return;
-        };
-        thread.detach();
-    }
-
-    /// Worker thread that fetches menu stats in background
-    fn menuStatsFetchWorker(self: *App) void {
-        // Use a thread-local allocator for git operations
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        defer _ = gpa.deinit();
-        const alloc = gpa.allocator();
-
-        // Fetch stats using thread-local allocator
-        const working = git.getDiffStats(alloc, .{ .working_dir = .{ .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
-        const staged = git.getDiffStats(alloc, .{ .working_dir = .{ .staged = true } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
-
-        // Detect default branch
-        var default_branch: []const u8 = "main";
-        var branch_allocated = false;
-        if (git.detectDefaultBranch(alloc)) |branch| {
-            default_branch = branch;
-            branch_allocated = true;
-        } else |_| {}
-        defer if (branch_allocated) alloc.free(default_branch);
-
-        const main_stats = git.getDiffStats(alloc, .{ .single_ref = .{ .ref = default_branch, .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
-
-        // Copy default branch name to app's allocator (for long-term storage)
-        const branch_copy = self.allocator.dupe(u8, default_branch) catch null;
-
-        // Write results to app state
-        // Note: This is safe because we only read these when menu_stats_cached is true
-        self.state.working_stats = working;
-        self.state.staged_stats = staged;
-        self.state.main_stats = main_stats;
-        self.state.default_branch_name = branch_copy;
-        self.state.menu_stats_cached = true;
-        self.state.menu_stats_loading = false;
-
-        // Trigger re-render so stats appear without user input
-        self.needs_render = true;
-    }
-
-    /// Synchronous fallback for stats fetching (used if thread spawn fails)
-    fn fetchMenuStatsSync(self: *App) void {
-        self.state.working_stats = git.getDiffStats(self.allocator, .{ .working_dir = .{ .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
-        self.state.staged_stats = git.getDiffStats(self.allocator, .{ .working_dir = .{ .staged = true } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
-
-        var default_branch: []const u8 = "main";
-        var branch_allocated = false;
-        if (git.detectDefaultBranch(self.allocator)) |branch| {
-            default_branch = branch;
-            branch_allocated = true;
-        } else |_| {}
-
-        self.state.main_stats = git.getDiffStats(self.allocator, .{ .single_ref = .{ .ref = default_branch, .staged = false } }) catch git.DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
-
-        // Store branch name (take ownership if allocated, otherwise dupe)
-        if (branch_allocated) {
-            self.state.default_branch_name = default_branch;
-        } else {
-            self.state.default_branch_name = self.allocator.dupe(u8, default_branch) catch null;
-        }
-
-        self.state.menu_stats_cached = true;
-    }
-
-    // Subagent modal fetch
-
-    /// Start async fetch of subagent session messages for the drill-in modal.
-    /// Opens the modal in loading state and spawns a background thread.
-    pub fn startSubagentModalFetch(self: *App, session_id: []const u8, title: []const u8) void {
-        const agent_state = self.getActiveAgentState() orelse return;
-
-        // Get base_url from the active opencode manager
-        const mgr = self.getActiveOpencodeManager() orelse return;
-        const base_url = mgr.base_url orelse return;
-
-        // Open modal in loading state
-        agent_state.openSubagentModal(session_id, title) catch |err| {
-            std.log.err("Failed to open subagent modal: {}", .{err});
-            return;
-        };
-
-        // Create context for the fetch thread
-        // Use c_allocator since the worker thread frees with c_allocator
-        const ctx = std.heap.c_allocator.create(SubagentFetchContext) catch return;
-        ctx.* = .{
-            .app = self,
-            .base_url = std.heap.c_allocator.dupe(u8, base_url) catch {
-                std.heap.c_allocator.destroy(ctx);
-                return;
-            },
-            .session_id = std.heap.c_allocator.dupe(u8, session_id) catch {
-                std.heap.c_allocator.free(ctx.base_url);
-                std.heap.c_allocator.destroy(ctx);
-                return;
-            },
-        };
-
-        const thread = std.Thread.spawn(.{}, subagentFetchWorker, .{ctx}) catch {
-            // On thread spawn failure, show error in modal
-            if (agent_state.getSubagentModal()) |modal| {
-                modal.loading = false;
-                modal.error_message = self.allocator.dupe(u8, "Failed to start fetch thread") catch null;
-            }
-            ctx.deinit(std.heap.c_allocator);
-            std.heap.c_allocator.destroy(ctx);
-            return;
-        };
-        thread.detach();
-
-        self.needs_render = true;
-    }
-
-    /// Worker thread that fetches subagent session messages.
-    /// Stores result in pending_subagent_fetch for main-thread processing (avoids data race).
-    fn subagentFetchWorker(ctx: *SubagentFetchContext) void {
-        const app = ctx.app;
-        const pending = &app.pending_subagent_fetch;
-
-        // Create a temporary client for the fetch
-        var client = opencode.Client.init(std.heap.c_allocator, ctx.base_url) catch {
-            pending.mutex.lock();
-            pending.error_message = "Failed to connect to server";
-            pending.mutex.unlock();
-            pending.ready.store(true, .release);
-            app.needs_render = true;
-            ctx.deinit(std.heap.c_allocator);
-            std.heap.c_allocator.destroy(ctx);
-            return;
-        };
-        defer client.deinit();
-
-        const modal_messages = client.fetchSessionMessages(ctx.session_id) catch |err| {
-            const err_msg: []const u8 = switch (err) {
-                error.SessionNotFound => "Session not found",
-                error.ConnectionFailed => "Connection failed",
-                error.ServerError => "Server error",
-                error.InvalidResponse => "Invalid response from server",
-                else => "Failed to fetch messages",
-            };
-            std.log.err("Subagent fetch failed: {s} ({})", .{ err_msg, err });
-            pending.mutex.lock();
-            pending.error_message = err_msg;
-            pending.mutex.unlock();
-            pending.ready.store(true, .release);
-            app.needs_render = true;
-            ctx.deinit(std.heap.c_allocator);
-            std.heap.c_allocator.destroy(ctx);
-            return;
-        };
-
-        pending.mutex.lock();
-        pending.messages = modal_messages;
-        pending.mutex.unlock();
-        pending.ready.store(true, .release);
-        app.needs_render = true;
-        ctx.deinit(std.heap.c_allocator);
-        std.heap.c_allocator.destroy(ctx);
-    }
-
-    /// Poll for completed subagent fetch and process on main thread.
-    /// This avoids the data race of modifying modal.messages from the worker thread.
-    fn pollSubagentFetch(self: *App) void {
-        if (!self.pending_subagent_fetch.ready.load(.acquire)) return;
-
-        // Take pending data under mutex
-        self.pending_subagent_fetch.mutex.lock();
-        const messages = self.pending_subagent_fetch.messages;
-        const err_msg = self.pending_subagent_fetch.error_message;
-        self.pending_subagent_fetch.messages = null;
-        self.pending_subagent_fetch.error_message = null;
-        self.pending_subagent_fetch.mutex.unlock();
-        self.pending_subagent_fetch.ready.store(false, .release);
-
-        processSubagentFetchResult(self, messages, err_msg);
-    }
-
-    /// Process fetched subagent messages on the main thread (safe to modify modal state).
-    fn processSubagentFetchResult(app: *App, modal_messages: ?[]opencode.Client.ModalMessage, err_msg: ?[]const u8) void {
-        const agent_state = app.getActiveAgentState() orelse {
-            // Modal was closed while fetch was in progress — free the messages
-            if (modal_messages) |msgs| {
-                for (msgs) |*m| m.deinit(std.heap.c_allocator);
-                std.heap.c_allocator.free(msgs);
-            }
-            return;
-        };
-
-        const modal = agent_state.getSubagentModal() orelse {
-            if (modal_messages) |msgs| {
-                for (msgs) |*m| m.deinit(std.heap.c_allocator);
-                std.heap.c_allocator.free(msgs);
-            }
-            return;
-        };
-
-        modal.loading = false;
-
-        if (err_msg) |msg| {
-            modal.error_message = agent_state.allocator.dupe(u8, msg) catch null;
-        } else if (modal_messages) |msgs| {
-            // Convert ModalMessages to Messages for ChatLineMap rendering
-            for (msgs) |*m| {
-                const alloc = agent_state.allocator;
-                switch (m.role) {
-                    .user => {
-                        const content = if (m.content) |c|
-                            alloc.dupe(u8, c) catch continue
-                        else
-                            alloc.dupe(u8, "") catch continue;
-                        modal.messages.append(alloc, .{
-                            .role = .user,
-                            .content = content,
-                            .timestamp = 0,
-                        }) catch {
-                            alloc.free(content);
-                        };
-                    },
-                    .assistant => {
-                        const content = if (m.content) |c|
-                            alloc.dupe(u8, c) catch continue
-                        else
-                            alloc.dupe(u8, "") catch continue;
-                        modal.messages.append(alloc, .{
-                            .role = .agent,
-                            .content = content,
-                            .timestamp = 0,
-                        }) catch {
-                            alloc.free(content);
-                        };
-                    },
-                    .tool => {
-                        const display = m.tool_title orelse m.tool_name orelse "Tool";
-                        const content = alloc.dupe(u8, display) catch continue;
-                        const duped_name = if (m.tool_name) |n| (alloc.dupe(u8, n) catch null) else null;
-                        modal.messages.append(alloc, .{
-                            .role = .tool,
-                            .content = content,
-                            .tool_name = duped_name,
-                            .tool_status = .completed,
-                            .timestamp = 0,
-                        }) catch {
-                            alloc.free(content);
-                            if (duped_name) |name| alloc.free(name);
-                        };
-                    },
-                }
-
-                // Free the originals (owned by c_allocator)
-                m.deinit(std.heap.c_allocator);
-            }
-            std.heap.c_allocator.free(msgs);
-            modal.line_map_dirty = true;
-        }
-
-        app.needs_render = true;
-    }
-
     // Graphite stack functions
 
-    /// Lazy graphite detection - only runs once on first access
-    /// This avoids blocking startup with `which gt` and `gt state` calls
-    pub fn ensureGraphiteDetected(self: *App) void {
-        if (self.state.graphite_detected) return;
-
-        self.state.graphite_detected = true;
-        self.state.graphite_available = graphite.isGraphiteAvailable(self.allocator);
-
-        if (self.state.graphite_available) {
-            if (graphite.getGraphiteStack(self.allocator) catch null) |stack| {
-                self.state.graphite_stack = stack;
-            }
-        }
-    }
-
+    /// Open the Graphite stack picker. Thin cross-cutting forwarder: runs lazy
+    /// detection via the controller, then owns App mode/status transitions.
     pub fn startGraphiteStack(self: *App) !void {
         if (!try self.ensureGitRepositoryContext()) return;
 
-        self.ensureGraphiteDetected();
+        graphite_controller.ensureDetected(&self.state.graphite, self.allocator);
 
-        if (!self.state.graphite_available) {
+        if (!self.state.graphite.available) {
             self.state.status_message = "Graphite CLI (gt) not installed";
             self.state.status_message_time = std.time.milliTimestamp();
             return;
@@ -4295,8 +2562,8 @@ pub const App = struct {
 
         // Use cached stack - don't re-fetch (that's slow)
         // Stack is refreshed on app refresh ('r' key)
-        if (self.state.graphite_stack) |stack| {
-            self.state.graphite_stack_selection = stack.current_idx;
+        if (self.state.graphite.stack) |stack| {
+            self.state.graphite.selection = stack.current_idx;
             self.mode = .graphite_stack;
         } else {
             self.state.status_message = "Not in a Graphite stack";
@@ -4304,151 +2571,42 @@ pub const App = struct {
         }
     }
 
-    /// Refresh the graphite stack (called on app refresh)
-    /// Only re-fetches if a graphite stack was already loaded to avoid unnecessary
-    /// process spawns when not using graphite mode.
-    pub fn refreshGraphiteStack(self: *App) void {
-        // Skip if graphite hasn't been detected or isn't available
-        if (!self.state.graphite_detected or !self.state.graphite_available) return;
-
-        // Only re-fetch if we already had a graphite stack loaded
-        // This avoids blocking when not using graphite mode
-        if (self.state.graphite_stack == null) return;
-
-        // Free old stack
-        if (self.state.graphite_stack) |*old_stack| {
-            old_stack.deinit(self.allocator);
-            self.state.graphite_stack = null;
-        }
-
-        // Re-fetch stack
-        if (graphite.getGraphiteStack(self.allocator) catch null) |stack| {
-            self.state.graphite_stack = stack;
-        }
-    }
-
     // =========================================================================
     // PR Review (native `skim pr` / `:pr`)
     // =========================================================================
 
-    /// Begin (or restart) a background load of the open PR list. Paints the
-    /// last-known cached list instantly (stale-while-revalidate), then refreshes
-    /// off-thread so a slow `gh` never freezes the UI.
-    pub fn startPrListLoad(self: *App) !void {
-        if (self.pr_fetch_in_flight) return;
-        if (self.pr_cache_key == null) self.pr_cache_key = pr.cache.keyFor(self.allocator);
-        self.loadPrsFromCache();
-        self.pr_fetch_in_flight = true;
-        self.setPrMessage("");
-        self.pr_fetch_thread = std.Thread.spawn(.{}, prFetchWorker, .{self}) catch {
-            self.pr_fetch_in_flight = false;
-            self.setPrMessage("failed to start PR loader");
-            return;
-        };
-    }
-
-    fn prFetchWorker(self: *App) void {
-        const ca = std.heap.c_allocator;
-        var failed = false;
-        var list: ?pr.PullRequestList = null;
-        if (pr.github.listPullRequestsRaw(ca)) |raw| {
-            defer ca.free(raw);
-            if (self.pr_cache_key) |key| pr.cache.write(ca, key, raw) catch {};
-            if (pr.parse.parse(ca, raw)) |parsed| {
-                list = parsed;
-            } else |_| {
-                failed = true;
-            }
-        } else |_| {
-            failed = true;
-        }
-
-        self.pr_fetch.mutex.lock();
-        if (self.pr_fetch.result) |*stale| stale.deinit();
-        self.pr_fetch.result = list;
-        self.pr_fetch.failed = failed;
-        self.pr_fetch.mutex.unlock();
-        self.pr_fetch.ready.store(true, .release);
-    }
-
-    fn pollPendingPrFetch(self: *App) void {
-        if (!self.pr_fetch.ready.load(.acquire)) return;
-
-        self.pr_fetch.mutex.lock();
-        const maybe = self.pr_fetch.result;
-        const failed = self.pr_fetch.failed;
-        self.pr_fetch.result = null;
-        self.pr_fetch.failed = false;
-        self.pr_fetch.mutex.unlock();
-        self.pr_fetch.ready.store(false, .release);
-
-        if (self.pr_fetch_thread) |t| {
-            t.join();
-            self.pr_fetch_thread = null;
-        }
-        self.pr_fetch_in_flight = false;
-
-        if (maybe) |list| {
-            if (self.state.pr.list) |*old| old.deinit();
-            self.state.pr.list = list;
-            self.rebuildPrStacks();
-            self.rebuildPrFilter();
-            // The author overlay aliases the arena we just freed; rebuild it
-            // against the fresh PRs before anything reads it.
-            if (self.state.pr.picking_author) self.refreshPrAuthorList();
-            self.setPrMessage("");
-        } else if (failed) {
-            self.setPrMessage("failed to load PRs — is gh installed and authenticated?");
-        }
-        self.needs_render = true;
-    }
-
-    fn loadPrsFromCache(self: *App) void {
-        const key = self.pr_cache_key orelse return;
-        const raw = (pr.cache.read(self.allocator, key) catch return) orelse return;
-        defer self.allocator.free(raw);
-        const list = pr.parse.parse(self.allocator, raw) catch return;
-        if (self.state.pr.list) |*old| old.deinit();
-        self.state.pr.list = list;
-        self.rebuildPrStacks();
-        self.rebuildPrFilter();
-    }
-
-    /// Recompute the stacked-PR grouping for the current list. Stack data is
-    /// purely index-based, so it's cheap to rebuild and independent of the
-    /// list's string arena.
-    fn rebuildPrStacks(self: *App) void {
-        const p = &self.state.pr;
-        if (p.analysis) |*a| a.deinit(self.allocator);
-        p.analysis = null;
-        if (p.order.len > 0) self.allocator.free(p.order);
-        p.order = &.{};
-
-        const list = p.list orelse return;
-        var analysis = pr.stack.analyze(self.allocator, list.items) catch return;
-        const order = pr.stack.displayOrder(self.allocator, list.items, analysis) catch {
-            analysis.deinit(self.allocator);
-            return;
-        };
-        p.analysis = analysis;
-        p.order = order;
+    /// Force an immediate synchronous repaint from inside an event handler, so a
+    /// loading indicator lands on screen before a blocking operation freezes the
+    /// event loop. No-op (and never fails) in headless mode.
+    fn renderNow(self: *App) void {
+        const vx = &(self.vx orelse return);
+        const tty = &(self.tty orelse return);
+        const win = vx.window();
+        frame.render(self, win) catch return;
+        vx.render(tty.writer()) catch return;
     }
 
     /// Review the highlighted PR natively: fetch its head + base into local refs
     /// (no worktree) and swap the diff to `origin/<base>...refs/skim/pr-<n>`.
     pub fn reviewSelectedPr(self: *App) !void {
-        const pull = self.selectedPr() orelse return;
+        const pull = pr_controller.selected(&self.state.pr) orelse return;
         try self.selectPullRequest(pull);
     }
 
     pub fn selectPullRequest(self: *App, pull: pr.PullRequest) !void {
-        self.setPrMessage("");
+        // Fetching the PR's refs blocks the event loop on a network `git fetch`,
+        // so paint a loading indicator first — otherwise the picker just freezes
+        // between Enter and the diff appearing.
+        var msg_buf: [64]u8 = undefined;
+        const loading = std.fmt.bufPrint(&msg_buf, "Loading PR #{d}…", .{pull.number}) catch "Loading PR…";
+        pr_controller.setMessage(&self.state.pr, loading);
+        self.renderNow();
 
         const head_ref_name = pr.github.fetchRef(self.allocator, .{
             .number = pull.number,
             .base_ref = pull.base_ref,
         }) catch {
-            self.setPrMessage("fetch failed — is gh/git authenticated?");
+            pr_controller.setMessage(&self.state.pr, "fetch failed — is gh/git authenticated?");
             self.needs_render = true;
             return;
         };
@@ -4478,242 +2636,32 @@ pub const App = struct {
             .use_merge_base = true,
         } };
 
+        pr_controller.setMessage(&self.state.pr, "");
         self.state.pager_mode = false;
         self.mode = .normal;
         try self.refresh();
     }
 
-    pub fn rebuildPrFilter(self: *App) void {
-        const p = &self.state.pr;
-        p.filtered.clearRetainingCapacity();
-        const list = p.list orelse return;
-        // Walk the stack-grouped order when available so stacked PRs stay
-        // contiguous (and their connector glyphs connect); otherwise fall back
-        // to the list's natural order.
-        if (p.order.len == list.items.len) {
-            for (p.order) |idx| {
-                if (pr.filter.matchesFilters(list.items[idx], p.query(), p.authorFilter())) {
-                    p.filtered.append(self.allocator, idx) catch {};
-                }
-            }
-        } else {
-            for (list.items, 0..) |pull, i| {
-                if (pr.filter.matchesFilters(pull, p.query(), p.authorFilter())) {
-                    p.filtered.append(self.allocator, i) catch {};
-                }
-            }
-        }
-        if (p.filtered.items.len == 0) {
-            p.selection = 0;
-        } else if (p.selection >= p.filtered.items.len) {
-            p.selection = p.filtered.items.len - 1;
-        }
-    }
-
-    pub fn prMove(self: *App, delta: isize) void {
-        const p = &self.state.pr;
-        const len = p.filtered.items.len;
-        if (len == 0) return;
-        const cur: isize = @intCast(p.selection);
-        const max: isize = @intCast(len - 1);
-        p.selection = @intCast(std.math.clamp(cur + delta, 0, max));
-    }
-
-    /// Keep the selected row within the visible window. `rows` is the list
-    /// viewport height (window height minus header and status rows).
-    pub fn clampPrScroll(self: *App, rows: usize) void {
-        const p = &self.state.pr;
-        if (rows == 0) return;
-        if (p.picking_author) {
-            if (p.author_selection < p.author_scroll) {
-                p.author_scroll = p.author_selection;
-            } else if (p.author_selection >= p.author_scroll + rows) {
-                p.author_scroll = p.author_selection - rows + 1;
-            }
-            return;
-        }
-        if (p.selection < p.scroll) {
-            p.scroll = p.selection;
-        } else if (p.selection >= p.scroll + rows) {
-            p.scroll = p.selection - rows + 1;
-        }
-    }
-
-    pub fn selectedPr(self: *const App) ?pr.PullRequest {
-        const p = &self.state.pr;
-        if (p.filtered.items.len == 0) return null;
-        const list = p.list orelse return null;
-        if (p.selection >= p.filtered.items.len) return null;
-        return list.items[p.filtered.items[p.selection]];
-    }
-
     /// Esc peels back one layer at a time: query, then the pinned author, then
     /// leave — so a stray Esc never drops you out with filters still applied.
+    /// Owns App mode/quit state, so it stays a thin cross-cutting forwarder.
     pub fn prClearOrLeave(self: *App) void {
         const p = &self.state.pr;
         if (p.query_len > 0) {
             p.query_len = 0;
-            self.rebuildPrFilter();
+            pr_controller.rebuildFilter(p, self.allocator);
         } else if (p.author_len > 0) {
             p.author_len = 0;
-            self.rebuildPrFilter();
-        } else if (self.pr_only) {
+            pr_controller.rebuildFilter(p, self.allocator);
+        } else if (p.pr_only) {
             self.should_quit = true;
         } else {
             self.mode = .normal;
         }
     }
 
-    pub fn prAppendQueryChar(self: *App, c: u8) void {
-        const p = &self.state.pr;
-        if (p.query_len < p.query_buf.len) {
-            p.query_buf[p.query_len] = c;
-            p.query_len += 1;
-            self.rebuildPrFilter();
-        }
-    }
-
-    pub fn prBackspaceQuery(self: *App) void {
-        const p = &self.state.pr;
-        if (p.query_len > 0) p.query_len -= 1;
-        self.rebuildPrFilter();
-    }
-
-    pub fn openPrInBrowser(self: *App) void {
-        const pull = self.selectedPr() orelse return;
-        var buf: [16]u8 = undefined;
-        const num = std.fmt.bufPrint(&buf, "{d}", .{pull.number}) catch return;
-        var child = std.process.Child.init(&.{ "gh", "pr", "view", num, "--web" }, self.allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        child.spawn() catch return;
-        _ = child.wait() catch {};
-    }
-
-    pub fn prView(self: *const App) pr.render.View {
-        const p = &self.state.pr;
-        return .{
-            .prs = p.items(),
-            .filtered = p.filtered.items,
-            .selected = p.selection,
-            .scroll = p.scroll,
-            .loading = self.pr_fetch_in_flight,
-            .query = p.query(),
-            .message = p.message(),
-            .author_filter = p.authorFilter(),
-            .picking_author = p.picking_author,
-            .authors = p.author_list,
-            .author_filtered = p.author_filtered.items,
-            .author_selected = p.author_selection,
-            .author_scroll = p.author_scroll,
-            .author_query = p.authorQuery(),
-            .analysis = if (p.analysis) |*a| a else null,
-        };
-    }
-
-    fn setPrMessage(self: *App, text: []const u8) void {
-        const p = &self.state.pr;
-        const n = @min(text.len, p.message_buf.len);
-        @memcpy(p.message_buf[0..n], text[0..n]);
-        p.message_len = n;
-    }
-
-    // --- author filter overlay -----------------------------------------------
-
-    pub fn openPrAuthorPicker(self: *App) void {
-        if (self.state.pr.list == null) return;
-        const p = &self.state.pr;
-        p.author_query_len = 0;
-        p.author_selection = 0;
-        p.author_scroll = 0;
-        p.picking_author = true;
-        self.refreshPrAuthorList();
-    }
-
-    fn refreshPrAuthorList(self: *App) void {
-        const p = &self.state.pr;
-        const list = p.list orelse return;
-        self.freePrAuthors();
-        p.author_list = pr.authors.distinct(self.allocator, list.items) catch {
-            self.closePrAuthorPicker();
-            return;
-        };
-        self.rebuildPrAuthorFilter();
-    }
-
-    pub fn applySelectedPrAuthor(self: *App) void {
-        const p = &self.state.pr;
-        if (p.author_filtered.items.len == 0) {
-            self.closePrAuthorPicker();
-            return;
-        }
-        const login = p.author_list[p.author_filtered.items[p.author_selection]].login;
-        const n = @min(login.len, p.author_buf.len);
-        @memcpy(p.author_buf[0..n], login[0..n]);
-        p.author_len = n;
-
-        self.closePrAuthorPicker();
-        p.selection = 0;
-        p.scroll = 0;
-        self.rebuildPrFilter();
-    }
-
-    pub fn closePrAuthorPicker(self: *App) void {
-        const p = &self.state.pr;
-        p.picking_author = false;
-        self.freePrAuthors();
-        p.author_query_len = 0;
-    }
-
-    pub fn rebuildPrAuthorFilter(self: *App) void {
-        const p = &self.state.pr;
-        p.author_filtered.clearRetainingCapacity();
-        for (p.author_list, 0..) |a, i| {
-            if (pr.authors.matchesQuery(a.login, p.authorQuery())) {
-                p.author_filtered.append(self.allocator, i) catch {};
-            }
-        }
-        if (p.author_filtered.items.len == 0) {
-            p.author_selection = 0;
-        } else if (p.author_selection >= p.author_filtered.items.len) {
-            p.author_selection = p.author_filtered.items.len - 1;
-        }
-    }
-
-    pub fn prAuthorMove(self: *App, delta: isize) void {
-        const p = &self.state.pr;
-        const len = p.author_filtered.items.len;
-        if (len == 0) return;
-        const cur: isize = @intCast(p.author_selection);
-        const max: isize = @intCast(len - 1);
-        p.author_selection = @intCast(std.math.clamp(cur + delta, 0, max));
-    }
-
-    pub fn prAppendAuthorQueryChar(self: *App, c: u8) void {
-        const p = &self.state.pr;
-        if (p.author_query_len < p.author_query_buf.len) {
-            p.author_query_buf[p.author_query_len] = c;
-            p.author_query_len += 1;
-            self.rebuildPrAuthorFilter();
-        }
-    }
-
-    pub fn prBackspaceAuthorQuery(self: *App) void {
-        const p = &self.state.pr;
-        if (p.author_query_len > 0) p.author_query_len -= 1;
-        self.rebuildPrAuthorFilter();
-    }
-
-    fn freePrAuthors(self: *App) void {
-        const p = &self.state.pr;
-        if (p.author_list.len > 0) self.allocator.free(p.author_list);
-        p.author_list = &.{};
-        p.author_filtered.clearRetainingCapacity();
-    }
-
     pub fn selectGraphiteStackBranch(self: *App, idx: usize) !void {
-        const stack = self.state.graphite_stack orelse return;
+        const stack = self.state.graphite.stack orelse return;
         if (idx >= stack.branches.len) return;
 
         const selected = &stack.branches[idx];
@@ -4751,7 +2699,7 @@ pub const App = struct {
         }
 
         // Update current_idx in stack to reflect selection
-        self.state.graphite_stack.?.current_idx = idx;
+        self.state.graphite.stack.?.current_idx = idx;
 
         // Go back to normal mode and refresh
         self.state.pager_mode = false;
@@ -4761,7 +2709,7 @@ pub const App = struct {
 
     /// Navigate to parent branch (toward trunk, visually down in stack display)
     pub fn navigateStackToParent(self: *App) !void {
-        const stack = self.state.graphite_stack orelse {
+        const stack = self.state.graphite.stack orelse {
             self.state.status_message = "Not in a Graphite stack";
             self.state.status_message_time = std.time.milliTimestamp();
             return;
@@ -4778,7 +2726,7 @@ pub const App = struct {
 
     /// Navigate to child branch (toward tip, visually up in stack display)
     pub fn navigateStackToChild(self: *App) !void {
-        const stack = self.state.graphite_stack orelse {
+        const stack = self.state.graphite.stack orelse {
             self.state.status_message = "Not in a Graphite stack";
             self.state.status_message_time = std.time.milliTimestamp();
             return;
@@ -4854,7 +2802,7 @@ pub const App = struct {
     }
 
     // Get the visual selection range (start_line, end_line) inclusive
-    fn getVisualSelection(self: *App) ?struct { start: usize, end: usize } {
+    pub fn getVisualSelection(self: *App) ?struct { start: usize, end: usize } {
         const anchor = self.state.visual_anchor orelse return null;
         const cursor = self.state.global_cursor_line;
 
@@ -4870,87 +2818,6 @@ pub const App = struct {
 
         const selection = self.getVisualSelection() orelse return false;
         return global_line >= selection.start and global_line <= selection.end;
-    }
-
-    // Check if a comment is expanded (collapsed by default)
-    pub fn isCommentExpanded(self: *App, comment_idx: usize) bool {
-        return self.state.expanded_comments.contains(comment_idx);
-    }
-
-    // Toggle comment expanded/collapsed state
-    pub fn toggleCommentExpanded(self: *App, comment_idx: usize) void {
-        if (self.state.expanded_comments.contains(comment_idx)) {
-            _ = self.state.expanded_comments.remove(comment_idx);
-        } else {
-            self.state.expanded_comments.put(comment_idx, {}) catch {};
-        }
-    }
-
-    // Check if a file is folded (collapsed)
-    pub fn isFileFolded(self: *App, file_idx: usize) bool {
-        return self.state.collapsed_folds.contains(FoldKey.fileKey(file_idx));
-    }
-
-    // Check if a hunk is folded (collapsed)
-    pub fn isHunkFolded(self: *App, file_idx: usize, hunk_idx: usize) bool {
-        // If file is folded, hunk is implicitly folded
-        if (self.isFileFolded(file_idx)) return true;
-        return self.state.collapsed_folds.contains(FoldKey.hunkKey(file_idx, hunk_idx));
-    }
-
-    // Toggle file fold state
-    pub fn toggleFileFold(self: *App, file_idx: usize) void {
-        const key = FoldKey.fileKey(file_idx);
-        if (self.state.collapsed_folds.contains(key)) {
-            _ = self.state.collapsed_folds.remove(key);
-        } else {
-            self.state.collapsed_folds.put(key, {}) catch {};
-        }
-    }
-
-    // Toggle hunk fold state
-    pub fn toggleHunkFold(self: *App, file_idx: usize, hunk_idx: usize) void {
-        const key = FoldKey.hunkKey(file_idx, hunk_idx);
-        if (self.state.collapsed_folds.contains(key)) {
-            _ = self.state.collapsed_folds.remove(key);
-        } else {
-            self.state.collapsed_folds.put(key, {}) catch {};
-        }
-    }
-
-    // Close (fold) a file
-    pub fn closeFileFold(self: *App, file_idx: usize) void {
-        self.state.collapsed_folds.put(FoldKey.fileKey(file_idx), {}) catch {};
-    }
-
-    // Close (fold) a hunk
-    pub fn closeHunkFold(self: *App, file_idx: usize, hunk_idx: usize) void {
-        self.state.collapsed_folds.put(FoldKey.hunkKey(file_idx, hunk_idx), {}) catch {};
-    }
-
-    // Open (unfold) a file
-    pub fn openFileFold(self: *App, file_idx: usize) void {
-        _ = self.state.collapsed_folds.remove(FoldKey.fileKey(file_idx));
-    }
-
-    // Open (unfold) a hunk
-    pub fn openHunkFold(self: *App, file_idx: usize, hunk_idx: usize) void {
-        _ = self.state.collapsed_folds.remove(FoldKey.hunkKey(file_idx, hunk_idx));
-    }
-
-    // Close all folds (fold all files and hunks)
-    pub fn closeAllFolds(self: *App) void {
-        for (self.state.files, 0..) |file, file_idx| {
-            self.state.collapsed_folds.put(FoldKey.fileKey(file_idx), {}) catch {};
-            for (file.hunks, 0..) |_, hunk_idx| {
-                self.state.collapsed_folds.put(FoldKey.hunkKey(file_idx, hunk_idx), {}) catch {};
-            }
-        }
-    }
-
-    // Open all folds (unfold everything)
-    pub fn openAllFolds(self: *App) void {
-        self.state.collapsed_folds.clearRetainingCapacity();
     }
 
     // Count total lines in a hunk (for fold indicator)
@@ -5066,210 +2933,6 @@ pub const App = struct {
         return RenderUtils.renderGutterWithBlame(self, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
     }
 
-    // Toggle fold at cursor position (file header -> fold file, hunk/code -> fold hunk)
-    pub fn toggleFoldUnderCursor(self: *App) !void {
-        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
-        const file_idx = record.file_idx;
-
-        // Track which fold was toggled for cursor positioning
-        var target_hunk_idx: ?usize = null;
-
-        switch (record.line_type) {
-            .file_header => {
-                self.toggleFileFold(file_idx);
-            },
-            .hunk_header => |hunk_info| {
-                self.toggleHunkFold(file_idx, hunk_info.hunk_idx);
-                target_hunk_idx = hunk_info.hunk_idx;
-            },
-            .code_line => |code_info| {
-                self.toggleHunkFold(file_idx, code_info.hunk_idx);
-                target_hunk_idx = code_info.hunk_idx;
-            },
-            .comment_line => |comment_info| {
-                self.toggleHunkFold(file_idx, comment_info.parent_hunk_idx);
-                target_hunk_idx = comment_info.parent_hunk_idx;
-            },
-            .spacer => {
-                // On spacer, no fold action
-                return;
-            },
-        }
-
-        // Rebuild LineMap and move cursor to fold header
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-        self.moveCursorToFoldHeader(file_idx, target_hunk_idx);
-        self.needs_render = true;
-    }
-
-    // Close fold at cursor position
-    pub fn closeFoldUnderCursor(self: *App) !void {
-        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
-        const file_idx = record.file_idx;
-
-        // Track which fold was closed for cursor positioning
-        var target_hunk_idx: ?usize = null;
-
-        switch (record.line_type) {
-            .file_header => {
-                self.closeFileFold(file_idx);
-            },
-            .hunk_header => |hunk_info| {
-                self.closeHunkFold(file_idx, hunk_info.hunk_idx);
-                target_hunk_idx = hunk_info.hunk_idx;
-            },
-            .code_line => |code_info| {
-                self.closeHunkFold(file_idx, code_info.hunk_idx);
-                target_hunk_idx = code_info.hunk_idx;
-            },
-            .comment_line => |comment_info| {
-                self.closeHunkFold(file_idx, comment_info.parent_hunk_idx);
-                target_hunk_idx = comment_info.parent_hunk_idx;
-            },
-            .spacer => {
-                return;
-            },
-        }
-
-        // Rebuild LineMap and move cursor to fold header
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-        self.moveCursorToFoldHeader(file_idx, target_hunk_idx);
-        self.needs_render = true;
-    }
-
-    // Open fold at cursor position
-    pub fn openFoldUnderCursor(self: *App) !void {
-        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
-        const file_idx = record.file_idx;
-
-        // Track which fold was opened for cursor positioning
-        var target_hunk_idx: ?usize = null;
-
-        switch (record.line_type) {
-            .file_header => {
-                self.openFileFold(file_idx);
-            },
-            .hunk_header => |hunk_info| {
-                self.openHunkFold(file_idx, hunk_info.hunk_idx);
-                target_hunk_idx = hunk_info.hunk_idx;
-            },
-            .code_line => |code_info| {
-                self.openHunkFold(file_idx, code_info.hunk_idx);
-                target_hunk_idx = code_info.hunk_idx;
-            },
-            .comment_line => |comment_info| {
-                self.openHunkFold(file_idx, comment_info.parent_hunk_idx);
-                target_hunk_idx = comment_info.parent_hunk_idx;
-            },
-            .spacer => {
-                return;
-            },
-        }
-
-        // Rebuild LineMap and move cursor to fold header
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-        self.moveCursorToFoldHeader(file_idx, target_hunk_idx);
-        self.needs_render = true;
-    }
-
-    // Close all folds and rebuild LineMap
-    pub fn closeAllFoldsAndRebuild(self: *App) !void {
-        // Capture anchor before closing all
-        const anchor = self.captureViewportAnchor(self.state.global_cursor_line);
-
-        self.closeAllFolds();
-
-        // Rebuild LineMap
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-        _ = self.restoreViewportFromAnchor(anchor);
-        self.needs_render = true;
-    }
-
-    // Open all folds and rebuild LineMap
-    pub fn openAllFoldsAndRebuild(self: *App) !void {
-        // Capture anchor before opening all
-        const anchor = self.captureViewportAnchor(self.state.global_cursor_line);
-
-        self.openAllFolds();
-
-        // Rebuild LineMap
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-        _ = self.restoreViewportFromAnchor(anchor);
-        self.needs_render = true;
-    }
-
-    // Move cursor to the fold header (file or hunk) after folding
-    fn moveCursorToFoldHeader(self: *App, file_idx: usize, hunk_idx: ?usize) void {
-        // Search for the header line in the rebuilt LineMap
-        for (0..self.state.line_map.records.len) |line_idx| {
-            const record = self.state.line_map.getLineRecord(line_idx) orelse continue;
-            if (record.file_idx != file_idx) continue;
-
-            if (hunk_idx) |h_idx| {
-                // Looking for hunk header
-                switch (record.line_type) {
-                    .hunk_header => |hunk_info| {
-                        if (hunk_info.hunk_idx == h_idx) {
-                            self.state.global_cursor_line = line_idx;
-                            Navigation.ensureCursorVisible(self, true);
-                            return;
-                        }
-                    },
-                    else => {},
-                }
-            } else {
-                // Looking for file header
-                switch (record.line_type) {
-                    .file_header => {
-                        self.state.global_cursor_line = line_idx;
-                        Navigation.ensureCursorVisible(self, true);
-                        return;
-                    },
-                    else => {},
-                }
-            }
-        }
-    }
-
-    // Close the file containing the cursor (zC - fold entire file from anywhere)
-    pub fn closeFileFoldUnderCursor(self: *App) !void {
-        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
-        const file_idx = record.file_idx;
-
-        // Close the file fold
-        self.closeFileFold(file_idx);
-
-        // Rebuild LineMap
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-
-        // Move cursor to the file header
-        self.moveCursorToFoldHeader(file_idx, null);
-        self.needs_render = true;
-    }
-
-    // Open the file containing the cursor (zO - unfold entire file from anywhere)
-    pub fn openFileFoldUnderCursor(self: *App) !void {
-        const record = self.state.line_map.getLineRecord(self.state.global_cursor_line) orelse return;
-        const file_idx = record.file_idx;
-
-        // Open the file fold
-        self.openFileFold(file_idx);
-
-        // Rebuild LineMap
-        self.state.line_map.deinit();
-        self.state.line_map = try line_map.LineMap.build(self.allocator, self.state.files, &self.state.comment_store, self.convertHunkViewMode(), self.shouldApplyHunkFiltering(), &self.state.collapsed_folds);
-
-        // Move cursor to the file header
-        self.moveCursorToFoldHeader(file_idx, null);
-        self.needs_render = true;
-    }
-
     pub fn yankVisualSelection(self: *App) !void {
         const selection = self.getVisualSelection() orelse return;
 
@@ -5336,2094 +2999,6 @@ pub const App = struct {
         try clipboard.copyToClipboard(self.allocator, buffer.items);
     }
 
-    fn render(self: *App, win: vaxis.Window) !void {
-        const profile_frame = if (profiling_enabled) self.profile_active_frame else false;
-        var total_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
-        var header_ns: u64 = 0;
-        var content_ns: u64 = 0;
-        var status_ns: u64 = 0;
-        var agent_ns: u64 = 0;
-        var overlay_ns: u64 = 0;
-        if (profile_frame) {
-            self.profile_counters = .{};
-        }
-
-        win.clear();
-        self.resetFrameAllocators();
-
-        // Hide cursor by default - comment input will show it when needed
-        win.hideCursor();
-
-        if (win.width == 0 or win.height == 0) {
-            return;
-        }
-
-        // Content height without dividers (continuous mode)
-        const content_height = win.height -| Layout.header_height -| Layout.status_height;
-
-        // Check if agent panel should be shown (visible and not full-screen)
-        // Don't show when in agent_selection mode (selecting which agent to connect to)
-        const show_agent_panel = self.isAgentPanelVisible() and !self.isAgentFullScreen() and self.mode != .agent_selection;
-
-        // Render header and content (or empty/branch menu if no files)
-        if (self.state.files.len == 0) {
-            // No files - show empty state or branch selection menu
-            // If agent panel is visible, render it as sidebar with empty menu in main area
-            if (show_agent_panel) {
-                const panel_side = self.getAgentPanelSide();
-                const panel_width = win.width * 3 / 10; // 30% for agent panel
-                const diff_width = win.width - panel_width;
-
-                if (panel_side == .left) {
-                    // Agent panel on left
-                    const agent_win = win.child(.{
-                        .x_off = 0,
-                        .y_off = Layout.header_height,
-                        .width = @intCast(panel_width),
-                        .height = @intCast(content_height),
-                    });
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try agent.renderAgentPanel(self, agent_win);
-                        if (timer_opt) |*timer| agent_ns += timer.read();
-                    } else {
-                        try agent.renderAgentPanel(self, agent_win);
-                    }
-
-                    // Empty menu on right
-                    const content_win = win.child(.{
-                        .x_off = @intCast(panel_width),
-                        .y_off = 0,
-                        .width = @intCast(diff_width),
-                        .height = @intCast(win.height),
-                    });
-                    if (self.mode == .branch_selection) {
-                        if (profile_frame) {
-                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                            try UI.renderBranchSelectionMenu(self, content_win);
-                            if (timer_opt) |*timer| overlay_ns += timer.read();
-                        } else {
-                            try UI.renderBranchSelectionMenu(self, content_win);
-                        }
-                    } else if (self.mode == .commit_selection) {
-                        if (profile_frame) {
-                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                            try UI.renderCommitSelectionMenu(self, content_win);
-                            if (timer_opt) |*timer| overlay_ns += timer.read();
-                        } else {
-                            try UI.renderCommitSelectionMenu(self, content_win);
-                        }
-                    } else if (self.mode == .commit_diff_mode) {
-                        if (profile_frame) {
-                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                            try UI.renderCommitSelectionMenu(self, content_win);
-                            if (timer_opt) |*timer| overlay_ns += timer.read();
-                            timer_opt = std.time.Timer.start() catch null;
-                            try UI.renderCommitDiffModeMenu(self, content_win);
-                            if (timer_opt) |*timer| overlay_ns += timer.read();
-                        } else {
-                            try UI.renderCommitSelectionMenu(self, content_win);
-                            try UI.renderCommitDiffModeMenu(self, content_win);
-                        }
-                    } else {
-                        if (profile_frame) {
-                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                            try UI.renderEmptyMenu(self, content_win);
-                            if (timer_opt) |*timer| overlay_ns += timer.read();
-                        } else {
-                            try UI.renderEmptyMenu(self, content_win);
-                        }
-                    }
-                } else {
-                    // Empty menu on left
-                    const content_win = win.child(.{
-                        .x_off = 0,
-                        .y_off = 0,
-                        .width = @intCast(diff_width),
-                        .height = @intCast(win.height),
-                    });
-                    if (self.mode == .branch_selection) {
-                        if (profile_frame) {
-                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                            try UI.renderBranchSelectionMenu(self, content_win);
-                            if (timer_opt) |*timer| overlay_ns += timer.read();
-                        } else {
-                            try UI.renderBranchSelectionMenu(self, content_win);
-                        }
-                    } else if (self.mode == .commit_selection) {
-                        if (profile_frame) {
-                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                            try UI.renderCommitSelectionMenu(self, content_win);
-                            if (timer_opt) |*timer| overlay_ns += timer.read();
-                        } else {
-                            try UI.renderCommitSelectionMenu(self, content_win);
-                        }
-                    } else if (self.mode == .commit_diff_mode) {
-                        if (profile_frame) {
-                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                            try UI.renderCommitSelectionMenu(self, content_win);
-                            if (timer_opt) |*timer| overlay_ns += timer.read();
-                            timer_opt = std.time.Timer.start() catch null;
-                            try UI.renderCommitDiffModeMenu(self, content_win);
-                            if (timer_opt) |*timer| overlay_ns += timer.read();
-                        } else {
-                            try UI.renderCommitSelectionMenu(self, content_win);
-                            try UI.renderCommitDiffModeMenu(self, content_win);
-                        }
-                    } else {
-                        if (profile_frame) {
-                            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                            try UI.renderEmptyMenu(self, content_win);
-                            if (timer_opt) |*timer| overlay_ns += timer.read();
-                        } else {
-                            try UI.renderEmptyMenu(self, content_win);
-                        }
-                    }
-
-                    // Agent panel on right
-                    const agent_win = win.child(.{
-                        .x_off = @intCast(diff_width),
-                        .y_off = Layout.header_height,
-                        .width = @intCast(panel_width),
-                        .height = @intCast(content_height),
-                    });
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try agent.renderAgentPanel(self, agent_win);
-                        if (timer_opt) |*timer| agent_ns += timer.read();
-                    } else {
-                        try agent.renderAgentPanel(self, agent_win);
-                    }
-                }
-            } else {
-                // No agent panel - full screen empty menu
-                if (self.mode == .branch_selection) {
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try UI.renderBranchSelectionMenu(self, win);
-                        if (timer_opt) |*timer| overlay_ns += timer.read();
-                    } else {
-                        try UI.renderBranchSelectionMenu(self, win);
-                    }
-                } else if (self.mode == .commit_selection) {
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try UI.renderCommitSelectionMenu(self, win);
-                        if (timer_opt) |*timer| overlay_ns += timer.read();
-                    } else {
-                        try UI.renderCommitSelectionMenu(self, win);
-                    }
-                } else if (self.mode == .commit_diff_mode) {
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try UI.renderCommitSelectionMenu(self, win);
-                        if (timer_opt) |*timer| overlay_ns += timer.read();
-                        timer_opt = std.time.Timer.start() catch null;
-                        try UI.renderCommitDiffModeMenu(self, win);
-                        if (timer_opt) |*timer| overlay_ns += timer.read();
-                    } else {
-                        try UI.renderCommitSelectionMenu(self, win);
-                        try UI.renderCommitDiffModeMenu(self, win);
-                    }
-                } else {
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try UI.renderEmptyMenu(self, win);
-                        if (timer_opt) |*timer| overlay_ns += timer.read();
-                    } else {
-                        try UI.renderEmptyMenu(self, win);
-                    }
-                }
-            }
-        } else {
-            // Normal rendering with header, content, and status bar
-            // Split content area based on panels
-            if (show_agent_panel) {
-                const panel_side = self.getAgentPanelSide();
-                const panel_width = win.width * 3 / 10; // 30% for agent panel
-                const diff_width = win.width - panel_width;
-
-                if (panel_side == .left) {
-                    // Agent panel on left (starts at y=0, full height including header area)
-                    const agent_win = win.child(.{
-                        .x_off = 0,
-                        .y_off = 0,
-                        .width = @intCast(panel_width),
-                        .height = @intCast(content_height + Layout.header_height),
-                    });
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try agent.renderAgentPanel(self, agent_win);
-                        if (timer_opt) |*timer| agent_ns += timer.read();
-                    } else {
-                        try agent.renderAgentPanel(self, agent_win);
-                    }
-
-                    // Header above diff content (on right side)
-                    const header_win = win.child(.{
-                        .x_off = @intCast(panel_width),
-                        .y_off = 0,
-                        .width = @intCast(diff_width),
-                        .height = @intCast(Layout.header_height),
-                    });
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try UI.renderHeader(self, header_win);
-                        if (timer_opt) |*timer| header_ns += timer.read();
-                    } else {
-                        try UI.renderHeader(self, header_win);
-                    }
-
-                    // Diff content on right (below header)
-                    const content_win = win.child(.{
-                        .x_off = @intCast(panel_width),
-                        .y_off = Layout.header_height,
-                        .width = @intCast(diff_width),
-                        .height = @intCast(content_height),
-                    });
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try self.renderContent(content_win);
-                        if (timer_opt) |*timer| content_ns += timer.read();
-                    } else {
-                        try self.renderContent(content_win);
-                    }
-                } else {
-                    // Agent panel on right (default)
-                    // Header above diff content (on left side)
-                    const header_win = win.child(.{
-                        .x_off = 0,
-                        .y_off = 0,
-                        .width = @intCast(diff_width),
-                        .height = @intCast(Layout.header_height),
-                    });
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try UI.renderHeader(self, header_win);
-                        if (timer_opt) |*timer| header_ns += timer.read();
-                    } else {
-                        try UI.renderHeader(self, header_win);
-                    }
-
-                    // Diff content on left (below header)
-                    const content_win = win.child(.{
-                        .x_off = 0,
-                        .y_off = Layout.header_height,
-                        .width = @intCast(diff_width),
-                        .height = @intCast(content_height),
-                    });
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try self.renderContent(content_win);
-                        if (timer_opt) |*timer| content_ns += timer.read();
-                    } else {
-                        try self.renderContent(content_win);
-                    }
-
-                    // Agent panel on right (starts at y=0, full height including header area)
-                    const agent_win = win.child(.{
-                        .x_off = @intCast(diff_width),
-                        .y_off = 0,
-                        .width = @intCast(panel_width),
-                        .height = @intCast(content_height + Layout.header_height),
-                    });
-                    if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                        try agent.renderAgentPanel(self, agent_win);
-                        if (timer_opt) |*timer| agent_ns += timer.read();
-                    } else {
-                        try agent.renderAgentPanel(self, agent_win);
-                    }
-                }
-            } else {
-                // Full width - header spans full width
-                const header_win = win.child(.{
-                    .x_off = 0,
-                    .y_off = 0,
-                    .width = @intCast(win.width),
-                    .height = @intCast(Layout.header_height),
-                });
-                if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                    try UI.renderHeader(self, header_win);
-                    if (timer_opt) |*timer| header_ns += timer.read();
-                } else {
-                    try UI.renderHeader(self, header_win);
-                }
-                // Full width content
-                const content_win = win.child(.{
-                    .x_off = 0,
-                    .y_off = Layout.header_height,
-                    .width = @intCast(win.width),
-                    .height = @intCast(content_height),
-                });
-                if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                    try self.renderContent(content_win);
-                    if (timer_opt) |*timer| content_ns += timer.read();
-                } else {
-                    try self.renderContent(content_win);
-                }
-            }
-        }
-
-        // Render unified status bar (handles both diff mode and agent mode content)
-        // This is outside the files check so it renders even when there are no files
-        const status_win = win.child(.{
-            .x_off = 0,
-            .y_off = win.height -| Layout.status_height,
-            .width = @intCast(win.width),
-            .height = @intCast(Layout.status_height),
-        });
-        if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-            try UI.renderStatus(self, status_win);
-            if (timer_opt) |*timer| status_ns += timer.read();
-        } else {
-            try UI.renderStatus(self, status_win);
-        }
-
-        // Render command palette overlay if in command palette mode
-        if (self.mode == .command_palette) {
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try command_palette.renderCommandPalette(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-            } else {
-                try command_palette.renderCommandPalette(self, win);
-            }
-        }
-
-        // Render help overlay if in help mode
-        if (self.mode == .help) {
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try help.renderHelpPopup(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-            } else {
-                try help.renderHelpPopup(self, win);
-            }
-        }
-
-        // Render graphite stack dialog if in graphite_stack mode
-        if (self.mode == .graphite_stack) {
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try UI.renderGraphiteStackDialog(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-            } else {
-                try UI.renderGraphiteStackDialog(self, win);
-            }
-        }
-
-        // Render the PR picker full-screen if in pr_review mode (it clears the
-        // window, so it overlays whatever diff was underneath).
-        if (self.mode == .pr_review) {
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try UI.renderPrReviewDialog(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-            } else {
-                try UI.renderPrReviewDialog(self, win);
-            }
-        }
-
-        // Render model selection dialog if in model_selection mode
-        if (self.mode == .model_selection) {
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try UI.renderModelSelectionDialog(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-            } else {
-                try UI.renderModelSelectionDialog(self, win);
-            }
-        }
-
-        // Render permission selection dialog if in permission_selection mode
-        if (self.mode == .permission_selection) {
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try UI.renderPermissionSelectionDialog(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-            } else {
-                try UI.renderPermissionSelectionDialog(self, win);
-            }
-        }
-
-        // Render agent selection dialog if in agent_selection mode
-        if (self.mode == .agent_selection) {
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try UI.renderAgentSelectionDialog(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-            } else {
-                try UI.renderAgentSelectionDialog(self, win);
-            }
-        }
-
-        // Render session picker dialog if in session_picker mode
-        if (self.mode == .session_picker) {
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try UI.renderSessionPickerDialog(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-            } else {
-                try UI.renderSessionPickerDialog(self, win);
-            }
-        }
-
-        // Render commit selection overlay if in commit_selection or commit_diff_mode
-        if (self.mode == .commit_selection) {
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try UI.renderCommitSelectionMenu(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-            } else {
-                try UI.renderCommitSelectionMenu(self, win);
-            }
-        }
-        if (self.mode == .commit_diff_mode) {
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try UI.renderCommitSelectionMenu(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-                timer_opt = std.time.Timer.start() catch null;
-                try UI.renderCommitDiffModeMenu(self, win);
-                if (timer_opt) |*timer| overlay_ns += timer.read();
-            } else {
-                try UI.renderCommitSelectionMenu(self, win);
-                try UI.renderCommitDiffModeMenu(self, win);
-            }
-        }
-
-        // Render agent panel full-screen if in full-screen mode AND in agent mode
-        // Only render when actually focused on the agent panel (mode == .agent)
-        // Use a child window that excludes the status bar row (status bar is unified)
-        if (self.isAgentPanelVisible() and self.isAgentFullScreen() and self.mode == .agent) {
-            const agent_win = win.child(.{
-                .x_off = 0,
-                .y_off = 0,
-                .width = win.width,
-                .height = if (win.height > Layout.status_height) win.height - Layout.status_height else win.height,
-            });
-            if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-                try agent.renderAgentPanel(self, agent_win);
-                if (timer_opt) |*timer| agent_ns += timer.read();
-            } else {
-                try agent.renderAgentPanel(self, agent_win);
-            }
-        }
-
-        if (profile_frame) {
-            const profile_log = std.log.scoped(.profile_render);
-            const total_ns: u64 = if (total_timer_opt) |*timer| timer.read() else 0;
-            profile_log.debug(
-                "render frame {d}: total_ns={d} header_ns={d} content_ns={d} status_ns={d} agent_ns={d} overlay_ns={d} mode={s} view={s} files={d} lines={d}",
-                .{ self.profile_frame_counter, total_ns, header_ns, content_ns, status_ns, agent_ns, overlay_ns, @tagName(self.mode), @tagName(self.state.view_mode), self.state.files.len, self.state.line_map.records.len },
-            );
-            profile_log.debug(
-                "render micro: slice_ns={d} slice_calls={d} pad_ns={d} pad_calls={d} gutter_ns={d} gutter_calls={d} highlight_ns={d} highlight_calls={d} overlap_ns={d} overlap_calls={d} build_ns={d} build_calls={d} search_ns={d} search_calls={d}",
-                .{
-                    self.profile_counters.slice_ns,
-                    self.profile_counters.slice_calls,
-                    self.profile_counters.pad_ns,
-                    self.profile_counters.pad_calls,
-                    self.profile_counters.gutter_ns,
-                    self.profile_counters.gutter_calls,
-                    self.profile_counters.highlight_total_ns,
-                    self.profile_counters.highlight_calls,
-                    self.profile_counters.highlight_overlap_ns,
-                    self.profile_counters.highlight_overlap_calls,
-                    self.profile_counters.highlight_build_ns,
-                    self.profile_counters.highlight_build_calls,
-                    self.profile_counters.search_ns,
-                    self.profile_counters.search_calls,
-                },
-            );
-        }
-    }
-
-    fn renderContent(self: *App, win: vaxis.Window) !void {
-        switch (self.state.view_mode) {
-            .unified => try UnifiedRenderer.renderContent(self, win),
-            .side_by_side => try SideBySideRenderer.renderContent(self, win),
-        }
-    }
-
-    // Detect merge conflict markers and return appropriate style
-    // Conflict markers: <<<<<<< (ours/HEAD), ======= (separator), >>>>>>> (theirs), ||||||| (base in diff3)
-    fn getConflictMarkerStyle(line_text: []const u8, base_style: vaxis.Style) ?vaxis.Style {
-        // Check for each type of conflict marker at start of line
-        if (std.mem.startsWith(u8, line_text, "<<<<<<<")) {
-            // "Ours" marker (HEAD/current changes) - blue
-            return vaxis.Style{
-                .fg = Color.conflict_ours_fg,
-                .bg = if (base_style.bg != .default) base_style.bg else Color.conflict_ours_bg,
-                .bold = true,
-            };
-        } else if (std.mem.startsWith(u8, line_text, "=======")) {
-            // Separator marker - yellow
-            return vaxis.Style{
-                .fg = Color.conflict_separator_fg,
-                .bg = if (base_style.bg != .default) base_style.bg else Color.conflict_separator_bg,
-                .bold = true,
-            };
-        } else if (std.mem.startsWith(u8, line_text, ">>>>>>>")) {
-            // "Theirs" marker (incoming changes) - purple
-            return vaxis.Style{
-                .fg = Color.conflict_theirs_fg,
-                .bg = if (base_style.bg != .default) base_style.bg else Color.conflict_theirs_bg,
-                .bold = true,
-            };
-        } else if (std.mem.startsWith(u8, line_text, "|||||||")) {
-            // Base marker (diff3 mode) - gray
-            return vaxis.Style{
-                .fg = Color.conflict_base_fg,
-                .bg = if (base_style.bg != .default) base_style.bg else Color.conflict_base_bg,
-                .bold = true,
-            };
-        }
-        return null;
-    }
-
-    // Generate colored segments for a line of text using syntax highlights
-    // Returns array of segments with syntax colors applied as foreground
-    // text: the text chunk to render (may be part of a wrapped line)
-    // full_line_text: the complete line text (for search highlighting)
-    // text_offset: offset of this chunk within the full line
-    // line_byte_offset: byte offset for syntax highlighting
-    pub fn createHighlightedSegments(
-        self: *App,
-        text: []const u8,
-        full_line_text: []const u8,
-        text_offset: usize,
-        line_byte_offset: usize,
-        highlights: ?[]syntax.Highlight,
-        line_spans: ?[]const parser.LineHighlightSpan,
-        base_style: vaxis.Style,
-        global_line: usize,
-    ) ![]vaxis.Cell.Segment {
-        var total_timer_opt: ?std.time.Timer = null;
-        if (self.profile_active_frame) {
-            total_timer_opt = std.time.Timer.start() catch null;
-        }
-        defer if (total_timer_opt) |*timer| {
-            self.profile_counters.highlight_total_ns += timer.read();
-            self.profile_counters.highlight_calls += 1;
-        };
-
-        const allocator = self.frameSegmentAllocator();
-
-        // Check for merge conflict markers and apply special styling
-        if (getConflictMarkerStyle(full_line_text, base_style)) |conflict_style| {
-            var segments = try allocator.alloc(vaxis.Cell.Segment, 1);
-            segments[0] = .{
-                .text = text,
-                .style = conflict_style,
-            };
-            return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
-        }
-
-        if (text.len == 0) {
-            var segments = try allocator.alloc(vaxis.Cell.Segment, 1);
-            segments[0] = .{
-                .text = text,
-                .style = base_style,
-            };
-            return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
-        }
-
-        if (line_spans) |spans| {
-            if (spans.len == 0) {
-                var segments = try allocator.alloc(vaxis.Cell.Segment, 1);
-                segments[0] = .{ .text = text, .style = base_style };
-                return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
-            }
-
-            var build_timer_opt: ?std.time.Timer = null;
-            if (self.profile_active_frame) {
-                build_timer_opt = std.time.Timer.start() catch null;
-            }
-
-            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
-            errdefer segments.deinit(allocator);
-
-            var pos: usize = 0;
-            var span_idx: usize = 0;
-            const chunk_start = text_offset;
-            const chunk_end = text_offset + text.len;
-
-            while (pos < text.len) {
-                const absolute_pos = chunk_start + pos;
-                while (span_idx < spans.len and spans[span_idx].end <= absolute_pos) {
-                    span_idx += 1;
-                }
-
-                if (span_idx >= spans.len or spans[span_idx].start >= chunk_end) {
-                    const chunk = text[pos..];
-                    try segments.append(allocator, .{ .text = chunk, .style = base_style });
-                    break;
-                }
-
-                const span = spans[span_idx];
-                if (span.start > absolute_pos) {
-                    const end = @min(span.start, chunk_end);
-                    const chunk = text[pos .. end - chunk_start];
-                    try segments.append(allocator, .{ .text = chunk, .style = base_style });
-                    pos = end - chunk_start;
-                    continue;
-                }
-
-                const end = @min(span.end, chunk_end);
-                const chunk = text[pos .. end - chunk_start];
-                var style = base_style;
-                switch (span.category) {
-                    .keyword => style.fg = Color.syntax_keyword,
-                    .function => style.fg = Color.syntax_function,
-                    .type => style.fg = Color.syntax_type,
-                    .string => style.fg = Color.syntax_string,
-                    .number, .constant => style.fg = Color.syntax_number,
-                    .comment => style.fg = Color.syntax_comment,
-                    .operator => style.fg = Color.syntax_operator,
-                    .default => {},
-                }
-
-                try segments.append(allocator, .{ .text = chunk, .style = style });
-                pos = end - chunk_start;
-                span_idx += 1;
-            }
-
-            if (build_timer_opt) |*timer| {
-                self.profile_counters.highlight_build_ns += timer.read();
-                self.profile_counters.highlight_build_calls += 1;
-            }
-
-            const owned_segments = try segments.toOwnedSlice(allocator);
-            return try self.applySearchHighlighting(owned_segments, text, full_line_text, text_offset, global_line);
-        }
-
-        if (highlights == null) {
-            // No highlights - return single segment
-            var segments = try allocator.alloc(vaxis.Cell.Segment, 1);
-            segments[0] = .{
-                .text = text,
-                .style = base_style,
-            };
-            // Still apply search highlighting even without syntax highlights
-            return try self.applySearchHighlighting(segments, text, full_line_text, text_offset, global_line);
-        }
-
-        const file_highlights = highlights.?;
-
-        const line_start = line_byte_offset;
-        const line_end = line_byte_offset + text.len;
-
-        var overlap_timer_opt: ?std.time.Timer = null;
-        if (self.profile_active_frame) {
-            overlap_timer_opt = std.time.Timer.start() catch null;
-        }
-        const start_index = findHighlightStartIndex(file_highlights, line_start);
-        if (overlap_timer_opt) |*timer| {
-            self.profile_counters.highlight_overlap_ns += timer.read();
-            self.profile_counters.highlight_overlap_calls += 1;
-        }
-
-        // Build segments by walking highlights in order
-        var build_timer_opt: ?std.time.Timer = null;
-        if (self.profile_active_frame) {
-            build_timer_opt = std.time.Timer.start() catch null;
-        }
-
-        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
-        errdefer segments.deinit(allocator);
-
-        var pos: usize = 0;
-        var idx = start_index;
-        while (pos < text.len) {
-            const absolute_pos = line_start + pos;
-            while (idx < file_highlights.len and file_highlights[idx].end_byte <= absolute_pos) {
-                idx += 1;
-            }
-
-            if (idx >= file_highlights.len or file_highlights[idx].start_byte >= line_end) {
-                const chunk = text[pos..];
-                try segments.append(allocator, .{ .text = chunk, .style = base_style });
-                break;
-            }
-
-            const h = file_highlights[idx];
-            const local_start = if (h.start_byte > line_start) h.start_byte - line_start else 0;
-            const local_end = if (h.end_byte < line_end) h.end_byte - line_start else text.len;
-
-            if (local_start > pos) {
-                const chunk = text[pos..@min(local_start, text.len)];
-                try segments.append(allocator, .{ .text = chunk, .style = base_style });
-                pos = @min(local_start, text.len);
-                continue;
-            }
-
-            if (local_end <= pos) {
-                idx += 1;
-                continue;
-            }
-
-            const end = @min(local_end, text.len);
-            const chunk = text[pos..end];
-
-            const color_category = h.getColorCategory();
-            var style = base_style;
-            switch (color_category) {
-                .keyword => style.fg = Color.syntax_keyword,
-                .function => style.fg = Color.syntax_function,
-                .type => style.fg = Color.syntax_type,
-                .string => style.fg = Color.syntax_string,
-                .number, .constant => style.fg = Color.syntax_number,
-                .comment => style.fg = Color.syntax_comment,
-                .operator => style.fg = Color.syntax_operator,
-                .default => {},
-            }
-
-            try segments.append(allocator, .{ .text = chunk, .style = style });
-            pos = end;
-            idx += 1;
-        }
-
-        if (build_timer_opt) |*timer| {
-            self.profile_counters.highlight_build_ns += timer.read();
-            self.profile_counters.highlight_build_calls += 1;
-        }
-
-        const owned_segments = try segments.toOwnedSlice(allocator);
-        return try self.applySearchHighlighting(owned_segments, text, full_line_text, text_offset, global_line);
-    }
-
-    fn findHighlightStartIndex(highlights: []syntax.Highlight, line_start: usize) usize {
-        var lo: usize = 0;
-        var hi: usize = highlights.len;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            if (highlights[mid].start_byte < line_start) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-
-        if (lo > 0 and highlights[lo - 1].end_byte > line_start) {
-            return lo - 1;
-        }
-        return lo;
-    }
-
-    // Apply search highlighting on top of existing segments
-    // Uses the search_state.matches as the source of truth for which lines should be highlighted
-    fn applySearchHighlighting(
-        self: *App,
-        segments: []vaxis.Cell.Segment,
-        chunk_text: []const u8,
-        full_line_text: []const u8,
-        chunk_offset: usize,
-        global_line: usize,
-    ) ![]vaxis.Cell.Segment {
-        var search_timer_opt: ?std.time.Timer = null;
-        if (self.profile_active_frame) {
-            search_timer_opt = std.time.Timer.start() catch null;
-        }
-        defer if (search_timer_opt) |*timer| {
-            self.profile_counters.search_ns += timer.read();
-            self.profile_counters.search_calls += 1;
-        };
-        _ = full_line_text;
-        _ = chunk_offset;
-
-        const allocator = self.frameSegmentAllocator();
-
-        // Check if search is active
-        const search_state = &self.state.search_state;
-        if (search_state.query_len == 0) {
-            return segments;
-        }
-
-        // KEY OPTIMIZATION: Check if this line is in the matches list
-        // If not, no need to search or highlight - just return segments as-is
-        const is_match_line = isMatchLine(search_state.matches.items, global_line);
-
-        if (!is_match_line) {
-            // This line doesn't match - return segments unchanged
-            return segments;
-        }
-
-        const query = search_state.query_buffer[0..search_state.query_len];
-
-        if (query.len > chunk_text.len) {
-            return segments;
-        }
-
-        // Determine case sensitivity (smart case)
-        const is_case_sensitive = search.isCaseSensitive(query);
-
-        // Find all matches in the chunk_text (this is the actual text to render)
-        var chunk_matches: std.ArrayList(struct { start: usize, end: usize }) = .{};
-        defer chunk_matches.deinit(allocator);
-
-        var search_pos: usize = 0;
-        while (search_pos <= chunk_text.len - query.len) {
-            const slice = chunk_text[search_pos .. search_pos + query.len];
-            const is_match = if (is_case_sensitive)
-                std.mem.eql(u8, slice, query)
-            else
-                std.ascii.eqlIgnoreCase(slice, query);
-
-            if (is_match) {
-                try chunk_matches.append(allocator, .{ .start = search_pos, .end = search_pos + query.len });
-                search_pos += query.len;
-            } else {
-                search_pos += 1;
-            }
-        }
-
-        if (chunk_matches.items.len == 0) {
-            return segments;
-        }
-
-        // Now map the matches from chunk_text coordinates to segment coordinates
-        var result_segments: std.ArrayList(vaxis.Cell.Segment) = .{};
-        errdefer result_segments.deinit(allocator);
-
-        var text_pos: usize = 0; // Current position in chunk_text
-        for (segments) |seg| {
-            const seg_start = text_pos;
-            const seg_end = text_pos + seg.text.len;
-
-            // Find matches that overlap with this segment
-            var seg_matches: std.ArrayList(struct { start: usize, end: usize }) = .{};
-            defer seg_matches.deinit(allocator);
-
-            for (chunk_matches.items) |match| {
-                if (match.end > seg_start and match.start < seg_end) {
-                    // Match overlaps this segment - convert to segment-local coordinates
-                    const local_start = if (match.start > seg_start) match.start - seg_start else 0;
-                    const local_end = @min(match.end, seg_end) - seg_start;
-                    try seg_matches.append(allocator, .{ .start = local_start, .end = local_end });
-                }
-            }
-
-            if (seg_matches.items.len == 0) {
-                // No matches in this segment - add as-is
-                try result_segments.append(allocator, seg);
-            } else {
-                // Split segment at match boundaries
-                var pos: usize = 0;
-                for (seg_matches.items) |match| {
-                    // Add text before match (if any)
-                    if (match.start > pos) {
-                        const before_text = seg.text[pos..match.start];
-                        try result_segments.append(allocator, .{
-                            .text = before_text,
-                            .style = seg.style,
-                        });
-                    }
-
-                    // Add highlighted match
-                    const match_text = seg.text[match.start..match.end];
-                    var match_style = seg.style;
-                    match_style.bg = rendering_common.Color.search_match_bg;
-                    match_style.fg = rendering_common.Color.search_match_fg;
-                    match_style.bold = true;
-                    try result_segments.append(allocator, .{
-                        .text = match_text,
-                        .style = match_style,
-                    });
-
-                    pos = match.end;
-                }
-
-                // Add text after last match (if any)
-                if (pos < seg.text.len) {
-                    const after_text = seg.text[pos..];
-                    try result_segments.append(allocator, .{
-                        .text = after_text,
-                        .style = seg.style,
-                    });
-                }
-            }
-
-            text_pos += seg.text.len;
-        }
-
-        const result = try result_segments.toOwnedSlice(allocator);
-        allocator.free(segments);
-        return result;
-    }
-
-    fn isMatchLine(matches: []const usize, line: usize) bool {
-        if (matches.len == 0) return false;
-        var lo: usize = 0;
-        var hi: usize = matches.len;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            const value = matches[mid];
-            if (value < line) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        return lo < matches.len and matches[lo] == line;
-    }
-
-    // ===== TUI Server Integration =====
-
-    /// Start TUI server and write session file
-    fn startTuiServer(self: *App) !void {
-        // Initialize session manager
-        var sm = try session_mgr.SessionManager.init(self.allocator);
-        errdefer sm.deinit();
-
-        // Create and start TUI server
-        var server = tui_server.TuiServer.init(self.allocator, handleTuiServerRequest, self);
-        try server.start();
-
-        const port = server.getPort();
-        std.log.info("TUI server started on port {d}", .{port});
-
-        self.tui_server = server;
-        self.session_manager = sm;
-
-        // Write initial session metadata once server and manager are registered.
-        try self.writeSessionMetadata();
-    }
-
-    /// Handle incoming request from CLI/MCP
-    fn handleTuiServerRequest(request: tui_server.Request, user_data: ?*anyopaque) tui_server.Response {
-        const self: *App = @ptrCast(@alignCast(user_data.?));
-
-        if (std.mem.eql(u8, request.method, "get_context")) {
-            return self.handleGetContext();
-        } else if (std.mem.eql(u8, request.method, "get_diff")) {
-            return self.handleGetDiff(request.params);
-        } else if (std.mem.eql(u8, request.method, "add_comment")) {
-            return self.handleAddComment(request.params);
-        } else if (std.mem.eql(u8, request.method, "list_comments")) {
-            return self.handleListComments();
-        } else if (std.mem.eql(u8, request.method, "delete_comment")) {
-            return self.handleDeleteComment(request.params);
-        }
-
-        return tui_server.errorResponse(tui_server.ErrorCode.METHOD_NOT_FOUND, "Unknown method");
-    }
-
-    fn writeSessionMetadata(self: *App) !void {
-        const sm = &(self.session_manager orelse return);
-        const server = &(self.tui_server orelse return);
-
-        var file_list: std.ArrayList([]const u8) = .{};
-        defer file_list.deinit(self.allocator);
-
-        for (self.state.files) |file| {
-            const path = if (file.new_path.len > 0) file.new_path else file.old_path;
-            try file_list.append(self.allocator, path);
-        }
-
-        try sm.writeSession(.{
-            .pid = session_mgr.getCurrentPid(),
-            .port = server.getPort(),
-            .cwd = self.state.git_repo_root,
-            .diff_ref = self.getDiffRefString(),
-            .files = file_list.items,
-            .started_at = std.time.timestamp(),
-        });
-    }
-
-    fn syncSessionMetadata(self: *App) void {
-        self.writeSessionMetadata() catch |err| {
-            std.log.warn("Failed to sync session metadata: {any}", .{err});
-        };
-    }
-
-    /// Handle get_context request - returns session state
-    fn handleGetContext(self: *App) tui_server.Response {
-        var result = std.json.ObjectMap.init(self.allocator);
-
-        // Add diff_ref
-        const diff_ref = self.getDiffRefString();
-        result.put("diff_ref", .{ .string = self.allocator.dupe(u8, diff_ref) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
-            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
-        };
-
-        // Add cwd
-        result.put("cwd", .{ .string = self.allocator.dupe(u8, self.state.git_repo_root) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
-            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
-        };
-
-        // Add view_mode
-        const view_mode_str = switch (self.state.view_mode) {
-            .unified => "unified",
-            .side_by_side => "side_by_side",
-        };
-        result.put("view_mode", .{ .string = self.allocator.dupe(u8, view_mode_str) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
-            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
-        };
-
-        // Add files array
-        var files_arr = std.json.Array.init(self.allocator);
-        for (self.state.files) |file| {
-            const path = if (file.new_path.len > 0) file.new_path else file.old_path;
-            files_arr.append(.{ .string = self.allocator.dupe(u8, path) catch continue }) catch {};
-        }
-        result.put("files", .{ .array = files_arr }) catch {};
-
-        // Add comment count
-        result.put("comment_count", .{ .integer = @intCast(self.state.comment_store.comments.items.len) }) catch {};
-
-        return .{ .result = .{ .object = result } };
-    }
-
-    /// Handle get_diff request - returns formatted diff with line numbers
-    /// Params: { file?: string } - optional file filter
-    fn handleGetDiff(self: *App, params: ?std.json.Value) tui_server.Response {
-        // Optional file filter
-        const file_filter: ?[]const u8 = blk: {
-            const p = params orelse break :blk null;
-            if (p != .object) break :blk null;
-            const file_val = p.object.get("file") orelse break :blk null;
-            if (file_val != .string) break :blk null;
-            if (file_val.string.len == 0) break :blk null;
-            break :blk file_val.string;
-        };
-
-        var output: std.ArrayList(u8) = .{};
-        const writer = output.writer(self.allocator);
-
-        for (self.state.files) |*file| {
-            const path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-            // Skip if file filter is set and doesn't match
-            if (file_filter) |filter| {
-                if (!std.mem.eql(u8, path, filter)) continue;
-            }
-
-            // File header
-            writer.print("=== {s} ===\n", .{path}) catch continue;
-
-            for (file.hunks, 0..) |*hunk, hunk_idx| {
-                // Hunk header
-                writer.print("\n@@ Hunk {d}: -{d},{d} +{d},{d} @@", .{
-                    hunk_idx,
-                    hunk.header.old_start,
-                    hunk.header.old_count,
-                    hunk.header.new_start,
-                    hunk.header.new_count,
-                }) catch continue;
-                if (hunk.header.context.len > 0) {
-                    writer.print(" {s}", .{hunk.header.context}) catch {};
-                }
-                writer.writeAll("\n") catch continue;
-
-                // Lines with line numbers
-                for (hunk.lines) |*line| {
-                    const marker: u8 = switch (line.line_type) {
-                        .add => '+',
-                        .delete => '-',
-                        .context => ' ',
-                    };
-
-                    // Format: "marker old_line new_line | content"
-                    // e.g. "+     42 | const x = 1;"  (added line, new line 42)
-                    // e.g. "-  41    | const y = 2;"  (deleted line, old line 41)
-                    // e.g. "   41 42 | unchanged"     (context line)
-                    const old_str: []const u8 = if (line.old_lineno) |n| blk: {
-                        break :blk std.fmt.allocPrint(self.allocator, "{d: >4}", .{n}) catch "????";
-                    } else "    ";
-                    defer if (line.old_lineno != null) self.allocator.free(old_str);
-
-                    const new_str: []const u8 = if (line.new_lineno) |n| blk: {
-                        break :blk std.fmt.allocPrint(self.allocator, "{d: >4}", .{n}) catch "????";
-                    } else "    ";
-                    defer if (line.new_lineno != null) self.allocator.free(new_str);
-
-                    writer.print("{c} {s} {s} | {s}\n", .{ marker, old_str, new_str, line.content }) catch continue;
-                }
-            }
-            writer.writeAll("\n") catch {};
-        }
-
-        const diff_text = output.toOwnedSlice(self.allocator) catch {
-            output.deinit(self.allocator);
-            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to build diff");
-        };
-
-        var result = std.json.ObjectMap.init(self.allocator);
-        result.put("diff", .{ .string = diff_text }) catch {
-            self.allocator.free(diff_text);
-            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to build result");
-        };
-        return .{ .result = .{ .object = result } };
-    }
-
-    /// Handle add_comment request
-    /// Params: { file: string, line: number, line_type: "new"|"old", text: string }
-    fn handleAddComment(self: *App, params: ?std.json.Value) tui_server.Response {
-        const p = params orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing params");
-        if (p != .object) return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "params must be object");
-
-        const obj = p.object;
-
-        // Extract parameters
-        const file_val = obj.get("file") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'file'");
-        const file = if (file_val == .string) file_val.string else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'file' must be string");
-
-        const line_val = obj.get("line") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'line'");
-        const line_num: u32 = switch (line_val) {
-            .integer => |i| if (i >= 0) @intCast(i) else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'line' must be non-negative"),
-            else => return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'line' must be integer"),
-        };
-
-        const line_type_val = obj.get("line_type") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'line_type'");
-        const line_type_str = if (line_type_val == .string) line_type_val.string else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'line_type' must be string");
-        const use_new_lineno = if (std.mem.eql(u8, line_type_str, "new"))
-            true
-        else if (std.mem.eql(u8, line_type_str, "old"))
-            false
-        else
-            return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'line_type' must be 'new' or 'old'");
-
-        const text_val = obj.get("text") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'text'");
-        const text = if (text_val == .string) text_val.string else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'text' must be string");
-
-        // Find the file in the diff
-        const file_diff = blk: {
-            for (self.state.files) |*f| {
-                const path = if (f.new_path.len > 0) f.new_path else f.old_path;
-                if (std.mem.eql(u8, path, file)) {
-                    break :blk f;
-                }
-            }
-            return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "File not found in diff");
-        };
-
-        // Find the hunk and line by line number
-        const line_info: struct { hunk_idx: usize, line_idx: usize, line: *const parser.Line } = blk: {
-            for (file_diff.hunks, 0..) |*hunk, hunk_idx| {
-                for (hunk.lines, 0..) |*line, line_idx| {
-                    const target_lineno = if (use_new_lineno) line.new_lineno else line.old_lineno;
-                    if (target_lineno) |ln| {
-                        if (ln == line_num) {
-                            break :blk .{ .hunk_idx = hunk_idx, .line_idx = line_idx, .line = line };
-                        }
-                    }
-                }
-            }
-            return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Line not found in diff");
-        };
-
-        // Add the comment
-        self.state.comment_store.addComment(
-            file,
-            line_info.hunk_idx,
-            line_info.line_idx,
-            text,
-            line_info.line.line_type,
-            line_info.line.content,
-            line_info.line.old_lineno,
-            line_info.line.new_lineno,
-        ) catch {
-            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to add comment");
-        };
-
-        // Rebuild LineMap
-        self.state.line_map.deinit();
-        self.state.line_map = line_map.LineMap.build(
-            self.allocator,
-            self.state.files,
-            &self.state.comment_store,
-            self.convertHunkViewMode(),
-            self.shouldApplyHunkFiltering(),
-            &self.state.collapsed_folds,
-        ) catch {
-            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
-        };
-        self.needs_render = true;
-
-        // Auto-scroll to show the new comment (for external callers like CLI/MCP)
-        const comment_idx = self.state.comment_store.comments.items.len - 1;
-        if (self.state.line_map.findLineByCommentIdx(comment_idx)) |comment_line| {
-            // Center the comment in the viewport
-            const half_viewport = self.state.viewport_height / 2;
-            if (comment_line >= half_viewport) {
-                self.state.global_scroll_offset = comment_line - half_viewport;
-            } else {
-                self.state.global_scroll_offset = 0;
-            }
-            // Also move cursor to the comment line
-            self.state.global_cursor_line = comment_line;
-        }
-
-        var result = std.json.ObjectMap.init(self.allocator);
-        result.put("success", .{ .bool = true }) catch {};
-        result.put("comment_index", .{ .integer = @intCast(comment_idx) }) catch {};
-        return .{ .result = .{ .object = result } };
-    }
-
-    /// Handle list_comments request
-    fn handleListComments(self: *App) tui_server.Response {
-        var result = std.json.ObjectMap.init(self.allocator);
-
-        var comments_arr = std.json.Array.init(self.allocator);
-        for (self.state.comment_store.comments.items, 0..) |comment, idx| {
-            var comment_obj = std.json.ObjectMap.init(self.allocator);
-            comment_obj.put("index", .{ .integer = @intCast(idx) }) catch continue;
-            comment_obj.put("file_path", .{ .string = self.allocator.dupe(u8, comment.file_path) catch continue }) catch continue;
-            comment_obj.put("hunk_idx", .{ .integer = @intCast(comment.hunk_idx) }) catch continue;
-            comment_obj.put("line_idx", .{ .integer = @intCast(comment.line_idx) }) catch continue;
-            comment_obj.put("text", .{ .string = self.allocator.dupe(u8, comment.text) catch continue }) catch continue;
-            comments_arr.append(.{ .object = comment_obj }) catch {};
-        }
-
-        result.put("comments", .{ .array = comments_arr }) catch {};
-        return .{ .result = .{ .object = result } };
-    }
-
-    /// Handle delete_comment request
-    fn handleDeleteComment(self: *App, params: ?std.json.Value) tui_server.Response {
-        const p = params orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing params");
-        if (p != .object) return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "params must be object");
-
-        const obj = p.object;
-
-        const index_val = obj.get("index") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'index'");
-        const index: usize = switch (index_val) {
-            .integer => |i| if (i >= 0) @intCast(i) else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'index' must be non-negative"),
-            else => return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'index' must be integer"),
-        };
-
-        // Delete comment
-        self.state.comment_store.deleteComment(index) catch {
-            return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Invalid comment index");
-        };
-
-        // Rebuild LineMap
-        self.state.line_map.deinit();
-        self.state.line_map = line_map.LineMap.build(
-            self.allocator,
-            self.state.files,
-            &self.state.comment_store,
-            self.convertHunkViewMode(),
-            self.shouldApplyHunkFiltering(),
-            &self.state.collapsed_folds,
-        ) catch {
-            return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
-        };
-        self.needs_render = true;
-
-        var result = std.json.ObjectMap.init(self.allocator);
-        result.put("success", .{ .bool = true }) catch {};
-        return .{ .result = .{ .object = result } };
-    }
-
-    /// Get session port (for status display)
-    pub fn getSessionPort(self: *const App) ?u16 {
-        if (self.tui_server) |server| {
-            return server.port;
-        }
-        return null;
-    }
-
-    // =========================================================================
-    // Review Methods
-    // =========================================================================
-
-    /// Background thread function for ACP connection
-    fn acpConnectThreadFn(ctx: *AcpConnectContext) void {
-        std.log.info("ACP: Background connection thread started for tab {d}", .{ctx.tab_id});
-
-        // Get the manager from the target tab
-        const mgr: *acp.AcpManager = blk: {
-            if (ctx.app.tab_manager) |*tm| {
-                if (tm.findTabById(ctx.tab_id)) |idx| {
-                    if (tm.getTab(idx)) |tab| {
-                        if (tab.getActiveAcpManager()) |m| {
-                            break :blk m;
-                        }
-                    }
-                }
-            }
-            std.log.err("ACP: No manager found for tab {d}", .{ctx.tab_id});
-            return;
-        };
-
-        // Get agent info from context (required - no auto-discovery)
-        const agent_info: acp.AgentInfo = if (ctx.agent) |a| a.* else {
-            std.log.err("ACP: No agent provided in context", .{});
-            mgr.status = .failed;
-            return;
-        };
-        std.log.info("ACP: Using agent: {s}", .{agent_info.name});
-
-        // Update status to connecting
-        mgr.status = .connecting;
-
-        // Convert AgentInfo.EnvVar to AcpManager.EnvVar for connect call
-        const mgr_env = ctx.app.allocator.alloc(acp.AcpManager.EnvVar, agent_info.env.len) catch {
-            std.log.err("ACP: Failed to allocate env vars", .{});
-            return;
-        };
-        defer ctx.app.allocator.free(mgr_env);
-        for (agent_info.env, 0..) |ev, i| {
-            mgr_env[i] = .{ .name = ev.name, .value = ev.value };
-        }
-
-        // Connect to agent (spawn + initialize)
-        mgr.connect(agent_info.command, agent_info.args, ctx.cwd, mgr_env) catch |err| {
-            std.log.err("ACP: Connect failed: {}", .{err});
-            return;
-        };
-        std.log.info("ACP: Connected, now creating session...", .{});
-
-        // Create session
-        mgr.createSession(ctx.cwd) catch |err| {
-            std.log.err("ACP: CreateSession failed: {}, status now={s}", .{ err, mgr.getStatusString() });
-            return;
-        };
-        std.log.info("ACP: Session created successfully! status={s}", .{mgr.getStatusString()});
-
-        // Apply configured mode if set (e.g., "plan", "bypassPermissions")
-        if (agent_info.mode) |mode_id| {
-            std.log.info("ACP: Applying configured mode: {s}", .{mode_id});
-            mgr.setMode(mode_id) catch |err| {
-                std.log.warn("ACP: Failed to set mode: {}", .{err});
-            };
-        }
-
-        // Apply configured model if set and matches an available model
-        if (agent_info.model) |model_name| {
-            std.log.info("ACP: Applying configured model: {s}", .{model_name});
-            _ = mgr.applyConfiguredModel(model_name);
-        }
-    }
-
-    /// Start an ACP agent session (non-blocking)
-    /// If agents are configured, may show selection menu first.
-    pub fn startAcpSession(self: *App) !void {
-        std.log.info("ACP: startAcpSession called", .{});
-
-        // Check if connection already in progress
-        if (self.pending_connection != null) {
-            std.log.info("ACP: Connection already in progress", .{});
-            self.showStatusMessage("Connection already in progress...");
-            return;
-        }
-
-        // Check if already connected
-        if (self.getActiveAcpManager()) |mgr| {
-            if (mgr.isConnected()) {
-                std.log.info("ACP: Already connected", .{});
-                self.showStatusMessage("Agent already connected");
-                return;
-            }
-        }
-
-        // Load configured agents (if not already loaded)
-        if (self.state.configured_agents == null) {
-            self.state.configured_agents = self.loadConfiguredAgents();
-        }
-
-        const agents = self.state.configured_agents orelse {
-            // No agents configured - show error in agent panel and stay in agent mode
-            std.log.warn("ACP: No agents configured in ~/.skim/config.json", .{});
-            if (self.getActiveAgentState()) |agent_state| {
-                agent_state.addMessage(.system, "No agents configured. Add agents to ~/.skim/config.json") catch {};
-            }
-            return;
-        };
-
-        // Decision logic for agent selection
-        if (agents.len == 0) {
-            std.log.warn("ACP: Empty agents list in config", .{});
-            if (self.getActiveAgentState()) |agent_state| {
-                agent_state.addMessage(.system, "No agents configured. Add agents to ~/.skim/config.json") catch {};
-            }
-            return;
-        }
-
-        // Always show agent selection menu
-        std.log.info("ACP: {d} agent(s) configured, showing selection menu", .{agents.len});
-        self.state.agent_selection_idx = 0;
-        self.mode = .agent_selection;
-        self.needs_render = true;
-    }
-
-    /// Connect to a specific agent.
-    /// Agent info is required - no auto-discovery.
-    /// Manager is stored directly in the target tab (pending_tab_for_selection or active tab).
-    pub fn connectToAgent(self: *App, agent_info: ?*const acp.AgentInfo) !void {
-        // Ensure tab manager exists
-        const tm = self.ensureTabManager() catch |err| {
-            std.log.err("ACP: Failed to ensure tab manager: {any}", .{err});
-            self.showStatusMessage("Failed to initialize tabs");
-            return;
-        };
-
-        // Find target tab (pending_tab_for_selection or active)
-        const target_tab: *agent.AgentTab = blk: {
-            if (self.state.pending_tab_for_selection) |pending_id| {
-                if (tm.findTabById(pending_id)) |idx| {
-                    if (tm.getTab(idx)) |tab| {
-                        break :blk tab;
-                    }
-                }
-            }
-            break :blk tm.activeTab() orelse {
-                std.log.err("ACP: No target tab found", .{});
-                self.showStatusMessage("No tab available");
-                return;
-            };
-        };
-
-        // Check protocol for Opencode/Codex routing
-        if (agent_info) |info| {
-            if (info.protocol == .opencode) {
-                try self.connectToOpencodeAgent(target_tab, info);
-                return;
-            }
-            if (info.protocol == .codex) {
-                try self.connectToCodexAgent(target_tab, info);
-                return;
-            }
-        }
-
-        // Clean up any existing manager on target tab
-        target_tab.disconnectAll();
-
-        // Create and initialize the manager with discovering status
-        const mgr = try self.allocator.create(acp.AcpManager);
-        mgr.* = acp.AcpManager.init(self.allocator);
-        mgr.status = .discovering;
-
-        // Store server name from config (for display in title bar)
-        if (agent_info) |info| {
-            mgr.server_name = self.allocator.dupe(u8, info.name) catch null;
-        }
-
-        // Store directly in target tab
-        target_tab.manager = .{ .acp = mgr };
-
-        // Clear pending tab selection
-        self.state.pending_tab_for_selection = null;
-
-        if (agent_info) |info| {
-            self.showStatusMessage("Connecting to agent...");
-            std.log.info("ACP: Connecting to {s} for tab {d}", .{ info.name, target_tab.id });
-        } else {
-            self.showStatusMessage("Discovering agent...");
-        }
-        self.needs_render = true;
-
-        // Store connection context (static lifetime for thread)
-        const ctx = try self.allocator.create(AcpConnectContext);
-        ctx.* = .{
-            .app = self,
-            .cwd = self.state.git_repo_root,
-            .agent = agent_info,
-            .tab_id = target_tab.id,
-        };
-
-        // Spawn background thread for connection
-        const thread = std.Thread.spawn(.{}, acpConnectThreadFn, .{ctx}) catch |err| {
-            std.log.err("Failed to spawn ACP connect thread: {any}", .{err});
-            self.showStatusMessage("Failed to start connection");
-            self.allocator.destroy(ctx);
-            // Clean up the manager we stored in the tab
-            target_tab.manager = null;
-            mgr.deinit();
-            self.allocator.destroy(mgr);
-            return;
-        };
-
-        self.pending_connection = .{
-            .thread = thread,
-            .tab_id = target_tab.id,
-            .ctx = .{ .acp = ctx },
-        };
-    }
-
-    /// Connect to an Opencode agent for the given tab (non-blocking)
-    fn connectToOpencodeAgent(self: *App, target_tab: *agent.AgentTab, agent_info: *const acp.AgentInfo) !void {
-        // Clean up any existing managers on target tab
-        target_tab.disconnectAll();
-
-        // Clear pending tab selection
-        self.state.pending_tab_for_selection = null;
-
-        // Create Opencode manager and store it in the tab immediately (enables rendering)
-        const mgr = try target_tab.createOpencodeManager();
-
-        self.showStatusMessage("Connecting to Opencode...");
-        std.log.info("Opencode: Connecting to {s} for tab {d}", .{ agent_info.name, target_tab.id });
-        self.needs_render = true;
-
-        // Store connection context (static lifetime for thread)
-        const ctx = try self.allocator.create(OpencodeConnectContext);
-        ctx.* = .{
-            .mgr = mgr,
-            .opencode_path = agent_info.command,
-            .port = 4096,
-            .cwd = self.state.git_repo_root,
-        };
-
-        // Spawn background thread for connection
-        const thread = std.Thread.spawn(.{}, opcConnectThreadFn, .{ctx}) catch |err| {
-            std.log.err("Failed to spawn Opencode connect thread: {any}", .{err});
-            self.showStatusMessage("Failed to start connection");
-            self.allocator.destroy(ctx);
-            target_tab.manager = null;
-            mgr.deinit();
-            self.allocator.destroy(mgr);
-            return;
-        };
-
-        self.pending_connection = .{
-            .thread = thread,
-            .tab_id = target_tab.id,
-            .ctx = .{ .opencode = ctx },
-        };
-    }
-
-    fn opcConnectThreadFn(ctx: *OpencodeConnectContext) void {
-        std.log.info("Opencode: Background connection thread started", .{});
-
-        ctx.mgr.connect(.{
-            .opencode_path = ctx.opencode_path,
-            .port = ctx.port,
-            .cwd = ctx.cwd,
-            .spawn_server = true,
-        }) catch |err| {
-            std.log.err("Opencode: Connect failed: {}", .{err});
-            return;
-        };
-
-        std.log.info("Opencode: Connected successfully", .{});
-    }
-
-    /// Connect to a Codex agent for the given tab (non-blocking)
-    fn connectToCodexAgent(self: *App, target_tab: *agent.AgentTab, agent_info: *const acp.AgentInfo) !void {
-        // Clean up any existing managers on target tab
-        target_tab.disconnectAll();
-
-        // Clear pending tab selection
-        self.state.pending_tab_for_selection = null;
-
-        // Create Codex manager and store it in the tab immediately (enables rendering)
-        const mgr = try target_tab.createCodexManager();
-
-        self.showStatusMessage("Connecting to Codex...");
-        std.log.info("Codex: Connecting to {s} for tab {d}", .{ agent_info.name, target_tab.id });
-        self.needs_render = true;
-
-        // Store connection context (static lifetime for thread)
-        const ctx = try self.allocator.create(CodexConnectContext);
-        ctx.* = .{
-            .allocator = self.allocator,
-            .mgr = mgr,
-            .command = agent_info.command,
-            .args = agent_info.args,
-            .cwd = self.state.git_repo_root,
-            .model = agent_info.model,
-            .mode = agent_info.mode,
-            .approval_policy = agent_info.approval_policy,
-            .sandbox_mode = agent_info.sandbox_mode,
-            .web_search = agent_info.web_search,
-        };
-
-        // Spawn background thread for connection
-        const thread = std.Thread.spawn(.{}, codexConnectThreadFn, .{ctx}) catch |err| {
-            std.log.err("Failed to spawn Codex connect thread: {any}", .{err});
-            self.showStatusMessage("Failed to start connection");
-            self.allocator.destroy(ctx);
-            target_tab.manager = null;
-            mgr.deinit();
-            self.allocator.destroy(mgr);
-            return;
-        };
-
-        self.pending_connection = .{
-            .thread = thread,
-            .tab_id = target_tab.id,
-            .ctx = .{ .codex = ctx },
-        };
-    }
-
-    fn codexConnectThreadFn(ctx: *CodexConnectContext) void {
-        std.log.info("Codex: Background connection thread started", .{});
-
-        applyCodexSessionConfig(ctx.mgr, ctx.mode, ctx.approval_policy);
-
-        const launch = buildCodexLaunchArgs(
-            ctx.allocator,
-            ctx.command,
-            ctx.args,
-            ctx.sandbox_mode,
-            ctx.web_search,
-        ) catch |err| {
-            std.log.err("Codex: Failed to build launch args: {}", .{err});
-            return;
-        };
-        defer ctx.allocator.free(launch.args);
-        defer if (launch.sandbox_override) |s| ctx.allocator.free(s);
-
-        // Connect to codex app-server (spawn process, handshake)
-        ctx.mgr.connect(ctx.command, launch.args, ctx.cwd) catch |err| {
-            std.log.err("Codex: Connect failed: {}", .{err});
-            return;
-        };
-
-        std.log.info("Codex: Connected, starting thread...", .{});
-
-        // Start a thread (creates conversation context)
-        ctx.mgr.startThread(ctx.model, ctx.cwd) catch |err| {
-            std.log.err("Codex: StartThread failed: {}", .{err});
-            return;
-        };
-
-        std.log.info("Codex: Thread started successfully", .{});
-    }
-
-    const CodexLaunchArgs = struct {
-        args: []const []const u8,
-        sandbox_override: ?[]const u8, // heap-allocated, must be freed separately
-    };
-
-    fn buildCodexLaunchArgs(
-        allocator: Allocator,
-        command: []const u8,
-        args: ?[]const []const u8,
-        sandbox_mode: ?[]const u8,
-        web_search: bool,
-    ) Allocator.Error!CodexLaunchArgs {
-        const base_args = args orelse &.{};
-        const is_native_codex = isCodexCommand(command);
-        const app_server_index = if (is_native_codex) findArg(base_args, "app-server") else null;
-        const should_append_app_server = is_native_codex and app_server_index == null;
-
-        // Use -c config overrides so settings propagate into app-server mode.
-        // Top-level CLI flags like --sandbox don't reliably reach the app-server subprocess.
-        const sandbox_override: ?[]const u8 = if (sandbox_mode != null and is_native_codex)
-            try std.fmt.allocPrint(allocator, "sandbox_mode=\"{s}\"", .{sandbox_mode.?})
-        else
-            null;
-        errdefer if (sandbox_override) |s| allocator.free(s);
-
-        const extra_count: usize =
-            (if (sandbox_override != null) @as(usize, 2) else 0) +
-            (if (web_search and is_native_codex) @as(usize, 1) else 0) +
-            (if (should_append_app_server) @as(usize, 1) else 0);
-
-        const result = try allocator.alloc([]const u8, base_args.len + extra_count);
-        errdefer allocator.free(result);
-
-        const insert_at = app_server_index orelse base_args.len;
-        var next_index: usize = 0;
-
-        for (base_args[0..insert_at]) |arg| {
-            result[next_index] = arg;
-            next_index += 1;
-        }
-
-        if (sandbox_override) |override| {
-            result[next_index] = "-c";
-            next_index += 1;
-            result[next_index] = override;
-            next_index += 1;
-        }
-
-        if (web_search and is_native_codex) {
-            result[next_index] = "--search";
-            next_index += 1;
-        }
-
-        for (base_args[insert_at..]) |arg| {
-            result[next_index] = arg;
-            next_index += 1;
-        }
-
-        if (should_append_app_server) {
-            result[next_index] = "app-server";
-        }
-
-        return .{ .args = result, .sandbox_override = sandbox_override };
-    }
-
-    fn isCodexCommand(command: []const u8) bool {
-        return std.mem.eql(u8, std.fs.path.basename(command), "codex");
-    }
-
-    fn findArg(args: []const []const u8, needle: []const u8) ?usize {
-        for (args, 0..) |arg, index| {
-            if (std.mem.eql(u8, arg, needle)) return index;
-        }
-        return null;
-    }
-
-    fn applyCodexSessionConfig(
-        mgr: *codex_mod.CodexManager,
-        mode: ?[]const u8,
-        approval_policy: ?[]const u8,
-    ) void {
-        mgr.requested_collaboration_mode = if (mode) |mode_id|
-            codex_mod.protocol.CollaborationMode.fromString(mode_id)
-        else
-            null;
-
-        mgr.requested_approval_policy = if (approval_policy) |policy_id|
-            codex_mod.protocol.ApprovalPolicy.fromString(policy_id)
-        else
-            null;
-    }
-
-    /// Connect to the currently selected agent in the selection menu
-    pub fn connectToSelectedAgent(self: *App) !void {
-        const agents = self.state.configured_agents orelse return;
-        if (self.state.agent_selection_idx >= agents.len) return;
-        self.pending_agent_connect_idx = null;
-        try self.connectToAgent(&agents[self.state.agent_selection_idx]);
-    }
-
-    fn startQueuedAgentConnection(self: *App) !void {
-        const idx = self.pending_agent_connect_idx orelse return;
-        const agents = self.state.configured_agents orelse {
-            self.pending_agent_connect_idx = null;
-            return;
-        };
-        if (idx >= agents.len) {
-            self.pending_agent_connect_idx = null;
-            return;
-        }
-
-        self.state.agent_selection_idx = idx;
-        try self.connectToSelectedAgent();
-    }
-
-    /// Load configured agents from config file.
-    /// Returns null if no agents are configured.
-    pub fn loadConfiguredAgents(self: *App) ?[]acp.AgentInfo {
-        // Try to load from config - now uses standard agent_servers format
-        const cfg_agents = app_config.getConfiguredAgents(self.allocator) catch null;
-
-        if (cfg_agents) |agents| {
-            if (agents.len > 0) {
-                // Convert config.AgentServerConfig to acp.ConfigAgent
-                const acp_agents = self.allocator.alloc(acp.ConfigAgent, agents.len) catch {
-                    app_config.freeAgentServers(self.allocator, agents);
-                    return null;
-                };
-                defer self.allocator.free(acp_agents);
-
-                for (agents, 0..) |cfg, i| {
-                    // Convert env vars
-                    const env_slice: ?[]const acp.ConfigEnvVar = if (cfg.env) |env| blk: {
-                        const env_copy = self.allocator.alloc(acp.ConfigEnvVar, env.len) catch {
-                            app_config.freeAgentServers(self.allocator, agents);
-                            return null;
-                        };
-                        for (env, 0..) |ev, j| {
-                            env_copy[j] = .{ .name = ev.name, .value = ev.value };
-                        }
-                        break :blk env_copy;
-                    } else null;
-
-                    // Convert skim extensions
-                    const skim_ext: ?acp.SkimAgentExtensions = if (cfg.skim) |s|
-                        .{ .default = s.default, .mode = s.mode, .model = s.model }
-                    else
-                        null;
-
-                    // Convert protocol enum
-                    const protocol: acp.AcpManager.Protocol = switch (cfg.protocol) {
-                        .acp => .acp,
-                        .opencode => .opencode,
-                        .codex => .codex,
-                    };
-
-                    acp_agents[i] = .{
-                        .name = cfg.name,
-                        .command = cfg.command,
-                        .args = cfg.args,
-                        .env = env_slice,
-                        .skim = skim_ext,
-                        .protocol = protocol,
-                        .approval_policy = cfg.approval_policy,
-                        .sandbox_mode = cfg.sandbox_mode,
-                        .web_search = cfg.web_search,
-                    };
-                }
-
-                // loadAgentList will dupe all strings and expand env vars
-                const result = (acp.loadAgentList(self.allocator, acp_agents) catch null) orelse {
-                    // Free converted env slices
-                    for (acp_agents) |a| {
-                        if (a.env) |e| self.allocator.free(e);
-                    }
-                    app_config.freeAgentServers(self.allocator, agents);
-                    return null;
-                };
-
-                // Free converted env slices
-                for (acp_agents) |a| {
-                    if (a.env) |e| self.allocator.free(e);
-                }
-                // Clean up config agents (loadAgentList made copies)
-                app_config.freeAgentServers(self.allocator, agents);
-                return result;
-            }
-            app_config.freeAgentServers(self.allocator, agents);
-        }
-
-        // No agents configured
-        return null;
-    }
-
-    /// Disconnect from the ACP agent for the active tab
-    pub fn stopAcpSession(self: *App) void {
-        if (self.tab_manager) |*tm| {
-            if (tm.activeTab()) |tab| {
-                if (tab.manager != null) {
-                    tab.disconnectAll();
-                    self.showStatusMessage("Disconnected from agent");
-                    self.needs_render = true;
-                }
-            }
-        }
-    }
-
-    /// Check ACP agent status for the active tab
-    pub fn getAcpStatus(self: *App) ?acp.AcpManager.Status {
-        if (self.getActiveAcpManager()) |mgr| {
-            return mgr.status;
-        }
-        return null;
-    }
-
-    /// Poll all managers: check connection thread, then poll each tab's manager.
-    fn pollAllManagers(self: *App) void {
-        const connection_active = self.pollConnectionThread();
-
-        // Don't poll tabs while an ACP or Codex connection thread is active — it would clear
-        // messages that waitForResponse() in the background thread needs.
-        if (connection_active) {
-            if (self.pending_connection) |conn| {
-                switch (conn.ctx) {
-                    .acp, .codex => return,
-                    .opencode => {},
-                }
-            }
-        }
-
-        // Poll all tabs via unified ManagerHandle.pollEvents
-        if (self.tab_manager) |*tm| {
-            for (tm.tabs.items, 0..) |*tab, tab_idx| {
-                const handle = tab.manager orelse continue;
-                self.pollTabManager(handle, &tab.agent_state, tab_idx == tm.active_idx);
-            }
-        }
-    }
-
-    /// Check if the pending connection thread completed and handle success/failure.
-    /// Returns true if a connection thread is still active.
-    fn pollConnectionThread(self: *App) bool {
-        const conn = self.pending_connection orelse return false;
-
-        const tab = self.getConnectingTab() orelse {
-            // Tab disappeared — clean up connection state
-            conn.thread.join();
-            switch (conn.ctx) {
-                .acp => |ctx| self.allocator.destroy(ctx),
-                .opencode => |ctx| self.allocator.destroy(ctx),
-                .codex => |ctx| self.allocator.destroy(ctx),
-            }
-            self.pending_connection = null;
-            return false;
-        };
-
-        const handle = tab.manager orelse {
-            // Manager was removed from the tab — clean up
-            conn.thread.join();
-            switch (conn.ctx) {
-                .acp => |ctx| self.allocator.destroy(ctx),
-                .opencode => |ctx| self.allocator.destroy(ctx),
-                .codex => |ctx| self.allocator.destroy(ctx),
-            }
-            self.pending_connection = null;
-            return false;
-        };
-
-        // Check if the manager is still initializing (thread still working)
-        if (handle.isInitializing()) return true;
-
-        // Thread is done — join and clean up
-        conn.thread.join();
-
-        switch (conn.ctx) {
-            .acp => |ctx| {
-                self.allocator.destroy(ctx);
-                switch (handle) {
-                    .acp => |mgr| {
-                        if (mgr.status == .session_active) {
-                            const agent_name = mgr.getAgentDisplayName();
-                            const model_name = mgr.getCurrentModelName();
-                            const msg = if (model_name.len > 0)
-                                std.fmt.allocPrint(self.allocator, "Connected to {s} · {s}", .{ agent_name, model_name }) catch "Connected"
-                            else
-                                std.fmt.allocPrint(self.allocator, "Connected to {s}", .{agent_name}) catch "Connected";
-                            defer if (!std.mem.eql(u8, msg, "Connected")) self.allocator.free(msg);
-                            self.showStatusMessage(msg);
-
-                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), true);
-
-                            std.log.info("ACP: Connection complete for tab {d}", .{conn.tab_id});
-                            mgr.sendNextQueuedPrompt();
-                        } else if (mgr.status == .failed) {
-                            self.showStatusMessage("Failed to connect to agent");
-                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), false);
-                            tab.manager = null;
-                            mgr.deinit();
-                            self.allocator.destroy(mgr);
-                        }
-                    },
-                    .opencode, .codex => {},
-                }
-            },
-            .opencode => |ctx| {
-                self.allocator.destroy(ctx);
-                switch (handle) {
-                    .opencode => |mgr| {
-                        if (mgr.status == .session_active) {
-                            self.showStatusMessage("Connected to Opencode");
-                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), true);
-                            std.log.info("Opencode: Connection complete for tab {d}", .{conn.tab_id});
-                        } else if (mgr.status == .failed or mgr.status == .disconnected) {
-                            self.showStatusMessage("Failed to connect to Opencode");
-                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), false);
-                            tab.manager = null;
-                            mgr.deinit();
-                            self.allocator.destroy(mgr);
-                        }
-                    },
-                    .acp, .codex => {},
-                }
-            },
-            .codex => |ctx| {
-                self.allocator.destroy(ctx);
-                switch (handle) {
-                    .codex => |mgr| {
-                        if (mgr.status == .thread_active) {
-                            const model_name = mgr.model orelse "Codex";
-                            const msg = std.fmt.allocPrint(self.allocator, "Connected to Codex · {s}", .{model_name}) catch "Connected to Codex";
-                            defer if (!std.mem.eql(u8, msg, "Connected to Codex")) self.allocator.free(msg);
-                            self.showStatusMessage(msg);
-
-                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), true);
-
-                            std.log.info("Codex: Connection complete for tab {d}", .{conn.tab_id});
-                        } else if (mgr.status == .@"error" or mgr.status == .disconnected) {
-                            self.showStatusMessage("Failed to connect to Codex");
-                            self.maybeAddConnectionSystemMessage(self.getConnectingAgentState(), false);
-                            tab.manager = null;
-                            mgr.deinit();
-                            self.allocator.destroy(mgr);
-                        }
-                    },
-                    .acp, .opencode => {},
-                }
-            },
-        }
-
-        self.pending_connection = null;
-        self.needs_render = true;
-        return false;
-    }
-
-    fn maybeAddConnectionSystemMessage(self: *App, agent_state_opt: ?*agent.AgentState, connected: bool) void {
-        _ = self;
-        if (!connected) return;
-
-        if (agent_state_opt) |agent_state_conn| {
-            agent_state_conn.addMessage(.system, "Agent ready.") catch {};
-        }
-    }
-
-    /// Get the tab being connected (via pending_connection.tab_id)
-    fn getConnectingTab(self: *App) ?*agent.AgentTab {
-        const conn = self.pending_connection orelse return null;
-        if (self.tab_manager) |*tm| {
-            if (tm.findTabById(conn.tab_id)) |idx| {
-                return tm.getTab(idx);
-            }
-        }
-        return null;
-    }
-
-    /// Get the agent state for the tab being connected
-    fn getConnectingAgentState(self: *App) ?*agent.AgentState {
-        if (self.getConnectingTab()) |tab| {
-            return &tab.agent_state;
-        }
-        return null;
-    }
-
-    /// Poll a single tab's manager and route events to its agent state
-    fn pollTabManager(self: *App, handle: agent.tab_manager.ManagerHandle, agent_state_ptr: *agent.AgentState, is_active_tab: bool) void {
-        const was_prompting = handle.isPrompting();
-
-        const result = handle.pollEvents(self.allocator, agent_state_ptr);
-
-        if (result.count > 0) self.needs_render = true;
-        if (result.more_pending) self.needs_render = true;
-        if (result.status_changed) self.needs_render = true;
-        if (result.needs_line_map_dirty) agent_state_ptr.line_map_dirty = true;
-
-        // Auto-execute staged shell commands when agent finishes prompting
-        if (was_prompting and !handle.isPrompting()) {
-            if (agent_state_ptr.hasStagedPrompt() and agent_state_ptr.isStagedShellCommand()) {
-                const staged = agent_state_ptr.getStagedPrompt();
-                agent_mode.handleShellCommand(self, agent_state_ptr, staged) catch {};
-                agent_state_ptr.clearStagedPrompt();
-            }
-        }
-
-        // Auto-send staged prompts when manager is ready
-        if (handle.isReadyForAutoSend() and agent_state_ptr.hasStagedPrompt()) {
-            if (agent_state_ptr.isStagedShellCommand()) {
-                const staged = agent_state_ptr.getStagedPrompt();
-                agent_mode.handleShellCommand(self, agent_state_ptr, staged) catch {};
-                agent_state_ptr.clearStagedPrompt();
-            } else if (agent_state_ptr.takeStagedPrompt()) |staged| {
-                if (is_active_tab) {
-                    std.log.info("Agent: Auto-sending staged message ({d} bytes)", .{staged.len});
-                }
-
-                agent_state_ptr.addMessage(.user, staged) catch {};
-
-                handle.sendPrompt(staged) catch |err| {
-                    std.log.err("Agent: Failed to send staged prompt: {any}", .{err});
-                    agent_state_ptr.addMessage(.system, "Failed to send staged message") catch {};
-                };
-
-                self.needs_render = true;
-            }
-        }
-    }
-
-    /// Get the diff reference string for display
-    fn getDiffRefString(self: *App) []const u8 {
-        return switch (self.state.diff_source) {
-            .working_dir => |wd| if (wd.staged) "staged" else "working",
-            .single_ref => |sr| sr.ref,
-            .two_refs => "refs",
-            .stdin => "stdin",
-        };
-    }
-
     /// Show a temporary status message (displayed for 3 seconds)
     /// Note: This duplicates the message, so caller can free their copy.
     pub fn showStatusMessage(self: *App, message: []const u8) void {
@@ -7464,64 +3039,6 @@ pub const App = struct {
 // ===== Tests =====
 // Note: searchInLine tests moved to src/search.zig
 
-test "search highlighting - basic match" {
-    const allocator = std.testing.allocator;
-
-    // Create a mock App with search state
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .should_quit = false,
-        .last_ctrl_c_time = 0,
-        .mode = .normal,
-        .state = undefined,
-    };
-
-    // Initialize search state
-    app.state.search_state = App.SearchState.init(allocator);
-    defer app.state.search_state.deinit();
-
-    // Set search query
-    const query = "test";
-    @memcpy(app.state.search_state.query_buffer[0..query.len], query);
-    app.state.search_state.query_len = query.len;
-
-    // Add line 100 to matches (simulate that performSearch found it)
-    try app.state.search_state.matches.append(100);
-
-    // Create input segments (single segment with plain text)
-    const chunk_text = "this is a test string";
-    var input_segments = [_]vaxis.Cell.Segment{
-        .{
-            .text = chunk_text,
-            .style = .{},
-        },
-    };
-
-    const input_copy = try allocator.alloc(vaxis.Cell.Segment, input_segments.len);
-    @memcpy(input_copy, &input_segments);
-
-    // Apply highlighting (pretend we're on global line 100)
-    const result = try app.applySearchHighlighting(
-        input_copy,
-        chunk_text,
-        chunk_text,
-        0,
-        100,
-    );
-    defer allocator.free(result);
-
-    // Verify: should have 3 segments (before, match, after)
-    try std.testing.expectEqual(@as(usize, 3), result.len);
-    try std.testing.expectEqualStrings("this is a ", result[0].text);
-    try std.testing.expectEqualStrings("test", result[1].text);
-    try std.testing.expectEqualStrings(" string", result[2].text);
-
-    // Verify the match has search highlight style
-    try std.testing.expect(result[1].style.bold);
-}
-
 test "queueSelectedAgentConnection switches to agent mode and queues selection" {
     const allocator = std.testing.allocator;
 
@@ -7557,7 +3074,7 @@ test "queueSelectedAgentConnection switches to agent mode and queues selection" 
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+        .blame = blame_ctrl.Blame.init(allocator),
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -7571,13 +3088,13 @@ test "queueSelectedAgentConnection switches to agent mode and queues selection" 
         .profile_counters = .{},
     };
     defer app.pending_highlight_jobs.deinit();
-    defer app.blame_cache.deinit();
+    defer app.blame.deinit();
     defer app.frame_segment_arena.deinit();
 
     app.state.configured_agents = &agents;
     app.state.agent_selection_idx = 0;
 
-    app.queueSelectedAgentConnection();
+    connect.queueSelectedAgentConnection(&app);
 
     try std.testing.expectEqual(App.Mode.agent, app.mode);
     try std.testing.expect(app.needs_render);
@@ -7611,7 +3128,7 @@ test "isSessionInitializing returns true for queued agent connection" {
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
+        .blame = blame_ctrl.Blame.init(allocator),
         .pending_connection = null,
         .pending_agent_connect_idx = 0,
         .pending_subagent_fetch = .{},
@@ -7625,297 +3142,10 @@ test "isSessionInitializing returns true for queued agent connection" {
         .profile_counters = .{},
     };
     defer app.pending_highlight_jobs.deinit();
-    defer app.blame_cache.deinit();
+    defer app.blame.deinit();
     defer app.frame_segment_arena.deinit();
 
     try std.testing.expect(app.isSessionInitializing());
-}
-
-test "maybeAddConnectionSystemMessage only emits ready message on success" {
-    const allocator = std.testing.allocator;
-
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = undefined,
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = std.heap.ArenaAllocator.init(allocator),
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame_cache = std.StringHashMap(blame.BlameData).init(allocator),
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = null,
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
-    defer app.pending_highlight_jobs.deinit();
-    defer app.blame_cache.deinit();
-    defer app.frame_segment_arena.deinit();
-
-    var agent_state = agent.AgentState.init(allocator, .right);
-    defer agent_state.deinit();
-
-    app.maybeAddConnectionSystemMessage(&agent_state, false);
-    try std.testing.expectEqual(@as(usize, 0), agent_state.messages.items.len);
-
-    app.maybeAddConnectionSystemMessage(&agent_state, true);
-    try std.testing.expectEqual(@as(usize, 1), agent_state.messages.items.len);
-    try std.testing.expectEqual(agent.AgentState.Message.Role.system, agent_state.messages.items[0].role);
-    try std.testing.expectEqualStrings("Agent ready.", agent_state.messages.items[0].content);
-}
-
-test "applyCodexSessionConfig enables plan collaboration mode" {
-    var mgr = codex_mod.CodexManager.init(std.testing.allocator);
-    defer mgr.deinit();
-
-    App.applyCodexSessionConfig(&mgr, "plan", "never");
-
-    try std.testing.expect(mgr.requested_collaboration_mode != null);
-    try std.testing.expect(mgr.requested_collaboration_mode.? == .plan);
-    try std.testing.expect(mgr.requested_approval_policy != null);
-    try std.testing.expect(mgr.requested_approval_policy.? == .never);
-}
-
-test "applyCodexSessionConfig ignores unknown mode" {
-    var mgr = codex_mod.CodexManager.init(std.testing.allocator);
-    defer mgr.deinit();
-
-    App.applyCodexSessionConfig(&mgr, "unknown-mode", "on-request");
-
-    try std.testing.expect(mgr.requested_collaboration_mode == null);
-    try std.testing.expect(mgr.requested_approval_policy != null);
-    try std.testing.expect(mgr.requested_approval_policy.? == .on_request);
-}
-
-test "buildCodexLaunchArgs adds app-server and first-class settings" {
-    const allocator = std.testing.allocator;
-
-    const launch = try App.buildCodexLaunchArgs(allocator, "codex", null, "workspace-write", true);
-    defer allocator.free(launch.args);
-    defer if (launch.sandbox_override) |s| allocator.free(s);
-
-    try std.testing.expectEqual(@as(usize, 4), launch.args.len);
-    try std.testing.expectEqualStrings("-c", launch.args[0]);
-    try std.testing.expectEqualStrings("sandbox_mode=\"workspace-write\"", launch.args[1]);
-    try std.testing.expectEqualStrings("--search", launch.args[2]);
-    try std.testing.expectEqualStrings("app-server", launch.args[3]);
-}
-
-test "buildCodexLaunchArgs inserts first-class settings before app-server" {
-    const allocator = std.testing.allocator;
-    const base_args = &[_][]const u8{
-        "-c",
-        "model=\"gpt-5.4\"",
-        "app-server",
-        "--listen",
-        "stdio://",
-    };
-
-    const launch = try App.buildCodexLaunchArgs(allocator, "codex", base_args, "workspace-write", true);
-    defer allocator.free(launch.args);
-    defer if (launch.sandbox_override) |s| allocator.free(s);
-
-    try std.testing.expectEqual(@as(usize, 8), launch.args.len);
-    try std.testing.expectEqualStrings("-c", launch.args[0]);
-    try std.testing.expectEqualStrings("model=\"gpt-5.4\"", launch.args[1]);
-    try std.testing.expectEqualStrings("-c", launch.args[2]);
-    try std.testing.expectEqualStrings("sandbox_mode=\"workspace-write\"", launch.args[3]);
-    try std.testing.expectEqualStrings("--search", launch.args[4]);
-    try std.testing.expectEqualStrings("app-server", launch.args[5]);
-    try std.testing.expectEqualStrings("--listen", launch.args[6]);
-    try std.testing.expectEqualStrings("stdio://", launch.args[7]);
-}
-
-test "search highlighting - multiple matches" {
-    const allocator = std.testing.allocator;
-
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .should_quit = false,
-        .last_ctrl_c_time = 0,
-        .mode = .normal,
-        .state = undefined,
-    };
-
-    app.state.search_state = App.SearchState.init(allocator);
-    defer app.state.search_state.deinit();
-
-    const query = "the";
-    @memcpy(app.state.search_state.query_buffer[0..query.len], query);
-    app.state.search_state.query_len = query.len;
-
-    // Add line 200 to matches
-    try app.state.search_state.matches.append(200);
-
-    const chunk_text = "the quick brown fox jumps over the lazy dog";
-    var input_segments = [_]vaxis.Cell.Segment{
-        .{
-            .text = chunk_text,
-            .style = .{},
-        },
-    };
-
-    const input_copy = try allocator.alloc(vaxis.Cell.Segment, input_segments.len);
-    @memcpy(input_copy, &input_segments);
-
-    const result = try app.applySearchHighlighting(
-        input_copy,
-        chunk_text,
-        chunk_text,
-        0,
-        200,
-    );
-    defer allocator.free(result);
-
-    // Should have 5 segments: match1, text, match2, text
-    try std.testing.expectEqual(@as(usize, 5), result.len);
-    try std.testing.expectEqualStrings("the", result[0].text);
-    try std.testing.expectEqualStrings(" quick brown fox jumps over ", result[1].text);
-    try std.testing.expectEqualStrings("the", result[2].text);
-    try std.testing.expectEqualStrings(" lazy dog", result[3].text);
-}
-
-test "search highlighting - case insensitive" {
-    const allocator = std.testing.allocator;
-
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .should_quit = false,
-        .last_ctrl_c_time = 0,
-        .mode = .normal,
-        .state = undefined,
-    };
-
-    app.state.search_state = App.SearchState.init(allocator);
-    defer app.state.search_state.deinit();
-
-    // Lowercase query (should match any case)
-    const query = "test";
-    @memcpy(app.state.search_state.query_buffer[0..query.len], query);
-    app.state.search_state.query_len = query.len;
-
-    // Add line 300 to matches
-    try app.state.search_state.matches.append(300);
-
-    const chunk_text = "Test TEST test";
-    var input_segments = [_]vaxis.Cell.Segment{
-        .{
-            .text = chunk_text,
-            .style = .{},
-        },
-    };
-
-    const input_copy = try allocator.alloc(vaxis.Cell.Segment, input_segments.len);
-    @memcpy(input_copy, &input_segments);
-
-    const result = try app.applySearchHighlighting(
-        input_copy,
-        chunk_text,
-        chunk_text,
-        0,
-        300,
-    );
-    defer allocator.free(result);
-
-    // Should match all 3 occurrences
-    try std.testing.expectEqual(@as(usize, 5), result.len);
-    try std.testing.expectEqualStrings("Test", result[0].text);
-    try std.testing.expect(result[0].style.bold);
-    try std.testing.expectEqualStrings(" ", result[1].text);
-    try std.testing.expectEqualStrings("TEST", result[2].text);
-    try std.testing.expect(result[2].style.bold);
-    try std.testing.expectEqualStrings(" ", result[3].text);
-    try std.testing.expectEqualStrings("test", result[4].text);
-    try std.testing.expect(result[4].style.bold);
-}
-
-test "search highlighting - across syntax segments" {
-    const allocator = std.testing.allocator;
-
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .should_quit = false,
-        .last_ctrl_c_time = 0,
-        .mode = .normal,
-        .state = undefined,
-    };
-
-    app.state.search_state = App.SearchState.init(allocator);
-    defer app.state.search_state.deinit();
-
-    const query = "function";
-    @memcpy(app.state.search_state.query_buffer[0..query.len], query);
-    app.state.search_state.query_len = query.len;
-
-    // Add line 400 to matches
-    try app.state.search_state.matches.append(400);
-
-    // Simulate syntax-highlighted segments
-    const chunk_text = "function test() {}";
-    var input_segments = [_]vaxis.Cell.Segment{
-        .{ // keyword
-            .text = "function",
-            .style = .{ .fg = .{ .rgb = [3]u8{ 255, 0, 0 } }, .bold = true },
-        },
-        .{ // space
-            .text = " ",
-            .style = .{},
-        },
-        .{ // function name
-            .text = "test",
-            .style = .{ .fg = .{ .rgb = [3]u8{ 255, 0, 255 } } },
-        },
-        .{ // rest
-            .text = "() {}",
-            .style = .{},
-        },
-    };
-
-    const input_copy = try allocator.alloc(vaxis.Cell.Segment, input_segments.len);
-    @memcpy(input_copy, &input_segments);
-
-    const result = try app.applySearchHighlighting(
-        input_copy,
-        chunk_text,
-        chunk_text,
-        0,
-        400,
-    );
-    defer allocator.free(result);
-
-    // First segment should be highlighted with search colors (not syntax colors)
-    try std.testing.expect(result.len > 0);
-    try std.testing.expectEqualStrings("function", result[0].text);
-    try std.testing.expect(result[0].style.bold);
-    // Search highlight should override syntax highlighting
 }
 
 test "stdin-backed app can switch to staged diff" {
@@ -7973,7 +3203,7 @@ test "stdin-backed app can open commit selection" {
 
     try std.testing.expect(app.state.pager_mode);
     try std.testing.expect(app.mode == .commit_selection);
-    try std.testing.expect(app.state.commit_list.items.len > 0);
+    try std.testing.expect(app.state.commit_select.list.items.len > 0);
 }
 
 fn setupGitRepoWithWorkingAndStagedChanges(allocator: Allocator, dir: std.fs.Dir) !void {

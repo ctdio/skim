@@ -11,6 +11,7 @@ Skim is a keyboard-driven TUI for code reviews built in Zig. Vim-style navigatio
 ## Build System
 
 ### Prerequisites
+
 - Zig 0.15.1 or later
 - Git must be available in PATH
 
@@ -45,12 +46,14 @@ zig build test
 ```
 
 **IMPORTANT for debugging**: Always use `zig build` (debug mode) when debugging. Debug builds have:
+
 - Better stack traces
 - Assertions enabled
 - No optimizations that interfere with debugging
 - std.log.debug() messages enabled
 
 ### Build Configuration
+
 - Output: `./zig-out/bin/skim`
 - Dependencies (in `build.zig.zon`):
   - vaxis (TUI rendering)
@@ -62,6 +65,7 @@ zig build test
 For detailed architecture documentation, see [docs/architecture.md](docs/architecture.md).
 
 **Quick Overview:**
+
 - **CLI Layer** (`main.zig`): Arg parsing, init, subcommand routing
 - **Application Layer** (`app.zig`): Modal state machine, event handling
 - **Line Tracking** (`line_map.zig`): Position registry
@@ -75,6 +79,7 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 - **Logging** (`logging.zig`): File logging to `~/.skim/*.log`
 
 **Key Design Principles:**
+
 - Modal interface (vim-style)
 - Shell-out to git (respects user config)
 - LineMap registry for positioning
@@ -93,6 +98,7 @@ Logs are written to files in `~/.skim/` instead of stderr (since stdout/stderr a
 ```
 
 **Using logs for debugging:**
+
 ```bash
 # Watch TUI logs in real-time
 tail -f ~/.skim/tui.log
@@ -123,6 +129,7 @@ The built-in agent panel (`Ctrl-e`) uses the Agent Client Protocol for direct co
 ```
 
 **Key ACP files:**
+
 - `acp/manager.zig`: Session lifecycle and agent discovery
 - `acp/client.zig`: Agent communication and message handling
 - `acp/codec.zig`: JSON-RPC encoding/decoding
@@ -131,6 +138,7 @@ The built-in agent panel (`Ctrl-e`) uses the Agent Client Protocol for direct co
 - `acp/sessions/`: Vendor-specific adapters (Claude, Codex)
 
 **Key Agent UI files:**
+
 - `agent/state.zig`: Agent panel state machine
 - `agent/render.zig`: Chat panel rendering
 - `agent/chat_line_map.zig`: Message line registry
@@ -141,6 +149,7 @@ The built-in agent panel (`Ctrl-e`) uses the Agent Client Protocol for direct co
 For AI agents that support MCP (Model Context Protocol), skim provides a stdio-based MCP server (`skim mcp --stdio`).
 
 **Key MCP files:**
+
 - `mcp/adapter.zig`: stdio MCP server for external agents
 - `mcp/tools.zig`: MCP tool implementations (list_clients, add_comment, etc.)
 - `mcp/framework.zig`: Mini MCP JSON-RPC framework
@@ -148,11 +157,13 @@ For AI agents that support MCP (Model Context Protocol), skim provides a stdio-b
 ## Development Workflow
 
 ### Testing
+
 - Tests colocated with implementation
 - Run: `zig build test`
 - Coverage includes: arg parsing, diff execution, parser, line_map, comments, editor
 
 ### Ziglint
+
 - Use `./scripts/ziglint.sh <paths...>` while iterating on touched Zig files
   for fast, file-scoped feedback.
 - Run `zig build lint` before finishing a Zig task to validate against the
@@ -168,17 +179,20 @@ For AI agents that support MCP (Model Context Protocol), skim provides a stdio-b
 **When modifying UI rendering, ALWAYS add or update snapshot tests.**
 
 The project uses snapshot testing to verify UI output. Infrastructure is in `src/testing/`:
+
 - `snapshot.zig`: Core snapshot comparison logic
 - `harness.zig`: Mock screen/window for capturing rendered output
 - `snapshot_scenarios.zig`: Test scenarios organized by domain
 - `snapshots/`: 55+ snapshot files (`.snap` extension)
 
 **Three testing domains:**
+
 1. **Diff rendering** - File headers, hunk headers, diff lines (`diff_test_helpers.zig`)
 2. **Agent chat UI** - Messages, tool calls, plan entries (`agent_test_helpers.zig`)
 3. **Markdown rendering** - Headers, formatting, code blocks (`markdown_test_helpers.zig`)
 
 **Running snapshot tests:**
+
 ```bash
 # Run tests (compares against existing snapshots)
 zig build test
@@ -188,6 +202,7 @@ SKIM_UPDATE_SNAPSHOTS=1 zig build test
 ```
 
 **Writing a snapshot test:**
+
 ```zig
 test "snapshot: my_feature" {
     const allocator = std.testing.allocator;
@@ -206,12 +221,14 @@ test "snapshot: my_feature" {
 ```
 
 **When to add snapshot tests:**
+
 - Adding new UI components or rendering functions
 - Modifying existing renderers (diff lines, headers, status bar, etc.)
 - Changing text formatting, spacing, or visual structure
 - Adding new line types to LineMap
 
 ### Debugging TUI Apps
+
 - Stdout/stderr not available (TUI rendering) - logs go to `~/.skim/*.log`
 - Use `std.log.debug/info/warn/err()` - routed to component-specific log files
 - Watch logs in real-time: `tail -f ~/.skim/tui.log`
@@ -219,6 +236,7 @@ test "snapshot: my_feature" {
 - Debug builds: `zig build` (better stack traces, assertions enabled)
 
 ### Code Style
+
 - Run `zig fmt`
 - Run `zig build lint` after Zig changes. The repo config is intentionally
   incremental, so fix findings in touched code and avoid broad cleanup unless
@@ -231,17 +249,53 @@ test "snapshot: my_feature" {
 See [docs/architecture.md](docs/architecture.md).
 
 ### LineMap System
+
 - Registry of renderable lines (file headers, hunk headers, code lines, comments, spacers)
 - Source of truth for positioning
 - Global line numbers (0-based, sequential)
 - Rebuilt on: init, refresh, comment add/delete
 
 ### Modal State Machine
+
 - Modes: normal, comment, search, visual, command_palette, help, branch_selection, commit_selection, graphite_stack, agent, model_selection, agent_selection, session_picker
 - Mode handlers in `src/modes/`
 - When adding modes: update `Mode` enum, create handler file, update status bar
 
+### App Struct Boundaries (avoid the god object)
+
+`App` (`src/app.zig`) is an **orchestrator, not a feature dumping ground.** It owns
+process lifecycle (`init`/`deinit`/`run`), the event loop, mode dispatch, and the
+shared `State`. Feature _logic_ lives in feature modules, not as `App` methods.
+
+**Before adding a method to `App`, stop.** Only these belong on `App`:
+
+- lifecycle (`init`/`deinit`/`run`), the event loop, and `render` orchestration
+- mode dispatch (`handleKey` → `src/modes/<mode>.zig`)
+- thin forwarders that hand a sub-state slice to a feature module
+
+**Everything else is a feature controller.** The pattern that already governs key
+_dispatch_ (`modes/<mode>.zig` calling `handleKey(app, key)`) governs feature
+_logic_ too:
+
+- Feature state = a top-level `pub` struct (e.g. `PrReviewState`), stored as one
+  field on `State` (e.g. `state.pr`) — **not** a scatter of loose `State` fields.
+- Feature logic = free functions in the feature module taking `*ThatState` plus the
+  narrow deps it needs (`allocator`, a status-message callback), **not** `*App`.
+  If a function only reaches through `self` to touch `self.state.<feature>`, it does
+  not belong on `App`.
+- `modes/<mode>.zig` and the command palette call the controller directly
+  (`pr_controller.move(&app.state.pr, 1)`), not a forwarding `App` method.
+
+This keeps `app.zig` readable top-to-bottom and lets features be unit-tested without
+constructing an `App`. Reference layout: `src/pr/` (state + `controller.zig` +
+`render.zig`) is the template. If a change would push `app.zig` meaningfully larger,
+that is the signal to extract a controller, not to add another method.
+
 ### Adding Features
+
+- **New feature with its own state/logic**: Add a `pub` state struct + controller
+  module (see **App Struct Boundaries**); wire one `State` field and dispatch from
+  `src/modes/`. Do **not** add the logic as `App` methods.
 - **New keybinding**: Update mode handler in `src/modes/`, update status bar help, update README
 - **New language**: Add grammar to `build.zig.zon`, update `highlighting/core.zig`, add `.scm` query file in `queries/`
 - **New line type**: Update `LineType` enum, update `LineMap.build()`, update renderers, **add snapshot tests**
@@ -251,6 +305,7 @@ See [docs/architecture.md](docs/architecture.md).
 ## Git Integration
 
 Three diff modes:
+
 1. Working directory: `skim`
 2. Staged: `skim --staged`
 3. Ref comparison: `skim ref1..ref2`

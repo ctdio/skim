@@ -1,394 +1,381 @@
+//! Controller for the in-process TUI server that answers CLI/MCP requests.
+//! Owns the request dispatch and session-metadata sync that back skim's
+//! `get_context`/`get_diff`/`add_comment`/`list_comments`/`delete_comment`
+//! endpoints. App keeps only lifecycle wiring; these free functions reach
+//! through the shared `App` services (state, allocator, session manager,
+//! render flag) they genuinely need.
+
 const std = @import("std");
-const mcp_client = @import("client.zig");
-const mcp_protocol = @import("protocol.zig");
-const mcp_line_resolver = @import("line_resolver.zig");
-const mcp_registry = @import("registry.zig");
+const App = @import("../app.zig").App;
+const tui_server = @import("tui_server.zig");
+const session_mgr = @import("session.zig");
+const line_map = @import("../line_map.zig");
+const hunk_view = @import("../hunk_view.zig");
 const parser = @import("../git/parser.zig");
-const comments = @import("../comments/store.zig");
-const git = @import("../git/diff.zig");
 
-const Allocator = std.mem.Allocator;
-const DiffSource = git.DiffSource;
+/// Start TUI server and write session file
+pub fn startTuiServer(app: *App) !void {
+    // Initialize session manager
+    var sm = try session_mgr.SessionManager.init(app.allocator);
+    errdefer sm.deinit();
 
-/// Send hello message to MCP server to register this client
-pub fn sendHello(
-    allocator: Allocator,
-    mcp: *mcp_client.McpClient,
-    files: []parser.FileDiff,
-    diff_source: DiffSource,
-) !void {
-    // Build file info list
-    var file_infos: std.ArrayList(mcp_protocol.FileInfo) = .{};
-    defer file_infos.deinit(allocator);
+    // Create and start TUI server
+    var server = tui_server.TuiServer.init(app.allocator, handleTuiServerRequest, app);
+    try server.start();
 
-    for (files) |file| {
-        const path = if (file.new_path.len > 0) file.new_path else file.old_path;
-        const old_path = file.old_path;
-        try file_infos.append(allocator, .{
-            .path = path,
-            .old_path = old_path,
-            .hunk_count = file.hunks.len,
-        });
-    }
+    const port = server.getPort();
+    std.log.info("TUI server started on port {d}", .{port});
 
-    // Get diff ref string
-    const diff_ref = getDiffRef(diff_source);
+    app.tui_server = server;
+    app.session_manager = sm;
 
-    // Generate session ID
-    const session_id = mcp_registry.generateSessionId();
-
-    // Get current working directory
-    const cwd_allocated = std.fs.cwd().realpathAlloc(allocator, ".") catch null;
-    defer if (cwd_allocated) |c| allocator.free(c);
-    const cwd = cwd_allocated orelse ".";
-
-    try mcp.sendHello(.{
-        .id = &session_id,
-        .cwd = cwd,
-        .diff_ref = diff_ref,
-        .files = file_infos.items,
-    });
+    // Write initial session metadata once server and manager are registered.
+    try writeSessionMetadata(app);
 }
 
-/// Handle add_comment request from MCP server
-/// Returns the comment index if successful, null otherwise
-pub fn handleAddComment(
-    allocator: Allocator,
-    mcp: *mcp_client.McpClient,
-    ac: mcp_protocol.AddCommentPayload,
-    files: []parser.FileDiff,
-    comment_store: *comments.CommentStore,
-) !?usize {
-    // Use LineResolver with explicit line_type selection
-    const resolver = mcp_line_resolver.LineResolver.init(allocator, files);
+/// Handle incoming request from CLI/MCP
+pub fn handleTuiServerRequest(request: tui_server.Request, user_data: ?*anyopaque) tui_server.Response {
+    const app: *App = @ptrCast(@alignCast(user_data.?));
 
-    // Choose resolution method based on line_type
-    const resolved = if (std.mem.eql(u8, ac.line_type, "new"))
-        resolver.resolveNewLine(ac.file, ac.line)
-    else if (std.mem.eql(u8, ac.line_type, "old"))
-        resolver.resolveOldLine(ac.file, ac.line)
-    else
-        null; // Invalid line_type - should have been caught earlier
+    if (std.mem.eql(u8, request.method, "get_context")) {
+        return handleGetContext(app);
+    } else if (std.mem.eql(u8, request.method, "get_diff")) {
+        return handleGetDiff(app, request.params);
+    } else if (std.mem.eql(u8, request.method, "add_comment")) {
+        return handleAddComment(app, request.params);
+    } else if (std.mem.eql(u8, request.method, "list_comments")) {
+        return handleListComments(app);
+    } else if (std.mem.eql(u8, request.method, "delete_comment")) {
+        return handleDeleteComment(app, request.params);
+    }
 
-    if (resolved == null) {
-        // Build descriptive error message with available lines
-        const line_info = try resolver.getLineNumbersForFile(allocator, ac.file);
-        defer if (line_info) |info| {
-            allocator.free(info.new_lines);
-            allocator.free(info.old_lines);
-        };
+    return tui_server.errorResponse(tui_server.ErrorCode.METHOD_NOT_FOUND, "Unknown method");
+}
 
-        var error_msg: std.ArrayList(u8) = .{};
-        defer error_msg.deinit(allocator);
+pub fn syncSessionMetadata(app: *App) void {
+    writeSessionMetadata(app) catch |err| {
+        std.log.warn("Failed to sync session metadata: {any}", .{err});
+    };
+}
 
-        const writer = error_msg.writer(allocator);
-        try writer.print("Line {d} not found in {s} version of {s}", .{
-            ac.line,
-            ac.line_type,
-            ac.file,
-        });
+/// Get session port (for status display)
+pub fn getSessionPort(app: *const App) ?u16 {
+    if (app.tui_server) |server| {
+        return server.port;
+    }
+    return null;
+}
 
-        if (line_info) |info| {
-            const target_lines = if (std.mem.eql(u8, ac.line_type, "new"))
-                info.new_lines
-            else
-                info.old_lines;
+/// Handle get_context request - returns session state
+pub fn handleGetContext(app: *App) tui_server.Response {
+    var result = std.json.ObjectMap.init(app.allocator);
 
-            if (target_lines.len > 0) {
-                try writer.writeAll(". Lines in diff: ");
-                try formatLineRanges(writer, target_lines);
-            } else {
-                try writer.writeAll(". No lines of this type in diff");
+    // Add diff_ref
+    const diff_ref = getDiffRefString(app);
+    result.put("diff_ref", .{ .string = app.allocator.dupe(u8, diff_ref) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
+        return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
+    };
+
+    // Add cwd
+    result.put("cwd", .{ .string = app.allocator.dupe(u8, app.state.git_repo_root) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
+        return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
+    };
+
+    // Add view_mode
+    const view_mode_str = switch (app.state.view_mode) {
+        .unified => "unified",
+        .side_by_side => "side_by_side",
+    };
+    result.put("view_mode", .{ .string = app.allocator.dupe(u8, view_mode_str) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
+        return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
+    };
+
+    // Add files array
+    var files_arr = std.json.Array.init(app.allocator);
+    for (app.state.files) |file| {
+        const path = if (file.new_path.len > 0) file.new_path else file.old_path;
+        files_arr.append(.{ .string = app.allocator.dupe(u8, path) catch continue }) catch {};
+    }
+    result.put("files", .{ .array = files_arr }) catch {};
+
+    // Add comment count
+    result.put("comment_count", .{ .integer = @intCast(app.state.comment_store.comments.items.len) }) catch {};
+
+    return .{ .result = .{ .object = result } };
+}
+
+/// Handle get_diff request - returns formatted diff with line numbers
+/// Params: { file?: string } - optional file filter
+pub fn handleGetDiff(app: *App, params: ?std.json.Value) tui_server.Response {
+    // Optional file filter
+    const file_filter: ?[]const u8 = blk: {
+        const p = params orelse break :blk null;
+        if (p != .object) break :blk null;
+        const file_val = p.object.get("file") orelse break :blk null;
+        if (file_val != .string) break :blk null;
+        if (file_val.string.len == 0) break :blk null;
+        break :blk file_val.string;
+    };
+
+    var output: std.ArrayList(u8) = .{};
+    const writer = output.writer(app.allocator);
+
+    for (app.state.files) |*file| {
+        const path = if (file.new_path.len > 0) file.new_path else file.old_path;
+
+        // Skip if file filter is set and doesn't match
+        if (file_filter) |filter| {
+            if (!std.mem.eql(u8, path, filter)) continue;
+        }
+
+        // File header
+        writer.print("=== {s} ===\n", .{path}) catch continue;
+
+        for (file.hunks, 0..) |*hunk, hunk_idx| {
+            // Hunk header
+            writer.print("\n@@ Hunk {d}: -{d},{d} +{d},{d} @@", .{
+                hunk_idx,
+                hunk.header.old_start,
+                hunk.header.old_count,
+                hunk.header.new_start,
+                hunk.header.new_count,
+            }) catch continue;
+            if (hunk.header.context.len > 0) {
+                writer.print(" {s}", .{hunk.header.context}) catch {};
+            }
+            writer.writeAll("\n") catch continue;
+
+            // Lines with line numbers
+            for (hunk.lines) |*line| {
+                const marker: u8 = switch (line.line_type) {
+                    .add => '+',
+                    .delete => '-',
+                    .context => ' ',
+                };
+
+                // Format: "marker old_line new_line | content"
+                // e.g. "+     42 | const x = 1;"  (added line, new line 42)
+                // e.g. "-  41    | const y = 2;"  (deleted line, old line 41)
+                // e.g. "   41 42 | unchanged"     (context line)
+                const old_str: []const u8 = if (line.old_lineno) |n| blk: {
+                    break :blk std.fmt.allocPrint(app.allocator, "{d: >4}", .{n}) catch "????";
+                } else "    ";
+                defer if (line.old_lineno != null) app.allocator.free(old_str);
+
+                const new_str: []const u8 = if (line.new_lineno) |n| blk: {
+                    break :blk std.fmt.allocPrint(app.allocator, "{d: >4}", .{n}) catch "????";
+                } else "    ";
+                defer if (line.new_lineno != null) app.allocator.free(new_str);
+
+                writer.print("{c} {s} {s} | {s}\n", .{ marker, old_str, new_str, line.content }) catch continue;
             }
         }
-
-        const error_str = try error_msg.toOwnedSlice(allocator);
-        defer allocator.free(error_str);
-
-        try mcp.sendCommentAdded(false, null, error_str);
-        return null;
+        writer.writeAll("\n") catch {};
     }
 
-    const resolved_line = resolved.?;
+    const diff_text = output.toOwnedSlice(app.allocator) catch {
+        output.deinit(app.allocator);
+        return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to build diff");
+    };
 
-    // Get line context
-    const file = &files[resolved_line.file_idx];
-    const hunk = &file.hunks[resolved_line.hunk_idx];
-    const line = &hunk.lines[resolved_line.line_idx];
-    const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-    // Add the comment
-    try comment_store.addComment(
-        file_path,
-        resolved_line.hunk_idx,
-        resolved_line.line_idx,
-        ac.text,
-        line.line_type,
-        line.content,
-        line.old_lineno,
-        line.new_lineno,
-    );
-
-    // Get the new comment index (last one added)
-    const comment_count = comment_store.comments.items.len;
-    const comment_idx = if (comment_count > 0) comment_count - 1 else 0;
-
-    // Send success response
-    try mcp.sendCommentAdded(true, comment_idx, null);
-
-    return comment_idx;
+    var result = std.json.ObjectMap.init(app.allocator);
+    result.put("diff", .{ .string = diff_text }) catch {
+        app.allocator.free(diff_text);
+        return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to build result");
+    };
+    return .{ .result = .{ .object = result } };
 }
 
-/// Helper function to format line ranges (e.g., "10-50, 100-120, 200")
-fn formatLineRanges(writer: anytype, lines: []const u32) !void {
-    if (lines.len == 0) return;
+/// Handle add_comment request
+/// Params: { file: string, line: number, line_type: "new"|"old", text: string }
+pub fn handleAddComment(app: *App, params: ?std.json.Value) tui_server.Response {
+    const p = params orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing params");
+    if (p != .object) return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "params must be object");
 
-    var i: usize = 0;
-    var range_count: usize = 0;
+    const obj = p.object;
 
-    while (i < lines.len) {
-        if (range_count > 0) try writer.writeAll(", ");
+    // Extract parameters
+    const file_val = obj.get("file") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'file'");
+    const file = if (file_val == .string) file_val.string else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'file' must be string");
 
-        const start = lines[i];
-        var end = start;
+    const line_val = obj.get("line") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'line'");
+    const line_num: u32 = switch (line_val) {
+        .integer => |i| if (i >= 0) @intCast(i) else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'line' must be non-negative"),
+        else => return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'line' must be integer"),
+    };
 
-        // Find consecutive lines
-        while (i + 1 < lines.len and lines[i + 1] == lines[i] + 1) {
-            i += 1;
-            end = lines[i];
+    const line_type_val = obj.get("line_type") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'line_type'");
+    const line_type_str = if (line_type_val == .string) line_type_val.string else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'line_type' must be string");
+    const use_new_lineno = if (std.mem.eql(u8, line_type_str, "new"))
+        true
+    else if (std.mem.eql(u8, line_type_str, "old"))
+        false
+    else
+        return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'line_type' must be 'new' or 'old'");
+
+    const text_val = obj.get("text") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'text'");
+    const text = if (text_val == .string) text_val.string else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'text' must be string");
+
+    // Find the file in the diff
+    const file_diff = blk: {
+        for (app.state.files) |*f| {
+            const path = if (f.new_path.len > 0) f.new_path else f.old_path;
+            if (std.mem.eql(u8, path, file)) {
+                break :blk f;
+            }
         }
+        return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "File not found in diff");
+    };
 
-        if (start == end) {
-            try writer.print("{d}", .{start});
-        } else {
-            try writer.print("{d}-{d}", .{ start, end });
-        }
-
-        i += 1;
-        range_count += 1;
-    }
-}
-
-/// Handle get_comments request - send all comments back
-pub fn handleGetComments(
-    allocator: Allocator,
-    mcp: *mcp_client.McpClient,
-    comment_store: *comments.CommentStore,
-) !void {
-    var comment_infos: std.ArrayList(mcp_protocol.CommentInfo) = .{};
-    defer comment_infos.deinit(allocator);
-
-    const all_comments = comment_store.comments.items;
-    for (all_comments, 0..) |comment, idx| {
-        // Determine which line number and type flag to use
-        const line_number: u32 = if (comment.new_lineno) |new| new else comment.old_lineno orelse 0;
-        const line_type_flag: []const u8 = if (comment.new_lineno != null) "new" else "old";
-
-        try comment_infos.append(allocator, .{
-            .idx = idx,
-            .file_path = comment.file_path,
-            .line = line_number,
-            .text = comment.text,
-            .line_type = @tagName(comment.line_type),
-            .line_type_flag = line_type_flag,
-        });
-    }
-
-    try mcp.sendComments(comment_infos.items);
-}
-
-/// Handle get_diff_context request - send lightweight diff metadata
-pub fn handleGetDiffContext(
-    allocator: Allocator,
-    mcp: *mcp_client.McpClient,
-    files: []parser.FileDiff,
-    diff_source: DiffSource,
-    git_repo_root: []const u8,
-) !void {
-    var file_summaries: std.ArrayList(mcp_protocol.DiffFileSummary) = .{};
-    defer file_summaries.deinit(allocator);
-
-    for (files) |file| {
-        var additions: usize = 0;
-        var deletions: usize = 0;
-
-        // Count additions and deletions
-        for (file.hunks) |hunk| {
-            for (hunk.lines) |line| {
-                switch (line.line_type) {
-                    .add => additions += 1,
-                    .delete => deletions += 1,
-                    .context => {},
+    // Find the hunk and line by line number
+    const line_info: struct { hunk_idx: usize, line_idx: usize, line: *const parser.Line } = blk: {
+        for (file_diff.hunks, 0..) |*hunk, hunk_idx| {
+            for (hunk.lines, 0..) |*line, line_idx| {
+                const target_lineno = if (use_new_lineno) line.new_lineno else line.old_lineno;
+                if (target_lineno) |ln| {
+                    if (ln == line_num) {
+                        break :blk .{ .hunk_idx = hunk_idx, .line_idx = line_idx, .line = line };
+                    }
                 }
             }
         }
-
-        // Determine file status
-        const status: []const u8 = getFileStatus(file);
-
-        try file_summaries.append(allocator, .{
-            .path = if (file.new_path.len > 0 and !std.mem.eql(u8, file.new_path, "/dev/null"))
-                file.new_path
-            else
-                file.old_path,
-            .old_path = file.old_path,
-            .status = status,
-            .additions = additions,
-            .deletions = deletions,
-            .hunk_count = file.hunks.len,
-        });
-    }
-
-    // Get diff_ref string (use ref1 for two_refs to show the base)
-    const diff_ref: []const u8 = switch (diff_source) {
-        .working_dir => |wd| if (wd.staged) "staged" else "working",
-        .single_ref => |sr| sr.ref,
-        .two_refs => |tr| tr.ref1,
-        .stdin => "stdin",
+        return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Line not found in diff");
     };
 
-    try mcp.sendDiffContext(.{
-        .diff_ref = diff_ref,
-        .cwd = git_repo_root,
-        .files = file_summaries.items,
-    });
+    // Add the comment
+    app.state.comment_store.addComment(
+        file,
+        line_info.hunk_idx,
+        line_info.line_idx,
+        text,
+        line_info.line.line_type,
+        line_info.line.content,
+        line_info.line.old_lineno,
+        line_info.line.new_lineno,
+    ) catch {
+        return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to add comment");
+    };
+
+    // Rebuild LineMap
+    app.state.line_map.deinit();
+    app.state.line_map = line_map.LineMap.build(
+        app.allocator,
+        app.state.files,
+        &app.state.comment_store,
+        hunk_view.convertHunkViewMode(app),
+        hunk_view.shouldApplyHunkFiltering(app),
+        &app.state.collapsed_folds,
+    ) catch {
+        return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
+    };
+    app.needs_render = true;
+
+    // Auto-scroll to show the new comment (for external callers like CLI/MCP)
+    const comment_idx = app.state.comment_store.comments.items.len - 1;
+    if (app.state.line_map.findLineByCommentIdx(comment_idx)) |comment_line| {
+        // Center the comment in the viewport
+        const half_viewport = app.state.viewport_height / 2;
+        if (comment_line >= half_viewport) {
+            app.state.global_scroll_offset = comment_line - half_viewport;
+        } else {
+            app.state.global_scroll_offset = 0;
+        }
+        // Also move cursor to the comment line
+        app.state.global_cursor_line = comment_line;
+    }
+
+    var result = std.json.ObjectMap.init(app.allocator);
+    result.put("success", .{ .bool = true }) catch {};
+    result.put("comment_index", .{ .integer = @intCast(comment_idx) }) catch {};
+    return .{ .result = .{ .object = result } };
 }
 
-/// Handle get_file_diff request - send full diff content for a specific file
-pub fn handleGetFileDiff(
-    allocator: Allocator,
-    mcp: *mcp_client.McpClient,
-    files: []parser.FileDiff,
-    requested_file: []const u8,
-) !void {
-    // Find the requested file in our diff
-    var found_file: ?*const parser.FileDiff = null;
-    for (files) |*file| {
-        const file_path = if (file.new_path.len > 0 and !std.mem.eql(u8, file.new_path, "/dev/null"))
-            file.new_path
-        else
-            file.old_path;
+/// Handle list_comments request
+pub fn handleListComments(app: *App) tui_server.Response {
+    var result = std.json.ObjectMap.init(app.allocator);
 
-        if (std.mem.eql(u8, file_path, requested_file)) {
-            found_file = file;
-            break;
-        }
+    var comments_arr = std.json.Array.init(app.allocator);
+    for (app.state.comment_store.comments.items, 0..) |comment, idx| {
+        var comment_obj = std.json.ObjectMap.init(app.allocator);
+        comment_obj.put("index", .{ .integer = @intCast(idx) }) catch continue;
+        comment_obj.put("file_path", .{ .string = app.allocator.dupe(u8, comment.file_path) catch continue }) catch continue;
+        comment_obj.put("hunk_idx", .{ .integer = @intCast(comment.hunk_idx) }) catch continue;
+        comment_obj.put("line_idx", .{ .integer = @intCast(comment.line_idx) }) catch continue;
+        comment_obj.put("text", .{ .string = app.allocator.dupe(u8, comment.text) catch continue }) catch continue;
+        comments_arr.append(.{ .object = comment_obj }) catch {};
     }
 
-    const file = found_file orelse {
-        // File not found - send empty response
-        try mcp.sendFileDiff(.{
-            .file = requested_file,
-            .old_file = "",
-            .status = "not_found",
-            .hunks = &[_]mcp_protocol.DiffHunkInfo{},
-        });
-        return;
+    result.put("comments", .{ .array = comments_arr }) catch {};
+    return .{ .result = .{ .object = result } };
+}
+
+/// Handle delete_comment request
+pub fn handleDeleteComment(app: *App, params: ?std.json.Value) tui_server.Response {
+    const p = params orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing params");
+    if (p != .object) return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "params must be object");
+
+    const obj = p.object;
+
+    const index_val = obj.get("index") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'index'");
+    const index: usize = switch (index_val) {
+        .integer => |i| if (i >= 0) @intCast(i) else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'index' must be non-negative"),
+        else => return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'index' must be integer"),
     };
 
-    // Determine file status
-    const status: []const u8 = getFileStatus(file.*);
+    // Delete comment
+    app.state.comment_store.deleteComment(index) catch {
+        return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Invalid comment index");
+    };
 
-    // Build hunk info array
-    var hunks: std.ArrayList(mcp_protocol.DiffHunkInfo) = .{};
-    defer {
-        for (hunks.items) |hunk| {
-            allocator.free(hunk.header);
-            allocator.free(hunk.lines);
-        }
-        hunks.deinit(allocator);
-    }
+    // Rebuild LineMap
+    app.state.line_map.deinit();
+    app.state.line_map = line_map.LineMap.build(
+        app.allocator,
+        app.state.files,
+        &app.state.comment_store,
+        hunk_view.convertHunkViewMode(app),
+        hunk_view.shouldApplyHunkFiltering(app),
+        &app.state.collapsed_folds,
+    ) catch {
+        return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
+    };
+    app.needs_render = true;
 
-    for (file.hunks) |hunk| {
-        // Build lines array for this hunk
-        var lines: std.ArrayList(mcp_protocol.DiffLineInfo) = .{};
-        errdefer lines.deinit(allocator);
-
-        for (hunk.lines) |line| {
-            const change_type_str: []const u8 = switch (line.line_type) {
-                .add => "add",
-                .delete => "delete",
-                .context => "context",
-            };
-
-            // Compute comment hints based on line type:
-            // - add: use new_lineno with line_type "new"
-            // - delete: use old_lineno with line_type "old"
-            // - context: prefer new_lineno (use "new"), fallback to old_lineno
-            const comment_hint: struct { line: u32, line_type: []const u8 } = switch (line.line_type) {
-                .add => .{ .line = line.new_lineno orelse 0, .line_type = "new" },
-                .delete => .{ .line = line.old_lineno orelse 0, .line_type = "old" },
-                .context => if (line.new_lineno) |n|
-                    .{ .line = n, .line_type = "new" }
-                else
-                    .{ .line = line.old_lineno orelse 0, .line_type = "old" },
-            };
-
-            try lines.append(allocator, .{
-                .change_type = change_type_str,
-                .content = line.content,
-                .old_lineno = line.old_lineno,
-                .new_lineno = line.new_lineno,
-                .comment_line = comment_hint.line,
-                .comment_line_type = comment_hint.line_type,
-            });
-        }
-
-        // Build header string like "@@ -10,5 +10,7 @@"
-        var header_buf: [128]u8 = undefined;
-        const header_slice = std.fmt.bufPrint(&header_buf, "@@ -{d},{d} +{d},{d} @@", .{
-            hunk.header.old_start,
-            hunk.header.old_count,
-            hunk.header.new_start,
-            hunk.header.new_count,
-        }) catch "@@ ... @@";
-        const header_str = try allocator.dupe(u8, header_slice);
-        errdefer allocator.free(header_str);
-
-        try hunks.append(allocator, .{
-            .header = header_str,
-            .old_start = hunk.header.old_start,
-            .old_count = hunk.header.old_count,
-            .new_start = hunk.header.new_start,
-            .new_count = hunk.header.new_count,
-            .lines = try lines.toOwnedSlice(allocator),
-        });
-    }
-
-    const file_path = if (file.new_path.len > 0 and !std.mem.eql(u8, file.new_path, "/dev/null"))
-        file.new_path
-    else
-        file.old_path;
-
-    try mcp.sendFileDiff(.{
-        .file = file_path,
-        .old_file = file.old_path,
-        .status = status,
-        .hunks = hunks.items,
-    });
+    var result = std.json.ObjectMap.init(app.allocator);
+    result.put("success", .{ .bool = true }) catch {};
+    return .{ .result = .{ .object = result } };
 }
 
 // ===== Helper functions =====
 
-/// Get diff reference string from DiffSource
-pub fn getDiffRef(diff_source: DiffSource) []const u8 {
-    return switch (diff_source) {
-        .working_dir => |wd| if (wd.staged) "staged" else "working",
-        .single_ref => |sr| sr.ref,
-        .two_refs => |tr| tr.ref2,
-        .stdin => "stdin",
-    };
+fn writeSessionMetadata(app: *App) !void {
+    const sm = &(app.session_manager orelse return);
+    const server = &(app.tui_server orelse return);
+
+    var file_list: std.ArrayList([]const u8) = .{};
+    defer file_list.deinit(app.allocator);
+
+    for (app.state.files) |file| {
+        const path = if (file.new_path.len > 0) file.new_path else file.old_path;
+        try file_list.append(app.allocator, path);
+    }
+
+    try sm.writeSession(.{
+        .pid = session_mgr.getCurrentPid(),
+        .port = server.getPort(),
+        .cwd = app.state.git_repo_root,
+        .diff_ref = getDiffRefString(app),
+        .files = file_list.items,
+        .started_at = std.time.timestamp(),
+    });
 }
 
-/// Determine file status string from file diff
-fn getFileStatus(file: parser.FileDiff) []const u8 {
-    if (file.old_path.len == 0 or std.mem.eql(u8, file.old_path, "/dev/null")) {
-        return "added";
-    } else if (file.new_path.len == 0 or std.mem.eql(u8, file.new_path, "/dev/null")) {
-        return "deleted";
-    } else if (!std.mem.eql(u8, file.old_path, file.new_path)) {
-        return "renamed";
-    } else {
-        return "modified";
-    }
+/// Get the diff reference string for display
+fn getDiffRefString(app: *App) []const u8 {
+    return switch (app.state.diff_source) {
+        .working_dir => |wd| if (wd.staged) "staged" else "working",
+        .single_ref => |sr| sr.ref,
+        .two_refs => "refs",
+        .stdin => "stdin",
+    };
 }

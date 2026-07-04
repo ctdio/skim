@@ -5,14 +5,18 @@ const agent = @import("../agent/agent.zig");
 const state = @import("../agent/state.zig");
 const protocol = @import("../acp/protocol.zig");
 const sessions = @import("../acp/sessions.zig");
+const connect = @import("../acp/connect.zig");
 const AcpManager = @import("../acp/manager.zig").AcpManager;
 const ManagerHandle = @import("../agent/manager_handle.zig").ManagerHandle;
+const debug_replay_controller = @import("../agent/debug_replay_controller.zig");
 const CodexManager = @import("../codex/manager.zig").CodexManager;
 const CodexProcess = @import("../codex/process.zig").CodexProcess;
 const CodexTransport = @import("../codex/transport.zig").StdioTransport;
 const codex_protocol = @import("../codex/protocol.zig");
 const command_palette = @import("../agent/command_palette.zig");
 const opencode = @import("../opencode/opencode.zig");
+const subagent_fetch = @import("../agent/subagent_fetch.zig");
+const model_selection_mode = @import("model_selection_mode.zig");
 
 /// Handle keyboard input when in agent mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -343,7 +347,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                     if (msg.subagent_info) |info| {
                         if (info.session_id) |session_id| {
                             const title = info.description orelse info.agent_type orelse "Subagent";
-                            app.startSubagentModalFetch(session_id, title);
+                            subagent_fetch.startSubagentModalFetch(app, session_id, title);
                             app.needs_render = true;
                             return;
                         }
@@ -1162,7 +1166,7 @@ fn handleDebugReplayKey(app: *App, agent_state: *agent.AgentState, key: vaxis.Ke
     }
 
     if (key.codepoint == ' ') {
-        const playing = app.toggleActiveDebugReplayPlaying();
+        const playing = debug_replay_controller.togglePlaying(agent_state, &app.needs_render);
         app.showStatusMessage(if (playing) "Replay playing" else "Replay paused");
         return true;
     }
@@ -1174,7 +1178,7 @@ fn handleDebugReplayKey(app: *App, agent_state: *agent.AgentState, key: vaxis.Ke
     }
 
     if (key.codepoint == 'r') {
-        app.restartActiveDebugReplay();
+        debug_replay_controller.restart(agent_state, app.getActiveManager(), &app.needs_render);
         app.showStatusMessage("Replay restarted");
         return true;
     }
@@ -1627,7 +1631,7 @@ fn handleLocalCommand(app: *App, agent_state: *agent.AgentState, command_name: [
         }
 
         // Switch to model selection mode with optional preselected model
-        app.resetModelFilter();
+        model_selection_mode.resetFilter(&app.state.model_select, .{ .allocator = app.allocator, .manager = app.getActiveManager() });
         app.mode = .model_selection;
 
         // If args provided, try to preselect that model
@@ -3136,7 +3140,7 @@ test "Ctrl-C interrupts active Codex turn in normal mode" {
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = undefined,
+        .blame = undefined,
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -3198,7 +3202,7 @@ test "Esc does not interrupt active Codex turn in normal mode" {
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = undefined,
+        .blame = undefined,
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -3258,7 +3262,7 @@ test "typed local slash command records the command without a success system mes
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = undefined,
+        .blame = undefined,
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -3311,7 +3315,7 @@ test "q exits debug replay session" {
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = undefined,
+        .blame = undefined,
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -3362,7 +3366,7 @@ test "ctrl-e does not exit debug replay session" {
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = undefined,
+        .blame = undefined,
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -3413,7 +3417,7 @@ test "empty enter after completed plan sends default acceptance reply" {
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = undefined,
+        .blame = undefined,
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -3479,7 +3483,7 @@ test "new tab action preserves vim mode when tabs reallocate" {
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = undefined,
+        .blame = undefined,
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -3539,7 +3543,7 @@ test "openSplit preserves vim mode when tabs reallocate" {
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = undefined,
+        .blame = undefined,
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -3599,7 +3603,7 @@ test "openSplit auto-equalizes a skewed layout" {
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = undefined,
+        .blame = undefined,
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -3671,7 +3675,7 @@ test "ctrl-w = equalizes agent pane sizes" {
         .needs_async_highlight = false,
         .tui_server = null,
         .session_manager = null,
-        .blame_cache = undefined,
+        .blame = undefined,
         .pending_connection = null,
         .pending_agent_connect_idx = null,
         .pending_subagent_fetch = .{},
@@ -3730,7 +3734,7 @@ fn executeAgentCommand(app: *App, agent_state: *agent.AgentState, action: comman
 
             // Load configured agents if not already loaded
             if (app.state.configured_agents == null) {
-                app.state.configured_agents = app.loadConfiguredAgents();
+                app.state.configured_agents = connect.loadConfiguredAgents(app);
             }
 
             // Switch to agent selection mode to pick agent for this tab
@@ -3788,7 +3792,7 @@ fn openSplit(app: *App, orientation: agent.tab_manager.SplitOrientation) !void {
 
     app.state.pending_tab_for_selection = new_tab.id;
     if (app.state.configured_agents == null) {
-        app.state.configured_agents = app.loadConfiguredAgents();
+        app.state.configured_agents = connect.loadConfiguredAgents(app);
     }
 
     app.mode = .agent_selection;

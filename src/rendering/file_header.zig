@@ -4,6 +4,7 @@ const parser = @import("../git/parser.zig");
 const rendering_common = @import("common.zig");
 const render_utils = @import("utils.zig");
 const state_helpers = @import("../state.zig");
+const folds = @import("../folds.zig");
 
 const App = @import("../app.zig").App;
 const Color = rendering_common.Color;
@@ -27,7 +28,7 @@ pub const FileHeader = struct {
 
         const stats = app.getFileDiffStats(file_idx);
         const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-        const is_folded = app.isFileFolded(file_idx);
+        const is_folded = folds.isFileFolded(&app.state.collapsed_folds, file_idx);
 
         // Fold indicator: ▶ for folded, ▼ for expanded
         const fold_indicator = if (is_folded) "▶ " else "▼ ";

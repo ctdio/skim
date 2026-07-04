@@ -6,6 +6,7 @@ const comments = @import("../comments/store.zig");
 const rendering_common = @import("common.zig");
 const state_helpers = @import("../state.zig");
 const gwidth = @import("width.zig").gwidth;
+const CommentController = @import("../comments/controller.zig").CommentController;
 
 const App = @import("../app.zig").App;
 const StateHelpers = state_helpers.StateHelpers;
@@ -546,7 +547,7 @@ pub const RenderUtils = struct {
 
             if (show_number and file_lineno != null) {
                 // Get blame info for this line
-                const blame_info = if (file_path) |fp| app.getBlameForLine(fp, file_lineno.?) else null;
+                const blame_info = if (file_path) |fp| app.blame.getForLine(fp, file_lineno.?) else null;
 
                 if (blame_info) |info| {
                     // Check if this is an uncommitted line (hash starts with 00000000)
@@ -555,14 +556,14 @@ pub const RenderUtils = struct {
                     // Check if same commit as previous line (for deduplication)
                     // Skip deduplication at the start of a hunk - always show blame there
                     const same_as_prev = if (is_first_line_in_hunk) false else blk: {
-                        const prev_blame = if (file_path) |fp| app.getBlameForLine(fp, file_lineno.? -| 1) else null;
+                        const prev_blame = if (file_path) |fp| app.blame.getForLine(fp, file_lineno.? -| 1) else null;
                         break :blk if (prev_blame) |prev| std.mem.eql(u8, &info.commit_hash, &prev.commit_hash) else false;
                     };
 
                     // Check if this is the 2nd line of a commit block (prev is same, prev-of-prev is different)
                     // Used to show commit message on the line after the blame info
                     const is_second_line_of_block = if (same_as_prev and file_lineno.? >= 2) blk: {
-                        const prev_prev_blame = if (file_path) |fp| app.getBlameForLine(fp, file_lineno.? - 2) else null;
+                        const prev_prev_blame = if (file_path) |fp| app.blame.getForLine(fp, file_lineno.? - 2) else null;
                         break :blk if (prev_prev_blame) |pp| !std.mem.eql(u8, &info.commit_hash, &pp.commit_hash) else true;
                     } else same_as_prev; // If line 1, treat as 2nd line of block if same_as_prev
 
@@ -1117,7 +1118,7 @@ pub const RenderUtils = struct {
 
         if (content_width < 20) return 0;
 
-        const is_expanded = app.isCommentExpanded(comment_idx);
+        const is_expanded = CommentController.isCommentExpanded(app, comment_idx);
         const max_lines = Layout.max_comment_lines;
 
         // Use cyan for regular comments, yellow when focused

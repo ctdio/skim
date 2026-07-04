@@ -7,6 +7,8 @@ const render_utils = @import("utils.zig");
 const state_helpers = @import("../state.zig");
 const navigation = @import("../navigation.zig");
 const file_header = @import("file_header.zig");
+const folds = @import("../folds.zig");
+const frame = @import("frame.zig");
 
 const App = @import("../app.zig").App;
 const Color = rendering_common.Color;
@@ -242,7 +244,7 @@ pub const UnifiedRenderer = struct {
         is_cursor: bool,
         is_in_visual: bool,
     ) !usize {
-        const is_folded = app.isHunkFolded(file_idx, hunk_idx);
+        const is_folded = folds.isHunkFolded(&app.state.collapsed_folds, file_idx, hunk_idx);
 
         // Build header text with fold indicator using shared utility
         var buf: [256]u8 = undefined;
@@ -514,7 +516,7 @@ pub const UnifiedRenderer = struct {
 
             // Generate syntax-highlighted segments for this chunk
             const chunk_byte_offset = byte_offset + byte_offset_in_text;
-            const segments = try app.createHighlightedSegments(chunk, text, byte_offset_in_text, chunk_byte_offset, highlights, line_spans, style, global_line);
+            const segments = try frame.createHighlightedSegments(app, chunk, text, byte_offset_in_text, chunk_byte_offset, highlights, line_spans, style, global_line);
             defer app.frameSegmentAllocator().free(segments);
 
             // Pad segments to full width for cursor, visual selection, or diff lines (add/delete)

@@ -4,6 +4,9 @@ const App = @import("../app.zig").App;
 const FindCommand = @import("../app.zig").App.FindCommand;
 const navigation = @import("../navigation.zig");
 const Navigation = navigation.Navigation;
+const folds = @import("../folds.zig");
+const hunk_view = @import("../hunk_view.zig");
+const CommentController = @import("../comments/controller.zig").CommentController;
 
 /// Handle keyboard input when in normal mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -30,37 +33,37 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             },
             'a' => {
                 // za - toggle fold at cursor
-                try app.toggleFoldUnderCursor();
+                try folds.toggleFoldUnderCursor(app);
                 return;
             },
             'c' => {
                 // zc - close fold at cursor
-                try app.closeFoldUnderCursor();
+                try folds.closeFoldUnderCursor(app);
                 return;
             },
             'o' => {
                 // zo - open fold at cursor (hunk level)
-                try app.openFoldUnderCursor();
+                try folds.openFoldUnderCursor(app);
                 return;
             },
             'C' => {
                 // zC - close file fold (fold entire file from anywhere)
-                try app.closeFileFoldUnderCursor();
+                try folds.closeFileFoldUnderCursor(app);
                 return;
             },
             'O' => {
                 // zO - open file fold (unfold entire file from anywhere)
-                try app.openFileFoldUnderCursor();
+                try folds.openFileFoldUnderCursor(app);
                 return;
             },
             'M' => {
                 // zM - close all folds
-                try app.closeAllFoldsAndRebuild();
+                try folds.closeAllFoldsAndRebuild(app);
                 return;
             },
             'R' => {
                 // zR - open all folds
-                try app.openAllFoldsAndRebuild();
+                try folds.openAllFoldsAndRebuild(app);
                 return;
             },
             else => {
@@ -85,7 +88,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         }
         // gY - yank all comments to agent input
         if (key.codepoint == 'Y') {
-            try app.yankCommentsToAgent();
+            try CommentController.yankCommentsToAgent(app);
             return;
         }
         // Any other key cancels the pending g, but still processes the key below
@@ -346,21 +349,21 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.state.cursor_column = 0; // Reset column on page navigation
             app.updateCurrentFileAndTriggerHighlighting();
         },
-        '\r' => try app.startCommentInput(), // Enter to create/edit comment
+        '\r' => try CommentController.startCommentInput(app), // Enter to create/edit comment
         's' => app.toggleViewMode(),
         '\t' => {
             // Tab cycles hunk view mode, Shift+Tab goes backwards
             if (key.mods.shift) {
-                try app.cycleHunkViewModePrev();
+                try hunk_view.cycleHunkViewModePrev(app);
             } else {
-                try app.cycleHunkViewMode();
+                try hunk_view.cycleHunkViewMode(app);
             }
         },
         'r' => try app.refresh(),
-        'y' => try app.yankCurrentCommentToClipboard(),
-        'Y' => try app.yankAllCommentsToClipboard(),
-        'd' => try app.deleteCommentUnderCursor(),
-        'D' => try app.clearAllComments(),
+        'y' => try CommentController.yankCurrentCommentToClipboard(app),
+        'Y' => try CommentController.yankAllCommentsToClipboard(app),
+        'd' => try CommentController.deleteCommentUnderCursor(app),
+        'D' => try CommentController.clearAllComments(app),
         'M' => {
             Navigation.centerCursor(app);
             app.state.cursor_column = 0; // Reset column on center
@@ -407,7 +410,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         '?' => app.mode = .help, // Show help overlay
         'a' => try app.stageCurrentFile(), // Stage the current file (git add)
         'A' => try app.stageAllFiles(), // Stage all files (git add -A)
-        'o' => app.toggleCommentUnderCursorExpanded(), // Toggle comment expand/collapse
+        'o' => CommentController.toggleCommentUnderCursorExpanded(app), // Toggle comment expand/collapse
         'B' => app.toggleBlame(), // Toggle git blame in gutter
         'S' => try app.startGraphiteStack(), // Open graphite stack picker
         else => {

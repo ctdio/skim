@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const acp = @import("../acp/acp.zig");
+const connect = @import("../acp/connect.zig");
 
 /// Handle keyboard input when in agent selection mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -81,7 +82,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.needs_render = true;
         },
         '\r' => { // Enter - select agent and connect
-            app.queueSelectedAgentConnection();
+            connect.queueSelectedAgentConnection(app);
         },
         else => {},
     }

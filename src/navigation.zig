@@ -2,6 +2,7 @@ const std = @import("std");
 const App = @import("app.zig").App;
 const rendering = @import("rendering/common.zig");
 const state_helpers = @import("state.zig");
+const CommentController = @import("comments/controller.zig").CommentController;
 const Layout = rendering.Layout;
 const StateHelpers = state_helpers.StateHelpers;
 
@@ -269,7 +270,7 @@ pub const Navigation = struct {
         switch (record.line_type) {
             .comment_line => |comment_info| {
                 const comment = app.state.comment_store.getComment(comment_info.comment_idx) orelse return 1;
-                const is_expanded = app.isCommentExpanded(comment_info.comment_idx);
+                const is_expanded = CommentController.isCommentExpanded(app, comment_info.comment_idx);
                 return calculateSavedCommentHeight(comment.text, is_expanded);
             },
             else => return 1,

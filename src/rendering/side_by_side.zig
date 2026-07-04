@@ -8,6 +8,9 @@ const render_utils = @import("utils.zig");
 const state_helpers = @import("../state.zig");
 const navigation = @import("../navigation.zig");
 const file_header = @import("file_header.zig");
+const folds = @import("../folds.zig");
+const frame = @import("frame.zig");
+const CommentController = @import("../comments/controller.zig").CommentController;
 
 const App = @import("../app.zig").App;
 const Color = rendering_common.Color;
@@ -287,7 +290,7 @@ pub const SideBySideRenderer = struct {
     ) !usize {
         _ = right_width; // Same text on both sides, so right_width not needed
 
-        const is_folded = app.isHunkFolded(file_idx, hunk_idx);
+        const is_folded = folds.isHunkFolded(&app.state.collapsed_folds, file_idx, hunk_idx);
 
         // Build header text with fold indicator using shared utility
         var buf: [256]u8 = undefined;
@@ -539,7 +542,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for left chunk
                     const left_chunk_byte_offset = byte_offset + left_byte_offset_in_content;
-                    const left_segments = try app.createHighlightedSegments(left_chunk, line.content, left_byte_offset_in_content, left_chunk_byte_offset, highlights, old_line_spans, style, global_line);
+                    const left_segments = try frame.createHighlightedSegments(app, left_chunk, line.content, left_byte_offset_in_content, left_chunk_byte_offset, highlights, old_line_spans, style, global_line);
                     defer app.frameSegmentAllocator().free(left_segments);
 
                     // Pad context lines only when cursor is on them
@@ -570,7 +573,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for right chunk
                     const right_chunk_byte_offset = byte_offset + right_byte_offset_in_content;
-                    const right_segments = try app.createHighlightedSegments(right_chunk, line.content, right_byte_offset_in_content, right_chunk_byte_offset, highlights, new_line_spans, style, global_line);
+                    const right_segments = try frame.createHighlightedSegments(app, right_chunk, line.content, right_byte_offset_in_content, right_chunk_byte_offset, highlights, new_line_spans, style, global_line);
                     defer app.frameSegmentAllocator().free(right_segments);
 
                     // Pad context lines only when cursor is on them
@@ -625,7 +628,7 @@ pub const SideBySideRenderer = struct {
                     // Generate syntax-highlighted segments for chunk
                     // (will fall back to plain text for delete lines since highlights is null)
                     const chunk_byte_offset = byte_offset + byte_offset_in_content;
-                    const segments = try app.createHighlightedSegments(chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, old_line_spans, style, global_line);
+                    const segments = try frame.createHighlightedSegments(app, chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, old_line_spans, style, global_line);
                     defer app.frameSegmentAllocator().free(segments);
 
                     // Always pad delete lines to show full-width background
@@ -690,7 +693,7 @@ pub const SideBySideRenderer = struct {
 
                     // Generate syntax-highlighted segments for chunk
                     const chunk_byte_offset = byte_offset + byte_offset_in_content;
-                    const segments = try app.createHighlightedSegments(chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, new_line_spans, style, global_line);
+                    const segments = try frame.createHighlightedSegments(app, chunk, line.content, byte_offset_in_content, chunk_byte_offset, highlights, new_line_spans, style, global_line);
                     defer app.frameSegmentAllocator().free(segments);
 
                     // Always pad add lines to show full-width background
@@ -962,7 +965,7 @@ pub const SideBySideRenderer = struct {
 
         if (layout.width < 20) return 0;
 
-        const is_expanded = app.isCommentExpanded(comment_idx);
+        const is_expanded = CommentController.isCommentExpanded(app, comment_idx);
         const max_lines = Layout.max_comment_lines;
 
         // Use cyan for regular comments, yellow when focused

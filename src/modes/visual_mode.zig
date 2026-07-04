@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const navigation = @import("../navigation.zig");
 const Navigation = navigation.Navigation;
+const CommentController = @import("../comments/controller.zig").CommentController;
 
 /// Handle keyboard input when in visual mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -50,7 +51,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.needs_render = true; // Force full redraw after exiting visual mode
         },
         '\r' => { // Enter - create comment for visual selection
-            try app.startCommentInputForVisualSelection();
+            try CommentController.startCommentInputForVisualSelection(app);
         },
         'j' => Navigation.moveCursorDown(app),
         'k' => Navigation.moveCursorUp(app),

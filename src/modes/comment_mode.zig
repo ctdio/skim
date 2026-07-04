@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const comment_editor = @import("../comments/editor.zig");
+const CommentController = @import("../comments/controller.zig").CommentController;
 const navigation = @import("../navigation.zig");
 const Navigation = navigation.Navigation;
 
@@ -22,7 +23,7 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     if (action) |act| {
         switch (act) {
             .save => {
-                const saved = try app.saveCurrentComment();
+                const saved = try CommentController.saveCurrentComment(app);
                 if (saved) {
                     app.mode = .normal;
                     app.state.active_comment_input = null;

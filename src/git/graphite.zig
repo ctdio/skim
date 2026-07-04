@@ -47,6 +47,70 @@ pub const GraphiteStack = struct {
     }
 };
 
+/// Authoritative branch→parent relationships from `gt state`, used to group
+/// stacked PRs by Graphite's own metadata rather than inferring parentage from
+/// GitHub base refs (which chains everything sharing a base into one false
+/// stack). Branch-name strings are owned by the arena.
+pub const BranchParents = struct {
+    arena: std.heap.ArenaAllocator,
+    map: std.StringHashMap([]const u8),
+
+    pub fn deinit(self: *BranchParents) void {
+        self.map.deinit();
+        self.arena.deinit();
+    }
+
+    /// The Graphite parent branch of `branch`, or null when `branch` is trunk or
+    /// not tracked by Graphite. A non-null result may itself be the trunk branch.
+    pub fn parentOf(self: *const BranchParents, branch: []const u8) ?[]const u8 {
+        return self.map.get(branch);
+    }
+};
+
+/// Run `gt state` and return each branch's Graphite parent. Returns null when
+/// graphite isn't installed or the repo isn't graphite-tracked, so callers can
+/// fall back to forge-native inference.
+pub fn getBranchParents(allocator: Allocator) ?BranchParents {
+    const args = &[_][]const u8{ "gt", "state" };
+    var child = std.process.Child.init(args, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+
+    child.spawn() catch return null;
+    const stdout = child.stdout.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch return null;
+    defer allocator.free(stdout);
+    const term = child.wait() catch return null;
+    if (term != .Exited or term.Exited != 0) return null;
+
+    return parseBranchParents(allocator, stdout);
+}
+
+/// Pure parse of `gt state` JSON into a branch→parent map. Every branch carrying
+/// a first parent ref is recorded (mapping to that parent, which may be trunk);
+/// the trunk branch itself has no parents and is omitted. Returns null on
+/// malformed JSON.
+pub fn parseBranchParents(allocator: Allocator, json_str: []const u8) ?BranchParents {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    const a = arena.allocator();
+    var map = std.StringHashMap([]const u8).init(allocator);
+
+    var it = parsed.value.object.iterator();
+    while (it.next()) |entry| {
+        const branch_value = entry.value_ptr.*;
+        if (branch_value != .object) continue;
+        const parent = firstParentRef(branch_value.object) orelse continue;
+        const key = a.dupe(u8, entry.key_ptr.*) catch break;
+        const val = a.dupe(u8, parent) catch break;
+        map.put(key, val) catch break;
+    }
+
+    return .{ .arena = arena, .map = map };
+}
+
 /// Check if the graphite CLI (gt) is available in PATH
 pub fn isGraphiteAvailable(allocator: Allocator) bool {
     const args = &[_][]const u8{ "which", "gt" };
@@ -282,6 +346,17 @@ const BranchInfo = struct {
     parent_ref: ?[]const u8,
 };
 
+/// The `ref` of a branch's first parent in `gt state`, or null when it has none.
+fn firstParentRef(obj: std.json.ObjectMap) ?[]const u8 {
+    const parents = obj.get("parents") orelse return null;
+    if (parents != .array or parents.array.items.len == 0) return null;
+    const first = parents.array.items[0];
+    if (first != .object) return null;
+    const ref = first.object.get("ref") orelse return null;
+    if (ref != .string) return null;
+    return ref.string;
+}
+
 /// Find all descendants of a branch (children, grandchildren, etc.)
 fn findDescendants(allocator: Allocator, branch_map: *std.StringHashMap(BranchInfo), parent: []const u8, result: *std.ArrayList([]const u8)) !void {
     // Find immediate children
@@ -318,4 +393,27 @@ test "isGraphiteAvailable returns bool" {
     const allocator = std.testing.allocator;
     _ = isGraphiteAvailable(allocator);
     // Just verify it doesn't crash
+}
+
+test "parseBranchParents: maps each branch to its parent, omitting trunk" {
+    const json =
+        \\{
+        \\  "main": { "trunk": true },
+        \\  "feat-a": { "parents": [{ "ref": "main" }] },
+        \\  "feat-b": { "parents": [{ "ref": "feat-a" }] }
+        \\}
+    ;
+    var bp = parseBranchParents(std.testing.allocator, json).?;
+    defer bp.deinit();
+
+    try std.testing.expectEqualStrings("main", bp.parentOf("feat-a").?);
+    try std.testing.expectEqualStrings("feat-a", bp.parentOf("feat-b").?);
+    // Trunk has no parents entry, so it is absent from the map.
+    try std.testing.expectEqual(@as(?[]const u8, null), bp.parentOf("main"));
+    // An unknown branch is absent too.
+    try std.testing.expectEqual(@as(?[]const u8, null), bp.parentOf("nope"));
+}
+
+test "parseBranchParents: malformed JSON yields null" {
+    try std.testing.expectEqual(@as(?BranchParents, null), parseBranchParents(std.testing.allocator, "not json"));
 }

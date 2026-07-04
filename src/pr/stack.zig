@@ -97,6 +97,21 @@ pub fn displayOrder(allocator: std.mem.Allocator, prs: []const PullRequest, anal
 /// returned analysis. Robust to cycles (a malformed base/head loop degrades to
 /// each involved PR being its own root rather than looping forever).
 pub fn analyze(allocator: std.mem.Allocator, prs: []const PullRequest) !Analysis {
+    return analyzeWith(allocator, prs, null);
+}
+
+/// Like `analyze`, but when `parent_branches` is supplied (one optional parent
+/// branch name per PR, in lockstep with `prs`) that authoritative name drives
+/// parentage instead of the PR's `base_ref`. Graphite's own stack metadata flows
+/// in this way, which avoids the false chains a shared base branch creates in the
+/// forge-native heuristic (many PRs sharing a base that is also some PR's head
+/// would otherwise collapse into one giant stack). A null entry falls back to
+/// that PR's `base_ref`, so PRs Graphite doesn't track still group forge-natively.
+pub fn analyzeWith(
+    allocator: std.mem.Allocator,
+    prs: []const PullRequest,
+    parent_branches: ?[]const ?[]const u8,
+) !Analysis {
     const n = prs.len;
 
     var parent_of = try allocator.alloc(?usize, n);
@@ -119,11 +134,13 @@ pub fn analyze(allocator: std.mem.Allocator, prs: []const PullRequest) !Analysis
     // before any are computed.
     for (0..n) |i| parent_of[i] = null;
 
-    // parent = the open PR whose head is this PR's base. A PR is never its own
-    // parent (a base==head PR is treated as a root).
+    // parent = the open PR whose head is this PR's base branch (per Graphite
+    // when provided, else the GitHub base_ref). A PR is never its own parent (a
+    // base==head PR is treated as a root).
     for (prs, 0..) |pr, i| {
-        if (pr.base_ref.len == 0) continue;
-        if (head_to_pr.get(pr.base_ref)) |p| {
+        const base = if (parent_branches) |pb| (pb[i] orelse pr.base_ref) else pr.base_ref;
+        if (base.len == 0) continue;
+        if (head_to_pr.get(base)) |p| {
             if (p != i and !isAncestor(parent_of, p, i)) parent_of[i] = p;
         }
     }
@@ -338,6 +355,41 @@ test "markOf: tip/middle/bottom for a stack, none for standalone" {
     try testing.expectEqual(Mark.middle, a.markOf(1));
     try testing.expectEqual(Mark.top, a.markOf(2));
     try testing.expectEqual(Mark.none, a.markOf(3));
+}
+
+test "analyzeWith: graphite parents override a misleading base_ref" {
+    // Both feature PRs list `shared` as their base, and a PR's head is `shared`,
+    // so the forge-native heuristic would chain all three into one stack. Graphite
+    // says both features branch off trunk (`main`), so they must stay standalone.
+    const prs = [_]PullRequest{
+        samplePr(.{ .number = 1, .head = "shared", .base = "main" }),
+        samplePr(.{ .number = 2, .head = "feat-a", .base = "shared" }),
+        samplePr(.{ .number = 3, .head = "feat-b", .base = "shared" }),
+    };
+    const parents = [_]?[]const u8{ "main", "main", "main" };
+    var a = try analyzeWith(testing.allocator, &prs, &parents);
+    defer a.deinit(testing.allocator);
+
+    try testing.expect(!a.isStacked(0));
+    try testing.expect(!a.isStacked(1));
+    try testing.expect(!a.isStacked(2));
+    try testing.expectEqual(@as(?usize, null), a.parent_of[1]);
+    try testing.expectEqual(@as(?usize, null), a.parent_of[2]);
+}
+
+test "analyzeWith: a null parent entry falls back to base_ref" {
+    // #1 is untracked by graphite (null) so it links via base_ref; #2 is tracked
+    // and points at #1's head. The two form one stack.
+    const prs = [_]PullRequest{
+        samplePr(.{ .number = 1, .head = "feat", .base = "main" }),
+        samplePr(.{ .number = 2, .head = "feat2", .base = "feat" }),
+    };
+    const parents = [_]?[]const u8{ null, "feat" };
+    var a = try analyzeWith(testing.allocator, &prs, &parents);
+    defer a.deinit(testing.allocator);
+
+    try testing.expectEqual(a.stack_of[0], a.stack_of[1]);
+    try testing.expectEqual(@as(?usize, 0), a.parent_of[1]);
 }
 
 test "displayOrder: groups a stack contiguously, tip first" {

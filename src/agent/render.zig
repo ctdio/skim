@@ -2951,7 +2951,7 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
     const entries = entries_buf[0..entry_count];
 
     // Use filtered indices for search support
-    const filtered = app.state.model_filtered_indices.items;
+    const filtered = app.state.model_select.filtered_indices.items;
     const filtered_count = filtered.len;
 
     // Fixed width, capped to window size (matches file picker pattern)
@@ -2995,8 +2995,8 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
     _ = dialog_win.print(&title_seg, .{ .row_offset = P, .col_offset = P });
 
     // Row 1: Search input
-    const query_len = app.state.model_filter_len;
-    const query = app.state.model_filter_query[0..query_len];
+    const query_len = app.state.model_select.filter_len;
+    const query = app.state.model_select.filter_query[0..query_len];
     var input_seg = [_]vaxis.Cell.Segment{
         .{ .text = "/ ", .style = .{ .fg = Color.yellow, .bg = Color.dialog_bg } },
         .{ .text = query, .style = .{ .fg = Color.white, .bg = Color.dialog_bg } },
@@ -3020,8 +3020,8 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
     // Calculate scroll offset
     var scroll_offset: usize = 0;
     if (filtered_count > MAX_MODEL_PICKER_VISIBLE) {
-        if (app.state.model_selection >= MAX_MODEL_PICKER_VISIBLE) {
-            scroll_offset = app.state.model_selection - MAX_MODEL_PICKER_VISIBLE + 1;
+        if (app.state.model_select.selection >= MAX_MODEL_PICKER_VISIBLE) {
+            scroll_offset = app.state.model_select.selection - MAX_MODEL_PICKER_VISIBLE + 1;
         }
         if (scroll_offset + MAX_MODEL_PICKER_VISIBLE > filtered_count) {
             scroll_offset = filtered_count - MAX_MODEL_PICKER_VISIBLE;
@@ -3049,7 +3049,7 @@ fn renderModelSelectionDialog(app: *App, win: vaxis.Window) void {
             if (actual_model_idx >= entries.len) continue;
 
             const entry = entries[actual_model_idx];
-            const is_selected = selection_idx == app.state.model_selection;
+            const is_selected = selection_idx == app.state.model_select.selection;
             const is_current = if (current_model_id) |cid| std.mem.eql(u8, entry.model_id, cid) else false;
 
             const row = P + 3 + i;

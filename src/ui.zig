@@ -9,6 +9,8 @@ const sessions = @import("acp/sessions.zig");
 const App = @import("app.zig").App;
 const graphite = @import("git/graphite.zig");
 const pr = @import("pr/pr.zig");
+const pr_controller = @import("pr/controller.zig");
+const menu_stats = @import("menu_stats.zig");
 const Color = rendering_common.Color;
 const Layout = rendering_common.Layout;
 const FrameChars = rendering_common.FrameChars;
@@ -114,7 +116,7 @@ pub const UI = struct {
         const subtitle = "Select a diff source:";
 
         // Start async stats fetch on first render (non-blocking)
-        app.startMenuStatsFetch();
+        menu_stats.startMenuStatsFetch(app);
 
         // Get cached stats if available, otherwise null
         const stats_ready = app.state.menu_stats_cached;
@@ -265,7 +267,7 @@ pub const UI = struct {
         _ = win.print(&title_seg, .{ .row_offset = @intCast(start_row), .col_offset = @intCast(title_col) });
 
         // Search query line
-        const query = app.state.branch_search_query[0..app.state.branch_search_len];
+        const query = app.state.branch_select.search_query[0..app.state.branch_select.search_len];
         var search_buf: [512]u8 = undefined;
         const search_line = if (query.len > 0)
             try std.fmt.bufPrint(&search_buf, "Search: {s}_", .{query})
@@ -280,10 +282,10 @@ pub const UI = struct {
         }};
         _ = win.print(&search_seg, .{ .row_offset = @intCast(start_row + 2), .col_offset = @intCast(search_col) });
 
-        if (app.state.branch_list.len == 0) return;
+        if (app.state.branch_select.list.len == 0) return;
 
         // Use filtered branches
-        const filtered = app.state.filtered_branches.items;
+        const filtered = app.state.branch_select.filtered.items;
 
         // Show "No matches" if filtered list is empty
         if (filtered.len == 0) {
@@ -299,7 +301,7 @@ pub const UI = struct {
             // Estimate max length including stats (branch name + stats format ~30 chars)
             var max_len: usize = 0;
             for (filtered) |branch_idx| {
-                const branch = app.state.branch_list[branch_idx];
+                const branch = app.state.branch_select.list[branch_idx];
                 const estimated_len = branch.len + 30; // Approximate space for stats
                 if (estimated_len > max_len) {
                     max_len = estimated_len;
@@ -312,8 +314,8 @@ pub const UI = struct {
 
             // Show up to 10 branches at a time (with scrolling)
             const max_visible = 10;
-            const start_idx = if (app.state.branch_selection >= max_visible)
-                app.state.branch_selection - max_visible + 1
+            const start_idx = if (app.state.branch_select.selection >= max_visible)
+                app.state.branch_select.selection - max_visible + 1
             else
                 0;
             const end_idx = @min(start_idx + max_visible, filtered.len);
@@ -321,8 +323,8 @@ pub const UI = struct {
             for (start_idx..end_idx) |idx| {
                 const row = start_row + 4 + (idx - start_idx);
                 const branch_idx = filtered[idx];
-                const branch = app.state.branch_list[branch_idx];
-                const is_selected = idx == app.state.branch_selection;
+                const branch = app.state.branch_select.list[branch_idx];
+                const is_selected = idx == app.state.branch_select.selection;
 
                 // Use cached stats (only fetch once per branch, not on every render)
                 const branch_stats = app.state.branch_stats_cache.get(branch_idx) orelse blk: {
@@ -424,7 +426,7 @@ pub const UI = struct {
         _ = popup_win.print(&title_seg, .{ .row_offset = 0 });
 
         // Row 1: Search query line
-        const query = app.state.commit_search_query[0..app.state.commit_search_len];
+        const query = app.state.commit_select.search_query[0..app.state.commit_select.search_len];
         var search_buf: [512]u8 = undefined;
         const search_line = if (query.len > 0)
             try std.fmt.bufPrint(&search_buf, "> {s}_", .{query})
@@ -451,7 +453,7 @@ pub const UI = struct {
         }
 
         // Rows 3+: Commit list
-        if (app.state.commit_list.items.len == 0) {
+        if (app.state.commit_select.list.items.len == 0) {
             const no_commits = "Loading commits...";
             const no_commits_copy = try RenderUtils.copyFrameText(app, no_commits);
             var no_commits_seg = [_]vaxis.Cell.Segment{.{
@@ -460,7 +462,7 @@ pub const UI = struct {
             }};
             _ = popup_win.print(&no_commits_seg, .{ .row_offset = 3, .col_offset = 1 });
         } else {
-            const filtered = app.state.filtered_commits.items;
+            const filtered = app.state.commit_select.filtered.items;
 
             if (filtered.len == 0) {
                 const no_matches = "No matching commits";
@@ -471,8 +473,8 @@ pub const UI = struct {
                 }};
                 _ = popup_win.print(&no_matches_seg, .{ .row_offset = 3, .col_offset = 1 });
             } else {
-                const start_idx = if (app.state.commit_selection >= max_visible)
-                    app.state.commit_selection - max_visible + 1
+                const start_idx = if (app.state.commit_select.selection >= max_visible)
+                    app.state.commit_select.selection - max_visible + 1
                 else
                     0;
                 const end_idx = @min(start_idx + max_visible, filtered.len);
@@ -480,8 +482,8 @@ pub const UI = struct {
                 for (start_idx..end_idx) |idx| {
                     const row: usize = 3 + (idx - start_idx);
                     const commit_idx = filtered[idx];
-                    const commit = app.state.commit_list.items[commit_idx];
-                    const is_selected = idx == app.state.commit_selection;
+                    const commit = app.state.commit_select.list.items[commit_idx];
+                    const is_selected = idx == app.state.commit_select.selection;
 
                     // Build segments for commit display
                     var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
@@ -546,7 +548,7 @@ pub const UI = struct {
     }
 
     pub fn renderCommitDiffModeMenu(app: *App, win: vaxis.Window) !void {
-        const commit = app.state.selected_commit_for_diff orelse return;
+        const commit = app.state.commit_select.selected_for_diff orelse return;
 
         // Small centered popup
         const title = " Select Diff Mode ";
@@ -598,7 +600,7 @@ pub const UI = struct {
         _ = popup_win.print(&info_seg, .{ .row_offset = @intCast(1), .col_offset = 1 });
 
         // Option 1
-        const is_opt1_selected = app.state.commit_diff_mode_selection == 0;
+        const is_opt1_selected = app.state.commit_select.diff_mode_selection == 0;
         const caret1 = if (is_opt1_selected) "▶ " else "  ";
         const caret1_copy = try RenderUtils.copyFrameText(app, caret1);
         const opt1_copy = try RenderUtils.copyFrameText(app, option1);
@@ -609,7 +611,7 @@ pub const UI = struct {
         _ = popup_win.print(&opt1_seg, .{ .row_offset = @intCast(3), .col_offset = 1 });
 
         // Option 2
-        const is_opt2_selected = app.state.commit_diff_mode_selection == 1;
+        const is_opt2_selected = app.state.commit_select.diff_mode_selection == 1;
         const caret2 = if (is_opt2_selected) "▶ " else "  ";
         const caret2_copy = try RenderUtils.copyFrameText(app, caret2);
         const opt2_copy = try RenderUtils.copyFrameText(app, option2);
@@ -629,7 +631,7 @@ pub const UI = struct {
     }
 
     pub fn renderGraphiteStackDialog(app: *App, win: vaxis.Window) !void {
-        const stack = app.state.graphite_stack orelse return;
+        const stack = app.state.graphite.stack orelse return;
 
         const branch_count = stack.branches.len;
 
@@ -683,7 +685,7 @@ pub const UI = struct {
             const array_idx = branch_count - 1 - visual_idx;
             const branch = stack.branches[array_idx];
             const row = visual_idx + 2;
-            const is_selected = array_idx == app.state.graphite_stack_selection;
+            const is_selected = array_idx == app.state.graphite.selection;
             const is_current = array_idx == stack.current_idx;
 
             var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
@@ -732,8 +734,8 @@ pub const UI = struct {
     /// window first, so it overlays whatever diff sat underneath.
     pub fn renderPrReviewDialog(app: *App, win: vaxis.Window) !void {
         const rows: usize = if (win.height > 2) win.height - 2 else 0;
-        app.clampPrScroll(rows);
-        pr.render.draw(win, app.prView());
+        pr_controller.clampScroll(&app.state.pr, rows);
+        pr.render.draw(win, pr_controller.view(&app.state.pr));
     }
 
     pub fn renderModelSelectionDialog(app: *App, win: vaxis.Window) !void {
@@ -763,7 +765,7 @@ pub const UI = struct {
         if (models.len == 0) return;
 
         // Use filtered indices
-        const filtered = app.state.model_filtered_indices.items;
+        const filtered = app.state.model_select.filtered_indices.items;
         const filtered_count = filtered.len;
 
         // Calculate dialog dimensions
@@ -832,7 +834,7 @@ pub const UI = struct {
         _ = popup_win.print(&title_seg, .{ .row_offset = @intCast(DIALOG_PADDING) });
 
         // Row PADDING+1: Search input with "> " prompt
-        const query = app.state.model_filter_query[0..app.state.model_filter_len];
+        const query = app.state.model_select.filter_query[0..app.state.model_select.filter_len];
         if (query.len > 0) {
             var search_buf: [280]u8 = undefined;
             const query_with_cursor = std.fmt.bufPrint(&search_buf, "{s}_", .{query}) catch query;
@@ -885,8 +887,8 @@ pub const UI = struct {
             const max_visible = available_rows / rows_per_model;
             var scroll_offset: usize = 0;
             if (max_visible > 0 and filtered_count > max_visible) {
-                if (app.state.model_selection >= max_visible) {
-                    scroll_offset = app.state.model_selection - max_visible + 1;
+                if (app.state.model_select.selection >= max_visible) {
+                    scroll_offset = app.state.model_select.selection - max_visible + 1;
                 }
                 if (scroll_offset + max_visible > filtered_count) {
                     scroll_offset = filtered_count - max_visible;
@@ -905,7 +907,7 @@ pub const UI = struct {
                 if (actual_model_idx >= models.len) continue;
 
                 const model = models[actual_model_idx];
-                const is_selected = selection_idx == app.state.model_selection;
+                const is_selected = selection_idx == app.state.model_select.selection;
                 const is_current = if (current_model_id) |cid| std.mem.eql(u8, model.model_id, cid) else false;
 
                 // Line 1: Selection caret + model name + current marker
@@ -1724,7 +1726,7 @@ pub const UI = struct {
             try segments.append(app.allocator, .{ .text = diff_str_copy, .style = .{ .fg = Color.cyan } });
 
             // Show graphite stack position if in a stack
-            if (app.state.graphite_stack) |stack| {
+            if (app.state.graphite.stack) |stack| {
                 var stack_buf: [64]u8 = undefined;
                 const stack_pos = try std.fmt.bufPrint(&stack_buf, " [{d}/{d} in stack]", .{ stack.current_idx + 1, stack.branches.len });
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, stack_pos), .style = .{ .fg = Color.magenta } });
