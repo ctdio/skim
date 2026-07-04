@@ -3,6 +3,7 @@ const App = @import("app.zig").App;
 const rendering = @import("rendering/common.zig");
 const state_helpers = @import("state.zig");
 const CommentController = @import("comments/controller.zig").CommentController;
+const RenderUtils = @import("rendering/utils.zig").RenderUtils;
 const Layout = rendering.Layout;
 const StateHelpers = state_helpers.StateHelpers;
 
@@ -272,6 +273,10 @@ pub const Navigation = struct {
                 const comment = app.state.comment_store.getComment(comment_info.comment_idx) orelse return 1;
                 const is_expanded = CommentController.isCommentExpanded(app, comment_info.comment_idx);
                 return calculateSavedCommentHeight(comment.text, is_expanded);
+            },
+            .review_thread => |thread_info| {
+                const width = if (app.state.viewport_width > 0) app.state.viewport_width else 80;
+                return RenderUtils.reviewThreadHeight(app, thread_info.thread_idx, thread_info.placement == .file_bucket, width);
             },
             else => return 1,
         }

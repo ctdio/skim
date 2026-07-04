@@ -1,6 +1,7 @@
 const std = @import("std");
 const parser = @import("git/parser.zig");
 const comments = @import("comments/store.zig");
+const thread_placement = @import("pr/thread_placement.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -28,6 +29,16 @@ pub const LineType = union(enum) {
         parent_hunk_idx: usize,
         parent_line_idx: usize,
         comment_idx: usize,
+    },
+
+    /// GitHub review thread (AD-5: one record per thread). `thread_idx` indexes
+    /// the session's threads/anchored slices (same order). `placement`
+    /// distinguishes an inline anchor (below its code line) from a file-level
+    /// bucket (below the file header); the concrete bucket reason and thread
+    /// body are looked up via `thread_idx` at render time (AD-4).
+    review_thread: struct {
+        thread_idx: usize,
+        placement: enum { inline_line, file_bucket },
     },
 
     /// Blank spacer line (between files or after file header)
@@ -89,6 +100,7 @@ pub const LineMap = struct {
         hunk_view_mode: HunkViewMode,
         apply_filtering: bool, // Only apply filtering in unified view
         collapsed_folds: ?*const std.AutoHashMap(u64, void), // Optional fold state
+        review_threads: ?[]const thread_placement.AnchoredThread, // GitHub review-thread anchors (null → no thread records)
     ) !LineMap {
         var records: std.ArrayList(LineRecord) = .{};
         errdefer records.deinit(allocator);
@@ -156,6 +168,29 @@ pub const LineMap = struct {
                 },
             });
             global_line += 1;
+
+            // File-level bucket threads (outdated / out-of-context / file-subject)
+            // render directly under the header, before the first hunk. Input
+            // order == anchored order == thread creation order (stable).
+            if (review_threads) |anchored| {
+                for (anchored) |a| {
+                    switch (a.placement) {
+                        .file_bucket => |b| {
+                            if (b.file_idx != file_idx) continue;
+                            try records.append(allocator, .{
+                                .global_line = global_line,
+                                .file_idx = file_idx,
+                                .line_type = .{ .review_thread = .{
+                                    .thread_idx = a.thread_idx,
+                                    .placement = .file_bucket,
+                                } },
+                            });
+                            global_line += 1;
+                        },
+                        else => {},
+                    }
+                }
+            }
 
             // Add hunks and their lines
             for (file.hunks, 0..) |hunk, hunk_idx| {
@@ -231,6 +266,29 @@ pub const LineMap = struct {
                             },
                         });
                         global_line += 1;
+                    }
+
+                    // Inline review threads anchored to this coordinate render
+                    // below any local comment. N threads per line is legal —
+                    // emit every match consecutively in anchored (input) order.
+                    if (review_threads) |anchored| {
+                        for (anchored) |a| {
+                            switch (a.placement) {
+                                .inline_line => |c| {
+                                    if (c.file_idx != file_idx or c.hunk_idx != hunk_idx or c.line_idx != line_idx_in_hunk) continue;
+                                    try records.append(allocator, .{
+                                        .global_line = global_line,
+                                        .file_idx = file_idx,
+                                        .line_type = .{ .review_thread = .{
+                                            .thread_idx = a.thread_idx,
+                                            .placement = .inline_line,
+                                        } },
+                                    });
+                                    global_line += 1;
+                                },
+                                else => {},
+                            }
+                        }
                     }
                 }
             }
@@ -359,6 +417,18 @@ pub const LineMap = struct {
         }
         return null;
     }
+
+    /// Find the global line number for a given review-thread index
+    pub fn findLineByThreadIdx(self: *const LineMap, thread_idx: usize) ?usize {
+        for (self.records) |*record| {
+            if (record.line_type == .review_thread) {
+                if (record.line_type.review_thread.thread_idx == thread_idx) {
+                    return record.global_line;
+                }
+            }
+        }
+        return null;
+    }
 };
 
 test "line map basic construction" {
@@ -389,7 +459,7 @@ test "line map basic construction" {
     var store = comments.CommentStore.init(allocator);
     defer store.deinit();
 
-    var line_map = try LineMap.build(allocator, files, &store, .all, true, null);
+    var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
     defer line_map.deinit();
 
     // File 1: header(0) + header_spacer(1) + hunk_header(2) + 2 lines(3,4) + file_spacers(5,6,7) = 8 lines
@@ -454,7 +524,7 @@ test "line map with comments" {
         null,
     );
 
-    var line_map = try LineMap.build(allocator, files, &store, .all, true, null);
+    var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
     defer line_map.deinit();
 
     // header(0) + header_spacer(1) + hunk_header(2) + delete_line(3) + comment(4) + add_line(5) = 6 lines
@@ -509,7 +579,7 @@ test "comment deletion scroll anchoring" {
     );
 
     // Build LineMap with comment
-    var line_map = try LineMap.build(allocator, files, &store, .all, true, null);
+    var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
 
     // Structure:
     // 0: file_header
@@ -588,7 +658,7 @@ test "comment deletion scroll anchoring" {
     line_map.deinit();
     try store.deleteComment(comment_idx);
 
-    line_map = try LineMap.build(allocator, files, &store, .all, true, null);
+    line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
     defer line_map.deinit();
 
     // After deletion: 10 lines (was 11, minus 1 comment)
@@ -644,7 +714,7 @@ test "comment deletion with multiple comments above" {
     try store.addComment("test.txt", 0, 7, "comment 3", .delete, "old3", 7, null);
 
     // Build LineMap with comments
-    var line_map = try LineMap.build(allocator, files, &store, .all, true, null);
+    var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
 
     // Structure (approximate):
     // 0: file_header
@@ -702,7 +772,7 @@ test "comment deletion with multiple comments above" {
     // Now delete comment 3 and rebuild
     line_map.deinit();
     try store.deleteComment(comment3_idx.?);
-    line_map = try LineMap.build(allocator, files, &store, .all, true, null);
+    line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
     defer line_map.deinit();
 
     // After deletion: 15 lines (was 16)

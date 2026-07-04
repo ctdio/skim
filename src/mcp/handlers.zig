@@ -265,6 +265,7 @@ pub fn handleAddComment(app: *App, params: ?std.json.Value) tui_server.Response 
         hunk_view.convertHunkViewMode(app),
         hunk_view.shouldApplyHunkFiltering(app),
         &app.state.collapsed_folds,
+        app.reviewAnchored(),
     ) catch {
         return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
     };
@@ -336,6 +337,7 @@ pub fn handleDeleteComment(app: *App, params: ?std.json.Value) tui_server.Respon
         hunk_view.convertHunkViewMode(app),
         hunk_view.shouldApplyHunkFiltering(app),
         &app.state.collapsed_folds,
+        app.reviewAnchored(),
     ) catch {
         return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to rebuild line map");
     };

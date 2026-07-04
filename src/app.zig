@@ -54,6 +54,8 @@ const codex_mod = @import("codex/codex.zig");
 const pr = @import("pr/pr.zig");
 const pr_controller = @import("pr/controller.zig");
 const review_controller = @import("pr/review_controller.zig");
+const thread_anchor = @import("pr/thread_anchor.zig");
+const thread_placement = @import("pr/thread_placement.zig");
 const subagent_fetch = @import("agent/subagent_fetch.zig");
 const hunk_view = @import("hunk_view.zig");
 
@@ -252,6 +254,7 @@ pub const App = struct {
         view_mode: ViewMode,
         hunk_view_mode: HunkViewMode,
         viewport_height: usize,
+        viewport_width: usize,
         count_prefix: ?usize, // For vim-style count prefixes (e.g., 5j)
         comment_store: comments.CommentStore,
         active_comment_input: ?comment_editor.CommentEditor.State,
@@ -481,7 +484,7 @@ pub const App = struct {
 
         // Build the line map (default to showing all lines, filtering enabled for unified view)
         // Note: collapsed_folds is null during init as it hasn't been initialized yet
-        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null);
+        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null, null);
         errdefer built_line_map.deinit();
 
         // Deep copy diff_source - App takes ownership of its own copy
@@ -534,6 +537,7 @@ pub const App = struct {
                 .view_mode = .unified,
                 .hunk_view_mode = .all,
                 .viewport_height = 0,
+                .viewport_width = 0,
                 .count_prefix = null,
                 .comment_store = comment_store,
                 .active_comment_input = null,
@@ -650,7 +654,7 @@ pub const App = struct {
             allocator.free(caches.line_counts);
         }
 
-        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null);
+        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null, null);
         errdefer built_line_map.deinit();
 
         // Deep copy diff_source
@@ -702,6 +706,7 @@ pub const App = struct {
                 .view_mode = .unified,
                 .hunk_view_mode = .all,
                 .viewport_height = 0,
+                .viewport_width = 0,
                 .count_prefix = null,
                 .comment_store = comment_store,
                 .active_comment_input = null,
@@ -795,7 +800,7 @@ pub const App = struct {
             allocator.free(caches.line_counts);
         }
 
-        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null);
+        var built_line_map = try line_map.LineMap.build(allocator, files, &comment_store, .all, true, null, null);
         errdefer built_line_map.deinit();
 
         return App{
@@ -819,6 +824,7 @@ pub const App = struct {
                 .view_mode = .unified,
                 .hunk_view_mode = .all,
                 .viewport_height = 0,
+                .viewport_width = 0,
                 .count_prefix = null,
                 .comment_store = comment_store,
                 .active_comment_input = null,
@@ -1268,8 +1274,12 @@ pub const App = struct {
         self.state.line_map.deinit();
         self.freeFileCaches();
 
+        // Re-derive review-thread anchors against the freshly parsed diff (AD-4)
+        // before building the map that will emit their records.
+        self.reanchorReview(new_files);
+
         // Rebuild line map with new files (preserve hunk view mode and fold state)
-        const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store, hunk_view.convertHunkViewMode(self), hunk_view.shouldApplyHunkFiltering(self), &self.state.collapsed_folds);
+        const new_line_map = try line_map.LineMap.build(self.allocator, new_files, &self.state.comment_store, hunk_view.convertHunkViewMode(self), hunk_view.shouldApplyHunkFiltering(self), &self.state.collapsed_folds, self.reviewAnchored());
         errdefer {
             // If LineMap.build failed, clean up new_files since old state is already freed
             for (new_files) |*file| {
@@ -2099,6 +2109,7 @@ pub const App = struct {
             hunk_view.convertHunkViewMode(self),
             hunk_view.shouldApplyHunkFiltering(self),
             &self.state.collapsed_folds,
+            self.reviewAnchored(),
         ) catch |err| {
             std.log.err("Failed to rebuild LineMap on view toggle: {any}", .{err});
             return;
@@ -2192,7 +2203,7 @@ pub const App = struct {
 
         return switch (record.line_type) {
             .code_line => |code| file.hunks[code.hunk_idx].lines[code.line_idx_in_hunk].content,
-            .file_header, .hunk_header, .comment_line, .spacer => null,
+            .file_header, .hunk_header, .comment_line, .review_thread, .spacer => null,
         };
     }
 
@@ -2315,7 +2326,7 @@ pub const App = struct {
                     line_number = old_line;
                 }
             },
-            .file_header, .spacer => {
+            .file_header, .review_thread, .spacer => {
                 // No specific line number for these
                 line_number = null;
             },
@@ -2648,6 +2659,9 @@ pub const App = struct {
             },
             .refreshed => |gh_error| {
                 if (gh_error) |kind| self.showStatusMessage(pr.github.kindMessage(kind));
+                // Refetch replaced the thread set; re-anchor + rebuild so the new
+                // threads render (the diff files are unchanged, so no full refresh).
+                self.rebuildReviewLineMap();
                 self.needs_render = true;
             },
             .fetch_failed => {
@@ -2688,6 +2702,55 @@ pub const App = struct {
         self.state.pager_mode = false;
         self.mode = .normal;
         try self.refresh();
+    }
+
+    /// Anchored review threads for the active session, or null when no session
+    /// is active / no threads anchored. Passed into `LineMap.build`.
+    pub fn reviewAnchored(self: *App) ?[]const thread_placement.AnchoredThread {
+        if (!review_controller.isActive(&self.state.review)) return null;
+        if (self.state.review.anchored.len == 0) return null;
+        return self.state.review.anchored;
+    }
+
+    /// Re-derive review-thread anchors against `files` (AD-4: anchors are never
+    /// persisted — every diff refresh recomputes them). No-op-safe when no
+    /// session is active. Must run before any `LineMap.build` on a new diff.
+    fn reanchorReview(self: *App, files: []const parser.FileDiff) void {
+        if (!review_controller.isActive(&self.state.review)) {
+            review_controller.freeAnchored(&self.state.review, self.allocator);
+            return;
+        }
+        const anchored = thread_anchor.anchorThreads(self.allocator, self.state.review.threads.items, files) catch {
+            review_controller.freeAnchored(&self.state.review, self.allocator);
+            return;
+        };
+        review_controller.setAnchored(&self.state.review, self.allocator, anchored, thread_placement.countUnplaced(anchored));
+    }
+
+    /// Re-anchor against the current diff and rebuild the LineMap in place. Used
+    /// after a review refetch (`r`), which replaces threads without touching the
+    /// diff files, so `refresh()` would be wasteful — only the thread records change.
+    fn rebuildReviewLineMap(self: *App) void {
+        self.reanchorReview(self.state.files);
+        const rebuilt = line_map.LineMap.build(
+            self.allocator,
+            self.state.files,
+            &self.state.comment_store,
+            hunk_view.convertHunkViewMode(self),
+            hunk_view.shouldApplyHunkFiltering(self),
+            &self.state.collapsed_folds,
+            self.reviewAnchored(),
+        ) catch |err| {
+            std.log.err("Failed to rebuild LineMap after review refetch: {any}", .{err});
+            return;
+        };
+        self.state.line_map.deinit();
+        self.state.line_map = rebuilt;
+        const total_lines = self.getTotalGlobalLines();
+        if (total_lines > 0 and self.state.global_cursor_line >= total_lines) {
+            self.state.global_cursor_line = total_lines - 1;
+        }
+        Navigation.clampScrollOffset(self);
     }
 
     /// Re-fetch review data for the active session (bound to the `r` refresh).
@@ -3045,6 +3108,9 @@ pub const App = struct {
                         try buffer.appendSlice(self.allocator, comment.text);
                         try buffer.append(self.allocator, '\n');
                     }
+                },
+                .review_thread => {
+                    // Threads are not part of the yankable diff text.
                 },
                 .spacer => {
                     // Skip spacer lines

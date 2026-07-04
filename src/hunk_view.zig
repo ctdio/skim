@@ -32,7 +32,7 @@ pub fn cycleHunkViewModePrev(app: *App) !void {
 
     // Rebuild LineMap
     app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, convertHunkViewMode(app), shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, convertHunkViewMode(app), shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
 
     // Restore positions from anchor
     _ = restoreViewportFromAnchor(app, anchor);
@@ -50,7 +50,7 @@ pub fn cycleHunkViewMode(app: *App) !void {
 
     // Rebuild LineMap to reflect new filtering
     app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, convertHunkViewMode(app), shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, convertHunkViewMode(app), shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
 
     // Restore positions from anchor
     _ = restoreViewportFromAnchor(app, anchor);
@@ -82,6 +82,11 @@ pub fn captureViewportAnchor(app: *App, reference_line: usize) ?ViewportAnchor {
         .comment_line => |comment_info| {
             anchor_line = findHunkHeaderLine(app, record.file_idx, comment_info.parent_hunk_idx);
             anchor_hunk = comment_info.parent_hunk_idx;
+        },
+        .review_thread => {
+            // Threads carry no hunk index in the record; anchor to the file header.
+            anchor_line = app.state.line_map.getFileHeaderLine(record.file_idx);
+            anchor_hunk = null;
         },
         .spacer => |spacer_info| {
             const next_file_idx = if (spacer_info.is_header_spacer)

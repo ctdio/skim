@@ -117,7 +117,7 @@ fn renderStdinDiff(allocator: Allocator, content: []const u8, max_lines: ?usize,
     // Rebuild line map
     app.state.line_map.deinit();
     const line_map_mod = @import("../line_map.zig");
-    app.state.line_map = try line_map_mod.LineMap.build(allocator, files, &app.state.comment_store, .all, true, &app.state.collapsed_folds);
+    app.state.line_map = try line_map_mod.LineMap.build(allocator, files, &app.state.comment_store, .all, true, &app.state.collapsed_folds, null);
 
     try renderAndOutput(allocator, &app, max_lines, width);
 

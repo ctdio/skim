@@ -7,12 +7,23 @@ const rendering_common = @import("common.zig");
 const state_helpers = @import("../state.zig");
 const gwidth = @import("width.zig").gwidth;
 const CommentController = @import("../comments/controller.zig").CommentController;
+const thread_block = @import("thread_block.zig");
+const review_controller = @import("../pr/review_controller.zig");
+const thread_placement = @import("../pr/thread_placement.zig");
 
 const App = @import("../app.zig").App;
 const StateHelpers = state_helpers.StateHelpers;
 const Color = rendering_common.Color;
 const FrameChars = rendering_common.FrameChars;
 const Layout = rendering_common.Layout;
+
+pub const ReviewThreadParams = struct {
+    thread_idx: usize,
+    is_bucket: bool,
+    row: usize,
+    width: usize,
+    is_cursor: bool,
+};
 
 pub const RenderUtils = struct {
     // Unicode display width utilities
@@ -1101,6 +1112,22 @@ pub const RenderUtils = struct {
     }
 
     /// Render saved comment display box with optional truncation
+    /// Render a GitHub review thread block (delegates layout to the App-free
+    /// `thread_block`). Returns rows used. Builds the render info from the active
+    /// session; a no-op (0 rows) if the index is stale.
+    pub fn renderReviewThread(app: *App, win: vaxis.Window, params: ReviewThreadParams) usize {
+        const info = buildThreadRenderInfo(app, params.thread_idx, params.is_bucket, params.is_cursor) orelse return 0;
+        return thread_block.renderThreadDisplay(win, info, params.row, params.width, app.frameSegmentAllocator());
+    }
+
+    /// Rendered height of a review-thread block — mirrors `renderReviewThread`'s
+    /// row count (both go through `thread_block`). Used by navigation's
+    /// per-record height calc so cursor/scroll math matches the drawn block.
+    pub fn reviewThreadHeight(app: *App, thread_idx: usize, is_bucket: bool, width: usize) usize {
+        const info = buildThreadRenderInfo(app, thread_idx, is_bucket, false) orelse return 1;
+        return thread_block.threadDisplayHeight(app.allocator, info, width);
+    }
+
     pub fn renderCommentDisplay(
         app: *App,
         win: vaxis.Window,
@@ -1610,5 +1637,44 @@ pub const RenderUtils = struct {
     ) ?*const comments.Comment {
         const idx = app.state.comment_store.findCommentAt(file_path, hunk_idx, line_idx_in_hunk) orelse return null;
         return app.state.comment_store.getComment(idx);
+    }
+
+    fn buildThreadRenderInfo(app: *App, thread_idx: usize, is_bucket: bool, is_cursor: bool) ?thread_block.ThreadRenderInfo {
+        const session = &app.state.review;
+        if (thread_idx >= session.threads.items.len) return null;
+        const reason: ?thread_placement.BucketReason = if (is_bucket and thread_idx < session.anchored.len)
+            switch (session.anchored[thread_idx].placement) {
+                .file_bucket => |b| b.reason,
+                else => null,
+            }
+        else
+            null;
+        return .{
+            .thread = &session.threads.items[thread_idx],
+            .is_bucketed = is_bucket,
+            .bucket_reason = reason,
+            .expanded = review_controller.isThreadExpanded(session, thread_idx),
+            .is_cursor = is_cursor,
+            .target_line_content = threadTargetLine(app, thread_idx, is_bucket),
+        };
+    }
+
+    /// The anchored code line's content, for rendering a suggestion's `−` row.
+    /// Only inline threads have a target; buckets return null.
+    fn threadTargetLine(app: *App, thread_idx: usize, is_bucket: bool) ?[]const u8 {
+        if (is_bucket) return null;
+        const session = &app.state.review;
+        if (thread_idx >= session.anchored.len) return null;
+        switch (session.anchored[thread_idx].placement) {
+            .inline_line => |c| {
+                if (c.file_idx >= app.state.files.len) return null;
+                const file = &app.state.files[c.file_idx];
+                if (c.hunk_idx >= file.hunks.len) return null;
+                const hunk = &file.hunks[c.hunk_idx];
+                if (c.line_idx >= hunk.lines.len) return null;
+                return hunk.lines[c.line_idx].content;
+            },
+            else => return null,
+        }
     }
 };

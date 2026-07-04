@@ -30,8 +30,9 @@ pub const CommentController = struct {
         var existing_comment_idx: ?usize = null;
 
         switch (record.line_type) {
-            .file_header, .hunk_header, .spacer => {
-                // Can't comment on these line types
+            .file_header, .hunk_header, .spacer, .review_thread => {
+                // Can't comment on these line types (GitHub review threads are
+                // read-only in this phase — no local comment editing on them).
                 return;
             },
             .code_line => |code| {
@@ -244,7 +245,7 @@ pub const CommentController = struct {
 
         // Rebuild LineMap since comment count changed
         app.state.line_map.deinit();
-        app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+        app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
 
         // Move cursor to the saved comment so it can be easily yanked
         if (app.state.line_map.findLineByCommentIdx(saved_comment_idx)) |comment_line| {
@@ -341,7 +342,7 @@ pub const CommentController = struct {
 
                 // Rebuild LineMap since comment count changed
                 app.state.line_map.deinit();
-                app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+                app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
 
                 const total_lines = app.getTotalGlobalLines();
                 if (total_lines == 0) {
@@ -427,7 +428,7 @@ pub const CommentController = struct {
 
         // Rebuild LineMap since comment count changed
         app.state.line_map.deinit();
-        app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+        app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
 
         // Adjust scroll and cursor to account for removed comments above them
         const total_lines = app.getTotalGlobalLines();

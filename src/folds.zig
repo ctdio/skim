@@ -114,6 +114,7 @@ pub fn toggleFoldUnderCursor(app: *App) !void {
             toggleHunkFold(&app.state.collapsed_folds, file_idx, comment_info.parent_hunk_idx);
             target_hunk_idx = comment_info.parent_hunk_idx;
         },
+        .review_thread => return,
         .spacer => {
             // On spacer, no fold action
             return;
@@ -122,7 +123,7 @@ pub fn toggleFoldUnderCursor(app: *App) !void {
 
     // Rebuild LineMap and move cursor to fold header
     app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
     moveCursorToFoldHeader(app, file_idx, target_hunk_idx);
     app.needs_render = true;
 }
@@ -151,6 +152,7 @@ pub fn closeFoldUnderCursor(app: *App) !void {
             closeHunkFold(&app.state.collapsed_folds, file_idx, comment_info.parent_hunk_idx);
             target_hunk_idx = comment_info.parent_hunk_idx;
         },
+        .review_thread => return,
         .spacer => {
             return;
         },
@@ -158,7 +160,7 @@ pub fn closeFoldUnderCursor(app: *App) !void {
 
     // Rebuild LineMap and move cursor to fold header
     app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
     moveCursorToFoldHeader(app, file_idx, target_hunk_idx);
     app.needs_render = true;
 }
@@ -187,6 +189,7 @@ pub fn openFoldUnderCursor(app: *App) !void {
             openHunkFold(&app.state.collapsed_folds, file_idx, comment_info.parent_hunk_idx);
             target_hunk_idx = comment_info.parent_hunk_idx;
         },
+        .review_thread => return,
         .spacer => {
             return;
         },
@@ -194,7 +197,7 @@ pub fn openFoldUnderCursor(app: *App) !void {
 
     // Rebuild LineMap and move cursor to fold header
     app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
     moveCursorToFoldHeader(app, file_idx, target_hunk_idx);
     app.needs_render = true;
 }
@@ -208,7 +211,7 @@ pub fn closeAllFoldsAndRebuild(app: *App) !void {
 
     // Rebuild LineMap
     app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
     _ = hunk_view.restoreViewportFromAnchor(app, anchor);
     app.needs_render = true;
 }
@@ -222,7 +225,7 @@ pub fn openAllFoldsAndRebuild(app: *App) !void {
 
     // Rebuild LineMap
     app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
     _ = hunk_view.restoreViewportFromAnchor(app, anchor);
     app.needs_render = true;
 }
@@ -237,7 +240,7 @@ pub fn closeFileFoldUnderCursor(app: *App) !void {
 
     // Rebuild LineMap
     app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
 
     // Move cursor to the file header
     moveCursorToFoldHeader(app, file_idx, null);
@@ -254,7 +257,7 @@ pub fn openFileFoldUnderCursor(app: *App) !void {
 
     // Rebuild LineMap
     app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds);
+    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
 
     // Move cursor to the file header
     moveCursorToFoldHeader(app, file_idx, null);

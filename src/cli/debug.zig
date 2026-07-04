@@ -8,12 +8,15 @@ const agent_render = @import("../agent/render.zig");
 const TabManager = @import("../agent/tab_manager.zig").TabManager;
 const App = @import("../app.zig").App;
 const codex_replay = @import("../codex/session_replay.zig");
-const DiffSource = @import("../git/diff.zig").DiffSource;
+const diff = @import("../git/diff.zig");
+const DiffSource = diff.DiffSource;
 const logging = @import("../logging.zig");
 const opencode_replay = @import("../opencode/session_replay.zig");
 const harness = @import("../testing/harness.zig");
 const github = @import("../pr/github.zig");
 const review_parse = @import("../pr/review_parse.zig");
+const parser = @import("../git/parser.zig");
+const thread_anchor = @import("../pr/thread_anchor.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -85,6 +88,11 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, subcmd, "pr-anchor")) {
+        try runPrAnchor(allocator, args);
+        return;
+    }
+
     if (std.mem.eql(u8, subcmd, "--help") or std.mem.eql(u8, subcmd, "-h")) {
         try printHelp();
         return;
@@ -101,10 +109,91 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
 /// through the SAME `github.zig`/`review_parse.zig` functions the TUI uses
 /// (AD-2), and print a human-readable summary. Exits non-zero on any failure.
 fn runPrView(allocator: Allocator, args: []const []const u8) !void {
+    const raw = try fetchReviewJson(allocator, args, "pr-view");
+    defer allocator.free(raw);
+
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var data = review_parse.parsePrDetails(allocator, raw) catch {
+        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer data.deinit();
+
+    try printPrView(data.details);
+}
+
+/// `skim debug pr-anchor <number|url>`: fetch a PR's review data + the PR diff
+/// through the SAME `github.zig`/`git` paths the TUI uses, run the real
+/// `thread_anchor.anchorThreads`, and print every thread's placement. Enforces
+/// the totality invariant (every thread is inline, bucketed, or unplaced —
+/// nothing silently dropped) and exits non-zero if it is ever violated.
+fn runPrAnchor(allocator: Allocator, args: []const []const u8) !void {
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+
+    const raw = try fetchReviewJson(allocator, args, "pr-anchor");
+    defer allocator.free(raw);
+
+    var data = review_parse.parsePrDetails(allocator, raw) catch {
+        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer data.deinit();
+    const details = data.details;
+
+    const head_ref = github.fetchRef(allocator, .{ .number = details.number, .base_ref = details.base_ref }) catch {
+        try stderr_writer.interface.writeAll("Failed to git-fetch the PR head ref (is git authenticated?).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer allocator.free(head_ref);
+
+    const ref1 = if (details.base_ref.len > 0)
+        try std.fmt.allocPrint(allocator, "origin/{s}", .{details.base_ref})
+    else
+        try allocator.dupe(u8, "HEAD");
+    defer allocator.free(ref1);
+
+    const diff_text = diff.getDiff(allocator, .{ .two_refs = .{
+        .ref1 = ref1,
+        .ref2 = head_ref,
+        .use_merge_base = true,
+    } }) catch {
+        try stderr_writer.interface.writeAll("Failed to run git diff for the PR range.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer allocator.free(diff_text);
+
+    const files = parser.parse(allocator, diff_text) catch {
+        try stderr_writer.interface.writeAll("Failed to parse the PR diff.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer {
+        for (files) |*f| f.deinit(allocator);
+        allocator.free(files);
+    }
+
+    const anchored = thread_anchor.anchorThreads(allocator, details.threads, files) catch {
+        try stderr_writer.interface.writeAll("Failed to anchor review threads.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer allocator.free(anchored);
+
+    const ok = try printPrAnchor(details, files, anchored);
+    if (!ok) std.process.exit(1);
+}
+
+/// Shared arg → gh review-data resolution for pr-view/pr-anchor. Returns the
+/// raw JSON bytes (caller owns) or exits non-zero with a diagnostic.
+fn fetchReviewJson(allocator: Allocator, args: []const []const u8, comptime cmd: []const u8) ![]u8 {
     var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
 
     if (args.len < 4) {
-        try stderr_writer.interface.writeAll("pr-view requires a PR number or github.com PR URL.\n");
+        try stderr_writer.interface.writeAll(cmd ++ " requires a PR number or github.com PR URL.\n");
         stderr_writer.interface.flush() catch {};
         std.process.exit(1);
     }
@@ -145,7 +234,7 @@ fn runPrView(allocator: Allocator, args: []const []const u8) !void {
         std.process.exit(1);
     };
 
-    const raw = switch (fetch) {
+    return switch (fetch) {
         .failed => |kind| {
             try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
             stderr_writer.interface.flush() catch {};
@@ -153,16 +242,85 @@ fn runPrView(allocator: Allocator, args: []const []const u8) !void {
         },
         .ok => |bytes| bytes,
     };
-    defer allocator.free(raw);
+}
 
-    var data = review_parse.parsePrDetails(allocator, raw) catch {
-        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+/// Print each thread's placement + totals. Returns false if the totality
+/// invariant is violated (inline + bucketed + unplaced != thread count), so the
+/// caller can exit non-zero.
+fn printPrAnchor(details: review_parse.PrDetails, files: []const parser.FileDiff, anchored: []const thread_anchor.AnchoredThread) !bool {
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+
+    try w.print("PR #{d}: {s}\n", .{ details.number, details.title });
+    try w.print("base: {s}  head: {s}  files: {d}  threads: {d}\n\n", .{
+        details.base_ref,
+        details.head_ref,
+        files.len,
+        details.threads.len,
+    });
+
+    var inline_count: usize = 0;
+    var bucket_count: usize = 0;
+    var unplaced_count: usize = 0;
+
+    try w.writeAll("Placements:\n");
+    for (anchored) |a| {
+        const t = details.threads[a.thread_idx];
+        const shown_line: ?u32 = t.line orelse t.original_line;
+        switch (a.placement) {
+            .inline_line => |loc| {
+                inline_count += 1;
+                try w.print("  [{d}] {s}:{?d} [{s}] {s} -> inline file={d} hunk={d} line={d}\n", .{
+                    a.thread_idx,      t.path,       shown_line,   sideLabel(t.side),
+                    threadStateLbl(t), loc.file_idx, loc.hunk_idx, loc.line_idx,
+                });
+            },
+            .file_bucket => |b| {
+                bucket_count += 1;
+                try w.print("  [{d}] {s}:{?d} [{s}] {s} -> file_bucket file={d} reason={s}\n", .{
+                    a.thread_idx,      t.path,     shown_line,                sideLabel(t.side),
+                    threadStateLbl(t), b.file_idx, bucketReasonLbl(b.reason),
+                });
+            },
+            .unplaced => {
+                unplaced_count += 1;
+                try w.print("  [{d}] {s}:{?d} [{s}] {s} -> UNPLACED (path not in diff)\n", .{
+                    a.thread_idx, t.path, shown_line, sideLabel(t.side), threadStateLbl(t),
+                });
+            },
+        }
+    }
+
+    const total = details.threads.len;
+    const accounted = inline_count + bucket_count + unplaced_count;
+    try w.print("\nTotals: inline={d}  bucketed={d}  unplaced={d}  accounted={d}/{d}\n", .{
+        inline_count, bucket_count, unplaced_count, accounted, total,
+    });
+
+    const totality_ok = accounted == total and anchored.len == total;
+    if (!totality_ok) {
+        try w.print("INVARIANT VIOLATED: {d} threads accounted for, expected {d} (anchored slice len {d}).\n", .{
+            accounted, total, anchored.len,
+        });
+    } else {
+        try w.writeAll("Totality invariant holds: every thread accounted for.\n");
+    }
+    return totality_ok;
+}
+
+fn threadStateLbl(t: review_parse.ReviewThread) []const u8 {
+    if (t.is_resolved) return "resolved";
+    if (t.is_outdated) return "outdated";
+    return "open";
+}
+
+fn bucketReasonLbl(reason: thread_anchor.BucketReason) []const u8 {
+    return switch (reason) {
+        .outdated => "outdated",
+        .out_of_context => "out_of_context",
+        .file_level => "file_level",
     };
-    defer data.deinit();
-
-    try printPrView(data.details);
 }
 
 fn printPrView(details: review_parse.PrDetails) !void {
@@ -436,6 +594,7 @@ fn printHelp() !void {
         \\    replay-codex <session.jsonl>    Render a saved Codex JSONL session
         \\    replay-opencode <session.log>   Render a saved Opencode SSE event log
         \\    pr-view <number|url>            Fetch + print a PR's GitHub review data
+        \\    pr-anchor <number|url>          Fetch a PR + anchor its review threads to the diff
         \\
         \\EXAMPLES:
         \\    skim debug replay-acp ~/.claude/projects/.../session.jsonl --tui
@@ -443,6 +602,7 @@ fn printHelp() !void {
         \\    skim debug replay-opencode ~/.skim/opencode/events/ses_...log --tui
         \\    skim debug pr-view 26015
         \\    skim debug pr-view https://github.com/owner/repo/pull/42
+        \\    skim debug pr-anchor 26015
         \\
     );
 }

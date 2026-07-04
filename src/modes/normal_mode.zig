@@ -7,6 +7,7 @@ const Navigation = navigation.Navigation;
 const folds = @import("../folds.zig");
 const hunk_view = @import("../hunk_view.zig");
 const CommentController = @import("../comments/controller.zig").CommentController;
+const review_controller = @import("../pr/review_controller.zig");
 
 /// Handle keyboard input when in normal mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -413,13 +414,27 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         '?' => app.mode = .help, // Show help overlay
         'a' => try app.stageCurrentFile(), // Stage the current file (git add)
         'A' => try app.stageAllFiles(), // Stage all files (git add -A)
-        'o' => CommentController.toggleCommentUnderCursorExpanded(app), // Toggle comment expand/collapse
+        'o' => try toggleExpandUnderCursor(app), // Toggle comment/thread expand/collapse
         'B' => app.toggleBlame(), // Toggle git blame in gutter
         'S' => try app.startGraphiteStack(), // Open graphite stack picker
         else => {
             // Reset count prefix on any other key
             app.state.count_prefix = null;
         },
+    }
+}
+
+/// Route the `o` key to the right expand/collapse target based on the record
+/// under the cursor: review threads toggle their own expansion, everything else
+/// falls through to the inline-comment toggle.
+fn toggleExpandUnderCursor(app: *App) !void {
+    const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return;
+    switch (record.line_type) {
+        .review_thread => |thread_info| {
+            try review_controller.toggleThreadExpanded(&app.state.review, app.allocator, thread_info.thread_idx);
+            app.needs_render = true;
+        },
+        else => CommentController.toggleCommentUnderCursorExpanded(app),
     }
 }
 

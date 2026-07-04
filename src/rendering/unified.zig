@@ -30,6 +30,7 @@ pub const UnifiedRenderer = struct {
         var rows_rendered: usize = 0;
 
         app.state.viewport_height = win.height;
+        app.state.viewport_width = win.width;
         Navigation.clampScrollOffset(app);
 
         // Calculate global gutter width (consistent across all files)
@@ -63,8 +64,9 @@ pub const UnifiedRenderer = struct {
 
             const is_cursor = global_line == app.state.global_cursor_line;
 
-            // Render sidebar for all line types except spacers and file headers
-            if (record.line_type != .spacer and record.line_type != .file_header) {
+            // Render sidebar for all line types except spacers, file headers, and
+            // review threads (thread blocks draw their own left border at col 0).
+            if (record.line_type != .spacer and record.line_type != .file_header and record.line_type != .review_thread) {
                 var sidebar_seg = [_]vaxis.Cell.Segment{.{
                     .text = "┃",
                     .style = sidebar_style,
@@ -166,6 +168,16 @@ pub const UnifiedRenderer = struct {
                         }
                         row += comment_rows;
                     }
+                },
+                .review_thread => |thread_info| {
+                    const rows_used = RenderUtils.renderReviewThread(app, win, .{
+                        .thread_idx = thread_info.thread_idx,
+                        .is_bucket = thread_info.placement == .file_bucket,
+                        .row = row,
+                        .width = win.width,
+                        .is_cursor = is_cursor,
+                    });
+                    row += rows_used;
                 },
                 .spacer => {
                     // Render spacer - just empty line with cursor highlight if needed (no left border)

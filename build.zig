@@ -268,6 +268,34 @@ pub fn build(b: *std.Build) void {
     const run_pr_tests = b.addRunArtifact(pr_tests);
     test_step.dependOn(&run_pr_tests.step);
 
+    // PR review-thread tests. The helper file lives in src/testing/ but reaches
+    // production code (git/, rendering/, pr/) through the src/-rooted
+    // review_test_root NAMED module — a named import keeps those modules' own
+    // test blocks out of this binary (mirrors approval_test_root).
+    const review_test_root_module = b.createModule(.{
+        .root_source_file = b.path("src/review_test_root.zig"),
+    });
+    review_test_root_module.addImport("vaxis", vaxis);
+    review_test_root_module.addImport("tree-sitter", tree_sitter);
+    review_test_root_module.addImport("build_options", build_options_module);
+    const review_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/review_test_helpers.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    review_tests.root_module.addImport("vaxis", vaxis);
+    review_tests.root_module.addImport("tree-sitter", tree_sitter);
+    review_tests.root_module.addImport("build_options", build_options_module);
+    review_tests.root_module.addImport("review_test_root", review_test_root_module);
+    for (grammars) |grammar| {
+        review_tests.linkLibrary(grammar);
+    }
+    review_tests.linkLibC();
+    const run_review_tests = b.addRunArtifact(review_tests);
+    test_step.dependOn(&run_review_tests.step);
+
     // Markdown module tests
     const markdown_tests = b.addTest(.{
         .root_module = b.createModule(.{

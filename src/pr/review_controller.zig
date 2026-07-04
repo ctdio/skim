@@ -15,6 +15,9 @@ const Allocator = std.mem.Allocator;
 
 const github = @import("github.zig");
 const review_parse = @import("review_parse.zig");
+const thread_placement = @import("thread_placement.zig");
+
+pub const AnchoredThread = thread_placement.AnchoredThread;
 
 /// Params for entering a PR. `base_ref`/`title`/`url` are known when entering
 /// from the picker (the PullRequest row carries them). For `skim pr <number>`
@@ -84,6 +87,17 @@ pub const ReviewSession = struct {
     threads: std.ArrayList(review_parse.ReviewThread) = .{},
     reviews: std.ArrayList(review_parse.Review) = .{},
     checks: std.ArrayList(review_parse.CheckRun) = .{},
+
+    // Derived render placement of `threads` (AD-4: recomputed by the App on every
+    // diff refresh, never persisted). Allocator-owned; replaced via `setAnchored`.
+    anchored: []AnchoredThread = &.{},
+    unplaced_count: usize = 0,
+    // Ephemeral expand/collapse UI state keyed by positional thread index. The
+    // key INVERTS the default (unresolved → expanded, resolved → collapsed):
+    // presence means "opposite of default". Positional keys are deliberately
+    // transient and cleared on every `applyFetchedData`, so they are exempt from
+    // AD-4's node-ID identity rule (this is view state, not review data).
+    expanded_threads: std.AutoHashMapUnmanaged(usize, void) = .{},
 
     // Async machinery (AD-3).
     entry: PendingEntry = .{},
@@ -200,6 +214,9 @@ pub fn applyFetchedData(self: *ReviewSession, allocator: Allocator, data: *revie
     const d = data.details;
 
     clearData(self);
+    // New payload → positional thread indices change; drop derived/UI state.
+    freeAnchored(self, allocator);
+    self.expanded_threads.clearRetainingCapacity();
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
@@ -280,6 +297,40 @@ pub fn isActive(self: *const ReviewSession) bool {
     return self.active;
 }
 
+/// Replace the derived anchor slice (transfers ownership of `anchored`). The
+/// previous slice is freed. `unplaced` is the count of threads whose path is
+/// absent from the diff (surfaced so nothing is silently dropped).
+pub fn setAnchored(self: *ReviewSession, allocator: Allocator, anchored: []AnchoredThread, unplaced: usize) void {
+    if (self.anchored.len > 0) allocator.free(self.anchored);
+    self.anchored = anchored;
+    self.unplaced_count = unplaced;
+}
+
+/// Free the anchor slice (e.g. when a new payload invalidates positional
+/// indices). Idempotent.
+pub fn freeAnchored(self: *ReviewSession, allocator: Allocator) void {
+    if (self.anchored.len > 0) allocator.free(self.anchored);
+    self.anchored = &.{};
+    self.unplaced_count = 0;
+}
+
+/// Whether thread `thread_idx` renders expanded. Default: expanded unless the
+/// thread is resolved. Presence in `expanded_threads` inverts that default.
+pub fn isThreadExpanded(self: *const ReviewSession, thread_idx: usize) bool {
+    const default_expanded = if (thread_idx < self.threads.items.len)
+        !self.threads.items[thread_idx].is_resolved
+    else
+        true;
+    const overridden = self.expanded_threads.contains(thread_idx);
+    return default_expanded != overridden;
+}
+
+/// Flip the expand/collapse state of thread `thread_idx`.
+pub fn toggleThreadExpanded(self: *ReviewSession, allocator: Allocator, thread_idx: usize) !void {
+    if (self.expanded_threads.remove(thread_idx)) return;
+    try self.expanded_threads.put(allocator, thread_idx, {});
+}
+
 /// Free the whole session. Joins any in-flight worker first so it can't write
 /// into freed state, then frees worker buffers and the review-data arena.
 pub fn deinitState(self: *ReviewSession, allocator: Allocator) void {
@@ -298,6 +349,8 @@ pub fn deinitState(self: *ReviewSession, allocator: Allocator) void {
     self.entering_base_ref = "";
 
     clearData(self);
+    freeAnchored(self, allocator);
+    self.expanded_threads.deinit(allocator);
     self.threads.deinit(allocator);
     self.reviews.deinit(allocator);
     self.checks.deinit(allocator);
@@ -559,4 +612,97 @@ test "applyFetchedData: thread with zero comments copies cleanly" {
     try testing.expectEqual(@as(usize, 0), session.threads.items[0].comments.len);
     try testing.expectEqual(review_parse.Side.left, session.threads.items[0].side);
     try testing.expectEqual(review_parse.SubjectType.file, session.threads.items[0].subject_type);
+}
+
+test "isThreadExpanded: unresolved threads default to expanded" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try session.threads.append(testing.allocator, threadWith(false));
+    try testing.expect(isThreadExpanded(&session, 0));
+}
+
+test "isThreadExpanded: resolved threads default to collapsed" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try session.threads.append(testing.allocator, threadWith(true));
+    try testing.expect(!isThreadExpanded(&session, 0));
+}
+
+test "toggleThreadExpanded: collapses an unresolved thread" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try session.threads.append(testing.allocator, threadWith(false));
+    try toggleThreadExpanded(&session, testing.allocator, 0);
+    try testing.expect(!isThreadExpanded(&session, 0));
+}
+
+test "toggleThreadExpanded: expands a resolved thread" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try session.threads.append(testing.allocator, threadWith(true));
+    try toggleThreadExpanded(&session, testing.allocator, 0);
+    try testing.expect(isThreadExpanded(&session, 0));
+}
+
+test "toggleThreadExpanded: toggling twice returns to default" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try session.threads.append(testing.allocator, threadWith(false));
+    try toggleThreadExpanded(&session, testing.allocator, 0);
+    try toggleThreadExpanded(&session, testing.allocator, 0);
+    try testing.expect(isThreadExpanded(&session, 0));
+    try testing.expectEqual(@as(usize, 0), session.expanded_threads.count());
+}
+
+test "setAnchored: stores slice and unplaced count, frees on replace" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+
+    const first = try testing.allocator.alloc(AnchoredThread, 2);
+    first[0] = .{ .thread_idx = 0, .placement = .unplaced };
+    first[1] = .{ .thread_idx = 1, .placement = .{ .file_bucket = .{ .file_idx = 0, .reason = .outdated } } };
+    setAnchored(&session, testing.allocator, first, 1);
+    try testing.expectEqual(@as(usize, 2), session.anchored.len);
+    try testing.expectEqual(@as(usize, 1), session.unplaced_count);
+
+    // Replacing frees the previous slice (leak-checked by the testing allocator).
+    const second = try testing.allocator.alloc(AnchoredThread, 1);
+    second[0] = .{ .thread_idx = 0, .placement = .{ .inline_line = .{ .file_idx = 0, .hunk_idx = 0, .line_idx = 0 } } };
+    setAnchored(&session, testing.allocator, second, 0);
+    try testing.expectEqual(@as(usize, 1), session.anchored.len);
+    try testing.expectEqual(@as(usize, 0), session.unplaced_count);
+}
+
+test "applyFetchedData: clears stale anchors and expansion overrides" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+
+    const anchored = try testing.allocator.alloc(AnchoredThread, 1);
+    anchored[0] = .{ .thread_idx = 0, .placement = .unplaced };
+    setAnchored(&session, testing.allocator, anchored, 1);
+    try session.expanded_threads.put(testing.allocator, 3, {});
+
+    var data = try review_parse.parsePrDetails(testing.allocator, canned_payload);
+    try applyFetchedData(&session, testing.allocator, &data);
+    data.deinit();
+
+    try testing.expectEqual(@as(usize, 0), session.anchored.len);
+    try testing.expectEqual(@as(usize, 0), session.unplaced_count);
+    try testing.expectEqual(@as(usize, 0), session.expanded_threads.count());
+}
+
+fn threadWith(is_resolved: bool) review_parse.ReviewThread {
+    return .{
+        .id = "PRRT_x",
+        .path = "x",
+        .line = 1,
+        .start_line = null,
+        .original_line = 1,
+        .side = .right,
+        .start_side = .right,
+        .is_resolved = is_resolved,
+        .is_outdated = false,
+        .subject_type = .line,
+        .comments = &.{},
+    };
 }

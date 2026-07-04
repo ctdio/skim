@@ -1,0 +1,8 @@
+┌ ● alice · 2024-01-15
+│ use a guard here:
+│ ┌ suggestion
+│ -     doStuff(x);
+│ + if (x == null) return;
+│ └
+│ thanks
+└─
