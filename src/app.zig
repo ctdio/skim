@@ -2124,16 +2124,7 @@ pub const App = struct {
         // Rebuild LineMap because filtering rules changed
         // Side-by-side: always show all lines (filtering=false)
         // Unified: apply current hunk view mode (filtering=true)
-        self.state.line_map.deinit();
-        self.state.line_map = line_map.LineMap.build(
-            self.allocator,
-            self.state.files,
-            &self.state.comment_store,
-            hunk_view.convertHunkViewMode(self),
-            hunk_view.shouldApplyHunkFiltering(self),
-            &self.state.collapsed_folds,
-            self.reviewAnchored(),
-        ) catch |err| {
+        hunk_view.rebuildLineMap(self) catch |err| {
             std.log.err("Failed to rebuild LineMap on view toggle: {any}", .{err});
             return;
         };

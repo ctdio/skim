@@ -30,9 +30,7 @@ pub fn cycleHunkViewModePrev(app: *App) !void {
     // Cycle to previous mode
     app.state.hunk_view_mode = app.state.hunk_view_mode.prev();
 
-    // Rebuild LineMap
-    app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, convertHunkViewMode(app), shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
+    try rebuildLineMap(app);
 
     // Restore positions from anchor
     _ = restoreViewportFromAnchor(app, anchor);
@@ -48,12 +46,27 @@ pub fn cycleHunkViewMode(app: *App) !void {
     // Cycle to next mode
     app.state.hunk_view_mode = app.state.hunk_view_mode.next();
 
-    // Rebuild LineMap to reflect new filtering
-    app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, convertHunkViewMode(app), shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
+    try rebuildLineMap(app);
 
     // Restore positions from anchor
     _ = restoreViewportFromAnchor(app, anchor);
+}
+
+/// Free the current LineMap and rebuild it from live app state, preserving the
+/// active view mode, hunk filtering, fold state, and review anchors. Callers that
+/// need viewport stability wrap this with captureViewportAnchor /
+/// restoreViewportFromAnchor.
+pub fn rebuildLineMap(app: *App) !void {
+    app.state.line_map.deinit();
+    app.state.line_map = try line_map.LineMap.build(
+        app.allocator,
+        app.state.files,
+        &app.state.comment_store,
+        convertHunkViewMode(app),
+        shouldApplyHunkFiltering(app),
+        &app.state.collapsed_folds,
+        app.reviewAnchored(),
+    );
 }
 
 /// Capture viewport anchor for preserving position across LineMap rebuilds.

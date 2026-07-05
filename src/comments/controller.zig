@@ -9,7 +9,6 @@ const std = @import("std");
 
 const App = @import("../app.zig").App;
 const comment_editor = @import("editor.zig");
-const line_map = @import("../line_map.zig");
 const clipboard = @import("../clipboard.zig");
 const navigation = @import("../navigation.zig");
 const hunk_view = @import("../hunk_view.zig");
@@ -362,8 +361,7 @@ pub const CommentController = struct {
         }
 
         // Rebuild LineMap since comment count changed
-        app.state.line_map.deinit();
-        app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
+        try hunk_view.rebuildLineMap(app);
 
         // Move cursor to the saved comment so it can be easily yanked
         if (app.state.line_map.findLineByCommentIdx(saved_comment_idx)) |comment_line| {
@@ -459,8 +457,7 @@ pub const CommentController = struct {
                 try app.state.comment_store.deleteComment(comment_info.comment_idx);
 
                 // Rebuild LineMap since comment count changed
-                app.state.line_map.deinit();
-                app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
+                try hunk_view.rebuildLineMap(app);
 
                 const total_lines = app.getTotalGlobalLines();
                 if (total_lines == 0) {
@@ -545,8 +542,7 @@ pub const CommentController = struct {
         app.state.comment_store.clearAll();
 
         // Rebuild LineMap since comment count changed
-        app.state.line_map.deinit();
-        app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
+        try hunk_view.rebuildLineMap(app);
 
         // Adjust scroll and cursor to account for removed comments above them
         const total_lines = app.getTotalGlobalLines();
