@@ -14,8 +14,10 @@ const default_limit = 50;
 const json_fields = "number,title,author,headRefName,baseRefName,isDraft,updatedAt,url,statusCheckRollup";
 
 /// List open PRs as the raw JSON `gh` emits, so callers can persist it verbatim
-/// (e.g. to the on-disk cache) before parsing. Caller owns the returned bytes.
-pub fn listPullRequestsRaw(allocator: std.mem.Allocator) ![]u8 {
+/// (e.g. to the on-disk cache) before parsing. On success the `.ok` bytes are
+/// owned by the caller; on failure the error is classified into a `GhErrorKind`
+/// (AD-8) so callers surface an actionable message via `kindMessage`.
+pub fn listPullRequestsRaw(allocator: std.mem.Allocator) !GhFetch {
     var buf: [16]u8 = undefined;
     const limit = std.fmt.bufPrint(&buf, "{d}", .{default_limit}) catch unreachable;
 
@@ -23,26 +25,7 @@ pub fn listPullRequestsRaw(allocator: std.mem.Allocator) ![]u8 {
         "gh", "pr", "list", "--limit", limit, "--json", json_fields,
     };
 
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &argv,
-        .max_output_bytes = 16 * 1024 * 1024,
-    }) catch |err| switch (err) {
-        error.FileNotFound => return Error.GhNotFound,
-        else => return err,
-    };
-    errdefer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .Exited => |code| if (code != 0) {
-            std.log.err("gh pr list failed ({d}): {s}", .{ code, result.stderr });
-            return Error.GhCommandFailed;
-        },
-        else => return Error.GhCommandFailed,
-    }
-
-    return result.stdout;
+    return runGhCapture(allocator, &argv, "gh pr list");
 }
 
 /// Fetch a PR's head into a stable local ref (`refs/skim/pr-<number>`) without

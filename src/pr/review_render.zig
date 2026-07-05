@@ -15,6 +15,7 @@ const vaxis = @import("vaxis");
 const review_controller = @import("review_controller.zig");
 const review_parse = @import("review_parse.zig");
 const line_writer = @import("line_writer.zig");
+const width_util = @import("../rendering/width.zig");
 
 const Verdict = review_controller.Verdict;
 const ThreadCounts = review_controller.ThreadCounts;
@@ -66,6 +67,14 @@ pub const InfoView = struct {
     unplaced_count: usize = 0,
     truncated: bool = false,
     scroll: usize = 0,
+    // Total logical lines in the scrollable body (from review_controller
+    // .infoLineCount) — drives the footer scroll indicator. 0 means nothing
+    // scrollable.
+    total_lines: usize = 0,
+    // Review data could not be fetched (git ok, gh failed). Renders a warn note
+    // in place of the empty-PR placeholder so a fetch failure never reads as a
+    // genuinely empty PR.
+    data_unavailable: bool = false,
     bg: Color = .default,
 };
 
@@ -117,9 +126,9 @@ pub fn drawSubmitDialog(win: vaxis.Window, view: SubmitView) void {
 
     var footer = LineWriter.init(.{ .win = win, .row = footer_row, .style = muted, .bg = view.bg });
     if (view.confirm_discard) {
-        footer.styledText(" ^D again to discard the pending review · any key cancels", warn_yellow);
+        footer.styledText(" ^D:Discard again  |  Any key:Cancel", warn_yellow);
     } else {
-        footer.styledText(" ^S submit · Tab verdict · ^D discard · Esc cancel", muted);
+        footer.styledText(" Tab:Verdict  |  ^S/Enter:Submit  |  ^J:Newline  |  ^D:Discard  |  ESC:Cancel", muted);
     }
 }
 
@@ -189,11 +198,31 @@ pub fn drawInfoPanel(win: vaxis.Window, view: InfoView) void {
 
     var footer = LineWriter.init(.{ .win = win, .row = footer_row, .style = muted, .bg = view.bg });
     footer.styledText(" j/k scroll · ^d/^u page · i/Esc/q close", muted);
+    drawScrollIndicator(&footer, view, body_top, body_bottom);
 }
 
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// Placeholder shown when the review body is empty. Names what ^S actually
+/// posts: the verdict itself, plus the drafts only when some are pending. The
+/// old "submits the drafts" wording misled the approve/request-changes paths,
+/// where submitting acts on the verdict even with zero drafts.
+fn emptyBodyPlaceholder(verdict: Verdict, draft_count: usize) []const u8 {
+    if (draft_count > 0) {
+        return switch (verdict) {
+            .comment => " (no summary — ^S submits the drafts)",
+            .approve => " (no summary — ^S approves and submits the drafts)",
+            .request_changes => " (no summary — ^S requests changes and submits the drafts)",
+        };
+    }
+    return switch (verdict) {
+        .comment => " (add a summary or a draft comment to submit)",
+        .approve => " (no summary — ^S approves this PR)",
+        .request_changes => " (no summary — ^S requests changes on this PR)",
+    };
+}
 
 fn drawVerdictOption(writer: *LineWriter, label: []const u8, selected: bool) void {
     if (selected) {
@@ -216,7 +245,7 @@ fn drawBodyEditor(win: vaxis.Window, view: SubmitView, top: u16, bottom: u16) vo
 
     if (view.body.len == 0) {
         var empty = LineWriter.init(.{ .win = win, .row = top, .style = muted, .bg = view.bg });
-        empty.styledText(" (no summary — Ctrl-S submits the drafts)", muted);
+        empty.styledText(emptyBodyPlaceholder(view.verdict, view.draft_count), muted);
         if (view.editing) positionCursor(win, top, 1, view.insert_mode);
         return;
     }
@@ -316,21 +345,66 @@ fn drawInfoBody(win: vaxis.Window, view: InfoView, top: u16, bottom: u16) void {
         _ = cur.begin(muted); // spacer
     }
 
-    // Description section.
+    // Description section. Each logical line is word-wrapped to the popup content
+    // width (one leading padding column) so long lines stay fully readable instead
+    // of clipping at the right edge — matching how thread bodies wrap. Row
+    // accounting mirrors this in review_controller.infoLineCount.
     if (view.body.len > 0) {
         if (cur.begin(muted)) |lw| {
             var w = lw;
             w.styledText(" Description", muted);
         }
+        const content_width: usize = win.width -| 1;
         var it = std.mem.splitScalar(u8, view.body, '\n');
-        while (it.next()) |line| {
-            if (cur.begin(.{})) |lw| {
-                var w = lw;
-                w.styledText(" ", .{});
-                w.text(line);
-            } else if (cur.exhausted()) break;
+        lines: while (it.next()) |line| {
+            var wrap = width_util.WrapIterator{ .text = line, .max_width = content_width };
+            while (wrap.next()) |seg| {
+                if (cur.begin(.{})) |lw| {
+                    var w = lw;
+                    w.styledText(" ", .{});
+                    w.text(seg);
+                } else if (cur.exhausted()) break :lines;
+            }
         }
     }
+
+    // Empty body: no checks, reviews, or description leaves the body a blank
+    // rectangle — draw a placeholder so the panel never reads as broken. When the
+    // review-data fetch failed (data_unavailable), the emptiness is a fetch
+    // failure rather than a genuinely empty PR, so surface a distinct warn note
+    // pointing at the retry key instead of the "No description." placeholder.
+    if (view.checks.len == 0 and view.reviews.len == 0 and view.body.len == 0) {
+        if (cur.begin(muted)) |lw| {
+            var w = lw;
+            if (view.data_unavailable) {
+                w.styledText(" ⚠ Review data unavailable — press r to retry", warn_yellow);
+            } else {
+                w.styledText(" No description.", muted);
+            }
+        }
+    }
+}
+
+/// Append a scroll-position indicator to the info-panel footer — arrows cue that
+/// content extends above (`↑`) / below (`↓`) the visible region, and `pos/total`
+/// mirrors the picker's `selected/total` readout. Drawn only when the body is
+/// actually taller than the visible region (nothing to scroll → no clutter).
+fn drawScrollIndicator(footer: *LineWriter, view: InfoView, body_top: u16, body_bottom: u16) void {
+    if (body_top >= body_bottom) return;
+    const visible_rows: usize = body_bottom - body_top;
+    if (view.total_lines <= visible_rows) return;
+
+    const scroll = @min(view.scroll, view.total_lines -| 1);
+    const more_above = scroll > 0;
+    const more_below = scroll + visible_rows < view.total_lines;
+
+    footer.styledText("  ", muted);
+    if (more_above) footer.styledText("↑", muted);
+    if (more_below) footer.styledText("↓", muted);
+    footer.styledText(" ", muted);
+    footer.styledUnsigned(scroll + 1, muted);
+    footer.styledText("/", muted);
+    footer.styledUnsigned(view.total_lines, muted);
 }
 
 fn fillBackground(win: vaxis.Window, bg: Color) void {
@@ -497,6 +571,44 @@ test "drawSubmitDialog: renders the review body preview" {
     try testing.expect(rowContains(ts.screen, 6, "second line"));
 }
 
+test "drawSubmitDialog: empty-body approve placeholder names the verdict, not drafts" {
+    var ts = try TestScreen.init(70, 12);
+    defer ts.deinit();
+
+    drawSubmitDialog(ts.window(), .{ .verdict = .approve, .draft_count = 0 });
+
+    try testing.expect(rowContains(ts.screen, 5, "approves this PR"));
+    try testing.expect(!screenContains(ts.screen, "submits the drafts"));
+}
+
+test "drawSubmitDialog: empty-body request-changes placeholder names the verdict" {
+    var ts = try TestScreen.init(70, 12);
+    defer ts.deinit();
+
+    drawSubmitDialog(ts.window(), .{ .verdict = .request_changes, .draft_count = 0 });
+
+    try testing.expect(rowContains(ts.screen, 5, "requests changes on this PR"));
+}
+
+test "drawSubmitDialog: empty-body comment placeholder guides instead of promising a refused submit" {
+    var ts = try TestScreen.init(70, 12);
+    defer ts.deinit();
+
+    drawSubmitDialog(ts.window(), .{ .verdict = .comment, .draft_count = 0 });
+
+    try testing.expect(rowContains(ts.screen, 5, "add a summary or a draft comment to submit"));
+    try testing.expect(!screenContains(ts.screen, "submits an empty comment review"));
+}
+
+test "drawSubmitDialog: empty-body placeholder mentions drafts when some are pending" {
+    var ts = try TestScreen.init(70, 12);
+    defer ts.deinit();
+
+    drawSubmitDialog(ts.window(), .{ .verdict = .approve, .draft_count = 3 });
+
+    try testing.expect(rowContains(ts.screen, 5, "approves and submits the drafts"));
+}
+
 test "drawSubmitDialog: scrolls the body to keep the cursor line visible" {
     var ts = try TestScreen.init(40, 10);
     defer ts.deinit();
@@ -580,7 +692,7 @@ test "drawSubmitDialog: armed discard shows the confirm prompt in the footer" {
 
     drawSubmitDialog(ts.window(), .{ .verdict = .comment, .confirm_discard = true });
 
-    try testing.expect(rowContains(ts.screen, 11, "^D again to discard"));
+    try testing.expect(rowContains(ts.screen, 11, "^D:Discard again"));
 }
 
 test "drawSubmitDialog: fills every cell with the popup background" {
@@ -649,6 +761,26 @@ test "drawInfoPanel: lists reviews with verdict and author" {
     try testing.expect(screenContains(ts.screen, "approved"));
     try testing.expect(screenContains(ts.screen, "mlugg"));
     try testing.expect(screenContains(ts.screen, "lgtm"));
+}
+
+test "drawInfoPanel: shows a placeholder when there are no checks, reviews, or description" {
+    var ts = try TestScreen.init(80, 20);
+    defer ts.deinit();
+
+    drawInfoPanel(ts.window(), .{ .number = 1, .title = "T" });
+
+    try testing.expect(screenContains(ts.screen, "No description."));
+}
+
+test "drawInfoPanel: warns when review data is unavailable instead of showing the empty placeholder" {
+    var ts = try TestScreen.init(80, 20);
+    defer ts.deinit();
+
+    drawInfoPanel(ts.window(), .{ .number = 1, .title = "T", .data_unavailable = true });
+
+    try testing.expect(screenContains(ts.screen, "Review data unavailable"));
+    try testing.expect(screenContains(ts.screen, "press r to retry"));
+    try testing.expect(!screenContains(ts.screen, "No description."));
 }
 
 test "drawInfoPanel: lists a passing check with a check glyph" {
@@ -731,4 +863,74 @@ test "drawInfoPanel: body scroll skips leading lines" {
     // shows at the top of the content region.
     try testing.expect(rowContains(ts.screen, 4, "line two"));
     try testing.expect(!rowContains(ts.screen, 4, "line one"));
+}
+
+test "drawInfoPanel: wraps a long description line instead of clipping it" {
+    var ts = try TestScreen.init(20, 12);
+    defer ts.deinit();
+
+    // At width 20 the description column is 19 cells; this line is 30, so its tail
+    // ("delta epsilon") would clip off the right edge without wrapping.
+    drawInfoPanel(ts.window(), .{
+        .number = 1,
+        .title = "T",
+        .body = "alpha beta gamma delta epsilon",
+    });
+
+    // Description header at row 4; the line word-wraps onto rows 5 and 6 so the
+    // tail stays readable rather than being lost past the edge.
+    try testing.expect(rowContains(ts.screen, 4, "Description"));
+    try testing.expect(rowContains(ts.screen, 5, "alpha"));
+    try testing.expect(!rowContains(ts.screen, 5, "epsilon"));
+    try testing.expect(rowContains(ts.screen, 6, "epsilon"));
+}
+
+test "drawInfoPanel: footer cues more content below and position when at the top" {
+    var ts = try TestScreen.init(70, 10);
+    defer ts.deinit();
+
+    // height 10 → footer row 9, body rows [4, 9): 5 visible; total 9 > 5 scrolls.
+    drawInfoPanel(ts.window(), .{
+        .number = 1,
+        .title = "T",
+        .body = "a\nb\nc\nd\ne\nf\ng\nh",
+        .total_lines = 9,
+        .scroll = 0,
+    });
+
+    try testing.expect(rowContains(ts.screen, 9, "↓"));
+    try testing.expect(rowContains(ts.screen, 9, "1/9"));
+    try testing.expect(!rowContains(ts.screen, 9, "↑"));
+}
+
+test "drawInfoPanel: footer cues more content above and below when scrolled" {
+    var ts = try TestScreen.init(70, 10);
+    defer ts.deinit();
+
+    drawInfoPanel(ts.window(), .{
+        .number = 1,
+        .title = "T",
+        .body = "a\nb\nc\nd\ne\nf\ng\nh",
+        .total_lines = 9,
+        .scroll = 3,
+    });
+
+    try testing.expect(rowContains(ts.screen, 9, "↑"));
+    try testing.expect(rowContains(ts.screen, 9, "↓"));
+    try testing.expect(rowContains(ts.screen, 9, "4/9"));
+}
+
+test "drawInfoPanel: footer omits the scroll indicator when content fits" {
+    var ts = try TestScreen.init(70, 10);
+    defer ts.deinit();
+
+    drawInfoPanel(ts.window(), .{
+        .number = 1,
+        .title = "T",
+        .body = "a\nb",
+        .total_lines = 3,
+    });
+
+    try testing.expect(!rowContains(ts.screen, 9, "↑"));
+    try testing.expect(!rowContains(ts.screen, 9, "↓"));
 }

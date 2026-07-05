@@ -1896,6 +1896,33 @@ test "snapshot: help_agent_popup" {
     try snapshot.expectSnapshot(allocator, "help_agent_popup", text);
 }
 
+test "snapshot: help_pr_review_popup" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 72, 14);
+    defer ctx.deinit();
+
+    const win = ctx.window();
+
+    const bindings = [_]help_helpers.Binding{
+        help_helpers.section("PR REVIEW"),
+        help_helpers.binding("R", "Submit review (verdict + body)"),
+        help_helpers.binding("i", "Toggle PR info panel"),
+        help_helpers.binding("C", "Comment target: GitHub ⇄ local"),
+        help_helpers.binding("r", "Refresh diff + refetch threads"),
+        help_helpers.binding("Enter", "Reply to thread (on thread)"),
+        help_helpers.binding("e", "Edit your comment (on thread)"),
+        help_helpers.binding("x", "Resolve / unresolve (on thread)"),
+        help_helpers.binding("d", "Delete your comment (on thread)"),
+    };
+
+    help_helpers.renderHelpPopup(win, " Keybindings ", &bindings, 72, 14);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "help_pr_review_popup", text);
+}
+
 // =============================================================================
 // ANSI Color Snapshot Tests
 // =============================================================================

@@ -2672,7 +2672,11 @@ pub const App = struct {
                 self.needs_render = true;
             },
             .refreshed => |gh_error| {
-                if (gh_error) |kind| self.showStatusMessage(pr.github.kindMessage(kind));
+                if (gh_error) |kind| {
+                    self.showStatusMessage(pr.github.kindMessage(kind));
+                } else {
+                    self.showStatusMessage("threads refreshed");
+                }
                 // Refetch replaced the thread set; re-anchor + rebuild so the new
                 // threads render (the diff files are unchanged, so no full refresh).
                 self.rebuildReviewLineMap();
@@ -2937,9 +2941,13 @@ pub const App = struct {
     /// Re-fetch review data for the active session (bound to the `r` refresh).
     /// No-op when no session is active or a fetch is already running.
     pub fn startReviewRefetch(self: *App) void {
-        review_controller.startRefetch(&self.state.review, self.allocator) catch |err| {
+        const review = &self.state.review;
+        const will_start = review.active and !review.entry_in_flight;
+        review_controller.startRefetch(review, self.allocator) catch |err| {
             std.log.warn("Failed to start review refetch: {any}", .{err});
+            return;
         };
+        if (will_start) self.showStatusMessage("refreshing review…");
     }
 
     /// Esc peels back one layer at a time: query, then the pinned author, then

@@ -389,6 +389,44 @@ pub const RenderUtils = struct {
         return slice;
     }
 
+    /// Appends the trailing hint text to an input-box header line, right-aligned
+    /// with a blank spacer. When the hints (plus their leading spacing) do not fit
+    /// in the remaining width, they are dropped and the space is padded with blanks
+    /// instead — this keeps the `┃` border on a single row on narrow terminals and
+    /// deeply-indented reply/edit boxes rather than wrapping the overflow onto the
+    /// next line and corrupting the border. `prefix_len` is the display width of the
+    /// already-appended border glyph plus label.
+    pub fn appendInputHeaderHints(
+        app: *App,
+        segments: *std.ArrayList(vaxis.Cell.Segment),
+        content_width: usize,
+        prefix_len: usize,
+        hints: []const u8,
+        hints_style: vaxis.Style,
+    ) !void {
+        const spacing = "  ";
+        const bg_style: vaxis.Style = .{ .bg = Color.comment_hover_bg };
+        const total_fixed = prefix_len + spacing.len + hints.len;
+
+        if (total_fixed <= content_width) {
+            const spacer_len = content_width - total_fixed;
+            if (spacer_len > 0) {
+                const spacer = try frameTextSlice(app, spacer_len);
+                @memset(spacer, ' ');
+                try segments.append(app.allocator, .{ .text = spacer, .style = bg_style });
+            }
+            try segments.append(app.allocator, .{ .text = try copyFrameText(app, spacing), .style = bg_style });
+            try segments.append(app.allocator, .{ .text = try copyFrameText(app, hints), .style = hints_style });
+        } else {
+            const pad_len = content_width -| prefix_len;
+            if (pad_len > 0) {
+                const pad = try frameTextSlice(app, pad_len);
+                @memset(pad, ' ');
+                try segments.append(app.allocator, .{ .text = pad, .style = bg_style });
+            }
+        }
+    }
+
     pub fn padTextForCursor(app: *App, text: []const u8, width: usize, is_cursor: bool) ![]const u8 {
         if (!is_cursor) return text;
 
@@ -838,22 +876,10 @@ pub const RenderUtils = struct {
         };
 
         const border_and_label_len = 1 + label.len; // "┃" + label
-        const spacing = "  ";
-        const total_fixed = border_and_label_len + spacing.len + hints.len;
-        const available_for_spacer = content_width -| total_fixed;
 
         try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
         try segments.append(app.allocator, .{ .text = label, .style = label_style });
-
-        // Spacer between label and hints
-        if (available_for_spacer > 0) {
-            const spacer = try frameTextSlice(app, available_for_spacer);
-            @memset(spacer, ' ');
-            try segments.append(app.allocator, .{ .text = spacer, .style = .{ .bg = Color.comment_hover_bg } });
-        }
-
-        try segments.append(app.allocator, .{ .text = try copyFrameText(app, spacing), .style = .{ .bg = Color.comment_hover_bg } });
-        try segments.append(app.allocator, .{ .text = try copyFrameText(app, hints), .style = hints_style });
+        try appendInputHeaderHints(app, &segments, content_width, border_and_label_len, hints, hints_style);
 
         _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
         current_row += 1;

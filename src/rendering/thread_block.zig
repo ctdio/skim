@@ -230,7 +230,7 @@ fn drawRow(win: vaxis.Window, row: PlannedRow, row_offset: usize, is_cursor: boo
         },
     }
 
-    _ = win.print(segs.items, .{ .row_offset = @intCast(row_offset), .col_offset = 0 });
+    _ = win.print(segs.items, .{ .row_offset = @intCast(row_offset), .col_offset = 0, .wrap = .none });
 }
 
 // =============================================================================

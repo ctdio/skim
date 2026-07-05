@@ -26,12 +26,20 @@ pub fn threadHint(params: struct { delete_confirm: bool, on_thread: bool, owns_c
     return if (params.owns_comment) .full else .reply_only;
 }
 
-/// The status-bar text for `hint` (empty string for `.none`).
-pub fn hintText(hint: ThreadHint) []const u8 {
+/// The status-bar text for `hint` (empty string for `.none`). `thread_resolved`
+/// flips the `x` label to `unresolve`, matching what `startToggleResolve` fires
+/// on an already-resolved thread (otherwise the advertised action contradicts it).
+pub fn hintText(hint: ThreadHint, thread_resolved: bool) []const u8 {
     return switch (hint) {
         .none => "",
         .delete_confirm => " │ delete your comment? d again to confirm",
-        .full => " │ ↵reply  x:resolve  e:edit  d:delete  o:fold",
-        .reply_only => " │ ↵reply  x:resolve  o:fold",
+        .full => if (thread_resolved)
+            " │ ↵reply  x:unresolve  e:edit  d:delete  o:fold"
+        else
+            " │ ↵reply  x:resolve  e:edit  d:delete  o:fold",
+        .reply_only => if (thread_resolved)
+            " │ ↵reply  x:unresolve  o:fold"
+        else
+            " │ ↵reply  x:resolve  o:fold",
     };
 }

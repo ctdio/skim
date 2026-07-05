@@ -254,10 +254,12 @@ pub fn build(b: *std.Build) void {
     const run_codex_tests = b.addRunArtifact(codex_tests);
     test_step.dependOn(&run_codex_tests.step);
 
-    // PR module tests
+    // PR module tests. Rooted at src/ (via pr_test_root) rather than src/pr/ so
+    // pr files can import across directory boundaries (e.g.
+    // review_render/review_controller -> ../rendering/width.zig).
     const pr_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/pr/pr.zig"),
+            .root_source_file = b.path("src/pr_test_root.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -267,6 +269,22 @@ pub fn build(b: *std.Build) void {
     pr_tests.linkLibC();
     const run_pr_tests = b.addRunArtifact(pr_tests);
     test_step.dependOn(&run_pr_tests.step);
+
+    // PR picker controller tests. The controller imports `../git/graphite.zig`,
+    // which is outside the `src/pr/`-rooted pr_tests module, so it gets its own
+    // src/-rooted aggregator step.
+    const pr_controller_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pr_controller_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    pr_controller_tests.root_module.addImport("vaxis", vaxis);
+    pr_controller_tests.root_module.addImport("build_options", build_options_module);
+    pr_controller_tests.linkLibC();
+    const run_pr_controller_tests = b.addRunArtifact(pr_controller_tests);
+    test_step.dependOn(&run_pr_controller_tests.step);
 
     // PR review-thread tests. The helper file lives in src/testing/ but reaches
     // production code (git/, rendering/, pr/) through the src/-rooted

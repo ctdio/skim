@@ -760,7 +760,7 @@ pub const SideBySideRenderer = struct {
     }
 
     /// Render comment input box in side-by-side mode
-    fn renderSideBySideCommentInput(
+    pub fn renderSideBySideCommentInput(
         app: *App,
         win: vaxis.Window,
         row: usize,
@@ -810,25 +810,16 @@ pub const SideBySideRenderer = struct {
 
         var current_row = row;
 
-        // Line 1: ┃ Comment                              Enter:Save  Ctrl+J:Newline  ESC:Cancel
+        // Line 1: ┃ <label>                              Enter:Save  Ctrl+J:Newline  ESC:Cancel
         const hints = "Enter:Save  Ctrl+J:Newline  ESC:Cancel";
-        const border_and_label = "┃ Comment";
-        const spacing = "  ";
-        const total_fixed = border_and_label.len + spacing.len + hints.len; // Total chars we're rendering
-        const available_for_spacer = layout.width -| total_fixed;
-
+        const label = switch (input.edit_context) {
+            .reply => try RenderUtils.copyFrameText(app, " Reply"),
+            .edit_own => try RenderUtils.copyFrameText(app, " Edit comment"),
+            .none => try RenderUtils.copyFrameText(app, " Comment"),
+        };
         try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
-        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
-
-        // Spacer between label and hints
-        if (available_for_spacer > 0) {
-            const spacer = try RenderUtils.frameTextSlice(app, available_for_spacer);
-            @memset(spacer, ' ');
-            try segments.append(app.allocator, .{ .text = spacer, .style = .{ .bg = Color.comment_hover_bg } });
-        }
-
-        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, spacing), .style = .{ .bg = Color.comment_hover_bg } });
-        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, hints), .style = hints_style });
+        try segments.append(app.allocator, .{ .text = label, .style = label_style });
+        try RenderUtils.appendInputHeaderHints(app, &segments, layout.width, 1 + label.len, hints, hints_style);
 
         _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col) });
         current_row += 1;

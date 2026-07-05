@@ -21,9 +21,14 @@ pub const View = struct {
     selected: usize,
     scroll: usize,
     loading: bool,
+    load_failed: bool = false,
     query: []const u8,
     message: []const u8,
     author_filter: []const u8 = "",
+
+    // `skim pr` boots straight into the picker, so ^c quits; when the picker is
+    // opened over an existing diff, ^c returns to that diff instead.
+    pr_only: bool = false,
 
     // Stacked-PR analysis (indexed by PR index). When present, rows show a
     // connector glyph; pair it with a stack-grouped `filtered` order so the
@@ -55,6 +60,11 @@ pub fn draw(win: vaxis.Window, view: View) void {
 
     if (view.loading and view.filtered.len == 0) {
         drawCentered(win, list_top, "Loading pull requests…");
+    } else if (view.load_failed and view.filtered.len == 0) {
+        // Match the classified cause the status bar shows; only fall back to a
+        // generic line when no specific message was supplied.
+        const body = if (view.message.len > 0) view.message else "Couldn't load pull requests.";
+        drawCentered(win, list_top, body);
     } else if (view.filtered.len == 0) {
         const empty = if (view.query.len > 0 or view.author_filter.len > 0) "No PRs match." else "No open pull requests.";
         drawCentered(win, list_top, empty);
@@ -77,6 +87,12 @@ pub fn draw(win: vaxis.Window, view: View) void {
 fn drawHeader(win: vaxis.Window, view: View) void {
     var writer = LineWriter.init(.{ .win = win, .row = 0 });
     writer.styledText(" skim pr", .{ .bold = true });
+    // While the first load is still in flight there is no count to report yet;
+    // showing "0 open pull requests" would contradict the "Loading…" body.
+    if (view.loading and view.prs.len == 0) {
+        writer.styledText("  loading…", mutedStyle(false));
+        return;
+    }
     writer.styledText("  ", mutedStyle(false));
     writer.styledUnsigned(view.prs.len, mutedStyle(false));
     writer.styledText(" open pull request", mutedStyle(false));
@@ -137,7 +153,8 @@ fn drawStatusBar(win: vaxis.Window, view: View) void {
         writer.styledText("  ", muted);
         writer.styledText(view.message, muted);
     } else {
-        writer.styledText("  enter review · ^a author · ^r refresh · ^o open · ^c quit", muted);
+        writer.styledText("  enter review · ^a author · ^r refresh · ^o open · esc clear/back · ^c ", muted);
+        writer.styledText(if (view.pr_only) "quit" else "back", muted);
     }
     if (view.loading) writer.styledText("  · loading…", muted);
 }
@@ -432,6 +449,138 @@ test "draw: header shows the active author filter as a chip" {
     });
 
     try testing.expect(rowContains(ts.screen, 0, "@alice"));
+}
+
+test "draw: a failed load reads as an error, not an empty repo" {
+    var ts = try TestScreen.init(80, 4);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{};
+    const filtered = [_]usize{};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 0,
+        .scroll = 0,
+        .loading = false,
+        .load_failed = true,
+        .query = "",
+        .message = "",
+    });
+
+    try testing.expect(rowContains(ts.screen, 1, "Couldn't load pull requests"));
+    try testing.expect(!rowContains(ts.screen, 1, "No open pull requests."));
+}
+
+test "draw: a failed load shows the classified cause, not a generic auth prompt" {
+    var ts = try TestScreen.init(80, 4);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{};
+    const filtered = [_]usize{};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 0,
+        .scroll = 0,
+        .loading = false,
+        .load_failed = true,
+        .query = "",
+        .message = "GitHub API rate limit reached",
+    });
+
+    try testing.expect(rowContains(ts.screen, 1, "rate limit"));
+    try testing.expect(!rowContains(ts.screen, 1, "authenticated"));
+}
+
+test "draw: initial load header hides the count instead of claiming zero PRs" {
+    var ts = try TestScreen.init(80, 4);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{};
+    const filtered = [_]usize{};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 0,
+        .scroll = 0,
+        .loading = true,
+        .query = "",
+        .message = "",
+    });
+
+    try testing.expect(rowContains(ts.screen, 0, "skim pr"));
+    try testing.expect(rowContains(ts.screen, 0, "loading…"));
+    try testing.expect(!rowContains(ts.screen, 0, "0 open pull request"));
+    try testing.expect(rowContains(ts.screen, 1, "Loading pull requests…"));
+}
+
+test "draw: header reports the count once a load completes" {
+    var ts = try TestScreen.init(80, 4);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{testPr(.{ .title = "Ready" })};
+    const filtered = [_]usize{0};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 0,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+    });
+
+    try testing.expect(rowContains(ts.screen, 0, "1 open pull request"));
+}
+
+test "draw: footer says ^c quit when booted into the picker" {
+    var ts = try TestScreen.init(90, 4);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{testPr(.{ .title = "Ready" })};
+    const filtered = [_]usize{0};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 0,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+        .pr_only = true,
+    });
+
+    try testing.expect(rowContains(ts.screen, 3, "esc clear/back"));
+    try testing.expect(rowContains(ts.screen, 3, "^c quit"));
+    try testing.expect(!rowContains(ts.screen, 3, "^c back"));
+}
+
+test "draw: footer says ^c back when picking over a diff" {
+    var ts = try TestScreen.init(90, 4);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{testPr(.{ .title = "Ready" })};
+    const filtered = [_]usize{0};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 0,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+        .pr_only = false,
+    });
+
+    try testing.expect(rowContains(ts.screen, 3, "esc clear/back"));
+    try testing.expect(rowContains(ts.screen, 3, "^c back"));
 }
 
 test "draw: author picker lists authors with counts over the PR list" {

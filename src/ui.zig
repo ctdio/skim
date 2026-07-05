@@ -780,6 +780,20 @@ pub const UI = struct {
             .min_height = 10,
         });
 
+        // Clamp scroll to the popup's visible body-row count so G / j can't strand
+        // the last logical line over a blank region. Mirrors drawInfoPanel's body
+        // window math (rows 0..2 + separator row 3, note/footer reserved at bottom).
+        const footer_row: u16 = if (popup.height >= 2) popup.height - 1 else 0;
+        const has_note = review.truncated or review.unplaced_count > 0;
+        const note_row: u16 = if (has_note and popup.height >= 3) footer_row - 1 else footer_row;
+        const body_bottom: u16 = if (has_note) note_row else footer_row;
+        const body_top: u16 = 4;
+        const visible_rows: usize = if (body_top < body_bottom) body_bottom - body_top else 0;
+        // Description column width: the popup width less the one-column left pad
+        // drawInfoBody prefixes each line with (must match its wrap width).
+        const content_width: usize = popup.width -| 1;
+        pr.review_controller.clampInfoScroll(review, content_width, visible_rows);
+
         pr.review_render.drawInfoPanel(popup, .{
             .number = review.number,
             .title = review.title,
@@ -797,6 +811,8 @@ pub const UI = struct {
             .unplaced_count = review.unplaced_count,
             .truncated = review.truncated,
             .scroll = review.info_scroll,
+            .total_lines = pr.review_controller.infoLineCount(review, content_width),
+            .data_unavailable = review.data_unavailable,
             .bg = Color.dialog_bg,
         });
     }
@@ -1885,6 +1901,11 @@ pub const UI = struct {
                     try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, post_seg), .style = .{ .fg = Color.magenta } });
                 }
 
+                // In-flight refetch (`r`): mirror the picker's muted loading note.
+                if (app.state.review.entry_in_flight) {
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " │ refreshing…"), .style = .{ .fg = Color.dim } });
+                }
+
                 // Delete confirmation takes priority; otherwise show the thread
                 // conversation hints when the cursor is on a review thread — with
                 // the edit/delete keys dropped when the viewer owns no comment
@@ -1894,6 +1915,10 @@ pub const UI = struct {
                     if (idx >= app.state.review.threads.items.len) break :blk false;
                     break :blk pr.review_controller.lastOwnCommentIdx(&app.state.review.threads.items[idx]) != null;
                 } else false;
+                const thread_resolved = if (cursor_thread_idx) |idx| blk: {
+                    if (idx >= app.state.review.threads.items.len) break :blk false;
+                    break :blk app.state.review.threads.items[idx].data.is_resolved;
+                } else false;
                 const hint = pr.thread_hint.threadHint(.{
                     .delete_confirm = pr.review_controller.deleteConfirmArmed(&app.state.review) != null,
                     .on_thread = cursor_thread_idx != null,
@@ -1901,7 +1926,7 @@ pub const UI = struct {
                 });
                 if (hint != .none) {
                     try segments.append(app.allocator, .{
-                        .text = try RenderUtils.copyFrameText(app, pr.thread_hint.hintText(hint)),
+                        .text = try RenderUtils.copyFrameText(app, pr.thread_hint.hintText(hint, thread_resolved)),
                         .style = if (hint == .delete_confirm) .{ .fg = Color.red, .bold = true } else .{ .fg = Color.dim },
                     });
                 }

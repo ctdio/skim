@@ -21,6 +21,7 @@ pub const snapshot = @import("testing/snapshot.zig");
 // review render tests need a minimal `App` value carrying an `active_comment_input`.
 pub const App = @import("app.zig").App;
 pub const RenderUtils = @import("rendering/utils.zig").RenderUtils;
+pub const SideBySideRenderer = @import("rendering/side_by_side.zig").SideBySideRenderer;
 pub const CommentEditor = @import("comments/editor.zig").CommentEditor;
 pub const SyntaxHighlighter = @import("highlighting/core.zig").SyntaxHighlighter;
 pub const TabManager = @import("agent/tab_manager.zig").TabManager;

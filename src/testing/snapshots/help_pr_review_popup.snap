@@ -1,0 +1,14 @@
+╭──────────────────────────── Keybindings ─────────────────────────────╮
+│                                                                      │
+│ PR REVIEW                                                            │
+│  R              │ Submit review (verdict + body)                     │
+│  i              │ Toggle PR info panel                               │
+│  C              │ Comment target: GitHub ⇄ local                     │
+│  r              │ Refresh diff + refetch threads                     │
+│  Enter          │ Reply to thread (on thread)                        │
+│  e              │ Edit your comment (on thread)                      │
+│  x              │ Resolve / unresolve (on thread)                    │
+│  d              │ Delete your comment (on thread)                    │
+│                                                                      │
+│                                                                      │
+╰───────────────────────── ? or Esc to close ──────────────────────────╯

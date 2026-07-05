@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 const github = @import("github.zig");
 const review_parse = @import("review_parse.zig");
 const thread_placement = @import("thread_placement.zig");
+const width = @import("../rendering/width.zig");
 
 pub const AnchoredThread = thread_placement.AnchoredThread;
 
@@ -341,6 +342,12 @@ pub const ReviewSession = struct {
 
     // Read-only PR info panel scroll offset (transient view state; FR-7).
     info_scroll: usize = 0,
+
+    // Set when an entry completed with a gh fetch error and no review data was
+    // applied (graceful degradation: git ok, gh failed). Drives the info panel's
+    // "data unavailable" note so a fetch failure never reads as a genuinely empty
+    // PR. Cleared on a successful refetch.
+    data_unavailable: bool = false,
 };
 
 /// Begin an async PR entry: git ref fetch + review-data fetch off-thread. No-op
@@ -415,6 +422,7 @@ pub fn pollPending(self: *ReviewSession, allocator: Allocator) EntryOutcome {
     if (raw_json) |raw| ca.free(raw);
 
     if (kind == .refetch) {
+        if (gh_error == null) self.data_unavailable = false;
         if (head_ref) |h| ca.free(h);
         if (base_ref) |b| ca.free(b);
         return .{ .refreshed = gh_error };
@@ -440,6 +448,7 @@ pub fn pollPending(self: *ReviewSession, allocator: Allocator) EntryOutcome {
     if (head_ref) |h| ca.free(h);
     if (base_ref) |b| ca.free(b);
 
+    self.data_unavailable = gh_error != null;
     return .{ .entered = .{ .head_ref = app_head, .base_ref = app_base, .gh_error = gh_error } };
 }
 
@@ -936,13 +945,24 @@ pub fn postingCount(self: *const ReviewSession) usize {
 /// section accounting in `review_render.drawInfoBody` so the mode's scroll clamp
 /// (and `G`) agree with what is actually rendered: a Checks section (header +
 /// rows + spacer), a Reviews section (header + rows + spacer), then the
-/// Description (header + body lines). Each section is present only when non-empty.
-pub fn infoLineCount(self: *const ReviewSession) usize {
+/// Description (header + body rows). Each section is present only when non-empty.
+/// `content_width` is the popup's description column width — the description
+/// word-wraps to it (matching `drawInfoBody`), so each logical line can span
+/// several rows.
+pub fn infoLineCount(self: *const ReviewSession, content_width: usize) usize {
     var total: usize = 0;
     if (self.checks.items.len > 0) total += 2 + self.checks.items.len; // header + rows + spacer
     if (self.reviews.items.len > 0) total += 2 + self.reviews.items.len; // header + rows + spacer
-    if (self.body.len > 0) total += 1 + bodyLineCount(self.body); // header + body lines
+    if (self.body.len > 0) total += 1 + wrappedBodyLineCount(self.body, content_width); // header + wrapped body rows
     return total;
+}
+
+/// Clamp the info-panel scroll so the last logical line can't be pulled above the
+/// visible body region, stranding it over blank space (FR-7). `visible_rows` is
+/// the popup's body-row count, matching `review_render.drawInfoPanel`'s window.
+pub fn clampInfoScroll(self: *ReviewSession, content_width: usize, visible_rows: usize) void {
+    const max_scroll = infoLineCount(self, content_width) -| visible_rows;
+    if (self.info_scroll > max_scroll) self.info_scroll = max_scroll;
 }
 
 /// Whether any write-path work (a running worker, a ready result, or queued
@@ -1947,14 +1967,13 @@ fn shiftExpandedAfterRemoval(self: *ReviewSession, allocator: Allocator, removed
 /// A thread that exists only as an unsubmitted draft: an in-flight placeholder,
 /// or a server thread whose comments are all still `pending` (mine, not yet
 /// submitted). These are the threads a discard removes.
-/// Newline-delimited logical line count of `body` (matches how
-/// `review_render.drawInfoBody` splits the description on '\n').
-fn bodyLineCount(body: []const u8) usize {
-    if (body.len == 0) return 0;
-    var count: usize = 1;
-    for (body) |c| {
-        if (c == '\n') count += 1;
-    }
+/// Wrapped row count of the description `body` at `content_width` — sums the wrap
+/// rows of each newline-delimited line, matching how `review_render.drawInfoBody`
+/// splits on '\n' and word-wraps each line to the popup's description column.
+fn wrappedBodyLineCount(body: []const u8, content_width: usize) usize {
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, body, '\n');
+    while (it.next()) |line| count += width.wrapRowCount(line, content_width);
     return count;
 }
 
@@ -2281,14 +2300,21 @@ test "deinitState: clean on a never-used session" {
 
 test "infoLineCount: zero when nothing is displayed" {
     var session = ReviewSession{};
-    try testing.expectEqual(@as(usize, 0), infoLineCount(&session));
+    try testing.expectEqual(@as(usize, 0), infoLineCount(&session, 80));
 }
 
 test "infoLineCount: description-only counts a header plus each body line" {
     var session = ReviewSession{};
     session.body = "a\nb\nc";
-    // 1 header + 3 body lines.
-    try testing.expectEqual(@as(usize, 4), infoLineCount(&session));
+    // 1 header + 3 body lines, each short enough to occupy a single wrapped row.
+    try testing.expectEqual(@as(usize, 4), infoLineCount(&session, 80));
+}
+
+test "infoLineCount: counts each wrapped row when a body line exceeds the width" {
+    var session = ReviewSession{};
+    session.body = "aaa bbb ccc"; // one logical line, 11 cells
+    // Width 4 wraps it to "aaa" / "bbb" / "ccc" = 3 rows; + 1 header = 4.
+    try testing.expectEqual(@as(usize, 4), infoLineCount(&session, 4));
 }
 
 test "infoLineCount: sums checks + reviews + description sections" {
@@ -2304,7 +2330,43 @@ test "infoLineCount: sums checks + reviews + description sections" {
     // checks: 2 rows + header + spacer = 4; reviews: 1 row + header + spacer = 3;
     // description: 1 header + 3 body lines = 4. Total = 11. This MUST equal the
     // logical lines drawInfoBody renders so `G`/scroll reach the true bottom.
-    try testing.expectEqual(@as(usize, 11), infoLineCount(&session));
+    try testing.expectEqual(@as(usize, 11), infoLineCount(&session, 80));
+}
+
+test "clampInfoScroll: pulls scroll back so the last line can't strand over blank space" {
+    var session = ReviewSession{};
+    session.body = "a\nb\nc"; // 4 logical lines (header + 3 body)
+    session.info_scroll = 3; // G-style: parked on the final logical line
+    // A 6-row body window fits all 4 lines, so scroll must clamp to 0.
+    clampInfoScroll(&session, 80, 6);
+    try testing.expectEqual(@as(usize, 0), session.info_scroll);
+}
+
+test "clampInfoScroll: leaves scroll untouched when content overflows the window" {
+    var session = ReviewSession{};
+    session.body = "a\nb\nc\nd\ne"; // 6 logical lines
+    session.info_scroll = 2;
+    // 3 visible rows → max_scroll = 6 - 3 = 3; 2 is already valid.
+    clampInfoScroll(&session, 80, 3);
+    try testing.expectEqual(@as(usize, 2), session.info_scroll);
+}
+
+test "clampInfoScroll: caps an over-scrolled offset to the last full page" {
+    var session = ReviewSession{};
+    session.body = "a\nb\nc\nd\ne"; // 6 logical lines
+    session.info_scroll = 5; // scrolled past the last full page
+    // 3 visible rows → max_scroll = 3.
+    clampInfoScroll(&session, 80, 3);
+    try testing.expectEqual(@as(usize, 3), session.info_scroll);
+}
+
+test "clampInfoScroll: accounts for wrapped rows so a narrow width can still scroll" {
+    var session = ReviewSession{};
+    session.body = "aaa bbb ccc"; // wraps to 3 rows at width 4
+    session.info_scroll = 10; // G-style overshoot
+    // width 4 → header + 3 wrapped rows = 4 logical lines; 2 visible → max_scroll 2.
+    clampInfoScroll(&session, 4, 2);
+    try testing.expectEqual(@as(usize, 2), session.info_scroll);
 }
 
 test "startRefetch: no-op when session is inactive" {

@@ -24,7 +24,7 @@ pub const PendingPrFetch = struct {
     mutex: std.Thread.Mutex = .{},
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     result: ?parse.PullRequestList = null,
-    failed: bool = false,
+    fail_kind: ?github.GhErrorKind = null,
 };
 
 /// State for the native PR review picker (the `pr_review` mode). Mirrors the
@@ -64,6 +64,7 @@ pub const PrReviewState = struct {
     pr_only: bool = false, // Booted directly into the PR picker (`skim pr`)
     fetch: PendingPrFetch = .{}, // Thread-safe result of the background PR load
     fetch_in_flight: bool = false, // A background PR load is running
+    load_failed: bool = false, // Last fetch failed with no list to show
     fetch_thread: ?std.Thread = null, // Joined on consume / at deinit
     cache_key: ?[]const u8 = null, // Per-repo cache key (owned)
 
@@ -111,9 +112,9 @@ pub fn pollPendingFetch(self: *PrReviewState, allocator: Allocator) bool {
 
     self.fetch.mutex.lock();
     const maybe = self.fetch.result;
-    const failed = self.fetch.failed;
+    const fail_kind = self.fetch.fail_kind;
     self.fetch.result = null;
-    self.fetch.failed = false;
+    self.fetch.fail_kind = null;
     self.fetch.mutex.unlock();
     self.fetch.ready.store(false, .release);
 
@@ -132,8 +133,10 @@ pub fn pollPendingFetch(self: *PrReviewState, allocator: Allocator) bool {
         // against the fresh PRs before anything reads it.
         if (self.picking_author) refreshAuthorList(self, allocator);
         setMessage(self, "");
-    } else if (failed) {
-        setMessage(self, "failed to load PRs — is gh installed and authenticated?");
+        self.load_failed = false;
+    } else if (fail_kind) |kind| {
+        setMessage(self, github.kindMessage(kind));
+        self.load_failed = true;
     }
     return true;
 }
@@ -230,9 +233,11 @@ pub fn view(self: *const PrReviewState) render.View {
         .selected = self.selection,
         .scroll = self.scroll,
         .loading = self.fetch_in_flight,
+        .load_failed = self.load_failed,
         .query = self.query(),
         .message = self.message(),
         .author_filter = self.authorFilter(),
+        .pr_only = self.pr_only,
         .picking_author = self.picking_author,
         .authors = self.author_list,
         .author_filtered = self.author_filtered.items,
@@ -324,24 +329,25 @@ pub fn deinitState(self: *PrReviewState, allocator: Allocator) void {
 
 fn fetchWorker(self: *PrReviewState) void {
     const ca = std.heap.c_allocator;
-    var failed = false;
+    var fail_kind: ?github.GhErrorKind = null;
     var list: ?parse.PullRequestList = null;
-    if (github.listPullRequestsRaw(ca)) |raw| {
-        defer ca.free(raw);
-        if (self.cache_key) |key| cache.write(ca, key, raw) catch {};
-        if (parse.parse(ca, raw)) |parsed| {
-            list = parsed;
-        } else |_| {
-            failed = true;
-        }
-    } else |_| {
-        failed = true;
+    switch (github.listPullRequestsRaw(ca) catch github.GhFetch{ .failed = .other }) {
+        .ok => |raw| {
+            defer ca.free(raw);
+            if (self.cache_key) |key| cache.write(ca, key, raw) catch {};
+            if (parse.parse(ca, raw)) |parsed| {
+                list = parsed;
+            } else |_| {
+                fail_kind = .other;
+            }
+        },
+        .failed => |kind| fail_kind = kind,
     }
 
     self.fetch.mutex.lock();
     if (self.fetch.result) |*stale| stale.deinit();
     self.fetch.result = list;
-    self.fetch.failed = failed;
+    self.fetch.fail_kind = fail_kind;
     self.fetch.mutex.unlock();
     self.fetch.ready.store(true, .release);
 }
@@ -420,4 +426,35 @@ fn freeAuthors(self: *PrReviewState, allocator: Allocator) void {
     if (self.author_list.len > 0) allocator.free(self.author_list);
     self.author_list = &.{};
     self.author_filtered.clearRetainingCapacity();
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+
+test "pollPendingFetch surfaces a rate-limit failure with its actionable message" {
+    var state: PrReviewState = .{};
+    defer deinitState(&state, testing.allocator);
+
+    state.fetch_in_flight = true;
+    state.fetch.fail_kind = .rate_limited;
+    state.fetch.ready.store(true, .release);
+
+    try testing.expect(pollPendingFetch(&state, testing.allocator));
+    try testing.expectEqualStrings(github.kindMessage(.rate_limited), state.message());
+    try testing.expect(state.load_failed);
+}
+
+test "pollPendingFetch surfaces a network failure distinctly from an auth failure" {
+    var state: PrReviewState = .{};
+    defer deinitState(&state, testing.allocator);
+
+    state.fetch_in_flight = true;
+    state.fetch.fail_kind = .network;
+    state.fetch.ready.store(true, .release);
+
+    try testing.expect(pollPendingFetch(&state, testing.allocator));
+    try testing.expectEqualStrings(github.kindMessage(.network), state.message());
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 
 const App = @import("app.zig").App;
+const review_controller = @import("pr/review_controller.zig");
 const Color = @import("rendering/common.zig").Color;
 const FrameChars = @import("rendering/common.zig").FrameChars;
 
@@ -147,6 +148,25 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
     try content_lines.append(app.allocator, .{ .blank = true });
+
+    // PR REVIEW (only while a review session is active)
+    if (review_controller.isActive(&app.state.review)) {
+        try content_lines.append(app.allocator, .{ .section = "PR REVIEW" });
+        const pr_bindings = [_]Binding{
+            .{ .key = "R", .desc = "Submit review (verdict + body)" },
+            .{ .key = "i", .desc = "Toggle PR info panel" },
+            .{ .key = "C", .desc = "Comment target: GitHub ⇄ local" },
+            .{ .key = "r", .desc = "Refresh diff + refetch threads" },
+            .{ .key = "Enter", .desc = "Reply to thread (on thread)" },
+            .{ .key = "e", .desc = "Edit your comment (on thread)" },
+            .{ .key = "x", .desc = "Resolve / unresolve (on thread)" },
+            .{ .key = "d", .desc = "Delete your comment (on thread)" },
+        };
+        for (pr_bindings) |b| {
+            try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
+        }
+        try content_lines.append(app.allocator, .{ .blank = true });
+    }
 
     // AGENT MODE
     try content_lines.append(app.allocator, .{ .section = "AGENT MODE" });

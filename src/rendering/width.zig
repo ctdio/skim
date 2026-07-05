@@ -70,49 +70,87 @@ pub fn sliceByDisplayWidth(text: []const u8, max_width: usize) []const u8 {
     return text[0..byte_pos];
 }
 
-/// Word-wrap `text` to `max_width` display cells, breaking on spaces where
-/// possible and hard-breaking otherwise. Caller owns the returned list.
+/// Word-wraps `text` to `max_width` display cells, yielding one slice per line
+/// (breaking on spaces where possible, hard-breaking otherwise). The single
+/// iteration primitive behind `wrapText`, `wrapRowCount`, and the info-panel
+/// description draw, so rendered wrap and height accounting cannot drift. A
+/// `max_width` of 0 yields nothing; empty `text` yields one empty line.
+pub const WrapIterator = struct {
+    text: []const u8,
+    max_width: usize,
+    pos: usize = 0,
+    done: bool = false,
+
+    pub fn next(self: *WrapIterator) ?[]const u8 {
+        if (self.done or self.max_width == 0) return null;
+        if (self.text.len == 0) {
+            self.done = true;
+            return self.text;
+        }
+        if (self.pos >= self.text.len) return null;
+
+        const seg = wrapSegment(self.text, self.pos, self.max_width);
+        const line = self.text[self.pos..seg.seg_end];
+        if (seg.done) self.done = true else self.pos = seg.next_start;
+        return line;
+    }
+};
+
+/// Word-wrap `text` to `max_width` display cells. Caller owns the returned list.
 pub fn wrapText(allocator: std.mem.Allocator, text: []const u8, max_width: usize) !std.ArrayList([]const u8) {
     var lines: std.ArrayList([]const u8) = .{};
     errdefer lines.deinit(allocator);
 
-    if (max_width == 0) return lines;
-
-    if (text.len == 0) {
-        try lines.append(allocator, text);
-        return lines;
-    }
-
-    var byte_start: usize = 0;
-    while (byte_start < text.len) {
-        const remaining = text[byte_start..];
-        if (displayWidth(remaining) <= max_width) {
-            try lines.append(allocator, remaining);
-            break;
-        }
-
-        const chunk = sliceByDisplayWidth(remaining, max_width);
-        var break_byte_pos = chunk.len;
-        var found_space = false;
-        var i: usize = chunk.len;
-        while (i > 0) : (i -= 1) {
-            if (chunk[i - 1] == ' ') {
-                break_byte_pos = i - 1;
-                found_space = true;
-                break;
-            }
-        }
-        if (!found_space) break_byte_pos = chunk.len;
-        if (break_byte_pos == 0) break_byte_pos = chunk.len; // avoid zero-progress / dropped leading space
-
-        try lines.append(allocator, remaining[0..break_byte_pos]);
-        byte_start += break_byte_pos;
-        if (found_space) {
-            while (byte_start < text.len and text[byte_start] == ' ') byte_start += 1;
-        }
-    }
+    var it = WrapIterator{ .text = text, .max_width = max_width };
+    while (it.next()) |line| try lines.append(allocator, line);
 
     return lines;
+}
+
+/// Rows `text` occupies when wrapped to `max_width` — equals
+/// `wrapText(...).items.len` but allocation-free, so height/scroll accounting can
+/// call it every frame.
+pub fn wrapRowCount(text: []const u8, max_width: usize) usize {
+    var count: usize = 0;
+    var it = WrapIterator{ .text = text, .max_width = max_width };
+    while (it.next()) |_| count += 1;
+    return count;
+}
+
+const WrapSegment = struct { seg_end: usize, next_start: usize, done: bool };
+
+/// One wrap step over `text` starting at `byte_start`: bytes `[byte_start, seg_end)`
+/// form the next line and `next_start` is where the following line begins (leading
+/// spaces after a space-break are skipped). `done` marks the final segment (the
+/// remainder fits in `max_width`). Callers guarantee `byte_start < text.len` and
+/// `max_width > 0`. The single source of truth for both `wrapText` and
+/// `wrapRowCount`, so rendered wrap and height accounting cannot drift.
+fn wrapSegment(text: []const u8, byte_start: usize, max_width: usize) WrapSegment {
+    const remaining = text[byte_start..];
+    if (displayWidth(remaining) <= max_width) {
+        return .{ .seg_end = text.len, .next_start = text.len, .done = true };
+    }
+
+    const chunk = sliceByDisplayWidth(remaining, max_width);
+    var break_len = chunk.len;
+    var found_space = false;
+    var i: usize = chunk.len;
+    while (i > 0) : (i -= 1) {
+        if (chunk[i - 1] == ' ') {
+            break_len = i - 1;
+            found_space = true;
+            break;
+        }
+    }
+    if (!found_space) break_len = chunk.len;
+    if (break_len == 0) break_len = chunk.len; // avoid zero-progress / dropped leading space
+
+    const seg_end = byte_start + break_len;
+    var next_start = seg_end;
+    if (found_space) {
+        while (next_start < text.len and text[next_start] == ' ') next_start += 1;
+    }
+    return .{ .seg_end = seg_end, .next_start = next_start, .done = false };
 }
 
 fn ensureData() ?*const DisplayWidth {

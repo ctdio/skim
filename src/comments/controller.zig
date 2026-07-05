@@ -276,8 +276,8 @@ pub const CommentController = struct {
             .edit_own => |e| return saveEditOwn(app, e.comment_id, input),
         }
 
-        if (input.vim.text_len == 0) {
-            // Empty comment - delete if editing existing, otherwise do nothing
+        if (std.mem.trim(u8, input.vim.text_buffer[0..input.vim.text_len], " \t\r\n").len == 0) {
+            // Empty (or whitespace-only) comment - delete if editing existing, otherwise do nothing
             if (input.editing_comment_idx) |idx| {
                 try app.state.comment_store.deleteComment(idx);
             }
@@ -661,7 +661,7 @@ pub const CommentController = struct {
     /// stays open so the text is not lost.
     fn saveReply(app: *App, thread_id: []const u8, input: comment_editor.CommentEditor.State) !bool {
         const body = input.vim.text_buffer[0..input.vim.text_len];
-        if (body.len == 0) return true;
+        if (std.mem.trim(u8, body, " \t\r\n").len == 0) return true;
 
         const thread_idx = review_controller.threadIdxById(&app.state.review, thread_id) orelse {
             app.showStatusMessage("thread no longer exists");
@@ -694,7 +694,7 @@ pub const CommentController = struct {
     /// the editor open.
     fn saveEditOwn(app: *App, comment_id: []const u8, input: comment_editor.CommentEditor.State) !bool {
         const body = input.vim.text_buffer[0..input.vim.text_len];
-        if (body.len == 0) {
+        if (std.mem.trim(u8, body, " \t\r\n").len == 0) {
             app.showStatusMessage("edit cannot be empty");
             return false;
         }

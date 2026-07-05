@@ -19,6 +19,7 @@ const snapshot = review.snapshot;
 
 const App = review.App;
 const RenderUtils = review.RenderUtils;
+const SideBySideRenderer = review.SideBySideRenderer;
 const CommentEditor = review.CommentEditor;
 
 const anchorThreads = review.anchorThreads;
@@ -505,6 +506,27 @@ test "snapshot: thread_posting_placeholder" {
     });
 }
 
+test "snapshot: thread_long_login_badges_narrow" {
+    // A resolved+outdated+draft thread with a maximal (39-char) GitHub login at a
+    // 40-col width: the header byline overflows the window. Each planned row must
+    // still draw exactly one physical line (.wrap = .none) so the byline does not
+    // wrap onto the comment body and threadDisplayHeight stays accurate.
+    var thread = makeThread(.{ .path = "src/x.zig", .line = null, .is_outdated = true });
+    thread.is_resolved = true;
+    var cmts = [_]ReviewComment{makeComment(.{
+        .author = "aaaaaaaaaa-bbbbbbbbbb-cccccccccc-dddddd",
+        .body = "needs a guard",
+        .review_state = .pending,
+    })};
+    thread.comments = &cmts;
+
+    try renderThreadSnapshotAtWidth("thread_long_login_badges_narrow", 40, .{
+        .thread = &thread,
+        .is_bucketed = false,
+        .expanded = true,
+    });
+}
+
 test "snapshot: thread_busy_badge" {
     var thread = makeThread(.{ .path = "src/x.zig", .line = 11, .side = .right });
     var cmts = [_]ReviewComment{makeComment(.{ .author = "alice", .body = "resolve me please" })};
@@ -555,15 +577,35 @@ test "threadHint: armed delete confirmation wins over everything" {
 }
 
 test "snapshot: review_status_thread_hints" {
-    try renderHintSnapshot("review_status_thread_hints", .full);
+    try renderHintSnapshot("review_status_thread_hints", .full, false);
 }
 
 test "snapshot: review_status_thread_hints_not_mine" {
-    try renderHintSnapshot("review_status_thread_hints_not_mine", .reply_only);
+    try renderHintSnapshot("review_status_thread_hints_not_mine", .reply_only, false);
+}
+
+test "snapshot: review_status_thread_hints_resolved" {
+    try renderHintSnapshot("review_status_thread_hints_resolved", .full, true);
+}
+
+test "snapshot: review_status_thread_hints_not_mine_resolved" {
+    try renderHintSnapshot("review_status_thread_hints_not_mine_resolved", .reply_only, true);
 }
 
 test "snapshot: review_status_delete_confirm" {
-    try renderHintSnapshot("review_status_delete_confirm", .delete_confirm);
+    try renderHintSnapshot("review_status_delete_confirm", .delete_confirm, false);
+}
+
+test "hintText: resolved thread advertises unresolve for a full hint" {
+    try testing.expect(std.mem.indexOf(u8, thread_hint.hintText(.full, true), "x:unresolve") != null);
+}
+
+test "hintText: unresolved thread advertises resolve for a full hint" {
+    try testing.expect(std.mem.indexOf(u8, thread_hint.hintText(.full, false), "x:resolve") != null);
+}
+
+test "hintText: resolved thread advertises unresolve for a reply-only hint" {
+    try testing.expect(std.mem.indexOf(u8, thread_hint.hintText(.reply_only, true), "x:unresolve") != null);
 }
 
 // =============================================================================
@@ -630,6 +672,64 @@ test "snapshot: review_thread_edit_prefilled" {
         .is_bucketed = false,
         .expanded = true,
     });
+}
+
+// =============================================================================
+// side-by-side input box: reply / edit label consistency with unified view
+// =============================================================================
+
+test "snapshot: review_side_by_side_reply_input" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var thread = makeThread(.{ .path = "src/x.zig", .line = 11, .side = .right });
+    var cmts = [_]ReviewComment{makeComment(.{ .author = "alice", .body = "should this be guarded?" })};
+    thread.comments = &cmts;
+
+    var editor = CommentEditor.State{
+        .target_file_path = "src/x.zig",
+        .target_hunk_idx = 0,
+        .target_line_idx = 0,
+        .target_end_hunk_idx = null,
+        .target_end_line_idx = null,
+        .editing_comment_idx = null,
+        .target = .local,
+        .edit_context = .{ .reply = .{ .thread_id = thread.id } },
+        .vim = CommentEditor.VimEditor.State.initWithMode(.insert),
+    };
+    editor.vim.setText("good catch, fixing now");
+    editor.vim.cursor_pos = editor.vim.text_len;
+    app.state.active_comment_input = editor;
+
+    try renderSideBySideInputSnapshot("review_side_by_side_reply_input", &app);
+}
+
+test "snapshot: review_side_by_side_edit_input" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var thread = makeThread(.{ .path = "src/x.zig", .line = 11, .side = .right });
+    var cmts = [_]ReviewComment{makeComment(.{ .author = "me", .body = "this needs a guard" })};
+    thread.comments = &cmts;
+
+    var editor = CommentEditor.State{
+        .target_file_path = "src/x.zig",
+        .target_hunk_idx = 0,
+        .target_line_idx = 0,
+        .target_end_hunk_idx = null,
+        .target_end_line_idx = null,
+        .editing_comment_idx = null,
+        .target = .local,
+        .edit_context = .{ .edit_own = .{ .thread_id = thread.id, .comment_id = cmts[0].id } },
+        .vim = CommentEditor.VimEditor.State.initWithMode(.insert),
+    };
+    editor.vim.setText("this needs a guard before deref");
+    editor.vim.cursor_pos = editor.vim.text_len;
+    app.state.active_comment_input = editor;
+
+    try renderSideBySideInputSnapshot("review_side_by_side_edit_input", &app);
 }
 
 // =============================================================================
@@ -705,13 +805,27 @@ fn renderThreadWithInputSnapshot(name: []const u8, app: *App, info: thread_block
     try snapshot.expectSnapshot(allocator, name, text);
 }
 
+/// Render the active reply/edit input box via the side-by-side renderer, which
+/// titles the box from `edit_context` the same way `unified.zig` does.
+fn renderSideBySideInputSnapshot(name: []const u8, app: *App) !void {
+    const allocator = testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 100, 24);
+    defer ctx.deinit();
+
+    _ = try SideBySideRenderer.renderSideBySideCommentInput(app, ctx.window(), 0, 40, 40, 4, .context);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, name, text);
+}
+
 /// Render a status-bar thread hint (a plain text segment) to a one-row window.
-fn renderHintSnapshot(name: []const u8, hint: thread_hint.ThreadHint) !void {
+fn renderHintSnapshot(name: []const u8, hint: thread_hint.ThreadHint, thread_resolved: bool) !void {
     const allocator = testing.allocator;
     var ctx = try harness.createTestContext(allocator, 60, 1);
     defer ctx.deinit();
 
-    var seg = [_]vaxis.Cell.Segment{.{ .text = thread_hint.hintText(hint), .style = .{} }};
+    var seg = [_]vaxis.Cell.Segment{.{ .text = thread_hint.hintText(hint, thread_resolved), .style = .{} }};
     _ = ctx.window().print(&seg, .{ .row_offset = 0 });
 
     const text = try ctx.captureToText();
@@ -720,11 +834,15 @@ fn renderHintSnapshot(name: []const u8, hint: thread_hint.ThreadHint) !void {
 }
 
 fn renderThreadSnapshot(name: []const u8, info: thread_block.ThreadRenderInfo) !void {
+    try renderThreadSnapshotAtWidth(name, 60, info);
+}
+
+fn renderThreadSnapshotAtWidth(name: []const u8, width: u16, info: thread_block.ThreadRenderInfo) !void {
     const allocator = testing.allocator;
-    var ctx = try harness.createTestContext(allocator, 60, 24);
+    var ctx = try harness.createTestContext(allocator, width, 24);
     defer ctx.deinit();
 
-    _ = thread_block.renderThreadDisplay(ctx.window(), info, 0, 60, ctx.frameAllocator());
+    _ = thread_block.renderThreadDisplay(ctx.window(), info, 0, width, ctx.frameAllocator());
 
     const text = try ctx.captureToText();
     defer allocator.free(text);
