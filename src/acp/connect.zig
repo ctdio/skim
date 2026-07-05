@@ -315,27 +315,6 @@ pub fn loadConfiguredAgents(app: *App) ?[]acp.AgentInfo {
     return null;
 }
 
-/// Disconnect from the ACP agent for the active tab
-pub fn stopAcpSession(app: *App) void {
-    if (app.tab_manager) |*tm| {
-        if (tm.activeTab()) |tab| {
-            if (tab.manager != null) {
-                tab.disconnectAll();
-                app.showStatusMessage("Disconnected from agent");
-                app.needs_render = true;
-            }
-        }
-    }
-}
-
-/// Check ACP agent status for the active tab
-pub fn getAcpStatus(app: *App) ?acp.AcpManager.Status {
-    if (app.getActiveAcpManager()) |mgr| {
-        return mgr.status;
-    }
-    return null;
-}
-
 /// Poll all managers: check connection thread, then poll each tab's manager.
 pub fn pollAllManagers(app: *App) void {
     const connection_active = pollConnectionThread(app);
