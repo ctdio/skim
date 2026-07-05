@@ -103,6 +103,22 @@ skim main...feature
 skim HEAD~5
 ```
 
+### Reviewing Pull Requests
+
+Boot directly into a PR review, or browse open PRs interactively. Requires the
+GitHub CLI (`gh`) on PATH, authenticated for the repo.
+
+```bash
+# Review PR #42 of the CWD repo's origin
+skim pr 42
+
+# Review a PR by URL (must match the origin remote's repository)
+skim pr https://github.com/<owner>/<repo>/pull/42
+
+# Open the interactive PR picker (lists open PRs to choose from)
+skim pr
+```
+
 ### As a Git Pager
 
 Skim can read diffs from stdin, making it usable as a git pager. Add to your `~/.gitconfig`:
