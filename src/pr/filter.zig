@@ -27,16 +27,6 @@ pub fn matches(pr: PullRequest, query: []const u8) bool {
     return true;
 }
 
-/// Indices into `prs` that match `query`, in order. Caller owns the slice.
-pub fn filterIndices(allocator: std.mem.Allocator, prs: []const PullRequest, query: []const u8) ![]usize {
-    var out: std.ArrayList(usize) = .{};
-    errdefer out.deinit(allocator);
-    for (prs, 0..) |pr, i| {
-        if (matches(pr, query)) try out.append(allocator, i);
-    }
-    return out.toOwnedSlice(allocator);
-}
-
 fn matchesTerm(pr: PullRequest, term: []const u8) bool {
     return containsIgnoreCase(pr.author, term) or
         containsIgnoreCase(pr.title, term) or
@@ -121,15 +111,4 @@ test "matchesFilters: query and author filter are ANDed together" {
     try testing.expect(matchesFilters(pr, "login", "alice"));
     try testing.expect(!matchesFilters(pr, "payments", "alice"));
     try testing.expect(!matchesFilters(pr, "login", "bob"));
-}
-
-test "filterIndices: returns matching positions in order" {
-    const prs = [_]PullRequest{
-        samplePr(.{ .author = "alice", .title = "a", .head = "x" }),
-        samplePr(.{ .author = "bob", .title = "b", .head = "y" }),
-        samplePr(.{ .author = "alice", .title = "c", .head = "z" }),
-    };
-    const idx = try filterIndices(testing.allocator, &prs, "alice");
-    defer testing.allocator.free(idx);
-    try testing.expectEqualSlices(usize, &.{ 0, 2 }, idx);
 }

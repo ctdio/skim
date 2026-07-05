@@ -3,7 +3,6 @@
 //! the PR data layer lives here.
 
 const std = @import("std");
-const parse = @import("parse.zig");
 const review_parse = @import("review_parse.zig");
 
 pub const Error = error{ GhCommandFailed, GhNotFound };
@@ -11,13 +10,6 @@ pub const Error = error{ GhCommandFailed, GhNotFound };
 const default_limit = 50;
 
 const json_fields = "number,title,author,headRefName,baseRefName,isDraft,updatedAt,url,statusCheckRollup";
-
-/// List open PRs for the repo in the current working directory.
-pub fn listPullRequests(allocator: std.mem.Allocator) !parse.PullRequestList {
-    const raw = try listPullRequestsRaw(allocator);
-    defer allocator.free(raw);
-    return parse.parse(allocator, raw);
-}
 
 /// List open PRs as the raw JSON `gh` emits, so callers can persist it verbatim
 /// (e.g. to the on-disk cache) before parsing. Caller owns the returned bytes.
