@@ -982,11 +982,8 @@ fn isMatchLine(matches: []const usize, line: usize) bool {
 // ===== Tests =====
 // Search highlighting tests exercise applySearchHighlighting against a real App.
 
-test "search highlighting - basic match" {
-    const allocator = std.testing.allocator;
-
-    // Create a mock App with search state
-    var app = App{
+fn searchTestApp(allocator: std.mem.Allocator) App {
+    return .{
         .allocator = allocator,
         .vx = undefined,
         .tty = undefined,
@@ -995,6 +992,12 @@ test "search highlighting - basic match" {
         .mode = .normal,
         .state = undefined,
     };
+}
+
+test "search highlighting - basic match" {
+    const allocator = std.testing.allocator;
+
+    var app = searchTestApp(allocator);
 
     // Initialize search state
     app.state.search_state = App.SearchState.init(allocator);
@@ -1044,15 +1047,7 @@ test "search highlighting - basic match" {
 test "search highlighting - multiple matches" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .should_quit = false,
-        .last_ctrl_c_time = 0,
-        .mode = .normal,
-        .state = undefined,
-    };
+    var app = searchTestApp(allocator);
 
     app.state.search_state = App.SearchState.init(allocator);
     defer app.state.search_state.deinit();
@@ -1096,15 +1091,7 @@ test "search highlighting - multiple matches" {
 test "search highlighting - case insensitive" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .should_quit = false,
-        .last_ctrl_c_time = 0,
-        .mode = .normal,
-        .state = undefined,
-    };
+    var app = searchTestApp(allocator);
 
     app.state.search_state = App.SearchState.init(allocator);
     defer app.state.search_state.deinit();
@@ -1153,15 +1140,7 @@ test "search highlighting - case insensitive" {
 test "search highlighting - across syntax segments" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .should_quit = false,
-        .last_ctrl_c_time = 0,
-        .mode = .normal,
-        .state = undefined,
-    };
+    var app = searchTestApp(allocator);
 
     app.state.search_state = App.SearchState.init(allocator);
     defer app.state.search_state.deinit();
