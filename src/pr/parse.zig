@@ -3,6 +3,10 @@
 //! trivially unit-testable against captured `gh` payloads.
 
 const std = @import("std");
+const json_fields = @import("json.zig");
+
+const strField = json_fields.strField;
+const boolField = json_fields.boolField;
 
 pub const CiStatus = enum {
     none,
@@ -84,11 +88,6 @@ fn stringField(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []con
     return allocator.dupe(u8, v.string);
 }
 
-fn boolField(obj: std.json.ObjectMap, key: []const u8) bool {
-    const v = obj.get(key) orelse return false;
-    return v == .bool and v.bool;
-}
-
 fn authorLogin(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]const u8 {
     const author = obj.get("author") orelse return allocator.dupe(u8, "");
     if (author != .object) return allocator.dupe(u8, "");
@@ -142,12 +141,6 @@ fn checkStatus(check: std.json.Value) CiStatus {
     }
 
     return .none;
-}
-
-fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const v = obj.get(key) orelse return null;
-    if (v != .string) return null;
-    return v.string;
 }
 
 fn eqAny(value: []const u8, candidates: []const []const u8) bool {
