@@ -2032,15 +2032,23 @@ fn isCancelKey(key: vaxis.Key) bool {
     return key.codepoint == 27 or isCtrlC(key);
 }
 
+fn isNavDown(key: vaxis.Key) bool {
+    return (key.codepoint == 'n' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.down or
+        (key.codepoint == 'j' and !key.mods.ctrl);
+}
+
+fn isNavUp(key: vaxis.Key) bool {
+    return (key.codepoint == 'p' and key.mods.ctrl) or
+        key.codepoint == vaxis.Key.up or
+        (key.codepoint == 'k' and !key.mods.ctrl);
+}
+
 fn handleAcpPermissionKeys(app: *App, mgr: ManagerHandle, perm: *AcpManager.PendingPermission, key: vaxis.Key) bool {
     const num_options = perm.options.len;
 
-    const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
-        key.codepoint == vaxis.Key.down or
-        (key.codepoint == 'j' and !key.mods.ctrl);
-    const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
-        key.codepoint == vaxis.Key.up or
-        (key.codepoint == 'k' and !key.mods.ctrl);
+    const is_down = isNavDown(key);
+    const is_up = isNavUp(key);
 
     if (is_down and num_options > 0) {
         perm.selected_index = (perm.selected_index + 1) % num_options;
@@ -2084,12 +2092,8 @@ fn handleCodexCommandKeys(app: *App, mgr: ManagerHandle, cmd: anytype, key: vaxi
     const Decision = CodexManager.CommandDecision;
     const decision_order = [_]Decision{ .accept, .accept_for_session, .accept_with_execpolicy_amendment, .decline, .cancel };
 
-    const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
-        key.codepoint == vaxis.Key.down or
-        (key.codepoint == 'j' and !key.mods.ctrl);
-    const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
-        key.codepoint == vaxis.Key.up or
-        (key.codepoint == 'k' and !key.mods.ctrl);
+    const is_down = isNavDown(key);
+    const is_up = isNavUp(key);
 
     if (is_down) {
         const cur_idx = findDecisionIndex(Decision, &decision_order, cmd.selected_decision);
@@ -2146,12 +2150,8 @@ fn handleCodexFileChangeKeys(app: *App, mgr: ManagerHandle, fc: anytype, key: va
     const Decision = CodexManager.FileChangeDecision;
     const decision_order = [_]Decision{ .accept, .accept_for_session, .decline, .cancel };
 
-    const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
-        key.codepoint == vaxis.Key.down or
-        (key.codepoint == 'j' and !key.mods.ctrl);
-    const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
-        key.codepoint == vaxis.Key.up or
-        (key.codepoint == 'k' and !key.mods.ctrl);
+    const is_down = isNavDown(key);
+    const is_up = isNavUp(key);
 
     if (is_down) {
         const cur_idx = findDecisionIndex(Decision, &decision_order, fc.selected_decision);
@@ -2208,12 +2208,8 @@ fn handleCodexUserInputKeys(app: *App, mgr: ManagerHandle, ui: anytype, key: vax
 
     const q = &ui.questions[ui.active_question];
 
-    const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
-        key.codepoint == vaxis.Key.down or
-        (key.codepoint == 'j' and !key.mods.ctrl);
-    const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
-        key.codepoint == vaxis.Key.up or
-        (key.codepoint == 'k' and !key.mods.ctrl);
+    const is_down = isNavDown(key);
+    const is_up = isNavUp(key);
 
     if (q.options) |opts| {
         if (is_down and opts.len > 0) {
@@ -2321,12 +2317,8 @@ fn handleQuestionPrompt(app: *App, agent_state: *state.AgentState, pending: *sta
     const q_state = &pending.states[pending.active_index];
     const options_len = question.options.len;
 
-    const is_down = (key.codepoint == 'n' and key.mods.ctrl) or
-        key.codepoint == vaxis.Key.down or
-        (key.codepoint == 'j' and !key.mods.ctrl);
-    const is_up = (key.codepoint == 'p' and key.mods.ctrl) or
-        key.codepoint == vaxis.Key.up or
-        (key.codepoint == 'k' and !key.mods.ctrl);
+    const is_down = isNavDown(key);
+    const is_up = isNavUp(key);
     const is_next = key.codepoint == vaxis.Key.tab or
         key.codepoint == vaxis.Key.right or
         (key.codepoint == 'l' and !key.mods.ctrl);
