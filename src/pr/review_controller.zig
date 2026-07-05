@@ -667,31 +667,13 @@ pub fn pollMutations(self: *ReviewSession, allocator: Allocator) MutationOutcome
     if (out_review_id) |rid| setReviewId(self, allocator, rid);
 
     if (failed) {
-        stashFailedDraft(self, allocator, self.mutation.in_body);
-        removePlaceholder(self, allocator, seq);
+        failPost(self, allocator, seq);
         outcome = .{ .failed = fail_kind };
-    } else applied: {
-        const raw = out_thread_raw orelse {
-            stashFailedDraft(self, allocator, self.mutation.in_body);
-            removePlaceholder(self, allocator, seq);
-            outcome = .{ .failed = .other };
-            break :applied;
-        };
-        var created = review_parse.parseCreatedThread(allocator, raw, self.viewer_login) catch {
-            stashFailedDraft(self, allocator, self.mutation.in_body);
-            removePlaceholder(self, allocator, seq);
-            outcome = .{ .failed = .other };
-            break :applied;
-        };
-        defer created.deinit();
-
-        replacePlaceholderWithThread(self, allocator, seq, created.thread) catch {
-            stashFailedDraft(self, allocator, self.mutation.in_body);
-            removePlaceholder(self, allocator, seq);
-            outcome = .{ .failed = .other };
-            break :applied;
-        };
+    } else if (applyPostedThread(self, allocator, out_thread_raw, seq)) {
         outcome = .posted;
+    } else |_| {
+        failPost(self, allocator, seq);
+        outcome = .{ .failed = .other };
     }
 
     // Free the worker's c_allocator buffers now that they're consumed.
@@ -1402,6 +1384,23 @@ fn removePlaceholder(self: *ReviewSession, allocator: Allocator, seq: u64) void 
 fn stashFailedDraft(self: *ReviewSession, allocator: Allocator, body: []const u8) void {
     if (self.draft_failed_text) |t| allocator.free(t);
     self.draft_failed_text = allocator.dupe(u8, body) catch null;
+}
+
+/// Roll back a failed post: stash the in-flight body for retry (NFR-2) and drop
+/// the optimistic placeholder.
+fn failPost(self: *ReviewSession, allocator: Allocator, seq: u64) void {
+    stashFailedDraft(self, allocator, self.mutation.in_body);
+    removePlaceholder(self, allocator, seq);
+}
+
+/// Success path for a completed post: parse the server thread and swap it in for
+/// the placeholder. Errors (missing raw, parse failure, replace failure) all map
+/// to the same `.other` rollback in `pollMutations`.
+fn applyPostedThread(self: *ReviewSession, allocator: Allocator, raw: ?[]const u8, seq: u64) !void {
+    const bytes = raw orelse return error.MissingThread;
+    var created = try review_parse.parseCreatedThread(allocator, bytes, self.viewer_login);
+    defer created.deinit();
+    try replacePlaceholderWithThread(self, allocator, seq, created.thread);
 }
 
 /// Cache the pending-review id used/created by a successful post.
