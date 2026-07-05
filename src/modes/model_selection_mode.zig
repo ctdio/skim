@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
 const ManagerHandle = @import("../agent/manager_handle.zig").ManagerHandle;
+const containsIgnoreCase = @import("../pr/filter.zig").containsIgnoreCase;
 
 /// Model selection sub-state: the picker selection index plus the fuzzy search
 /// filter over the active manager's models. All fields default so it stays out
@@ -170,20 +171,4 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             }
         },
     }
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-
-    const end = haystack.len - needle.len + 1;
-    outer: for (0..end) |i| {
-        for (0..needle.len) |j| {
-            const h = std.ascii.toLower(haystack[i + j]);
-            const n = std.ascii.toLower(needle[j]);
-            if (h != n) continue :outer;
-        }
-        return true;
-    }
-    return false;
 }

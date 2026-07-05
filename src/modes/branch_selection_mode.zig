@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const Allocator = std.mem.Allocator;
 const App = @import("../app.zig").App;
 const git = @import("../git/diff.zig");
+const containsIgnoreCase = @import("../pr/filter.zig").containsIgnoreCase;
 const DiffSource = git.DiffSource;
 
 /// Branch selection sub-state: the loaded branch list, the search/filter query,
@@ -179,7 +180,7 @@ pub fn filter(self: *BranchSelectState, allocator: Allocator) !void {
 
     // Case-insensitive search
     for (self.list, 0..) |branch, idx| {
-        if (matchesQuery(branch, query)) {
+        if (containsIgnoreCase(branch, query)) {
             try self.filtered.append(allocator, idx);
         }
     }
@@ -188,25 +189,4 @@ pub fn filter(self: *BranchSelectState, allocator: Allocator) !void {
     if (self.filtered.items.len > 0 and self.selection >= self.filtered.items.len) {
         self.selection = self.filtered.items.len - 1;
     }
-}
-
-fn matchesQuery(branch: []const u8, query: []const u8) bool {
-    // Simple case-insensitive substring match
-    if (branch.len < query.len) return false;
-
-    var i: usize = 0;
-    while (i <= branch.len - query.len) : (i += 1) {
-        var matches = true;
-        for (query, 0..) |qc, j| {
-            const bc = branch[i + j];
-            const qc_lower = if (qc >= 'A' and qc <= 'Z') qc + 32 else qc;
-            const bc_lower = if (bc >= 'A' and bc <= 'Z') bc + 32 else bc;
-            if (qc_lower != bc_lower) {
-                matches = false;
-                break;
-            }
-        }
-        if (matches) return true;
-    }
-    return false;
 }

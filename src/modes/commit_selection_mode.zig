@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const Allocator = std.mem.Allocator;
 const App = @import("../app.zig").App;
 const git = @import("../git/diff.zig");
+const containsIgnoreCase = @import("../pr/filter.zig").containsIgnoreCase;
 
 /// Commit selection sub-state: the loaded commit list, the search/filter query,
 /// lazy-load bookkeeping, and the diff-mode submenu. All fields default so it
@@ -311,20 +312,4 @@ fn matchesQuery(commit: git.CommitInfo, query: []const u8) bool {
         containsIgnoreCase(commit.short_hash, query) or
         containsIgnoreCase(commit.subject, query) or
         containsIgnoreCase(commit.author, query);
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-
-    const end = haystack.len - needle.len + 1;
-    outer: for (0..end) |i| {
-        for (0..needle.len) |j| {
-            const h = std.ascii.toLower(haystack[i + j]);
-            const n = std.ascii.toLower(needle[j]);
-            if (h != n) continue :outer;
-        }
-        return true;
-    }
-    return false;
 }
