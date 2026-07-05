@@ -1,6 +1,5 @@
 const std = @import("std");
 const App = @import("app.zig").App;
-const line_map = @import("line_map.zig");
 const parser = @import("git/parser.zig");
 const navigation = @import("navigation.zig");
 const hunk_view = @import("hunk_view.zig");
@@ -92,41 +91,17 @@ pub fn openAllFolds(folds: *FoldSet) void {
 
 // Toggle fold at cursor position (file header -> fold file, hunk/code -> fold hunk)
 pub fn toggleFoldUnderCursor(app: *App) !void {
-    const target = foldTargetUnderCursor(app) orelse return;
-    if (target.hunk_idx) |hunk_idx| {
-        toggleHunkFold(&app.state.collapsed_folds, target.file_idx, hunk_idx);
-    } else {
-        toggleFileFold(&app.state.collapsed_folds, target.file_idx);
-    }
-    try rebuildLineMap(app);
-    moveCursorToFoldHeader(app, target.file_idx, target.hunk_idx);
-    app.needs_render = true;
+    return foldUnderCursor(app, .toggle);
 }
 
 // Close fold at cursor position
 pub fn closeFoldUnderCursor(app: *App) !void {
-    const target = foldTargetUnderCursor(app) orelse return;
-    if (target.hunk_idx) |hunk_idx| {
-        closeHunkFold(&app.state.collapsed_folds, target.file_idx, hunk_idx);
-    } else {
-        closeFileFold(&app.state.collapsed_folds, target.file_idx);
-    }
-    try rebuildLineMap(app);
-    moveCursorToFoldHeader(app, target.file_idx, target.hunk_idx);
-    app.needs_render = true;
+    return foldUnderCursor(app, .close);
 }
 
 // Open fold at cursor position
 pub fn openFoldUnderCursor(app: *App) !void {
-    const target = foldTargetUnderCursor(app) orelse return;
-    if (target.hunk_idx) |hunk_idx| {
-        openHunkFold(&app.state.collapsed_folds, target.file_idx, hunk_idx);
-    } else {
-        openFileFold(&app.state.collapsed_folds, target.file_idx);
-    }
-    try rebuildLineMap(app);
-    moveCursorToFoldHeader(app, target.file_idx, target.hunk_idx);
-    app.needs_render = true;
+    return foldUnderCursor(app, .open);
 }
 
 // Close all folds and rebuild LineMap
@@ -136,7 +111,7 @@ pub fn closeAllFoldsAndRebuild(app: *App) !void {
 
     closeAllFolds(&app.state.collapsed_folds, app.state.files);
 
-    try rebuildLineMap(app);
+    try hunk_view.rebuildLineMap(app);
     _ = hunk_view.restoreViewportFromAnchor(app, anchor);
     app.needs_render = true;
 }
@@ -148,7 +123,7 @@ pub fn openAllFoldsAndRebuild(app: *App) !void {
 
     openAllFolds(&app.state.collapsed_folds);
 
-    try rebuildLineMap(app);
+    try hunk_view.rebuildLineMap(app);
     _ = hunk_view.restoreViewportFromAnchor(app, anchor);
     app.needs_render = true;
 }
@@ -161,7 +136,7 @@ pub fn closeFileFoldUnderCursor(app: *App) !void {
     // Close the file fold
     closeFileFold(&app.state.collapsed_folds, file_idx);
 
-    try rebuildLineMap(app);
+    try hunk_view.rebuildLineMap(app);
 
     // Move cursor to the file header
     moveCursorToFoldHeader(app, file_idx, null);
@@ -176,7 +151,7 @@ pub fn openFileFoldUnderCursor(app: *App) !void {
     // Open the file fold
     openFileFold(&app.state.collapsed_folds, file_idx);
 
-    try rebuildLineMap(app);
+    try hunk_view.rebuildLineMap(app);
 
     // Move cursor to the file header
     moveCursorToFoldHeader(app, file_idx, null);
@@ -187,6 +162,30 @@ pub fn openFileFoldUnderCursor(app: *App) !void {
 // lines) which hunk. Null when the cursor is on a line with no fold action.
 const FoldTarget = struct { file_idx: usize, hunk_idx: ?usize };
 
+const FoldOp = enum { toggle, close, open };
+
+// Apply a fold op to the target under the cursor, then rebuild and reposition.
+fn foldUnderCursor(app: *App, op: FoldOp) !void {
+    const target = foldTargetUnderCursor(app) orelse return;
+    const folds = &app.state.collapsed_folds;
+    if (target.hunk_idx) |hunk_idx| {
+        switch (op) {
+            .toggle => toggleHunkFold(folds, target.file_idx, hunk_idx),
+            .close => closeHunkFold(folds, target.file_idx, hunk_idx),
+            .open => openHunkFold(folds, target.file_idx, hunk_idx),
+        }
+    } else {
+        switch (op) {
+            .toggle => toggleFileFold(folds, target.file_idx),
+            .close => closeFileFold(folds, target.file_idx),
+            .open => openFileFold(folds, target.file_idx),
+        }
+    }
+    try hunk_view.rebuildLineMap(app);
+    moveCursorToFoldHeader(app, target.file_idx, target.hunk_idx);
+    app.needs_render = true;
+}
+
 fn foldTargetUnderCursor(app: *App) ?FoldTarget {
     const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return null;
     return switch (record.line_type) {
@@ -196,20 +195,6 @@ fn foldTargetUnderCursor(app: *App) ?FoldTarget {
         .comment_line => |comment_info| .{ .file_idx = record.file_idx, .hunk_idx = comment_info.parent_hunk_idx },
         .review_thread, .spacer => null,
     };
-}
-
-// Free the current LineMap and rebuild it from the live fold state.
-fn rebuildLineMap(app: *App) !void {
-    app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(
-        app.allocator,
-        app.state.files,
-        &app.state.comment_store,
-        hunk_view.convertHunkViewMode(app),
-        hunk_view.shouldApplyHunkFiltering(app),
-        &app.state.collapsed_folds,
-        app.reviewAnchored(),
-    );
 }
 
 // Move cursor to the fold header (file or hunk) after folding
