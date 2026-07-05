@@ -1460,43 +1460,61 @@ fn spawnPost(self: *ReviewSession, params: PostParams, seq: u64) !void {
     self.posting_worker_active = true;
 }
 
+/// Outcome of resolving a worker's pending-review id.
+const ResolvedReviewId = struct {
+    /// ca-owned working copy; the caller must free it.
+    review_id: ?[]u8,
+    /// ca-owned id to surface when a pending review was newly created.
+    out_review_id: ?[]u8,
+    failed: bool,
+    fail_kind: github.GhErrorKind,
+};
+
+/// Reuse the passed pending-review id or create one via GitHub. Shared by the
+/// post and submit workers so the create/parse/ownership dance stays in lockstep.
+fn resolveReviewId(in_review_id: ?[]const u8, pr_node_id: []const u8, head_oid: []const u8) ResolvedReviewId {
+    const ca = std.heap.c_allocator;
+    var result: ResolvedReviewId = .{ .review_id = null, .out_review_id = null, .failed = false, .fail_kind = .other };
+    if (in_review_id) |rid| {
+        result.review_id = ca.dupe(u8, rid) catch blk: {
+            result.failed = true;
+            break :blk null;
+        };
+    } else if (github.createPendingReview(ca, pr_node_id, head_oid)) |fetch| {
+        switch (fetch) {
+            .ok => |raw| {
+                defer ca.free(raw);
+                if (review_parse.parseCreatedReviewId(ca, raw)) |id| {
+                    result.review_id = id;
+                    result.out_review_id = ca.dupe(u8, id) catch null;
+                } else |_| {
+                    result.failed = true;
+                }
+            },
+            .failed => |k| {
+                result.failed = true;
+                result.fail_kind = k;
+            },
+        }
+    } else |_| {
+        result.failed = true;
+    }
+    return result;
+}
+
 /// Post worker (AD-3). Runs on `c_allocator` so its results survive the thread
 /// boundary. Reuses the cached review id or creates a pending review first, then
 /// posts the thread. Writes outputs under the mutex and flips `ready`.
 fn postThreadWorker(self: *ReviewSession) void {
     const ca = std.heap.c_allocator;
-    var failed = false;
-    var fail_kind: github.GhErrorKind = .other;
-    var out_review_id: ?[]u8 = null;
     var out_thread_raw: ?[]u8 = null;
 
-    var review_id: ?[]u8 = null; // ca-owned working copy
+    const resolved = resolveReviewId(self.mutation.in_review_id, self.mutation.in_pr_node_id, self.mutation.in_head_oid);
+    const review_id = resolved.review_id; // ca-owned working copy
     defer if (review_id) |r| ca.free(r);
-
-    if (self.mutation.in_review_id) |rid| {
-        review_id = ca.dupe(u8, rid) catch blk: {
-            failed = true;
-            break :blk null;
-        };
-    } else if (github.createPendingReview(ca, self.mutation.in_pr_node_id, self.mutation.in_head_oid)) |fetch| {
-        switch (fetch) {
-            .ok => |raw| {
-                defer ca.free(raw);
-                if (review_parse.parseCreatedReviewId(ca, raw)) |id| {
-                    review_id = id;
-                    out_review_id = ca.dupe(u8, id) catch null;
-                } else |_| {
-                    failed = true;
-                }
-            },
-            .failed => |k| {
-                failed = true;
-                fail_kind = k;
-            },
-        }
-    } else |_| {
-        failed = true;
-    }
+    const out_review_id = resolved.out_review_id;
+    var failed = resolved.failed;
+    var fail_kind = resolved.fail_kind;
 
     if (!failed) {
         if (github.addReviewThread(ca, .{
@@ -2049,33 +2067,12 @@ fn submitWorker(self: *ReviewSession) void {
     }
 
     // Submit path: resolve a review id first, then submit it.
-    var review_id: ?[]u8 = null; // ca-owned working copy
+    const resolved = resolveReviewId(m.in_review_id, m.in_pr_node_id, m.in_head_oid);
+    const review_id = resolved.review_id; // ca-owned working copy
     defer if (review_id) |r| ca.free(r);
-
-    if (m.in_review_id) |rid| {
-        review_id = ca.dupe(u8, rid) catch blk: {
-            failed = true;
-            break :blk null;
-        };
-    } else if (github.createPendingReview(ca, m.in_pr_node_id, m.in_head_oid)) |fetch| {
-        switch (fetch) {
-            .ok => |raw| {
-                defer ca.free(raw);
-                if (review_parse.parseCreatedReviewId(ca, raw)) |id| {
-                    review_id = id;
-                    out_review_id = ca.dupe(u8, id) catch null;
-                } else |_| {
-                    failed = true;
-                }
-            },
-            .failed => |k| {
-                failed = true;
-                fail_kind = k;
-            },
-        }
-    } else |_| {
-        failed = true;
-    }
+    out_review_id = resolved.out_review_id;
+    failed = resolved.failed;
+    fail_kind = resolved.fail_kind;
 
     if (!failed) {
         if (github.submitReview(ca, review_id.?, m.in_event, m.in_body)) |fetch| {
