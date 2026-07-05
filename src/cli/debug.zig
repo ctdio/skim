@@ -152,11 +152,7 @@ fn runPrView(allocator: Allocator, args: []const []const u8) !void {
     const raw = try fetchReviewJson(allocator, args, "pr-view");
     defer allocator.free(raw);
 
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-    var data = review_parse.parsePrDetails(allocator, raw) catch {
-        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        flushAndExit(&stderr_writer);
-    };
+    var data = parsePrDetailsOrExit(allocator, raw);
     defer data.deinit();
 
     if (hasFlag(args, "--ids")) {
@@ -177,10 +173,7 @@ fn runPrAnchor(allocator: Allocator, args: []const []const u8) !void {
     const raw = try fetchReviewJson(allocator, args, "pr-anchor");
     defer allocator.free(raw);
 
-    var data = review_parse.parsePrDetails(allocator, raw) catch {
-        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        flushAndExit(&stderr_writer);
-    };
+    var data = parsePrDetailsOrExit(allocator, raw);
     defer data.deinit();
     const details = data.details;
 
@@ -242,10 +235,7 @@ fn runPrComment(allocator: Allocator, args: []const []const u8) !void {
     const raw = try fetchReviewJson(allocator, args, "pr-comment");
     defer allocator.free(raw);
 
-    var data = review_parse.parsePrDetails(allocator, raw) catch {
-        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        flushAndExit(&stderr_writer);
-    };
+    var data = parsePrDetailsOrExit(allocator, raw);
     defer data.deinit();
     const details = data.details;
 
@@ -304,10 +294,7 @@ fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
     const raw = try fetchReviewJson(allocator, args, "pr-discard");
     defer allocator.free(raw);
 
-    var data = review_parse.parsePrDetails(allocator, raw) catch {
-        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        flushAndExit(&stderr_writer);
-    };
+    var data = parsePrDetailsOrExit(allocator, raw);
     defer data.deinit();
 
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -364,10 +351,7 @@ fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
     const raw = try fetchReviewJson(allocator, args, "pr-submit");
     defer allocator.free(raw);
 
-    var data = review_parse.parsePrDetails(allocator, raw) catch {
-        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        flushAndExit(&stderr_writer);
-    };
+    var data = parsePrDetailsOrExit(allocator, raw);
     defer data.deinit();
     const details = data.details;
 
@@ -582,6 +566,16 @@ fn flagValueOrExit(args: []const []const u8, flag: []const u8, cmd: []const u8, 
     stderr_writer.interface.print("{s}: missing {s}\n", .{ cmd, flag }) catch {};
     stderr_writer.interface.print("{s}\n", .{usage}) catch {};
     flushAndExit(&stderr_writer);
+}
+
+/// Parse a PR review payload, or exit non-zero with a diagnostic. Caller owns
+/// the returned data (`defer data.deinit()`).
+fn parsePrDetailsOrExit(allocator: Allocator, raw: []const u8) review_parse.PrReviewData {
+    return review_parse.parsePrDetails(allocator, raw) catch {
+        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n") catch {};
+        flushAndExit(&stderr_writer);
+    };
 }
 
 /// Unwrap a `GhFetch`, returning the raw bytes or exiting non-zero with the
