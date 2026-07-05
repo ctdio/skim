@@ -7,13 +7,13 @@ const vaxis = @import("vaxis");
 const parse = @import("parse.zig");
 const authors = @import("authors.zig");
 const stack = @import("stack.zig");
+const line_writer = @import("line_writer.zig");
 
 const PullRequest = parse.PullRequest;
 const CiStatus = parse.CiStatus;
 const AuthorCount = authors.AuthorCount;
 const Style = vaxis.Cell.Style;
-
-const digit_graphemes = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+const LineWriter = line_writer.LineWriter;
 
 pub const View = struct {
     prs: []const PullRequest,
@@ -37,76 +37,6 @@ pub const View = struct {
     author_selected: usize = 0,
     author_scroll: usize = 0,
     author_query: []const u8 = "",
-};
-
-const LineWriter = struct {
-    win: vaxis.Window,
-    row: u16,
-    col: u16,
-    style: Style,
-
-    fn init(win: vaxis.Window, row: u16, style: Style) LineWriter {
-        return initAt(win, row, 0, style);
-    }
-
-    fn initAt(win: vaxis.Window, row: u16, col: u16, style: Style) LineWriter {
-        return .{
-            .win = win,
-            .row = row,
-            .col = col,
-            .style = style,
-        };
-    }
-
-    fn text(self: *LineWriter, value: []const u8) void {
-        var iter = self.win.unicode.graphemeIterator(value);
-        while (iter.next()) |item| {
-            const bytes = item.bytes(value);
-            if (std.mem.eql(u8, bytes, "\n")) return;
-            self.grapheme(bytes);
-        }
-    }
-
-    fn styledText(self: *LineWriter, value: []const u8, style: Style) void {
-        const old_style = self.style;
-        self.style = style;
-        self.text(value);
-        self.style = old_style;
-    }
-
-    fn unsigned(self: *LineWriter, value: u64) void {
-        var divisor: u64 = 1;
-        while (value / divisor >= 10) {
-            divisor *= 10;
-        }
-
-        var remaining_divisor = divisor;
-        while (remaining_divisor > 0) : (remaining_divisor /= 10) {
-            const digit: usize = @intCast((value / remaining_divisor) % 10);
-            self.grapheme(digit_graphemes[digit]);
-        }
-    }
-
-    fn styledUnsigned(self: *LineWriter, value: u64, style: Style) void {
-        const old_style = self.style;
-        self.style = style;
-        self.unsigned(value);
-        self.style = old_style;
-    }
-
-    fn grapheme(self: *LineWriter, value: []const u8) void {
-        const width = self.win.gwidth(value);
-        if (width == 0) return;
-        if (width > self.win.width - self.col) {
-            self.col = self.win.width;
-            return;
-        }
-        self.win.writeCell(self.col, self.row, .{
-            .char = .{ .grapheme = value, .width = @intCast(width) },
-            .style = self.style,
-        });
-        self.col += width;
-    }
 };
 
 pub fn draw(win: vaxis.Window, view: View) void {
@@ -145,7 +75,7 @@ pub fn draw(win: vaxis.Window, view: View) void {
 }
 
 fn drawHeader(win: vaxis.Window, view: View) void {
-    var writer = LineWriter.init(win, 0, .{});
+    var writer = LineWriter.init(.{ .win = win, .row = 0 });
     writer.styledText(" skim pr", .{ .bold = true });
     writer.styledText("  ", mutedStyle(false));
     writer.styledUnsigned(view.prs.len, mutedStyle(false));
@@ -170,7 +100,7 @@ fn drawRow(win: vaxis.Window, row: u16, pr: PullRequest, selected: bool, mark: s
     // bracketed group; standalone PRs just get the matching indent.
     // Author follows (right after the number) so it stays visible even when a
     // long title/branch would otherwise push it off the right edge.
-    var writer = LineWriter.init(win, row, base_style);
+    var writer = LineWriter.init(.{ .win = win, .row = row, .style = base_style });
     writer.styledText(stackGlyph(mark), meta_style);
     writer.styledText(ciGlyph(pr.ci), status_style);
     writer.text("  ");
@@ -194,7 +124,7 @@ fn drawStatusBar(win: vaxis.Window, view: View) void {
     const muted = Style{ .fg = .{ .index = 8 } };
 
     // The status row is the live search prompt: the query is always editable.
-    var writer = LineWriter.init(win, row, muted);
+    var writer = LineWriter.init(.{ .win = win, .row = row, .style = muted });
     writer.styledText(" > ", muted);
     writer.text(view.query);
 
@@ -213,7 +143,7 @@ fn drawStatusBar(win: vaxis.Window, view: View) void {
 }
 
 fn drawAuthorPicker(win: vaxis.Window, view: View) void {
-    var header = LineWriter.init(win, 0, .{});
+    var header = LineWriter.init(.{ .win = win, .row = 0 });
     header.styledText(" filter by author", .{ .bold = true });
     header.styledText("  ", mutedStyle(false));
     header.styledUnsigned(view.author_filtered.len, mutedStyle(false));
@@ -236,7 +166,7 @@ fn drawAuthorPicker(win: vaxis.Window, view: View) void {
     }
 
     const muted = Style{ .fg = .{ .index = 8 } };
-    var prompt = LineWriter.init(win, win.height - 1, muted);
+    var prompt = LineWriter.init(.{ .win = win, .row = win.height - 1, .style = muted });
     prompt.styledText(" > ", muted);
     prompt.text(view.author_query);
     prompt.styledText("  enter apply · esc cancel · ^n/^p move", muted);
@@ -248,7 +178,7 @@ fn drawAuthorRow(win: vaxis.Window, row: u16, author: AuthorCount, selected: boo
 
     if (selected) fillRow(win, row, base_style);
 
-    var writer = LineWriter.init(win, row, base_style);
+    var writer = LineWriter.init(.{ .win = win, .row = row, .style = base_style });
     writer.text("  @");
     writer.text(author.login);
     writer.styledText("  (", meta_style);
@@ -259,7 +189,7 @@ fn drawAuthorRow(win: vaxis.Window, row: u16, author: AuthorCount, selected: boo
 fn drawCentered(win: vaxis.Window, row: u16, label: []const u8) void {
     const text_width = win.gwidth(label);
     const col: u16 = if (text_width < win.width) (win.width - text_width) / 2 else 0;
-    var writer = LineWriter.initAt(win, row, col, .{ .fg = .{ .index = 8 } });
+    var writer = LineWriter.init(.{ .win = win, .row = row, .col = col, .style = .{ .fg = .{ .index = 8 } } });
     writer.text(label);
 }
 

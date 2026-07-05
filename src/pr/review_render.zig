@@ -6,14 +6,15 @@
 //! assembled from the `ReviewSession`; a `bg` on the view keeps every text cell
 //! carrying the popup background so the dialog layers cleanly over the diff.
 //!
-//! Layout mirrors `pr/render.zig`: a small `LineWriter` over `vaxis.Window`
-//! cells, colocated `TestScreen` tests (this module cannot import `../testing`
-//! without escaping the `pr/` module root).
+//! Layout draws through the shared `pr/line_writer.zig` cell writer, with
+//! colocated `TestScreen` tests (this module cannot import `../testing` without
+//! escaping the `pr/` module root).
 
 const std = @import("std");
 const vaxis = @import("vaxis");
 const review_controller = @import("review_controller.zig");
 const review_parse = @import("review_parse.zig");
+const line_writer = @import("line_writer.zig");
 
 const Verdict = review_controller.Verdict;
 const ThreadCounts = review_controller.ThreadCounts;
@@ -23,6 +24,7 @@ const Review = review_parse.Review;
 const CheckRun = review_parse.CheckRun;
 const Style = vaxis.Cell.Style;
 const Color = vaxis.Cell.Color;
+const LineWriter = line_writer.LineWriter;
 
 const muted = Style{ .fg = .{ .index = 8 } };
 const accent = Style{ .fg = .{ .index = 6 } }; // cyan
@@ -75,12 +77,12 @@ pub fn drawSubmitDialog(win: vaxis.Window, view: SubmitView) void {
     if (win.height == 0 or win.width == 0) return;
     fillBackground(win, view.bg);
 
-    var title = LineWriter.init(win, 0, .{ .fg = .{ .index = 6 }, .bold = true }, view.bg);
+    var title = LineWriter.init(.{ .win = win, .row = 0, .style = .{ .fg = .{ .index = 6 }, .bold = true }, .bg = view.bg });
     title.text(" Submit review");
     if (view.submitting) title.styledText("  submitting…", muted);
 
     // Verdict selector: the active verdict is marked and highlighted.
-    var sel = LineWriter.init(win, 2, .{}, view.bg);
+    var sel = LineWriter.init(.{ .win = win, .row = 2, .bg = view.bg });
     sel.styledText(" ", .{});
     drawVerdictOption(&sel, "Comment", view.verdict == .comment);
     sel.styledText("   ", .{});
@@ -89,7 +91,7 @@ pub fn drawSubmitDialog(win: vaxis.Window, view: SubmitView) void {
     drawVerdictOption(&sel, "Request changes", view.verdict == .request_changes);
 
     // Summary of what the submit publishes.
-    var summary = LineWriter.init(win, 3, muted, view.bg);
+    var summary = LineWriter.init(.{ .win = win, .row = 3, .style = muted, .bg = view.bg });
     summary.styledText(" ", muted);
     summary.styledUnsigned(view.draft_count, muted);
     summary.styledText(if (view.draft_count == 1) " draft comment · " else " draft comments · ", muted);
@@ -108,12 +110,12 @@ pub fn drawSubmitDialog(win: vaxis.Window, view: SubmitView) void {
     }
 
     if (view.error_msg.len > 0 and err_row > body_top) {
-        var err = LineWriter.init(win, err_row, danger, view.bg);
+        var err = LineWriter.init(.{ .win = win, .row = err_row, .style = danger, .bg = view.bg });
         err.styledText(" ⚠ ", danger);
         err.styledText(view.error_msg, danger);
     }
 
-    var footer = LineWriter.init(win, footer_row, muted, view.bg);
+    var footer = LineWriter.init(.{ .win = win, .row = footer_row, .style = muted, .bg = view.bg });
     if (view.confirm_discard) {
         footer.styledText(" ^D again to discard the pending review · any key cancels", warn_yellow);
     } else {
@@ -130,13 +132,13 @@ pub fn drawInfoPanel(win: vaxis.Window, view: InfoView) void {
     if (win.height == 0 or win.width == 0) return;
     fillBackground(win, view.bg);
 
-    var header = LineWriter.init(win, 0, .{ .bold = true }, view.bg);
+    var header = LineWriter.init(.{ .win = win, .row = 0, .style = .{ .bold = true }, .bg = view.bg });
     header.styledText(" #", muted);
     header.styledUnsigned(view.number, muted);
     header.text(" ");
     header.text(view.title);
 
-    var meta = LineWriter.init(win, 1, muted, view.bg);
+    var meta = LineWriter.init(.{ .win = win, .row = 1, .style = muted, .bg = view.bg });
     meta.styledText(" @", muted);
     meta.styledText(view.author, accent);
     meta.styledText("  ", muted);
@@ -145,7 +147,7 @@ pub fn drawInfoPanel(win: vaxis.Window, view: InfoView) void {
     meta.styledText(view.head_ref, muted);
     if (view.is_draft) meta.styledText("  · draft", warn_yellow);
 
-    var status = LineWriter.init(win, 2, muted, view.bg);
+    var status = LineWriter.init(.{ .win = win, .row = 2, .style = muted, .bg = view.bg });
     status.styledText(" ", muted);
     status.styledText(rollupGlyph(view.rollup), rollupStyle(view.rollup));
     status.styledText(" CI · ", muted);
@@ -173,7 +175,7 @@ pub fn drawInfoPanel(win: vaxis.Window, view: InfoView) void {
     }
 
     if (has_note and note_row > body_top) {
-        var note = LineWriter.init(win, note_row, warn_yellow, view.bg);
+        var note = LineWriter.init(.{ .win = win, .row = note_row, .style = warn_yellow, .bg = view.bg });
         note.styledText(" ⚠ ", warn_yellow);
         if (view.unplaced_count > 0) {
             note.styledUnsigned(view.unplaced_count, warn_yellow);
@@ -185,7 +187,7 @@ pub fn drawInfoPanel(win: vaxis.Window, view: InfoView) void {
         }
     }
 
-    var footer = LineWriter.init(win, footer_row, muted, view.bg);
+    var footer = LineWriter.init(.{ .win = win, .row = footer_row, .style = muted, .bg = view.bg });
     footer.styledText(" j/k scroll · ^d/^u page · i/Esc/q close", muted);
 }
 
@@ -213,7 +215,7 @@ fn drawBodyEditor(win: vaxis.Window, view: SubmitView, top: u16, bottom: u16) vo
     const visible_rows: usize = bottom - top; // caller guarantees top < bottom
 
     if (view.body.len == 0) {
-        var empty = LineWriter.init(win, top, muted, view.bg);
+        var empty = LineWriter.init(.{ .win = win, .row = top, .style = muted, .bg = view.bg });
         empty.styledText(" (no summary — Ctrl-S submits the drafts)", muted);
         if (view.editing) positionCursor(win, top, 1, view.insert_mode);
         return;
@@ -245,7 +247,7 @@ fn drawBodyEditor(win: vaxis.Window, view: SubmitView, top: u16, bottom: u16) vo
     while (it.next()) |line| : (idx += 1) {
         if (idx < scroll) continue;
         if (row >= bottom) break;
-        var writer = LineWriter.init(win, row, .{}, view.bg);
+        var writer = LineWriter.init(.{ .win = win, .row = row, .bg = view.bg });
         writer.styledText(" ", .{});
         writer.text(line);
         row += 1;
@@ -427,7 +429,7 @@ const BodyCursor = struct {
         const visible = self.vi >= self.scroll and self.row < self.bottom;
         self.vi += 1;
         if (!visible) return null;
-        const lw = LineWriter.init(self.win, self.row, style, self.bg);
+        const lw = LineWriter.init(.{ .win = self.win, .row = self.row, .style = style, .bg = self.bg });
         self.row += 1;
         return lw;
     }
@@ -436,69 +438,6 @@ const BodyCursor = struct {
         return self.row >= self.bottom;
     }
 };
-
-const LineWriter = struct {
-    win: vaxis.Window,
-    row: u16,
-    col: u16,
-    style: Style,
-    bg: Color,
-
-    fn init(win: vaxis.Window, row: u16, style: Style, bg: Color) LineWriter {
-        return .{ .win = win, .row = row, .col = 0, .style = style, .bg = bg };
-    }
-
-    fn text(self: *LineWriter, value: []const u8) void {
-        var iter = self.win.unicode.graphemeIterator(value);
-        while (iter.next()) |item| {
-            const bytes = item.bytes(value);
-            if (std.mem.eql(u8, bytes, "\n")) return;
-            self.grapheme(bytes);
-        }
-    }
-
-    fn styledText(self: *LineWriter, value: []const u8, style: Style) void {
-        const old_style = self.style;
-        self.style = style;
-        self.text(value);
-        self.style = old_style;
-    }
-
-    fn unsigned(self: *LineWriter, value: u64) void {
-        var divisor: u64 = 1;
-        while (value / divisor >= 10) divisor *= 10;
-        var remaining = divisor;
-        while (remaining > 0) : (remaining /= 10) {
-            const digit: usize = @intCast((value / remaining) % 10);
-            self.grapheme(digit_graphemes[digit]);
-        }
-    }
-
-    fn styledUnsigned(self: *LineWriter, value: u64, style: Style) void {
-        const old_style = self.style;
-        self.style = style;
-        self.unsigned(value);
-        self.style = old_style;
-    }
-
-    fn grapheme(self: *LineWriter, value: []const u8) void {
-        const width = self.win.gwidth(value);
-        if (width == 0) return;
-        if (width > self.win.width - self.col) {
-            self.col = self.win.width;
-            return;
-        }
-        var style = self.style;
-        style.bg = self.bg;
-        self.win.writeCell(self.col, self.row, .{
-            .char = .{ .grapheme = value, .width = @intCast(width) },
-            .style = style,
-        });
-        self.col += width;
-    }
-};
-
-const digit_graphemes = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
 
 // =============================================================================
 // Tests
