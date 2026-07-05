@@ -16,13 +16,6 @@ pub const StepContext = struct {
     needs_render: *bool,
 };
 
-pub fn hasActive(agent_state: ?*const AgentState) bool {
-    if (agent_state) |st| {
-        return st.hasDebugReplay();
-    }
-    return false;
-}
-
 pub fn isPlaying(agent_state: ?*const AgentState) bool {
     if (agent_state) |st| {
         return st.isDebugReplayPlaying();
