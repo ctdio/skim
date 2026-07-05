@@ -30,6 +30,7 @@ const Color = rendering_common.Color;
 const gwidth = @import("../rendering/width.zig").gwidth;
 
 // Import utilities for word-aware wrapping and dialog rendering
+const width_util = @import("../rendering/width.zig");
 const rendering_utils = @import("../rendering/utils.zig");
 const RenderUtils = rendering_utils.RenderUtils;
 
@@ -1181,7 +1182,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, tab: *AgentTab, is_focused: bool
     };
     _ = win.print(&title_seg, .{ .row_offset = 0 });
 
-    const title_width = 2 + RenderUtils.displayWidth(title) + RenderUtils.displayWidth(suffix);
+    const title_width = 2 + width_util.displayWidth(title) + width_util.displayWidth(suffix);
 
     var replay_buf: [48]u8 = undefined;
     var replay_text: ?[]const u8 = null;
@@ -1232,7 +1233,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, tab: *AgentTab, is_focused: bool
     const dim_style = vaxis.Style{ .fg = Color.dim_gray };
 
     // Reserve right edge for status to avoid overlapping token/context text.
-    const status_width = RenderUtils.displayWidth(status_text);
+    const status_width = width_util.displayWidth(status_text);
     const status_col = if (win.width > title_width + status_width)
         win.width - status_width
     else
@@ -1291,14 +1292,14 @@ fn printTitleInfoSegmentClipped(win: vaxis.Window, row: usize, col: *usize, end_
     if (col.* >= end_col) return;
 
     const available = end_col - col.*;
-    const clipped = RenderUtils.sliceByDisplayWidth(text, available);
+    const clipped = width_util.sliceByDisplayWidth(text, available);
     if (clipped.len == 0) return;
 
     var seg = [_]vaxis.Cell.Segment{
         .{ .text = clipped, .style = style },
     };
     _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col.*) });
-    col.* += RenderUtils.displayWidth(clipped);
+    col.* += width_util.displayWidth(clipped);
 }
 
 /// Render the tab bar when multiple tabs exist (vim-style)

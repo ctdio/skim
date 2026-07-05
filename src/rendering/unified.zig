@@ -4,6 +4,7 @@ const parser = @import("../git/parser.zig");
 const syntax = @import("../highlighting/core.zig");
 const rendering_common = @import("common.zig");
 const render_utils = @import("utils.zig");
+const width_util = @import("width.zig");
 const state_helpers = @import("../state.zig");
 const navigation = @import("../navigation.zig");
 const file_header = @import("file_header.zig");
@@ -299,7 +300,7 @@ pub const UnifiedRenderer = struct {
         };
 
         // Calculate number of rows needed for wrapping (use display width, not bytes)
-        const text_display_width = RenderUtils.displayWidth(header_text);
+        const text_display_width = width_util.displayWidth(header_text);
         const num_rows = if (text_display_width == 0) 1 else (text_display_width + content_width - 1) / content_width;
 
         const content_start = 1 + gutter_width + Layout.gutter_spacing;
@@ -359,13 +360,13 @@ pub const UnifiedRenderer = struct {
             const chunk = app.profileSliceByDisplayWidth(remaining_text, content_width);
 
             // Calculate display position of range boundary
-            const range_display_len = RenderUtils.displayWidth(header_text[0..range_len]);
+            const range_display_len = width_util.displayWidth(header_text[0..range_len]);
 
             if (chunk.len > 0) {
                 // Determine if we're in range or context section based on display position
                 if (display_start < range_display_len) {
                     // This chunk starts in range section (possibly mixed with context)
-                    const display_end = display_start + RenderUtils.displayWidth(chunk);
+                    const display_end = display_start + width_util.displayWidth(chunk);
                     if (display_end <= range_display_len) {
                         // Pure range
                         const range_text = try RenderUtils.copyFrameText(app, chunk);

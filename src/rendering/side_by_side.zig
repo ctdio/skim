@@ -5,6 +5,7 @@ const syntax = @import("../highlighting/core.zig");
 const comments = @import("../comments/store.zig");
 const rendering_common = @import("common.zig");
 const render_utils = @import("utils.zig");
+const width_util = @import("width.zig");
 const state_helpers = @import("../state.zig");
 const navigation = @import("../navigation.zig");
 const file_header = @import("file_header.zig");
@@ -347,7 +348,7 @@ pub const SideBySideRenderer = struct {
         };
 
         // Calculate number of rows needed for wrapping (use display width, not bytes)
-        const text_display_width = RenderUtils.displayWidth(header_text);
+        const text_display_width = width_util.displayWidth(header_text);
         const num_rows = if (text_display_width == 0) 1 else (text_display_width + left_width - 1) / left_width;
 
         // Get styles using shared utilities
@@ -407,14 +408,14 @@ pub const SideBySideRenderer = struct {
             const chunk = app.profileSliceByDisplayWidth(remaining_text, left_width);
 
             // Calculate display position of range boundary
-            const range_display_len = RenderUtils.displayWidth(header_text[0..range_len]);
+            const range_display_len = width_util.displayWidth(header_text[0..range_len]);
 
             const left_content_start = 1 + gutter_width + Layout.gutter_spacing;
             if (chunk.len > 0) {
                 // Determine if we're in range or context section based on display position
                 if (display_start < range_display_len) {
                     // This chunk starts in range section (possibly mixed with context)
-                    const display_end = display_start + RenderUtils.displayWidth(chunk);
+                    const display_end = display_start + width_util.displayWidth(chunk);
                     if (display_end <= range_display_len) {
                         // Pure range
                         const range_text = try RenderUtils.copyFrameText(app, chunk);
@@ -471,7 +472,7 @@ pub const SideBySideRenderer = struct {
             if (chunk.len > 0) {
                 // Reuse the display position calculations from left side
                 if (display_start < range_display_len) {
-                    const display_end = display_start + RenderUtils.displayWidth(chunk);
+                    const display_end = display_start + width_util.displayWidth(chunk);
                     if (display_end <= range_display_len) {
                         // Pure range
                         const range_text = try RenderUtils.copyFrameText(app, chunk);
@@ -556,7 +557,7 @@ pub const SideBySideRenderer = struct {
         switch (line.line_type) {
             .context => {
                 // Show on both sides - calculate rows based on display width
-                const content_display_width = RenderUtils.displayWidth(line.content);
+                const content_display_width = width_util.displayWidth(line.content);
                 const num_rows = if (content_display_width == 0) 1 else (content_display_width + left_width - 1) / left_width;
 
                 var current_row = row;
@@ -642,7 +643,7 @@ pub const SideBySideRenderer = struct {
             .delete => {
                 // Show on left only, wrap as needed
                 // Note: Delete lines are not in the new file, so syntax highlighting won't apply
-                const content_display_width = RenderUtils.displayWidth(line.content);
+                const content_display_width = width_util.displayWidth(line.content);
                 const num_rows = if (content_display_width == 0) 1 else (content_display_width + left_width - 1) / left_width;
 
                 var current_row = row;
@@ -700,7 +701,7 @@ pub const SideBySideRenderer = struct {
             },
             .add => {
                 // Show on right only, wrap as needed
-                const content_display_width = RenderUtils.displayWidth(line.content);
+                const content_display_width = width_util.displayWidth(line.content);
                 const num_rows = if (content_display_width == 0) 1 else (content_display_width + right_width - 1) / right_width;
 
                 var current_row = row;

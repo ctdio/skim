@@ -16,6 +16,7 @@ const search = @import("search.zig");
 const clipboard = @import("clipboard.zig");
 const rendering_common = @import("rendering/common.zig");
 const render_utils = @import("rendering/utils.zig");
+const width_util = @import("rendering/width.zig");
 const frame = @import("rendering/frame.zig");
 const state_helpers = @import("state.zig");
 const ui_components = @import("ui.zig");
@@ -3174,10 +3175,10 @@ pub const App = struct {
     pub fn profileSliceByDisplayWidth(self: *App, text: []const u8, max_width: usize) []const u8 {
         if (profiling_enabled) {
             if (!self.profile_active_frame) {
-                return RenderUtils.sliceByDisplayWidth(text, max_width);
+                return width_util.sliceByDisplayWidth(text, max_width);
             }
             var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
-            const slice = RenderUtils.sliceByDisplayWidth(text, max_width);
+            const slice = width_util.sliceByDisplayWidth(text, max_width);
             if (timer_opt) |*timer| {
                 self.profile_counters.slice_ns += timer.read();
             }
@@ -3185,7 +3186,7 @@ pub const App = struct {
             return slice;
         }
 
-        return RenderUtils.sliceByDisplayWidth(text, max_width);
+        return width_util.sliceByDisplayWidth(text, max_width);
     }
 
     pub fn profilePadSegments(

@@ -10,6 +10,7 @@ const rendering_common = @import("../rendering/common.zig");
 const Color = rendering_common.Color;
 
 const rendering_utils = @import("../rendering/utils.zig");
+const width_util = @import("../rendering/width.zig");
 const RenderUtils = rendering_utils.RenderUtils;
 
 const highlighting = @import("../highlighting/core.zig");
@@ -1780,7 +1781,7 @@ pub const ChatLineMap = struct {
         // Calculate total line width in terminal cells.
         var total_width: usize = 0;
         for (segments.items) |seg| {
-            total_width += RenderUtils.displayWidth(seg.text);
+            total_width += width_util.displayWidth(seg.text);
         }
 
         // Calculate available width (accounting for indent)
@@ -1799,7 +1800,7 @@ pub const ChatLineMap = struct {
         var current_width: usize = 0;
 
         for (segments.items) |seg| {
-            const seg_width = RenderUtils.displayWidth(seg.text);
+            const seg_width = width_util.displayWidth(seg.text);
             // Try to fit this segment on the current line
             if (current_width + seg_width <= available_width) {
                 // Fits entirely
@@ -1812,7 +1813,7 @@ pub const ChatLineMap = struct {
 
                 while (remaining.len > 0) {
                     const space_left = if (available_width > current_width) available_width - current_width else 0;
-                    const remaining_width = RenderUtils.displayWidth(remaining);
+                    const remaining_width = width_util.displayWidth(remaining);
 
                     if (remaining_width <= space_left) {
                         // Rest fits on current line
@@ -1825,7 +1826,7 @@ pub const ChatLineMap = struct {
                     }
 
                     // Find a good break point (word boundary) without splitting UTF-8 graphemes.
-                    const fitting = RenderUtils.sliceByDisplayWidth(remaining, space_left);
+                    const fitting = width_util.sliceByDisplayWidth(remaining, space_left);
                     var break_at: usize = fitting.len;
 
                     // Prefer the last natural break point in the fitting slice.
@@ -1849,7 +1850,7 @@ pub const ChatLineMap = struct {
 
                     // If still no break point (very long word at start of line), force break at available width
                     if (break_at == 0) {
-                        const one_cell = RenderUtils.sliceByDisplayWidth(remaining, 1);
+                        const one_cell = width_util.sliceByDisplayWidth(remaining, 1);
                         break_at = if (one_cell.len > 0) one_cell.len else @min(@as(usize, 1), remaining.len);
                     }
 
@@ -1863,7 +1864,7 @@ pub const ChatLineMap = struct {
                             .text = text_portion,
                             .style = remaining_style,
                         });
-                        current_width += RenderUtils.displayWidth(text_portion);
+                        current_width += width_util.displayWidth(text_portion);
                     }
 
                     // Flush current line

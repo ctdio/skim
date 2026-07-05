@@ -6,7 +6,6 @@ const comments = @import("../comments/store.zig");
 const rendering_common = @import("common.zig");
 const state_helpers = @import("../state.zig");
 const width_util = @import("width.zig");
-const gwidth = width_util.gwidth;
 const CommentController = @import("../comments/controller.zig").CommentController;
 const thread_block = @import("thread_block.zig");
 const review_controller = @import("../pr/review_controller.zig");
@@ -27,23 +26,6 @@ pub const ReviewThreadParams = struct {
 };
 
 pub const RenderUtils = struct {
-    // Unicode display width utilities
-
-    /// Calculate the display width of a UTF-8 string in terminal cells.
-    /// Uses vaxis gwidth for accurate Unicode width calculation including
-    /// wide characters (emoji, CJK) that take 2 terminal cells.
-    pub fn displayWidth(text: []const u8) usize {
-        return width_util.displayWidth(text);
-    }
-
-    /// Slice a UTF-8 string by display width (terminal cells), not bytes.
-    /// Returns a slice of the input text containing at most `max_width` terminal cells.
-    /// The returned slice ends at a valid UTF-8 boundary.
-    /// Uses vaxis gwidth for accurate Unicode width calculation.
-    pub fn sliceByDisplayWidth(text: []const u8, max_width: usize) []const u8 {
-        return width_util.sliceByDisplayWidth(text, max_width);
-    }
-
     /// Skip a number of codepoints in a UTF-8 string and return the byte offset.
     /// Returns the byte position after skipping `count` codepoints.
     pub fn skipCodepoints(text: []const u8, count: usize) usize {
