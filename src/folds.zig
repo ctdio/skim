@@ -92,113 +92,40 @@ pub fn openAllFolds(folds: *FoldSet) void {
 
 // Toggle fold at cursor position (file header -> fold file, hunk/code -> fold hunk)
 pub fn toggleFoldUnderCursor(app: *App) !void {
-    const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return;
-    const file_idx = record.file_idx;
-
-    // Track which fold was toggled for cursor positioning
-    var target_hunk_idx: ?usize = null;
-
-    switch (record.line_type) {
-        .file_header => {
-            toggleFileFold(&app.state.collapsed_folds, file_idx);
-        },
-        .hunk_header => |hunk_info| {
-            toggleHunkFold(&app.state.collapsed_folds, file_idx, hunk_info.hunk_idx);
-            target_hunk_idx = hunk_info.hunk_idx;
-        },
-        .code_line => |code_info| {
-            toggleHunkFold(&app.state.collapsed_folds, file_idx, code_info.hunk_idx);
-            target_hunk_idx = code_info.hunk_idx;
-        },
-        .comment_line => |comment_info| {
-            toggleHunkFold(&app.state.collapsed_folds, file_idx, comment_info.parent_hunk_idx);
-            target_hunk_idx = comment_info.parent_hunk_idx;
-        },
-        .review_thread => return,
-        .spacer => {
-            // On spacer, no fold action
-            return;
-        },
+    const target = foldTargetUnderCursor(app) orelse return;
+    if (target.hunk_idx) |hunk_idx| {
+        toggleHunkFold(&app.state.collapsed_folds, target.file_idx, hunk_idx);
+    } else {
+        toggleFileFold(&app.state.collapsed_folds, target.file_idx);
     }
-
-    // Rebuild LineMap and move cursor to fold header
-    app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
-    moveCursorToFoldHeader(app, file_idx, target_hunk_idx);
+    try rebuildLineMap(app);
+    moveCursorToFoldHeader(app, target.file_idx, target.hunk_idx);
     app.needs_render = true;
 }
 
 // Close fold at cursor position
 pub fn closeFoldUnderCursor(app: *App) !void {
-    const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return;
-    const file_idx = record.file_idx;
-
-    // Track which fold was closed for cursor positioning
-    var target_hunk_idx: ?usize = null;
-
-    switch (record.line_type) {
-        .file_header => {
-            closeFileFold(&app.state.collapsed_folds, file_idx);
-        },
-        .hunk_header => |hunk_info| {
-            closeHunkFold(&app.state.collapsed_folds, file_idx, hunk_info.hunk_idx);
-            target_hunk_idx = hunk_info.hunk_idx;
-        },
-        .code_line => |code_info| {
-            closeHunkFold(&app.state.collapsed_folds, file_idx, code_info.hunk_idx);
-            target_hunk_idx = code_info.hunk_idx;
-        },
-        .comment_line => |comment_info| {
-            closeHunkFold(&app.state.collapsed_folds, file_idx, comment_info.parent_hunk_idx);
-            target_hunk_idx = comment_info.parent_hunk_idx;
-        },
-        .review_thread => return,
-        .spacer => {
-            return;
-        },
+    const target = foldTargetUnderCursor(app) orelse return;
+    if (target.hunk_idx) |hunk_idx| {
+        closeHunkFold(&app.state.collapsed_folds, target.file_idx, hunk_idx);
+    } else {
+        closeFileFold(&app.state.collapsed_folds, target.file_idx);
     }
-
-    // Rebuild LineMap and move cursor to fold header
-    app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
-    moveCursorToFoldHeader(app, file_idx, target_hunk_idx);
+    try rebuildLineMap(app);
+    moveCursorToFoldHeader(app, target.file_idx, target.hunk_idx);
     app.needs_render = true;
 }
 
 // Open fold at cursor position
 pub fn openFoldUnderCursor(app: *App) !void {
-    const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return;
-    const file_idx = record.file_idx;
-
-    // Track which fold was opened for cursor positioning
-    var target_hunk_idx: ?usize = null;
-
-    switch (record.line_type) {
-        .file_header => {
-            openFileFold(&app.state.collapsed_folds, file_idx);
-        },
-        .hunk_header => |hunk_info| {
-            openHunkFold(&app.state.collapsed_folds, file_idx, hunk_info.hunk_idx);
-            target_hunk_idx = hunk_info.hunk_idx;
-        },
-        .code_line => |code_info| {
-            openHunkFold(&app.state.collapsed_folds, file_idx, code_info.hunk_idx);
-            target_hunk_idx = code_info.hunk_idx;
-        },
-        .comment_line => |comment_info| {
-            openHunkFold(&app.state.collapsed_folds, file_idx, comment_info.parent_hunk_idx);
-            target_hunk_idx = comment_info.parent_hunk_idx;
-        },
-        .review_thread => return,
-        .spacer => {
-            return;
-        },
+    const target = foldTargetUnderCursor(app) orelse return;
+    if (target.hunk_idx) |hunk_idx| {
+        openHunkFold(&app.state.collapsed_folds, target.file_idx, hunk_idx);
+    } else {
+        openFileFold(&app.state.collapsed_folds, target.file_idx);
     }
-
-    // Rebuild LineMap and move cursor to fold header
-    app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
-    moveCursorToFoldHeader(app, file_idx, target_hunk_idx);
+    try rebuildLineMap(app);
+    moveCursorToFoldHeader(app, target.file_idx, target.hunk_idx);
     app.needs_render = true;
 }
 
@@ -209,9 +136,7 @@ pub fn closeAllFoldsAndRebuild(app: *App) !void {
 
     closeAllFolds(&app.state.collapsed_folds, app.state.files);
 
-    // Rebuild LineMap
-    app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
+    try rebuildLineMap(app);
     _ = hunk_view.restoreViewportFromAnchor(app, anchor);
     app.needs_render = true;
 }
@@ -223,9 +148,7 @@ pub fn openAllFoldsAndRebuild(app: *App) !void {
 
     openAllFolds(&app.state.collapsed_folds);
 
-    // Rebuild LineMap
-    app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
+    try rebuildLineMap(app);
     _ = hunk_view.restoreViewportFromAnchor(app, anchor);
     app.needs_render = true;
 }
@@ -238,9 +161,7 @@ pub fn closeFileFoldUnderCursor(app: *App) !void {
     // Close the file fold
     closeFileFold(&app.state.collapsed_folds, file_idx);
 
-    // Rebuild LineMap
-    app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
+    try rebuildLineMap(app);
 
     // Move cursor to the file header
     moveCursorToFoldHeader(app, file_idx, null);
@@ -255,13 +176,40 @@ pub fn openFileFoldUnderCursor(app: *App) !void {
     // Open the file fold
     openFileFold(&app.state.collapsed_folds, file_idx);
 
-    // Rebuild LineMap
-    app.state.line_map.deinit();
-    app.state.line_map = try line_map.LineMap.build(app.allocator, app.state.files, &app.state.comment_store, hunk_view.convertHunkViewMode(app), hunk_view.shouldApplyHunkFiltering(app), &app.state.collapsed_folds, app.reviewAnchored());
+    try rebuildLineMap(app);
 
     // Move cursor to the file header
     moveCursorToFoldHeader(app, file_idx, null);
     app.needs_render = true;
+}
+
+// The fold target under the cursor: which file, and (for hunk/code/comment
+// lines) which hunk. Null when the cursor is on a line with no fold action.
+const FoldTarget = struct { file_idx: usize, hunk_idx: ?usize };
+
+fn foldTargetUnderCursor(app: *App) ?FoldTarget {
+    const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return null;
+    return switch (record.line_type) {
+        .file_header => .{ .file_idx = record.file_idx, .hunk_idx = null },
+        .hunk_header => |hunk_info| .{ .file_idx = record.file_idx, .hunk_idx = hunk_info.hunk_idx },
+        .code_line => |code_info| .{ .file_idx = record.file_idx, .hunk_idx = code_info.hunk_idx },
+        .comment_line => |comment_info| .{ .file_idx = record.file_idx, .hunk_idx = comment_info.parent_hunk_idx },
+        .review_thread, .spacer => null,
+    };
+}
+
+// Free the current LineMap and rebuild it from the live fold state.
+fn rebuildLineMap(app: *App) !void {
+    app.state.line_map.deinit();
+    app.state.line_map = try line_map.LineMap.build(
+        app.allocator,
+        app.state.files,
+        &app.state.comment_store,
+        hunk_view.convertHunkViewMode(app),
+        hunk_view.shouldApplyHunkFiltering(app),
+        &app.state.collapsed_folds,
+        app.reviewAnchored(),
+    );
 }
 
 // Move cursor to the fold header (file or hunk) after folding
