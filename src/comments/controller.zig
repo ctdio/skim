@@ -645,7 +645,7 @@ pub const CommentController = struct {
             .body = ctx.comment_text,
         }) catch |err| {
             std.log.err("failed to start draft post: {any}", .{err});
-            app.showStatusMessage("failed to post draft comment");
+            app.showStatusError("failed to post draft comment");
             return false;
         };
 
@@ -670,7 +670,7 @@ pub const CommentController = struct {
 
         const started = review_controller.startReply(&app.state.review, app.allocator, thread_idx, body) catch |err| {
             std.log.err("failed to start reply: {any}", .{err});
-            app.showStatusMessage("failed to send reply");
+            app.showStatusError("failed to send reply");
             return false;
         };
         if (!started) {
@@ -706,7 +706,7 @@ pub const CommentController = struct {
 
         const started = review_controller.startEditOwn(&app.state.review, app.allocator, loc.thread_idx, loc.comment_idx, body) catch |err| {
             std.log.err("failed to start edit: {any}", .{err});
-            app.showStatusMessage("failed to save edit");
+            app.showStatusError("failed to save edit");
             return false;
         };
         if (!started) {

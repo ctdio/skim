@@ -813,6 +813,7 @@ pub const UI = struct {
             .scroll = review.info_scroll,
             .total_lines = pr.review_controller.infoLineCount(review, content_width),
             .data_unavailable = review.data_unavailable,
+            .refreshing = review.entry_in_flight,
             .bg = Color.dialog_bg,
         });
     }
@@ -1839,6 +1840,7 @@ pub const UI = struct {
 
             // Active PR review session: number, draft count, comment target, and
             // any in-flight draft posts.
+            var thread_hint_active = false;
             if (pr.review_controller.isActive(&app.state.review)) {
                 var pr_buf: [48]u8 = undefined;
                 const pr_seg = try std.fmt.bufPrint(&pr_buf, "  PR #{d}", .{app.state.review.number});
@@ -1859,6 +1861,33 @@ pub const UI = struct {
                         .none => Color.dim,
                     };
                     try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ci_glyph), .style = .{ .fg = ci_color, .bold = true } });
+                }
+
+                // Delete confirmation takes priority; otherwise show the thread
+                // conversation hints when the cursor is on a review thread — with
+                // the edit/delete keys dropped when the viewer owns no comment
+                // there (those actions would refuse) — FR-5. Rendered before the
+                // secondary metadata so the actionable keys survive at 80 cols.
+                const cursor_thread_idx = cursorReviewThreadIdx(app);
+                const owns_comment = if (cursor_thread_idx) |idx| blk: {
+                    if (idx >= app.state.review.threads.items.len) break :blk false;
+                    break :blk pr.review_controller.lastOwnCommentIdx(&app.state.review.threads.items[idx]) != null;
+                } else false;
+                const thread_resolved = if (cursor_thread_idx) |idx| blk: {
+                    if (idx >= app.state.review.threads.items.len) break :blk false;
+                    break :blk app.state.review.threads.items[idx].data.is_resolved;
+                } else false;
+                const hint = pr.thread_hint.threadHint(.{
+                    .delete_confirm = pr.review_controller.deleteConfirmArmed(&app.state.review) != null,
+                    .on_thread = cursor_thread_idx != null,
+                    .owns_comment = owns_comment,
+                });
+                if (hint != .none) {
+                    thread_hint_active = true;
+                    try segments.append(app.allocator, .{
+                        .text = try RenderUtils.copyFrameText(app, pr.thread_hint.hintText(hint, thread_resolved)),
+                        .style = if (hint == .delete_confirm) .{ .fg = Color.red, .bold = true } else .{ .fg = Color.dim },
+                    });
                 }
 
                 const drafts = pr.review_controller.draftCount(&app.state.review);
@@ -1906,30 +1935,6 @@ pub const UI = struct {
                     try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " │ refreshing…"), .style = .{ .fg = Color.dim } });
                 }
 
-                // Delete confirmation takes priority; otherwise show the thread
-                // conversation hints when the cursor is on a review thread — with
-                // the edit/delete keys dropped when the viewer owns no comment
-                // there (those actions would refuse) — FR-5.
-                const cursor_thread_idx = cursorReviewThreadIdx(app);
-                const owns_comment = if (cursor_thread_idx) |idx| blk: {
-                    if (idx >= app.state.review.threads.items.len) break :blk false;
-                    break :blk pr.review_controller.lastOwnCommentIdx(&app.state.review.threads.items[idx]) != null;
-                } else false;
-                const thread_resolved = if (cursor_thread_idx) |idx| blk: {
-                    if (idx >= app.state.review.threads.items.len) break :blk false;
-                    break :blk app.state.review.threads.items[idx].data.is_resolved;
-                } else false;
-                const hint = pr.thread_hint.threadHint(.{
-                    .delete_confirm = pr.review_controller.deleteConfirmArmed(&app.state.review) != null,
-                    .on_thread = cursor_thread_idx != null,
-                    .owns_comment = owns_comment,
-                });
-                if (hint != .none) {
-                    try segments.append(app.allocator, .{
-                        .text = try RenderUtils.copyFrameText(app, pr.thread_hint.hintText(hint, thread_resolved)),
-                        .style = if (hint == .delete_confirm) .{ .fg = Color.red, .bold = true } else .{ .fg = Color.dim },
-                    });
-                }
             }
 
             // Only show hunk view mode indicator in unified view (where filtering applies)
@@ -1974,16 +1979,26 @@ pub const UI = struct {
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
             }
 
-            // Show temporary status message (if any)
+            // Show temporary status message (if any). Errors render red with a ⚠
+            // prefix (matching the submit dialog) so a failed thread interaction
+            // never reads like a success.
             if (app.state.status_message) |msg| {
                 var msg_buf: [128]u8 = undefined;
-                const formatted = std.fmt.bufPrint(&msg_buf, "  [{s}]", .{msg}) catch msg;
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, formatted), .style = .{ .fg = Color.magenta } });
+                const is_error = app.state.status_message_severity == .err;
+                const formatted = if (is_error)
+                    std.fmt.bufPrint(&msg_buf, "  [⚠ {s}]", .{msg}) catch msg
+                else
+                    std.fmt.bufPrint(&msg_buf, "  [{s}]", .{msg}) catch msg;
+                const color = if (is_error) Color.red else Color.magenta;
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, formatted), .style = .{ .fg = color } });
             }
 
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
-
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+            // Drop the generic "j/k:Move | ? for help" trailer while a contextual
+            // thread hint is showing so the actionable keys survive at 80 cols.
+            if (!thread_hint_active) {
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+            }
         }
 
         _ = win.print(segments.items, .{ .row_offset = @intCast(0) });

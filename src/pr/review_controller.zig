@@ -1017,8 +1017,9 @@ pub fn verdictLabel(verdict: Verdict) []const u8 {
 }
 
 /// Cycle the selected verdict (Tab / Shift-Tab in the dialog). `forward` advances
-/// comment → approve → request_changes → comment.
-pub fn cycleVerdict(self: *ReviewSession, forward: bool) void {
+/// comment → approve → request_changes → comment. Clears any stale submit error so
+/// switching verdict to fix a rejected submit doesn't leave a contradictory message.
+pub fn cycleVerdict(self: *ReviewSession, allocator: Allocator, forward: bool) void {
     const order = [_]Verdict{ .comment, .approve, .request_changes };
     var idx: usize = 0;
     for (order, 0..) |v, i| {
@@ -1027,6 +1028,7 @@ pub fn cycleVerdict(self: *ReviewSession, forward: bool) void {
     const n = order.len;
     idx = if (forward) (idx + 1) % n else (idx + n - 1) % n;
     self.submit.verdict = order[idx];
+    clearSubmitError(self, allocator);
 }
 
 /// Begin an async submit of the selected verdict with `body` (FR-6). Refuses a
@@ -3037,20 +3039,29 @@ test "verdictLabel: maps each verdict to its human label" {
 test "cycleVerdict: forward wraps comment -> approve -> request_changes -> comment" {
     var session = ReviewSession{};
     try testing.expectEqual(Verdict.comment, session.submit.verdict);
-    cycleVerdict(&session, true);
+    cycleVerdict(&session, testing.allocator, true);
     try testing.expectEqual(Verdict.approve, session.submit.verdict);
-    cycleVerdict(&session, true);
+    cycleVerdict(&session, testing.allocator, true);
     try testing.expectEqual(Verdict.request_changes, session.submit.verdict);
-    cycleVerdict(&session, true);
+    cycleVerdict(&session, testing.allocator, true);
     try testing.expectEqual(Verdict.comment, session.submit.verdict);
 }
 
 test "cycleVerdict: backward wraps comment -> request_changes" {
     var session = ReviewSession{};
-    cycleVerdict(&session, false);
+    cycleVerdict(&session, testing.allocator, false);
     try testing.expectEqual(Verdict.request_changes, session.submit.verdict);
-    cycleVerdict(&session, false);
+    cycleVerdict(&session, testing.allocator, false);
     try testing.expectEqual(Verdict.approve, session.submit.verdict);
+}
+
+test "cycleVerdict: clears a stale submit error when the verdict changes" {
+    var session = ReviewSession{};
+    session.submit.verdict = .approve;
+    session.submit.error_msg = try testing.allocator.dupe(u8, "Can not approve your own pull request");
+    cycleVerdict(&session, testing.allocator, true);
+    try testing.expectEqual(Verdict.request_changes, session.submit.verdict);
+    try testing.expect(session.submit.error_msg == null);
 }
 
 test "submitGuard: refuses when no session is active" {

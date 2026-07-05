@@ -2,6 +2,6 @@
 │ this needs a guard
 └─
        ┃
-       ┃ Edit comment
+       ┃ Edit         Enter:Save  Ctrl+J:Newline  ESC:Cancel
        ┃ > this needs a guard before deref
        ┃

@@ -1913,6 +1913,7 @@ test "snapshot: help_pr_review_popup" {
         help_helpers.binding("e", "Edit your comment (on thread)"),
         help_helpers.binding("x", "Resolve / unresolve (on thread)"),
         help_helpers.binding("d", "Delete your comment (on thread)"),
+        help_helpers.binding("o", "Fold / expand thread (on thread)"),
     };
 
     help_helpers.renderHelpPopup(win, " Keybindings ", &bindings, 72, 14);

@@ -389,27 +389,36 @@ pub const RenderUtils = struct {
         return slice;
     }
 
-    /// Appends the trailing hint text to an input-box header line, right-aligned
-    /// with a blank spacer. When the hints (plus their leading spacing) do not fit
-    /// in the remaining width, they are dropped and the space is padded with blanks
-    /// instead — this keeps the `┃` border on a single row on narrow terminals and
-    /// deeply-indented reply/edit boxes rather than wrapping the overflow onto the
-    /// next line and corrupting the border. `prefix_len` is the display width of the
-    /// already-appended border glyph plus label.
+    /// Appends the label and right-aligned trailing hints to an input-box header
+    /// line. The actionable hints (`Enter:Save …`) are the priority: their width is
+    /// reserved first and the label is ellipsized to whatever space is left so the
+    /// hints always render (e.g. ` Comment (Lines 10-20)` is ellipsized at narrow
+    /// widths rather than dropping the guidance entirely). Only when the terminal is
+    /// too narrow to fit the hints at all are they dropped and the label padded —
+    /// this keeps the `┃` border on a single row rather than wrapping the overflow
+    /// onto the next line and corrupting the border. `border_len` is the display
+    /// width of the already-appended border glyph.
     pub fn appendInputHeaderHints(
         app: *App,
         segments: *std.ArrayList(vaxis.Cell.Segment),
         content_width: usize,
-        prefix_len: usize,
+        border_len: usize,
+        label: []const u8,
+        label_style: vaxis.Style,
         hints: []const u8,
         hints_style: vaxis.Style,
     ) !void {
         const spacing = "  ";
         const bg_style: vaxis.Style = .{ .bg = Color.comment_hover_bg };
-        const total_fixed = prefix_len + spacing.len + hints.len;
+        const hints_block = spacing.len + hints.len;
 
-        if (total_fixed <= content_width) {
-            const spacer_len = content_width - total_fixed;
+        if (content_width >= border_len + hints_block) {
+            const label_budget = content_width - border_len - hints_block;
+            const shown = try truncateLabelWithEllipsis(app, label, label_budget);
+            const shown_width = @min(label.len, label_budget);
+            try segments.append(app.allocator, .{ .text = shown, .style = label_style });
+
+            const spacer_len = label_budget - shown_width;
             if (spacer_len > 0) {
                 const spacer = try frameTextSlice(app, spacer_len);
                 @memset(spacer, ' ');
@@ -417,14 +426,36 @@ pub const RenderUtils = struct {
             }
             try segments.append(app.allocator, .{ .text = try copyFrameText(app, spacing), .style = bg_style });
             try segments.append(app.allocator, .{ .text = try copyFrameText(app, hints), .style = hints_style });
-        } else {
-            const pad_len = content_width -| prefix_len;
-            if (pad_len > 0) {
-                const pad = try frameTextSlice(app, pad_len);
-                @memset(pad, ' ');
-                try segments.append(app.allocator, .{ .text = pad, .style = bg_style });
-            }
+            return;
         }
+
+        // Too narrow to fit the hints without wrapping the border — drop them,
+        // keep the (truncated) label, and pad the remainder.
+        const label_budget = content_width -| border_len;
+        const shown = try truncateLabelWithEllipsis(app, label, label_budget);
+        const shown_width = @min(label.len, label_budget);
+        try segments.append(app.allocator, .{ .text = shown, .style = label_style });
+        const pad_len = label_budget - shown_width;
+        if (pad_len > 0) {
+            const pad = try frameTextSlice(app, pad_len);
+            @memset(pad, ' ');
+            try segments.append(app.allocator, .{ .text = pad, .style = bg_style });
+        }
+    }
+
+    /// Truncates an ASCII label to `max_width` display cells, reserving one cell for
+    /// a trailing ellipsis when characters are dropped. Returns the label unchanged
+    /// when it already fits.
+    fn truncateLabelWithEllipsis(app: *App, label: []const u8, max_width: usize) ![]const u8 {
+        if (label.len <= max_width) return label;
+        if (max_width == 0) return label[0..0];
+
+        const ellipsis = "…";
+        const keep = max_width - 1;
+        const buf = try frameTextSlice(app, keep + ellipsis.len);
+        if (keep > 0) @memcpy(buf[0..keep], label[0..keep]);
+        @memcpy(buf[keep..], ellipsis);
+        return buf;
     }
 
     pub fn padTextForCursor(app: *App, text: []const u8, width: usize, is_cursor: bool) ![]const u8 {
@@ -853,7 +884,7 @@ pub const RenderUtils = struct {
         const label = blk: {
             switch (input.edit_context) {
                 .reply => break :blk try copyFrameText(app, " Reply"),
-                .edit_own => break :blk try copyFrameText(app, " Edit comment"),
+                .edit_own => break :blk try copyFrameText(app, " Edit"),
                 .none => {},
             }
             if (input.target_end_hunk_idx != null and input.target_end_line_idx != null) {
@@ -875,11 +906,8 @@ pub const RenderUtils = struct {
             }
         };
 
-        const border_and_label_len = 1 + label.len; // "┃" + label
-
         try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
-        try segments.append(app.allocator, .{ .text = label, .style = label_style });
-        try appendInputHeaderHints(app, &segments, content_width, border_and_label_len, hints, hints_style);
+        try appendInputHeaderHints(app, &segments, content_width, 1, label, label_style, hints, hints_style);
 
         _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
         current_row += 1;

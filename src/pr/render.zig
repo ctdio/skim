@@ -153,10 +153,42 @@ fn drawStatusBar(win: vaxis.Window, view: View) void {
         writer.styledText("  ", muted);
         writer.styledText(view.message, muted);
     } else {
-        writer.styledText("  enter review · ^a author · ^r refresh · ^o open · esc clear/back · ^c ", muted);
-        writer.styledText(if (view.pr_only) "quit" else "back", muted);
+        drawHint(&writer, view.pr_only);
     }
     if (view.loading) writer.styledText("  · loading…", muted);
+}
+
+/// Draws the picker key hints from the writer's current column. When the row is
+/// too narrow to hold every hint (e.g. an 80-column terminal), lower-priority
+/// segments are dropped right-to-left (open, then reload, then author) so the
+/// essential "esc clear/back · ^c quit/back" affordance is never clipped.
+fn drawHint(writer: *LineWriter, pr_only: bool) void {
+    const muted = Style{ .fg = .{ .index = 8 } };
+    const optional = [_][]const u8{ "enter review", "^n/^p move", "^a author", "^r reload", "^o open" };
+    const essential = "esc clear/back · ^c ";
+    const verb: []const u8 = if (pr_only) "quit" else "back";
+
+    const win = writer.win;
+    const lead_w = win.gwidth("  ");
+    const sep_w = win.gwidth(" · ");
+    const essential_w = win.gwidth(essential) + win.gwidth(verb);
+
+    // Largest count of leading segments that still leaves room for the essential
+    // hint; each kept segment carries a trailing " · " into the next one.
+    var keep: usize = optional.len;
+    while (keep > 0) : (keep -= 1) {
+        var used: u16 = writer.col + lead_w + essential_w + @as(u16, @intCast(keep)) * sep_w;
+        for (optional[0..keep]) |seg| used += win.gwidth(seg);
+        if (used <= win.width) break;
+    }
+
+    writer.styledText("  ", muted);
+    for (optional[0..keep]) |seg| {
+        writer.styledText(seg, muted);
+        writer.styledText(" · ", muted);
+    }
+    writer.styledText(essential, muted);
+    writer.styledText(verb, muted);
 }
 
 fn drawAuthorPicker(win: vaxis.Window, view: View) void {
@@ -581,6 +613,31 @@ test "draw: footer says ^c back when picking over a diff" {
 
     try testing.expect(rowContains(ts.screen, 3, "esc clear/back"));
     try testing.expect(rowContains(ts.screen, 3, "^c back"));
+}
+
+test "draw: footer keeps the quit/back hint on an 80-column terminal" {
+    var ts = try TestScreen.init(80, 4);
+    defer ts.deinit();
+
+    const prs = [_]PullRequest{testPr(.{ .title = "Ready" })};
+    const filtered = [_]usize{0};
+
+    draw(ts.window(), .{
+        .prs = &prs,
+        .filtered = &filtered,
+        .selected = 0,
+        .scroll = 0,
+        .loading = false,
+        .query = "",
+        .message = "",
+        .pr_only = true,
+    });
+
+    // The full hint overflows 80 cols; lower-priority segments drop so the
+    // essential clear/quit affordance still renders in full.
+    try testing.expect(rowContains(ts.screen, 3, "esc clear/back"));
+    try testing.expect(rowContains(ts.screen, 3, "^c quit"));
+    try testing.expect(rowContains(ts.screen, 3, "enter review"));
 }
 
 test "draw: author picker lists authors with counts over the PR list" {

@@ -75,6 +75,11 @@ pub const InfoView = struct {
     // in place of the empty-PR placeholder so a fetch failure never reads as a
     // genuinely empty PR.
     data_unavailable: bool = false,
+    // An `r` refetch is in flight. Surfaces a header marker (and swaps the
+    // data-unavailable retry note to a refreshing state) so the action is
+    // acknowledged inside the ~80%-screen overlay, not only on the status bar
+    // peeking out below it.
+    refreshing: bool = false,
     bg: Color = .default,
 };
 
@@ -116,6 +121,16 @@ pub fn drawSubmitDialog(win: vaxis.Window, view: SubmitView) void {
     const err_row: u16 = if (win.height >= 3) win.height - 2 else 0;
     if (body_top < err_row) {
         drawBodyEditor(win, view, body_top, err_row);
+    } else {
+        // Too short to fit the body editor. review_submit_mode still forwards
+        // every keystroke into the vim editor, so without a note here the user
+        // would type the review body with no preview and no cursor — blind input
+        // (Nielsen: visibility of system status). Surface a resize note in a row
+        // above the footer so input is never silent.
+        const note_row: u16 = @min(@as(u16, 4), footer_row -| 1);
+        var note = LineWriter.init(.{ .win = win, .row = note_row, .style = warn_yellow, .bg = view.bg });
+        note.styledText(" ⚠ ", warn_yellow);
+        note.styledText("Terminal too small — resize to edit", warn_yellow);
     }
 
     if (view.error_msg.len > 0 and err_row > body_top) {
@@ -128,7 +143,7 @@ pub fn drawSubmitDialog(win: vaxis.Window, view: SubmitView) void {
     if (view.confirm_discard) {
         footer.styledText(" ^D:Discard again  |  Any key:Cancel", warn_yellow);
     } else {
-        footer.styledText(" Tab:Verdict  |  ^S/Enter:Submit  |  ^J:Newline  |  ^D:Discard  |  ESC:Cancel", muted);
+        footer.styledText(" Tab:Verdict  |  ^S/Enter:Submit  |  ^D:Discard  |  ESC:Cancel", muted);
     }
 }
 
@@ -146,6 +161,7 @@ pub fn drawInfoPanel(win: vaxis.Window, view: InfoView) void {
     header.styledUnsigned(view.number, muted);
     header.text(" ");
     header.text(view.title);
+    if (view.refreshing) header.styledText("  refreshing…", muted);
 
     var meta = LineWriter.init(.{ .win = win, .row = 1, .style = muted, .bg = view.bg });
     meta.styledText(" @", muted);
@@ -197,8 +213,8 @@ pub fn drawInfoPanel(win: vaxis.Window, view: InfoView) void {
     }
 
     var footer = LineWriter.init(.{ .win = win, .row = footer_row, .style = muted, .bg = view.bg });
-    footer.styledText(" j/k scroll · ^d/^u page · i/Esc/q close", muted);
-    drawScrollIndicator(&footer, view, body_top, body_bottom);
+    footer.styledText(" j/k/^d/^u scroll · g/G ends · r refresh · q close", muted);
+    drawScrollIndicator(win, footer_row, view, body_top, body_bottom);
 }
 
 // =============================================================================
@@ -376,7 +392,9 @@ fn drawInfoBody(win: vaxis.Window, view: InfoView, top: u16, bottom: u16) void {
     if (view.checks.len == 0 and view.reviews.len == 0 and view.body.len == 0) {
         if (cur.begin(muted)) |lw| {
             var w = lw;
-            if (view.data_unavailable) {
+            if (view.data_unavailable and view.refreshing) {
+                w.styledText(" ⚠ Review data unavailable — refreshing…", muted);
+            } else if (view.data_unavailable) {
                 w.styledText(" ⚠ Review data unavailable — press r to retry", warn_yellow);
             } else {
                 w.styledText(" No description.", muted);
@@ -385,11 +403,15 @@ fn drawInfoBody(win: vaxis.Window, view: InfoView, top: u16, bottom: u16) void {
     }
 }
 
-/// Append a scroll-position indicator to the info-panel footer — arrows cue that
-/// content extends above (`↑`) / below (`↓`) the visible region, and `pos/total`
-/// mirrors the picker's `selected/total` readout. Drawn only when the body is
-/// actually taller than the visible region (nothing to scroll → no clutter).
-fn drawScrollIndicator(footer: *LineWriter, view: InfoView, body_top: u16, body_bottom: u16) void {
+/// Draw a scroll-position indicator right-aligned into the footer's trailing
+/// columns — arrows cue that content extends above (`↑`) / below (`↓`) the
+/// visible region, and `pos/total` mirrors the picker's `selected/total`
+/// readout. Right-aligned (rather than appended after the hint) so it renders
+/// independently of the hint length: on a narrow popup — e.g. the 64-col default
+/// on an 80-col terminal — appending would clip it off past the right edge.
+/// Drawn only when the body is actually taller than the visible region (nothing
+/// to scroll → no clutter).
+fn drawScrollIndicator(win: vaxis.Window, footer_row: u16, view: InfoView, body_top: u16, body_bottom: u16) void {
     if (body_top >= body_bottom) return;
     const visible_rows: usize = body_bottom - body_top;
     if (view.total_lines <= visible_rows) return;
@@ -398,13 +420,26 @@ fn drawScrollIndicator(footer: *LineWriter, view: InfoView, body_top: u16, body_
     const more_above = scroll > 0;
     const more_below = scroll + visible_rows < view.total_lines;
 
-    footer.styledText("  ", muted);
-    if (more_above) footer.styledText("↑", muted);
-    if (more_below) footer.styledText("↓", muted);
-    footer.styledText(" ", muted);
-    footer.styledUnsigned(scroll + 1, muted);
-    footer.styledText("/", muted);
-    footer.styledUnsigned(view.total_lines, muted);
+    const arrows: u16 = @as(u16, @intFromBool(more_above)) + @as(u16, @intFromBool(more_below));
+    const indicator_width: u16 = arrows + 1 + digitCount(scroll + 1) + 1 + digitCount(view.total_lines);
+    if (win.width <= indicator_width) return;
+    // Flush right with a one-column margin mirroring the hint's one-column left pad.
+    const start_col: u16 = win.width -| indicator_width -| 1;
+
+    var ind = LineWriter.init(.{ .win = win, .row = footer_row, .col = start_col, .style = muted, .bg = view.bg });
+    if (more_above) ind.styledText("↑", muted);
+    if (more_below) ind.styledText("↓", muted);
+    ind.styledText(" ", muted);
+    ind.styledUnsigned(scroll + 1, muted);
+    ind.styledText("/", muted);
+    ind.styledUnsigned(view.total_lines, muted);
+}
+
+fn digitCount(value: u64) u16 {
+    var count: u16 = 1;
+    var v = value;
+    while (v >= 10) : (v /= 10) count += 1;
+    return count;
 }
 
 fn fillBackground(win: vaxis.Window, bg: Color) void {
@@ -674,6 +709,26 @@ test "drawSubmitDialog: no cursor is shown when not editing" {
     try testing.expect(!ts.screen.cursor_vis);
 }
 
+test "drawSubmitDialog: warns to resize instead of accepting blind input on an ultra-short terminal" {
+    // height 6 → footer row 5, error row 4, body_top 5: the body editor region
+    // collapses, so drawBodyEditor is skipped and no cursor is positioned. Keys
+    // still forward into the editor, so a resize note must appear or the user
+    // types the review body blind.
+    var ts = try TestScreen.init(40, 6);
+    defer ts.deinit();
+
+    drawSubmitDialog(ts.window(), .{
+        .verdict = .comment,
+        .body = "typed blind",
+        .editing = true,
+        .insert_mode = true,
+    });
+
+    try testing.expect(screenContains(ts.screen, "Terminal too small"));
+    // No hardware cursor is positioned, so it must not read as an active editor.
+    try testing.expect(!ts.screen.cursor_vis);
+}
+
 test "drawSubmitDialog: surfaces a submit error above the footer" {
     var ts = try TestScreen.init(70, 12);
     defer ts.deinit();
@@ -693,6 +748,17 @@ test "drawSubmitDialog: armed discard shows the confirm prompt in the footer" {
     drawSubmitDialog(ts.window(), .{ .verdict = .comment, .confirm_discard = true });
 
     try testing.expect(rowContains(ts.screen, 11, "^D:Discard again"));
+}
+
+test "drawSubmitDialog: footer hints fit the production popup width without clipping ESC" {
+    // Production sizes this popup at desired_width 64 (ui.zig). The footer must
+    // fit so its trailing ESC:Cancel hint is never truncated.
+    var ts = try TestScreen.init(64, 12);
+    defer ts.deinit();
+
+    drawSubmitDialog(ts.window(), .{ .verdict = .comment });
+
+    try testing.expect(rowContains(ts.screen, 11, "ESC:Cancel"));
 }
 
 test "drawSubmitDialog: fills every cell with the popup background" {
@@ -781,6 +847,39 @@ test "drawInfoPanel: warns when review data is unavailable instead of showing th
     try testing.expect(screenContains(ts.screen, "Review data unavailable"));
     try testing.expect(screenContains(ts.screen, "press r to retry"));
     try testing.expect(!screenContains(ts.screen, "No description."));
+}
+
+test "drawInfoPanel: header marks an in-flight refetch so the action is acknowledged in-panel" {
+    var ts = try TestScreen.init(80, 20);
+    defer ts.deinit();
+
+    drawInfoPanel(ts.window(), .{ .number = 1, .title = "T", .refreshing = true });
+
+    try testing.expect(rowContains(ts.screen, 0, "refreshing…"));
+}
+
+test "drawInfoPanel: no refreshing marker when a refetch is not in flight" {
+    var ts = try TestScreen.init(80, 20);
+    defer ts.deinit();
+
+    drawInfoPanel(ts.window(), .{ .number = 1, .title = "T" });
+
+    try testing.expect(!screenContains(ts.screen, "refreshing…"));
+}
+
+test "drawInfoPanel: data-unavailable note swaps to refreshing while a retry is in flight" {
+    var ts = try TestScreen.init(80, 20);
+    defer ts.deinit();
+
+    drawInfoPanel(ts.window(), .{
+        .number = 1,
+        .title = "T",
+        .data_unavailable = true,
+        .refreshing = true,
+    });
+
+    try testing.expect(screenContains(ts.screen, "Review data unavailable — refreshing…"));
+    try testing.expect(!screenContains(ts.screen, "press r to retry"));
 }
 
 test "drawInfoPanel: lists a passing check with a check glyph" {
@@ -933,4 +1032,36 @@ test "drawInfoPanel: footer omits the scroll indicator when content fits" {
 
     try testing.expect(!rowContains(ts.screen, 9, "↑"));
     try testing.expect(!rowContains(ts.screen, 9, "↓"));
+}
+
+test "drawInfoPanel: footer documents g/G end jumps" {
+    var ts = try TestScreen.init(80, 20);
+    defer ts.deinit();
+
+    drawInfoPanel(ts.window(), .{ .number = 1, .title = "T" });
+
+    try testing.expect(rowContains(ts.screen, 19, "g/G ends"));
+}
+
+test "drawInfoPanel: scroll indicator renders at the 64-col default popup width" {
+    // On an 80-col terminal the info popup is (80*4)/5 = 64 cols. The footer hint
+    // plus a right-aligned scroll indicator must both fit; appending the indicator
+    // after the full-width hint used to clip it off entirely at this width.
+    var ts = try TestScreen.init(64, 10);
+    defer ts.deinit();
+
+    // height 10 → footer row 9, body rows [4, 9): 5 visible; total 9 > 5 scrolls.
+    drawInfoPanel(ts.window(), .{
+        .number = 1,
+        .title = "T",
+        .body = "a\nb\nc\nd\ne\nf\ng\nh",
+        .total_lines = 9,
+        .scroll = 3,
+    });
+
+    try testing.expect(rowContains(ts.screen, 9, "↑"));
+    try testing.expect(rowContains(ts.screen, 9, "↓"));
+    try testing.expect(rowContains(ts.screen, 9, "4/9"));
+    // The shortened hint still fits alongside the indicator at this width.
+    try testing.expect(rowContains(ts.screen, 9, "q close"));
 }

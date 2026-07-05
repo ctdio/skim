@@ -161,6 +161,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
             .{ .key = "e", .desc = "Edit your comment (on thread)" },
             .{ .key = "x", .desc = "Resolve / unresolve (on thread)" },
             .{ .key = "d", .desc = "Delete your comment (on thread)" },
+            .{ .key = "o", .desc = "Fold / expand thread (on thread)" },
         };
         for (pr_bindings) |b| {
             try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });

@@ -814,12 +814,11 @@ pub const SideBySideRenderer = struct {
         const hints = "Enter:Save  Ctrl+J:Newline  ESC:Cancel";
         const label = switch (input.edit_context) {
             .reply => try RenderUtils.copyFrameText(app, " Reply"),
-            .edit_own => try RenderUtils.copyFrameText(app, " Edit comment"),
+            .edit_own => try RenderUtils.copyFrameText(app, " Edit"),
             .none => try RenderUtils.copyFrameText(app, " Comment"),
         };
         try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
-        try segments.append(app.allocator, .{ .text = label, .style = label_style });
-        try RenderUtils.appendInputHeaderHints(app, &segments, layout.width, 1 + label.len, hints, hints_style);
+        try RenderUtils.appendInputHeaderHints(app, &segments, layout.width, 1, label, label_style, hints, hints_style);
 
         _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col) });
         current_row += 1;

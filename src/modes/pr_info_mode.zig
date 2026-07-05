@@ -4,8 +4,9 @@ const App = @import("../app.zig").App;
 
 const page_step: usize = 10;
 
-/// Handle keyboard input in the read-only PR info panel (FR-7). j/k scroll the
-/// description a line at a time, Ctrl-d/Ctrl-u a page; i / Esc / q close it; r
+/// Handle keyboard input in the read-only PR info panel (FR-7). j/k or Up/Down
+/// scroll the description a line at a time, Ctrl-d/Ctrl-u or PageUp/PageDown a
+/// page, g/G jump to top/bottom; i / Esc / q close it; r
 /// re-fetches review data (retry after a failed fetch — see the data-unavailable
 /// note in `review_render`).
 ///
@@ -41,12 +42,20 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     }
 
     switch (key.codepoint) {
-        'j' => {
+        'j', vaxis.Key.down => {
             review.info_scroll +|= 1;
             app.needs_render = true;
         },
-        'k' => {
+        'k', vaxis.Key.up => {
             review.info_scroll -|= 1;
+            app.needs_render = true;
+        },
+        vaxis.Key.page_down => {
+            review.info_scroll +|= page_step;
+            app.needs_render = true;
+        },
+        vaxis.Key.page_up => {
+            review.info_scroll -|= page_step;
             app.needs_render = true;
         },
         'g' => {

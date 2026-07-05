@@ -16,15 +16,26 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
     }
     const editor_state = &app.state.review_submit_editor.?;
 
+    // While a submit is in flight, startSubmit has already captured the verdict +
+    // body for the request. Ignore verdict-cycle and editor-mutation keys so the
+    // dialog can't display a verdict/body that contradicts what's being submitted;
+    // only Esc (close the dialog) stays live.
+    if (review.submit.submitting) {
+        if (key.codepoint == vaxis.Key.escape and editor_state.vim_mode == .normal) {
+            app.closeReviewSubmit();
+        }
+        return;
+    }
+
     // Tab / Shift-Tab cycle the verdict (before the editor, so Tab never inserts).
     if (key.codepoint == vaxis.Key.tab and !key.mods.shift) {
-        review_controller.cycleVerdict(review, true);
+        review_controller.cycleVerdict(review, app.allocator, true);
         review_controller.disarmDiscardConfirm(review);
         app.needs_render = true;
         return;
     }
     if (key.codepoint == vaxis.Key.tab and key.mods.shift) {
-        review_controller.cycleVerdict(review, false);
+        review_controller.cycleVerdict(review, app.allocator, false);
         review_controller.disarmDiscardConfirm(review);
         app.needs_render = true;
         return;

@@ -189,6 +189,10 @@ fn buildFileCaches(allocator: Allocator, files: []const parser.FileDiff) !FileCa
     };
 }
 
+/// Severity of a temporary status-bar message. Errors render red with a ⚠
+/// prefix so a failed thread interaction never reads like a success.
+pub const StatusSeverity = enum { info, err };
+
 pub const App = struct {
     allocator: Allocator,
     vx: ?Vaxis, // null in headless mode (print command)
@@ -293,6 +297,7 @@ pub const App = struct {
         status_message: ?[]const u8, // Message to show in status bar
         status_message_owned: ?[]const u8, // Owned copy (for freeing)
         status_message_time: i64, // When message was set (for auto-clear)
+        status_message_severity: StatusSeverity, // Info vs error styling
 
         // Blame view
         show_blame: bool, // Whether to show git blame info in gutter
@@ -569,6 +574,7 @@ pub const App = struct {
                 .status_message = null,
                 .status_message_owned = null,
                 .status_message_time = 0,
+                .status_message_severity = .info,
                 .show_blame = false,
                 .menu_stats_cached = false,
                 .menu_stats_loading = false,
@@ -738,6 +744,7 @@ pub const App = struct {
                 .status_message = null,
                 .status_message_owned = null,
                 .status_message_time = 0,
+                .status_message_severity = .info,
                 .show_blame = false,
                 .menu_stats_cached = false,
                 .menu_stats_loading = false,
@@ -856,6 +863,7 @@ pub const App = struct {
                 .status_message = null,
                 .status_message_owned = null,
                 .status_message_time = 0,
+                .status_message_severity = .info,
                 .show_blame = false,
                 .menu_stats_cached = false,
                 .menu_stats_loading = false,
@@ -2667,13 +2675,13 @@ pub const App = struct {
                     return;
                 };
                 if (info.gh_error) |kind| {
-                    self.showStatusMessage(pr.github.kindMessage(kind));
+                    self.showStatusError(pr.github.kindMessage(kind));
                 }
                 self.needs_render = true;
             },
             .refreshed => |gh_error| {
                 if (gh_error) |kind| {
-                    self.showStatusMessage(pr.github.kindMessage(kind));
+                    self.showStatusError(pr.github.kindMessage(kind));
                 } else {
                     self.showStatusMessage("threads refreshed");
                 }
@@ -2702,7 +2710,7 @@ pub const App = struct {
             },
             .failed => |kind| {
                 self.rebuildReviewLineMap();
-                self.showStatusMessage(pr.github.kindMessage(kind));
+                self.showStatusError(pr.github.kindMessage(kind));
                 self.needs_render = true;
             },
         }
@@ -2722,7 +2730,7 @@ pub const App = struct {
             },
             .failed => |info| {
                 self.rebuildReviewLineMap();
-                self.showStatusMessage(pr.github.kindMessage(info.err));
+                self.showStatusError(pr.github.kindMessage(info.err));
                 self.needs_render = true;
             },
         }
@@ -2759,8 +2767,14 @@ pub const App = struct {
                 self.showStatusMessage("pending review discarded");
                 self.needs_render = true;
             },
-            .submit_failed, .discard_failed => {
-                self.showStatusMessage("submit failed — see dialog");
+            .submit_failed => {
+                const dialog_open = self.mode == .review_submit;
+                self.showStatusError(if (dialog_open) "submit failed — see dialog" else "submit failed — press R to view");
+                self.needs_render = true;
+            },
+            .discard_failed => {
+                const dialog_open = self.mode == .review_submit;
+                self.showStatusError(if (dialog_open) "discard failed — see dialog" else "discard failed — press R to view");
                 self.needs_render = true;
             },
         }
@@ -3310,9 +3324,19 @@ pub const App = struct {
         try clipboard.copyToClipboard(self.allocator, buffer.items);
     }
 
-    /// Show a temporary status message (displayed for 3 seconds)
+    /// Show a temporary informational status message (displayed for 3 seconds)
     /// Note: This duplicates the message, so caller can free their copy.
     pub fn showStatusMessage(self: *App, message: []const u8) void {
+        self.setStatusMessage(message, .info);
+    }
+
+    /// Show a temporary error status message (rendered red with a ⚠ prefix so a
+    /// failed thread interaction never reads like a success).
+    pub fn showStatusError(self: *App, message: []const u8) void {
+        self.setStatusMessage(message, .err);
+    }
+
+    fn setStatusMessage(self: *App, message: []const u8, severity: StatusSeverity) void {
         // Free previous allocated message if any
         if (self.state.status_message_owned) |old| {
             self.allocator.free(old);
@@ -3326,6 +3350,7 @@ pub const App = struct {
         };
         self.state.status_message_owned = owned;
         self.state.status_message = owned;
+        self.state.status_message_severity = severity;
         self.state.status_message_time = std.time.timestamp();
         self.needs_render = true;
     }

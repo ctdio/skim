@@ -538,7 +538,7 @@ fn reviewThreadUnderCursor(app: *App) ?usize {
 fn startThreadResolveToggle(app: *App, thread_idx: usize) !void {
     const started = review_controller.startToggleResolve(&app.state.review, app.allocator, thread_idx) catch |err| {
         std.log.err("failed to toggle resolve: {any}", .{err});
-        app.showStatusMessage("failed to update thread");
+        app.showStatusError("failed to update thread");
         return;
     };
     if (!started) {
@@ -585,7 +585,7 @@ fn fireThreadDelete(app: *App, thread_id: []const u8) !void {
     };
     const started = review_controller.startDeleteOwn(&app.state.review, app.allocator, thread_idx) catch |err| {
         std.log.err("failed to start delete: {any}", .{err});
-        app.showStatusMessage("failed to delete comment");
+        app.showStatusError("failed to delete comment");
         return;
     };
     if (!started) {

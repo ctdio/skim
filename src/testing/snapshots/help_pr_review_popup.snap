@@ -9,6 +9,6 @@
 │  e              │ Edit your comment (on thread)                      │
 │  x              │ Resolve / unresolve (on thread)                    │
 │  d              │ Delete your comment (on thread)                    │
-│                                                                      │
+│  o              │ Fold / expand thread (on thread)                   │
 │                                                                      │
 ╰───────────────────────── ? or Esc to close ──────────────────────────╯
