@@ -444,55 +444,9 @@ const BodyCursor = struct {
 // =============================================================================
 
 const testing = std.testing;
-
-const TestScreen = struct {
-    screen: vaxis.Screen,
-    unicode: vaxis.Unicode,
-
-    fn init(cols: u16, rows: u16) !TestScreen {
-        var screen = try vaxis.Screen.init(testing.allocator, .{
-            .cols = cols,
-            .rows = rows,
-            .x_pixel = 0,
-            .y_pixel = 0,
-        });
-        errdefer screen.deinit(testing.allocator);
-        const unicode = try vaxis.Unicode.init(testing.allocator);
-        return .{ .screen = screen, .unicode = unicode };
-    }
-
-    fn deinit(self: *TestScreen) void {
-        self.screen.deinit(testing.allocator);
-        self.unicode.deinit(testing.allocator);
-    }
-
-    fn window(self: *TestScreen) vaxis.Window {
-        return .{
-            .x_off = 0,
-            .y_off = 0,
-            .parent_x_off = 0,
-            .parent_y_off = 0,
-            .width = self.screen.width,
-            .height = self.screen.height,
-            .screen = &self.screen,
-            .unicode = &self.unicode,
-        };
-    }
-};
-
-fn rowContains(screen: vaxis.Screen, row: u16, needle: []const u8) bool {
-    var buf: [1024]u8 = undefined;
-    var len: usize = 0;
-    var col: u16 = 0;
-    while (col < screen.width) : (col += 1) {
-        const cell = screen.readCell(col, row) orelse continue;
-        const g = cell.char.grapheme;
-        if (len + g.len > buf.len) break;
-        @memcpy(buf[len .. len + g.len], g);
-        len += g.len;
-    }
-    return std.mem.indexOf(u8, buf[0..len], needle) != null;
-}
+const render_test_screen = @import("render_test_screen.zig");
+const TestScreen = render_test_screen.TestScreen;
+const rowContains = render_test_screen.rowContains;
 
 fn screenContains(screen: vaxis.Screen, needle: []const u8) bool {
     var row: u16 = 0;
