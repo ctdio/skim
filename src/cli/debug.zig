@@ -155,8 +155,7 @@ fn runPrView(allocator: Allocator, args: []const []const u8) !void {
     var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
     var data = review_parse.parsePrDetails(allocator, raw) catch {
         try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer data.deinit();
 
@@ -180,16 +179,14 @@ fn runPrAnchor(allocator: Allocator, args: []const []const u8) !void {
 
     var data = review_parse.parsePrDetails(allocator, raw) catch {
         try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer data.deinit();
     const details = data.details;
 
     const head_ref = github.fetchRef(allocator, .{ .number = details.number, .base_ref = details.base_ref }) catch {
         try stderr_writer.interface.writeAll("Failed to git-fetch the PR head ref (is git authenticated?).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer allocator.free(head_ref);
 
@@ -205,15 +202,13 @@ fn runPrAnchor(allocator: Allocator, args: []const []const u8) !void {
         .use_merge_base = true,
     } }) catch {
         try stderr_writer.interface.writeAll("Failed to run git diff for the PR range.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer allocator.free(diff_text);
 
     const files = parser.parse(allocator, diff_text) catch {
         try stderr_writer.interface.writeAll("Failed to parse the PR diff.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer {
         for (files) |*f| f.deinit(allocator);
@@ -222,8 +217,7 @@ fn runPrAnchor(allocator: Allocator, args: []const []const u8) !void {
 
     const anchored = thread_anchor.anchorThreads(allocator, details.threads, files) catch {
         try stderr_writer.interface.writeAll("Failed to anchor review threads.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer allocator.free(anchored);
 
@@ -242,8 +236,7 @@ fn runPrComment(allocator: Allocator, args: []const []const u8) !void {
     const opts = parsePrCommentArgs(args) catch |err| {
         try stderr_writer.interface.print("pr-comment: {s}\n", .{prCommentErrMsg(err)});
         stderr_writer.interface.writeAll("Usage: skim debug pr-comment <number|url> --path P --line N --side left|right [--start-line N] [--start-side left|right] --body TEXT\n") catch {};
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
 
     const raw = try fetchReviewJson(allocator, args, "pr-comment");
@@ -251,8 +244,7 @@ fn runPrComment(allocator: Allocator, args: []const []const u8) !void {
 
     var data = review_parse.parsePrDetails(allocator, raw) catch {
         try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer data.deinit();
     const details = data.details;
@@ -274,14 +266,12 @@ fn runPrComment(allocator: Allocator, args: []const []const u8) !void {
         .body = opts.body,
     }) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (addPullRequestReviewThread).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     const thread_raw = switch (thread_fetch) {
         .failed => |kind| {
             try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
-            stderr_writer.interface.flush() catch {};
-            std.process.exit(1);
+            flushAndExit(&stderr_writer);
         },
         .ok => |bytes| bytes,
     };
@@ -289,8 +279,7 @@ fn runPrComment(allocator: Allocator, args: []const []const u8) !void {
 
     var created = review_parse.parseCreatedThread(allocator, thread_raw, details.viewer_login) catch {
         try stderr_writer.interface.writeAll("Post returned no thread (bad path/line or a GraphQL error).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer created.deinit();
 
@@ -317,8 +306,7 @@ fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
 
     var data = review_parse.parsePrDetails(allocator, raw) catch {
         try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer data.deinit();
 
@@ -333,14 +321,12 @@ fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
 
     const fetch = github.deletePendingReview(allocator, review_id) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (deletePullRequestReview).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     switch (fetch) {
         .failed => |kind| {
             try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
-            stderr_writer.interface.flush() catch {};
-            std.process.exit(1);
+            flushAndExit(&stderr_writer);
         },
         .ok => |bytes| {
             defer allocator.free(bytes);
@@ -349,8 +335,7 @@ fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
             if (review_parse.firstErrorMessage(allocator, bytes) catch null) |msg| {
                 defer allocator.free(msg);
                 try stderr_writer.interface.print("{s}\n", .{msg});
-                stderr_writer.interface.flush() catch {};
-                std.process.exit(1);
+                flushAndExit(&stderr_writer);
             }
         },
     }
@@ -372,8 +357,7 @@ fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
     const event = eventStringFromArg(event_arg) orelse {
         try stderr_writer.interface.print("pr-submit: invalid --event '{s}' (want comment|approve|request-changes)\n", .{event_arg});
         try stderr_writer.interface.print("{s}\n", .{usage});
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     const body = flagValueOpt(args, "--body") orelse "";
 
@@ -382,8 +366,7 @@ fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
 
     var data = review_parse.parsePrDetails(allocator, raw) catch {
         try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer data.deinit();
     const details = data.details;
@@ -401,15 +384,13 @@ fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
         // A review we created solely to submit must not be left dangling.
         if (created_here) discardCreatedReview(allocator, review_id);
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (submitPullRequestReview).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     const submit_raw = switch (fetch) {
         .failed => |kind| {
             if (created_here) discardCreatedReview(allocator, review_id);
             try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
-            stderr_writer.interface.flush() catch {};
-            std.process.exit(1);
+            flushAndExit(&stderr_writer);
         },
         .ok => |bytes| bytes,
     };
@@ -418,8 +399,7 @@ fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
     var result = review_parse.parseSubmitReview(allocator, submit_raw) catch {
         if (created_here) discardCreatedReview(allocator, review_id);
         try stderr_writer.interface.writeAll("Failed to parse the submit response from gh.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer result.deinit();
 
@@ -428,8 +408,7 @@ fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
         // not leave an empty pending review behind.
         if (created_here) discardCreatedReview(allocator, review_id);
         try stderr_writer.interface.print("Submit rejected: {s}\n", .{result.error_message});
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     }
 
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -448,16 +427,14 @@ fn runPrReply(allocator: Allocator, args: []const []const u8) !void {
 
     const fetch = github.replyToThread(allocator, thread_id, body) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (addPullRequestReviewThreadReply).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     const raw = ghOkOrExit(fetch);
     defer allocator.free(raw);
 
     var created = review_parse.parseCreatedComment(allocator, raw, "") catch {
         try stderr_writer.interface.writeAll("Reply returned no comment (bad thread id or a GraphQL error).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer created.deinit();
 
@@ -485,16 +462,14 @@ fn runPrResolve(allocator: Allocator, args: []const []const u8, resolve: bool) !
     else
         github.unresolveThread(allocator, thread_id)) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (resolve/unresolveReviewThread).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     const raw = ghOkOrExit(fetch);
     defer allocator.free(raw);
 
     var result = review_parse.parseResolveResult(allocator, raw) catch {
         try stderr_writer.interface.writeAll("Resolve mutation returned no thread (bad thread id or a GraphQL error).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer result.deinit();
 
@@ -513,16 +488,14 @@ fn runPrEdit(allocator: Allocator, args: []const []const u8) !void {
 
     const fetch = github.updateReviewComment(allocator, comment_id, body) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (updatePullRequestReviewComment).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     const raw = ghOkOrExit(fetch);
     defer allocator.free(raw);
 
     var updated = review_parse.parseUpdatedComment(allocator, raw) catch {
         try stderr_writer.interface.writeAll("Edit returned no comment (bad comment id or a GraphQL error).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer updated.deinit();
 
@@ -541,16 +514,14 @@ fn runPrDelete(allocator: Allocator, args: []const []const u8) !void {
 
     const fetch = github.deleteReviewComment(allocator, comment_id) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (deletePullRequestReviewComment).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     const raw = ghOkOrExit(fetch);
     defer allocator.free(raw);
 
     const del_id = review_parse.parseDeletedComment(allocator, raw) catch {
         try stderr_writer.interface.writeAll("Delete failed (bad comment id or a GraphQL error).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer allocator.free(del_id);
 
@@ -592,6 +563,13 @@ fn eventStringFromArg(arg: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Flush `w` (best-effort) and exit non-zero. Terminal failure tail shared by
+/// every `skim debug` error path.
+fn flushAndExit(w: *std.fs.File.Writer) noreturn {
+    w.interface.flush() catch {};
+    std.process.exit(1);
+}
+
 fn flagValueOrExit(args: []const []const u8, flag: []const u8, cmd: []const u8, usage: []const u8) []const u8 {
     var i: usize = 4;
     while (i < args.len) : (i += 1) {
@@ -603,8 +581,7 @@ fn flagValueOrExit(args: []const []const u8, flag: []const u8, cmd: []const u8, 
     var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
     stderr_writer.interface.print("{s}: missing {s}\n", .{ cmd, flag }) catch {};
     stderr_writer.interface.print("{s}\n", .{usage}) catch {};
-    stderr_writer.interface.flush() catch {};
-    std.process.exit(1);
+    flushAndExit(&stderr_writer);
 }
 
 /// Unwrap a `GhFetch`, returning the raw bytes or exiting non-zero with the
@@ -614,8 +591,7 @@ fn ghOkOrExit(fetch: github.GhFetch) []u8 {
         .failed => |kind| {
             var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
             stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)}) catch {};
-            stderr_writer.interface.flush() catch {};
-            std.process.exit(1);
+            flushAndExit(&stderr_writer);
         },
         .ok => |bytes| return bytes,
     }
@@ -626,22 +602,19 @@ fn createReviewOrExit(allocator: Allocator, pr_node_id: []const u8, commit_oid: 
     var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
     const fetch = github.createPendingReview(allocator, pr_node_id, commit_oid) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (addPullRequestReview).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     const raw = switch (fetch) {
         .failed => |kind| {
             try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
-            stderr_writer.interface.flush() catch {};
-            std.process.exit(1);
+            flushAndExit(&stderr_writer);
         },
         .ok => |bytes| bytes,
     };
     defer allocator.free(raw);
     return review_parse.parseCreatedReviewId(allocator, raw) catch {
         try stderr_writer.interface.writeAll("Could not read the created review id from gh.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
 }
 
@@ -748,21 +721,18 @@ fn fetchReviewJson(allocator: Allocator, args: []const []const u8, comptime cmd:
 
     if (args.len < 4) {
         try stderr_writer.interface.writeAll(cmd ++ " requires a PR number or github.com PR URL.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     }
 
     const arg = args[3];
     const request = github.parsePrArg(arg) catch {
         try stderr_writer.interface.print("Invalid PR argument '{s}' — expected a number or a github.com PR URL.\n", .{arg});
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
 
     const origin = github.getOriginOwnerRepo(allocator) catch {
         try stderr_writer.interface.writeAll("Could not resolve the origin remote (run inside a GitHub repo clone).\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
     defer allocator.free(origin.owner);
     defer allocator.free(origin.repo);
@@ -775,8 +745,7 @@ fn fetchReviewJson(allocator: Allocator, args: []const []const u8, comptime cmd:
                     "URL points at {s}/{s} but the origin remote is {s}/{s}.\n",
                     .{ u.owner, u.repo, origin.owner, origin.repo },
                 );
-                stderr_writer.interface.flush() catch {};
-                std.process.exit(1);
+                flushAndExit(&stderr_writer);
             }
             break :blk u.number;
         },
@@ -784,15 +753,13 @@ fn fetchReviewJson(allocator: Allocator, args: []const []const u8, comptime cmd:
 
     const fetch = github.fetchReviewData(allocator, origin, number) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql.\n");
-        stderr_writer.interface.flush() catch {};
-        std.process.exit(1);
+        flushAndExit(&stderr_writer);
     };
 
     return switch (fetch) {
         .failed => |kind| {
             try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
-            stderr_writer.interface.flush() catch {};
-            std.process.exit(1);
+            flushAndExit(&stderr_writer);
         },
         .ok => |bytes| bytes,
     };
