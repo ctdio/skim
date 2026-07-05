@@ -206,6 +206,111 @@ pub fn parseCreatedThread(allocator: std.mem.Allocator, json_bytes: []const u8, 
     return .{ .arena = arena, .thread = thread };
 }
 
+/// Owns a single `ReviewComment` parsed from an `addPullRequestReviewThreadReply`
+/// mutation response, plus the arena backing its strings. Free with `deinit`.
+pub const CreatedComment = struct {
+    arena: std.heap.ArenaAllocator,
+    comment: ReviewComment,
+
+    pub fn deinit(self: *CreatedComment) void {
+        self.arena.deinit();
+    }
+};
+
+/// Parse the `comment` node from an `addPullRequestReviewThreadReply` response
+/// into a `ReviewComment`, reusing the SAME comment-node parser as the fetch path
+/// (the mutation selection byte-mirrors the fetch query's comment nodes). Detects
+/// the GraphQL `{"errors":[...]}` envelope and a null `comment`.
+pub fn parseCreatedComment(allocator: std.mem.Allocator, json_bytes: []const u8, viewer_login: []const u8) !CreatedComment {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidPayload;
+    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
+    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const reply = objField(data, "addPullRequestReviewThreadReply") orelse return error.InvalidPayload;
+    const node = objField(reply, "comment") orelse return error.ReplyFailed;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const comment = try parseCommentNode(arena.allocator(), node, viewer_login);
+    return .{ .arena = arena, .comment = comment };
+}
+
+/// Result of a resolve/unresolve mutation: the thread id and its new resolved
+/// state. Handles both `resolveReviewThread` and `unresolveReviewThread` keys.
+pub const ResolveResult = struct {
+    arena: std.heap.ArenaAllocator,
+    thread_id: []const u8,
+    is_resolved: bool,
+
+    pub fn deinit(self: *ResolveResult) void {
+        self.arena.deinit();
+    }
+};
+
+pub fn parseResolveResult(allocator: std.mem.Allocator, json_bytes: []const u8) !ResolveResult {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidPayload;
+    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
+    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const mutation = objField(data, "resolveReviewThread") orelse
+        objField(data, "unresolveReviewThread") orelse return error.InvalidPayload;
+    const thread = objField(mutation, "thread") orelse return error.ResolveFailed;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    // Allocate BEFORE the return literal: the literal copies `arena` by value, so
+    // its state must already reflect the dupe (mirrors parsePrView).
+    const thread_id = try dupe(arena.allocator(), strField(thread, "id") orelse "");
+    const is_resolved = boolField(thread, "isResolved");
+    return .{ .arena = arena, .thread_id = thread_id, .is_resolved = is_resolved };
+}
+
+/// Result of an `updatePullRequestReviewComment` mutation: the comment id and its
+/// new body. Both are arena-owned; free with `deinit`.
+pub const UpdatedComment = struct {
+    arena: std.heap.ArenaAllocator,
+    id: []const u8,
+    body: []const u8,
+
+    pub fn deinit(self: *UpdatedComment) void {
+        self.arena.deinit();
+    }
+};
+
+pub fn parseUpdatedComment(allocator: std.mem.Allocator, json_bytes: []const u8) !UpdatedComment {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidPayload;
+    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
+    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const update = objField(data, "updatePullRequestReviewComment") orelse return error.InvalidPayload;
+    const comment = objField(update, "pullRequestReviewComment") orelse return error.UpdateFailed;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+    const id = try dupe(a, strField(comment, "id") orelse "");
+    const body = try dupe(a, strField(comment, "body") orelse "");
+    return .{ .arena = arena, .id = id, .body = body };
+}
+
+/// Confirm a `deletePullRequestReviewComment` mutation succeeded and return the
+/// echoed comment id (owned by `allocator`). The id to remove locally comes from
+/// the mutation record, not this response — this call only validates success.
+pub fn parseDeletedComment(allocator: std.mem.Allocator, json_bytes: []const u8) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidPayload;
+    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
+    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const del = objField(data, "deletePullRequestReviewComment") orelse return error.InvalidPayload;
+    const comment = objField(del, "pullRequestReviewComment") orelse return error.DeleteFailed;
+    const id = strField(comment, "id") orelse return error.DeleteFailed;
+    return allocator.dupe(u8, id);
+}
+
 pub fn parsePrView(allocator: std.mem.Allocator, json_bytes: []const u8) !PrViewMeta {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
@@ -371,23 +476,30 @@ fn parseComments(a: std.mem.Allocator, thread: std.json.ObjectMap, viewer_login:
     var count: usize = 0;
     for (nodes) |node| {
         if (node != .object) continue;
-        const obj = node.object;
-        const author = loginField(obj, "author");
-        const review = objField(obj, "pullRequestReview");
-        list[count] = .{
-            .id = try dupe(a, strField(obj, "id") orelse ""),
-            .database_id = u64Field(obj, "databaseId"),
-            .author = try dupe(a, author),
-            .body = try dupe(a, strField(obj, "body") orelse ""),
-            .created_at = try dupe(a, strField(obj, "createdAt") orelse ""),
-            .review_id = try dupe(a, if (review) |r| strField(r, "id") orelse "" else ""),
-            .review_state = reviewStateFrom(if (review) |r| strField(r, "state") orelse "" else ""),
-            .is_mine = viewer_login.len > 0 and std.mem.eql(u8, author, viewer_login),
-            .diff_hunk = try dupe(a, strField(obj, "diffHunk") orelse ""),
-        };
+        list[count] = try parseCommentNode(a, node.object, viewer_login);
         count += 1;
     }
     return list[0..count];
+}
+
+/// Parse one comment node (a `comments.nodes[*]` object, or the byte-identical
+/// `comment` node returned by `addPullRequestReviewThreadReply`) into a
+/// `ReviewComment`. The single source of truth for comment-node shape, shared by
+/// the fetch path and the reply mutation path.
+fn parseCommentNode(a: std.mem.Allocator, obj: std.json.ObjectMap, viewer_login: []const u8) !ReviewComment {
+    const author = loginField(obj, "author");
+    const review = objField(obj, "pullRequestReview");
+    return .{
+        .id = try dupe(a, strField(obj, "id") orelse ""),
+        .database_id = u64Field(obj, "databaseId"),
+        .author = try dupe(a, author),
+        .body = try dupe(a, strField(obj, "body") orelse ""),
+        .created_at = try dupe(a, strField(obj, "createdAt") orelse ""),
+        .review_id = try dupe(a, if (review) |r| strField(r, "id") orelse "" else ""),
+        .review_state = reviewStateFrom(if (review) |r| strField(r, "state") orelse "" else ""),
+        .is_mine = viewer_login.len > 0 and std.mem.eql(u8, author, viewer_login),
+        .diff_hunk = try dupe(a, strField(obj, "diffHunk") orelse ""),
+    };
 }
 
 /// GitHub only ever exposes the viewer's own PENDING review, but match author
@@ -814,6 +926,117 @@ test "parseCreatedThread: is_mine false when viewer differs from author" {
     var created = try parseCreatedThread(testing.allocator, mutation_add_thread, "someone-else");
     defer created.deinit();
     try testing.expect(!created.thread.comments[0].is_mine);
+}
+
+// =============================================================================
+// Thread-interaction mutation parsers (Phase 4) — canned data captured live via
+// `gh api graphql` against a scratch PR on 2026-07-05 (see phase-04 captured/).
+// =============================================================================
+
+const mutation_reply =
+    \\{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"PRRC_kwDOQOqc087SDGoO","databaseId":3524028942,"author":{"login":"ctdio"},"body":"harness reply \"quoted\" %s émoji 🎯\nsecond line `backtick` & <html>","createdAt":"2026-07-05T00:02:21Z","diffHunk":"@@ -652,3 +652,8 @@ Built with:\n ## License\n \n MIT\n+harness-line-1","pullRequestReview":{"id":"PRR_kwDOQOqc088AAAABE_6Wmw","state":"COMMENTED"},"replyTo":{"id":"PRRC_kwDOQOqc087SDGn3"}}}}}
+;
+
+const mutation_reply_pending =
+    \\{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"PRRC_kwDOQOqc087SDGo-","databaseId":3524028990,"author":{"login":"ctdio"},"body":"reply issued while a pending review exists","createdAt":"2026-07-05T00:02:23Z","diffHunk":"@@ -652,3 +652,8 @@ Built with:\n ## License\n \n MIT\n+harness-line-1","pullRequestReview":{"id":"PRR_kwDOQOqc088AAAABE_6WvQ","state":"PENDING"},"replyTo":{"id":"PRRC_kwDOQOqc087SDGn3"}}}}}
+;
+
+const mutation_resolve =
+    \\{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_kwDOQOqc086OX9Bp","isResolved":true}}}}
+;
+
+const mutation_unresolve =
+    \\{"data":{"unresolveReviewThread":{"thread":{"id":"PRRT_kwDOQOqc086OX9Bp","isResolved":false}}}}
+;
+
+const mutation_update_comment =
+    \\{"data":{"updatePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_kwDOQOqc087SDGoO","body":"edited reply body — 100% changed 🔁"}}}}
+;
+
+const mutation_delete_comment =
+    \\{"data":{"deletePullRequestReviewComment":{"clientMutationId":null,"pullRequestReviewComment":{"id":"PRRC_kwDOQOqc087SDGoO","databaseId":3524028942}}}}
+;
+
+test "parseCreatedComment: reply node parses byte-exact with COMMENTED state" {
+    var created = try parseCreatedComment(testing.allocator, mutation_reply, "ctdio");
+    defer created.deinit();
+    const c = created.comment;
+    try testing.expectEqualStrings("PRRC_kwDOQOqc087SDGoO", c.id);
+    try testing.expectEqual(@as(u64, 3524028942), c.database_id);
+    try testing.expectEqualStrings("ctdio", c.author);
+    try testing.expectEqualStrings("harness reply \"quoted\" %s émoji \u{1F3AF}\nsecond line `backtick` & <html>", c.body);
+    try testing.expectEqual(ReviewState.commented, c.review_state);
+    try testing.expect(c.is_mine);
+    try testing.expectEqualStrings("PRR_kwDOQOqc088AAAABE_6Wmw", c.review_id);
+}
+
+test "parseCreatedComment: reply joining a pending review carries pending state" {
+    var created = try parseCreatedComment(testing.allocator, mutation_reply_pending, "ctdio");
+    defer created.deinit();
+    // Risk 1b: a reply issued while a pending review exists returns PENDING —
+    // the draft-badge path is real and must be surfaced.
+    try testing.expectEqual(ReviewState.pending, created.comment.review_state);
+}
+
+test "parseCreatedComment: is_mine false when viewer differs from author" {
+    var created = try parseCreatedComment(testing.allocator, mutation_reply, "someone-else");
+    defer created.deinit();
+    try testing.expect(!created.comment.is_mine);
+}
+
+test "parseCreatedComment: detects the GraphQL error envelope" {
+    const err_body =
+        \\{"data":{"addPullRequestReviewThreadReply":null},"errors":[{"message":"nope"}]}
+    ;
+    try testing.expectError(error.GraphqlError, parseCreatedComment(testing.allocator, err_body, "ctdio"));
+}
+
+test "parseResolveResult: resolve sets isResolved true" {
+    var r = try parseResolveResult(testing.allocator, mutation_resolve);
+    defer r.deinit();
+    try testing.expectEqualStrings("PRRT_kwDOQOqc086OX9Bp", r.thread_id);
+    try testing.expect(r.is_resolved);
+}
+
+test "parseResolveResult: unresolve sets isResolved false (different top-level key)" {
+    var r = try parseResolveResult(testing.allocator, mutation_unresolve);
+    defer r.deinit();
+    try testing.expectEqualStrings("PRRT_kwDOQOqc086OX9Bp", r.thread_id);
+    try testing.expect(!r.is_resolved);
+}
+
+test "parseResolveResult: detects the GraphQL error envelope" {
+    const err_body =
+        \\{"data":{"resolveReviewThread":null},"errors":[{"message":"nope"}]}
+    ;
+    try testing.expectError(error.GraphqlError, parseResolveResult(testing.allocator, err_body));
+}
+
+test "parseUpdatedComment: extracts id and new body byte-exact" {
+    var u = try parseUpdatedComment(testing.allocator, mutation_update_comment);
+    defer u.deinit();
+    try testing.expectEqualStrings("PRRC_kwDOQOqc087SDGoO", u.id);
+    try testing.expectEqualStrings("edited reply body — 100% changed \u{1F501}", u.body);
+}
+
+test "parseUpdatedComment: detects the GraphQL error envelope" {
+    const err_body =
+        \\{"data":{"updatePullRequestReviewComment":null},"errors":[{"message":"nope"}]}
+    ;
+    try testing.expectError(error.GraphqlError, parseUpdatedComment(testing.allocator, err_body));
+}
+
+test "parseDeletedComment: confirms success and echoes the deleted id" {
+    const id = try parseDeletedComment(testing.allocator, mutation_delete_comment);
+    defer testing.allocator.free(id);
+    try testing.expectEqualStrings("PRRC_kwDOQOqc087SDGoO", id);
+}
+
+test "parseDeletedComment: detects the GraphQL error envelope" {
+    const err_body =
+        \\{"data":{"deletePullRequestReviewComment":null},"errors":[{"message":"nope"}]}
+    ;
+    try testing.expectError(error.GraphqlError, parseDeletedComment(testing.allocator, err_body));
 }
 
 test "parsePrDetails: unicode and CRLF bodies survive byte-exact" {

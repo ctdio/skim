@@ -1759,6 +1759,27 @@ pub const UI = struct {
                     const post_seg = try std.fmt.bufPrint(&post_buf, " │ posting…({d})", .{posting});
                     try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, post_seg), .style = .{ .fg = Color.magenta } });
                 }
+
+                // Delete confirmation takes priority; otherwise show the thread
+                // conversation hints when the cursor is on a review thread — with
+                // the edit/delete keys dropped when the viewer owns no comment
+                // there (those actions would refuse) — FR-5.
+                const cursor_thread_idx = cursorReviewThreadIdx(app);
+                const owns_comment = if (cursor_thread_idx) |idx| blk: {
+                    if (idx >= app.state.review.threads.items.len) break :blk false;
+                    break :blk pr.review_controller.lastOwnCommentIdx(&app.state.review.threads.items[idx]) != null;
+                } else false;
+                const hint = pr.thread_hint.threadHint(.{
+                    .delete_confirm = pr.review_controller.deleteConfirmArmed(&app.state.review) != null,
+                    .on_thread = cursor_thread_idx != null,
+                    .owns_comment = owns_comment,
+                });
+                if (hint != .none) {
+                    try segments.append(app.allocator, .{
+                        .text = try RenderUtils.copyFrameText(app, pr.thread_hint.hintText(hint)),
+                        .style = if (hint == .delete_confirm) .{ .fg = Color.red, .bold = true } else .{ .fg = Color.dim },
+                    });
+                }
             }
 
             // Only show hunk view mode indicator in unified view (where filtering applies)
@@ -1839,6 +1860,14 @@ pub const UI = struct {
             .style = style,
         }};
         _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
+    }
+
+    /// The positional thread index under the cursor when it sits on a review-thread
+    /// record (drives contextual thread hints in the status bar), or null.
+    fn cursorReviewThreadIdx(app: *App) ?usize {
+        const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return null;
+        if (record.line_type != .review_thread) return null;
+        return record.line_type.review_thread.thread_idx;
     }
 
     /// Render a vertical divider line

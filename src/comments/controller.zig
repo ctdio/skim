@@ -191,10 +191,92 @@ pub const CommentController = struct {
         app.state.visual_anchor = null;
     }
 
+    /// Open the inline editor to reply to the review thread at `thread_idx`
+    /// (FR-5). Refuses when the thread is still an unposted placeholder or busy.
+    /// Pre-fills a previously failed reply/edit body for draft safety (AD-8).
+    pub fn startReplyInput(app: *App, thread_idx: usize) !void {
+        if (thread_idx >= app.state.review.threads.items.len) return;
+        const thread = app.state.review.threads.items[thread_idx];
+        if (thread.posting) {
+            app.showStatusMessage("thread is still posting");
+            return;
+        }
+        if (review_controller.isThreadBusy(&app.state.review, thread_idx)) {
+            app.showStatusMessage("thread is busy");
+            return;
+        }
+
+        var input = comment_editor.CommentEditor.State{
+            .target_file_path = thread.data.path,
+            .target_hunk_idx = 0,
+            .target_line_idx = 0,
+            .target_end_hunk_idx = null,
+            .target_end_line_idx = null,
+            .editing_comment_idx = null,
+            .target = .local,
+            .edit_context = .{ .reply = .{ .thread_id = thread.data.id } },
+            .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
+        };
+        // Peek (do not consume) the stashed failed draft: the stash is only cleared
+        // once the reply is actually sent (saveReply), so cancelling or emptying the
+        // editor preserves the draft for retry (AD-8).
+        if (review_controller.peekFailedDraft(&app.state.review)) |text| {
+            input.vim.setText(text);
+            input.vim.cursor_pos = input.vim.text_len;
+        }
+
+        app.state.active_comment_input = input;
+        app.mode = .comment;
+    }
+
+    /// Open the inline editor to edit the viewer's comment at `comment_idx` in the
+    /// thread at `thread_idx` (FR-5), pre-filled with its current body. Refuses on
+    /// a placeholder / busy thread or an invalid comment index.
+    pub fn startEditOwnInput(app: *App, thread_idx: usize, comment_idx: usize) !void {
+        if (thread_idx >= app.state.review.threads.items.len) return;
+        const thread = app.state.review.threads.items[thread_idx];
+        if (thread.posting) {
+            app.showStatusMessage("thread is still posting");
+            return;
+        }
+        if (review_controller.isThreadBusy(&app.state.review, thread_idx)) {
+            app.showStatusMessage("thread is busy");
+            return;
+        }
+        if (comment_idx >= thread.data.comments.len) return;
+        const comment = thread.data.comments[comment_idx];
+
+        var input = comment_editor.CommentEditor.State{
+            .target_file_path = thread.data.path,
+            .target_hunk_idx = 0,
+            .target_line_idx = 0,
+            .target_end_hunk_idx = null,
+            .target_end_line_idx = null,
+            .editing_comment_idx = null,
+            .target = .local,
+            .edit_context = .{ .edit_own = .{ .thread_id = thread.data.id, .comment_id = comment.id } },
+            .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
+        };
+        input.vim.setText(comment.body);
+        input.vim.cursor_pos = input.vim.text_len;
+
+        app.state.active_comment_input = input;
+        app.mode = .comment;
+    }
+
     pub fn saveCurrentComment(app: *App) !bool {
         if (app.state.active_comment_input == null) return false;
 
         const input = app.state.active_comment_input.?;
+
+        // Thread conversation editors (reply / edit-own) dispatch a thread
+        // mutation instead of the diff-coordinate comment path (FR-5).
+        switch (input.edit_context) {
+            .none => {},
+            .reply => |r| return saveReply(app, r.thread_id, input),
+            .edit_own => |e| return saveEditOwn(app, e.comment_id, input),
+        }
+
         if (input.vim.text_len == 0) {
             // Empty comment - delete if editing existing, otherwise do nothing
             if (input.editing_comment_idx) |idx| {
@@ -573,6 +655,71 @@ pub const CommentController = struct {
 
         app.rebuildReviewLineMap();
         app.showStatusMessage("posting draft comment…");
+        return true;
+    }
+
+    /// Dispatch an async reply to a thread from the editor's contents (FR-5).
+    /// The thread is re-resolved by node id at save time (its positional index may
+    /// have shifted under a concurrent mutation while the editor was open). Empty
+    /// body closes the editor without sending. On a refused/failed start the editor
+    /// stays open so the text is not lost.
+    fn saveReply(app: *App, thread_id: []const u8, input: comment_editor.CommentEditor.State) !bool {
+        const body = input.vim.text_buffer[0..input.vim.text_len];
+        if (body.len == 0) return true;
+
+        const thread_idx = review_controller.threadIdxById(&app.state.review, thread_id) orelse {
+            app.showStatusMessage("thread no longer exists");
+            return true;
+        };
+
+        const started = review_controller.startReply(&app.state.review, app.allocator, thread_idx, body) catch |err| {
+            std.log.err("failed to start reply: {any}", .{err});
+            app.showStatusMessage("failed to send reply");
+            return false;
+        };
+        if (!started) {
+            app.showStatusMessage("cannot reply to this thread right now");
+            return false;
+        }
+
+        // The reply is now committed to the send path; the pre-filled failed draft
+        // (if any) has served its purpose, so clear the stash (AD-8).
+        if (review_controller.takeFailedDraft(&app.state.review)) |text| app.allocator.free(text);
+
+        app.rebuildReviewLineMap();
+        app.showStatusMessage("sending reply…");
+        return true;
+    }
+
+    /// Dispatch an async edit of the viewer's comment from the editor's contents
+    /// (FR-5). The comment is re-resolved by node id at save time (its thread /
+    /// comment indices may have shifted under a concurrent mutation while the editor
+    /// was open). An empty edit is refused (GitHub rejects empty bodies) and keeps
+    /// the editor open.
+    fn saveEditOwn(app: *App, comment_id: []const u8, input: comment_editor.CommentEditor.State) !bool {
+        const body = input.vim.text_buffer[0..input.vim.text_len];
+        if (body.len == 0) {
+            app.showStatusMessage("edit cannot be empty");
+            return false;
+        }
+
+        const loc = review_controller.findCommentLoc(&app.state.review, comment_id) orelse {
+            app.showStatusMessage("comment no longer exists");
+            return true;
+        };
+
+        const started = review_controller.startEditOwn(&app.state.review, app.allocator, loc.thread_idx, loc.comment_idx, body) catch |err| {
+            std.log.err("failed to start edit: {any}", .{err});
+            app.showStatusMessage("failed to save edit");
+            return false;
+        };
+        if (!started) {
+            app.showStatusMessage("cannot edit this comment right now");
+            return false;
+        }
+
+        app.rebuildReviewLineMap();
+        app.showStatusMessage("saving edit…");
         return true;
     }
 

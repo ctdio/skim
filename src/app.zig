@@ -1620,6 +1620,7 @@ pub const App = struct {
             if (pr_controller.pollPendingFetch(&self.state.pr, self.allocator)) self.needs_render = true;
             self.pollReviewEntry();
             self.pollReviewMutations();
+            self.pollReviewThreadMutations();
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
@@ -2689,6 +2690,36 @@ pub const App = struct {
                 self.needs_render = true;
             },
         }
+    }
+
+    /// Consume a completed thread interaction (reply / resolve / edit / delete).
+    /// On success the local model was already updated in place, so re-anchor +
+    /// rebuild the LineMap; on failure surface the classified error (reply/edit
+    /// bodies are stashed for the next editor-open).
+    fn pollReviewThreadMutations(self: *App) void {
+        switch (review_controller.pollThreadMutations(&self.state.review, self.allocator)) {
+            .none => {},
+            .applied => |kind| {
+                self.rebuildReviewLineMap();
+                self.showStatusMessage(threadMutationAppliedMessage(kind));
+                self.needs_render = true;
+            },
+            .failed => |info| {
+                self.rebuildReviewLineMap();
+                self.showStatusMessage(pr.github.kindMessage(info.err));
+                self.needs_render = true;
+            },
+        }
+    }
+
+    fn threadMutationAppliedMessage(kind: review_controller.ThreadMutationKind) []const u8 {
+        return switch (kind) {
+            .reply => "reply posted",
+            .resolve => "thread resolved",
+            .unresolve => "thread unresolved",
+            .edit => "comment updated",
+            .delete => "comment deleted",
+        };
     }
 
     /// Swap the diff to the fetched PR refs and refresh. `head_ref` is the local

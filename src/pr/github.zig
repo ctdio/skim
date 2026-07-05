@@ -374,6 +374,59 @@ const delete_review_mutation =
     \\}
 ;
 
+/// Comment-node selection for the reply mutation. Byte-mirrors the comment nodes
+/// selected by `review_query`/`thread_node_selection` so `review_parse.parseCreatedComment`
+/// reuses the SAME comment-node parser as the fetch path.
+const reply_mutation =
+    \\mutation ($tid: ID!, $body: String!) {
+    \\  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $tid, body: $body}) {
+    \\    comment {
+    \\      id
+    \\      databaseId
+    \\      author { login }
+    \\      body
+    \\      createdAt
+    \\      diffHunk
+    \\      pullRequestReview { id state }
+    \\      replyTo { id }
+    \\    }
+    \\  }
+    \\}
+;
+
+const resolve_thread_mutation =
+    \\mutation ($tid: ID!) {
+    \\  resolveReviewThread(input: {threadId: $tid}) {
+    \\    thread { id isResolved }
+    \\  }
+    \\}
+;
+
+const unresolve_thread_mutation =
+    \\mutation ($tid: ID!) {
+    \\  unresolveReviewThread(input: {threadId: $tid}) {
+    \\    thread { id isResolved }
+    \\  }
+    \\}
+;
+
+const update_comment_mutation =
+    \\mutation ($cid: ID!, $body: String!) {
+    \\  updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $cid, body: $body}) {
+    \\    pullRequestReviewComment { id body }
+    \\  }
+    \\}
+;
+
+const delete_comment_mutation =
+    \\mutation ($cid: ID!) {
+    \\  deletePullRequestReviewComment(input: {id: $cid}) {
+    \\    clientMutationId
+    \\    pullRequestReviewComment { id databaseId }
+    \\  }
+    \\}
+;
+
 /// Params for `addReviewThread`. `start_line == null` posts a single-line
 /// comment; otherwise a multi-line range (start..line).
 pub const AddThreadParams = struct {
@@ -412,6 +465,71 @@ pub fn deletePendingReview(allocator: std.mem.Allocator, review_id: []const u8) 
     const argv = try buildDeleteReviewArgs(allocator, review_id);
     defer freeArgv(allocator, argv);
     return runGhCapture(allocator, argv, "gh api graphql (deletePullRequestReview)");
+}
+
+/// Reply to an existing review thread. Returns the raw mutation JSON (parse with
+/// `review_parse.parseCreatedComment`). GitHub attaches the reply to the viewer's
+/// pending review if one exists (comment returns `state: PENDING`). The body is a
+/// `-f body=<text>` argv element — shell-safe by construction.
+pub fn replyToThread(allocator: std.mem.Allocator, thread_id: []const u8, body: []const u8) !GhFetch {
+    const argv = try buildReplyArgs(allocator, thread_id, body);
+    defer freeArgv(allocator, argv);
+    return runGhCapture(allocator, argv, "gh api graphql (addPullRequestReviewThreadReply)");
+}
+
+/// Mark a review thread resolved. Idempotent server-side (resolving an already
+/// resolved thread returns `isResolved: true`). Parse with `parseResolveResult`.
+pub fn resolveThread(allocator: std.mem.Allocator, thread_id: []const u8) !GhFetch {
+    const argv = try buildResolveArgs(allocator, resolve_thread_mutation, thread_id);
+    defer freeArgv(allocator, argv);
+    return runGhCapture(allocator, argv, "gh api graphql (resolveReviewThread)");
+}
+
+/// Mark a review thread unresolved. Parse with `parseResolveResult`.
+pub fn unresolveThread(allocator: std.mem.Allocator, thread_id: []const u8) !GhFetch {
+    const argv = try buildResolveArgs(allocator, unresolve_thread_mutation, thread_id);
+    defer freeArgv(allocator, argv);
+    return runGhCapture(allocator, argv, "gh api graphql (unresolveReviewThread)");
+}
+
+/// Edit a review comment's body. Parse with `review_parse.parseUpdatedComment`.
+pub fn updateReviewComment(allocator: std.mem.Allocator, comment_node_id: []const u8, body: []const u8) !GhFetch {
+    const argv = try buildUpdateCommentArgs(allocator, comment_node_id, body);
+    defer freeArgv(allocator, argv);
+    return runGhCapture(allocator, argv, "gh api graphql (updatePullRequestReviewComment)");
+}
+
+/// Delete a review comment. Parse/confirm with `review_parse.parseDeletedComment`.
+pub fn deleteReviewComment(allocator: std.mem.Allocator, comment_node_id: []const u8) !GhFetch {
+    const argv = try buildDeleteCommentArgs(allocator, comment_node_id);
+    defer freeArgv(allocator, argv);
+    return runGhCapture(allocator, argv, "gh api graphql (deletePullRequestReviewComment)");
+}
+
+fn buildReplyArgs(allocator: std.mem.Allocator, thread_id: []const u8, body: []const u8) ![][]const u8 {
+    return buildGraphqlArgv(allocator, reply_mutation, &.{
+        .{ .key = "tid", .value = thread_id },
+        .{ .key = "body", .value = body },
+    }, &.{});
+}
+
+fn buildResolveArgs(allocator: std.mem.Allocator, mutation: []const u8, thread_id: []const u8) ![][]const u8 {
+    return buildGraphqlArgv(allocator, mutation, &.{
+        .{ .key = "tid", .value = thread_id },
+    }, &.{});
+}
+
+fn buildUpdateCommentArgs(allocator: std.mem.Allocator, comment_node_id: []const u8, body: []const u8) ![][]const u8 {
+    return buildGraphqlArgv(allocator, update_comment_mutation, &.{
+        .{ .key = "cid", .value = comment_node_id },
+        .{ .key = "body", .value = body },
+    }, &.{});
+}
+
+fn buildDeleteCommentArgs(allocator: std.mem.Allocator, comment_node_id: []const u8) ![][]const u8 {
+    return buildGraphqlArgv(allocator, delete_comment_mutation, &.{
+        .{ .key = "cid", .value = comment_node_id },
+    }, &.{});
 }
 
 fn buildCreateReviewArgs(allocator: std.mem.Allocator, pr_node_id: []const u8, commit_oid: []const u8) ![][]const u8 {
@@ -794,6 +912,44 @@ test "buildDeleteReviewArgs: carries the review id" {
     defer freeArgv(testing.allocator, argv);
     try testing.expect(argvContains(argv, "id=PRR_del"));
     try testing.expect(std.mem.indexOf(u8, argv[4], "deletePullRequestReview") != null);
+}
+
+test "buildReplyArgs: carries thread id + hostile body verbatim" {
+    const hostile = "reply \"quote\" %s émoji 🎯\nsecond `backtick` & <html>";
+    const argv = try buildReplyArgs(testing.allocator, "PRRT_1", hostile);
+    defer freeArgv(testing.allocator, argv);
+    try testing.expect(argvContains(argv, "tid=PRRT_1"));
+    try testing.expect(argvContains(argv, "body=" ++ "reply \"quote\" %s émoji 🎯\nsecond `backtick` & <html>"));
+    try testing.expect(std.mem.indexOf(u8, argv[4], "addPullRequestReviewThreadReply") != null);
+}
+
+test "buildResolveArgs: resolve carries thread id and mutation name" {
+    const argv = try buildResolveArgs(testing.allocator, resolve_thread_mutation, "PRRT_9");
+    defer freeArgv(testing.allocator, argv);
+    try testing.expect(argvContains(argv, "tid=PRRT_9"));
+    try testing.expect(std.mem.indexOf(u8, argv[4], "resolveReviewThread") != null);
+    try testing.expect(std.mem.indexOf(u8, argv[4], "unresolveReviewThread") == null);
+}
+
+test "buildResolveArgs: unresolve uses the unresolve mutation" {
+    const argv = try buildResolveArgs(testing.allocator, unresolve_thread_mutation, "PRRT_9");
+    defer freeArgv(testing.allocator, argv);
+    try testing.expect(std.mem.indexOf(u8, argv[4], "unresolveReviewThread") != null);
+}
+
+test "buildUpdateCommentArgs: carries comment id + body verbatim" {
+    const argv = try buildUpdateCommentArgs(testing.allocator, "PRRC_7", "edited 100% 🔁");
+    defer freeArgv(testing.allocator, argv);
+    try testing.expect(argvContains(argv, "cid=PRRC_7"));
+    try testing.expect(argvContains(argv, "body=edited 100% 🔁"));
+    try testing.expect(std.mem.indexOf(u8, argv[4], "updatePullRequestReviewComment") != null);
+}
+
+test "buildDeleteCommentArgs: carries comment id and mutation name" {
+    const argv = try buildDeleteCommentArgs(testing.allocator, "PRRC_del");
+    defer freeArgv(testing.allocator, argv);
+    try testing.expect(argvContains(argv, "cid=PRRC_del"));
+    try testing.expect(std.mem.indexOf(u8, argv[4], "deletePullRequestReviewComment") != null);
 }
 
 test "buildGraphqlArgv: mirrors gh api graphql -f/-F shape" {

@@ -391,6 +391,10 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // review_test_root reaches App (for the reply/edit input-box render snapshots),
+    // which transitively needs the markdown module — wire it now that it exists.
+    review_test_root_module.addImport("markdown", markdown_module);
+
     const snapshot_scenarios_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/testing/snapshot_scenarios.zig"),

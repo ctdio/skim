@@ -4,6 +4,7 @@
 //! Only this file's `test {}` blocks run in the `review_tests` binary.
 
 const std = @import("std");
+const vaxis = @import("vaxis");
 const review = @import("review_test_root");
 
 const thread_anchor = review.thread_anchor;
@@ -12,8 +13,13 @@ const parser = review.parser;
 const line_map = review.line_map;
 const comments = review.comments;
 const thread_block = review.thread_block;
+const thread_hint = review.thread_hint;
 const harness = review.harness;
 const snapshot = review.snapshot;
+
+const App = review.App;
+const RenderUtils = review.RenderUtils;
+const CommentEditor = review.CommentEditor;
 
 const anchorThreads = review.anchorThreads;
 const countUnplaced = review.countUnplaced;
@@ -499,9 +505,219 @@ test "snapshot: thread_posting_placeholder" {
     });
 }
 
+test "snapshot: thread_busy_badge" {
+    var thread = makeThread(.{ .path = "src/x.zig", .line = 11, .side = .right });
+    var cmts = [_]ReviewComment{makeComment(.{ .author = "alice", .body = "resolve me please" })};
+    thread.comments = &cmts;
+
+    try renderThreadSnapshot("thread_busy_badge", .{
+        .thread = &thread,
+        .is_bucketed = false,
+        .expanded = true,
+        .busy = true,
+    });
+}
+
+// =============================================================================
+// thread_hint: contextual status-bar hints (pure decision + snapshot)
+// =============================================================================
+
+test "threadHint: off a thread with nothing armed shows nothing" {
+    try testing.expectEqual(thread_hint.ThreadHint.none, thread_hint.threadHint(.{
+        .delete_confirm = false,
+        .on_thread = false,
+        .owns_comment = false,
+    }));
+}
+
+test "threadHint: on a thread the viewer owns a comment in shows the full hint" {
+    try testing.expectEqual(thread_hint.ThreadHint.full, thread_hint.threadHint(.{
+        .delete_confirm = false,
+        .on_thread = true,
+        .owns_comment = true,
+    }));
+}
+
+test "threadHint: on a thread the viewer does not own drops edit/delete" {
+    try testing.expectEqual(thread_hint.ThreadHint.reply_only, thread_hint.threadHint(.{
+        .delete_confirm = false,
+        .on_thread = true,
+        .owns_comment = false,
+    }));
+}
+
+test "threadHint: armed delete confirmation wins over everything" {
+    try testing.expectEqual(thread_hint.ThreadHint.delete_confirm, thread_hint.threadHint(.{
+        .delete_confirm = true,
+        .on_thread = true,
+        .owns_comment = true,
+    }));
+}
+
+test "snapshot: review_status_thread_hints" {
+    try renderHintSnapshot("review_status_thread_hints", .full);
+}
+
+test "snapshot: review_status_thread_hints_not_mine" {
+    try renderHintSnapshot("review_status_thread_hints_not_mine", .reply_only);
+}
+
+test "snapshot: review_status_delete_confirm" {
+    try renderHintSnapshot("review_status_delete_confirm", .delete_confirm);
+}
+
+// =============================================================================
+// input box under a thread: reply / edit-prefilled (App-backed render)
+// =============================================================================
+
+test "snapshot: review_thread_reply_input" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var thread = makeThread(.{ .path = "src/x.zig", .line = 11, .side = .right });
+    var cmts = [_]ReviewComment{makeComment(.{ .author = "alice", .body = "should this be guarded?" })};
+    thread.comments = &cmts;
+
+    var editor = CommentEditor.State{
+        .target_file_path = "src/x.zig",
+        .target_hunk_idx = 0,
+        .target_line_idx = 0,
+        .target_end_hunk_idx = null,
+        .target_end_line_idx = null,
+        .editing_comment_idx = null,
+        .target = .local,
+        .edit_context = .{ .reply = .{ .thread_id = thread.id } },
+        .vim = CommentEditor.VimEditor.State.initWithMode(.insert),
+    };
+    editor.vim.setText("good catch, fixing now");
+    editor.vim.cursor_pos = editor.vim.text_len;
+    app.state.active_comment_input = editor;
+
+    try renderThreadWithInputSnapshot("review_thread_reply_input", &app, .{
+        .thread = &thread,
+        .is_bucketed = false,
+        .expanded = true,
+    });
+}
+
+test "snapshot: review_thread_edit_prefilled" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var thread = makeThread(.{ .path = "src/x.zig", .line = 11, .side = .right });
+    var cmts = [_]ReviewComment{makeComment(.{ .author = "me", .body = "this needs a guard" })};
+    thread.comments = &cmts;
+
+    var editor = CommentEditor.State{
+        .target_file_path = "src/x.zig",
+        .target_hunk_idx = 0,
+        .target_line_idx = 0,
+        .target_end_hunk_idx = null,
+        .target_end_line_idx = null,
+        .editing_comment_idx = null,
+        .target = .local,
+        .edit_context = .{ .edit_own = .{ .thread_id = thread.id, .comment_id = cmts[0].id } },
+        .vim = CommentEditor.VimEditor.State.initWithMode(.insert),
+    };
+    editor.vim.setText("this needs a guard before deref");
+    editor.vim.cursor_pos = editor.vim.text_len;
+    app.state.active_comment_input = editor;
+
+    try renderThreadWithInputSnapshot("review_thread_edit_prefilled", &app, .{
+        .thread = &thread,
+        .is_bucketed = false,
+        .expanded = true,
+    });
+}
+
 // =============================================================================
 // Test builders
 // =============================================================================
+
+const FRAME_TEXT_CAPACITY: usize = 262144;
+
+/// Minimal `App` for render-only snapshots: everything the review input-box
+/// renderer does not touch is left `undefined`. `renderCommentInputBox` reads
+/// only `state.active_comment_input`, the frame text buffer, and the allocator.
+fn initRenderApp(allocator: std.mem.Allocator) !App {
+    const frame_buffer = try allocator.alloc(u8, FRAME_TEXT_CAPACITY);
+    var syntax_highlighter = try review.SyntaxHighlighter.init(allocator);
+    errdefer syntax_highlighter.deinit();
+
+    return .{
+        .allocator = allocator,
+        .vx = null,
+        .tty = null,
+        .mode = .comment,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = frame_buffer,
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = syntax_highlighter,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = review.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+}
+
+fn deinitRenderApp(app: *App) void {
+    if (app.tab_manager) |*tm| tm.deinit();
+    app.syntax_highlighter.deinit();
+    app.allocator.free(app.frame_text_buffer);
+}
+
+/// Render a thread block and, immediately under it, the active reply/edit input
+/// box — mirroring the production placement in `unified.zig`/`side_by_side.zig`.
+fn renderThreadWithInputSnapshot(name: []const u8, app: *App, info: thread_block.ThreadRenderInfo) !void {
+    const allocator = testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 24);
+    defer ctx.deinit();
+
+    const rows = thread_block.renderThreadDisplay(ctx.window(), info, 0, 60, ctx.frameAllocator());
+    _ = try RenderUtils.renderCommentInputBox(app, ctx.window(), rows, 4);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, name, text);
+}
+
+/// Render a status-bar thread hint (a plain text segment) to a one-row window.
+fn renderHintSnapshot(name: []const u8, hint: thread_hint.ThreadHint) !void {
+    const allocator = testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 60, 1);
+    defer ctx.deinit();
+
+    var seg = [_]vaxis.Cell.Segment{.{ .text = thread_hint.hintText(hint), .style = .{} }};
+    _ = ctx.window().print(&seg, .{ .row_offset = 0 });
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, name, text);
+}
 
 fn renderThreadSnapshot(name: []const u8, info: thread_block.ThreadRenderInfo) !void {
     const allocator = testing.allocator;

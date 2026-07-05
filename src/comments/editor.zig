@@ -12,6 +12,21 @@ pub const CommentEditor = struct {
     /// review comment posted to the active PR session (AD-7).
     pub const Target = enum { local, github };
 
+    /// Conversation context for editors opened on an existing GitHub review
+    /// thread (FR-5). `.none` is the ordinary diff-line comment editor (routed by
+    /// `Target`); `.reply`/`.edit_own` short-circuit the diff-coordinate save path
+    /// and dispatch a thread mutation instead. Targets are keyed by GitHub node id
+    /// (not positional index) so a thread/comment removed under a concurrent
+    /// mutation while the editor is open re-resolves correctly at save time. The id
+    /// slices borrow the target thread's session-owned/arena strings, which stay
+    /// valid for the editor's lifetime (the target is never refetched away in
+    /// comment mode and cannot be removed by a mutation on another thread).
+    pub const EditContext = union(enum) {
+        none,
+        reply: struct { thread_id: []const u8 },
+        edit_own: struct { thread_id: []const u8, comment_id: []const u8 },
+    };
+
     /// Active comment input state.
     /// Contains comment-specific targeting info plus embedded vim state.
     pub const State = struct {
@@ -24,6 +39,8 @@ pub const CommentEditor = struct {
         editing_comment_idx: ?usize,
         // Destination of the saved comment (set when the editor is opened).
         target: Target = .local,
+        // Thread-conversation context (reply/edit on a GitHub thread), or `.none`.
+        edit_context: EditContext = .none,
 
         // Embedded vim state
         vim: VimEditor.State,

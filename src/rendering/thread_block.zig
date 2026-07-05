@@ -28,6 +28,9 @@ pub const ThreadRenderInfo = struct {
     /// True while this thread is an optimistic placeholder whose draft post is
     /// still in flight — the block carries a `[POSTING…]` badge.
     posting: bool = false,
+    /// True while a thread interaction (reply/resolve/edit/delete) is in flight
+    /// against this thread — the block carries a `[…]` working badge.
+    busy: bool = false,
     /// The anchored code line's content, rendered as the `−` row of a suggestion
     /// on an inline thread. Null for bucketed threads (no target line to show).
     target_line_content: ?[]const u8 = null,
@@ -270,6 +273,7 @@ fn badges(arena: Allocator, info: ThreadRenderInfo, draft: bool) ![]const u8 {
         try buf.appendSlice(arena, " [OUTDATED]");
     }
     if (info.posting) try buf.appendSlice(arena, " [POSTING…]");
+    if (info.busy) try buf.appendSlice(arena, " […]");
     if (draft) try buf.appendSlice(arena, " [DRAFT]");
     return buf.toOwnedSlice(arena);
 }

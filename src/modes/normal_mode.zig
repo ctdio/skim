@@ -17,6 +17,22 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         return;
     }
 
+    // Two-step delete confirmation for review threads (AD-8). Armed by `d` on a
+    // thread; a second `d` fires the delete, any other key disarms and falls
+    // through to be processed normally.
+    if (review_controller.deleteConfirmArmed(&app.state.review)) |armed_id| {
+        app.needs_render = true;
+        if (key.codepoint == 'd' and !key.mods.ctrl and !key.mods.alt) {
+            // Fire using the armed node id (re-resolved to a live index inside
+            // fireThreadDelete) BEFORE disarming frees the id buffer.
+            try fireThreadDelete(app, armed_id);
+            review_controller.disarmDeleteConfirm(&app.state.review, app.allocator);
+            return;
+        }
+        // Otherwise: disarm; fall through to handle this key normally.
+        review_controller.disarmDeleteConfirm(&app.state.review, app.allocator);
+    }
+
     // If waiting for second z for zz (center cursor) or fold commands (za/zc/zo/zM/zR)
     if (app.state.pending_z) {
         app.state.pending_z = false;
@@ -350,7 +366,15 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.state.cursor_column = 0; // Reset column on page navigation
             app.updateCurrentFileAndTriggerHighlighting();
         },
-        '\r' => try CommentController.startCommentInput(app), // Enter to create/edit comment
+        '\r' => {
+            // Enter replies to a review thread under the cursor, else
+            // creates/edits an inline comment.
+            if (reviewThreadUnderCursor(app)) |thread_idx| {
+                try CommentController.startReplyInput(app, thread_idx);
+            } else {
+                try CommentController.startCommentInput(app);
+            }
+        },
         's' => app.toggleViewMode(),
         '\t' => {
             // Tab cycles hunk view mode, Shift+Tab goes backwards
@@ -366,7 +390,31 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         },
         'y' => try CommentController.yankCurrentCommentToClipboard(app),
         'Y' => try CommentController.yankAllCommentsToClipboard(app),
-        'd' => try CommentController.deleteCommentUnderCursor(app),
+        'd' => {
+            // On a review thread, `d` arms delete confirmation for the viewer's
+            // own comment; otherwise it deletes the inline comment under cursor.
+            if (reviewThreadUnderCursor(app)) |thread_idx| {
+                armThreadDelete(app, thread_idx);
+            } else {
+                try CommentController.deleteCommentUnderCursor(app);
+            }
+        },
+        'x' => {
+            // Toggle resolve/unresolve on the review thread under the cursor.
+            if (reviewThreadUnderCursor(app)) |thread_idx| {
+                try startThreadResolveToggle(app, thread_idx);
+            } else {
+                app.state.count_prefix = null;
+            }
+        },
+        'e' => {
+            // Edit the viewer's own comment in the review thread under the cursor.
+            if (reviewThreadUnderCursor(app)) |thread_idx| {
+                try startThreadEdit(app, thread_idx);
+            } else {
+                app.state.count_prefix = null;
+            }
+        },
         'D' => try CommentController.clearAllComments(app),
         'M' => {
             Navigation.centerCursor(app);
@@ -452,6 +500,79 @@ fn toggleExpandUnderCursor(app: *App) !void {
         },
         else => CommentController.toggleCommentUnderCursorExpanded(app),
     }
+}
+
+/// The review-thread index under the cursor, or null when the cursor is not on a
+/// review-thread record.
+fn reviewThreadUnderCursor(app: *App) ?usize {
+    const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return null;
+    return switch (record.line_type) {
+        .review_thread => |thread_info| thread_info.thread_idx,
+        else => null,
+    };
+}
+
+/// Toggle resolve/unresolve on the review thread at `thread_idx` (FR-5).
+fn startThreadResolveToggle(app: *App, thread_idx: usize) !void {
+    const started = review_controller.startToggleResolve(&app.state.review, app.allocator, thread_idx) catch |err| {
+        std.log.err("failed to toggle resolve: {any}", .{err});
+        app.showStatusMessage("failed to update thread");
+        return;
+    };
+    if (!started) {
+        app.showStatusMessage("cannot resolve this thread right now");
+        return;
+    }
+    app.rebuildReviewLineMap();
+    app.showStatusMessage("updating thread…");
+    app.needs_render = true;
+}
+
+/// Open the editor to edit the viewer's last comment in the thread (FR-5).
+fn startThreadEdit(app: *App, thread_idx: usize) !void {
+    if (thread_idx >= app.state.review.threads.items.len) return;
+    const thread = &app.state.review.threads.items[thread_idx];
+    const own_idx = review_controller.lastOwnCommentIdx(thread) orelse {
+        app.showStatusMessage("no comment of yours to edit here");
+        return;
+    };
+    try CommentController.startEditOwnInput(app, thread_idx, own_idx);
+}
+
+/// Arm delete confirmation for the viewer's own comment in the thread (FR-5).
+/// Refuses (with a hint) when the viewer owns no comment in the thread.
+fn armThreadDelete(app: *App, thread_idx: usize) void {
+    if (thread_idx >= app.state.review.threads.items.len) return;
+    const thread = &app.state.review.threads.items[thread_idx];
+    if (review_controller.lastOwnCommentIdx(thread) == null) {
+        app.showStatusMessage("no comment of yours to delete here");
+        return;
+    }
+    review_controller.armDeleteConfirm(&app.state.review, app.allocator, thread.data.id);
+    app.showStatusMessage("press d again to delete your comment");
+    app.needs_render = true;
+}
+
+/// Fire the confirmed delete of the viewer's own comment (FR-5). The armed thread
+/// is re-resolved by node id: its positional index may have shifted (or the thread
+/// may have vanished) under a concurrent mutation between the two `d` keypresses.
+fn fireThreadDelete(app: *App, thread_id: []const u8) !void {
+    const thread_idx = review_controller.threadIdxById(&app.state.review, thread_id) orelse {
+        app.showStatusMessage("thread no longer exists");
+        return;
+    };
+    const started = review_controller.startDeleteOwn(&app.state.review, app.allocator, thread_idx) catch |err| {
+        std.log.err("failed to start delete: {any}", .{err});
+        app.showStatusMessage("failed to delete comment");
+        return;
+    };
+    if (!started) {
+        app.showStatusMessage("cannot delete: no comment of yours here");
+        return;
+    }
+    app.rebuildReviewLineMap();
+    app.showStatusMessage("deleting comment…");
+    app.needs_render = true;
 }
 
 /// Handle keyboard input when in empty menu (no files loaded)

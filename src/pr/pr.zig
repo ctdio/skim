@@ -26,6 +26,7 @@ pub const stack = @import("stack.zig");
 pub const render = @import("render.zig");
 pub const review_parse = @import("review_parse.zig");
 pub const review_controller = @import("review_controller.zig");
+pub const thread_hint = @import("thread_hint.zig");
 
 pub const PullRequest = parse.PullRequest;
 pub const PullRequestList = parse.PullRequestList;

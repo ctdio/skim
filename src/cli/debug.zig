@@ -103,6 +103,31 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, subcmd, "pr-reply")) {
+        try runPrReply(allocator, args);
+        return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "pr-resolve")) {
+        try runPrResolve(allocator, args, true);
+        return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "pr-unresolve")) {
+        try runPrResolve(allocator, args, false);
+        return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "pr-edit")) {
+        try runPrEdit(allocator, args);
+        return;
+    }
+
+    if (std.mem.eql(u8, subcmd, "pr-delete")) {
+        try runPrDelete(allocator, args);
+        return;
+    }
+
     if (std.mem.eql(u8, subcmd, "--help") or std.mem.eql(u8, subcmd, "-h")) {
         try printHelp();
         return;
@@ -130,7 +155,11 @@ fn runPrView(allocator: Allocator, args: []const []const u8) !void {
     };
     defer data.deinit();
 
-    try printPrView(data.details);
+    if (hasFlag(args, "--ids")) {
+        try printPrIds(data.details);
+    } else {
+        try printPrView(data.details);
+    }
 }
 
 /// `skim debug pr-anchor <number|url>`: fetch a PR's review data + the PR diff
@@ -311,6 +340,168 @@ fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
         .ok => |bytes| allocator.free(bytes),
     }
     try w.print("Discarded pending review {s}\n", .{review_id});
+}
+
+/// `skim debug pr-reply <number|url> --thread PRRT_… --body TEXT`: post a reply
+/// to an existing thread through the SAME `github.replyToThread`/`review_parse`
+/// cores the TUI uses (AD-2). Prints the created comment.
+fn runPrReply(allocator: Allocator, args: []const []const u8) !void {
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const thread_id = flagValueOrExit(args, "--thread", "pr-reply", "Usage: skim debug pr-reply <number|url> --thread PRRT_… --body TEXT");
+    const body = flagValueOrExit(args, "--body", "pr-reply", "Usage: skim debug pr-reply <number|url> --thread PRRT_… --body TEXT");
+
+    const fetch = github.replyToThread(allocator, thread_id, body) catch {
+        try stderr_writer.interface.writeAll("Failed to run gh api graphql (addPullRequestReviewThreadReply).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    const raw = ghOkOrExit(fetch);
+    defer allocator.free(raw);
+
+    var created = review_parse.parseCreatedComment(allocator, raw, "") catch {
+        try stderr_writer.interface.writeAll("Reply returned no comment (bad thread id or a GraphQL error).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer created.deinit();
+
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+    try w.print("Replied to thread {s}\n", .{thread_id});
+    try w.print("  comment: {s}  by {s}\n", .{ created.comment.id, created.comment.author });
+    try w.print("  body: {s}\n", .{created.comment.body});
+}
+
+/// `skim debug pr-resolve|pr-unresolve <number|url> --thread PRRT_…`: toggle a
+/// thread's resolved state through `github.resolveThread`/`unresolveThread`.
+fn runPrResolve(allocator: Allocator, args: []const []const u8, resolve: bool) !void {
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const cmd = if (resolve) "pr-resolve" else "pr-unresolve";
+    const usage = if (resolve)
+        "Usage: skim debug pr-resolve <number|url> --thread PRRT_…"
+    else
+        "Usage: skim debug pr-unresolve <number|url> --thread PRRT_…";
+    const thread_id = flagValueOrExit(args, "--thread", cmd, usage);
+
+    const fetch = (if (resolve)
+        github.resolveThread(allocator, thread_id)
+    else
+        github.unresolveThread(allocator, thread_id)) catch {
+        try stderr_writer.interface.writeAll("Failed to run gh api graphql (resolve/unresolveReviewThread).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    const raw = ghOkOrExit(fetch);
+    defer allocator.free(raw);
+
+    var result = review_parse.parseResolveResult(allocator, raw) catch {
+        try stderr_writer.interface.writeAll("Resolve mutation returned no thread (bad thread id or a GraphQL error).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer result.deinit();
+
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+    try w.print("Thread {s}  resolved={}\n", .{ result.thread_id, result.is_resolved });
+}
+
+/// `skim debug pr-edit <number|url> --comment PRRC_… --body TEXT`: edit a review
+/// comment through `github.updateReviewComment`. Prints the new body.
+fn runPrEdit(allocator: Allocator, args: []const []const u8) !void {
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const comment_id = flagValueOrExit(args, "--comment", "pr-edit", "Usage: skim debug pr-edit <number|url> --comment PRRC_… --body TEXT");
+    const body = flagValueOrExit(args, "--body", "pr-edit", "Usage: skim debug pr-edit <number|url> --comment PRRC_… --body TEXT");
+
+    const fetch = github.updateReviewComment(allocator, comment_id, body) catch {
+        try stderr_writer.interface.writeAll("Failed to run gh api graphql (updatePullRequestReviewComment).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    const raw = ghOkOrExit(fetch);
+    defer allocator.free(raw);
+
+    var updated = review_parse.parseUpdatedComment(allocator, raw) catch {
+        try stderr_writer.interface.writeAll("Edit returned no comment (bad comment id or a GraphQL error).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer updated.deinit();
+
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+    try w.print("Updated comment {s}\n", .{updated.id});
+    try w.print("  body: {s}\n", .{updated.body});
+}
+
+/// `skim debug pr-delete <number|url> --comment PRRC_…`: delete a review comment
+/// through `github.deleteReviewComment`. Prints the deleted comment's id.
+fn runPrDelete(allocator: Allocator, args: []const []const u8) !void {
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const comment_id = flagValueOrExit(args, "--comment", "pr-delete", "Usage: skim debug pr-delete <number|url> --comment PRRC_…");
+
+    const fetch = github.deleteReviewComment(allocator, comment_id) catch {
+        try stderr_writer.interface.writeAll("Failed to run gh api graphql (deletePullRequestReviewComment).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    const raw = ghOkOrExit(fetch);
+    defer allocator.free(raw);
+
+    const del_id = review_parse.parseDeletedComment(allocator, raw) catch {
+        try stderr_writer.interface.writeAll("Delete failed (bad comment id or a GraphQL error).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer allocator.free(del_id);
+
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+    try w.print("Deleted comment {s}\n", .{del_id});
+}
+
+/// Whether `flag` appears anywhere in the positional args (index 3+).
+fn hasFlag(args: []const []const u8, flag: []const u8) bool {
+    var i: usize = 3;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], flag)) return true;
+    }
+    return false;
+}
+
+/// The value following `flag` (searched from index 4, after the PR arg), or exit
+/// non-zero with a usage message when the flag or its value is missing.
+fn flagValueOrExit(args: []const []const u8, flag: []const u8, cmd: []const u8, usage: []const u8) []const u8 {
+    var i: usize = 4;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], flag)) {
+            if (i + 1 < args.len) return args[i + 1];
+            break;
+        }
+    }
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    stderr_writer.interface.print("{s}: missing {s}\n", .{ cmd, flag }) catch {};
+    stderr_writer.interface.print("{s}\n", .{usage}) catch {};
+    stderr_writer.interface.flush() catch {};
+    std.process.exit(1);
+}
+
+/// Unwrap a `GhFetch`, returning the raw bytes or exiting non-zero with the
+/// classified error message.
+fn ghOkOrExit(fetch: github.GhFetch) []u8 {
+    switch (fetch) {
+        .failed => |kind| {
+            var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+            stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)}) catch {};
+            stderr_writer.interface.flush() catch {};
+            std.process.exit(1);
+        },
+        .ok => |bytes| return bytes,
+    }
 }
 
 /// Create a pending review and return its id, or exit non-zero with a diagnostic.
@@ -592,9 +783,25 @@ fn printPrView(details: review_parse.PrDetails) !void {
             if (t.is_outdated) " outdated" else "",
             t.comments.len,
         });
-        if (t.comments.len > 0) {
-            const c = t.comments[0];
-            try w.print("      first by {s}: {s}\n", .{ c.author, previewLine(c.body) });
+        for (t.comments) |c| {
+            try w.print("      by {s}: {s}\n", .{ c.author, previewLine(c.body) });
+        }
+    }
+}
+
+/// `skim debug pr-view <number|url> --ids`: print each thread's node id followed
+/// by its comment node ids (one per line), in thread/comment order. The
+/// thread-lifecycle harness greps these `PRRT_`/`PRRC_` ids to drive the other
+/// pr-* subcommands.
+fn printPrIds(details: review_parse.PrDetails) !void {
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+
+    for (details.threads) |t| {
+        try w.print("{s}\n", .{t.id});
+        for (t.comments) |c| {
+            try w.print("  {s}\n", .{c.id});
         }
     }
 }
@@ -828,10 +1035,15 @@ fn printHelp() !void {
         \\    replay-acp <session.jsonl>      Render a saved ACP/Claude session transcript
         \\    replay-codex <session.jsonl>    Render a saved Codex JSONL session
         \\    replay-opencode <session.log>   Render a saved Opencode SSE event log
-        \\    pr-view <number|url>            Fetch + print a PR's GitHub review data
+        \\    pr-view <number|url> [--ids]    Fetch + print a PR's GitHub review data (--ids lists node ids)
         \\    pr-anchor <number|url>          Fetch a PR + anchor its review threads to the diff
         \\    pr-comment <number|url> ...     Post a draft review thread (see options below)
         \\    pr-discard <number|url>         Discard the viewer's pending review
+        \\    pr-reply <number|url> --thread PRRT_… --body TEXT     Reply to an existing thread
+        \\    pr-resolve <number|url> --thread PRRT_…               Resolve a thread
+        \\    pr-unresolve <number|url> --thread PRRT_…             Unresolve a thread
+        \\    pr-edit <number|url> --comment PRRC_… --body TEXT     Edit a review comment
+        \\    pr-delete <number|url> --comment PRRC_…               Delete a review comment
         \\
         \\PR-COMMENT OPTIONS:
         \\    --path P                        File path the comment targets (required)
@@ -850,6 +1062,11 @@ fn printHelp() !void {
         \\    skim debug pr-anchor 26015
         \\    skim debug pr-comment 42 --path src/x.zig --line 10 --side right --body "nit: rename"
         \\    skim debug pr-discard 42
+        \\    skim debug pr-view 42 --ids
+        \\    skim debug pr-reply 42 --thread PRRT_abc --body "thanks, fixed"
+        \\    skim debug pr-resolve 42 --thread PRRT_abc
+        \\    skim debug pr-edit 42 --comment PRRC_xyz --body "updated"
+        \\    skim debug pr-delete 42 --comment PRRC_xyz
         \\
     );
 }

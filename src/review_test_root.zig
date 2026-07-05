@@ -12,8 +12,18 @@ pub const parser = @import("git/parser.zig");
 pub const line_map = @import("line_map.zig");
 pub const comments = @import("comments/store.zig");
 pub const thread_block = @import("rendering/thread_block.zig");
+pub const thread_hint = @import("pr/thread_hint.zig");
 pub const harness = @import("testing/harness.zig");
 pub const snapshot = @import("testing/snapshot.zig");
+
+// App + render seams for the reply/edit input-box render snapshots (FR-5). The
+// input box is drawn by `RenderUtils.renderCommentInputBox(*App, …)`, so the
+// review render tests need a minimal `App` value carrying an `active_comment_input`.
+pub const App = @import("app.zig").App;
+pub const RenderUtils = @import("rendering/utils.zig").RenderUtils;
+pub const CommentEditor = @import("comments/editor.zig").CommentEditor;
+pub const SyntaxHighlighter = @import("highlighting/core.zig").SyntaxHighlighter;
+pub const TabManager = @import("agent/tab_manager.zig").TabManager;
 
 pub const AnchoredThread = thread_anchor.AnchoredThread;
 pub const Placement = thread_anchor.Placement;

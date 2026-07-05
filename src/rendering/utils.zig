@@ -930,6 +930,11 @@ pub const RenderUtils = struct {
 
         // Build label with range info if applicable
         const label = blk: {
+            switch (input.edit_context) {
+                .reply => break :blk try copyFrameText(app, " Reply"),
+                .edit_own => break :blk try copyFrameText(app, " Edit comment"),
+                .none => {},
+            }
             if (input.target_end_hunk_idx != null and input.target_end_line_idx != null) {
                 // Range comment - show line range
                 const start_line = input.target_line_idx + 1; // +1 for 1-based display
@@ -1656,6 +1661,7 @@ pub const RenderUtils = struct {
             .expanded = review_controller.isThreadExpanded(session, thread_idx),
             .is_cursor = is_cursor,
             .posting = session.threads.items[thread_idx].posting,
+            .busy = session.threads.items[thread_idx].busy,
             .target_line_content = threadTargetLine(app, thread_idx, is_bucket),
         };
     }

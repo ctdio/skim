@@ -201,6 +201,33 @@ pub const SideBySideRenderer = struct {
                         .is_cursor = is_cursor,
                     });
                     row += rows_used;
+
+                    // Reply / edit editor renders full-width under the thread block
+                    // when it targets this thread (FR-5), matching the thread block
+                    // which is itself drawn full-width in side-by-side.
+                    if (app.mode == .comment and is_cursor) {
+                        if (app.state.active_comment_input) |input| {
+                            const cur_id = app.state.review.threads.items[thread_info.thread_idx].data.id;
+                            const targets_this_thread = switch (input.edit_context) {
+                                .reply => |r| std.mem.eql(u8, r.thread_id, cur_id),
+                                .edit_own => |e| std.mem.eql(u8, e.thread_id, cur_id),
+                                .none => false,
+                            };
+                            if (targets_this_thread and row < win.height) {
+                                const comment_start_row = row;
+                                const comment_rows = try RenderUtils.renderCommentInputBox(app, win, row, gutter_width);
+                                var comment_row_idx: usize = 0;
+                                while (comment_row_idx < comment_rows and comment_start_row + comment_row_idx < win.height) : (comment_row_idx += 1) {
+                                    var comment_sidebar = [_]vaxis.Cell.Segment{.{
+                                        .text = "┃",
+                                        .style = sidebar_style,
+                                    }};
+                                    _ = win.print(&comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0) });
+                                }
+                                row += comment_rows;
+                            }
+                        }
+                    }
                 },
                 .spacer => {
                     // Render spacer - just empty line with cursor highlight if needed (no borders)

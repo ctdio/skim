@@ -50,6 +50,10 @@ pub const SessionThread = struct {
     posting: bool = false,
     owned: bool = false,
     local_seq: u64 = 0,
+    /// True while a thread interaction (reply/resolve/edit/delete) is in flight
+    /// against this thread — blocks a second concurrent action on the same thread
+    /// and drives the per-thread pending marker. Cleared on poll apply/failure.
+    busy: bool = false,
 };
 
 /// Params for posting a review thread. Slices are borrowed by `startPostThread`
@@ -106,6 +110,59 @@ const QueuedPost = struct {
     start_side: review_parse.Side,
     body: []u8,
     local_seq: u64,
+};
+
+/// The conversation operations on an existing review thread (FR-5). `resolve`
+/// and `unresolve` are distinct so the worker can pick the right mutation
+/// without re-reading thread state off-thread.
+pub const ThreadMutationKind = enum { reply, resolve, unresolve, edit, delete };
+
+/// Outcome of consuming a completed thread mutation.
+pub const ThreadMutationOutcome = union(enum) {
+    none,
+    applied: ThreadMutationKind, // succeeded and applied locally; caller re-anchors + rebuilds
+    failed: struct { kind: ThreadMutationKind, err: github.GhErrorKind },
+};
+
+/// Thread-safe handoff of a single in-flight thread mutation (reply/resolve/
+/// unresolve/edit/delete) to the main loop. One runs at a time; a per-thread
+/// `busy` flag blocks a second action on the same thread while further actions
+/// queue. Inputs are set before spawn; outputs written under `mutex` then
+/// `ready.store(true, .release)`. All buffers are `c_allocator`-owned so they
+/// survive the thread boundary; `pollThreadMutations` frees them on consumption.
+pub const ThreadMutation = struct {
+    mutex: std.Thread.Mutex = .{},
+    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    // Inputs.
+    kind: ThreadMutationKind = .reply,
+    in_thread_id: []u8 = &.{}, // target thread node id (busy tracking + reply/resolve arg)
+    in_comment_id: []u8 = &.{}, // edit/delete arg (comment node id)
+    in_body: []u8 = &.{}, // reply/edit body
+
+    // Outputs.
+    out_raw: ?[]u8 = null, // mutation response JSON
+    failed: bool = false,
+    fail_kind: github.GhErrorKind = .other,
+};
+
+const QueuedThreadMutation = struct {
+    kind: ThreadMutationKind,
+    thread_id: []u8,
+    comment_id: []u8,
+    body: []u8,
+};
+
+/// Two-step delete confirmation (AD-8 draft safety for destructive ops). Armed
+/// by the first `d` on a thread; the second `d` fires the delete, any other key
+/// disarms. Keyed by the thread's node id (an owned copy) — NOT a positional
+/// index — so a concurrent mutation that shifts or removes threads between the
+/// two `d` keypresses can never redirect the delete onto a neighbouring thread.
+/// The id is re-resolved to a live index at fire time (`fireThreadDelete`),
+/// mirroring the save-time re-resolution of reply/edit. Transient UI state:
+/// cleared on refetch alongside `expanded_threads`.
+pub const DeleteConfirm = struct {
+    thread_id: []u8,
 };
 
 /// Thread-safe handoff of a background entry/refetch to the main loop. Worker
@@ -196,6 +253,16 @@ pub const ReviewSession = struct {
     // Draft safety (NFR-2): the body of the last failed post, preserved so the
     // next comment-open pre-fills the editor. Session-allocator-owned.
     draft_failed_text: ?[]u8 = null,
+
+    // Thread interactions (Phase 4, FR-5): reply / resolve / edit / delete on an
+    // existing thread. Serialized like posts (one worker, the rest queue) with a
+    // per-thread `busy` marker so a second action on the same thread is refused.
+    thread_mutation: ThreadMutation = .{},
+    thread_mutation_thread: ?std.Thread = null,
+    thread_mut_active: bool = false,
+    queued_thread_mutations: std.ArrayList(QueuedThreadMutation) = .{},
+    // Two-step delete confirmation state (null = disarmed). See `DeleteConfirm`.
+    delete_confirm: ?DeleteConfirm = null,
 };
 
 /// Begin an async PR entry: git ref fetch + review-data fetch off-thread. No-op
@@ -320,6 +387,7 @@ pub fn applyFetchedData(self: *ReviewSession, allocator: Allocator, data: *revie
     // New payload → positional thread indices change; drop derived/UI state.
     freeAnchored(self, allocator);
     self.expanded_threads.clearRetainingCapacity();
+    disarmDeleteConfirm(self, allocator);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
@@ -565,6 +633,213 @@ pub fn takeFailedDraft(self: *ReviewSession) ?[]u8 {
     return text;
 }
 
+/// Borrow the stashed failed-draft body WITHOUT clearing it. Used to pre-fill an
+/// editor whose send is not yet committed (reply): the stash is only cleared once
+/// the send actually succeeds, so cancelling or emptying the editor preserves the
+/// draft for retry (AD-8). Null when there is nothing stashed.
+pub fn peekFailedDraft(self: *const ReviewSession) ?[]const u8 {
+    return self.draft_failed_text;
+}
+
+// =============================================================================
+// Thread interactions (FR-5): reply / resolve / edit / delete
+// =============================================================================
+
+/// Whether thread `thread_idx` has a mutation in flight (blocks a second action
+/// on the same thread and drives the "…" busy badge).
+pub fn isThreadBusy(self: *const ReviewSession, thread_idx: usize) bool {
+    if (thread_idx >= self.threads.items.len) return false;
+    return self.threads.items[thread_idx].busy;
+}
+
+/// The last comment authored by the viewer in `thread` (edit/delete target), or
+/// null when the viewer owns none.
+pub fn lastOwnCommentIdx(thread: *const SessionThread) ?usize {
+    var result: ?usize = null;
+    for (thread.data.comments, 0..) |c, i| {
+        if (c.is_mine) result = i;
+    }
+    return result;
+}
+
+/// Begin an async reply to `thread_idx` with `body`. Refused (returns false)
+/// when the index is out of range, the thread is busy, or the thread is still an
+/// unposted placeholder. On success marks the thread busy and dispatches (or
+/// queues) the worker.
+pub fn startReply(self: *ReviewSession, allocator: Allocator, thread_idx: usize, body: []const u8) !bool {
+    const st = mutableThread(self, thread_idx) orelse return false;
+    if (st.busy or st.posting) return false;
+    const thread_id = st.data.id;
+    st.busy = true;
+    errdefer st.busy = false;
+    try beginThreadMutation(self, allocator, .{ .kind = .reply, .thread_id = thread_id, .comment_id = "", .body = body });
+    return true;
+}
+
+/// Begin an async resolve/unresolve toggle on `thread_idx` (picks the mutation
+/// from the thread's current resolved state). Same refusal rules as `startReply`.
+pub fn startToggleResolve(self: *ReviewSession, allocator: Allocator, thread_idx: usize) !bool {
+    const st = mutableThread(self, thread_idx) orelse return false;
+    if (st.busy or st.posting) return false;
+    const thread_id = st.data.id;
+    const kind: ThreadMutationKind = if (st.data.is_resolved) .unresolve else .resolve;
+    st.busy = true;
+    errdefer st.busy = false;
+    try beginThreadMutation(self, allocator, .{ .kind = kind, .thread_id = thread_id, .comment_id = "", .body = "" });
+    return true;
+}
+
+/// Begin an async edit of the comment at `comment_idx` in `thread_idx` with
+/// `new_body`. Refused when the index/comment is invalid, the thread is busy, or
+/// it is an unposted placeholder.
+pub fn startEditOwn(self: *ReviewSession, allocator: Allocator, thread_idx: usize, comment_idx: usize, new_body: []const u8) !bool {
+    const st = mutableThread(self, thread_idx) orelse return false;
+    if (st.busy or st.posting) return false;
+    if (comment_idx >= st.data.comments.len) return false;
+    const comment_id = st.data.comments[comment_idx].id;
+    const thread_id = st.data.id;
+    st.busy = true;
+    errdefer st.busy = false;
+    try beginThreadMutation(self, allocator, .{ .kind = .edit, .thread_id = thread_id, .comment_id = comment_id, .body = new_body });
+    return true;
+}
+
+/// Begin an async delete of the viewer's last comment in `thread_idx`. Refused
+/// when the thread is busy/placeholder or the viewer owns no comment in it.
+pub fn startDeleteOwn(self: *ReviewSession, allocator: Allocator, thread_idx: usize) !bool {
+    const st = mutableThread(self, thread_idx) orelse return false;
+    if (st.busy or st.posting) return false;
+    const own_idx = lastOwnCommentIdx(st) orelse return false;
+    const comment_id = st.data.comments[own_idx].id;
+    const thread_id = st.data.id;
+    st.busy = true;
+    errdefer st.busy = false;
+    try beginThreadMutation(self, allocator, .{ .kind = .delete, .thread_id = thread_id, .comment_id = comment_id, .body = "" });
+    return true;
+}
+
+/// Arm the two-step delete confirmation for the thread with `thread_id` (first
+/// `d`). Stores an owned copy of the node id so it survives concurrent thread
+/// removal/reordering; on OOM the confirmation is simply left disarmed.
+pub fn armDeleteConfirm(self: *ReviewSession, allocator: Allocator, thread_id: []const u8) void {
+    if (self.delete_confirm) |dc| allocator.free(dc.thread_id);
+    self.delete_confirm = null;
+    const id = allocator.dupe(u8, thread_id) catch return;
+    self.delete_confirm = .{ .thread_id = id };
+}
+
+/// Disarm the delete confirmation (any key other than the confirming `d`).
+pub fn disarmDeleteConfirm(self: *ReviewSession, allocator: Allocator) void {
+    if (self.delete_confirm) |dc| allocator.free(dc.thread_id);
+    self.delete_confirm = null;
+}
+
+/// The node id of the thread currently armed for delete confirmation, or null.
+/// Borrows the session-owned copy; valid until the next arm/disarm/refetch.
+pub fn deleteConfirmArmed(self: *const ReviewSession) ?[]const u8 {
+    if (self.delete_confirm) |dc| return dc.thread_id;
+    return null;
+}
+
+/// Consume a completed thread mutation, if ready. Joins the worker, clears the
+/// target thread's busy flag, applies the response locally (append reply / flip
+/// resolved / replace body / remove comment-or-thread) or stashes the failed
+/// text (reply/edit) for retry, frees worker buffers, and dispatches the next
+/// queued mutation. Returns `.none` when nothing is ready.
+pub fn pollThreadMutations(self: *ReviewSession, allocator: Allocator) ThreadMutationOutcome {
+    if (!self.thread_mutation.ready.load(.acquire)) return .none;
+
+    self.thread_mutation.mutex.lock();
+    const out_raw = self.thread_mutation.out_raw;
+    const failed = self.thread_mutation.failed;
+    const fail_kind = self.thread_mutation.fail_kind;
+    self.thread_mutation.out_raw = null;
+    self.thread_mutation.mutex.unlock();
+    self.thread_mutation.ready.store(false, .release);
+
+    if (self.thread_mutation_thread) |t| {
+        t.join();
+        self.thread_mutation_thread = null;
+    }
+    self.thread_mut_active = false;
+
+    const ca = std.heap.c_allocator;
+    const kind = self.thread_mutation.kind;
+    const thread_id = self.thread_mutation.in_thread_id;
+    const comment_id = self.thread_mutation.in_comment_id;
+
+    // Clear the target thread's busy marker (found by node id — its positional
+    // index may have shifted under a concurrent refetch).
+    if (threadIdxById(self, thread_id)) |i| self.threads.items[i].busy = false;
+
+    var outcome: ThreadMutationOutcome = .{ .failed = .{ .kind = kind, .err = .other } };
+    if (failed) {
+        if (kind == .reply or kind == .edit) stashFailedDraft(self, allocator, self.thread_mutation.in_body);
+        outcome = .{ .failed = .{ .kind = kind, .err = fail_kind } };
+    } else if (out_raw) |raw| {
+        if (applyThreadMutation(self, allocator, .{ .kind = kind, .thread_id = thread_id, .comment_id = comment_id, .raw = raw })) {
+            outcome = .{ .applied = kind };
+        } else |_| {
+            if (kind == .reply or kind == .edit) stashFailedDraft(self, allocator, self.thread_mutation.in_body);
+            outcome = .{ .failed = .{ .kind = kind, .err = .other } };
+        }
+    }
+
+    if (out_raw) |raw| ca.free(raw);
+    freeThreadMutationBuffers(self);
+    drainThreadQueue(self, allocator);
+    return outcome;
+}
+
+/// Apply a completed thread-mutation response to the session (identity-keyed by
+/// node id; positional indices are never trusted). Server threads touched by a
+/// text mutation are first converted to session-owned copies so the response can
+/// mutate their strings; on refetch those owned copies are discarded in favor of
+/// authoritative server data. A response for a thread/comment that no longer
+/// exists locally (e.g. a concurrent refetch removed it) is a silent no-op — no
+/// crash, no log (a logged warn would fail the test runner). `params.raw` remains
+/// owned by the caller.
+pub fn applyThreadMutation(
+    self: *ReviewSession,
+    allocator: Allocator,
+    params: struct { kind: ThreadMutationKind, thread_id: []const u8, comment_id: []const u8, raw: []const u8 },
+) !void {
+    switch (params.kind) {
+        .reply => {
+            var created = try review_parse.parseCreatedComment(allocator, params.raw, self.viewer_login);
+            defer created.deinit();
+            const idx = threadIdxById(self, params.thread_id) orelse return;
+            try ensureOwnedThread(self, allocator, idx);
+            try appendCommentOwned(self, allocator, idx, created.comment);
+        },
+        .resolve, .unresolve => {
+            var r = try review_parse.parseResolveResult(allocator, params.raw);
+            defer r.deinit();
+            const idx = threadIdxById(self, params.thread_id) orelse return;
+            self.threads.items[idx].data.is_resolved = r.is_resolved;
+            // Reset expand override: default flips with resolved state.
+            _ = self.expanded_threads.remove(idx);
+        },
+        .edit => {
+            var u = try review_parse.parseUpdatedComment(allocator, params.raw);
+            defer u.deinit();
+            const loc = findCommentLoc(self, params.comment_id) orelse return;
+            try ensureOwnedThread(self, allocator, loc.thread_idx);
+            replaceCommentBodyOwned(self, allocator, loc.thread_idx, params.comment_id, u.body);
+        },
+        .delete => {
+            const del_id = try review_parse.parseDeletedComment(allocator, params.raw);
+            allocator.free(del_id);
+            const loc = findCommentLoc(self, params.comment_id) orelse return;
+            try ensureOwnedThread(self, allocator, loc.thread_idx);
+            try removeCommentOwned(self, allocator, loc.thread_idx, params.comment_id);
+            if (self.threads.items[loc.thread_idx].data.comments.len == 0) {
+                removeThreadAt(self, allocator, loc.thread_idx);
+            }
+        },
+    }
+}
+
 /// Count of draft threads to show in the status bar: threads whose comments are
 /// all pending, plus in-flight placeholders.
 pub fn draftCount(self: *const ReviewSession) usize {
@@ -600,7 +875,8 @@ pub fn postingCount(self: *const ReviewSession) usize {
 /// Whether any write-path work (a running worker, a ready result, or queued
 /// posts) is outstanding — joins the main loop's poll predicate.
 pub fn hasPostingWork(self: *const ReviewSession) bool {
-    return self.posting_worker_active or self.mutation.ready.load(.acquire) or self.queued_posts.items.len > 0;
+    return self.posting_worker_active or self.mutation.ready.load(.acquire) or self.queued_posts.items.len > 0 or
+        self.thread_mut_active or self.thread_mutation.ready.load(.acquire) or self.queued_thread_mutations.items.len > 0;
 }
 
 /// Free the whole session. Joins any in-flight worker first so it can't write
@@ -615,6 +891,11 @@ pub fn deinitState(self: *ReviewSession, allocator: Allocator) void {
     self.mutation_thread = null;
     self.posting_worker_active = false;
 
+    // Join any in-flight thread-mutation worker for the same reason.
+    if (self.thread_mutation_thread) |t| t.join();
+    self.thread_mutation_thread = null;
+    self.thread_mut_active = false;
+
     const ca = std.heap.c_allocator;
     if (self.entry.raw_json) |r| ca.free(r);
     if (self.entry.fetched_head_ref) |h| ca.free(h);
@@ -628,8 +909,12 @@ pub fn deinitState(self: *ReviewSession, allocator: Allocator) void {
     freeMutationBuffers(self);
     clearQueuedPosts(self, allocator);
     self.queued_posts.deinit(allocator);
+    freeThreadMutationBuffers(self);
+    clearQueuedThreadMutations(self, allocator);
+    self.queued_thread_mutations.deinit(allocator);
     if (self.draft_failed_text) |t| allocator.free(t);
     self.draft_failed_text = null;
+    disarmDeleteConfirm(self, allocator);
 
     // Free session-owned (placeholder / just-posted) thread strings before the
     // list is torn down; server threads are freed by clearData's arena.deinit.
@@ -1044,17 +1329,7 @@ fn dupeThreadOwned(allocator: Allocator, thread: review_parse.ReviewThread) !rev
     const comments = try allocator.alloc(review_parse.ReviewComment, thread.comments.len);
     errdefer allocator.free(comments);
     for (thread.comments, 0..) |c, i| {
-        comments[i] = .{
-            .id = try allocator.dupe(u8, c.id),
-            .database_id = c.database_id,
-            .author = try allocator.dupe(u8, c.author),
-            .body = try allocator.dupe(u8, c.body),
-            .created_at = try allocator.dupe(u8, c.created_at),
-            .review_id = try allocator.dupe(u8, c.review_id),
-            .review_state = c.review_state,
-            .is_mine = c.is_mine,
-            .diff_hunk = try allocator.dupe(u8, c.diff_hunk),
-        };
+        comments[i] = try dupeComment(allocator, c);
     }
     return .{
         .id = try allocator.dupe(u8, thread.id),
@@ -1073,17 +1348,303 @@ fn dupeThreadOwned(allocator: Allocator, thread: review_parse.ReviewThread) !rev
 
 /// Free a session-owned (placeholder / posted-copy) thread's strings.
 fn freeOwnedThread(allocator: Allocator, st: SessionThread) void {
-    for (st.data.comments) |c| {
-        allocator.free(c.id);
-        allocator.free(c.author);
-        allocator.free(c.body);
-        allocator.free(c.created_at);
-        allocator.free(c.review_id);
-        allocator.free(c.diff_hunk);
-    }
+    for (st.data.comments) |c| freeComment(allocator, c);
     if (st.data.comments.len > 0) allocator.free(st.data.comments);
     allocator.free(st.data.id);
     allocator.free(st.data.path);
+}
+
+/// Deep-copy one `ReviewComment` into session-allocator-owned strings.
+fn dupeComment(allocator: Allocator, c: review_parse.ReviewComment) !review_parse.ReviewComment {
+    return .{
+        .id = try allocator.dupe(u8, c.id),
+        .database_id = c.database_id,
+        .author = try allocator.dupe(u8, c.author),
+        .body = try allocator.dupe(u8, c.body),
+        .created_at = try allocator.dupe(u8, c.created_at),
+        .review_id = try allocator.dupe(u8, c.review_id),
+        .review_state = c.review_state,
+        .is_mine = c.is_mine,
+        .diff_hunk = try allocator.dupe(u8, c.diff_hunk),
+    };
+}
+
+/// Free one session-owned `ReviewComment`'s strings.
+fn freeComment(allocator: Allocator, c: review_parse.ReviewComment) void {
+    allocator.free(c.id);
+    allocator.free(c.author);
+    allocator.free(c.body);
+    allocator.free(c.created_at);
+    allocator.free(c.review_id);
+    allocator.free(c.diff_hunk);
+}
+
+// --- Thread-interaction helpers ----------------------------------------------
+
+pub const CommentLoc = struct { thread_idx: usize, comment_idx: usize };
+
+/// Mutable pointer to the thread at `thread_idx`, or null when out of range.
+fn mutableThread(self: *ReviewSession, thread_idx: usize) ?*SessionThread {
+    if (thread_idx >= self.threads.items.len) return null;
+    return &self.threads.items[thread_idx];
+}
+
+/// Positional index of the thread whose node id equals `id`, or null. Public so
+/// the editor save path can re-resolve a reply/edit target whose index may have
+/// shifted under a concurrent mutation while the editor was open (AD-4 identity).
+pub fn threadIdxById(self: *const ReviewSession, id: []const u8) ?usize {
+    for (self.threads.items, 0..) |st, i| {
+        if (std.mem.eql(u8, st.data.id, id)) return i;
+    }
+    return null;
+}
+
+/// Locate a comment by node id across all threads, or null when absent. Public
+/// for the same save-time re-resolution reason as `threadIdxById`.
+pub fn findCommentLoc(self: *const ReviewSession, comment_id: []const u8) ?CommentLoc {
+    for (self.threads.items, 0..) |st, ti| {
+        for (st.data.comments, 0..) |c, ci| {
+            if (std.mem.eql(u8, c.id, comment_id)) return .{ .thread_idx = ti, .comment_idx = ci };
+        }
+    }
+    return null;
+}
+
+/// Dispatch a thread mutation, or queue it behind an in-flight one. Inputs are
+/// borrowed; `spawnThreadMutation`/`enqueueThreadMutation` copy them.
+fn beginThreadMutation(
+    self: *ReviewSession,
+    allocator: Allocator,
+    params: struct { kind: ThreadMutationKind, thread_id: []const u8, comment_id: []const u8, body: []const u8 },
+) !void {
+    if (self.thread_mut_active or self.thread_mutation.ready.load(.acquire)) {
+        try enqueueThreadMutation(self, allocator, params.kind, params.thread_id, params.comment_id, params.body);
+        return;
+    }
+    try spawnThreadMutation(self, params.kind, params.thread_id, params.comment_id, params.body);
+}
+
+/// Copy the mutation inputs into `c_allocator` buffers and spawn the worker.
+fn spawnThreadMutation(self: *ReviewSession, kind: ThreadMutationKind, thread_id: []const u8, comment_id: []const u8, body: []const u8) !void {
+    const ca = std.heap.c_allocator;
+    const tid = try ca.dupe(u8, thread_id);
+    errdefer ca.free(tid);
+    const cid = try ca.dupe(u8, comment_id);
+    errdefer ca.free(cid);
+    const b = try ca.dupe(u8, body);
+    errdefer ca.free(b);
+
+    self.thread_mutation.kind = kind;
+    self.thread_mutation.in_thread_id = tid;
+    self.thread_mutation.in_comment_id = cid;
+    self.thread_mutation.in_body = b;
+    self.thread_mutation.out_raw = null;
+    self.thread_mutation.failed = false;
+    self.thread_mutation.fail_kind = .other;
+    self.thread_mutation.ready.store(false, .release);
+
+    self.thread_mutation_thread = std.Thread.spawn(.{}, threadMutationWorker, .{self}) catch {
+        // Detach the buffers from the struct; the errdefers above free them.
+        self.thread_mutation.in_thread_id = &.{};
+        self.thread_mutation.in_comment_id = &.{};
+        self.thread_mutation.in_body = &.{};
+        return error.SpawnFailed;
+    };
+    self.thread_mut_active = true;
+}
+
+/// Thread-mutation worker (AD-3). Runs on `c_allocator`; writes the raw response
+/// (or failure classification) under the mutex, then flips `ready`.
+fn threadMutationWorker(self: *ReviewSession) void {
+    const ca = std.heap.c_allocator;
+    var failed = false;
+    var fail_kind: github.GhErrorKind = .other;
+    var out_raw: ?[]u8 = null;
+
+    const m = &self.thread_mutation;
+    const result = switch (m.kind) {
+        .reply => github.replyToThread(ca, m.in_thread_id, m.in_body),
+        .resolve => github.resolveThread(ca, m.in_thread_id),
+        .unresolve => github.unresolveThread(ca, m.in_thread_id),
+        .edit => github.updateReviewComment(ca, m.in_comment_id, m.in_body),
+        .delete => github.deleteReviewComment(ca, m.in_comment_id),
+    };
+    if (result) |fetch| {
+        switch (fetch) {
+            .ok => |raw| out_raw = raw,
+            .failed => |k| {
+                failed = true;
+                fail_kind = k;
+            },
+        }
+    } else |_| {
+        failed = true;
+    }
+
+    m.mutex.lock();
+    m.out_raw = out_raw;
+    m.failed = failed;
+    m.fail_kind = fail_kind;
+    m.mutex.unlock();
+    m.ready.store(true, .release);
+}
+
+/// Queue a thread mutation behind the in-flight worker (copying its inputs onto
+/// the session allocator).
+fn enqueueThreadMutation(self: *ReviewSession, allocator: Allocator, kind: ThreadMutationKind, thread_id: []const u8, comment_id: []const u8, body: []const u8) !void {
+    const tid = try allocator.dupe(u8, thread_id);
+    errdefer allocator.free(tid);
+    const cid = try allocator.dupe(u8, comment_id);
+    errdefer allocator.free(cid);
+    const b = try allocator.dupe(u8, body);
+    errdefer allocator.free(b);
+    try self.queued_thread_mutations.append(allocator, .{ .kind = kind, .thread_id = tid, .comment_id = cid, .body = b });
+}
+
+/// Dispatch the next queued thread mutation if the worker is idle. If the spawn
+/// fails, the target thread's busy marker is cleared so it isn't stuck.
+fn drainThreadQueue(self: *ReviewSession, allocator: Allocator) void {
+    if (self.queued_thread_mutations.items.len == 0) return;
+    if (self.thread_mut_active or self.thread_mutation.ready.load(.acquire)) return;
+
+    const q = self.queued_thread_mutations.orderedRemove(0);
+    defer {
+        allocator.free(q.thread_id);
+        allocator.free(q.comment_id);
+        allocator.free(q.body);
+    }
+    spawnThreadMutation(self, q.kind, q.thread_id, q.comment_id, q.body) catch {
+        if (threadIdxById(self, q.thread_id)) |i| self.threads.items[i].busy = false;
+    };
+}
+
+/// Free the `c_allocator` buffers held on `self.thread_mutation` and reset them.
+fn freeThreadMutationBuffers(self: *ReviewSession) void {
+    const ca = std.heap.c_allocator;
+    if (self.thread_mutation.in_thread_id.len > 0) ca.free(self.thread_mutation.in_thread_id);
+    if (self.thread_mutation.in_comment_id.len > 0) ca.free(self.thread_mutation.in_comment_id);
+    if (self.thread_mutation.in_body.len > 0) ca.free(self.thread_mutation.in_body);
+    if (self.thread_mutation.out_raw) |r| ca.free(r);
+    self.thread_mutation.in_thread_id = &.{};
+    self.thread_mutation.in_comment_id = &.{};
+    self.thread_mutation.in_body = &.{};
+    self.thread_mutation.out_raw = null;
+}
+
+/// Free every queued thread mutation's session-owned buffers.
+fn clearQueuedThreadMutations(self: *ReviewSession, allocator: Allocator) void {
+    for (self.queued_thread_mutations.items) |q| {
+        allocator.free(q.thread_id);
+        allocator.free(q.comment_id);
+        allocator.free(q.body);
+    }
+    self.queued_thread_mutations.clearRetainingCapacity();
+}
+
+/// Convert the server thread at `idx` into a session-owned deep copy in place, so
+/// its strings can be mutated (append/replace/remove). No-op when already owned.
+fn ensureOwnedThread(self: *ReviewSession, allocator: Allocator, idx: usize) !void {
+    const st = &self.threads.items[idx];
+    if (st.owned) return;
+    const owned_data = try dupeThreadOwned(allocator, st.data);
+    self.threads.items[idx] = .{
+        .data = owned_data,
+        .posting = st.posting,
+        .owned = true,
+        .local_seq = st.local_seq,
+        .busy = st.busy,
+    };
+}
+
+/// Append a deep copy of `comment` to the owned thread at `idx` (reallocating its
+/// comment slice). The thread MUST already be owned (`ensureOwnedThread`).
+fn appendCommentOwned(self: *ReviewSession, allocator: Allocator, idx: usize, comment: review_parse.ReviewComment) !void {
+    const t = &self.threads.items[idx].data;
+    const old = t.comments;
+    const new = try allocator.alloc(review_parse.ReviewComment, old.len + 1);
+    @memcpy(new[0..old.len], old);
+    new[old.len] = dupeComment(allocator, comment) catch |err| {
+        allocator.free(new);
+        return err;
+    };
+    if (old.len > 0) allocator.free(old);
+    t.comments = new;
+}
+
+/// Replace the body of the comment with `comment_id` in the owned thread at `idx`.
+fn replaceCommentBodyOwned(self: *ReviewSession, allocator: Allocator, idx: usize, comment_id: []const u8, new_body: []const u8) void {
+    const t = &self.threads.items[idx].data;
+    for (t.comments) |*c| {
+        if (std.mem.eql(u8, c.id, comment_id)) {
+            const nb = allocator.dupe(u8, new_body) catch return;
+            allocator.free(c.body);
+            c.body = nb;
+            return;
+        }
+    }
+}
+
+/// Remove the comment with `comment_id` from the owned thread at `idx`, freeing
+/// its strings and shrinking the comment slice.
+fn removeCommentOwned(self: *ReviewSession, allocator: Allocator, idx: usize, comment_id: []const u8) !void {
+    const t = &self.threads.items[idx].data;
+    const old = t.comments;
+    var target: ?usize = null;
+    for (old, 0..) |c, i| {
+        if (std.mem.eql(u8, c.id, comment_id)) {
+            target = i;
+            break;
+        }
+    }
+    const ti = target orelse return;
+
+    if (old.len == 1) {
+        freeComment(allocator, old[0]);
+        allocator.free(old);
+        t.comments = &.{};
+        return;
+    }
+
+    // Allocate the replacement BEFORE freeing anything so a failed alloc leaves
+    // the thread untouched.
+    const new = try allocator.alloc(review_parse.ReviewComment, old.len - 1);
+    var j: usize = 0;
+    for (old, 0..) |c, i| {
+        if (i == ti) continue;
+        new[j] = c;
+        j += 1;
+    }
+    freeComment(allocator, old[ti]);
+    allocator.free(old);
+    t.comments = new;
+}
+
+/// Remove the thread at `idx` (its last comment was deleted), freeing it if owned
+/// and shifting `expanded_threads` keys to match the new indexing.
+fn removeThreadAt(self: *ReviewSession, allocator: Allocator, idx: usize) void {
+    const st = self.threads.orderedRemove(idx);
+    if (st.owned) freeOwnedThread(allocator, st);
+    shiftExpandedAfterRemoval(self, allocator, idx);
+}
+
+/// Rebuild `expanded_threads` after removing the thread at `removed_idx`: drop
+/// that key, shift higher keys down by one. On allocation failure the transient
+/// expansion state is simply cleared (view state, not review data).
+fn shiftExpandedAfterRemoval(self: *ReviewSession, allocator: Allocator, removed_idx: usize) void {
+    var kept: std.ArrayList(usize) = .{};
+    defer kept.deinit(allocator);
+    var it = self.expanded_threads.iterator();
+    while (it.next()) |e| {
+        const k = e.key_ptr.*;
+        if (k == removed_idx) continue;
+        const shifted = if (k > removed_idx) k - 1 else k;
+        kept.append(allocator, shifted) catch {
+            self.expanded_threads.clearRetainingCapacity();
+            return;
+        };
+    }
+    self.expanded_threads.clearRetainingCapacity();
+    for (kept.items) |k| self.expanded_threads.put(allocator, k, {}) catch {};
 }
 
 // =============================================================================
@@ -1402,6 +1963,21 @@ test "stashFailedDraft / takeFailedDraft: round-trips the body, then clears" {
     try testing.expect(takeFailedDraft(&session) == null);
 }
 
+test "peekFailedDraft borrows the body without clearing it" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try testing.expect(peekFailedDraft(&session) == null);
+
+    stashFailedDraft(&session, testing.allocator, "retry me");
+    try testing.expectEqualStrings("retry me", peekFailedDraft(&session).?);
+    // Peeking again still finds it (not consumed) — a cancelled reply keeps the draft.
+    try testing.expectEqualStrings("retry me", peekFailedDraft(&session).?);
+
+    const taken = takeFailedDraft(&session);
+    defer if (taken) |t| testing.allocator.free(t);
+    try testing.expect(peekFailedDraft(&session) == null);
+}
+
 test "stashFailedDraft: replaces a previously stashed body without leaking" {
     var session = ReviewSession{};
     defer deinitState(&session, testing.allocator);
@@ -1493,8 +2069,360 @@ test "pollMutations: none when no mutation is ready" {
     try testing.expect(pollMutations(&session, testing.allocator) == .none);
 }
 
+// --- Thread-interaction tests -----------------------------------------------
+
+const reply_fixture =
+    \\{"data":{"addPullRequestReviewThreadReply":{"comment":
+    \\{"id":"PRRC_reply","databaseId":100,"author":{"login":"ctdio"},"body":"my reply","createdAt":"2025-02-02T00:00:00Z","diffHunk":"@@ -1 +1 @@","pullRequestReview":{"id":"PRR_2","state":"COMMENTED"},"replyTo":{"id":"PRRC_1"}}
+    \\}}}
+;
+const resolve_fixture =
+    \\{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":true}}}}
+;
+const unresolve_fixture =
+    \\{"data":{"unresolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":false}}}}
+;
+const update_fixture =
+    \\{"data":{"updatePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_1","body":"edited body"}}}}
+;
+const delete_fixture =
+    \\{"data":{"deletePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_1","databaseId":99}}}}
+;
+
+test "applyThreadMutation reply appends the server comment to the thread" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    session.viewer_login = "ctdio";
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{.{ .id = "PRRC_1", .mine = true }});
+
+    try applyThreadMutation(&session, testing.allocator, .{ .kind = .reply, .thread_id = "PRRT_1", .comment_id = "", .raw = reply_fixture });
+
+    try testing.expectEqual(@as(usize, 2), session.threads.items[0].data.comments.len);
+    try testing.expectEqualStrings("PRRC_reply", session.threads.items[0].data.comments[1].id);
+    try testing.expectEqualStrings("my reply", session.threads.items[0].data.comments[1].body);
+    try testing.expect(session.threads.items[0].data.comments[1].is_mine);
+}
+
+test "applyThreadMutation reply converts a server (non-owned) thread to owned" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    session.viewer_login = "ctdio";
+
+    var comments = [_]review_parse.ReviewComment{.{
+        .id = "PRRC_1",
+        .database_id = 99,
+        .author = "ctdio",
+        .body = "orig",
+        .created_at = "",
+        .review_id = "",
+        .review_state = .commented,
+        .is_mine = true,
+        .diff_hunk = "",
+    }};
+    try session.threads.append(testing.allocator, .{ .data = .{
+        .id = "PRRT_1",
+        .path = "src/x.zig",
+        .line = 10,
+        .start_line = null,
+        .original_line = 10,
+        .side = .right,
+        .start_side = .right,
+        .is_resolved = false,
+        .is_outdated = false,
+        .subject_type = .line,
+        .comments = &comments,
+    }, .owned = false });
+
+    try applyThreadMutation(&session, testing.allocator, .{ .kind = .reply, .thread_id = "PRRT_1", .comment_id = "", .raw = reply_fixture });
+
+    try testing.expect(session.threads.items[0].owned);
+    try testing.expectEqual(@as(usize, 2), session.threads.items[0].data.comments.len);
+}
+
+test "applyThreadMutation resolve flips is_resolved and clears the expand override" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{.{ .id = "PRRC_1", .mine = true }});
+    try session.expanded_threads.put(testing.allocator, 0, {});
+
+    try applyThreadMutation(&session, testing.allocator, .{ .kind = .resolve, .thread_id = "PRRT_1", .comment_id = "", .raw = resolve_fixture });
+
+    try testing.expect(session.threads.items[0].data.is_resolved);
+    try testing.expectEqual(@as(usize, 0), session.expanded_threads.count());
+}
+
+test "applyThreadMutation unresolve clears is_resolved" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", true, &.{.{ .id = "PRRC_1", .mine = true }});
+
+    try applyThreadMutation(&session, testing.allocator, .{ .kind = .unresolve, .thread_id = "PRRT_1", .comment_id = "", .raw = unresolve_fixture });
+
+    try testing.expect(!session.threads.items[0].data.is_resolved);
+}
+
+test "applyThreadMutation edit replaces the comment body" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{.{ .id = "PRRC_1", .mine = true }});
+
+    try applyThreadMutation(&session, testing.allocator, .{ .kind = .edit, .thread_id = "PRRT_1", .comment_id = "PRRC_1", .raw = update_fixture });
+
+    try testing.expectEqualStrings("edited body", session.threads.items[0].data.comments[0].body);
+}
+
+test "applyThreadMutation delete drops the comment but keeps a multi-comment thread" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{
+        .{ .id = "PRRC_1", .mine = true },
+        .{ .id = "PRRC_2", .mine = false },
+    });
+
+    try applyThreadMutation(&session, testing.allocator, .{ .kind = .delete, .thread_id = "PRRT_1", .comment_id = "PRRC_1", .raw = delete_fixture });
+
+    try testing.expectEqual(@as(usize, 1), session.threads.items.len);
+    try testing.expectEqual(@as(usize, 1), session.threads.items[0].data.comments.len);
+    try testing.expectEqualStrings("PRRC_2", session.threads.items[0].data.comments[0].id);
+}
+
+test "applyThreadMutation delete removes the whole thread with its last comment and shifts expansion" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{.{ .id = "PRRC_1", .mine = true }});
+    try appendOwnedThread(&session, testing.allocator, "PRRT_2", false, &.{.{ .id = "PRRC_9", .mine = false }});
+    // Override expansion of the second thread; deleting the first shifts it to 0.
+    try session.expanded_threads.put(testing.allocator, 1, {});
+
+    try applyThreadMutation(&session, testing.allocator, .{ .kind = .delete, .thread_id = "PRRT_1", .comment_id = "PRRC_1", .raw = delete_fixture });
+
+    try testing.expectEqual(@as(usize, 1), session.threads.items.len);
+    try testing.expectEqualStrings("PRRT_2", session.threads.items[0].data.id);
+    try testing.expect(session.expanded_threads.contains(0));
+    try testing.expect(!session.expanded_threads.contains(1));
+}
+
+test "applyThreadMutation on an unknown thread id is a silent no-op" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    session.viewer_login = "ctdio";
+
+    try applyThreadMutation(&session, testing.allocator, .{ .kind = .reply, .thread_id = "PRRT_missing", .comment_id = "", .raw = reply_fixture });
+
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+}
+
+test "lastOwnCommentIdx returns the last viewer-authored comment" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{
+        .{ .id = "c0", .mine = false },
+        .{ .id = "c1", .mine = true },
+        .{ .id = "c2", .mine = false },
+        .{ .id = "c3", .mine = true },
+    });
+    try testing.expectEqual(@as(?usize, 3), lastOwnCommentIdx(&session.threads.items[0]));
+}
+
+test "lastOwnCommentIdx returns null when the viewer owns no comment" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{
+        .{ .id = "c0", .mine = false },
+        .{ .id = "c1", .mine = false },
+    });
+    try testing.expectEqual(@as(?usize, null), lastOwnCommentIdx(&session.threads.items[0]));
+}
+
+test "delete confirm arms with a thread id, reports it, and disarms" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try testing.expect(deleteConfirmArmed(&session) == null);
+    armDeleteConfirm(&session, testing.allocator, "PRRT_9");
+    try testing.expectEqualStrings("PRRT_9", deleteConfirmArmed(&session).?);
+    disarmDeleteConfirm(&session, testing.allocator);
+    try testing.expect(deleteConfirmArmed(&session) == null);
+}
+
+test "delete confirm survives a concurrent delete-last on an earlier thread without redirecting" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    // Threads A (idx 0) and B (idx 1); the viewer arms delete on B.
+    try appendOwnedThread(&session, testing.allocator, "PRRT_A", false, &.{.{ .id = "PRRC_A", .mine = true }});
+    try appendOwnedThread(&session, testing.allocator, "PRRT_B", false, &.{.{ .id = "PRRC_B", .mine = true }});
+    armDeleteConfirm(&session, testing.allocator, "PRRT_B");
+
+    // A concurrent delete-last on A (idx 0) removes it and shifts B down to idx 0.
+    try applyThreadMutation(&session, testing.allocator, .{ .kind = .delete, .thread_id = "PRRT_A", .comment_id = "PRRC_A", .raw = delete_fixture });
+    try testing.expectEqual(@as(usize, 1), session.threads.items.len);
+
+    // The armed id still resolves to B (now at idx 0) — never a neighbour.
+    const armed = deleteConfirmArmed(&session).?;
+    try testing.expectEqualStrings("PRRT_B", armed);
+    try testing.expectEqual(@as(?usize, 0), threadIdxById(&session, armed));
+}
+
+test "delete confirm is cleared when the armed thread itself is removed" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_A", false, &.{.{ .id = "PRRC_A", .mine = true }});
+    try appendOwnedThread(&session, testing.allocator, "PRRT_B", false, &.{.{ .id = "PRRC_B", .mine = true }});
+    armDeleteConfirm(&session, testing.allocator, "PRRT_B");
+
+    // Delete-last on B removes B; the armed id no longer resolves, so a fire refuses.
+    try applyThreadMutation(&session, testing.allocator, .{ .kind = .delete, .thread_id = "PRRT_B", .comment_id = "PRRC_B", .raw = delete_fixture });
+    const armed = deleteConfirmArmed(&session).?;
+    try testing.expect(threadIdxById(&session, armed) == null);
+}
+
+test "isThreadBusy reflects the busy flag and is false out of range" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{.{ .id = "PRRC_1", .mine = true }});
+    try testing.expect(!isThreadBusy(&session, 0));
+    session.threads.items[0].busy = true;
+    try testing.expect(isThreadBusy(&session, 0));
+    try testing.expect(!isThreadBusy(&session, 5));
+}
+
+test "startReply refuses a second action while the thread is busy" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{.{ .id = "PRRC_1", .mine = true }});
+    session.threads.items[0].busy = true;
+    try testing.expect(!try startReply(&session, testing.allocator, 0, "reply"));
+}
+
+test "startReply refuses an unposted placeholder" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    session.active = true;
+    const seq = try appendPlaceholder(&session, testing.allocator, samplePost("draft"));
+    _ = seq;
+    try testing.expect(!try startReply(&session, testing.allocator, 0, "reply"));
+}
+
+test "startToggleResolve queues an unresolve when the thread is resolved" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", true, &.{.{ .id = "PRRC_1", .mine = true }});
+    // Simulate an in-flight worker so beginThreadMutation enqueues (no real IO).
+    session.thread_mut_active = true;
+
+    try testing.expect(try startToggleResolve(&session, testing.allocator, 0));
+    try testing.expectEqual(@as(usize, 1), session.queued_thread_mutations.items.len);
+    try testing.expectEqual(ThreadMutationKind.unresolve, session.queued_thread_mutations.items[0].kind);
+    try testing.expect(session.threads.items[0].busy);
+
+    session.thread_mut_active = false; // no worker to join in deinit
+}
+
+test "startReply queues behind an in-flight mutation with its body" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{.{ .id = "PRRC_1", .mine = true }});
+    session.thread_mut_active = true;
+
+    try testing.expect(try startReply(&session, testing.allocator, 0, "queued reply"));
+    try testing.expectEqual(ThreadMutationKind.reply, session.queued_thread_mutations.items[0].kind);
+    try testing.expectEqualStrings("queued reply", session.queued_thread_mutations.items[0].body);
+    try testing.expectEqualStrings("PRRT_1", session.queued_thread_mutations.items[0].thread_id);
+
+    session.thread_mut_active = false;
+}
+
+test "pollThreadMutations: none when nothing is ready" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try testing.expect(pollThreadMutations(&session, testing.allocator) == .none);
+}
+
+test "pollThreadMutations applies a ready reply and clears busy" {
+    const ca = std.heap.c_allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    session.viewer_login = "ctdio";
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{.{ .id = "PRRC_1", .mine = true }});
+    session.threads.items[0].busy = true;
+
+    // Simulate a completed worker (no real gh / thread spawned).
+    session.thread_mutation.kind = .reply;
+    session.thread_mutation.in_thread_id = try ca.dupe(u8, "PRRT_1");
+    session.thread_mutation.in_comment_id = try ca.dupe(u8, "");
+    session.thread_mutation.in_body = try ca.dupe(u8, "my reply");
+    session.thread_mutation.out_raw = try ca.dupe(u8, reply_fixture);
+    session.thread_mut_active = true;
+    session.thread_mutation.ready.store(true, .release);
+
+    const outcome = pollThreadMutations(&session, testing.allocator);
+    try testing.expect(outcome == .applied);
+    try testing.expectEqual(ThreadMutationKind.reply, outcome.applied);
+    try testing.expectEqual(@as(usize, 2), session.threads.items[0].data.comments.len);
+    try testing.expect(!session.threads.items[0].busy);
+}
+
+test "pollThreadMutations stashes the body and clears busy on a failed reply" {
+    const ca = std.heap.c_allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_1", false, &.{.{ .id = "PRRC_1", .mine = true }});
+    session.threads.items[0].busy = true;
+
+    session.thread_mutation.kind = .reply;
+    session.thread_mutation.in_thread_id = try ca.dupe(u8, "PRRT_1");
+    session.thread_mutation.in_comment_id = try ca.dupe(u8, "");
+    session.thread_mutation.in_body = try ca.dupe(u8, "draft reply");
+    session.thread_mutation.failed = true;
+    session.thread_mutation.fail_kind = .network;
+    session.thread_mut_active = true;
+    session.thread_mutation.ready.store(true, .release);
+
+    const outcome = pollThreadMutations(&session, testing.allocator);
+    try testing.expect(outcome == .failed);
+    try testing.expectEqual(github.GhErrorKind.network, outcome.failed.err);
+    try testing.expect(!session.threads.items[0].busy);
+
+    const stashed = takeFailedDraft(&session);
+    defer if (stashed) |t| testing.allocator.free(t);
+    try testing.expectEqualStrings("draft reply", stashed.?);
+}
+
 fn samplePost(body: []const u8) PostParams {
     return .{ .path = "src/x.zig", .line = 10, .side = .right, .body = body };
+}
+
+const CommentSeed = struct { id: []const u8, mine: bool, body: []const u8 = "orig" };
+
+/// Append a fully session-owned thread for tests (so `deinitState` frees it and
+/// the testing allocator leak-checks it).
+fn appendOwnedThread(session: *ReviewSession, allocator: Allocator, id: []const u8, is_resolved: bool, seeds: []const CommentSeed) !void {
+    const arr = try allocator.alloc(review_parse.ReviewComment, seeds.len);
+    for (seeds, 0..) |s, i| {
+        arr[i] = .{
+            .id = try allocator.dupe(u8, s.id),
+            .database_id = 0,
+            .author = try allocator.dupe(u8, "ctdio"),
+            .body = try allocator.dupe(u8, s.body),
+            .created_at = try allocator.dupe(u8, ""),
+            .review_id = try allocator.dupe(u8, ""),
+            .review_state = .commented,
+            .is_mine = s.mine,
+            .diff_hunk = try allocator.dupe(u8, ""),
+        };
+    }
+    try session.threads.append(allocator, .{ .data = .{
+        .id = try allocator.dupe(u8, id),
+        .path = try allocator.dupe(u8, "src/x.zig"),
+        .line = 10,
+        .start_line = null,
+        .original_line = 10,
+        .side = .right,
+        .start_side = .right,
+        .is_resolved = is_resolved,
+        .is_outdated = false,
+        .subject_type = .line,
+        .comments = arr,
+    }, .owned = true });
 }
 
 fn threadWith(is_resolved: bool) SessionThread {
