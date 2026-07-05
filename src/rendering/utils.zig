@@ -5,7 +5,8 @@ const blame = @import("../git/blame.zig");
 const comments = @import("../comments/store.zig");
 const rendering_common = @import("common.zig");
 const state_helpers = @import("../state.zig");
-const gwidth = @import("width.zig").gwidth;
+const width_util = @import("width.zig");
+const gwidth = width_util.gwidth;
 const CommentController = @import("../comments/controller.zig").CommentController;
 const thread_block = @import("thread_block.zig");
 const review_controller = @import("../pr/review_controller.zig");
@@ -32,18 +33,7 @@ pub const RenderUtils = struct {
     /// Uses vaxis gwidth for accurate Unicode width calculation including
     /// wide characters (emoji, CJK) that take 2 terminal cells.
     pub fn displayWidth(text: []const u8) usize {
-        var width: usize = 0;
-        var byte_pos: usize = 0;
-
-        while (byte_pos < text.len) {
-            const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
-            const char_end = @min(byte_pos + char_len, text.len);
-            const grapheme = text[byte_pos..char_end];
-            width += gwidth(grapheme);
-            byte_pos = char_end;
-        }
-
-        return width;
+        return width_util.displayWidth(text);
     }
 
     /// Slice a UTF-8 string by display width (terminal cells), not bytes.
@@ -51,38 +41,7 @@ pub const RenderUtils = struct {
     /// The returned slice ends at a valid UTF-8 boundary.
     /// Uses vaxis gwidth for accurate Unicode width calculation.
     pub fn sliceByDisplayWidth(text: []const u8, max_width: usize) []const u8 {
-        if (max_width == 0) return text[0..0];
-
-        const limit = @min(text.len, max_width);
-        var ascii_end: usize = 0;
-        while (ascii_end < limit) : (ascii_end += 1) {
-            const byte = text[ascii_end];
-            if (byte < 0x20 or byte >= 0x7f) break;
-        }
-        if (ascii_end == limit) return text[0..limit];
-
-        var width: usize = 0;
-        var byte_pos: usize = 0;
-
-        if (ascii_end > 0) {
-            width = ascii_end;
-            byte_pos = ascii_end;
-        }
-
-        while (byte_pos < text.len) {
-            const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
-            const char_end = @min(byte_pos + char_len, text.len);
-            const grapheme = text[byte_pos..char_end];
-            const char_width = gwidth(grapheme);
-
-            // Check if adding this character would exceed max_width
-            if (width + char_width > max_width) break;
-
-            width += char_width;
-            byte_pos = char_end;
-        }
-
-        return text[0..byte_pos];
+        return width_util.sliceByDisplayWidth(text, max_width);
     }
 
     /// Skip a number of codepoints in a UTF-8 string and return the byte offset.
@@ -822,65 +781,7 @@ pub const RenderUtils = struct {
     /// Wrap text to fit within max_width (in display cells), breaking at word boundaries when possible
     /// Properly handles UTF-8 multi-byte characters.
     pub fn wrapText(allocator: std.mem.Allocator, text: []const u8, max_width: usize) !std.ArrayList([]const u8) {
-        var lines: std.ArrayList([]const u8) = .{};
-        errdefer lines.deinit(allocator);
-
-        if (max_width == 0) return lines;
-
-        // Handle empty text - still return one empty line
-        if (text.len == 0) {
-            try lines.append(allocator, text);
-            return lines;
-        }
-
-        var byte_start: usize = 0;
-        while (byte_start < text.len) {
-            const remaining = text[byte_start..];
-            const remaining_display_width = displayWidth(remaining);
-
-            // If remaining text fits, add it as-is
-            if (remaining_display_width <= max_width) {
-                try lines.append(allocator, remaining);
-                break;
-            }
-
-            // Get max_width characters worth of text
-            const max_chunk = sliceByDisplayWidth(remaining, max_width);
-
-            // Find the last space within this chunk to break at word boundary
-            var break_byte_pos = max_chunk.len;
-            var found_space = false;
-
-            // Look backwards through the bytes to find a space
-            // (Space is always a single byte in UTF-8)
-            var i: usize = max_chunk.len;
-            while (i > 0) : (i -= 1) {
-                if (max_chunk[i - 1] == ' ') {
-                    break_byte_pos = i - 1; // Break before the space
-                    found_space = true;
-                    break;
-                }
-            }
-
-            // If no space found, hard break at max_width characters
-            if (!found_space) {
-                break_byte_pos = max_chunk.len;
-            }
-
-            // Add this segment
-            try lines.append(allocator, remaining[0..break_byte_pos]);
-
-            // Move past the break point and any spaces
-            byte_start += break_byte_pos;
-            if (found_space) {
-                // Skip the space(s) we broke on
-                while (byte_start < text.len and text[byte_start] == ' ') {
-                    byte_start += 1;
-                }
-            }
-        }
-
-        return lines;
+        return width_util.wrapText(allocator, text, max_width);
     }
 
     /// Render inline comment input box (when in comment mode)

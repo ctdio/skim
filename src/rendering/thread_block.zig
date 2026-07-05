@@ -12,7 +12,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const common = @import("common.zig");
-const gwidth = @import("width.zig").gwidth;
+const width_util = @import("width.zig");
 const review_parse = @import("../pr/review_parse.zig");
 const thread_placement = @import("../pr/thread_placement.zig");
 
@@ -150,12 +150,12 @@ fn planBody(arena: Allocator, rows: *std.ArrayList(PlannedRow), info: ThreadRend
         try rows.append(arena, .{ .kind = .sugg_open, .text = "suggestion" });
         if (!info.is_bucketed) {
             if (info.target_line_content) |target| {
-                try rows.append(arena, .{ .kind = .sugg_del, .text = try sliceByDisplayWidth(arena, target, text_width) });
+                try rows.append(arena, .{ .kind = .sugg_del, .text = width_util.sliceByDisplayWidth(target, text_width) });
             }
         }
         var it = std.mem.splitScalar(u8, sugg, '\n');
         while (it.next()) |line| {
-            try rows.append(arena, .{ .kind = .sugg_add, .text = try sliceByDisplayWidth(arena, line, text_width) });
+            try rows.append(arena, .{ .kind = .sugg_add, .text = width_util.sliceByDisplayWidth(line, text_width) });
         }
         try rows.append(arena, .{ .kind = .sugg_close, .text = "" });
     }
@@ -167,8 +167,8 @@ fn planWrappedText(arena: Allocator, rows: *std.ArrayList(PlannedRow), text: []c
     if (text.len == 0) return;
     var line_it = std.mem.splitScalar(u8, text, '\n');
     while (line_it.next()) |line| {
-        const wrapped = try wrapText(arena, line, text_width);
-        for (wrapped) |seg| {
+        const wrapped = try width_util.wrapText(arena, line, text_width);
+        for (wrapped.items) |seg| {
             try rows.append(arena, .{ .kind = .body, .text = seg });
         }
     }
@@ -356,76 +356,4 @@ fn normalizeNewlines(arena: Allocator, s: []const u8) ![]const u8 {
         n += 1;
     }
     return out[0..n];
-}
-
-// =============================================================================
-// Width helpers (mirror rendering/utils.zig, without the App coupling)
-// =============================================================================
-
-fn displayWidth(text: []const u8) usize {
-    var width: usize = 0;
-    var byte_pos: usize = 0;
-    while (byte_pos < text.len) {
-        const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
-        const char_end = @min(byte_pos + char_len, text.len);
-        width += gwidth(text[byte_pos..char_end]);
-        byte_pos = char_end;
-    }
-    return width;
-}
-
-fn sliceByDisplayWidth(arena: Allocator, text: []const u8, max_width: usize) ![]const u8 {
-    _ = arena;
-    if (displayWidth(text) <= max_width) return text;
-    var width: usize = 0;
-    var byte_pos: usize = 0;
-    while (byte_pos < text.len) {
-        const char_len = std.unicode.utf8ByteSequenceLength(text[byte_pos]) catch 1;
-        const char_end = @min(byte_pos + char_len, text.len);
-        const w = gwidth(text[byte_pos..char_end]);
-        if (width + w > max_width) break;
-        width += w;
-        byte_pos = char_end;
-    }
-    return text[0..byte_pos];
-}
-
-fn wrapText(arena: Allocator, text: []const u8, max_width: usize) ![][]const u8 {
-    var lines: std.ArrayList([]const u8) = .{};
-    if (max_width == 0) return lines.toOwnedSlice(arena);
-    if (text.len == 0) {
-        try lines.append(arena, text);
-        return lines.toOwnedSlice(arena);
-    }
-
-    var byte_start: usize = 0;
-    while (byte_start < text.len) {
-        const remaining = text[byte_start..];
-        if (displayWidth(remaining) <= max_width) {
-            try lines.append(arena, remaining);
-            break;
-        }
-
-        const chunk = try sliceByDisplayWidth(arena, remaining, max_width);
-        var break_byte_pos = chunk.len;
-        var found_space = false;
-        var i: usize = chunk.len;
-        while (i > 0) : (i -= 1) {
-            if (chunk[i - 1] == ' ') {
-                break_byte_pos = i - 1;
-                found_space = true;
-                break;
-            }
-        }
-        if (!found_space) break_byte_pos = chunk.len;
-        if (break_byte_pos == 0) break_byte_pos = chunk.len; // avoid zero-progress on leading space
-
-        try lines.append(arena, remaining[0..break_byte_pos]);
-        byte_start += break_byte_pos;
-        if (found_space) {
-            while (byte_start < text.len and text[byte_start] == ' ') byte_start += 1;
-        }
-    }
-
-    return lines.toOwnedSlice(arena);
 }
