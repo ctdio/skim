@@ -21,4 +21,6 @@ pub const Mode = enum {
     agent_selection, // Agent selection menu (before connecting)
     session_picker, // Session picker for /resume command
     pr_review, // Pull request picker (native PR review)
+    review_submit, // Submit-review dialog (verdict + body) for a PR session
+    pr_info, // Read-only PR info panel overlay
 };

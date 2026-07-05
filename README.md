@@ -138,124 +138,144 @@ Navigate files and position cursor with vim-style movements:
 
 #### Navigation
 
-| Key | Action |
-|-----|--------|
-| `h` / `l` | Previous / Next file |
-| `j` / `k` | Cursor down / up |
-| `Ctrl-n` | Next file (alternative) |
-| `Space` / `Ctrl-f` / `PageDown` | Page down (full) |
-| `b` / `Ctrl-b` / `PageUp` | Page up (full) |
-| `Ctrl-d` / `Ctrl-u` | Half-page down / up |
-| `gg` | Jump to top of file |
-| `G` | Jump to bottom of file |
-| `Shift-M` | Center cursor in viewport |
-| `zz` | Center viewport on cursor |
-| `[h` / `]h` | Previous / Next code change (supports count prefix) |
-| `[c` / `]c` | Previous / Next comment |
-| `{` / `}` | Previous / Next empty line (supports count prefix) |
+| Key                             | Action                                              |
+| ------------------------------- | --------------------------------------------------- |
+| `h` / `l`                       | Previous / Next file                                |
+| `j` / `k`                       | Cursor down / up                                    |
+| `Ctrl-n`                        | Next file (alternative)                             |
+| `Space` / `Ctrl-f` / `PageDown` | Page down (full)                                    |
+| `b` / `Ctrl-b` / `PageUp`       | Page up (full)                                      |
+| `Ctrl-d` / `Ctrl-u`             | Half-page down / up                                 |
+| `gg`                            | Jump to top of file                                 |
+| `G`                             | Jump to bottom of file                              |
+| `Shift-M`                       | Center cursor in viewport                           |
+| `zz`                            | Center viewport on cursor                           |
+| `[h` / `]h`                     | Previous / Next code change (supports count prefix) |
+| `[c` / `]c`                     | Previous / Next comment                             |
+| `{` / `}`                       | Previous / Next empty line (supports count prefix)  |
 
 #### Character Find (like vim)
 
-| Key | Action |
-|-----|--------|
-| `f{char}` | Find character forward (cursor on character) |
-| `F{char}` | Find character backward (cursor on character) |
+| Key       | Action                                           |
+| --------- | ------------------------------------------------ |
+| `f{char}` | Find character forward (cursor on character)     |
+| `F{char}` | Find character backward (cursor on character)    |
 | `t{char}` | Find character forward (cursor before character) |
 | `T{char}` | Find character backward (cursor after character) |
-| `;` | Repeat last find in same direction |
+| `;`       | Repeat last find in same direction               |
 
 #### Search & Command Palette
 
-| Key | Action |
-|-----|--------|
-| `/` | Enter search mode |
-| `n` / `N` | Next / Previous search match |
-| `Ctrl-p` | Open file palette (type `>` to switch to commands) |
-| `:` | Open command palette (vim-style) |
-| `?` | Show keybindings help |
+| Key       | Action                                             |
+| --------- | -------------------------------------------------- |
+| `/`       | Enter search mode                                  |
+| `n` / `N` | Next / Previous search match                       |
+| `Ctrl-p`  | Open file palette (type `>` to switch to commands) |
+| `:`       | Open command palette (vim-style)                   |
+| `?`       | Show keybindings help                              |
 
 #### Comments
 
-| Key | Action |
-|-----|--------|
-| `Enter` | Add/edit comment on cursor line |
-| `d` | Delete comment under cursor |
-| `D` | Clear all comments |
-| `o` | Toggle comment expand/collapse |
-| `y` | Yank (copy) current comment to clipboard |
-| `Y` | Yank (copy) all comments to clipboard |
-| `gY` | Yank all comments to agent input |
+| Key     | Action                                   |
+| ------- | ---------------------------------------- |
+| `Enter` | Add/edit comment on cursor line          |
+| `d`     | Delete comment under cursor              |
+| `D`     | Clear all comments                       |
+| `o`     | Toggle comment expand/collapse           |
+| `y`     | Yank (copy) current comment to clipboard |
+| `Y`     | Yank (copy) all comments to clipboard    |
+| `gY`    | Yank all comments to agent input         |
+
+#### PR Review
+
+Available when reviewing a pull request (`skim` launched against a PR). Keys marked _(on thread)_ act on the review thread under the cursor.
+
+| Key                   | Action                                                    |
+| --------------------- | --------------------------------------------------------- |
+| `C`                   | Toggle new-comment target (GitHub pending review ⇄ local) |
+| `Enter` _(on thread)_ | Reply to the review thread                                |
+| `e` _(on thread)_     | Edit your own comment in the thread                       |
+| `d` _(on thread)_     | Delete your own comment (two-step confirm)                |
+| `x` _(on thread)_     | Toggle resolve / unresolve on the thread                  |
+| `R`                   | Open submit-review dialog (verdict + body)                |
+| `i`                   | Toggle read-only PR info panel                            |
+| `r`                   | Refresh diff and refetch review threads                   |
+
+**SUBMIT REVIEW dialog** (`R`): `Tab` / `Shift-Tab` cycle the verdict (Comment / Approve / Request changes), `Ctrl-S` submits, `Ctrl-D` discards the pending review (two-step confirm), `ESC` cancels. Body editing uses the same vim-style editor as comments.
+
+**PR INFO panel** (`i`): `j` / `k` scroll, `Ctrl-d` / `Ctrl-u` page, `g` / `G` jump to top / bottom, `i` / `q` / `ESC` close.
 
 #### View Modes
 
-| Key | Action |
-|-----|--------|
-| `s` | Toggle unified/side-by-side view |
+| Key                 | Action                                                       |
+| ------------------- | ------------------------------------------------------------ |
+| `s`                 | Toggle unified/side-by-side view                             |
 | `Tab` / `Shift-Tab` | Cycle hunk view mode (all / additions only / deletions only) |
-| `B` | Toggle git blame in gutter |
+| `B`                 | Toggle git blame in gutter                                   |
 
 #### Folding
 
-| Key | Action |
-|-----|--------|
-| `za` | Toggle fold at cursor (hunk-level) |
-| `zc` / `zo` | Close / Open fold at cursor (hunk-level) |
+| Key         | Action                                         |
+| ----------- | ---------------------------------------------- |
+| `za`        | Toggle fold at cursor (hunk-level)             |
+| `zc` / `zo` | Close / Open fold at cursor (hunk-level)       |
 | `zC` / `zO` | Close / Open file fold (from anywhere in file) |
-| `zM` / `zR` | Close / Open all folds |
+| `zM` / `zR` | Close / Open all folds                         |
 
 #### Visual Mode
 
-| Key | Action |
-|-----|--------|
+| Key       | Action                      |
+| --------- | --------------------------- |
 | `v` / `V` | Enter visual selection mode |
 
 #### Git Operations
 
-| Key | Action |
-|-----|--------|
+| Key | Action                         |
+| --- | ------------------------------ |
 | `r` | Refresh diff (reload from git) |
 | `a` | Stage current file (`git add`) |
 | `A` | Stage all files (`git add -A`) |
 
 #### Graphite Integration
 
-| Key | Action |
-|-----|--------|
-| `S` | Open Graphite stack picker |
+| Key  | Action                                   |
+| ---- | ---------------------------------------- |
+| `S`  | Open Graphite stack picker               |
 | `[s` | Navigate to parent branch (toward trunk) |
-| `]s` | Navigate to child branch (toward tip) |
+| `]s` | Navigate to child branch (toward tip)    |
 
 #### Agent Panel
 
-| Key | Action |
-|-----|--------|
-| `Ctrl-e` | Toggle agent panel |
-| `Ctrl-w h/j/k/l` | Focus panes in normal mode, falling back to diff at outer edge |
-| `Ctrl-w w` | Cycle panes / diff focus in normal mode |
-| `Ctrl-w v` / `Ctrl-w s` | Open vertical / horizontal split in agent normal mode |
-| `Ctrl-w c` / `Ctrl-w o` | Close focused pane / keep only focused pane |
-| `Ctrl-w H/J/K/L` | Move focused pane to far edge |
-| `Ctrl-w + - < >` | Resize focused pane |
+| Key                     | Action                                                         |
+| ----------------------- | -------------------------------------------------------------- |
+| `Ctrl-e`                | Toggle agent panel                                             |
+| `Ctrl-w h/j/k/l`        | Focus panes in normal mode, falling back to diff at outer edge |
+| `Ctrl-w w`              | Cycle panes / diff focus in normal mode                        |
+| `Ctrl-w v` / `Ctrl-w s` | Open vertical / horizontal split in agent normal mode          |
+| `Ctrl-w c` / `Ctrl-w o` | Close focused pane / keep only focused pane                    |
+| `Ctrl-w H/J/K/L`        | Move focused pane to far edge                                  |
+| `Ctrl-w + - < >`        | Resize focused pane                                            |
 
 #### Other
 
-| Key | Action |
-|-----|--------|
-| `Ctrl-g` | Open current file in $EDITOR |
-| `:` | Open command palette (`:quit` to exit) |
+| Key      | Action                                 |
+| -------- | -------------------------------------- |
+| `Ctrl-g` | Open current file in $EDITOR           |
+| `:`      | Open command palette (`:quit` to exit) |
 
 ### SEARCH Mode
 
 Search through diff content:
 
-| Key | Action |
-|-----|--------|
-| Type | Enter search query (smart case: lowercase=ignore case, uppercase=exact) |
-| `Enter` | Execute search and jump to first match |
-| `ESC` | Cancel and return to NORMAL mode |
-| `Backspace` | Delete character from query |
+| Key         | Action                                                                  |
+| ----------- | ----------------------------------------------------------------------- |
+| Type        | Enter search query (smart case: lowercase=ignore case, uppercase=exact) |
+| `Enter`     | Execute search and jump to first match                                  |
+| `ESC`       | Cancel and return to NORMAL mode                                        |
+| `Backspace` | Delete character from query                                             |
 
 **Search behavior:**
+
 - Case-insensitive unless query contains uppercase
 - Searches across all files in the diff
 - Searches diff content only (add/delete/context lines)
@@ -265,16 +285,17 @@ Search through diff content:
 
 Quick access to files and commands:
 
-| Key | Action |
-|-----|--------|
-| Type | Filter files/commands by name (case-insensitive) |
-| `>` | Prefix to switch between file/command mode |
-| `↑`/`↓` or `Ctrl-p`/`Ctrl-n` | Navigate selection |
-| `Enter` | Execute selected command or jump to file |
-| `ESC` | Cancel and return to NORMAL mode |
-| `Backspace` | Delete character from filter |
+| Key                          | Action                                           |
+| ---------------------------- | ------------------------------------------------ |
+| Type                         | Filter files/commands by name (case-insensitive) |
+| `>`                          | Prefix to switch between file/command mode       |
+| `↑`/`↓` or `Ctrl-p`/`Ctrl-n` | Navigate selection                               |
+| `Enter`                      | Execute selected command or jump to file         |
+| `ESC`                        | Cancel and return to NORMAL mode                 |
+| `Backspace`                  | Delete character from filter                     |
 
 **Two modes:**
+
 - **File Mode** (`Ctrl-p`): Filter and jump to files
   - Type `>` to switch to command mode
 - **Command Mode** (`:` key): Built-in commands (vim-style)
@@ -285,32 +306,32 @@ Quick access to files and commands:
 
 Select multiple lines for operations:
 
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Extend selection down / up |
-| `h` / `l` | Previous / Next file |
-| `g` / `G` | Jump to top / bottom |
-| `Ctrl-d` / `Ctrl-u` | Page down / up |
-| `y` | Yank (copy) selection to clipboard |
-| `Enter` | Create comment for visual selection |
-| `v` / `ESC` | Exit visual mode |
+| Key                 | Action                              |
+| ------------------- | ----------------------------------- |
+| `j` / `k`           | Extend selection down / up          |
+| `h` / `l`           | Previous / Next file                |
+| `g` / `G`           | Jump to top / bottom                |
+| `Ctrl-d` / `Ctrl-u` | Page down / up                      |
+| `y`                 | Yank (copy) selection to clipboard  |
+| `Enter`             | Create comment for visual selection |
+| `v` / `ESC`         | Exit visual mode                    |
 
 ### COMMENT Mode
 
 Edit comments with vim-style editing:
 
-| Key | Action |
-|-----|--------|
-| `Enter` | Save comment and return to NORMAL mode |
-| `Ctrl-J` | Insert newline in comment |
-| `ESC` | Cancel and return to NORMAL mode |
+| Key                   | Action                                                              |
+| --------------------- | ------------------------------------------------------------------- |
+| `Enter`               | Save comment and return to NORMAL mode                              |
+| `Ctrl-J`              | Insert newline in comment                                           |
+| `ESC`                 | Cancel and return to NORMAL mode                                    |
 | `i` / `a` / `I` / `A` | Insert modes (before cursor / after cursor / line start / line end) |
-| `h` / `j` / `k` / `l` | Move cursor |
-| `w` / `b` / `e` | Word motions (next word / back word / end of word) |
-| `0` / `$` | Jump to line start / end |
-| `x` | Delete character under cursor |
-| `dd` | Delete entire line |
-| `Backspace` | Delete character before cursor |
+| `h` / `j` / `k` / `l` | Move cursor                                                         |
+| `w` / `b` / `e`       | Word motions (next word / back word / end of word)                  |
+| `0` / `$`             | Jump to line start / end                                            |
+| `x`                   | Delete character under cursor                                       |
+| `dd`                  | Delete entire line                                                  |
+| `Backspace`           | Delete character before cursor                                      |
 
 ## AI Integration
 
@@ -363,22 +384,23 @@ Configure agents and panel settings in `~/.skim/config.json`:
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `command` | string | Yes | CLI command to spawn the agent |
-| `args` | string[] | No | Additional CLI arguments to pass to the agent |
-| `env` | object | No | Environment variables (supports `${VAR}` expansion) |
-| `protocol` | string | No | Communication protocol: `"acp"`, `"opencode"`, or `"codex"` |
-| `approval_policy` | string | No | Codex approval mode for new threads (`"never"`, `"on-request"`) |
-| `sandbox_mode` | string | No | Codex sandbox mode (`"read-only"`, `"workspace-write"`, `"danger-full-access"`) |
-| `web_search` | bool | No | Enable Codex native web search tool |
-| `skim.default` | bool | No | Auto-connect to this agent (default: `false`) |
-| `skim.model` | string | No | AI model to use (e.g., `"opus"`, `"sonnet"`) |
-| `skim.mode` | string | No | Agent session mode (e.g., `"plan"`, `"code"`) |
+| Field             | Type     | Required | Description                                                                     |
+| ----------------- | -------- | -------- | ------------------------------------------------------------------------------- |
+| `command`         | string   | Yes      | CLI command to spawn the agent                                                  |
+| `args`            | string[] | No       | Additional CLI arguments to pass to the agent                                   |
+| `env`             | object   | No       | Environment variables (supports `${VAR}` expansion)                             |
+| `protocol`        | string   | No       | Communication protocol: `"acp"`, `"opencode"`, or `"codex"`                     |
+| `approval_policy` | string   | No       | Codex approval mode for new threads (`"never"`, `"on-request"`)                 |
+| `sandbox_mode`    | string   | No       | Codex sandbox mode (`"read-only"`, `"workspace-write"`, `"danger-full-access"`) |
+| `web_search`      | bool     | No       | Enable Codex native web search tool                                             |
+| `skim.default`    | bool     | No       | Auto-connect to this agent (default: `false`)                                   |
+| `skim.model`      | string   | No       | AI model to use (e.g., `"opus"`, `"sonnet"`)                                    |
+| `skim.mode`       | string   | No       | Agent session mode (e.g., `"plan"`, `"code"`)                                   |
 
 For native Codex, set `"protocol": "codex"` and use `"command": "codex"`. Skim will launch `codex app-server` automatically and apply `sandbox_mode` / `web_search` as first-class Codex settings.
 
 **Agent Selection:**
+
 - **Single agent**: Auto-connects immediately
 - **Multiple agents with default**: Auto-connects to the agent marked `"default": true`
 - **Multiple agents, no default**: Shows selection menu (`j`/`k` to navigate, `Enter` to select)
@@ -387,8 +409,8 @@ Switch agents anytime via the command palette (`Ctrl-p`, then `>Switch Agent`).
 
 **Other options:**
 
-| Option | Values | Default |
-|--------|--------|---------|
+| Option             | Values              | Default   |
+| ------------------ | ------------------- | --------- |
 | `agent_panel_side` | `"left"`, `"right"` | `"right"` |
 
 #### @file References
@@ -400,12 +422,12 @@ Type `@` in the agent prompt to fuzzy-search and embed file contents:
 @readme    → matches README.md
 ```
 
-| Key | Action |
-|-----|--------|
-| `@` | Open file picker (at word boundary) |
-| `↑`/`↓` or `Ctrl-p`/`Ctrl-n` | Navigate file list |
-| `Enter` or `Tab` | Insert selected file |
-| `Ctrl-C` / `ESC` | Close file picker |
+| Key                          | Action                              |
+| ---------------------------- | ----------------------------------- |
+| `@`                          | Open file picker (at word boundary) |
+| `↑`/`↓` or `Ctrl-p`/`Ctrl-n` | Navigate file list                  |
+| `Enter` or `Tab`             | Insert selected file                |
+| `Ctrl-C` / `ESC`             | Close file picker                   |
 
 #### Agent Panel Keybindings
 
@@ -413,110 +435,110 @@ The agent panel uses vim-style modal editing.
 
 ##### Global
 
-| Key | Action |
-|-----|--------|
+| Key      | Action                      |
+| -------- | --------------------------- |
 | `Ctrl-E` | Close panel, return to diff |
-| `Ctrl-G` | Edit prompt in $EDITOR |
-| `Ctrl-S` | Stash/unstash prompt |
-| `Ctrl-T` | Toggle todo list expansion |
+| `Ctrl-G` | Edit prompt in $EDITOR      |
+| `Ctrl-S` | Stash/unstash prompt        |
+| `Ctrl-T` | Toggle todo list expansion  |
 
 ##### Insert Mode
 
-| Key | Action |
-|-----|--------|
-| `Enter` | Send prompt to agent |
-| `Ctrl-J` | Insert newline in prompt |
-| `Ctrl-C` / `ESC` | Exit to normal mode |
-| `/` | Show slash command menu (at prompt start) |
-| `@` | Show file picker (at word boundary) |
-| `!` | Toggle shell command mode (empty input) |
-| `Up` | Restore stashed prompt (empty input) |
+| Key              | Action                                    |
+| ---------------- | ----------------------------------------- |
+| `Enter`          | Send prompt to agent                      |
+| `Ctrl-J`         | Insert newline in prompt                  |
+| `Ctrl-C` / `ESC` | Exit to normal mode                       |
+| `/`              | Show slash command menu (at prompt start) |
+| `@`              | Show file picker (at word boundary)       |
+| `!`              | Toggle shell command mode (empty input)   |
+| `Up`             | Restore stashed prompt (empty input)      |
 
 ##### Normal Mode
 
-| Key | Action |
-|-----|--------|
-| `Ctrl-W h/j/k/l` | Focus pane / diff edge |
-| `Ctrl-W w` | Cycle panes / diff focus |
+| Key                     | Action                           |
+| ----------------------- | -------------------------------- |
+| `Ctrl-W h/j/k/l`        | Focus pane / diff edge           |
+| `Ctrl-W w`              | Cycle panes / diff focus         |
 | `Ctrl-W v` / `Ctrl-W s` | Open vertical / horizontal split |
-| `Ctrl-W c` / `Ctrl-W o` | Close pane / only pane |
-| `Ctrl-W H/J/K/L` | Move pane to edge |
-| `Ctrl-W + - < >` | Resize focused pane |
+| `Ctrl-W c` / `Ctrl-W o` | Close pane / only pane           |
+| `Ctrl-W H/J/K/L`        | Move pane to edge                |
+| `Ctrl-W + - < >`        | Resize focused pane              |
 
-| Key | Action |
-|-----|--------|
-| `i` / `a` / `I` / `A` | Enter insert mode |
-| `h` / `l` | Move cursor left/right |
-| `w` / `b` / `e` | Word motions |
-| `0` / `$` | Line start/end |
-| `gg` / `G` | Jump to top/bottom of input |
-| `Ctrl-D` / `Ctrl-U` | Half-page down/up in input |
-| `x` / `dd` | Delete char/line |
-| `:` | Open command palette |
-| `?` | Show help |
-| `gb` / `Space+b` | Enter history mode |
-| `gt` / `gT` | Next/previous tab |
-| `Space+f` | Scroll to bottom, enable follow |
-| `V` | Toggle diff view mode |
-| `Tab` | Cycle session modes |
-| `Ctrl-C` | Interrupt agent |
+| Key                   | Action                          |
+| --------------------- | ------------------------------- |
+| `i` / `a` / `I` / `A` | Enter insert mode               |
+| `h` / `l`             | Move cursor left/right          |
+| `w` / `b` / `e`       | Word motions                    |
+| `0` / `$`             | Line start/end                  |
+| `gg` / `G`            | Jump to top/bottom of input     |
+| `Ctrl-D` / `Ctrl-U`   | Half-page down/up in input      |
+| `x` / `dd`            | Delete char/line                |
+| `:`                   | Open command palette            |
+| `?`                   | Show help                       |
+| `gb` / `Space+b`      | Enter history mode              |
+| `gt` / `gT`           | Next/previous tab               |
+| `Space+f`             | Scroll to bottom, enable follow |
+| `V`                   | Toggle diff view mode           |
+| `Tab`                 | Cycle session modes             |
+| `Ctrl-C`              | Interrupt agent                 |
 
 ##### History Mode
 
 Enter with `gb` or `Space+b`. Browse and yank from message history.
 
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Move cursor down/up |
-| `h` / `l` | Jump to prev/next message |
-| `gg` / `G` | Jump to top/bottom |
-| `Ctrl-D` / `Ctrl-U` | Page down/up |
-| `M` | Center cursor in viewport |
-| `v` | Enter visual selection mode |
-| `y` | Yank user message at cursor |
-| `yy` | Yank current line |
-| `Y` | Yank entire current message |
-| `Space+f` | Resume follow mode, exit history |
-| `i` | Exit to insert mode |
-| `Ctrl-C` / `ESC` / `q` | Exit to normal mode |
+| Key                    | Action                           |
+| ---------------------- | -------------------------------- |
+| `j` / `k`              | Move cursor down/up              |
+| `h` / `l`              | Jump to prev/next message        |
+| `gg` / `G`             | Jump to top/bottom               |
+| `Ctrl-D` / `Ctrl-U`    | Page down/up                     |
+| `M`                    | Center cursor in viewport        |
+| `v`                    | Enter visual selection mode      |
+| `y`                    | Yank user message at cursor      |
+| `yy`                   | Yank current line                |
+| `Y`                    | Yank entire current message      |
+| `Space+f`              | Resume follow mode, exit history |
+| `i`                    | Exit to insert mode              |
+| `Ctrl-C` / `ESC` / `q` | Exit to normal mode              |
 
 ##### Visual Mode
 
 Enter with `v` from history mode.
 
-| Key | Action |
-|-----|--------|
-| `j` / `k` | Extend selection down/up |
-| `y` | Yank selection to clipboard |
-| `Ctrl-C` / `ESC` / `v` | Exit visual mode |
+| Key                    | Action                      |
+| ---------------------- | --------------------------- |
+| `j` / `k`              | Extend selection down/up    |
+| `y`                    | Yank selection to clipboard |
+| `Ctrl-C` / `ESC` / `v` | Exit visual mode            |
 
 ##### Permission Prompt
 
 When agent requests permission:
 
-| Key | Action |
-|-----|--------|
-| `j` / `k` or `Up` / `Down` | Navigate options |
-| `Ctrl-D` / `Ctrl-U` | Scroll message history |
-| `Enter` / `y` | Accept selected option |
-| `Ctrl-C` / `ESC` / `n` | Reject/cancel |
+| Key                        | Action                 |
+| -------------------------- | ---------------------- |
+| `j` / `k` or `Up` / `Down` | Navigate options       |
+| `Ctrl-D` / `Ctrl-U`        | Scroll message history |
+| `Enter` / `y`              | Accept selected option |
+| `Ctrl-C` / `ESC` / `n`     | Reject/cancel          |
 
 ##### Menus (Slash, File Picker, Command Palette)
 
-| Key | Action |
-|-----|--------|
-| `Ctrl-N` / `Ctrl-P` | Navigate menu |
-| `Tab` | Insert selected item |
-| `Enter` | Insert and execute |
-| `Ctrl-C` / `ESC` | Close menu |
+| Key                 | Action               |
+| ------------------- | -------------------- |
+| `Ctrl-N` / `Ctrl-P` | Navigate menu        |
+| `Tab`               | Insert selected item |
+| `Enter`             | Insert and execute   |
+| `Ctrl-C` / `ESC`    | Close menu           |
 
 ##### Slash Commands
 
-| Command | Action |
-|---------|--------|
-| `/clear` | Clear session and start fresh |
-| `/model` | Switch AI model |
-| `/resume` | Resume previous session |
+| Command   | Action                        |
+| --------- | ----------------------------- |
+| `/clear`  | Clear session and start fresh |
+| `/model`  | Switch AI model               |
+| `/resume` | Resume previous session       |
 
 ### CLI Commands for Agents
 
@@ -548,11 +570,13 @@ skim session comment delete 0
 ```
 
 **Options:**
+
 - `--id <PID>` - Target a specific session when multiple are running
 - `--json` - Output in JSON format (for programmatic parsing)
 - `--type <old|new>` - For comments: `new` for added lines, `old` for deleted lines
 
 **Diff output format:**
+
 ```
 MARKER OLD_LINE NEW_LINE | CONTENT
 +       -       42       | const x = 1;    # added line (use --type new)
@@ -577,13 +601,13 @@ For AI agents that support MCP (Model Context Protocol), add skim to your agent'
 
 **Available MCP Tools:**
 
-| Tool | Description |
-|------|-------------|
-| `list_clients` | List all connected skim TUI instances |
-| `get_diff_context` | Get diff metadata (files, stats, mode) |
-| `get_file_diff` | Get full diff content for a specific file |
-| `add_comment` | Add a review comment to a specific line |
-| `get_comments` | Get all comments from a skim instance |
+| Tool               | Description                               |
+| ------------------ | ----------------------------------------- |
+| `list_clients`     | List all connected skim TUI instances     |
+| `get_diff_context` | Get diff metadata (files, stats, mode)    |
+| `get_file_diff`    | Get full diff content for a specific file |
+| `add_comment`      | Add a review comment to a specific line   |
+| `get_comments`     | Get all comments from a skim instance     |
 
 ### Debug Replay
 
@@ -599,14 +623,15 @@ skim debug replay-codex ~/.codex/sessions/...jsonl --tui
 
 **Replay controls:**
 
-| Key | Action |
-|-----|--------|
-| `Space` | Play / pause replay |
-| `n` | Step one event |
-| `r` | Restart replay |
-| `Ctrl-C` / `q` / `ESC` | Exit replay |
+| Key                    | Action              |
+| ---------------------- | ------------------- |
+| `Space`                | Play / pause replay |
+| `n`                    | Step one event      |
+| `r`                    | Restart replay      |
+| `Ctrl-C` / `q` / `ESC` | Exit replay         |
 
 This is a good fit for agent-assisted testing:
+
 - Reproduce a UI bug from a real Codex session without reconnecting to a live agent
 - Capture the final render headlessly and compare it against snapshots
 - Run the replay under tmux, send keys programmatically, and capture the visible pane for review
@@ -635,6 +660,7 @@ The agent will automatically find skim sessions running in the same directory. T
 ### Log Files
 
 Skim writes logs to `~/.skim/`:
+
 - `tui.log` - TUI client logs
 - `mcp.log` - MCP adapter logs
 
@@ -643,6 +669,7 @@ Skim writes logs to `~/.skim/`:
 ## Credits
 
 Built with:
+
 - [libvaxis](https://github.com/rockorager/libvaxis) - TUI rendering library
 - [tree-sitter](https://tree-sitter.github.io/) - Parser generator for syntax highlighting
 - Language grammars from [tree-sitter-grammars](https://github.com/tree-sitter-grammars):

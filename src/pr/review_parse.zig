@@ -311,6 +311,59 @@ pub fn parseDeletedComment(allocator: std.mem.Allocator, json_bytes: []const u8)
     return allocator.dupe(u8, id);
 }
 
+/// Outcome of a `submitPullRequestReview` mutation. GitHub returns HTTP 200 with
+/// an `{"errors":[…]}` envelope for a rejected submit (e.g. approving your own
+/// PR), so success and rejection both parse cleanly: `ok == true` carries the
+/// submitted review's id + state; `ok == false` carries the rejection message
+/// verbatim (for the submit dialog's error row). Free with `deinit`.
+pub const SubmitReviewResult = struct {
+    arena: std.heap.ArenaAllocator,
+    ok: bool,
+    id: []const u8,
+    state: ReviewState,
+    error_message: []const u8,
+
+    pub fn deinit(self: *SubmitReviewResult) void {
+        self.arena.deinit();
+    }
+};
+
+pub fn parseSubmitReview(allocator: std.mem.Allocator, json_bytes: []const u8) !SubmitReviewResult {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidPayload;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+
+    // A rejected submit (self-approval, etc.) is a 200-with-errors envelope; the
+    // message is the whole value of this branch, so allocate it before the return
+    // literal (the literal copies `arena` by value — mirrors parsePrView).
+    if (graphqlErrorMessage(parsed.value)) |msg| {
+        const error_message = try dupe(a, msg);
+        return .{ .arena = arena, .ok = false, .id = "", .state = .unknown, .error_message = error_message };
+    }
+
+    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const submit = objField(data, "submitPullRequestReview") orelse return error.InvalidPayload;
+    const review = objField(submit, "pullRequestReview") orelse return error.SubmitFailed;
+    const id = try dupe(a, strField(review, "id") orelse "");
+    const state = reviewStateFrom(strField(review, "state") orelse "");
+    return .{ .arena = arena, .ok = true, .id = id, .state = state, .error_message = "" };
+}
+
+/// The first GraphQL `errors[].message` in `json_bytes` (owned by `allocator`),
+/// or null when the response carries no error envelope. Used by the write path to
+/// detect a 200-with-errors failure on mutations that otherwise only need a
+/// success check (e.g. discard). Errors only on structurally-broken JSON.
+pub fn firstErrorMessage(allocator: std.mem.Allocator, json_bytes: []const u8) !?[]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
+    defer parsed.deinit();
+    const msg = graphqlErrorMessage(parsed.value) orelse return null;
+    return try allocator.dupe(u8, msg);
+}
+
 pub fn parsePrView(allocator: std.mem.Allocator, json_bytes: []const u8) !PrViewMeta {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
@@ -1037,6 +1090,50 @@ test "parseDeletedComment: detects the GraphQL error envelope" {
         \\{"data":{"deletePullRequestReviewComment":null},"errors":[{"message":"nope"}]}
     ;
     try testing.expectError(error.GraphqlError, parseDeletedComment(testing.allocator, err_body));
+}
+
+const mutation_submit_review =
+    \\{"data":{"submitPullRequestReview":{"pullRequestReview":{"id":"PRR_kwDOQOqc088AAAABE_3crg","state":"COMMENTED"}}}}
+;
+
+// Ground-truth self-approval rejection captured live (gh 2.45.0, ctdio/skim) —
+// mirrors scripts/test-infra/pr-review/captured/self-approval-error.json.
+const mutation_submit_self_approve_error =
+    \\{"data":{"submitPullRequestReview":null},"errors":[{"type":"UNPROCESSABLE","path":["submitPullRequestReview"],"locations":[{"line":1,"column":20}],"message":"Could not approve for pull request review. Can not approve your own pull request"}]}
+;
+
+test "parseSubmitReview: success carries the submitted review id and state" {
+    var r = try parseSubmitReview(testing.allocator, mutation_submit_review);
+    defer r.deinit();
+    try testing.expect(r.ok);
+    try testing.expectEqualStrings("PRR_kwDOQOqc088AAAABE_3crg", r.id);
+    try testing.expectEqual(ReviewState.commented, r.state);
+}
+
+test "parseSubmitReview: self-approval rejection surfaces the verbatim message" {
+    var r = try parseSubmitReview(testing.allocator, mutation_submit_self_approve_error);
+    defer r.deinit();
+    try testing.expect(!r.ok);
+    try testing.expectEqualStrings("Could not approve for pull request review. Can not approve your own pull request", r.error_message);
+    // The real match target the dialog uses is a stable substring of this wording.
+    try testing.expect(std.mem.indexOf(u8, r.error_message, "approve your own pull request") != null);
+}
+
+test "parseSubmitReview: null review with no errors is a distinct failure" {
+    try testing.expectError(error.SubmitFailed, parseSubmitReview(testing.allocator, "{\"data\":{\"submitPullRequestReview\":{\"pullRequestReview\":null}}}"));
+}
+
+test "firstErrorMessage: returns the message for an error envelope" {
+    const msg = try firstErrorMessage(testing.allocator, mutation_submit_self_approve_error);
+    defer if (msg) |m| testing.allocator.free(m);
+    try testing.expect(msg != null);
+    try testing.expect(std.mem.indexOf(u8, msg.?, "approve your own pull request") != null);
+}
+
+test "firstErrorMessage: null on a clean response" {
+    const msg = try firstErrorMessage(testing.allocator, mutation_submit_review);
+    defer if (msg) |m| testing.allocator.free(m);
+    try testing.expect(msg == null);
 }
 
 test "parsePrDetails: unicode and CRLF bodies survive byte-exact" {

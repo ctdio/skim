@@ -738,6 +738,91 @@ pub const UI = struct {
         pr.render.draw(win, pr_controller.view(&app.state.pr));
     }
 
+    /// Centered submit-review dialog overlay (FR-6). Builds a bordered popup over
+    /// the diff (the codebase dialog idiom), then lets the pure drawing in
+    /// `pr/review_render.zig` paint the `SubmitView` snapshot into it.
+    pub fn renderReviewSubmitDialog(app: *App, win: vaxis.Window) !void {
+        const review = &app.state.review;
+        const editor = app.state.review_submit_editor;
+        const body = if (editor) |*ed| ed.getText() else "";
+
+        const popup = centeredPopup(win, .{
+            .desired_width = 64,
+            .desired_height = 14,
+            .min_width = 40,
+            .min_height = 8,
+        });
+
+        pr.review_render.drawSubmitDialog(popup, .{
+            .verdict = review.submit.verdict,
+            .body = body,
+            .draft_count = pr.review_controller.draftCount(review),
+            .counts = pr.review_controller.threadCounts(review),
+            .submitting = review.submit.submitting,
+            .confirm_discard = pr.review_controller.discardArmed(review),
+            .error_msg = pr.review_controller.submitError(review) orelse "",
+            .cursor_byte = if (editor) |*ed| ed.cursor_pos else 0,
+            .insert_mode = if (editor) |*ed| ed.vim_mode == .insert else false,
+            .editing = editor != null,
+            .bg = Color.dialog_bg,
+        });
+    }
+
+    /// Centered read-only PR info panel overlay (FR-7). A large (~80%) bordered
+    /// popup over the diff; pure drawing lives in `pr/review_render.zig`.
+    pub fn renderPrInfoPanel(app: *App, win: vaxis.Window) !void {
+        const review = &app.state.review;
+
+        const popup = centeredPopup(win, .{
+            .desired_width = @intCast((@as(usize, win.width) * 4) / 5),
+            .desired_height = @intCast((@as(usize, win.height) * 4) / 5),
+            .min_width = 40,
+            .min_height = 10,
+        });
+
+        pr.review_render.drawInfoPanel(popup, .{
+            .number = review.number,
+            .title = review.title,
+            .author = review.author,
+            .base_ref = review.base_ref,
+            .head_ref = review.head_ref,
+            .is_draft = review.is_draft,
+            .review_decision = review.review_decision,
+            .rollup = review.rollup,
+            .body = review.body,
+            .reviews = review.reviews.items,
+            .checks = review.checks.items,
+            .counts = pr.review_controller.threadCounts(review),
+            .draft_count = pr.review_controller.draftCount(review),
+            .unplaced_count = review.unplaced_count,
+            .truncated = review.truncated,
+            .scroll = review.info_scroll,
+            .bg = Color.dialog_bg,
+        });
+    }
+
+    /// Build a centered child window over `win`, clamped to fit. Callers fill it
+    /// (the pure review-render draws paint the background themselves).
+    fn centeredPopup(win: vaxis.Window, dims: struct {
+        desired_width: u16,
+        desired_height: u16,
+        min_width: u16,
+        min_height: u16,
+    }) vaxis.Window {
+        const max_w = win.width -| 2;
+        const max_h = win.height -| 2;
+        const width = @max(@min(dims.desired_width, max_w), @min(dims.min_width, max_w));
+        const height = @max(@min(dims.desired_height, max_h), @min(dims.min_height, max_h));
+        const x_off = if (win.width > width) (win.width - width) / 2 else 0;
+        const y_off = if (win.height > height) (win.height - height) / 2 else 0;
+        return win.child(.{
+            .x_off = @intCast(x_off),
+            .y_off = @intCast(y_off),
+            .width = width,
+            .height = height,
+        });
+    }
+
     pub fn renderModelSelectionDialog(app: *App, win: vaxis.Window) !void {
         // Normalize models from whichever manager is active (ACP or OpenCode)
         const ModelInfo = struct {
@@ -1474,6 +1559,8 @@ pub const UI = struct {
             .agent_selection => "-- AGENT SELECTION --",
             .session_picker => "-- RESUME SESSION --",
             .pr_review => "-- PR REVIEW --",
+            .review_submit => "-- SUBMIT REVIEW --",
+            .pr_info => "-- PR INFO --",
             .agent => blk: {
                 // Show vim mode when in agent mode
                 if (app.getActiveAgentStateConst()) |agent_state| {
@@ -1523,6 +1610,8 @@ pub const UI = struct {
             .agent_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .session_picker => "j/k:Move  |  Enter:Load  |  ESC:Cancel",
             .pr_review => "^n/^p:Move  |  Enter:Review  |  ^a:Author  |  ^r:Refresh  |  ESC:Back",
+            .review_submit => "Tab:Verdict  |  ^S/Enter:Submit  |  ^D:Discard  |  ESC:Cancel",
+            .pr_info => "j/k:Scroll  |  ^d/^u:Page  |  i/ESC/q:Close",
             .agent => blk: {
                 if (app.getActiveAgentStateConst()) |agent_state| {
                     break :blk switch (agent_state.input.vim.vim_mode) {
@@ -1739,11 +1828,47 @@ pub const UI = struct {
                 const pr_seg = try std.fmt.bufPrint(&pr_buf, "  PR #{d}", .{app.state.review.number});
                 try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, pr_seg), .style = .{ .fg = Color.cyan, .bold = true } });
 
+                // CI rollup glyph for the PR head (FR-6 final summary).
+                const ci_glyph: []const u8 = switch (app.state.review.rollup) {
+                    .success => " ✓",
+                    .failure, .err => " ✗",
+                    .pending => " •",
+                    .none => "",
+                };
+                if (ci_glyph.len > 0) {
+                    const ci_color = switch (app.state.review.rollup) {
+                        .success => Color.green,
+                        .failure, .err => Color.red,
+                        .pending => Color.yellow,
+                        .none => Color.dim,
+                    };
+                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ci_glyph), .style = .{ .fg = ci_color, .bold = true } });
+                }
+
                 const drafts = pr.review_controller.draftCount(&app.state.review);
                 if (drafts > 0) {
                     var draft_buf: [32]u8 = undefined;
                     const draft_seg = try std.fmt.bufPrint(&draft_buf, " │ drafts:{d}", .{drafts});
                     try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, draft_seg), .style = .{ .fg = Color.yellow } });
+                }
+
+                // Unresolved/total review-thread summary (FR-6 final summary).
+                const thread_counts = pr.review_controller.threadCounts(&app.state.review);
+                if (thread_counts.total > 0) {
+                    var tc_buf: [32]u8 = undefined;
+                    const tc_seg = try std.fmt.bufPrint(&tc_buf, " │ ⊚ {d}/{d}", .{ thread_counts.unresolved, thread_counts.total });
+                    try segments.append(app.allocator, .{
+                        .text = try RenderUtils.copyFrameText(app, tc_seg),
+                        .style = .{ .fg = if (thread_counts.unresolved > 0) Color.yellow else Color.green },
+                    });
+                }
+
+                // Truncated fetch note (AD-9: no silent truncation).
+                if (app.state.review.truncated) {
+                    try segments.append(app.allocator, .{
+                        .text = try RenderUtils.copyFrameText(app, " │ ⚠trunc"),
+                        .style = .{ .fg = Color.yellow, .bold = true },
+                    });
                 }
 
                 const target_github = app.state.review.comment_target == .github;

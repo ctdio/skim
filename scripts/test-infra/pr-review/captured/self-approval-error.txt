@@ -1,0 +1,12 @@
+# Ground-truth GitHub self-approval rejection (captured 2026-07-05T01:40:12Z)
+# gh 2.45.0  repo=ctdio/skim  viewer=ctdio
+# submitPullRequestReview(event:APPROVE) on the viewer's own PR.
+#
+# Fixture use: review_controller's submit-error path + github error
+# classification must map an envelope carrying this message to a readable
+# 'cannot approve your own pull request'-class error_msg (dialog stays open,
+# body preserved). The unit test feeds a canned envelope with this message.
+
+MESSAGE=Could not approve for pull request review. Can not approve your own pull request
+
+# Raw envelope saved alongside in self-approval-error.json

@@ -466,11 +466,33 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
         'B' => app.toggleBlame(), // Toggle git blame in gutter
         'S' => try app.startGraphiteStack(), // Open graphite stack picker
         'C' => toggleCommentTarget(app), // Toggle new-comment target (GitHub draft ⇄ local)
+        'R' => openReviewSubmit(app), // Submit-review dialog (verdict + body)
+        'i' => openPrInfo(app), // Read-only PR info panel
         else => {
             // Reset count prefix on any other key
             app.state.count_prefix = null;
         },
     }
+}
+
+/// Open the submit-review dialog for the active session. No-op (with a hint) when
+/// no session is active (guards the key against non-review diffs).
+fn openReviewSubmit(app: *App) void {
+    if (!review_controller.isActive(&app.state.review)) {
+        app.showStatusMessage("no active PR review session");
+        return;
+    }
+    app.openReviewSubmit();
+}
+
+/// Open the read-only PR info panel for the active session. No-op (with a hint)
+/// when no session is active.
+fn openPrInfo(app: *App) void {
+    if (!review_controller.isActive(&app.state.review)) {
+        app.showStatusMessage("no active PR review session");
+        return;
+    }
+    app.openPrInfo();
 }
 
 /// Toggle where new comments are written for the active PR review session. No-op

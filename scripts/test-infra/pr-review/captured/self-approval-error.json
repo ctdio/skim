@@ -1,0 +1,1 @@
+{"data":{"submitPullRequestReview":null},"errors":[{"type":"UNPROCESSABLE","path":["submitPullRequestReview"],"locations":[{"line":1,"column":20}],"message":"Could not approve for pull request review. Can not approve your own pull request"}]}

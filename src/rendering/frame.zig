@@ -412,6 +412,28 @@ pub fn render(app: *App, win: vaxis.Window) !void {
         }
     }
 
+    // Render submit-review dialog if in review_submit mode
+    if (app.mode == .review_submit) {
+        if (profile_frame) {
+            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            try UI.renderReviewSubmitDialog(app, win);
+            if (timer_opt) |*timer| overlay_ns += timer.read();
+        } else {
+            try UI.renderReviewSubmitDialog(app, win);
+        }
+    }
+
+    // Render read-only PR info panel if in pr_info mode
+    if (app.mode == .pr_info) {
+        if (profile_frame) {
+            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            try UI.renderPrInfoPanel(app, win);
+            if (timer_opt) |*timer| overlay_ns += timer.read();
+        } else {
+            try UI.renderPrInfoPanel(app, win);
+        }
+    }
+
     // Render model selection dialog if in model_selection mode
     if (app.mode == .model_selection) {
         if (profile_frame) {

@@ -374,6 +374,14 @@ const delete_review_mutation =
     \\}
 ;
 
+const submit_review_mutation =
+    \\mutation ($rid: ID!, $event: PullRequestReviewEvent!, $body: String!) {
+    \\  submitPullRequestReview(input: {pullRequestReviewId: $rid, event: $event, body: $body}) {
+    \\    pullRequestReview { id state }
+    \\  }
+    \\}
+;
+
 /// Comment-node selection for the reply mutation. Byte-mirrors the comment nodes
 /// selected by `review_query`/`thread_node_selection` so `review_parse.parseCreatedComment`
 /// reuses the SAME comment-node parser as the fetch path.
@@ -457,14 +465,30 @@ pub fn addReviewThread(allocator: std.mem.Allocator, params: AddThreadParams) !G
     return runGhCapture(allocator, argv, "gh api graphql (addPullRequestReviewThread)");
 }
 
-/// Discard a pending review. Returns the raw mutation JSON (parse the deleted
-/// id with `review_parse.parseCreatedReviewId`-style access is not needed —
-/// callers only check success). Used by `skim debug pr-discard` (TUI discard
-/// UI lands in phase 5).
+/// Discard a pending review. Returns the raw mutation JSON. Like `submitReview`,
+/// this routes through `runGhCaptureAllowErrorBody`: GitHub returns HTTP 200 with
+/// an `errors` envelope for a domain rejection (e.g. the pending review was
+/// deleted on the web mid-flight), so preserving that body lets the caller surface
+/// the specific message via `review_parse.firstErrorMessage` instead of a generic
+/// classified error. Used by `skim debug pr-discard` and the TUI discard flow.
 pub fn deletePendingReview(allocator: std.mem.Allocator, review_id: []const u8) !GhFetch {
     const argv = try buildDeleteReviewArgs(allocator, review_id);
     defer freeArgv(allocator, argv);
-    return runGhCapture(allocator, argv, "gh api graphql (deletePullRequestReview)");
+    return runGhCaptureAllowErrorBody(allocator, argv, "gh api graphql (deletePullRequestReview)");
+}
+
+/// Submit a review (`submitPullRequestReview`), transitioning the pending review
+/// to COMMENT/APPROVE/REQUEST_CHANGES and publishing all its draft comments.
+/// `event` is the GraphQL enum string ("COMMENT" | "APPROVE" | "REQUEST_CHANGES");
+/// pass it via `review_controller.verdictEvent`. Returns the raw mutation JSON —
+/// note GitHub returns HTTP 200 with an `errors` envelope for a rejected submit
+/// (e.g. approving your own PR), so parse with `review_parse.parseSubmitReview`,
+/// which surfaces that envelope's message. The body is a `-f body=<text>` argv
+/// element — shell-safe by construction.
+pub fn submitReview(allocator: std.mem.Allocator, review_id: []const u8, event: []const u8, body: []const u8) !GhFetch {
+    const argv = try buildSubmitReviewArgs(allocator, review_id, event, body);
+    defer freeArgv(allocator, argv);
+    return runGhCaptureAllowErrorBody(allocator, argv, "gh api graphql (submitPullRequestReview)");
 }
 
 /// Reply to an existing review thread. Returns the raw mutation JSON (parse with
@@ -509,6 +533,14 @@ pub fn deleteReviewComment(allocator: std.mem.Allocator, comment_node_id: []cons
 fn buildReplyArgs(allocator: std.mem.Allocator, thread_id: []const u8, body: []const u8) ![][]const u8 {
     return buildGraphqlArgv(allocator, reply_mutation, &.{
         .{ .key = "tid", .value = thread_id },
+        .{ .key = "body", .value = body },
+    }, &.{});
+}
+
+fn buildSubmitReviewArgs(allocator: std.mem.Allocator, review_id: []const u8, event: []const u8, body: []const u8) ![][]const u8 {
+    return buildGraphqlArgv(allocator, submit_review_mutation, &.{
+        .{ .key = "rid", .value = review_id },
+        .{ .key = "event", .value = event },
         .{ .key = "body", .value = body },
     }, &.{});
 }
@@ -621,6 +653,40 @@ fn runGhCapture(allocator: std.mem.Allocator, argv: []const []const u8, label: [
     };
     if (code != 0) {
         std.log.err("{s} failed ({d}): {s}", .{ label, code, result.stderr });
+        allocator.free(result.stdout);
+        return .{ .failed = classifyGhFailure(code, result.stderr) };
+    }
+    return .{ .ok = result.stdout };
+}
+
+/// Like `runGhCapture`, but preserves the stdout GraphQL body on a nonzero exit
+/// when that body is a 200-with-errors envelope. GitHub returns HTTP 200 with an
+/// `errors` array for domain rejections (e.g. approving your own PR); `gh` still
+/// exits nonzero and prints the envelope to stdout. Returning it as `.ok` lets
+/// the caller's parser surface the real, human-readable rejection message rather
+/// than a generic classified error (FR-6/AD-8). Genuine transport failures (no
+/// errors envelope on stdout) still return `.failed`.
+fn runGhCaptureAllowErrorBody(allocator: std.mem.Allocator, argv: []const []const u8, label: []const u8) !GhFetch {
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv,
+        .max_output_bytes = 16 * 1024 * 1024,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return .{ .failed = .not_installed },
+        else => return err,
+    };
+    errdefer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    const code: u32 = switch (result.term) {
+        .Exited => |c| c,
+        else => 1,
+    };
+    if (code != 0) {
+        std.log.err("{s} failed ({d}): {s}", .{ label, code, result.stderr });
+        if (std.mem.indexOf(u8, result.stdout, "\"errors\"") != null) {
+            return .{ .ok = result.stdout };
+        }
         allocator.free(result.stdout);
         return .{ .failed = classifyGhFailure(code, result.stderr) };
     }
@@ -912,6 +978,25 @@ test "buildDeleteReviewArgs: carries the review id" {
     defer freeArgv(testing.allocator, argv);
     try testing.expect(argvContains(argv, "id=PRR_del"));
     try testing.expect(std.mem.indexOf(u8, argv[4], "deletePullRequestReview") != null);
+}
+
+test "buildSubmitReviewArgs: carries review id, event, and hostile body verbatim" {
+    const hostile = "ship it \"quote\" %s émoji 🚀\nsecond `backtick` & <html>";
+    const argv = try buildSubmitReviewArgs(testing.allocator, "PRR_1", "COMMENT", hostile);
+    defer freeArgv(testing.allocator, argv);
+    try testing.expect(argvContains(argv, "rid=PRR_1"));
+    try testing.expect(argvContains(argv, "event=COMMENT"));
+    try testing.expect(argvContains(argv, "body=" ++ "ship it \"quote\" %s émoji 🚀\nsecond `backtick` & <html>"));
+    try testing.expect(std.mem.indexOf(u8, argv[4], "submitPullRequestReview") != null);
+    // event must be bound as a typed enum variable, not baked into the query text.
+    try testing.expect(std.mem.indexOf(u8, argv[4], "PullRequestReviewEvent!") != null);
+}
+
+test "buildSubmitReviewArgs: approve event carries verbatim" {
+    const argv = try buildSubmitReviewArgs(testing.allocator, "PRR_2", "APPROVE", "");
+    defer freeArgv(testing.allocator, argv);
+    try testing.expect(argvContains(argv, "event=APPROVE"));
+    try testing.expect(argvContains(argv, "body="));
 }
 
 test "buildReplyArgs: carries thread id + hostile body verbatim" {

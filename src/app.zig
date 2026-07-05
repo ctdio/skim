@@ -40,6 +40,8 @@ const permission_selection_mode = @import("modes/permission_selection_mode.zig")
 const agent_selection_mode = @import("modes/agent_selection_mode.zig");
 const session_picker_mode = @import("modes/session_picker_mode.zig");
 const pr_review_mode = @import("modes/pr_review_mode.zig");
+const review_submit_mode = @import("modes/review_submit_mode.zig");
+const pr_info_mode = @import("modes/pr_info_mode.zig");
 const agent_mode = @import("modes/agent_mode.zig");
 const agent = @import("agent/agent.zig");
 const debug_replay_controller = @import("agent/debug_replay_controller.zig");
@@ -322,6 +324,11 @@ pub const App = struct {
 
         // Native GitHub PR review session (async entry + review data). Defaulted.
         review: review_controller.ReviewSession = .{},
+
+        // Submit-review dialog body editor (Phase 5). Non-null only while the
+        // dialog is open. Defaulted null (stays out of the init literal); the
+        // editor buffer is large so it is only allocated on demand.
+        review_submit_editor: ?comment_editor.CommentEditor.VimEditor.State = null,
 
         // Boot straight into this PR number when set (`skim pr <n|url>`).
         pr_boot_number: ?u32 = null,
@@ -1621,6 +1628,7 @@ pub const App = struct {
             self.pollReviewEntry();
             self.pollReviewMutations();
             self.pollReviewThreadMutations();
+            self.pollReviewSubmit();
 
             // Render if we had events, need to update, or first render
             if (had_events or self.needs_render or first_render) {
@@ -2049,6 +2057,16 @@ pub const App = struct {
                     self.needs_render = true;
                     return;
                 },
+                .review_submit => {
+                    self.closeReviewSubmit();
+                    self.needs_render = true;
+                    return;
+                },
+                .pr_info => {
+                    self.mode = .normal;
+                    self.needs_render = true;
+                    return;
+                },
                 .agent => {
                     // In agent mode, single Ctrl+C closes subagent drill-in first,
                     // then exits history mode.
@@ -2086,6 +2104,8 @@ pub const App = struct {
             .agent_selection => try agent_selection_mode.handleKey(self, key),
             .session_picker => try session_picker_mode.handleKey(self, key),
             .pr_review => try pr_review_mode.handleKey(self, key),
+            .review_submit => try review_submit_mode.handleKey(self, key),
+            .pr_info => try pr_info_mode.handleKey(self, key),
             .agent => try agent_mode.handleKey(self, key),
         }
     }
@@ -2720,6 +2740,117 @@ pub const App = struct {
             .edit => "comment updated",
             .delete => "comment deleted",
         };
+    }
+
+    /// Consume a completed submit/discard (Phase 5). On success the dialog closes
+    /// and a refetch pulls authoritative post-submit data; on failure the dialog
+    /// stays open with the classified error (the body is preserved for retry).
+    fn pollReviewSubmit(self: *App) void {
+        switch (review_controller.pollSubmit(&self.state.review, self.allocator)) {
+            .none => {},
+            .submitted => |verdict| {
+                self.state.review_submit_editor = null;
+                self.mode = .normal;
+                self.rebuildReviewLineMap();
+                self.showStatusMessage(submittedMessage(verdict));
+                self.startReviewRefetch();
+                self.needs_render = true;
+            },
+            .discarded => {
+                self.state.review_submit_editor = null;
+                self.mode = .normal;
+                self.rebuildReviewLineMap();
+                self.showStatusMessage("pending review discarded");
+                self.needs_render = true;
+            },
+            .submit_failed, .discard_failed => {
+                self.showStatusMessage("submit failed — see dialog");
+                self.needs_render = true;
+            },
+        }
+    }
+
+    fn submittedMessage(verdict: review_controller.Verdict) []const u8 {
+        return switch (verdict) {
+            .comment => "review submitted (comment)",
+            .approve => "review submitted (approve)",
+            .request_changes => "review submitted (request changes)",
+        };
+    }
+
+    /// Open the submit-review dialog for the active session (bound to `R`). Inits
+    /// the body editor (restoring any Esc-stashed body) and switches to the
+    /// dialog mode. No-op when no review session is active.
+    pub fn openReviewSubmit(self: *App) void {
+        if (!review_controller.isActive(&self.state.review)) return;
+        // A submit's pending-review create must not race an in-flight draft post
+        // (double-create). Refuse to open the dialog until posts settle.
+        if (review_controller.hasThreadWriteWork(&self.state.review)) {
+            self.showStatusMessage("drafts still posting — try again in a moment");
+            self.needs_render = true;
+            return;
+        }
+        var editor_state = comment_editor.CommentEditor.VimEditor.State.init();
+        if (review_controller.submitBodyStash(&self.state.review)) |stash| {
+            editor_state.setText(stash);
+        }
+        self.state.review_submit_editor = editor_state;
+        review_controller.disarmDiscardConfirm(&self.state.review);
+        self.mode = .review_submit;
+        self.needs_render = true;
+    }
+
+    /// Close the submit dialog (Esc / Ctrl-C), preserving the in-progress body so
+    /// a reopen restores it (AD-8), and return to the diff.
+    pub fn closeReviewSubmit(self: *App) void {
+        if (self.state.review_submit_editor) |*ed| {
+            review_controller.stashSubmitBody(&self.state.review, self.allocator, ed.getText());
+        }
+        self.state.review_submit_editor = null;
+        review_controller.disarmDiscardConfirm(&self.state.review);
+        self.mode = .normal;
+        self.needs_render = true;
+    }
+
+    /// Fire the submit with the dialog's current body + verdict. Surfaces the
+    /// client-side refusal (empty body / no review) as a status message; on
+    /// `.started` the async worker runs and `pollReviewSubmit` consumes it.
+    pub fn submitReviewNow(self: *App) void {
+        const body = if (self.state.review_submit_editor) |*ed| ed.getText() else "";
+        const action = review_controller.startSubmit(&self.state.review, self.allocator, body) catch {
+            self.showStatusMessage("failed to start submit");
+            return;
+        };
+        switch (action) {
+            .started => self.showStatusMessage("submitting review…"),
+            .refused_empty => self.showStatusMessage("nothing to submit — add a body or drafts"),
+            .refused_no_review => self.showStatusMessage("no active review"),
+            .busy => self.showStatusMessage("a submit is already in progress"),
+        }
+        self.needs_render = true;
+    }
+
+    /// Fire a discard of the pending review (second Ctrl-D). Surfaces refusals.
+    pub fn discardReviewNow(self: *App) void {
+        const action = review_controller.startDiscard(&self.state.review, self.allocator) catch {
+            self.showStatusMessage("failed to start discard");
+            return;
+        };
+        switch (action) {
+            .started => self.showStatusMessage("discarding pending review…"),
+            .refused_no_review => self.showStatusMessage("no pending review to discard"),
+            .refused_empty, .busy => self.showStatusMessage("a submit is already in progress"),
+        }
+        review_controller.disarmDiscardConfirm(&self.state.review);
+        self.needs_render = true;
+    }
+
+    /// Open the read-only PR info panel (bound to `i`). No-op without a session.
+    pub fn openPrInfo(self: *App) void {
+        if (!review_controller.isActive(&self.state.review)) return;
+        self.state.review.info_scroll = 0;
+        self.mode = .pr_info;
+        self.needs_render = true;
     }
 
     /// Swap the diff to the fetched PR refs and refresh. `head_ref` is the local

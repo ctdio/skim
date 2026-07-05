@@ -165,7 +165,72 @@ pub const DeleteConfirm = struct {
     thread_id: []u8,
 };
 
+/// The terminal review verdict (FR-6). Maps to a `PullRequestReviewEvent`
+/// (`verdictEvent`) for the mutation and to a `ReviewState` (`verdictState`) for
+/// the optimistic post-submit flip of the session's pending comments.
+pub const Verdict = enum { comment, approve, request_changes };
+
+const SubmitKind = enum { submit, discard };
+
+/// Live submit-dialog state (FR-6/FR-7). `error_msg` (a failed submit, surfaced
+/// in the dialog) and `body_stash` (the in-progress body preserved when the
+/// dialog is closed with Esc so a reopen restores it — AD-8 draft safety) are
+/// session-allocator-owned. The body editor itself lives in the imperative shell
+/// (`app.state`), not here — the controller stays free of `vim_editor`, which is
+/// outside the `pr/` test-module root.
+pub const SubmitState = struct {
+    verdict: Verdict = .comment,
+    submitting: bool = false,
+    confirm_discard: bool = false,
+    error_msg: ?[]u8 = null,
+    body_stash: ?[]u8 = null,
+};
+
+/// Thread-safe handoff of an in-flight submit/discard to the main loop (AD-3).
+/// Inputs set before spawn; outputs written under `mutex` then
+/// `ready.store(true, .release)`. All buffers are `c_allocator`-owned so they
+/// survive the thread boundary; `pollSubmit` frees them on consumption.
+pub const PendingSubmit = struct {
+    mutex: std.Thread.Mutex = .{},
+    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    kind: SubmitKind = .submit,
+
+    // Inputs.
+    in_pr_node_id: []u8 = &.{},
+    in_head_oid: []u8 = &.{},
+    in_review_id: ?[]u8 = null, // cached pending review id, or null → worker creates (submit)
+    in_event: []u8 = &.{}, // PullRequestReviewEvent string
+    in_body: []u8 = &.{},
+    verdict: Verdict = .comment,
+
+    // Outputs.
+    out_review_id: ?[]u8 = null, // review id used/created (cached on success)
+    out_error_msg: ?[]u8 = null, // 200-with-errors message (self-approval etc.)
+    failed: bool = false,
+    fail_kind: github.GhErrorKind = .other,
+};
+
+/// Client-side disposition of a submit/discard request (before any worker spawn).
+pub const SubmitAction = enum { started, refused_empty, refused_no_review, busy };
+
+/// Outcome of consuming a completed submit/discard.
+pub const SubmitOutcome = union(enum) {
+    none,
+    submitted: Verdict, // review posted; caller refetches for authoritative data
+    submit_failed: github.GhErrorKind,
+    discarded, // pending review deleted; drafts removed locally
+    discard_failed: github.GhErrorKind,
+};
+
+/// Resolved/unresolved thread tallies for the status-bar summary (FR-6).
+pub const ThreadCounts = struct {
+    total: usize = 0,
+    unresolved: usize = 0,
+};
+
 /// Thread-safe handoff of a background entry/refetch to the main loop. Worker
+/// writes results under the mutex, then `ready.store(true, .release)`. All
 /// writes results under the mutex, then `ready.store(true, .release)`. All
 /// buffers are `c_allocator`-owned so they survive the thread boundary.
 pub const PendingEntry = struct {
@@ -263,6 +328,19 @@ pub const ReviewSession = struct {
     queued_thread_mutations: std.ArrayList(QueuedThreadMutation) = .{},
     // Two-step delete confirmation state (null = disarmed). See `DeleteConfirm`.
     delete_confirm: ?DeleteConfirm = null,
+
+    // Submit / discard (Phase 5, FR-6/FR-7). The verdict dialog + its async
+    // machinery. A submit/discard is the terminal action: it refuses while any
+    // inline post / thread-interaction work is outstanding (`hasThreadWriteWork`)
+    // so its `createPendingReview` can never race `postThreadWorker`'s into a
+    // double pending-review create (GitHub allows one pending review per PR).
+    submit: SubmitState = .{},
+    submit_mutation: PendingSubmit = .{},
+    submit_thread: ?std.Thread = null,
+    submit_in_flight: bool = false,
+
+    // Read-only PR info panel scroll offset (transient view state; FR-7).
+    info_scroll: usize = 0,
 };
 
 /// Begin an async PR entry: git ref fetch + review-data fetch off-thread. No-op
@@ -844,23 +922,23 @@ pub fn applyThreadMutation(
 /// all pending, plus in-flight placeholders.
 pub fn draftCount(self: *const ReviewSession) usize {
     var count: usize = 0;
-    for (self.threads.items) |st| {
-        if (st.posting) {
-            count += 1;
-            continue;
-        }
-        const comments = st.data.comments;
-        if (comments.len == 0) continue;
-        var all_pending = true;
-        for (comments) |c| {
-            if (c.review_state != .pending) {
-                all_pending = false;
-                break;
-            }
-        }
-        if (all_pending) count += 1;
+    for (self.threads.items) |*st| {
+        if (isDraftThread(st)) count += 1;
     }
     return count;
+}
+
+/// Resolved/unresolved tallies over the SERVER threads (excludes in-flight
+/// placeholders and drafts — a draft is not yet a conversation). Feeds the
+/// status-bar review summary (FR-6).
+pub fn threadCounts(self: *const ReviewSession) ThreadCounts {
+    var counts = ThreadCounts{};
+    for (self.threads.items) |*st| {
+        if (st.posting or isDraftThread(st)) continue;
+        counts.total += 1;
+        if (!st.data.is_resolved) counts.unresolved += 1;
+    }
+    return counts;
 }
 
 /// Number of in-flight / queued optimistic placeholders (status-bar "posting…").
@@ -872,11 +950,200 @@ pub fn postingCount(self: *const ReviewSession) usize {
     return count;
 }
 
+/// Total logical lines the PR info panel scrolls over (FR-7). MUST mirror the
+/// section accounting in `review_render.drawInfoBody` so the mode's scroll clamp
+/// (and `G`) agree with what is actually rendered: a Checks section (header +
+/// rows + spacer), a Reviews section (header + rows + spacer), then the
+/// Description (header + body lines). Each section is present only when non-empty.
+pub fn infoLineCount(self: *const ReviewSession) usize {
+    var total: usize = 0;
+    if (self.checks.items.len > 0) total += 2 + self.checks.items.len; // header + rows + spacer
+    if (self.reviews.items.len > 0) total += 2 + self.reviews.items.len; // header + rows + spacer
+    if (self.body.len > 0) total += 1 + bodyLineCount(self.body); // header + body lines
+    return total;
+}
+
 /// Whether any write-path work (a running worker, a ready result, or queued
 /// posts) is outstanding — joins the main loop's poll predicate.
 pub fn hasPostingWork(self: *const ReviewSession) bool {
+    return hasThreadWriteWork(self) or hasSubmitWork(self);
+}
+
+/// Whether any inline post or thread-interaction (reply/resolve/edit/delete) work
+/// is outstanding — excludes the terminal submit/discard. A submit/discard refuses
+/// while this is true (see `submitGuard` / `startDiscard`) so its pending-review
+/// creation can't race a concurrent `postThreadWorker` into a double create.
+pub fn hasThreadWriteWork(self: *const ReviewSession) bool {
     return self.posting_worker_active or self.mutation.ready.load(.acquire) or self.queued_posts.items.len > 0 or
         self.thread_mut_active or self.thread_mutation.ready.load(.acquire) or self.queued_thread_mutations.items.len > 0;
+}
+
+/// Whether a submit/discard worker is running or has a result waiting — joins the
+/// main loop's poll predicate so `pollSubmit` gets called.
+pub fn hasSubmitWork(self: *const ReviewSession) bool {
+    return self.submit_in_flight or self.submit_mutation.ready.load(.acquire);
+}
+
+// =============================================================================
+// Submit / discard (FR-6/FR-7)
+// =============================================================================
+
+/// The `PullRequestReviewEvent` string for a verdict (mutation arg).
+pub fn verdictEvent(verdict: Verdict) []const u8 {
+    return switch (verdict) {
+        .comment => "COMMENT",
+        .approve => "APPROVE",
+        .request_changes => "REQUEST_CHANGES",
+    };
+}
+
+/// The human label for a verdict (dialog selector).
+pub fn verdictLabel(verdict: Verdict) []const u8 {
+    return switch (verdict) {
+        .comment => "Comment",
+        .approve => "Approve",
+        .request_changes => "Request changes",
+    };
+}
+
+/// Cycle the selected verdict (Tab / Shift-Tab in the dialog). `forward` advances
+/// comment → approve → request_changes → comment.
+pub fn cycleVerdict(self: *ReviewSession, forward: bool) void {
+    const order = [_]Verdict{ .comment, .approve, .request_changes };
+    var idx: usize = 0;
+    for (order, 0..) |v, i| {
+        if (v == self.submit.verdict) idx = i;
+    }
+    const n = order.len;
+    idx = if (forward) (idx + 1) % n else (idx + n - 1) % n;
+    self.submit.verdict = order[idx];
+}
+
+/// Begin an async submit of the selected verdict with `body` (FR-6). Refuses a
+/// COMMENT review that would post nothing (empty body AND no drafts), refuses
+/// (`.busy`) when a submit/discard is already in flight OR inline post/thread work
+/// is still outstanding (`hasThreadWriteWork` — avoids a double pending-review
+/// create), and refuses when no session is active. On `.started` the worker
+/// ensures a pending review then submits it.
+pub fn startSubmit(self: *ReviewSession, allocator: Allocator, body: []const u8) !SubmitAction {
+    if (submitGuard(self, body)) |refusal| return refusal;
+    clearSubmitError(self, allocator);
+    try spawnSubmit(self, .submit, body);
+    self.submit.submitting = true;
+    return .started;
+}
+
+/// The client-side decision for a submit: a refusal `SubmitAction`, or null when
+/// the submit should proceed (spawn a worker). Pure — split out so the decision
+/// is unit-testable without spawning a live `gh` worker (AD-10).
+pub fn submitGuard(self: *const ReviewSession, body: []const u8) ?SubmitAction {
+    if (!self.active) return .refused_no_review;
+    if (self.submit_in_flight or self.submit_mutation.ready.load(.acquire)) return .busy;
+    if (hasThreadWriteWork(self)) return .busy;
+    const trimmed = std.mem.trim(u8, body, " \t\r\n");
+    if (trimmed.len == 0 and self.submit.verdict == .comment and draftCount(self) == 0) return .refused_empty;
+    return null;
+}
+
+/// Begin an async discard of the pending review (FR-7): deletes it server-side,
+/// removing all its draft comments. Refuses when there is no pending review to
+/// discard, a submit/discard is already running, or inline post/thread work is
+/// still outstanding (`hasThreadWriteWork`).
+pub fn startDiscard(self: *ReviewSession, allocator: Allocator) !SubmitAction {
+    if (!self.active) return .refused_no_review;
+    if (self.submit_in_flight or self.submit_mutation.ready.load(.acquire)) return .busy;
+    if (hasThreadWriteWork(self)) return .busy;
+    if (currentReviewId(self) == null) return .refused_no_review;
+    clearSubmitError(self, allocator);
+    try spawnSubmit(self, .discard, "");
+    self.submit.submitting = true;
+    return .started;
+}
+
+/// Consume a completed submit/discard, if ready. Joins the worker, caches any
+/// created review id, applies the local effect (optimistic verdict flip / draft
+/// removal) or records the error for the dialog, closes the dialog on success,
+/// and frees worker buffers. Returns `.none` when nothing is ready.
+pub fn pollSubmit(self: *ReviewSession, allocator: Allocator) SubmitOutcome {
+    if (!self.submit_mutation.ready.load(.acquire)) return .none;
+
+    self.submit_mutation.mutex.lock();
+    const out_review_id = self.submit_mutation.out_review_id;
+    const out_error_msg = self.submit_mutation.out_error_msg;
+    const failed = self.submit_mutation.failed;
+    const fail_kind = self.submit_mutation.fail_kind;
+    const kind = self.submit_mutation.kind;
+    const verdict = self.submit_mutation.verdict;
+    self.submit_mutation.out_review_id = null;
+    self.submit_mutation.out_error_msg = null;
+    self.submit_mutation.mutex.unlock();
+    self.submit_mutation.ready.store(false, .release);
+
+    if (self.submit_thread) |t| {
+        t.join();
+        self.submit_thread = null;
+    }
+    self.submit_in_flight = false;
+    self.submit.submitting = false;
+
+    const ca = std.heap.c_allocator;
+    // Cache a created review id even on a partial failure (review created, submit
+    // rejected) so a retry / discard reuses it instead of double-creating.
+    if (out_review_id) |rid| setReviewId(self, allocator, rid);
+
+    var outcome: SubmitOutcome = .none;
+    if (failed) {
+        setSubmitError(self, allocator, out_error_msg orelse github.kindMessage(fail_kind));
+        outcome = if (kind == .discard) .{ .discard_failed = fail_kind } else .{ .submit_failed = fail_kind };
+    } else if (kind == .discard) {
+        applyDiscard(self, allocator);
+        closeSubmitDialogSilent(self, allocator);
+        outcome = .discarded;
+    } else {
+        applySubmitSuccess(self, allocator, verdict);
+        closeSubmitDialogSilent(self, allocator);
+        outcome = .{ .submitted = verdict };
+    }
+
+    if (out_review_id) |r| ca.free(r);
+    if (out_error_msg) |r| ca.free(r);
+    freeSubmitBuffers(self);
+    return outcome;
+}
+
+/// Arm the two-step discard confirmation (first Ctrl-D). The second Ctrl-D fires
+/// `startDiscard`; any other key disarms.
+pub fn armDiscardConfirm(self: *ReviewSession) void {
+    self.submit.confirm_discard = true;
+}
+
+/// Disarm the discard confirmation.
+pub fn disarmDiscardConfirm(self: *ReviewSession) void {
+    self.submit.confirm_discard = false;
+}
+
+/// Whether the discard confirmation is armed.
+pub fn discardArmed(self: *const ReviewSession) bool {
+    return self.submit.confirm_discard;
+}
+
+/// Preserve the in-progress submit body (Esc-out) so a reopen restores it (AD-8).
+/// An empty/whitespace body clears the stash rather than preserving stale text.
+pub fn stashSubmitBody(self: *ReviewSession, allocator: Allocator, body: []const u8) void {
+    if (self.submit.body_stash) |s| allocator.free(s);
+    self.submit.body_stash = null;
+    if (std.mem.trim(u8, body, " \t\r\n").len == 0) return;
+    self.submit.body_stash = allocator.dupe(u8, body) catch null;
+}
+
+/// Borrow the stashed submit body (to pre-fill the reopened editor), or null.
+pub fn submitBodyStash(self: *const ReviewSession) ?[]const u8 {
+    return self.submit.body_stash;
+}
+
+/// Borrow the last submit-error text (surfaced in the dialog), or null.
+pub fn submitError(self: *const ReviewSession) ?[]const u8 {
+    return self.submit.error_msg;
 }
 
 /// Free the whole session. Joins any in-flight worker first so it can't write
@@ -895,6 +1162,11 @@ pub fn deinitState(self: *ReviewSession, allocator: Allocator) void {
     if (self.thread_mutation_thread) |t| t.join();
     self.thread_mutation_thread = null;
     self.thread_mut_active = false;
+
+    // Join any in-flight submit/discard worker for the same reason.
+    if (self.submit_thread) |t| t.join();
+    self.submit_thread = null;
+    self.submit_in_flight = false;
 
     const ca = std.heap.c_allocator;
     if (self.entry.raw_json) |r| ca.free(r);
@@ -915,6 +1187,12 @@ pub fn deinitState(self: *ReviewSession, allocator: Allocator) void {
     if (self.draft_failed_text) |t| allocator.free(t);
     self.draft_failed_text = null;
     disarmDeleteConfirm(self, allocator);
+
+    freeSubmitBuffers(self);
+    if (self.submit.error_msg) |m| allocator.free(m);
+    self.submit.error_msg = null;
+    if (self.submit.body_stash) |s| allocator.free(s);
+    self.submit.body_stash = null;
 
     // Free session-owned (placeholder / just-posted) thread strings before the
     // list is torn down; server threads are freed by clearData's arena.deinit.
@@ -1647,6 +1925,269 @@ fn shiftExpandedAfterRemoval(self: *ReviewSession, allocator: Allocator, removed
     for (kept.items) |k| self.expanded_threads.put(allocator, k, {}) catch {};
 }
 
+// --- Submit / discard helpers ------------------------------------------------
+
+/// A thread that exists only as an unsubmitted draft: an in-flight placeholder,
+/// or a server thread whose comments are all still `pending` (mine, not yet
+/// submitted). These are the threads a discard removes.
+/// Newline-delimited logical line count of `body` (matches how
+/// `review_render.drawInfoBody` splits the description on '\n').
+fn bodyLineCount(body: []const u8) usize {
+    if (body.len == 0) return 0;
+    var count: usize = 1;
+    for (body) |c| {
+        if (c == '\n') count += 1;
+    }
+    return count;
+}
+
+fn isDraftThread(st: *const SessionThread) bool {
+    if (st.posting) return true;
+    const comments = st.data.comments;
+    if (comments.len == 0) return false;
+    for (comments) |c| {
+        if (c.review_state != .pending) return false;
+    }
+    return true;
+}
+
+/// The `ReviewState` a verdict submits into (optimistic post-submit flip).
+fn verdictState(verdict: Verdict) review_parse.ReviewState {
+    return switch (verdict) {
+        .comment => .commented,
+        .approve => .approved,
+        .request_changes => .changes_requested,
+    };
+}
+
+/// Copy the submit/discard inputs into `c_allocator` buffers and spawn the
+/// worker. Buffers live on `self.submit_mutation` (freed by `pollSubmit` /
+/// `deinitState`).
+fn spawnSubmit(self: *ReviewSession, kind: SubmitKind, body: []const u8) !void {
+    const ca = std.heap.c_allocator;
+
+    const pr_node_id = try ca.dupe(u8, self.pr_node_id);
+    errdefer ca.free(pr_node_id);
+    const head_oid = try ca.dupe(u8, self.head_ref_oid);
+    errdefer ca.free(head_oid);
+    const event = try ca.dupe(u8, verdictEvent(self.submit.verdict));
+    errdefer ca.free(event);
+    const body_buf = try ca.dupe(u8, body);
+    errdefer ca.free(body_buf);
+    var review_id_buf: ?[]u8 = null;
+    if (currentReviewId(self)) |rid| review_id_buf = try ca.dupe(u8, rid);
+    errdefer if (review_id_buf) |r| ca.free(r);
+
+    self.submit_mutation.kind = kind;
+    self.submit_mutation.in_pr_node_id = pr_node_id;
+    self.submit_mutation.in_head_oid = head_oid;
+    self.submit_mutation.in_event = event;
+    self.submit_mutation.in_body = body_buf;
+    self.submit_mutation.in_review_id = review_id_buf;
+    self.submit_mutation.verdict = self.submit.verdict;
+    self.submit_mutation.out_review_id = null;
+    self.submit_mutation.out_error_msg = null;
+    self.submit_mutation.failed = false;
+    self.submit_mutation.fail_kind = .other;
+    self.submit_mutation.ready.store(false, .release);
+
+    self.submit_thread = std.Thread.spawn(.{}, submitWorker, .{self}) catch {
+        // Detach the buffers from the struct; the errdefers above free them.
+        self.submit_mutation.in_pr_node_id = &.{};
+        self.submit_mutation.in_head_oid = &.{};
+        self.submit_mutation.in_event = &.{};
+        self.submit_mutation.in_body = &.{};
+        self.submit_mutation.in_review_id = null;
+        return error.SpawnFailed;
+    };
+    self.submit_in_flight = true;
+}
+
+/// Submit/discard worker (AD-3). Runs on `c_allocator`. Submit ensures a pending
+/// review (reuse cached id or create one) then calls `submitPullRequestReview`;
+/// a 200-with-errors envelope (self-approval etc.) becomes an `out_error_msg`.
+/// Discard deletes the pending review. Writes outputs under the mutex, flips
+/// `ready`.
+fn submitWorker(self: *ReviewSession) void {
+    const ca = std.heap.c_allocator;
+    const m = &self.submit_mutation;
+    var failed = false;
+    var fail_kind: github.GhErrorKind = .other;
+    var out_review_id: ?[]u8 = null;
+    var out_error_msg: ?[]u8 = null;
+
+    if (m.kind == .discard) {
+        if (m.in_review_id) |rid| {
+            if (github.deletePendingReview(ca, rid)) |fetch| {
+                switch (fetch) {
+                    .ok => |raw| {
+                        defer ca.free(raw);
+                        if (review_parse.firstErrorMessage(ca, raw)) |maybe| {
+                            if (maybe) |msg| {
+                                failed = true;
+                                out_error_msg = msg;
+                            }
+                        } else |_| {}
+                    },
+                    .failed => |k| {
+                        failed = true;
+                        fail_kind = k;
+                    },
+                }
+            } else |_| {
+                failed = true;
+            }
+        } else {
+            failed = true;
+        }
+        m.mutex.lock();
+        m.out_error_msg = out_error_msg;
+        m.failed = failed;
+        m.fail_kind = fail_kind;
+        m.mutex.unlock();
+        m.ready.store(true, .release);
+        return;
+    }
+
+    // Submit path: resolve a review id first, then submit it.
+    var review_id: ?[]u8 = null; // ca-owned working copy
+    defer if (review_id) |r| ca.free(r);
+
+    if (m.in_review_id) |rid| {
+        review_id = ca.dupe(u8, rid) catch blk: {
+            failed = true;
+            break :blk null;
+        };
+    } else if (github.createPendingReview(ca, m.in_pr_node_id, m.in_head_oid)) |fetch| {
+        switch (fetch) {
+            .ok => |raw| {
+                defer ca.free(raw);
+                if (review_parse.parseCreatedReviewId(ca, raw)) |id| {
+                    review_id = id;
+                    out_review_id = ca.dupe(u8, id) catch null;
+                } else |_| {
+                    failed = true;
+                }
+            },
+            .failed => |k| {
+                failed = true;
+                fail_kind = k;
+            },
+        }
+    } else |_| {
+        failed = true;
+    }
+
+    if (!failed) {
+        if (github.submitReview(ca, review_id.?, m.in_event, m.in_body)) |fetch| {
+            switch (fetch) {
+                .ok => |raw| {
+                    defer ca.free(raw);
+                    if (review_parse.parseSubmitReview(ca, raw)) |res| {
+                        var r = res;
+                        defer r.deinit();
+                        if (!r.ok) {
+                            failed = true;
+                            out_error_msg = ca.dupe(u8, r.error_message) catch null;
+                        }
+                    } else |_| {
+                        failed = true;
+                    }
+                },
+                .failed => |k| {
+                    failed = true;
+                    fail_kind = k;
+                },
+            }
+        } else |_| {
+            failed = true;
+        }
+    }
+
+    m.mutex.lock();
+    m.out_review_id = out_review_id;
+    m.out_error_msg = out_error_msg;
+    m.failed = failed;
+    m.fail_kind = fail_kind;
+    m.mutex.unlock();
+    m.ready.store(true, .release);
+}
+
+/// Apply a successful submit locally: flip every still-`pending` comment to the
+/// submitted verdict's state (immediate feedback before the caller's refetch),
+/// and drop the now-consumed pending review ids.
+fn applySubmitSuccess(self: *ReviewSession, allocator: Allocator, verdict: Verdict) void {
+    const new_state = verdictState(verdict);
+    for (self.threads.items) |*st| {
+        for (st.data.comments) |*c| {
+            if (c.review_state == .pending) c.review_state = new_state;
+        }
+        st.posting = false;
+    }
+    dropReviewIds(self, allocator);
+}
+
+/// Apply a successful discard locally: remove every draft/placeholder thread and
+/// drop the pending review ids. Iterates back-to-front so `removeThreadAt`'s
+/// index-shift bookkeeping stays correct.
+fn applyDiscard(self: *ReviewSession, allocator: Allocator) void {
+    var i: usize = self.threads.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (isDraftThread(&self.threads.items[i])) removeThreadAt(self, allocator, i);
+    }
+    clearQueuedPosts(self, allocator);
+    dropReviewIds(self, allocator);
+}
+
+/// Free and null both cached pending-review ids.
+fn dropReviewIds(self: *ReviewSession, allocator: Allocator) void {
+    if (self.pending_review_id) |id| allocator.free(id);
+    self.pending_review_id = null;
+    if (self.posted_review_id) |id| allocator.free(id);
+    self.posted_review_id = null;
+}
+
+/// Replace the dialog's error text with an owned copy of `msg`.
+fn setSubmitError(self: *ReviewSession, allocator: Allocator, msg: []const u8) void {
+    if (self.submit.error_msg) |m| allocator.free(m);
+    self.submit.error_msg = allocator.dupe(u8, msg) catch null;
+}
+
+/// Clear the dialog's error text.
+fn clearSubmitError(self: *ReviewSession, allocator: Allocator) void {
+    if (self.submit.error_msg) |m| allocator.free(m);
+    self.submit.error_msg = null;
+}
+
+/// Close the submit dialog after a successful submit/discard: drop the stashed
+/// body (it was submitted or discarded), the error, and the discard arming.
+fn closeSubmitDialogSilent(self: *ReviewSession, allocator: Allocator) void {
+    if (self.submit.body_stash) |s| allocator.free(s);
+    self.submit.body_stash = null;
+    self.submit.confirm_discard = false;
+    clearSubmitError(self, allocator);
+}
+
+/// Free the `c_allocator` buffers held on `self.submit_mutation` and reset them.
+fn freeSubmitBuffers(self: *ReviewSession) void {
+    const ca = std.heap.c_allocator;
+    if (self.submit_mutation.in_pr_node_id.len > 0) ca.free(self.submit_mutation.in_pr_node_id);
+    if (self.submit_mutation.in_head_oid.len > 0) ca.free(self.submit_mutation.in_head_oid);
+    if (self.submit_mutation.in_event.len > 0) ca.free(self.submit_mutation.in_event);
+    if (self.submit_mutation.in_body.len > 0) ca.free(self.submit_mutation.in_body);
+    if (self.submit_mutation.in_review_id) |r| ca.free(r);
+    if (self.submit_mutation.out_review_id) |r| ca.free(r);
+    if (self.submit_mutation.out_error_msg) |r| ca.free(r);
+    self.submit_mutation.in_pr_node_id = &.{};
+    self.submit_mutation.in_head_oid = &.{};
+    self.submit_mutation.in_event = &.{};
+    self.submit_mutation.in_body = &.{};
+    self.submit_mutation.in_review_id = null;
+    self.submit_mutation.out_review_id = null;
+    self.submit_mutation.out_error_msg = null;
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -1740,6 +2281,34 @@ test "deinitState: clean on a never-used session" {
     var session = ReviewSession{};
     deinitState(&session, testing.allocator);
     try testing.expect(!isActive(&session));
+}
+
+test "infoLineCount: zero when nothing is displayed" {
+    var session = ReviewSession{};
+    try testing.expectEqual(@as(usize, 0), infoLineCount(&session));
+}
+
+test "infoLineCount: description-only counts a header plus each body line" {
+    var session = ReviewSession{};
+    session.body = "a\nb\nc";
+    // 1 header + 3 body lines.
+    try testing.expectEqual(@as(usize, 4), infoLineCount(&session));
+}
+
+test "infoLineCount: sums checks + reviews + description sections" {
+    var session = ReviewSession{};
+    defer session.checks.deinit(testing.allocator);
+    defer session.reviews.deinit(testing.allocator);
+
+    try session.checks.append(testing.allocator, .{ .name = "build", .status = "COMPLETED", .conclusion = "SUCCESS" });
+    try session.checks.append(testing.allocator, .{ .name = "lint", .status = "COMPLETED", .conclusion = "FAILURE" });
+    try session.reviews.append(testing.allocator, .{ .id = "R1", .author = "a", .state = .approved, .body = "", .submitted_at = "" });
+    session.body = "a\nb\nc";
+
+    // checks: 2 rows + header + spacer = 4; reviews: 1 row + header + spacer = 3;
+    // description: 1 header + 3 body lines = 4. Total = 11. This MUST equal the
+    // logical lines drawInfoBody renders so `G`/scroll reach the true bottom.
+    try testing.expectEqual(@as(usize, 11), infoLineCount(&session));
 }
 
 test "startRefetch: no-op when session is inactive" {
@@ -2387,11 +2956,180 @@ test "pollThreadMutations stashes the body and clears busy on a failed reply" {
     try testing.expectEqualStrings("draft reply", stashed.?);
 }
 
+test "verdictEvent: maps each verdict to its PullRequestReviewEvent" {
+    try testing.expectEqualStrings("COMMENT", verdictEvent(.comment));
+    try testing.expectEqualStrings("APPROVE", verdictEvent(.approve));
+    try testing.expectEqualStrings("REQUEST_CHANGES", verdictEvent(.request_changes));
+}
+
+test "verdictLabel: maps each verdict to its human label" {
+    try testing.expectEqualStrings("Comment", verdictLabel(.comment));
+    try testing.expectEqualStrings("Approve", verdictLabel(.approve));
+    try testing.expectEqualStrings("Request changes", verdictLabel(.request_changes));
+}
+
+test "cycleVerdict: forward wraps comment -> approve -> request_changes -> comment" {
+    var session = ReviewSession{};
+    try testing.expectEqual(Verdict.comment, session.submit.verdict);
+    cycleVerdict(&session, true);
+    try testing.expectEqual(Verdict.approve, session.submit.verdict);
+    cycleVerdict(&session, true);
+    try testing.expectEqual(Verdict.request_changes, session.submit.verdict);
+    cycleVerdict(&session, true);
+    try testing.expectEqual(Verdict.comment, session.submit.verdict);
+}
+
+test "cycleVerdict: backward wraps comment -> request_changes" {
+    var session = ReviewSession{};
+    cycleVerdict(&session, false);
+    try testing.expectEqual(Verdict.request_changes, session.submit.verdict);
+    cycleVerdict(&session, false);
+    try testing.expectEqual(Verdict.approve, session.submit.verdict);
+}
+
+test "submitGuard: refuses when no session is active" {
+    var session = ReviewSession{};
+    try testing.expectEqual(SubmitAction.refused_no_review, submitGuard(&session, "body").?);
+}
+
+test "submitGuard: refuses empty-body COMMENT with no drafts" {
+    var session = ReviewSession{};
+    session.active = true;
+    session.submit.verdict = .comment;
+    try testing.expectEqual(SubmitAction.refused_empty, submitGuard(&session, "   \n").?);
+}
+
+test "submitGuard: allows empty-body APPROVE with no drafts" {
+    var session = ReviewSession{};
+    session.active = true;
+    session.submit.verdict = .approve;
+    try testing.expect(submitGuard(&session, "") == null);
+}
+
+test "submitGuard: allows empty-body COMMENT when a draft exists" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    session.active = true;
+    session.submit.verdict = .comment;
+    try appendOwnedThread(&session, testing.allocator, "PRRT_draft", false, &.{
+        .{ .id = "PRRC_d", .mine = true, .state = .pending },
+    });
+    try testing.expect(submitGuard(&session, "") == null);
+}
+
+test "submitGuard: refuses while a submit is in flight" {
+    var session = ReviewSession{};
+    session.active = true;
+    session.submit.verdict = .approve;
+    session.submit_in_flight = true;
+    try testing.expectEqual(SubmitAction.busy, submitGuard(&session, "body").?);
+}
+
+test "startDiscard: refuses when there is no pending review" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    session.active = true;
+    const action = try startDiscard(&session, testing.allocator);
+    try testing.expectEqual(SubmitAction.refused_no_review, action);
+}
+
+test "submitGuard: refuses while an inline draft post is still in flight" {
+    var session = ReviewSession{};
+    session.active = true;
+    session.submit.verdict = .approve;
+    session.posting_worker_active = true; // a post worker is mid-createPendingReview
+    try testing.expectEqual(SubmitAction.busy, submitGuard(&session, "body").?);
+    session.posting_worker_active = false; // avoid deinit joining a nonexistent worker
+}
+
+test "startDiscard: refuses (busy) while an inline draft post is still in flight" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    session.active = true;
+    // A pending review exists (discard would otherwise proceed) but a post is
+    // mid-flight — discard must refuse rather than race the create/delete.
+    session.pending_review_id = try testing.allocator.dupe(u8, "PRR_pending");
+    session.posting_worker_active = true;
+    const action = try startDiscard(&session, testing.allocator);
+    try testing.expectEqual(SubmitAction.busy, action);
+    session.posting_worker_active = false;
+}
+
+test "threadCounts: counts unresolved and total over server threads, excluding drafts" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    try appendOwnedThread(&session, testing.allocator, "PRRT_a", false, &.{
+        .{ .id = "c1", .mine = false, .state = .commented },
+    });
+    try appendOwnedThread(&session, testing.allocator, "PRRT_b", true, &.{
+        .{ .id = "c2", .mine = false, .state = .commented },
+    });
+    try appendOwnedThread(&session, testing.allocator, "PRRT_draft", false, &.{
+        .{ .id = "c3", .mine = true, .state = .pending },
+    });
+    const counts = threadCounts(&session);
+    try testing.expectEqual(@as(usize, 2), counts.total);
+    try testing.expectEqual(@as(usize, 1), counts.unresolved);
+}
+
+test "applySubmitSuccess: flips pending comments to the verdict state and drops review ids" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    session.pending_review_id = try testing.allocator.dupe(u8, "PRR_pending");
+    try appendOwnedThread(&session, testing.allocator, "PRRT_a", false, &.{
+        .{ .id = "c1", .mine = true, .state = .pending },
+    });
+
+    applySubmitSuccess(&session, testing.allocator, .approve);
+
+    try testing.expectEqual(review_parse.ReviewState.approved, session.threads.items[0].data.comments[0].review_state);
+    try testing.expect(session.pending_review_id == null);
+    try testing.expect(session.posted_review_id == null);
+}
+
+test "applyDiscard: removes draft threads but keeps submitted ones" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+    session.pending_review_id = try testing.allocator.dupe(u8, "PRR_pending");
+    try appendOwnedThread(&session, testing.allocator, "PRRT_submitted", false, &.{
+        .{ .id = "c1", .mine = false, .state = .commented },
+    });
+    try appendOwnedThread(&session, testing.allocator, "PRRT_draft", false, &.{
+        .{ .id = "c2", .mine = true, .state = .pending },
+    });
+
+    applyDiscard(&session, testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), session.threads.items.len);
+    try testing.expectEqualStrings("PRRT_submitted", session.threads.items[0].data.id);
+    try testing.expect(session.pending_review_id == null);
+}
+
+test "stashSubmitBody: round-trips a body and an empty body clears it" {
+    var session = ReviewSession{};
+    defer deinitState(&session, testing.allocator);
+
+    stashSubmitBody(&session, testing.allocator, "half-written review");
+    try testing.expectEqualStrings("half-written review", submitBodyStash(&session).?);
+
+    stashSubmitBody(&session, testing.allocator, "   ");
+    try testing.expect(submitBodyStash(&session) == null);
+}
+
+test "discard confirm: arm then disarm toggles the flag" {
+    var session = ReviewSession{};
+    try testing.expect(!discardArmed(&session));
+    armDiscardConfirm(&session);
+    try testing.expect(discardArmed(&session));
+    disarmDiscardConfirm(&session);
+    try testing.expect(!discardArmed(&session));
+}
+
 fn samplePost(body: []const u8) PostParams {
     return .{ .path = "src/x.zig", .line = 10, .side = .right, .body = body };
 }
 
-const CommentSeed = struct { id: []const u8, mine: bool, body: []const u8 = "orig" };
+const CommentSeed = struct { id: []const u8, mine: bool, body: []const u8 = "orig", state: review_parse.ReviewState = .commented };
 
 /// Append a fully session-owned thread for tests (so `deinitState` frees it and
 /// the testing allocator leak-checks it).
@@ -2405,7 +3143,7 @@ fn appendOwnedThread(session: *ReviewSession, allocator: Allocator, id: []const 
             .body = try allocator.dupe(u8, s.body),
             .created_at = try allocator.dupe(u8, ""),
             .review_id = try allocator.dupe(u8, ""),
-            .review_state = .commented,
+            .review_state = s.state,
             .is_mine = s.mine,
             .diff_hunk = try allocator.dupe(u8, ""),
         };

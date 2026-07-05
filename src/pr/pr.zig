@@ -24,6 +24,7 @@ pub const filter = @import("filter.zig");
 pub const authors = @import("authors.zig");
 pub const stack = @import("stack.zig");
 pub const render = @import("render.zig");
+pub const review_render = @import("review_render.zig");
 pub const review_parse = @import("review_parse.zig");
 pub const review_controller = @import("review_controller.zig");
 pub const thread_hint = @import("thread_hint.zig");

@@ -20,7 +20,7 @@ pub fn wheelKeyForMode(mode: Mode, down: bool) ?u21 {
     return switch (mode) {
         // The main diff view binds j/k for line scrolling; arrow keys are not
         // bound there.
-        .normal, .visual => if (down) 'j' else 'k',
+        .normal, .visual, .pr_info => if (down) 'j' else 'k',
 
         // Every other scrollable surface binds the arrow keys (some, like the
         // command palette and selection menus, bind *only* arrows).
@@ -39,7 +39,7 @@ pub fn wheelKeyForMode(mode: Mode, down: bool) ?u21 {
 
         // Text-input modes and any surface without meaningful vertical scroll
         // ignore the wheel.
-        .comment, .search, .commit_diff_mode => null,
+        .comment, .search, .commit_diff_mode, .review_submit => null,
     };
 }
 

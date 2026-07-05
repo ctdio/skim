@@ -103,6 +103,11 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
+    if (std.mem.eql(u8, subcmd, "pr-submit")) {
+        try runPrSubmit(allocator, args);
+        return;
+    }
+
     if (std.mem.eql(u8, subcmd, "pr-reply")) {
         try runPrReply(allocator, args);
         return;
@@ -337,9 +342,100 @@ fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
             stderr_writer.interface.flush() catch {};
             std.process.exit(1);
         },
-        .ok => |bytes| allocator.free(bytes),
+        .ok => |bytes| {
+            defer allocator.free(bytes);
+            // deletePendingReview allows a 200-with-errors envelope through as `.ok`
+            // (e.g. the review was deleted on the web mid-flight); surface it.
+            if (review_parse.firstErrorMessage(allocator, bytes) catch null) |msg| {
+                defer allocator.free(msg);
+                try stderr_writer.interface.print("{s}\n", .{msg});
+                stderr_writer.interface.flush() catch {};
+                std.process.exit(1);
+            }
+        },
     }
     try w.print("Discarded pending review {s}\n", .{review_id});
+}
+
+/// `skim debug pr-submit <number|url> --event comment|approve|request-changes
+/// [--body TEXT]`: submit the viewer's pending review through the SAME
+/// `github.submitReview`/`review_parse.parseSubmitReview` cores the TUI uses
+/// (AD-2). Ensures a pending review exists first (reuse or create — this is the
+/// body-only submit path), so a body-only COMMENT publishes a review with no
+/// inline comments. A rejected submit (self-approval etc.) is a 200-with-errors
+/// envelope: prints the classified message to stderr and exits non-zero.
+fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const usage = "Usage: skim debug pr-submit <number|url> --event comment|approve|request-changes [--body TEXT]";
+
+    const event_arg = flagValueOrExit(args, "--event", "pr-submit", usage);
+    const event = eventStringFromArg(event_arg) orelse {
+        try stderr_writer.interface.print("pr-submit: invalid --event '{s}' (want comment|approve|request-changes)\n", .{event_arg});
+        try stderr_writer.interface.print("{s}\n", .{usage});
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    const body = flagValueOpt(args, "--body") orelse "";
+
+    const raw = try fetchReviewJson(allocator, args, "pr-submit");
+    defer allocator.free(raw);
+
+    var data = review_parse.parsePrDetails(allocator, raw) catch {
+        try stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer data.deinit();
+    const details = data.details;
+
+    // Ensure a pending review exists (reuse the viewer's, else create one) —
+    // this is the ensure-pending-review-then-submit path for a body-only review.
+    const created_here = details.pending_review_id == null;
+    const review_id = if (details.pending_review_id) |id|
+        try allocator.dupe(u8, id)
+    else
+        try createReviewOrExit(allocator, details.pr_node_id, details.head_ref_oid);
+    defer allocator.free(review_id);
+
+    const fetch = github.submitReview(allocator, review_id, event, body) catch {
+        // A review we created solely to submit must not be left dangling.
+        if (created_here) discardCreatedReview(allocator, review_id);
+        try stderr_writer.interface.writeAll("Failed to run gh api graphql (submitPullRequestReview).\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    const submit_raw = switch (fetch) {
+        .failed => |kind| {
+            if (created_here) discardCreatedReview(allocator, review_id);
+            try stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)});
+            stderr_writer.interface.flush() catch {};
+            std.process.exit(1);
+        },
+        .ok => |bytes| bytes,
+    };
+    defer allocator.free(submit_raw);
+
+    var result = review_parse.parseSubmitReview(allocator, submit_raw) catch {
+        if (created_here) discardCreatedReview(allocator, review_id);
+        try stderr_writer.interface.writeAll("Failed to parse the submit response from gh.\n");
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer result.deinit();
+
+    if (!result.ok) {
+        // Self-approval etc.: reject and, when we created the review just now, do
+        // not leave an empty pending review behind.
+        if (created_here) discardCreatedReview(allocator, review_id);
+        try stderr_writer.interface.print("Submit rejected: {s}\n", .{result.error_message});
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    }
+
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const w = &stdout_writer.interface;
+    defer w.flush() catch {};
+    try w.print("Submitted review {s} (state: {s})\n", .{ result.id, @tagName(result.state) });
 }
 
 /// `skim debug pr-reply <number|url> --thread PRRT_… --body TEXT`: post a reply
@@ -475,6 +571,27 @@ fn hasFlag(args: []const []const u8, flag: []const u8) bool {
 
 /// The value following `flag` (searched from index 4, after the PR arg), or exit
 /// non-zero with a usage message when the flag or its value is missing.
+/// Look up an optional flag's value without exiting when it is absent.
+fn flagValueOpt(args: []const []const u8, flag: []const u8) ?[]const u8 {
+    var i: usize = 4;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], flag)) {
+            if (i + 1 < args.len) return args[i + 1];
+            return null;
+        }
+    }
+    return null;
+}
+
+/// Map a `--event` arg to its `PullRequestReviewEvent` string, or null when the
+/// arg is not one of the three verdicts.
+fn eventStringFromArg(arg: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, arg, "comment")) return "COMMENT";
+    if (std.mem.eql(u8, arg, "approve")) return "APPROVE";
+    if (std.mem.eql(u8, arg, "request-changes")) return "REQUEST_CHANGES";
+    return null;
+}
+
 fn flagValueOrExit(args: []const []const u8, flag: []const u8, cmd: []const u8, usage: []const u8) []const u8 {
     var i: usize = 4;
     while (i < args.len) : (i += 1) {
@@ -526,6 +643,17 @@ fn createReviewOrExit(allocator: Allocator, pr_node_id: []const u8, commit_oid: 
         stderr_writer.interface.flush() catch {};
         std.process.exit(1);
     };
+}
+
+/// Best-effort delete of a pending review this command created but could not
+/// submit (so a rejected self-approve leaves no dangling review). Failures are
+/// swallowed — the caller is already exiting with the submit error.
+fn discardCreatedReview(allocator: Allocator, review_id: []const u8) void {
+    const fetch = github.deletePendingReview(allocator, review_id) catch return;
+    switch (fetch) {
+        .ok => |bytes| allocator.free(bytes),
+        .failed => {},
+    }
 }
 
 const PrCommentError = error{
@@ -770,6 +898,7 @@ fn printPrView(details: review_parse.PrDetails) !void {
     try w.writeAll("\nReviews:\n");
     for (details.reviews) |r| {
         try w.print("  - {s} [{s}] {s}\n", .{ r.author, reviewStateLabel(r.state), r.submitted_at });
+        if (r.body.len > 0) try w.print("      {s}\n", .{previewLine(r.body)});
     }
 
     try w.writeAll("\nThreads:\n");
@@ -1039,6 +1168,7 @@ fn printHelp() !void {
         \\    pr-anchor <number|url>          Fetch a PR + anchor its review threads to the diff
         \\    pr-comment <number|url> ...     Post a draft review thread (see options below)
         \\    pr-discard <number|url>         Discard the viewer's pending review
+        \\    pr-submit <number|url> --event comment|approve|request-changes [--body TEXT]  Submit the pending review
         \\    pr-reply <number|url> --thread PRRT_… --body TEXT     Reply to an existing thread
         \\    pr-resolve <number|url> --thread PRRT_…               Resolve a thread
         \\    pr-unresolve <number|url> --thread PRRT_…             Unresolve a thread
@@ -1062,6 +1192,7 @@ fn printHelp() !void {
         \\    skim debug pr-anchor 26015
         \\    skim debug pr-comment 42 --path src/x.zig --line 10 --side right --body "nit: rename"
         \\    skim debug pr-discard 42
+        \\    skim debug pr-submit 42 --event comment --body "LGTM overall"
         \\    skim debug pr-view 42 --ids
         \\    skim debug pr-reply 42 --thread PRRT_abc --body "thanks, fixed"
         \\    skim debug pr-resolve 42 --thread PRRT_abc
