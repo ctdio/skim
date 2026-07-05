@@ -2957,6 +2957,49 @@ const PoisonAllocator = struct {
     }
 };
 
+/// Minimal agent-mode `App` for tests: everything undefined/empty except the
+/// fields these tests touch, with a fresh right-split `TabManager`. `state` is
+/// left `undefined`; tests that read unset state fields overwrite it with
+/// `std.mem.zeroes(@FieldType(App, "state"))` after constructing.
+fn testApp(allocator: std.mem.Allocator) App {
+    return .{
+        .allocator = allocator,
+        .vx = undefined,
+        .tty = undefined,
+        .mode = .agent,
+        .state = undefined,
+        .should_quit = false,
+        .should_suspend_for_editor = false,
+        .editor_file_path = null,
+        .editor_line_number = null,
+        .editor_is_prompt_edit = false,
+        .last_ctrl_c = 0,
+        .header_line_buffers = undefined,
+        .frame_text_buffer = &.{},
+        .frame_text_used = 0,
+        .frame_segment_arena = undefined,
+        .syntax_highlighter = undefined,
+        .highlight_worker = null,
+        .pending_highlight_jobs = undefined,
+        .needs_render = false,
+        .needs_async_highlight = false,
+        .tui_server = null,
+        .session_manager = null,
+        .blame = undefined,
+        .pending_connection = null,
+        .pending_agent_connect_idx = null,
+        .pending_subagent_fetch = .{},
+        .in_bracketed_paste = false,
+        .agent_only = false,
+        .tab_manager = agent.TabManager.init(allocator, .right),
+        .profile_render = false,
+        .profile_every_n = 0,
+        .profile_frame_counter = 0,
+        .profile_active_frame = false,
+        .profile_counters = .{},
+    };
+}
+
 test "parsePromptContent plain text no @ references" {
     const allocator = std.testing.allocator;
     const parsed = try parsePromptContent(allocator, "hello world");
@@ -3117,42 +3160,7 @@ test "buildCodexUserInputAnswers preserves selected option and custom text" {
 test "Ctrl-C interrupts active Codex turn in normal mode" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = undefined,
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = undefined,
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame = undefined,
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = agent.TabManager.init(allocator, .right),
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
+    var app = testApp(allocator);
     defer if (app.tab_manager) |*tm| tm.deinit();
 
     const tab = try app.tab_manager.?.createTab("Tab 1");
@@ -3179,42 +3187,7 @@ test "Ctrl-C interrupts active Codex turn in normal mode" {
 test "Esc does not interrupt active Codex turn in normal mode" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = undefined,
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = undefined,
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame = undefined,
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = agent.TabManager.init(allocator, .right),
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
+    var app = testApp(allocator);
     defer if (app.tab_manager) |*tm| tm.deinit();
 
     const tab = try app.tab_manager.?.createTab("Tab 1");
@@ -3239,42 +3212,7 @@ test "Esc does not interrupt active Codex turn in normal mode" {
 test "typed local slash command records the command without a success system message" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = undefined,
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = undefined,
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame = undefined,
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = agent.TabManager.init(allocator, .right),
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
+    var app = testApp(allocator);
     defer if (app.tab_manager) |*tm| tm.deinit();
 
     const tab = try app.tab_manager.?.createTab("Tab 1");
@@ -3292,42 +3230,7 @@ test "typed local slash command records the command without a success system mes
 test "q exits debug replay session" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = undefined,
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = undefined,
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame = undefined,
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = agent.TabManager.init(allocator, .right),
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
+    var app = testApp(allocator);
     defer if (app.tab_manager) |*tm| tm.deinit();
 
     const tab = try app.tab_manager.?.createTab("Replay");
@@ -3343,42 +3246,7 @@ test "q exits debug replay session" {
 test "ctrl-e does not exit debug replay session" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = undefined,
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = undefined,
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame = undefined,
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = agent.TabManager.init(allocator, .right),
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
+    var app = testApp(allocator);
     defer if (app.tab_manager) |*tm| tm.deinit();
 
     const tab = try app.tab_manager.?.createTab("Replay");
@@ -3394,42 +3262,7 @@ test "ctrl-e does not exit debug replay session" {
 test "empty enter after completed plan sends default acceptance reply" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = undefined,
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = undefined,
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame = undefined,
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = agent.TabManager.init(allocator, .right),
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
+    var app = testApp(allocator);
     defer if (app.tab_manager) |*tm| tm.deinit();
 
     const tab = try app.tab_manager.?.createTab("Tab 1");
@@ -3460,42 +3293,8 @@ test "new tab action preserves vim mode when tabs reallocate" {
     var poison = PoisonAllocator.init(std.testing.allocator);
     const allocator = poison.allocator();
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = std.mem.zeroes(@FieldType(App, "state")),
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = undefined,
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame = undefined,
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = agent.TabManager.init(allocator, .right),
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
+    var app = testApp(allocator);
+    app.state = std.mem.zeroes(@FieldType(App, "state"));
     defer if (app.tab_manager) |*tm| tm.deinit();
 
     const tab = try app.tab_manager.?.createTab("Tab 1");
@@ -3520,42 +3319,8 @@ test "openSplit preserves vim mode when tabs reallocate" {
     var poison = PoisonAllocator.init(std.testing.allocator);
     const allocator = poison.allocator();
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = std.mem.zeroes(@FieldType(App, "state")),
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = undefined,
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame = undefined,
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = agent.TabManager.init(allocator, .right),
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
+    var app = testApp(allocator);
+    app.state = std.mem.zeroes(@FieldType(App, "state"));
     defer if (app.tab_manager) |*tm| tm.deinit();
 
     const tab = try app.tab_manager.?.createTab("Tab 1");
@@ -3580,42 +3345,8 @@ test "openSplit preserves vim mode when tabs reallocate" {
 test "openSplit auto-equalizes a skewed layout" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = std.mem.zeroes(@FieldType(App, "state")),
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = undefined,
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame = undefined,
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = agent.TabManager.init(allocator, .right),
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
+    var app = testApp(allocator);
+    app.state = std.mem.zeroes(@FieldType(App, "state"));
     defer if (app.tab_manager) |*tm| tm.deinit();
 
     const left_id = (try app.tab_manager.?.createTab("Left")).id;
@@ -3652,42 +3383,8 @@ test "openSplit auto-equalizes a skewed layout" {
 test "ctrl-w = equalizes agent pane sizes" {
     const allocator = std.testing.allocator;
 
-    var app = App{
-        .allocator = allocator,
-        .vx = undefined,
-        .tty = undefined,
-        .mode = .agent,
-        .state = std.mem.zeroes(@FieldType(App, "state")),
-        .should_quit = false,
-        .should_suspend_for_editor = false,
-        .editor_file_path = null,
-        .editor_line_number = null,
-        .editor_is_prompt_edit = false,
-        .last_ctrl_c = 0,
-        .header_line_buffers = undefined,
-        .frame_text_buffer = &.{},
-        .frame_text_used = 0,
-        .frame_segment_arena = undefined,
-        .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = undefined,
-        .needs_render = false,
-        .needs_async_highlight = false,
-        .tui_server = null,
-        .session_manager = null,
-        .blame = undefined,
-        .pending_connection = null,
-        .pending_agent_connect_idx = null,
-        .pending_subagent_fetch = .{},
-        .in_bracketed_paste = false,
-        .agent_only = false,
-        .tab_manager = agent.TabManager.init(allocator, .right),
-        .profile_render = false,
-        .profile_every_n = 0,
-        .profile_frame_counter = 0,
-        .profile_active_frame = false,
-        .profile_counters = .{},
-    };
+    var app = testApp(allocator);
+    app.state = std.mem.zeroes(@FieldType(App, "state"));
     defer if (app.tab_manager) |*tm| tm.deinit();
 
     const left_id = (try app.tab_manager.?.createTab("Left")).id;
