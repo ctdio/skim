@@ -4,6 +4,8 @@
 
 const std = @import("std");
 const review_parse = @import("review_parse.zig");
+const filter = @import("filter.zig");
+const git = @import("git.zig");
 
 pub const Error = error{ GhCommandFailed, GhNotFound };
 
@@ -212,7 +214,7 @@ pub const review_query =
 
 /// Resolve the current repo's `owner/repo` from the origin remote URL.
 pub fn getOriginOwnerRepo(allocator: std.mem.Allocator) !OwnerRepo {
-    const url = gitLine(allocator, &.{ "git", "config", "--get", "remote.origin.url" }) orelse return error.NoOriginRemote;
+    const url = git.line(allocator, &.{ "git", "config", "--get", "remote.origin.url" }) orelse return error.NoOriginRemote;
     defer allocator.free(url);
     return parseOwnerRepo(allocator, url);
 }
@@ -604,14 +606,14 @@ fn sideArg(side: review_parse.Side) []const u8 {
 /// missing-binary case (that surfaces as spawn error.FileNotFound -> not_installed).
 pub fn classifyGhFailure(exit_code: u32, stderr: []const u8) GhErrorKind {
     _ = exit_code;
-    if (containsIgnoreCase(stderr, "gh auth login")) return .not_authenticated;
-    if (containsIgnoreCase(stderr, "Bad credentials")) return .not_authenticated;
-    if (containsIgnoreCase(stderr, "HTTP 401")) return .not_authenticated;
-    if (containsIgnoreCase(stderr, "API rate limit")) return .rate_limited;
-    if (containsIgnoreCase(stderr, "Could not resolve to a")) return .not_found;
-    if (containsIgnoreCase(stderr, "check your internet connection")) return .network;
-    if (containsIgnoreCase(stderr, "error connecting to")) return .network;
-    if (containsIgnoreCase(stderr, "dial tcp")) return .network;
+    if (filter.containsIgnoreCase(stderr, "gh auth login")) return .not_authenticated;
+    if (filter.containsIgnoreCase(stderr, "Bad credentials")) return .not_authenticated;
+    if (filter.containsIgnoreCase(stderr, "HTTP 401")) return .not_authenticated;
+    if (filter.containsIgnoreCase(stderr, "API rate limit")) return .rate_limited;
+    if (filter.containsIgnoreCase(stderr, "Could not resolve to a")) return .not_found;
+    if (filter.containsIgnoreCase(stderr, "check your internet connection")) return .network;
+    if (filter.containsIgnoreCase(stderr, "error connecting to")) return .network;
+    if (filter.containsIgnoreCase(stderr, "dial tcp")) return .network;
     return .other;
 }
 
@@ -710,38 +712,6 @@ fn buildGraphqlArgv(allocator: std.mem.Allocator, query: []const u8, string_vars
 fn freeArgv(allocator: std.mem.Allocator, argv: [][]const u8) void {
     for (argv) |arg| allocator.free(arg);
     allocator.free(argv);
-}
-
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
-    }
-    return false;
-}
-
-/// Run a git command and return its single trimmed line of stdout, or null on
-/// any failure/empty output. Mirrors `cache.zig`'s helper (kept private there).
-fn gitLine(allocator: std.mem.Allocator, argv: []const []const u8) ?[]u8 {
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = argv,
-        .max_output_bytes = 1024 * 1024,
-    }) catch return null;
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    const ok = switch (result.term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
-    if (!ok) return null;
-
-    const trimmed = std.mem.trimRight(u8, result.stdout, " \r\n");
-    if (trimmed.len == 0) return null;
-    return allocator.dupe(u8, trimmed) catch null;
 }
 
 fn runGit(allocator: std.mem.Allocator, argv: []const []const u8) !void {

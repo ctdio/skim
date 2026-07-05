@@ -5,6 +5,7 @@
 //! `parse.zig` stays the one and only parser.
 
 const std = @import("std");
+const git = @import("git.zig");
 
 pub const subdir = ".skim/cache";
 
@@ -14,8 +15,8 @@ const max_cache_bytes = 16 * 1024 * 1024;
 /// present, else the repo root path. Returns null when neither can be resolved
 /// (e.g. not inside a git repo). Caller owns the result.
 pub fn keyFor(allocator: std.mem.Allocator) ?[]u8 {
-    if (gitLine(allocator, &.{ "git", "config", "--get", "remote.origin.url" })) |url| return url;
-    return gitLine(allocator, &.{ "git", "rev-parse", "--show-toplevel" });
+    if (git.line(allocator, &.{ "git", "config", "--get", "remote.origin.url" })) |url| return url;
+    return git.line(allocator, &.{ "git", "rev-parse", "--show-toplevel" });
 }
 
 /// Read cached PR JSON for `key`. Returns null when the cache is absent or
@@ -40,28 +41,6 @@ pub fn write(allocator: std.mem.Allocator, key: []const u8, json_bytes: []const 
 // =============================================================================
 // Helpers
 // =============================================================================
-
-/// Run a git command and return its single line of stdout (trimmed), or null on
-/// any failure or empty output. Caller owns the result.
-fn gitLine(allocator: std.mem.Allocator, argv: []const []const u8) ?[]u8 {
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = argv,
-        .max_output_bytes = 1024 * 1024,
-    }) catch return null;
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    const ok = switch (result.term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
-    if (!ok) return null;
-
-    const trimmed = std.mem.trimRight(u8, result.stdout, " \r\n");
-    if (trimmed.len == 0) return null;
-    return allocator.dupe(u8, trimmed) catch null;
-}
 
 fn pathFor(allocator: std.mem.Allocator, key: []const u8) ![]u8 {
     const home = try std.process.getEnvVarOwned(allocator, "HOME");
