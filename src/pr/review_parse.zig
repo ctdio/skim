@@ -169,11 +169,7 @@ pub const PrViewMeta = struct {
 pub fn parseCreatedReviewId(allocator: std.mem.Allocator, json_bytes: []const u8) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidPayload;
-    // Pure layer: surface the GraphQL error as a distinct error; the IO/controller
-    // shell logs (mirrors `parse.zig`, which never logs).
-    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
-    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const data = try dataObject(parsed.value);
     const add = objField(data, "addPullRequestReview") orelse return error.InvalidPayload;
     const review = objField(add, "pullRequestReview") orelse return error.MissingReviewId;
     const id = strField(review, "id") orelse return error.MissingReviewId;
@@ -201,9 +197,7 @@ pub const CreatedThread = struct {
 pub fn parseCreatedThread(allocator: std.mem.Allocator, json_bytes: []const u8, viewer_login: []const u8) !CreatedThread {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidPayload;
-    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
-    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const data = try dataObject(parsed.value);
     const add = objField(data, "addPullRequestReviewThread") orelse return error.InvalidPayload;
     // A bad path yields `thread: null` (JSON null / absent) with no errors
     // envelope — objField returns null for both, so this is the failure branch.
@@ -234,9 +228,7 @@ pub const CreatedComment = struct {
 pub fn parseCreatedComment(allocator: std.mem.Allocator, json_bytes: []const u8, viewer_login: []const u8) !CreatedComment {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidPayload;
-    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
-    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const data = try dataObject(parsed.value);
     const reply = objField(data, "addPullRequestReviewThreadReply") orelse return error.InvalidPayload;
     const node = objField(reply, "comment") orelse return error.ReplyFailed;
 
@@ -261,9 +253,7 @@ pub const ResolveResult = struct {
 pub fn parseResolveResult(allocator: std.mem.Allocator, json_bytes: []const u8) !ResolveResult {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidPayload;
-    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
-    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const data = try dataObject(parsed.value);
     const mutation = objField(data, "resolveReviewThread") orelse
         objField(data, "unresolveReviewThread") orelse return error.InvalidPayload;
     const thread = objField(mutation, "thread") orelse return error.ResolveFailed;
@@ -292,9 +282,7 @@ pub const UpdatedComment = struct {
 pub fn parseUpdatedComment(allocator: std.mem.Allocator, json_bytes: []const u8) !UpdatedComment {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidPayload;
-    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
-    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const data = try dataObject(parsed.value);
     const update = objField(data, "updatePullRequestReviewComment") orelse return error.InvalidPayload;
     const comment = objField(update, "pullRequestReviewComment") orelse return error.UpdateFailed;
 
@@ -312,9 +300,7 @@ pub fn parseUpdatedComment(allocator: std.mem.Allocator, json_bytes: []const u8)
 pub fn parseDeletedComment(allocator: std.mem.Allocator, json_bytes: []const u8) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidPayload;
-    if (graphqlErrorMessage(parsed.value) != null) return error.GraphqlError;
-    const data = objField(parsed.value.object, "data") orelse return error.InvalidPayload;
+    const data = try dataObject(parsed.value);
     const del = objField(data, "deletePullRequestReviewComment") orelse return error.InvalidPayload;
     const comment = objField(del, "pullRequestReviewComment") orelse return error.DeleteFailed;
     const id = strField(comment, "id") orelse return error.DeleteFailed;
@@ -528,6 +514,15 @@ fn graphqlErrorMessage(root: std.json.Value) ?[]const u8 {
     const msg = first.object.get("message") orelse return "GraphQL error";
     if (msg != .string) return "GraphQL error";
     return msg.string;
+}
+
+/// Validate a mutation response envelope and return its `data` object: rejects a
+/// non-object root, surfaces a `{"errors":[...]}` envelope as GraphqlError, and
+/// requires a `data` object.
+fn dataObject(root: std.json.Value) !std.json.ObjectMap {
+    if (root != .object) return error.InvalidPayload;
+    if (graphqlErrorMessage(root) != null) return error.GraphqlError;
+    return objField(root.object, "data") orelse return error.InvalidPayload;
 }
 
 fn parseComments(a: std.mem.Allocator, thread: std.json.ObjectMap, viewer_login: []const u8, truncated: *bool) ![]ReviewComment {
