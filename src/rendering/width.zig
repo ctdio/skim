@@ -143,7 +143,16 @@ fn wrapSegment(text: []const u8, byte_start: usize, max_width: usize) WrapSegmen
         }
     }
     if (!found_space) break_len = chunk.len;
-    if (break_len == 0) break_len = chunk.len; // avoid zero-progress / dropped leading space
+    if (break_len == 0) {
+        // chunk.len == 0 means the leading grapheme is wider than max_width, so
+        // sliceByDisplayWidth returned nothing; emit one overflowing grapheme to
+        // guarantee forward progress. Otherwise a break at position 0 would drop a
+        // leading space, so keep the whole chunk instead.
+        break_len = if (chunk.len == 0)
+            @min(std.unicode.utf8ByteSequenceLength(remaining[0]) catch 1, remaining.len)
+        else
+            chunk.len;
+    }
 
     const seg_end = byte_start + break_len;
     var next_start = seg_end;
@@ -151,6 +160,22 @@ fn wrapSegment(text: []const u8, byte_start: usize, max_width: usize) WrapSegmen
         while (next_start < text.len and text[next_start] == ' ') next_start += 1;
     }
     return .{ .seg_end = seg_end, .next_start = next_start, .done = false };
+}
+
+test "wrapText: wide grapheme wider than max_width makes forward progress" {
+    // A 2-cell emoji at max_width == 1 makes sliceByDisplayWidth return an empty
+    // chunk. Without a forward-progress guard the iterator loops forever; this
+    // locks the guard that emits one overflowing grapheme per line.
+    var lines = try wrapText(std.testing.allocator, "😀😀", 1);
+    defer lines.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), lines.items.len);
+    try std.testing.expectEqualStrings("😀", lines.items[0]);
+    try std.testing.expectEqualStrings("😀", lines.items[1]);
+}
+
+test "wrapRowCount: wide grapheme wider than max_width terminates" {
+    try std.testing.expectEqual(@as(usize, 3), wrapRowCount("😀😀😀", 1));
 }
 
 fn ensureData() ?*const DisplayWidth {

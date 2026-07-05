@@ -286,6 +286,21 @@ pub fn build(b: *std.Build) void {
     const run_pr_controller_tests = b.addRunArtifact(pr_controller_tests);
     test_step.dependOn(&run_pr_controller_tests.step);
 
+    // Rendering width/wrap tests. width.zig is self-contained (std + vaxis only)
+    // and holds colocated wrap tests, so it roots its own step — main.zig's tree
+    // does not reliably pull test blocks from transitively-imported files.
+    const width_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rendering/width.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    width_tests.root_module.addImport("vaxis", vaxis);
+    width_tests.linkLibC();
+    const run_width_tests = b.addRunArtifact(width_tests);
+    test_step.dependOn(&run_width_tests.step);
+
     // PR review-thread tests. The helper file lives in src/testing/ but reaches
     // production code (git/, rendering/, pr/) through the src/-rooted
     // review_test_root NAMED module — a named import keeps those modules' own

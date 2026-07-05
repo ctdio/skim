@@ -232,7 +232,6 @@ pub const ThreadCounts = struct {
 
 /// Thread-safe handoff of a background entry/refetch to the main loop. Worker
 /// writes results under the mutex, then `ready.store(true, .release)`. All
-/// writes results under the mutex, then `ready.store(true, .release)`. All
 /// buffers are `c_allocator`-owned so they survive the thread boundary.
 pub const PendingEntry = struct {
     mutex: std.Thread.Mutex = .{},
@@ -477,7 +476,16 @@ pub fn applyFetchedData(self: *ReviewSession, allocator: Allocator, data: *revie
     disarmDeleteConfirm(self, allocator);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
-    errdefer arena.deinit();
+    // On a mid-copy failure (OOM) the arena is torn down here, so any thread/
+    // review/check entries already appended into `self` point into freed memory.
+    // The caller (pollPending) swallows the error and keeps the session, so reset
+    // it to a clean/empty state rather than leaving dangling pointers. The
+    // preserved placeholders were moved out of `self.threads`, so free them too.
+    errdefer {
+        arena.deinit();
+        for (preserved.items) |st| freeOwnedThread(allocator, st);
+        clearData(self, allocator);
+    }
     const a = arena.allocator();
 
     self.threads.clearRetainingCapacity();
