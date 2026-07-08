@@ -109,7 +109,7 @@ pub fn main() !void {
             };
             defer app.deinit();
 
-            try app.run();
+            try runApp(&app);
             return;
         } else if (std.mem.eql(u8, args[1], "agent")) {
             // `skim agent` starts the agent panel directly
@@ -136,7 +136,7 @@ pub fn main() !void {
             };
             defer app.deinit();
 
-            try app.run();
+            try runApp(&app);
             return;
         }
     }
@@ -186,7 +186,7 @@ pub fn main() !void {
     };
     defer app.deinit();
 
-    try app.run();
+    try runApp(&app);
 }
 
 // =============================================================================
@@ -245,7 +245,29 @@ fn runPrCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer app.deinit();
 
-    try app.run();
+    try runApp(&app);
+}
+
+/// Run the TUI event loop on a dedicated thread with a large stack.
+///
+/// The debug build's stack frames are huge (the self-hosted backend gives every
+/// local in every scope its own non-overlapping slot), so deep call chains —
+/// keypress -> mode handler -> controller -> `App.refresh` — overflow the 8 MB
+/// default main-thread stack and SIGSEGV. A 64 MB loop-thread stack gives every
+/// chain ample headroom; the cost is negligible in release (thread stacks are
+/// lazily paged). `App.run`'s own tty-reader thread and the process-global
+/// SIGWINCH handler are thread-agnostic, so the loop need not run on main.
+fn runApp(app: *App) !void {
+    var run_err: ?anyerror = null;
+    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, runAppEntry, .{ app, &run_err });
+    thread.join();
+    if (run_err) |err| return err;
+}
+
+fn runAppEntry(app: *App, out_err: *?anyerror) void {
+    app.run() catch |err| {
+        out_err.* = err;
+    };
 }
 
 fn printPrHelp() !void {

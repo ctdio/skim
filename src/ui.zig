@@ -1516,7 +1516,37 @@ pub const UI = struct {
     pub fn renderStatus(app: *App, win: vaxis.Window) !void {
         win.clear();
 
-        const mode_str = switch (app.mode) {
+        // Build status bar using segments with colors
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        defer segments.deinit(app.allocator);
+
+        // Add panel indicator when both panels are visible
+        if (app.areBothPanelsVisible()) {
+            const panel_indicator = if (app.mode == .agent) "AGENT " else "DIFF ";
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, panel_indicator), .style = .{ .fg = Color.cyan, .bold = true } });
+        }
+
+        // Each mode's branch lives in its own function so their locals do not
+        // share a single stack frame. Inlined into one body they overflowed the
+        // 8 MB main-thread stack in debug builds (the combined frame needed ~13 MB),
+        // crashing on the first status render of every command.
+        if (app.mode == .comment and app.state.active_comment_input != null and
+            app.state.active_comment_input.?.vim.vim_mode == .command)
+        {
+            try appendCommandStatus(app, &segments);
+        } else if (app.mode == .search) {
+            try appendSearchStatus(app, &segments);
+        } else if (app.mode == .agent) {
+            try appendAgentStatus(app, &segments);
+        } else {
+            try appendNormalStatus(app, &segments);
+        }
+
+        _ = win.print(segments.items, .{ .row_offset = @intCast(0) });
+    }
+
+    fn modeStr(app: *App) []const u8 {
+        return switch (app.mode) {
             .normal => blk: {
                 // Check if waiting for find character in normal mode
                 if (app.state.pending_find) |find_cmd| {
@@ -1591,17 +1621,11 @@ pub const UI = struct {
                 break :blk "-- AGENT --";
             },
         };
+    }
 
-        const view_str = switch (app.state.view_mode) {
-            .unified => "[Unified]",
-            .side_by_side => "[Side-by-Side]",
-        };
-
-        // Hunk view mode with symbol
-        const hunk_view_symbol = app.state.hunk_view_mode.toSymbol();
-
+    fn keybindingsStr(app: *App) []const u8 {
         // Context-aware keybindings based on cursor position and mode
-        const keybindings = switch (app.mode) {
+        return switch (app.mode) {
             .normal => "j/k:Move  |  ? for help",
             .comment => blk: {
                 if (app.state.active_comment_input) |input| {
@@ -1641,367 +1665,375 @@ pub const UI = struct {
                 break :blk ",d:Close";
             },
         };
+    }
 
+    fn appendCommandStatus(app: *App, segments: *std.ArrayList(vaxis.Cell.Segment)) !void {
+        // In command mode, show command line like vim
+        const input = app.state.active_comment_input.?;
+        const command = input.vim.command_buffer[0..input.vim.command_len];
+
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ":"), .style = .{ .bold = true } });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, command), .style = .{} });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "_"), .style = .{} });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindingsStr(app)), .style = .{} });
+    }
+
+    fn appendSearchStatus(app: *App, segments: *std.ArrayList(vaxis.Cell.Segment)) !void {
+        // In search mode, show search prompt with current query
+        const query = app.state.search_state.query_buffer[0..app.state.search_state.query_len];
+        const match_count = app.state.search_state.matches.items.len;
+
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, modeStr(app)), .style = .{} });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  /"), .style = .{} });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, query), .style = .{} });
+
+        if (match_count > 0) {
+            const current_match = if (app.state.search_state.current_match_idx) |idx| idx + 1 else 0;
+            var buf: [64]u8 = undefined;
+            const match_info = try std.fmt.bufPrint(&buf, "  ({d} of {d} matches)  ", .{ current_match, match_count });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
+        } else if (app.state.search_state.query_len > 0) {
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "_  "), .style = .{} });
+        } else {
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "_  "), .style = .{} });
+        }
+
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindingsStr(app)), .style = .{} });
+    }
+
+    fn appendAgentStatus(app: *App, segments: *std.ArrayList(vaxis.Cell.Segment)) !void {
+        // Agent mode - show vim mode, model name, session mode, stash indicator
+        if (app.getActiveAgentStateConst()) |agent_state| {
+            // Mode indicator on the left
+            // Check history visual mode, then history mode (takes precedence over vim mode)
+            const agent_mode_str = if (agent_state.isInHistoryVisualMode())
+                "-- VISUAL --"
+            else if (agent_state.isInHistoryMode())
+                "-- HISTORY --"
+            else switch (agent_state.input.vim.vim_mode) {
+                .normal => "-- NORMAL --",
+                .insert => "-- INSERT --",
+                .visual => "-- VISUAL --",
+                .command => "-- COMMAND --",
+            };
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, agent_mode_str), .style = .{ .bold = true } });
+
+            // Session mode (if available)
+            if (app.getActiveManager()) |mgr| {
+                if (mgr.hasModes()) {
+                    const session_mode_name = mgr.getCurrentModeName();
+                    if (session_mode_name.len > 0) {
+                        var session_buf: [64]u8 = undefined;
+                        const session_str = std.fmt.bufPrint(&session_buf, " [{s}]", .{session_mode_name}) catch "";
+                        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, session_str), .style = .{ .fg = Color.white } });
+                    }
+                }
+            }
+
+            // Stash indicator
+            if (agent_state.hasStash()) {
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " [stashed]"), .style = .{ .fg = Color.yellow, .bold = true } });
+            }
+
+            // Model name
+            if (app.getActiveAcpManager()) |mgr| {
+                if (mgr.hasModels()) {
+                    const model_name = mgr.getCurrentModelName();
+                    if (model_name.len > 0) {
+                        var model_buf: [64]u8 = undefined;
+                        const model_str = std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch "";
+                        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
+                    }
+                }
+            } else if (app.getActiveOpencodeManager()) |mgr| {
+                const model_name = mgr.getCurrentModelName();
+                if (model_name.len > 0) {
+                    const variant = mgr.getVariant();
+
+                    var model_buf: [128]u8 = undefined;
+                    const model_str = if (variant) |v|
+                        std.fmt.bufPrint(&model_buf, " {s} [{s}]", .{ model_name, v }) catch ""
+                    else
+                        std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch "";
+
+                    if (model_str.len > 0) {
+                        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
+                    }
+                }
+
+                // Show parent agent token usage for current turn
+                const tok = mgr.getParentTokenCounts();
+                const total_tokens = tok.input + tok.output + tok.reasoning;
+                if (total_tokens > 0) {
+                    var tok_buf: [48]u8 = undefined;
+                    const tok_str = if (total_tokens >= 1_000_000)
+                        std.fmt.bufPrint(&tok_buf, " ({d}.{d}M tokens)", .{ total_tokens / 1_000_000, (total_tokens % 1_000_000) / 100_000 }) catch ""
+                    else if (total_tokens >= 1_000)
+                        std.fmt.bufPrint(&tok_buf, " ({d}.{d}k tokens)", .{ total_tokens / 1_000, (total_tokens % 1_000) / 100 }) catch ""
+                    else
+                        std.fmt.bufPrint(&tok_buf, " ({d} tokens)", .{total_tokens}) catch "";
+                    if (tok_str.len > 0) {
+                        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, tok_str), .style = .{ .fg = Color.dim } });
+                    }
+                }
+            } else if (app.getActiveManager()) |mgr| {
+                switch (mgr) {
+                    .codex => |cm| {
+                        const model_name = cm.current_model orelse cm.model orelse "Codex";
+                        if (model_name.len > 0) {
+                            const fast_mode_enabled = if (cm.service_tier) |service_tier| service_tier == .fast else false;
+                            var model_buf: [160]u8 = undefined;
+                            const model_str = if (cm.reasoning_effort) |effort|
+                                if (fast_mode_enabled)
+                                    std.fmt.bufPrint(&model_buf, " {s} [{s}] [fast]", .{ model_name, effort.toString() }) catch ""
+                                else
+                                    std.fmt.bufPrint(&model_buf, " {s} [{s}]", .{ model_name, effort.toString() }) catch ""
+                            else if (fast_mode_enabled)
+                                std.fmt.bufPrint(&model_buf, " {s} [fast]", .{model_name}) catch ""
+                            else
+                                std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch "";
+
+                            if (model_str.len > 0) {
+                                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
+                            }
+                        }
+
+                        const permission_label = if (cm.approval_policy == .never) " [Full Access]" else " [Default]";
+                        const permission_style: vaxis.Style = if (cm.approval_policy == .never)
+                            .{ .fg = Color.yellow, .bold = true }
+                        else
+                            .{ .fg = Color.white };
+                        try segments.append(app.allocator, .{
+                            .text = try RenderUtils.copyFrameText(app, permission_label),
+                            .style = permission_style,
+                        });
+                    },
+                    else => {},
+                }
+            }
+
+            // Keybindings on the right
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+
+            // Agent-specific keybindings based on vim mode
+            const has_modes = if (app.getActiveManager()) |mgr| mgr.hasModes() else false;
+            const agent_keybindings = switch (agent_state.input.vim.vim_mode) {
+                .insert => "S-Enter:newline  Enter:send  ESC:normal",
+                .normal => if (has_modes) "Tab:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",
+                .visual => "ESC:exit",
+                .command => "Enter:execute  ESC:cancel",
+            };
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, agent_keybindings), .style = .{ .fg = Color.dim_gray } });
+        } else {
+            // Fallback if no agent state
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, modeStr(app)), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindingsStr(app)), .style = .{} });
+        }
+    }
+
+    fn appendNormalStatus(app: *App, segments: *std.ArrayList(vaxis.Cell.Segment)) !void {
+        const view_str = switch (app.state.view_mode) {
+            .unified => "[Unified]",
+            .side_by_side => "[Side-by-Side]",
+        };
+        const hunk_view_symbol = app.state.hunk_view_mode.toSymbol();
         // Get file position info (line number shown via scrollbar)
         const total_files = app.state.files.len;
         const current_file = app.state.current_file_idx + 1; // Display 1-indexed
 
-        // Build status bar using segments with colors
-        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
-        defer segments.deinit(app.allocator);
+        // Normal mode status bar with colored hunk view mode
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, modeStr(app)), .style = .{} });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, view_str), .style = .{} });
 
-        // Add panel indicator when both panels are visible
-        if (app.areBothPanelsVisible()) {
-            const panel_indicator = if (app.mode == .agent) "AGENT " else "DIFF ";
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, panel_indicator), .style = .{ .fg = Color.cyan, .bold = true } });
+        // Show diff source mode
+        const diff_str = try formatDiffSource(app.allocator, app.state.diff_source);
+        defer app.allocator.free(diff_str);
+        const diff_str_copy = try RenderUtils.copyFrameText(app, diff_str);
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
+        try segments.append(app.allocator, .{ .text = diff_str_copy, .style = .{ .fg = Color.cyan } });
+
+        // Show graphite stack position if in a stack
+        if (app.state.graphite.stack) |stack| {
+            var stack_buf: [64]u8 = undefined;
+            const stack_pos = try std.fmt.bufPrint(&stack_buf, " [{d}/{d} in stack]", .{ stack.current_idx + 1, stack.branches.len });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, stack_pos), .style = .{ .fg = Color.magenta } });
         }
 
-        if (app.mode == .comment and app.state.active_comment_input != null and
-            app.state.active_comment_input.?.vim.vim_mode == .command)
-        {
-            // In command mode, show command line like vim
-            const input = app.state.active_comment_input.?;
-            const command = input.vim.command_buffer[0..input.vim.command_len];
+        // Active PR review session: number, draft count, comment target, and
+        // any in-flight draft posts.
+        const thread_hint_active = if (pr.review_controller.isActive(&app.state.review))
+            try appendReviewSessionStatus(app, segments)
+        else
+            false;
 
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ":"), .style = .{ .bold = true } });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, command), .style = .{} });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "_"), .style = .{} });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
-        } else if (app.mode == .search) {
-            // In search mode, show search prompt with current query
-            const query = app.state.search_state.query_buffer[0..app.state.search_state.query_len];
-            const match_count = app.state.search_state.matches.items.len;
+        // Only show hunk view mode indicator in unified view (where filtering applies)
+        if (app.state.view_mode == .unified) {
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " ["), .style = .{} });
 
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  /"), .style = .{} });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, query), .style = .{} });
-
-            if (match_count > 0) {
-                const current_match = if (app.state.search_state.current_match_idx) |idx| idx + 1 else 0;
-                var buf: [64]u8 = undefined;
-                const match_info = try std.fmt.bufPrint(&buf, "  ({d} of {d} matches)  ", .{ current_match, match_count });
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
-            } else if (app.state.search_state.query_len > 0) {
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "_  "), .style = .{} });
+            // Add colored hunk view symbol
+            if (app.state.hunk_view_mode == .all) {
+                // For "+/-" mode, color + green and - red
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "+"), .style = .{ .fg = Color.green, .bold = true } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "/"), .style = .{ .bold = true } });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "-"), .style = .{ .fg = Color.red, .bold = true } });
             } else {
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "_  "), .style = .{} });
-            }
-
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
-        } else if (app.mode == .agent) {
-            // Agent mode - show vim mode, model name, session mode, stash indicator
-            if (app.getActiveAgentStateConst()) |agent_state| {
-                // Mode indicator on the left
-                // Check history visual mode, then history mode (takes precedence over vim mode)
-                const agent_mode_str = if (agent_state.isInHistoryVisualMode())
-                    "-- VISUAL --"
-                else if (agent_state.isInHistoryMode())
-                    "-- HISTORY --"
-                else switch (agent_state.input.vim.vim_mode) {
-                    .normal => "-- NORMAL --",
-                    .insert => "-- INSERT --",
-                    .visual => "-- VISUAL --",
-                    .command => "-- COMMAND --",
+                // For single mode, use appropriate color
+                const hunk_view_style: vaxis.Style = switch (app.state.hunk_view_mode) {
+                    .all => unreachable, // Already handled above
+                    .old => .{ .fg = Color.red, .bold = true },
+                    .new => .{ .fg = Color.green, .bold = true },
                 };
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, agent_mode_str), .style = .{ .bold = true } });
-
-                // Session mode (if available)
-                if (app.getActiveManager()) |mgr| {
-                    if (mgr.hasModes()) {
-                        const session_mode_name = mgr.getCurrentModeName();
-                        if (session_mode_name.len > 0) {
-                            var session_buf: [64]u8 = undefined;
-                            const session_str = std.fmt.bufPrint(&session_buf, " [{s}]", .{session_mode_name}) catch "";
-                            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, session_str), .style = .{ .fg = Color.white } });
-                        }
-                    }
-                }
-
-                // Stash indicator
-                if (agent_state.hasStash()) {
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " [stashed]"), .style = .{ .fg = Color.yellow, .bold = true } });
-                }
-
-                // Model name
-                if (app.getActiveAcpManager()) |mgr| {
-                    if (mgr.hasModels()) {
-                        const model_name = mgr.getCurrentModelName();
-                        if (model_name.len > 0) {
-                            var model_buf: [64]u8 = undefined;
-                            const model_str = std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch "";
-                            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
-                        }
-                    }
-                } else if (app.getActiveOpencodeManager()) |mgr| {
-                    const model_name = mgr.getCurrentModelName();
-                    if (model_name.len > 0) {
-                        const variant = mgr.getVariant();
-
-                        var model_buf: [128]u8 = undefined;
-                        const model_str = if (variant) |v|
-                            std.fmt.bufPrint(&model_buf, " {s} [{s}]", .{ model_name, v }) catch ""
-                        else
-                            std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch "";
-
-                        if (model_str.len > 0) {
-                            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
-                        }
-                    }
-
-                    // Show parent agent token usage for current turn
-                    const tok = mgr.getParentTokenCounts();
-                    const total_tokens = tok.input + tok.output + tok.reasoning;
-                    if (total_tokens > 0) {
-                        var tok_buf: [48]u8 = undefined;
-                        const tok_str = if (total_tokens >= 1_000_000)
-                            std.fmt.bufPrint(&tok_buf, " ({d}.{d}M tokens)", .{ total_tokens / 1_000_000, (total_tokens % 1_000_000) / 100_000 }) catch ""
-                        else if (total_tokens >= 1_000)
-                            std.fmt.bufPrint(&tok_buf, " ({d}.{d}k tokens)", .{ total_tokens / 1_000, (total_tokens % 1_000) / 100 }) catch ""
-                        else
-                            std.fmt.bufPrint(&tok_buf, " ({d} tokens)", .{total_tokens}) catch "";
-                        if (tok_str.len > 0) {
-                            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, tok_str), .style = .{ .fg = Color.dim } });
-                        }
-                    }
-                } else if (app.getActiveManager()) |mgr| {
-                    switch (mgr) {
-                        .codex => |cm| {
-                            const model_name = cm.current_model orelse cm.model orelse "Codex";
-                            if (model_name.len > 0) {
-                                const fast_mode_enabled = if (cm.service_tier) |service_tier| service_tier == .fast else false;
-                                var model_buf: [160]u8 = undefined;
-                                const model_str = if (cm.reasoning_effort) |effort|
-                                    if (fast_mode_enabled)
-                                        std.fmt.bufPrint(&model_buf, " {s} [{s}] [fast]", .{ model_name, effort.toString() }) catch ""
-                                    else
-                                        std.fmt.bufPrint(&model_buf, " {s} [{s}]", .{ model_name, effort.toString() }) catch ""
-                                else if (fast_mode_enabled)
-                                    std.fmt.bufPrint(&model_buf, " {s} [fast]", .{model_name}) catch ""
-                                else
-                                    std.fmt.bufPrint(&model_buf, " {s}", .{model_name}) catch "";
-
-                                if (model_str.len > 0) {
-                                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, model_str), .style = .{ .fg = Color.cyan } });
-                                }
-                            }
-
-                            const permission_label = if (cm.approval_policy == .never) " [Full Access]" else " [Default]";
-                            const permission_style: vaxis.Style = if (cm.approval_policy == .never)
-                                .{ .fg = Color.yellow, .bold = true }
-                            else
-                                .{ .fg = Color.white };
-                            try segments.append(app.allocator, .{
-                                .text = try RenderUtils.copyFrameText(app, permission_label),
-                                .style = permission_style,
-                            });
-                        },
-                        else => {},
-                    }
-                }
-
-                // Keybindings on the right
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
-
-                // Agent-specific keybindings based on vim mode
-                const has_modes = if (app.getActiveManager()) |mgr| mgr.hasModes() else false;
-                const agent_keybindings = switch (agent_state.input.vim.vim_mode) {
-                    .insert => "S-Enter:newline  Enter:send  ESC:normal",
-                    .normal => if (has_modes) "Tab:mode  i:insert  ^E:diff  z:full" else "i:insert  ^E:diff  z:full",
-                    .visual => "ESC:exit",
-                    .command => "Enter:execute  ESC:cancel",
-                };
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, agent_keybindings), .style = .{ .fg = Color.dim_gray } });
-            } else {
-                // Fallback if no agent state
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
+                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, hunk_view_symbol), .style = hunk_view_style });
             }
-        } else {
-            // Normal mode status bar with colored hunk view mode
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, mode_str), .style = .{} });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, view_str), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "]"), .style = .{} });
+        }
 
-            // Show diff source mode
-            const diff_str = try formatDiffSource(app.allocator, app.state.diff_source);
-            defer app.allocator.free(diff_str);
-            const diff_str_copy = try RenderUtils.copyFrameText(app, diff_str);
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " "), .style = .{} });
-            try segments.append(app.allocator, .{ .text = diff_str_copy, .style = .{ .fg = Color.cyan } });
-
-            // Show graphite stack position if in a stack
-            if (app.state.graphite.stack) |stack| {
-                var stack_buf: [64]u8 = undefined;
-                const stack_pos = try std.fmt.bufPrint(&stack_buf, " [{d}/{d} in stack]", .{ stack.current_idx + 1, stack.branches.len });
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, stack_pos), .style = .{ .fg = Color.magenta } });
-            }
-
-            // Active PR review session: number, draft count, comment target, and
-            // any in-flight draft posts.
-            var thread_hint_active = false;
-            if (pr.review_controller.isActive(&app.state.review)) {
-                var pr_buf: [48]u8 = undefined;
-                const pr_seg = try std.fmt.bufPrint(&pr_buf, "  PR #{d}", .{app.state.review.number});
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, pr_seg), .style = .{ .fg = Color.cyan, .bold = true } });
-
-                // CI rollup glyph for the PR head (FR-6 final summary).
-                const ci_glyph: []const u8 = switch (app.state.review.rollup) {
-                    .success => " ✓",
-                    .failure, .err => " ✗",
-                    .pending => " •",
-                    .none => "",
-                };
-                if (ci_glyph.len > 0) {
-                    const ci_color = switch (app.state.review.rollup) {
-                        .success => Color.green,
-                        .failure, .err => Color.red,
-                        .pending => Color.yellow,
-                        .none => Color.dim,
-                    };
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ci_glyph), .style = .{ .fg = ci_color, .bold = true } });
-                }
-
-                // Delete confirmation takes priority; otherwise show the thread
-                // conversation hints when the cursor is on a review thread — with
-                // the edit/delete keys dropped when the viewer owns no comment
-                // there (those actions would refuse) — FR-5. Rendered before the
-                // secondary metadata so the actionable keys survive at 80 cols.
-                const cursor_thread_idx = cursorReviewThreadIdx(app);
-                const owns_comment = if (cursor_thread_idx) |idx| blk: {
-                    if (idx >= app.state.review.threads.items.len) break :blk false;
-                    break :blk pr.review_controller.lastOwnCommentIdx(&app.state.review.threads.items[idx]) != null;
-                } else false;
-                const thread_resolved = if (cursor_thread_idx) |idx| blk: {
-                    if (idx >= app.state.review.threads.items.len) break :blk false;
-                    break :blk app.state.review.threads.items[idx].data.is_resolved;
-                } else false;
-                const hint = pr.thread_hint.threadHint(.{
-                    .delete_confirm = pr.review_controller.deleteConfirmArmed(&app.state.review) != null,
-                    .on_thread = cursor_thread_idx != null,
-                    .owns_comment = owns_comment,
-                });
-                if (hint != .none) {
-                    thread_hint_active = true;
-                    try segments.append(app.allocator, .{
-                        .text = try RenderUtils.copyFrameText(app, pr.thread_hint.hintText(hint, thread_resolved)),
-                        .style = if (hint == .delete_confirm) .{ .fg = Color.red, .bold = true } else .{ .fg = Color.dim },
-                    });
-                }
-
-                const drafts = pr.review_controller.draftCount(&app.state.review);
-                if (drafts > 0) {
-                    var draft_buf: [32]u8 = undefined;
-                    const draft_seg = try std.fmt.bufPrint(&draft_buf, " │ drafts:{d}", .{drafts});
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, draft_seg), .style = .{ .fg = Color.yellow } });
-                }
-
-                // Unresolved/total review-thread summary (FR-6 final summary).
-                const thread_counts = pr.review_controller.threadCounts(&app.state.review);
-                if (thread_counts.total > 0) {
-                    var tc_buf: [32]u8 = undefined;
-                    const tc_seg = try std.fmt.bufPrint(&tc_buf, " │ ⊚ {d}/{d}", .{ thread_counts.unresolved, thread_counts.total });
-                    try segments.append(app.allocator, .{
-                        .text = try RenderUtils.copyFrameText(app, tc_seg),
-                        .style = .{ .fg = if (thread_counts.unresolved > 0) Color.yellow else Color.green },
-                    });
-                }
-
-                // Truncated fetch note (AD-9: no silent truncation).
-                if (app.state.review.truncated) {
-                    try segments.append(app.allocator, .{
-                        .text = try RenderUtils.copyFrameText(app, " │ ⚠trunc"),
-                        .style = .{ .fg = Color.yellow, .bold = true },
-                    });
-                }
-
-                const target_github = app.state.review.comment_target == .github;
-                const target_seg = if (target_github) " │ →GH" else " │ →local";
-                try segments.append(app.allocator, .{
-                    .text = try RenderUtils.copyFrameText(app, target_seg),
-                    .style = .{ .fg = if (target_github) Color.green else Color.dim, .bold = target_github },
-                });
-
-                const posting = pr.review_controller.postingCount(&app.state.review);
-                if (posting > 0) {
-                    var post_buf: [32]u8 = undefined;
-                    const post_seg = try std.fmt.bufPrint(&post_buf, " │ posting…({d})", .{posting});
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, post_seg), .style = .{ .fg = Color.magenta } });
-                }
-
-                // In-flight refetch (`r`): mirror the picker's muted loading note.
-                if (app.state.review.entry_in_flight) {
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " │ refreshing…"), .style = .{ .fg = Color.dim } });
-                }
-
-            }
-
-            // Only show hunk view mode indicator in unified view (where filtering applies)
-            if (app.state.view_mode == .unified) {
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " ["), .style = .{} });
-
-                // Add colored hunk view symbol
-                if (app.state.hunk_view_mode == .all) {
-                    // For "+/-" mode, color + green and - red
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "+"), .style = .{ .fg = Color.green, .bold = true } });
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "/"), .style = .{ .bold = true } });
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "-"), .style = .{ .fg = Color.red, .bold = true } });
-                } else {
-                    // For single mode, use appropriate color
-                    const hunk_view_style: vaxis.Style = switch (app.state.hunk_view_mode) {
-                        .all => unreachable, // Already handled above
-                        .old => .{ .fg = Color.red, .bold = true },
-                        .new => .{ .fg = Color.green, .bold = true },
-                    };
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, hunk_view_symbol), .style = hunk_view_style });
-                }
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "]"), .style = .{} });
-            }
-
-            if (app.state.count_prefix) |count| {
-                var buf: [64]u8 = undefined;
-                const count_str = try std.fmt.bufPrint(&buf, " [{d}]", .{count});
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, count_str), .style = .{} });
-            }
-
-            // Only show file position (line number shown via scrollbar)
+        if (app.state.count_prefix) |count| {
             var buf: [64]u8 = undefined;
-            const pos_info = try std.fmt.bufPrint(&buf, "  File {d}/{d}", .{ current_file, total_files });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, pos_info), .style = .{} });
-
-            // Show search info if there are active matches in normal mode
-            if (app.state.search_state.hasMatches()) {
-                const match_count = app.state.search_state.matches.items.len;
-                const current_match = if (app.state.search_state.current_match_idx) |idx| idx + 1 else 0;
-                var match_buf: [64]u8 = undefined;
-                const match_info = try std.fmt.bufPrint(&match_buf, "  [{d}/{d} matches]", .{ current_match, match_count });
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
-            }
-
-            // Show temporary status message (if any). Errors render red with a ⚠
-            // prefix (matching the submit dialog) so a failed thread interaction
-            // never reads like a success.
-            if (app.state.status_message) |msg| {
-                var msg_buf: [128]u8 = undefined;
-                const is_error = app.state.status_message_severity == .err;
-                const formatted = if (is_error)
-                    std.fmt.bufPrint(&msg_buf, "  [⚠ {s}]", .{msg}) catch msg
-                else
-                    std.fmt.bufPrint(&msg_buf, "  [{s}]", .{msg}) catch msg;
-                const color = if (is_error) Color.red else Color.magenta;
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, formatted), .style = .{ .fg = color } });
-            }
-
-            // Drop the generic "j/k:Move | ? for help" trailer while a contextual
-            // thread hint is showing so the actionable keys survive at 80 cols.
-            if (!thread_hint_active) {
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindings), .style = .{} });
-            }
+            const count_str = try std.fmt.bufPrint(&buf, " [{d}]", .{count});
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, count_str), .style = .{} });
         }
 
-        _ = win.print(segments.items, .{ .row_offset = @intCast(0) });
+        // Only show file position (line number shown via scrollbar)
+        var buf: [64]u8 = undefined;
+        const pos_info = try std.fmt.bufPrint(&buf, "  File {d}/{d}", .{ current_file, total_files });
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, pos_info), .style = .{} });
+
+        // Show search info if there are active matches in normal mode
+        if (app.state.search_state.hasMatches()) {
+            const match_count = app.state.search_state.matches.items.len;
+            const current_match = if (app.state.search_state.current_match_idx) |idx| idx + 1 else 0;
+            var match_buf: [64]u8 = undefined;
+            const match_info = try std.fmt.bufPrint(&match_buf, "  [{d}/{d} matches]", .{ current_match, match_count });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, match_info), .style = .{} });
+        }
+
+        // Show temporary status message (if any). Errors render red with a ⚠
+        // prefix (matching the submit dialog) so a failed thread interaction
+        // never reads like a success.
+        if (app.state.status_message) |msg| {
+            var msg_buf: [128]u8 = undefined;
+            const is_error = app.state.status_message_severity == .err;
+            const formatted = if (is_error)
+                std.fmt.bufPrint(&msg_buf, "  [⚠ {s}]", .{msg}) catch msg
+            else
+                std.fmt.bufPrint(&msg_buf, "  [{s}]", .{msg}) catch msg;
+            const color = if (is_error) Color.red else Color.magenta;
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, formatted), .style = .{ .fg = color } });
+        }
+
+        // Drop the generic "j/k:Move | ? for help" trailer while a contextual
+        // thread hint is showing so the actionable keys survive at 80 cols.
+        if (!thread_hint_active) {
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "  "), .style = .{} });
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, keybindingsStr(app)), .style = .{} });
+        }
+    }
+
+    /// Append the active PR-review session segments (PR number, CI glyph, thread
+    /// hints, draft/thread counts, comment target, in-flight notes). Returns
+    /// whether a contextual thread hint was shown so the caller can drop the
+    /// generic keybindings trailer. Assumes an active review session.
+    fn appendReviewSessionStatus(app: *App, segments: *std.ArrayList(vaxis.Cell.Segment)) !bool {
+        var thread_hint_active = false;
+
+        var pr_buf: [48]u8 = undefined;
+        const pr_seg = try std.fmt.bufPrint(&pr_buf, "  PR #{d}", .{app.state.review.number});
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, pr_seg), .style = .{ .fg = Color.cyan, .bold = true } });
+
+        // CI rollup glyph for the PR head (FR-6 final summary).
+        const ci_glyph: []const u8 = switch (app.state.review.rollup) {
+            .success => " ✓",
+            .failure, .err => " ✗",
+            .pending => " •",
+            .none => "",
+        };
+        if (ci_glyph.len > 0) {
+            const ci_color = switch (app.state.review.rollup) {
+                .success => Color.green,
+                .failure, .err => Color.red,
+                .pending => Color.yellow,
+                .none => Color.dim,
+            };
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, ci_glyph), .style = .{ .fg = ci_color, .bold = true } });
+        }
+
+        // Delete confirmation takes priority; otherwise show the thread
+        // conversation hints when the cursor is on a review thread — with
+        // the edit/delete keys dropped when the viewer owns no comment
+        // there (those actions would refuse) — FR-5. Rendered before the
+        // secondary metadata so the actionable keys survive at 80 cols.
+        const cursor_thread_idx = cursorReviewThreadIdx(app);
+        const owns_comment = if (cursor_thread_idx) |idx| blk: {
+            if (idx >= app.state.review.threads.items.len) break :blk false;
+            break :blk pr.review_controller.lastOwnCommentIdx(&app.state.review.threads.items[idx]) != null;
+        } else false;
+        const thread_resolved = if (cursor_thread_idx) |idx| blk: {
+            if (idx >= app.state.review.threads.items.len) break :blk false;
+            break :blk app.state.review.threads.items[idx].data.is_resolved;
+        } else false;
+        const hint = pr.thread_hint.threadHint(.{
+            .delete_confirm = pr.review_controller.deleteConfirmArmed(&app.state.review) != null,
+            .on_thread = cursor_thread_idx != null,
+            .owns_comment = owns_comment,
+        });
+        if (hint != .none) {
+            thread_hint_active = true;
+            try segments.append(app.allocator, .{
+                .text = try RenderUtils.copyFrameText(app, pr.thread_hint.hintText(hint, thread_resolved)),
+                .style = if (hint == .delete_confirm) .{ .fg = Color.red, .bold = true } else .{ .fg = Color.dim },
+            });
+        }
+
+        const drafts = pr.review_controller.draftCount(&app.state.review);
+        if (drafts > 0) {
+            var draft_buf: [32]u8 = undefined;
+            const draft_seg = try std.fmt.bufPrint(&draft_buf, " │ drafts:{d}", .{drafts});
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, draft_seg), .style = .{ .fg = Color.yellow } });
+        }
+
+        // Unresolved/total review-thread summary (FR-6 final summary).
+        const thread_counts = pr.review_controller.threadCounts(&app.state.review);
+        if (thread_counts.total > 0) {
+            var tc_buf: [32]u8 = undefined;
+            const tc_seg = try std.fmt.bufPrint(&tc_buf, " │ ⊚ {d}/{d}", .{ thread_counts.unresolved, thread_counts.total });
+            try segments.append(app.allocator, .{
+                .text = try RenderUtils.copyFrameText(app, tc_seg),
+                .style = .{ .fg = if (thread_counts.unresolved > 0) Color.yellow else Color.green },
+            });
+        }
+
+        // Truncated fetch note (AD-9: no silent truncation).
+        if (app.state.review.truncated) {
+            try segments.append(app.allocator, .{
+                .text = try RenderUtils.copyFrameText(app, " │ ⚠trunc"),
+                .style = .{ .fg = Color.yellow, .bold = true },
+            });
+        }
+
+        const target_github = app.state.review.comment_target == .github;
+        const target_seg = if (target_github) " │ →GH" else " │ →local";
+        try segments.append(app.allocator, .{
+            .text = try RenderUtils.copyFrameText(app, target_seg),
+            .style = .{ .fg = if (target_github) Color.green else Color.dim, .bold = target_github },
+        });
+
+        const posting = pr.review_controller.postingCount(&app.state.review);
+        if (posting > 0) {
+            var post_buf: [32]u8 = undefined;
+            const post_seg = try std.fmt.bufPrint(&post_buf, " │ posting…({d})", .{posting});
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, post_seg), .style = .{ .fg = Color.magenta } });
+        }
+
+        // In-flight refetch (`r`): mirror the picker's muted loading note.
+        if (app.state.review.entry_in_flight) {
+            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " │ refreshing…"), .style = .{ .fg = Color.dim } });
+        }
+
+        return thread_hint_active;
     }
 
     pub fn printHeaderLine(app: *App, win: vaxis.Window, row: usize, text: []const u8, style: vaxis.Style) !void {
