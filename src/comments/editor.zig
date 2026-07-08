@@ -39,6 +39,9 @@ pub const CommentEditor = struct {
         editing_comment_idx: ?usize,
         // Destination of the saved comment (set when the editor is opened).
         target: Target = .local,
+        // True when the editor was opened during an active PR review session, so
+        // the input box can label a new comment's destination (local vs GitHub).
+        in_review_session: bool = false,
         // Thread-conversation context (reply/edit on a GitHub thread), or `.none`.
         edit_context: EditContext = .none,
 

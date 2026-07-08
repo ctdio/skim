@@ -675,6 +675,106 @@ test "snapshot: review_thread_edit_prefilled" {
 }
 
 // =============================================================================
+// new-comment input box: label reflects the review-session comment target
+// =============================================================================
+
+test "snapshot: review_new_comment_input_github_target" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var editor = CommentEditor.State{
+        .target_file_path = "src/x.zig",
+        .target_hunk_idx = 0,
+        .target_line_idx = 10,
+        .target_end_hunk_idx = null,
+        .target_end_line_idx = null,
+        .editing_comment_idx = null,
+        .target = .github,
+        .in_review_session = true,
+        .edit_context = .none,
+        .vim = CommentEditor.VimEditor.State.initWithMode(.insert),
+    };
+    editor.vim.setText("this should be guarded");
+    editor.vim.cursor_pos = editor.vim.text_len;
+    app.state.active_comment_input = editor;
+
+    try renderNewCommentInputSnapshot("review_new_comment_input_github_target", &app);
+}
+
+test "snapshot: review_new_comment_input_local_target" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var editor = CommentEditor.State{
+        .target_file_path = "src/x.zig",
+        .target_hunk_idx = 0,
+        .target_line_idx = 10,
+        .target_end_hunk_idx = null,
+        .target_end_line_idx = null,
+        .editing_comment_idx = null,
+        .target = .local,
+        .in_review_session = true,
+        .edit_context = .none,
+        .vim = CommentEditor.VimEditor.State.initWithMode(.insert),
+    };
+    editor.vim.setText("note to self");
+    editor.vim.cursor_pos = editor.vim.text_len;
+    app.state.active_comment_input = editor;
+
+    try renderNewCommentInputSnapshot("review_new_comment_input_local_target", &app);
+}
+
+test "snapshot: review_new_comment_input_github_range" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var editor = CommentEditor.State{
+        .target_file_path = "src/x.zig",
+        .target_hunk_idx = 0,
+        .target_line_idx = 10,
+        .target_end_hunk_idx = 0,
+        .target_end_line_idx = 13,
+        .editing_comment_idx = null,
+        .target = .github,
+        .in_review_session = true,
+        .edit_context = .none,
+        .vim = CommentEditor.VimEditor.State.initWithMode(.insert),
+    };
+    editor.vim.setText("guard this whole block");
+    editor.vim.cursor_pos = editor.vim.text_len;
+    app.state.active_comment_input = editor;
+
+    try renderNewCommentInputSnapshot("review_new_comment_input_github_range", &app);
+}
+
+test "snapshot: review_new_comment_input_no_session" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var editor = CommentEditor.State{
+        .target_file_path = "src/x.zig",
+        .target_hunk_idx = 0,
+        .target_line_idx = 10,
+        .target_end_hunk_idx = null,
+        .target_end_line_idx = null,
+        .editing_comment_idx = null,
+        .target = .local,
+        .in_review_session = false,
+        .edit_context = .none,
+        .vim = CommentEditor.VimEditor.State.initWithMode(.insert),
+    };
+    editor.vim.setText("plain local comment");
+    editor.vim.cursor_pos = editor.vim.text_len;
+    app.state.active_comment_input = editor;
+
+    try renderNewCommentInputSnapshot("review_new_comment_input_no_session", &app);
+}
+
+// =============================================================================
 // side-by-side input box: reply / edit label consistency with unified view
 // =============================================================================
 
@@ -813,6 +913,20 @@ fn renderSideBySideInputSnapshot(name: []const u8, app: *App) !void {
     defer ctx.deinit();
 
     _ = try SideBySideRenderer.renderSideBySideCommentInput(app, ctx.window(), 0, 40, 40, 4, .context);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, name, text);
+}
+
+/// Render just the new-comment input box (no thread above it) — the `.none`
+/// edit-context path whose label reflects the review-session comment target.
+fn renderNewCommentInputSnapshot(name: []const u8, app: *App) !void {
+    const allocator = testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 80, 24);
+    defer ctx.deinit();
+
+    _ = try RenderUtils.renderCommentInputBox(app, ctx.window(), 0, 4);
 
     const text = try ctx.captureToText();
     defer allocator.free(text);

@@ -95,6 +95,7 @@ pub const CommentController = struct {
             .target_end_line_idx = null, // Single-line comment
             .editing_comment_idx = existing_comment_idx,
             .target = target,
+            .in_review_session = review_controller.isActive(&app.state.review),
             .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
         };
 
@@ -165,6 +166,7 @@ pub const CommentController = struct {
             .target_end_line_idx = if (is_single_line) null else end_code.line_idx_in_hunk,
             .editing_comment_idx = null, // Always creating new comment from visual mode
             .target = target,
+            .in_review_session = review_controller.isActive(&app.state.review),
             .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
         };
 

@@ -887,21 +887,36 @@ pub const RenderUtils = struct {
                 .edit_own => break :blk try copyFrameText(app, " Edit"),
                 .none => {},
             }
+            // In a PR review session, surface where the new comment lands: a
+            // GitHub review draft or a local skim comment.
+            const target_word: ?[]const u8 = if (input.in_review_session)
+                (if (input.target == .github) "GitHub" else "local")
+            else
+                null;
+            var label_buf: [80]u8 = undefined;
             if (input.target_end_hunk_idx != null and input.target_end_line_idx != null) {
                 // Range comment - show line range
                 const start_line = input.target_line_idx + 1; // +1 for 1-based display
                 const end_line = input.target_end_line_idx.? + 1;
-                if (input.target_hunk_idx == input.target_end_hunk_idx.?) {
-                    // Same hunk - use frame text buffer for formatted string
-                    var label_buf: [64]u8 = undefined;
-                    const formatted = try std.fmt.bufPrint(&label_buf, " Comment (Lines {d}-{d})", .{ start_line, end_line });
+                const same_hunk = input.target_hunk_idx == input.target_end_hunk_idx.?;
+                if (target_word) |word| {
+                    const formatted = if (same_hunk)
+                        try std.fmt.bufPrint(&label_buf, " Comment ({s}, Lines {d}-{d})", .{ word, start_line, end_line })
+                    else
+                        try std.fmt.bufPrint(&label_buf, " Comment ({s}, Range)", .{word});
                     break :blk try copyFrameText(app, formatted);
-                } else {
-                    // Different hunks (unlikely but handle it)
-                    break :blk try copyFrameText(app, " Comment (Range)");
                 }
+                const formatted: []const u8 = if (same_hunk)
+                    try std.fmt.bufPrint(&label_buf, " Comment (Lines {d}-{d})", .{ start_line, end_line })
+                else
+                    " Comment (Range)";
+                break :blk try copyFrameText(app, formatted);
             } else {
                 // Single-line comment
+                if (target_word) |word| {
+                    const formatted = try std.fmt.bufPrint(&label_buf, " Comment ({s})", .{word});
+                    break :blk try copyFrameText(app, formatted);
+                }
                 break :blk try copyFrameText(app, " Comment");
             }
         };
