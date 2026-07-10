@@ -7,6 +7,7 @@ const search = @import("../search.zig");
 const rendering_common = @import("common.zig");
 const render_unified = @import("unified.zig");
 const render_side_by_side = @import("side_by_side.zig");
+const loading = @import("loading.zig");
 const ui_components = @import("../ui.zig");
 const agent = @import("../agent/agent.zig");
 const command_palette = @import("../command_palette.zig");
@@ -51,6 +52,13 @@ pub fn render(app: *App, win: vaxis.Window) !void {
 
     // Render header and content (or empty/branch menu if no files)
     if (app.state.files.len == 0) {
+        // Initial diff still streaming and nothing on screen yet: show a loading
+        // indicator instead of the "no changes" menu until the first file lands.
+        if (app.state.diff_load.isLoading()) {
+            loading.renderLoadingScreen(win);
+            return;
+        }
+
         // No files - show empty state or branch selection menu
         // If agent panel is visible, render it as sidebar with empty menu in main area
         if (show_agent_panel) {

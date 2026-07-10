@@ -75,6 +75,67 @@ pub fn getDiff(allocator: Allocator, source: DiffSource) ![]u8 {
     return runGitCommand(allocator, build.args.items);
 }
 
+/// Spawn `git diff` for `source` and stream stdout to `onChunk` as bytes
+/// arrive, instead of buffering the whole diff up front. `shouldCancel` is
+/// checked between reads so a caller can abort a long-running diff (e.g. on
+/// quit or refresh). Returns error.Canceled if aborted, error.GitCommandFailed
+/// on non-zero git exit.
+pub fn streamDiff(
+    allocator: Allocator,
+    source: DiffSource,
+    ctx: anytype,
+    comptime onChunk: fn (@TypeOf(ctx), []const u8) void,
+    comptime shouldCancel: fn (@TypeOf(ctx)) bool,
+) !void {
+    const extra_flags = &[_][]const u8{ "--no-color", "--no-ext-diff", "-U10" };
+    var build = try buildDiffArgs(allocator, source, extra_flags);
+    defer build.args.deinit(allocator);
+    defer if (build.range_owned) |r| allocator.free(r);
+
+    var child = std.process.Child.init(build.args.items, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    try child.spawn();
+
+    const stdout = child.stdout.?;
+    var read_buf: [64 * 1024]u8 = undefined;
+    var canceled = false;
+
+    while (true) {
+        if (shouldCancel(ctx)) {
+            canceled = true;
+            _ = child.kill() catch {};
+            break;
+        }
+        const n = stdout.read(&read_buf) catch break;
+        if (n == 0) break; // EOF
+        onChunk(ctx, read_buf[0..n]);
+    }
+
+    // Drain stderr for diagnostics (bounded). git writes little/nothing here on
+    // success, so the pipe cannot fill while we read stdout above.
+    const stderr = child.stderr.?.readToEndAlloc(allocator, 1 * 1024 * 1024) catch null;
+    defer if (stderr) |s| allocator.free(s);
+
+    const term = child.wait() catch return error.GitCommandFailed;
+
+    if (canceled) return error.Canceled;
+
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) {
+                if (stderr) |s| {
+                    const trimmed = std.mem.trimRight(u8, s, &std.ascii.whitespace);
+                    if (trimmed.len > 0) std.log.warn("git diff failed: {s}", .{trimmed});
+                }
+                return error.GitCommandFailed;
+            }
+        },
+        else => return error.GitCommandFailed,
+    }
+}
+
 fn runGitCommand(allocator: Allocator, args: []const []const u8) ![]u8 {
     var child = std.process.Child.init(args, allocator);
     child.stdout_behavior = .Pipe;
@@ -563,6 +624,31 @@ test "getDiff working directory" {
     defer allocator.free(diff);
 
     // Just verify it doesn't crash - actual output depends on git repo state
+}
+
+test "streamDiff reads the same bytes as getDiff" {
+    const allocator = std.testing.allocator;
+
+    const buffered = try getDiff(allocator, .{ .working_dir = .{ .staged = false } });
+    defer allocator.free(buffered);
+
+    const Ctx = struct {
+        buf: std.ArrayList(u8) = .{},
+        alloc: Allocator,
+
+        fn onChunk(self: *@This(), chunk: []const u8) void {
+            self.buf.appendSlice(self.alloc, chunk) catch {};
+        }
+        fn noCancel(_: *@This()) bool {
+            return false;
+        }
+    };
+
+    var ctx = Ctx{ .alloc = allocator };
+    defer ctx.buf.deinit(allocator);
+
+    try streamDiff(allocator, .{ .working_dir = .{ .staged = false } }, &ctx, Ctx.onChunk, Ctx.noCancel);
+    try std.testing.expectEqualStrings(buffered, ctx.buf.items);
 }
 
 test "DiffSource.stdin variant exists" {

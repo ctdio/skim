@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const git = @import("git/diff.zig");
 const blame_ctrl = @import("git/blame_controller.zig");
+const diff_loader = @import("git/diff_loader.zig");
 const parser = @import("git/parser.zig");
 const syntax = @import("highlighting/core.zig");
 const comments = @import("comments/store.zig");
@@ -331,6 +332,10 @@ pub const App = struct {
         // Native GitHub PR review session (async entry + review data). Defaulted.
         review: review_controller.ReviewSession = .{},
 
+        // Streaming diff-load sub-state. Defaulted idle; armed by init/refresh
+        // and driven by the event loop so large diffs render as they arrive.
+        diff_load: diff_loader.DiffLoad = .{},
+
         // Submit-review dialog body editor (Phase 5). Non-null only while the
         // dialog is open. Defaulted null (stays out of the init literal); the
         // editor buffer is large so it is only allocated on demand.
@@ -440,14 +445,16 @@ pub const App = struct {
             defer allocator.free(clean_text);
             break :blk try parser.parse(allocator, clean_text);
         } else blk: {
-            // Normal mode: load git diff (including untracked files for working directory mode)
-            const diff_result = try git.getDiffWithUntracked(allocator, config.diff_source);
-            defer diff_result.deinit(allocator);
-
-            const parsed_files = try parser.parse(allocator, diff_result.diff_text);
-            parser.markUntrackedFiles(parsed_files, diff_result.untracked_paths);
-            break :blk parsed_files;
+            // Normal mode: stream the git diff on a background thread so the TUI
+            // comes up immediately and files render as they arrive instead of
+            // freezing until a large diff is fully buffered. Start empty; the
+            // loader (armed below, started in run()) fills state.files.
+            break :blk try allocator.alloc(parser.FileDiff, 0);
         };
+
+        // Only the normal git path loads asynchronously; agent/pr/pager modes
+        // populate `files` synchronously above.
+        const start_async_load = !is_agent_only and !is_pr_only and !is_pager_mode;
         errdefer {
             for (files) |*file| {
                 file.deinit(allocator);
@@ -621,6 +628,12 @@ pub const App = struct {
 
         app.state.pr.pr_only = is_pr_only;
         app.state.pr_boot_number = if (@hasField(@TypeOf(config), "pr_request")) config.pr_request else null;
+
+        // Arm the streaming diff loader; run() starts it once the App has a
+        // stable address (init returns App by value).
+        if (start_async_load) {
+            diff_loader.requestStart(&app.state.diff_load, .incremental);
+        }
 
         // Graphite detection is lazy - happens on first access to avoid blocking startup
         // Main loop will spawn background thread to highlight initial file
@@ -931,6 +944,10 @@ pub const App = struct {
             worker.deinit();
         }
 
+        // Join any in-flight streaming diff load before freeing state.files so
+        // the worker can't append into freed state.
+        diff_loader.deinitState(&self.state.diff_load, self.allocator);
+
         // Free pending job content strings
         var iter = self.pending_highlight_jobs.iterator();
         while (iter.next()) |entry| {
@@ -1234,24 +1251,27 @@ pub const App = struct {
         return true;
     }
 
+    /// Trigger a diff reload. Streams a fresh diff on a background thread and,
+    /// in `.replace` mode, keeps the current view until it is fully loaded, then
+    /// swaps atomically (see pollDiffLoad → applyRefreshedFiles). Non-blocking,
+    /// so a large diff never freezes the UI on refresh.
     pub fn refresh(self: *App) !void {
         // Disabled in pager mode (stdin content is read once)
         if (self.state.pager_mode) return;
 
-        // Load fresh git diff (including untracked files for working directory mode)
-        const diff_result = try git.getDiffWithUntracked(self.allocator, self.state.diff_source);
-        defer diff_result.deinit(self.allocator);
+        diff_loader.start(&self.state.diff_load, self.allocator, self.state.diff_source, .replace);
+    }
 
-        const new_files = try parser.parse(self.allocator, diff_result.diff_text);
+    /// Swap in a freshly loaded diff, preserving the focused file and cursor.
+    /// Takes ownership of `new_files` (frees it on error). Runs on the main
+    /// thread from pollDiffLoad once a `.replace` load completes.
+    fn applyRefreshedFiles(self: *App, new_files: []parser.FileDiff) !void {
         errdefer {
             for (new_files) |*file| {
                 file.deinit(self.allocator);
             }
             self.allocator.free(new_files);
         }
-
-        // Mark untracked files
-        parser.markUntrackedFiles(new_files, diff_result.untracked_paths);
 
         const caches = try buildFileCaches(self.allocator, new_files);
         errdefer {
@@ -1333,6 +1353,111 @@ pub const App = struct {
 
         // Keep external session discovery metadata in sync with the current diff.
         mcp_handlers.syncSessionMetadata(self);
+    }
+
+    /// Per-frame poll of the streaming diff loader. In `.incremental` mode it
+    /// appends newly-parsed files to the view as they arrive; in `.replace` mode
+    /// it swaps the whole diff in once the load finishes. Joins the worker and
+    /// finalizes on completion.
+    fn pollDiffLoad(self: *App) void {
+        const dl = &self.state.diff_load;
+        if (!dl.isLoading()) return;
+
+        _ = diff_loader.takeReady(dl); // clear the wake signal; we drain unconditionally
+
+        if (dl.mode == .incremental) {
+            self.drainIncrementalFiles() catch {
+                self.showStatusMessage("Out of memory loading diff");
+            };
+        }
+
+        if (dl.isDone()) {
+            if (dl.mode == .replace) {
+                self.applyReplaceLoad() catch {
+                    self.showStatusMessage("Failed to refresh diff");
+                };
+            } else {
+                // Pick up any files that landed alongside the done signal.
+                self.drainIncrementalFiles() catch {};
+            }
+
+            const failed = dl.hasFailed();
+            diff_loader.finishAndJoin(dl, self.allocator);
+            self.needs_render = true;
+            self.needs_async_highlight = true;
+            if (failed and self.state.files.len == 0) {
+                self.showStatusMessage("Failed to load diff");
+            }
+        }
+    }
+
+    /// Move newly-streamed files into the view (initial incremental load).
+    fn drainIncrementalFiles(self: *App) !void {
+        var new_files: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+        defer new_files.deinit(self.allocator);
+
+        const n = try diff_loader.drainNewFiles(&self.state.diff_load, &new_files, self.allocator);
+        if (n == 0) return;
+
+        try self.appendFilesToState(new_files.items);
+        self.needs_render = true;
+        self.needs_async_highlight = true;
+    }
+
+    /// Take the full loaded diff and hand it to the refresh swap (refresh load).
+    fn applyReplaceLoad(self: *App) !void {
+        var all: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+        defer all.deinit(self.allocator);
+
+        _ = try diff_loader.drainNewFiles(&self.state.diff_load, &all, self.allocator);
+        if (all.items.len == 0) {
+            // Empty diff: still clear the current view via the refresh path.
+            const empty = try self.allocator.alloc(parser.FileDiff, 0);
+            try self.applyRefreshedFiles(empty);
+            return;
+        }
+
+        const new_files = try self.allocator.dupe(parser.FileDiff, all.items);
+        try self.applyRefreshedFiles(new_files);
+    }
+
+    /// Grow `state.files` with `more` and rebuild derived caches + line map over
+    /// the combined list. Commits atomically: on OOM the old view is untouched.
+    fn appendFilesToState(self: *App, more: []const parser.FileDiff) !void {
+        const old = self.state.files;
+        const combined = try self.allocator.alloc(parser.FileDiff, old.len + more.len);
+        errdefer self.allocator.free(combined);
+        @memcpy(combined[0..old.len], old);
+        @memcpy(combined[old.len..], more);
+
+        const caches = try buildFileCaches(self.allocator, combined);
+        errdefer {
+            self.allocator.free(caches.stats);
+            self.allocator.free(caches.line_counts);
+        }
+
+        // Re-derive review-thread anchors before building the map that emits
+        // their records (matches applyRefreshedFiles).
+        self.reanchorReview(combined);
+
+        const new_line_map = try line_map.LineMap.build(self.allocator, combined, &self.state.comment_store, hunk_view.convertHunkViewMode(self), hunk_view.shouldApplyHunkFiltering(self), &self.state.collapsed_folds, self.reviewAnchored());
+
+        // Commit: free only the old array (structs moved into `combined`).
+        self.allocator.free(old);
+        self.freeFileCaches();
+        self.state.line_map.deinit();
+
+        self.state.files = combined;
+        self.state.file_diff_stats = caches.stats;
+        self.state.file_line_counts = caches.line_counts;
+        self.state.global_gutter_width = caches.gutter_width;
+        self.state.line_map = new_line_map;
+
+        const total_lines = self.getTotalGlobalLines();
+        if (total_lines > 0 and self.state.global_cursor_line >= total_lines) {
+            self.state.global_cursor_line = total_lines - 1;
+        }
+        Navigation.clampScrollOffset(self);
     }
 
     /// Stage the current file (git add) and refresh the view
@@ -1472,6 +1597,10 @@ pub const App = struct {
             }
         }
 
+        // Start the streaming diff load now that the App has a stable address
+        // (init returns App by value, so the worker's *DiffLoad must point here).
+        diff_loader.startIfRequested(&self.state.diff_load, self.allocator, self.state.diff_source);
+
         var first_render = true;
         var last_shimmer_render: i64 = 0;
 
@@ -1493,7 +1622,8 @@ pub const App = struct {
             const blame_active = self.blame.isActive();
             const pr_active = self.state.pr.fetch.ready.load(.acquire) or self.state.pr.fetch_in_flight;
             const review_active = self.state.review.entry.ready.load(.acquire) or self.state.review.entry_in_flight or review_controller.hasPostingWork(&self.state.review);
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active and !review_active;
+            const diff_loading = self.state.diff_load.isLoading();
+            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active and !review_active and !diff_loading;
             if (should_poll) {
                 loop.pollEvent();
             } else {
@@ -1632,6 +1762,7 @@ pub const App = struct {
 
             // Poll subagent fetch result (worker thread -> main thread)
             subagent_fetch.pollSubagentFetch(self);
+            self.pollDiffLoad();
             if (blame_ctrl.pollPending(&self.blame, self.profile_render)) self.needs_render = true;
             if (pr_controller.pollPendingFetch(&self.state.pr, self.allocator)) self.needs_render = true;
             self.pollReviewEntry();

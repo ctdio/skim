@@ -7,10 +7,24 @@ const md_helpers = @import("markdown_test_helpers.zig");
 const help_helpers = @import("help_test_helpers.zig");
 const model_helpers = @import("model_selection_test_helpers.zig");
 const palette_helpers = @import("command_palette_test_helpers.zig");
+const loading_helpers = @import("loading_test_helpers.zig");
 
 // =============================================================================
 // Diff Rendering Snapshot Tests
 // =============================================================================
+
+test "snapshot: loading_screen" {
+    const allocator = std.testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 40, 9);
+    defer ctx.deinit();
+
+    loading_helpers.renderLoadingScreen(ctx.window());
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+
+    try snapshot.expectSnapshot(allocator, "loading_screen", text);
+}
 
 test "snapshot: diff_file_header" {
     const allocator = std.testing.allocator;
