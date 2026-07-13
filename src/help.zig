@@ -58,6 +58,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "j / k", .desc = "Cursor down / up" },
         .{ .key = "g / G", .desc = "Jump to top / bottom" },
         .{ .key = "Ctrl-d / u", .desc = "Page down / up" },
+        .{ .key = "Space", .desc = "Page down" },
         .{ .key = "Ctrl-n", .desc = "Next file" },
         .{ .key = "M", .desc = "Center cursor in viewport" },
         .{ .key = "zz", .desc = "Center viewport on cursor" },

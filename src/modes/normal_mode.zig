@@ -312,6 +312,12 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.state.cursor_column = 0; // Reset column on jump
             app.updateCurrentFileAndTriggerHighlighting();
         },
+        ' ' => {
+            // Space: page down (mirrors Ctrl-d)
+            Navigation.pageDown(app);
+            app.state.cursor_column = 0; // Reset column on page navigation
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
         '\r' => try app.startCommentInput(), // Enter to create/edit comment
         's' => app.toggleViewMode(),
         '\t' => {
