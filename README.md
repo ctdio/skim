@@ -143,8 +143,9 @@ Navigate files and position cursor with vim-style movements:
 | `h` / `l` | Previous / Next file |
 | `j` / `k` | Cursor down / up |
 | `Ctrl-n` | Next file (alternative) |
-| `Ctrl-d` / `Ctrl-u` | Page down / up |
-| `Space` | Page down |
+| `Space` / `Ctrl-f` / `PageDown` | Page down (full) |
+| `b` / `Ctrl-b` / `PageUp` | Page up (full) |
+| `Ctrl-d` / `Ctrl-u` | Half-page down / up |
 | `gg` | Jump to top of file |
 | `G` | Jump to bottom of file |
 | `Shift-M` | Center cursor in viewport |

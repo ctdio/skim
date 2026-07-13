@@ -253,6 +253,18 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 app.state.cursor_column = 0; // Reset column on page navigation
                 app.updateCurrentFileAndTriggerHighlighting();
             },
+            'f' => {
+                // Ctrl-f: full page down (less/more style)
+                Navigation.fullPageDown(app);
+                app.state.cursor_column = 0; // Reset column on page navigation
+                app.updateCurrentFileAndTriggerHighlighting();
+            },
+            'b' => {
+                // Ctrl-b: full page up (less/more style)
+                Navigation.fullPageUp(app);
+                app.state.cursor_column = 0; // Reset column on page navigation
+                app.updateCurrentFileAndTriggerHighlighting();
+            },
             'e' => {
                 // Ctrl+E: Toggle agent panel
                 try app.toggleAgentPanel();
@@ -313,8 +325,24 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             app.updateCurrentFileAndTriggerHighlighting();
         },
         ' ' => {
-            // Space: page down (mirrors Ctrl-d)
-            Navigation.pageDown(app);
+            // Space: full page down (less/more style)
+            Navigation.fullPageDown(app);
+            app.state.cursor_column = 0; // Reset column on page navigation
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        'b' => {
+            // b: full page up (less/more style)
+            Navigation.fullPageUp(app);
+            app.state.cursor_column = 0; // Reset column on page navigation
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        vaxis.Key.page_down, vaxis.Key.kp_page_down => {
+            Navigation.fullPageDown(app);
+            app.state.cursor_column = 0; // Reset column on page navigation
+            app.updateCurrentFileAndTriggerHighlighting();
+        },
+        vaxis.Key.page_up, vaxis.Key.kp_page_up => {
+            Navigation.fullPageUp(app);
             app.state.cursor_column = 0; // Reset column on page navigation
             app.updateCurrentFileAndTriggerHighlighting();
         },
