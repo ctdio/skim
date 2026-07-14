@@ -193,11 +193,11 @@ pub const Navigation = struct {
         }
     }
 
-    pub fn scrollPageDown(app: *App) void {
-        const scroll_amount = app.state.viewport_height / 2;
+    pub fn fullPageDown(app: *App) void {
+        const scroll_amount = app.state.viewport_height;
         const total_lines = app.getTotalGlobalLines();
 
-        // Move cursor down by half viewport, clamped to last line
+        // Move cursor down by a full viewport, clamped to last line
         if (total_lines > 0) {
             app.state.global_cursor_line = @min(app.state.global_cursor_line + scroll_amount, total_lines - 1);
         }
@@ -207,10 +207,10 @@ pub const Navigation = struct {
         clampScrollOffset(app);
     }
 
-    pub fn scrollPageUp(app: *App) void {
-        const scroll_amount = app.state.viewport_height / 2;
+    pub fn fullPageUp(app: *App) void {
+        const scroll_amount = app.state.viewport_height;
 
-        // Move cursor up by half viewport, clamped to 0
+        // Move cursor up by a full viewport, clamped to 0
         app.state.global_cursor_line -|= scroll_amount;
 
         // Move viewport up by same amount to maintain screen position
