@@ -9,6 +9,7 @@ const line_map = @import("line_map.zig");
 const tui_server = @import("mcp/tui_server.zig");
 const session_mgr = @import("mcp/session.zig");
 const navigation = @import("navigation.zig");
+const mouse = @import("mouse.zig");
 const search = @import("search.zig");
 const clipboard = @import("clipboard.zig");
 const rendering_common = @import("rendering/common.zig");
@@ -342,23 +343,7 @@ pub const App = struct {
     profile_active_frame: bool, // True when current render should be profiled
     profile_counters: RenderProfileCounters,
 
-    const Mode = enum {
-        normal, // Normal navigation and viewing
-        comment, // Comment editing
-        search, // Search input
-        visual, // Visual selection mode
-        command_palette, // Command palette
-        help, // Help overlay
-        branch_selection, // Branch selection menu (when empty)
-        commit_selection, // Commit selection menu
-        commit_diff_mode, // Submenu to select diff mode after commit selection
-        graphite_stack, // Graphite stack picker
-        agent, // Agent chat panel
-        model_selection, // AI model selection menu
-        permission_selection, // Codex permission mode menu
-        agent_selection, // Agent selection menu (before connecting)
-        session_picker, // Session picker for /resume command
-    };
+    pub const Mode = @import("mode.zig").Mode;
 
     // Character find commands for NORMAL mode (f/t/F/T)
     pub const FindCommand = enum {
@@ -1824,6 +1809,10 @@ pub const App = struct {
         try loop.start();
         defer loop.stop();
 
+        // Enable mouse reporting so the wheel can scroll the diff and panels.
+        // vaxis disables it automatically on deinit.
+        try vx.setMouseMode(writer, true);
+
         // Start TUI server for CLI/MCP connections
         self.startTuiServer() catch |err| {
             std.log.warn("Failed to start TUI server: {any}", .{err});
@@ -1941,6 +1930,10 @@ pub const App = struct {
 
                 // Restart the event loop
                 try loop.start();
+
+                // Suspending for the editor resets terminal state, so
+                // re-assert mouse reporting.
+                try vx.setMouseMode(tty.writer(), true);
 
                 // Refresh diff after returning from editor (only for file editing, not prompt editing)
                 if (!self.editor_is_prompt_edit) {
@@ -2245,6 +2238,7 @@ pub const App = struct {
     fn handleEvent(self: *App, event: Event) !void {
         switch (event) {
             .key_press => |key| try self.handleKey(key),
+            .mouse => |m| try self.handleMouse(m),
             .winsize => |ws| try self.vx.?.resize(self.allocator, self.tty.?.writer(), ws),
             .paste_start => {
                 self.in_bracketed_paste = true;
@@ -2273,6 +2267,23 @@ pub const App = struct {
                 self.allocator.free(text);
             },
             else => {},
+        }
+    }
+
+    /// Translate a mouse-wheel notch into the navigation keystroke the active
+    /// mode binds for line scrolling, routed through the normal keyboard
+    /// dispatch so every surface reuses its existing scroll behavior. Non-wheel
+    /// mouse events (clicks, drags, motion) are ignored.
+    fn handleMouse(self: *App, m: vaxis.Mouse) !void {
+        const down = switch (m.button) {
+            .wheel_down => true,
+            .wheel_up => false,
+            else => return,
+        };
+        const codepoint = mouse.wheelKeyForMode(self.mode, down) orelse return;
+        var i: usize = 0;
+        while (i < mouse.lines_per_notch) : (i += 1) {
+            try self.handleKey(.{ .codepoint = codepoint });
         }
     }
 
