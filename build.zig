@@ -205,6 +205,18 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // Mouse-wheel routing tests
+    const mouse_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mouse.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    mouse_tests.root_module.addImport("vaxis", vaxis);
+    const run_mouse_tests = b.addRunArtifact(mouse_tests);
+    test_step.dependOn(&run_mouse_tests.step);
+
     // ACP module tests
     const acp_tests = b.addTest(.{
         .root_module = b.createModule(.{
