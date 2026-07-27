@@ -22,7 +22,11 @@ const year = new Date().getFullYear();
 ---
 
 <!doctype html>
-<html lang="en">
+<!-- Dark-first by default: the SSR attribute matches Starlight's docs pages so
+     the no-JS / pre-hydration case is dark regardless of the OS
+     `prefers-color-scheme`. The inline bootstrap below overrides it to light
+     only when an explicit `starlight-theme` choice says so. -->
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -40,17 +44,14 @@ const year = new Date().getFullYear();
     <meta name="theme-color" content="#0b0d10" />
     <!-- Theme bootstrap: match Starlight's key + attribute so light/dark stays
          in sync across the landing page and the docs. Runs before paint to
-         avoid a flash of the wrong theme. -->
+         avoid a flash of the wrong theme. Defaults to dark on first visit
+         regardless of the OS `prefers-color-scheme`; only an explicit stored
+         choice selects light. -->
     <script is:inline>
       (() => {
         const stored =
           typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
-        const theme =
-          stored === 'light' || stored === 'dark'
-            ? stored
-            : window.matchMedia('(prefers-color-scheme: light)').matches
-              ? 'light'
-              : 'dark';
+        const theme = stored === 'light' ? 'light' : 'dark';
         document.documentElement.dataset.theme = theme;
       })();
     </script>
