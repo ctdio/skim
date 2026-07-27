@@ -1,0 +1,877 @@
+/* ============================================================
+   Skim landing page
+   ============================================================
+   Styles for the custom full-width marketing page. Design tokens and
+   the `--tui-*` terminal palette come from `theme.css` (loaded first).
+   All motion is gated behind `prefers-reduced-motion: no-preference`
+   via the `@media` blocks at the bottom, so reduced-motion users get a
+   still, legible page (one representative diff frame, no blink, no
+   cross-fade, no hover transforms).
+   ============================================================ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body.sk-landing {
+  margin: 0;
+  background: var(--sk-bg);
+  color: var(--sk-fg);
+  font-family: var(--sk-font-sans);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.sk-landing a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.sk-wrap {
+  width: 100%;
+  max-width: 72rem;
+  margin: 0 auto;
+  padding-inline: 1.25rem;
+}
+
+.sk-mono {
+  font-family: var(--sk-font-mono);
+}
+
+/* Skip link for keyboard users */
+.sk-skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  background: var(--sk-accent-strong);
+  color: #fff;
+  padding: 0.5rem 1rem;
+  border-radius: 0.375rem;
+}
+.sk-skip:focus {
+  left: 1rem;
+  top: 1rem;
+}
+
+:where(.sk-landing) :focus-visible {
+  outline: 2px solid var(--sk-accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ============================================================
+   Header / nav
+   ============================================================ */
+.sk-header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: color-mix(in srgb, var(--sk-bg) 82%, transparent);
+  backdrop-filter: saturate(160%) blur(10px);
+  border-bottom: 1px solid var(--sk-border);
+}
+.sk-nav {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  height: 3.75rem;
+}
+.sk-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-weight: 650;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+.sk-brand svg {
+  display: block;
+}
+.sk-nav-spacer {
+  flex: 1;
+}
+.sk-nav-links {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.sk-nav-links a {
+  padding: 0.4rem 0.7rem;
+  border-radius: 0.4rem;
+  color: var(--sk-muted);
+  font-size: 0.9rem;
+  transition: color 0.15s, background 0.15s;
+}
+.sk-nav-links a:hover {
+  color: var(--sk-fg);
+  background: var(--sk-bg-subtle);
+}
+@media (max-width: 640px) {
+  .sk-nav-links .sk-hide-sm {
+    display: none;
+  }
+}
+
+/* Theme toggle button */
+.sk-theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1px solid var(--sk-border);
+  border-radius: 0.5rem;
+  background: var(--sk-bg-subtle);
+  color: var(--sk-muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.sk-theme-toggle:hover {
+  color: var(--sk-fg);
+  border-color: var(--sk-border-strong);
+}
+.sk-theme-toggle svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+.sk-theme-toggle .sk-icon-sun {
+  display: none;
+}
+:root[data-theme='light'] .sk-theme-toggle .sk-icon-sun {
+  display: block;
+}
+:root[data-theme='light'] .sk-theme-toggle .sk-icon-moon {
+  display: none;
+}
+
+/* ============================================================
+   Buttons
+   ============================================================ */
+.sk-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.6rem 1.1rem;
+  border-radius: 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 550;
+  font-family: var(--sk-font-mono);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.15s;
+}
+.sk-btn-primary {
+  background: var(--sk-fg);
+  color: var(--sk-bg);
+}
+.sk-btn-primary:hover {
+  background: var(--sk-accent-strong);
+  color: #fff;
+}
+.sk-btn-ghost {
+  border-color: var(--sk-border-strong);
+  color: var(--sk-fg);
+}
+.sk-btn-ghost:hover {
+  border-color: var(--sk-accent);
+  background: var(--sk-bg-subtle);
+}
+.sk-btn-arrow {
+  width: 1.15rem;
+  height: 1.15rem;
+  transition: transform 0.15s;
+}
+.sk-btn:hover .sk-btn-arrow {
+  transform: translateX(3px);
+}
+
+/* ============================================================
+   Hero
+   ============================================================ */
+.sk-hero {
+  padding-top: clamp(2.5rem, 6vw, 5rem);
+  padding-bottom: clamp(2rem, 4vw, 3.5rem);
+  text-align: center;
+}
+.sk-eyebrow {
+  font-family: var(--sk-font-mono);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--sk-accent);
+  margin: 0 0 1rem;
+}
+.sk-h1 {
+  font-size: clamp(2.4rem, 6vw, 4.25rem);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  font-weight: 700;
+  margin: 0 auto;
+  max-width: 18ch;
+  text-wrap: balance;
+}
+.sk-lede {
+  margin: 1.15rem auto 0;
+  max-width: 42rem;
+  font-size: clamp(1.05rem, 2.2vw, 1.3rem);
+  color: var(--sk-muted);
+  text-wrap: balance;
+}
+.sk-cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+  margin-top: 1.75rem;
+}
+.sk-install-inline {
+  margin: 1.25rem auto 0;
+  max-width: 30rem;
+}
+
+/* ============================================================
+   Terminal frame (shared by hero + vignettes)
+   ============================================================ */
+.term {
+  border-radius: 0.7rem;
+  overflow: hidden;
+  border: 1px solid var(--tui-chrome-border);
+  background: var(--tui-bg);
+  box-shadow:
+    0 1px 0 0 color-mix(in srgb, var(--sk-fg) 6%, transparent),
+    0 24px 60px -24px rgba(0, 0, 0, 0.55);
+}
+.term-chrome {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 2.1rem;
+  padding-inline: 0.75rem;
+  background: var(--tui-chrome-bg);
+  border-bottom: 1px solid var(--tui-chrome-border);
+}
+.term-lights {
+  position: absolute;
+  left: 0.75rem;
+  display: flex;
+  gap: 0.45rem;
+}
+.term-lights span {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.25);
+}
+.term-title {
+  font-family: var(--sk-font-mono);
+  font-size: 0.78rem;
+  color: var(--tui-chrome-title);
+  white-space: nowrap;
+}
+
+/* ============================================================
+   Hero terminal — cross-faded scenes
+   ============================================================ */
+.sk-hero-term {
+  margin: clamp(2rem, 5vw, 3.25rem) auto 0;
+  max-width: 60rem;
+}
+.term-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem;
+  margin-bottom: 0.85rem;
+}
+.term-tab {
+  font-family: var(--sk-font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  color: var(--sk-dim);
+  border: 1px solid var(--sk-border);
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  background: var(--sk-bg-subtle);
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+.term-tab[aria-current='true'] {
+  color: var(--sk-accent);
+  border-color: color-mix(in srgb, var(--sk-accent) 55%, var(--sk-border));
+  background: color-mix(in srgb, var(--sk-accent) 12%, var(--sk-bg-subtle));
+}
+
+.term-stage {
+  position: relative;
+  font-family: var(--sk-font-mono);
+  font-size: clamp(0.62rem, 1.35vw, 0.86rem);
+  line-height: 1.55;
+}
+.term-scene {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+  pointer-events: none;
+}
+.term-scene.is-active {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* The first scene is in normal flow so the stage takes its height; the
+   rest overlay it absolutely. All scenes are the same fixed height so
+   nothing reflows as they cross-fade. */
+.term-scene.term-scene-flow {
+  position: relative;
+}
+.term-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding-top: 0.35rem;
+  background: var(--tui-bg);
+  color: var(--tui-fg);
+  overflow: hidden;
+}
+/* Fixed-height diff region so every cross-faded scene is the same size and
+   nothing reflows as the story advances. Sized in `em` so it tracks the
+   responsive terminal font-size. */
+.d-diff {
+  position: relative;
+  height: 16.2em;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.term-status {
+  margin-top: auto;
+}
+
+/* Diff rows */
+.d-row {
+  display: flex;
+  align-items: baseline;
+  white-space: pre;
+  padding-inline: 0.15rem 0.75rem;
+}
+.d-gutter {
+  flex: 0 0 auto;
+  width: 4.5em;
+  padding-right: 0.75em;
+  text-align: right;
+  color: var(--tui-dim);
+  background: var(--tui-gutter);
+  user-select: none;
+}
+.d-sign {
+  flex: 0 0 auto;
+  width: 1.4em;
+  text-align: center;
+  user-select: none;
+}
+.d-code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.d-add {
+  background: var(--tui-add-bg);
+}
+.d-add .d-sign {
+  color: var(--tui-add-fg);
+}
+.d-add .d-gutter {
+  color: var(--tui-add-fg);
+  background: color-mix(in srgb, var(--tui-add-bg) 70%, var(--tui-gutter));
+}
+.d-del {
+  background: var(--tui-del-bg);
+}
+.d-del .d-sign {
+  color: var(--tui-del-fg);
+}
+.d-del .d-gutter {
+  color: var(--tui-del-fg);
+  background: color-mix(in srgb, var(--tui-del-bg) 70%, var(--tui-gutter));
+}
+.d-hunk {
+  color: var(--tui-hunk);
+  padding-inline: 0.5rem;
+}
+.d-filehdr {
+  color: var(--tui-filehdr);
+  font-weight: 600;
+  padding: 0.1rem 0.6rem 0.35rem;
+  border-bottom: 1px solid var(--tui-divider);
+  margin-bottom: 0.2rem;
+}
+.d-cursor-line {
+  box-shadow: inset 2px 0 0 0 var(--sk-accent);
+  background: color-mix(in srgb, var(--sk-accent) 10%, transparent);
+}
+
+/* Syntax token colors */
+.t-kw { color: var(--tui-kw); }
+.t-str { color: var(--tui-str); }
+.t-fn { color: var(--tui-fn); }
+.t-num { color: var(--tui-num); }
+.t-type { color: var(--tui-type); }
+.t-com { color: var(--tui-comment); font-style: italic; }
+.t-punct { color: var(--tui-punct); }
+.t-dim { color: var(--tui-dim); }
+
+/* search highlight */
+.d-match {
+  background: color-mix(in srgb, var(--tui-mode-search) 40%, transparent);
+  color: var(--tui-fg);
+  border-radius: 2px;
+}
+
+/* Status bar */
+.term-status {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.15rem 0.65rem;
+  font-size: 0.92em;
+  background: var(--tui-status-bg);
+  color: var(--tui-status-fg);
+}
+.term-status .mode {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.term-status .sep {
+  flex: 1;
+}
+.term-status.is-search {
+  background: var(--tui-mode-search);
+}
+.term-status.is-visual {
+  background: var(--tui-mode-visual);
+}
+
+/* Side-by-side */
+.d-split {
+  display: flex;
+}
+.d-split-col {
+  flex: 1 1 50%;
+  min-width: 0;
+}
+.d-split-col + .d-split-col {
+  border-left: 1px solid var(--tui-divider);
+}
+
+/* Command palette overlay */
+.palette-dim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, #000 45%, transparent);
+}
+.palette {
+  position: absolute;
+  left: 50%;
+  top: 12%;
+  transform: translateX(-50%);
+  width: min(85%, 30rem);
+  background: var(--tui-bg);
+  border: 1px solid var(--tui-divider);
+  border-radius: 0.5rem;
+  box-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.palette-input {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--tui-divider);
+  color: var(--tui-fg);
+}
+.palette-input .prompt {
+  color: var(--tui-hunk);
+}
+.palette-item {
+  padding: 0.35rem 0.75rem;
+  color: var(--tui-fg);
+}
+.palette-item .desc {
+  color: var(--tui-dim);
+}
+.palette-item.sel {
+  background: var(--tui-sel-bg);
+  box-shadow: inset 2px 0 0 0 var(--sk-accent);
+}
+
+/* Search input line */
+.search-line {
+  padding: 0.15rem 0.65rem;
+  color: var(--tui-fg);
+  background: var(--tui-gutter);
+  border-top: 1px solid var(--tui-divider);
+}
+.search-line .prompt {
+  color: var(--tui-mode-search);
+}
+
+/* Comment thread */
+.comment-thread {
+  margin: 0.15rem 0.4rem 0.15rem 4.9em;
+  padding: 0.3rem 0.6rem;
+  border-left: 2px solid var(--tui-comment-accent);
+  background: var(--tui-comment-bg);
+  color: var(--tui-fg);
+  border-radius: 0 0.3rem 0.3rem 0;
+  white-space: normal;
+}
+.comment-thread .who {
+  color: var(--tui-comment-accent);
+  font-weight: 600;
+}
+
+/* blinking block cursor */
+.blink {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  transform: translateY(0.18em);
+  background: var(--tui-cursor);
+}
+
+/* ============================================================
+   Sections
+   ============================================================ */
+.sk-section {
+  border-top: 1px solid var(--sk-border);
+  padding-block: clamp(3rem, 7vw, 5rem);
+}
+.sk-kicker {
+  font-family: var(--sk-font-mono);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--sk-accent);
+  margin: 0 0 0.6rem;
+}
+.sk-h2 {
+  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+  margin: 0;
+  max-width: 24ch;
+}
+.sk-section-lead {
+  margin: 1rem 0 0;
+  max-width: 46rem;
+  color: var(--sk-muted);
+  font-size: 1.05rem;
+}
+
+/* Problem → solution two-up */
+.sk-two {
+  display: grid;
+  gap: 2rem;
+  margin-top: 2.5rem;
+}
+@media (min-width: 860px) {
+  .sk-two {
+    grid-template-columns: 1fr 1fr;
+    gap: 3rem;
+    align-items: center;
+  }
+}
+.sk-prob-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--sk-border);
+}
+.sk-prob-list li {
+  display: grid;
+  grid-template-columns: 2rem 1fr;
+  gap: 0.75rem;
+  padding: 0.95rem 0;
+  border-bottom: 1px solid var(--sk-border);
+}
+.sk-prob-list .n {
+  font-family: var(--sk-font-mono);
+  color: var(--sk-dim);
+  font-size: 0.85rem;
+}
+.sk-prob-list b {
+  color: var(--sk-fg);
+}
+.sk-prob-list span.body {
+  color: var(--sk-muted);
+}
+
+/* ============================================================
+   Feature grid
+   ============================================================ */
+.sk-features {
+  display: grid;
+  gap: 1.25rem;
+  margin-top: 2.5rem;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 640px) {
+  .sk-features {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (min-width: 980px) {
+  .sk-features {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+.sk-feat {
+  border: 1px solid var(--sk-border);
+  border-radius: 0.85rem;
+  background: var(--sk-card);
+  padding: 1.35rem;
+  transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+}
+.sk-feat:hover {
+  border-color: var(--sk-border-strong);
+}
+.sk-feat h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1.02rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.sk-feat p {
+  margin: 0;
+  color: var(--sk-muted);
+  font-size: 0.92rem;
+}
+.sk-feat .kb {
+  display: inline-block;
+  font-family: var(--sk-font-mono);
+  font-size: 0.72rem;
+  color: var(--sk-accent);
+  border: 1px solid color-mix(in srgb, var(--sk-accent) 40%, var(--sk-border));
+  border-radius: 0.3rem;
+  padding: 0.05rem 0.4rem;
+  margin-bottom: 0.7rem;
+}
+
+/* ============================================================
+   Install block
+   ============================================================ */
+.sk-install {
+  text-align: center;
+}
+.sk-codeblock {
+  position: relative;
+  margin: 1.5rem auto 0;
+  max-width: 42rem;
+  text-align: left;
+  border: 1px solid var(--tui-chrome-border);
+  border-radius: 0.6rem;
+  overflow: hidden;
+  background: var(--tui-bg);
+}
+.sk-codeblock pre {
+  margin: 0;
+  padding: 1rem 1.15rem;
+  overflow-x: auto;
+  font-family: var(--sk-font-mono);
+  font-size: 0.86rem;
+  line-height: 1.7;
+  color: var(--tui-fg);
+}
+.sk-codeblock .cprompt {
+  color: var(--tui-add-fg);
+  user-select: none;
+}
+.sk-codeblock .ccomment {
+  color: var(--tui-comment);
+}
+
+/* ============================================================
+   Footer
+   ============================================================ */
+.sk-footer {
+  border-top: 1px solid var(--sk-border);
+  background: var(--sk-bg-subtle);
+}
+.sk-footer-grid {
+  display: grid;
+  gap: 2rem;
+  padding-block: 3rem;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 720px) {
+  .sk-footer-grid {
+    grid-template-columns: 2fr 1fr 1fr;
+  }
+}
+.sk-footer h4 {
+  font-family: var(--sk-font-mono);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--sk-muted);
+  margin: 0 0 0.85rem;
+}
+.sk-footer ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.sk-footer a {
+  color: var(--sk-muted);
+  font-size: 0.9rem;
+  transition: color 0.15s;
+}
+.sk-footer a:hover {
+  color: var(--sk-fg);
+}
+.sk-footer-blurb {
+  color: var(--sk-muted);
+  font-size: 0.92rem;
+  max-width: 28rem;
+  margin: 0.75rem 0 0;
+}
+.sk-footer-bottom {
+  border-top: 1px solid var(--sk-border);
+  padding-block: 1.25rem;
+  font-family: var(--sk-font-mono);
+  font-size: 0.8rem;
+  color: var(--sk-dim);
+}
+
+/* ============================================================
+   Motion — everything below only runs when motion is allowed
+   ============================================================ */
+@media (prefers-reduced-motion: no-preference) {
+  .blink {
+    animation: sk-blink 1.1s steps(1) infinite;
+  }
+  @keyframes sk-blink {
+    0%,
+    50% {
+      opacity: 1;
+    }
+    50.01%,
+    100% {
+      opacity: 0;
+    }
+  }
+  .sk-feat:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 14px 30px -18px rgba(0, 0, 0, 0.5);
+  }
+  /* feature vignette ambient/hover motion */
+  .fv-cursor {
+    transition: transform 0.3s ease;
+  }
+  .sk-feat:hover .fv-step {
+    transform: translateY(var(--fv-row, 1.4em));
+  }
+  .fv-step {
+    transition: transform 0.3s ease;
+  }
+  .sk-feat:hover .fv-reveal {
+    max-height: 3em;
+    opacity: 1;
+  }
+  .fv-reveal {
+    max-height: 0;
+    opacity: 0;
+    overflow: hidden;
+    transition:
+      max-height 0.3s ease,
+      opacity 0.3s ease;
+  }
+  .fv-pulse {
+    animation: sk-pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes sk-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+}
+
+/* ============================================================
+   Supporting mini-mockup — a small diff whose cursor line steps
+   through the four code changes on a loop (like pressing ]h).
+   ============================================================ */
+.mini {
+  max-width: 26rem;
+}
+.mini .term-body {
+  height: auto;
+  padding-bottom: 0.25rem;
+}
+.mini .d-diff {
+  height: auto;
+}
+.mini-cursor {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1.55em;
+  background: color-mix(in srgb, var(--sk-accent) 12%, transparent);
+  box-shadow: inset 2px 0 0 0 var(--sk-accent);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mini-cursor {
+    animation: sk-step 6s steps(1) infinite;
+  }
+  /* Four dwell positions over the loop; each row is 1.55em tall and the
+     first data row starts at 1.55em from the diff top (after the +/- rows
+     layout in the mini mockup). */
+  @keyframes sk-step {
+    0%,
+    22% {
+      transform: translateY(0);
+    }
+    25%,
+    47% {
+      transform: translateY(1.55em);
+    }
+    50%,
+    72% {
+      transform: translateY(4.65em);
+    }
+    75%,
+    97% {
+      transform: translateY(6.2em);
+    }
+    100% {
+      transform: translateY(0);
+    }
+  }
+}
+
+/* Reduced motion: only the first hero scene shows; JS also bails, but
+   guard here too in case JS toggles a class before the query is read. */
+@media (prefers-reduced-motion: reduce) {
+  .term-scene {
+    transition: none;
+  }
+  .mini-cursor {
+    top: 0;
+  }
+}

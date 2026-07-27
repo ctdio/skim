@@ -1,0 +1,225 @@
+---
+/**
+ * The animated hero: a hand-built CSS/HTML mockup of the Skim TUI reviewing a
+ * diff. It cross-fades through five representative moments — unified diff
+ * navigation, side-by-side view, the command palette, search, and the inline
+ * comment system — all rendered from plain markup + the `--tui-*` terminal
+ * palette (no images, no canvas). A tiny inline script rotates the active scene
+ * on a timer; it bails entirely under `prefers-reduced-motion` (leaving the
+ * first scene static) and pauses via IntersectionObserver while off-screen.
+ * Every scene is the same fixed height, so the frame never reflows.
+ */
+---
+
+<div class="sk-hero-term">
+  <div class="term-tabs" role="tablist" aria-label="Skim features">
+    <span class="term-tab" data-tab="0" aria-current="true">Diff navigation</span>
+    <span class="term-tab" data-tab="1">Side-by-side</span>
+    <span class="term-tab" data-tab="2">Command palette</span>
+    <span class="term-tab" data-tab="3">Search</span>
+    <span class="term-tab" data-tab="4">Comments</span>
+  </div>
+
+  <div class="term" data-hero-term>
+    <div class="term-chrome">
+      <div class="term-lights">
+        <span style="background:#ff5f57"></span>
+        <span style="background:#febc2e"></span>
+        <span style="background:#28c840"></span>
+      </div>
+      <span class="term-title">skim — reviewing main..feature</span>
+    </div>
+
+    <div class="term-stage" aria-live="off">
+      <!-- Scene 1 · unified diff, cursor stepping through a hunk -->
+      <div class="term-scene term-scene-flow is-active" data-scene="0" role="group" aria-label="Unified diff navigation">
+        <div class="term-body">
+          <div class="d-filehdr">▾ src/app.zig <span class="t-dim">·  2 hunks  ·  +2 −1</span></div>
+          <div class="d-diff">
+            <div class="d-row"><span class="d-gutter">40 40</span><span class="d-sign"> </span><span class="d-code">    <span class="t-kw">const</span> key = ev.key;</span></div>
+            <div class="d-row"><span class="d-gutter">41 41</span><span class="d-sign"> </span><span class="d-code">    <span class="t-kw">switch</span> (self.mode) &#123;</span></div>
+            <div class="d-row"><span class="d-gutter">42 42</span><span class="d-sign"> </span><span class="d-code">        .normal =&gt; &#123;</span></div>
+            <div class="d-row d-del"><span class="d-gutter">43   </span><span class="d-sign">−</span><span class="d-code">            <span class="t-kw">try</span> self.<span class="t-fn">moveCursor</span>(key);</span></div>
+            <div class="d-row d-add d-cursor-line"><span class="d-gutter">   43</span><span class="d-sign">+</span><span class="d-code">            <span class="t-kw">try</span> self.<span class="t-fn">handleNormalKey</span>(key);</span></div>
+            <div class="d-row d-add"><span class="d-gutter">   44</span><span class="d-sign">+</span><span class="d-code">            self.<span class="t-fn">refreshViewport</span>();</span></div>
+            <div class="d-row"><span class="d-gutter">44 45</span><span class="d-sign"> </span><span class="d-code">        &#125;,</span></div>
+            <div class="d-row"><span class="d-gutter">45 46</span><span class="d-sign"> </span><span class="d-code">        .search =&gt; <span class="t-kw">try</span> self.<span class="t-fn">runSearch</span>(key),</span></div>
+            <div class="d-row"><span class="d-gutter">46 47</span><span class="d-sign"> </span><span class="d-code">    &#125;</span></div>
+            <div class="d-row"><span class="d-gutter">47 48</span><span class="d-sign"> </span><span class="d-code">&#125;</span></div>
+          </div>
+          <div class="term-status">
+            <span class="mode">NORMAL</span>
+            <span>src/app.zig</span>
+            <span class="t-dim" style="color:rgba(255,255,255,.7)">[1/6]</span>
+            <span class="sep"></span>
+            <span>unified</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 2 · side-by-side -->
+      <div class="term-scene" data-scene="1" role="group" aria-label="Side-by-side view">
+        <div class="term-body">
+          <div class="d-filehdr">▾ src/app.zig <span class="t-dim">·  side-by-side</span></div>
+          <div class="d-diff">
+            <div class="d-split">
+              <div class="d-split-col">
+                <div class="d-row"><span class="d-gutter">41</span><span class="d-sign"> </span><span class="d-code">  <span class="t-kw">switch</span> (mode) &#123;</span></div>
+                <div class="d-row"><span class="d-gutter">42</span><span class="d-sign"> </span><span class="d-code">    .normal =&gt; &#123;</span></div>
+                <div class="d-row d-del"><span class="d-gutter">43</span><span class="d-sign">−</span><span class="d-code">      <span class="t-kw">try</span> self.<span class="t-fn">moveCursor</span>(key);</span></div>
+                <div class="d-row"><span class="d-gutter">  </span><span class="d-sign"> </span><span class="d-code"> </span></div>
+                <div class="d-row"><span class="d-gutter">44</span><span class="d-sign"> </span><span class="d-code">    &#125;,</span></div>
+                <div class="d-row"><span class="d-gutter">45</span><span class="d-sign"> </span><span class="d-code">  &#125;</span></div>
+              </div>
+              <div class="d-split-col">
+                <div class="d-row"><span class="d-gutter">41</span><span class="d-sign"> </span><span class="d-code">  <span class="t-kw">switch</span> (mode) &#123;</span></div>
+                <div class="d-row"><span class="d-gutter">42</span><span class="d-sign"> </span><span class="d-code">    .normal =&gt; &#123;</span></div>
+                <div class="d-row d-add"><span class="d-gutter">43</span><span class="d-sign">+</span><span class="d-code">      <span class="t-kw">try</span> self.<span class="t-fn">handleNormalKey</span>(key);</span></div>
+                <div class="d-row d-add"><span class="d-gutter">44</span><span class="d-sign">+</span><span class="d-code">      self.<span class="t-fn">refreshViewport</span>();</span></div>
+                <div class="d-row"><span class="d-gutter">45</span><span class="d-sign"> </span><span class="d-code">    &#125;,</span></div>
+                <div class="d-row"><span class="d-gutter">46</span><span class="d-sign"> </span><span class="d-code">  &#125;</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="term-status">
+            <span class="mode">NORMAL</span>
+            <span>src/app.zig</span>
+            <span class="sep"></span>
+            <span>press <b>s</b> · side-by-side</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 3 · command palette -->
+      <div class="term-scene" data-scene="2" role="group" aria-label="Command palette">
+        <div class="term-body">
+          <div class="d-filehdr">▾ src/parser.zig <span class="t-dim">·  unified</span></div>
+          <div class="d-diff">
+            <div class="d-row"><span class="d-gutter">12 12</span><span class="d-sign"> </span><span class="d-code">    <span class="t-kw">fn</span> <span class="t-fn">parseHunk</span>(line: []<span class="t-kw">const</span> <span class="t-type">u8</span>) &#123;</span></div>
+            <div class="d-row"><span class="d-gutter">13 13</span><span class="d-sign"> </span><span class="d-code">        <span class="t-com">// ...</span></span></div>
+            <div class="d-row"><span class="d-gutter">14 14</span><span class="d-sign"> </span><span class="d-code">    &#125;</span></div>
+            <div class="palette-dim"></div>
+            <div class="palette">
+              <div class="palette-input"><span class="prompt">&gt; </span><span class="blink"></span></div>
+              <div class="palette-item sel">Toggle View Mode <span class="desc">· unified ⇄ side-by-side</span></div>
+              <div class="palette-item">Refresh Diff <span class="desc">· reload from git</span></div>
+              <div class="palette-item">Show Help <span class="desc">· keybindings</span></div>
+              <div class="palette-item">Quit <span class="desc">· :quit</span></div>
+            </div>
+          </div>
+          <div class="term-status">
+            <span class="mode">NORMAL</span>
+            <span class="sep"></span>
+            <span><b>Ctrl-p</b> files · <b>:</b> commands</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 4 · search -->
+      <div class="term-scene" data-scene="3" role="group" aria-label="Search across the diff">
+        <div class="term-body">
+          <div class="d-filehdr">▾ src/parser.zig <span class="t-dim">·  3 matches</span></div>
+          <div class="d-diff">
+            <div class="d-row"><span class="d-gutter">10 10</span><span class="d-sign"> </span><span class="d-code">    <span class="t-kw">pub fn</span> <span class="t-fn">parse</span>(diff: []<span class="t-kw">const</span> <span class="t-type">u8</span>) &#123;</span></div>
+            <div class="d-row"><span class="d-gutter">11 11</span><span class="d-sign"> </span><span class="d-code">        <span class="t-kw">while</span> (lines.<span class="t-fn">next</span>()) |line| &#123;</span></div>
+            <div class="d-row d-add"><span class="d-gutter">   12</span><span class="d-sign">+</span><span class="d-code">            <span class="t-kw">try</span> self.<span class="d-match">parseHunk</span>(line);</span></div>
+            <div class="d-row"><span class="d-gutter">13 13</span><span class="d-sign"> </span><span class="d-code">    <span class="t-kw">fn</span> <span class="d-match">parseHunk</span>(line: []<span class="t-kw">const</span> <span class="t-type">u8</span>) &#123;</span></div>
+            <div class="d-row"><span class="d-gutter">14 14</span><span class="d-sign"> </span><span class="d-code">        <span class="t-kw">const</span> h = <span class="d-match">parseHunk</span>Header(line);</span></div>
+            <div class="d-row"><span class="d-gutter">15 15</span><span class="d-sign"> </span><span class="d-code">    &#125;</span></div>
+          </div>
+          <div class="search-line"><span class="prompt">/</span>parseHunk<span class="blink"></span></div>
+        </div>
+      </div>
+
+      <!-- Scene 5 · inline comments -->
+      <div class="term-scene" data-scene="4" role="group" aria-label="Inline comments">
+        <div class="term-body">
+          <div class="d-filehdr">▾ src/git/diff.zig <span class="t-dim">·  1 comment</span></div>
+          <div class="d-diff">
+            <div class="d-row"><span class="d-gutter">88 88</span><span class="d-sign"> </span><span class="d-code">    <span class="t-kw">const</span> path = try <span class="t-fn">allocPath</span>(a, hdr);</span></div>
+            <div class="d-row d-add d-cursor-line"><span class="d-gutter">   89</span><span class="d-sign">+</span><span class="d-code">    <span class="t-kw">const</span> mode = hdr.mode <span class="t-punct">orelse</span> <span class="t-num">0o644</span>;</span></div>
+            <div class="comment-thread">
+              <span class="who">you</span> <span class="t-dim">· line 89</span><br />
+              Guard against a null <span class="t-punct">mode</span> here — a deleted file
+              header omits it and this would panic.
+            </div>
+            <div class="d-row"><span class="d-gutter">89 90</span><span class="d-sign"> </span><span class="d-code">    <span class="t-kw">return</span> .&#123; .path = path, .mode = mode &#125;;</span></div>
+            <div class="d-row"><span class="d-gutter">90 91</span><span class="d-sign"> </span><span class="d-code">&#125;</span></div>
+          </div>
+          <div class="term-status">
+            <span class="mode">NORMAL</span>
+            <span class="sep"></span>
+            <span><b>y</b> yanked comment to clipboard · <b>Y</b> yank all</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script is:inline>
+  (() => {
+    const root = document.querySelector('[data-hero-term]');
+    if (!root) return;
+    const scenes = Array.from(root.querySelectorAll('.term-scene'));
+    const tabs = Array.from(document.querySelectorAll('.term-tab'));
+    if (scenes.length < 2) return;
+
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let index = 0;
+    let timer = 0;
+    let visible = true;
+
+    const show = (i) => {
+      index = i % scenes.length;
+      scenes.forEach((s, n) => s.classList.toggle('is-active', n === index));
+      tabs.forEach((t, n) => {
+        if (n === index) t.setAttribute('aria-current', 'true');
+        else t.removeAttribute('aria-current');
+      });
+    };
+
+    const stop = () => {
+      if (timer) {
+        window.clearInterval(timer);
+        timer = 0;
+      }
+    };
+    const start = () => {
+      if (timer || mq.matches || !visible) return;
+      timer = window.setInterval(() => show(index + 1), 3400);
+    };
+
+    // Manual control: clicking/focusing a tab jumps to its scene and restarts.
+    tabs.forEach((tab, n) => {
+      const jump = () => {
+        show(n);
+        stop();
+        start();
+      };
+      tab.setAttribute('tabindex', '0');
+      tab.setAttribute('role', 'tab');
+      tab.addEventListener('click', jump);
+      tab.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          jump();
+        }
+      });
+    });
+
+    if (mq.matches) return; // reduced motion: leave scene 1 static
+
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        visible = entry.isIntersecting;
+        if (visible) start();
+        else stop();
+      },
+      { threshold: 0.2 },
+    );
+    io.observe(root);
+    mq.addEventListener('change', () => (mq.matches ? stop() : start()));
+    start();
+  })();
+</script>
