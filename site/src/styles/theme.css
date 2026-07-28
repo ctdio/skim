@@ -236,3 +236,36 @@
 .sl-markdown-content kbd {
   font-family: var(--sk-font-mono);
 }
+
+/* ============================================================
+   Expressive Code: attach the "Copied!" success tooltip to the
+   copy button.
+   ============================================================
+   The copy control (`.copy`) is a flex row containing an empty
+   `[aria-live]` wrapper followed by the copy `<button>`; when you
+   click copy, EC appends the green `.feedback` bubble into that
+   wrapper. `.copy` ships a `gap: 0.25rem`, so the wrapper (now
+   holding the bubble) and the button sit 0.25rem apart — which,
+   on top of the bubble's own arrow margin, leaves the bubble and
+   its pointer/arrow floating a few px short of the button.
+
+   EC exposes success *color* tokens (`frames.tooltipSuccess*`, set
+   via astro.config styleOverrides) but no *positioning* token for
+   this gap, so collapse it here instead. With the gap removed, the
+   bubble's arrow tip meets the button edge (EC's arrow offset is
+   pre-tuned for the zero-gap case), so the tooltip reads as anchored
+   to the button. The success color/foreground are left to EC's
+   theme defaults, which are already legible (white on green) in both
+   light and dark. */
+.expressive-code .copy {
+  gap: 0;
+}
+
+/* With the gap gone, the bubble sits one margin-width from the button.
+   That margin (`--tooltip-arrow-size`) is exactly the room EC reserves
+   for the arrow, and EC's arrow offset lands the tip ~1px short of the
+   button edge. Trim 1px so the arrow tip meets the button with no
+   residual sub-pixel gap. */
+.expressive-code .copy .feedback {
+  margin-inline-end: calc(var(--tooltip-arrow-size) - 1px);
+}
