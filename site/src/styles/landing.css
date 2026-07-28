@@ -169,21 +169,28 @@ body.sk-landing {
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.15s;
 }
-.sk-btn-primary {
+/* The primary/ghost label colors are set with a `.sk-btn.sk-btn-*` compound
+   selector (specificity 0,2,0) so they beat `.sk-landing a { color: inherit }`
+   (0,1,1). Without the extra class the resting label inherited the page text
+   color — white-on-white on the white `--sk-fg` fill — and the button rendered
+   blank. The fill/label pair below is a maximal-contrast fg-on-bg swap that
+   clears WCAG AA in both themes at rest, hover, and focus. */
+.sk-btn.sk-btn-primary {
   background: var(--sk-fg);
   color: var(--sk-bg);
 }
-.sk-btn-primary:hover {
+.sk-btn.sk-btn-primary:hover {
   background: var(--sk-accent-hover);
   color: var(--sk-on-accent);
 }
-.sk-btn-ghost {
+.sk-btn.sk-btn-ghost {
   border-color: var(--sk-border-strong);
   color: var(--sk-fg);
 }
-.sk-btn-ghost:hover {
+.sk-btn.sk-btn-ghost:hover {
   border-color: var(--sk-accent);
   background: var(--sk-bg-subtle);
+  color: var(--sk-fg);
 }
 .sk-btn-arrow {
   width: 1.15rem;

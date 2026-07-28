@@ -61,6 +61,11 @@ export default defineConfig({
         },
       ],
       customCss: ['./src/styles/theme.css'],
+      // Override the search component to add Up/Down/Enter keyboard navigation
+      // over Pagefind's results (the stock default UI only supports Tab/click).
+      components: {
+        Search: './src/components/Search.astro',
+      },
       // The landing page is a custom full-width Astro page at `src/pages/index.astro`.
       // All Starlight docs live under the `docs/` content subtree so they serve
       // beneath `/docs/…` while `/` stays the marketing page.

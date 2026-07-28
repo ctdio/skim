@@ -1,0 +1,102 @@
+---
+// Component override for Starlight's search. It renders the stock Search
+// (Pagefind default UI) unchanged and layers keyboard navigation on top: the
+// default UI exposes results only as Tab-able links, so Up/Down + Enter don't
+// move through them. Registered via `components.Search` in astro.config.mjs.
+import Default from '@astrojs/starlight/components/Search.astro';
+---
+
+<Default {...Astro.props}><slot /></Default>
+
+<!--
+  Up/Down move a highlighted selection through the Pagefind result links and
+  Enter opens the highlighted one. Focus stays in the search input so the query
+  remains editable; selection is a virtual highlight (a data attribute styled
+  below), not DOM focus. Inlined (is:inline) so it is emitted verbatim on every
+  docs page rather than going through Astro's hoisted-script bundling.
+-->
+<script is:inline>
+  (() => {
+    const bindSearchKeyboardNav = (dialog) => {
+      if (!dialog || dialog.dataset.skNavBound) return;
+      dialog.dataset.skNavBound = 'true';
+
+      let selected = -1;
+
+      const links = () =>
+        Array.from(dialog.querySelectorAll('.pagefind-ui__result-link'));
+
+      const clear = (els) =>
+        els.forEach((el) => el.removeAttribute('data-sk-active'));
+
+      const highlight = (idx) => {
+        const els = links();
+        clear(els);
+        if (idx < 0 || idx >= els.length) {
+          selected = -1;
+          return;
+        }
+        selected = idx;
+        const el = els[idx];
+        el.setAttribute('data-sk-active', '');
+        el.scrollIntoView({ block: 'nearest' });
+      };
+
+      // Reset the selection whenever the result set changes (a new query).
+      new MutationObserver(() => {
+        selected = -1;
+      }).observe(dialog, { childList: true, subtree: true });
+
+      dialog.addEventListener('keydown', (event) => {
+        const els = links();
+        switch (event.key) {
+          case 'ArrowDown':
+            if (!els.length) return;
+            event.preventDefault();
+            highlight(selected + 1 >= els.length ? 0 : selected + 1);
+            break;
+          case 'ArrowUp':
+            if (!els.length) return;
+            event.preventDefault();
+            highlight(selected <= 0 ? els.length - 1 : selected - 1);
+            break;
+          case 'Enter': {
+            if (selected < 0 || selected >= els.length) return;
+            const href = els[selected].getAttribute('href');
+            if (!href) return;
+            event.preventDefault();
+            window.location.assign(href);
+            break;
+          }
+          default:
+            break;
+        }
+      });
+    };
+
+    const initSearchKeyboardNav = () => {
+      document
+        .querySelectorAll('site-search dialog')
+        .forEach(bindSearchKeyboardNav);
+    };
+
+    initSearchKeyboardNav();
+    // Re-bind after client-side navigations (Astro/Starlight view transitions).
+    document.addEventListener('astro:page-load', initSearchKeyboardNav);
+  })();
+</script>
+
+<style is:global>
+  @layer starlight.core {
+    /* Mirror Starlight's own hover/focus-within treatment so the keyboard
+       selection reads identically to a moused-over or tab-focused result. */
+    #starlight__search
+      .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)):has(
+        [data-sk-active]
+      ),
+    #starlight__search .pagefind-ui__result-nested:has([data-sk-active]) {
+      outline: 1px solid var(--sl-color-accent-high);
+      background-color: var(--sl-color-accent-low);
+    }
+  }
+</style>
