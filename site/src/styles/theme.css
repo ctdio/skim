@@ -65,6 +65,11 @@
   --sk-card: #101317;
   --sk-accent: #60a5fa;
   --sk-accent-strong: #3b82f6;
+  /* Primary-button hover fill + its label color. The hover fill is a step
+     darker than --sk-accent-strong so white text clears WCAG AA (white on
+     #2563eb ≈ 5.2:1; white on #3b82f6 was only ~3.7:1). */
+  --sk-accent-hover: #2563eb;
+  --sk-on-accent: #ffffff;
   --sk-add: #4ade80;
   --sk-del: #f87171;
 }
@@ -80,6 +85,9 @@
   --sk-card: #fafbfc;
   --sk-accent: #2563eb;
   --sk-accent-strong: #1d4ed8;
+  /* Hover fill already dark enough for white text (≈6.7:1). */
+  --sk-accent-hover: #1d4ed8;
+  --sk-on-accent: #ffffff;
   --sk-add: #16a34a;
   --sk-del: #dc2626;
 }
@@ -190,6 +198,8 @@
     --sk-card: #fafbfc;
     --sk-accent: #2563eb;
     --sk-accent-strong: #1d4ed8;
+    --sk-accent-hover: #1d4ed8;
+    --sk-on-accent: #ffffff;
 
     --tui-chrome-bg: #e6e6e6;
     --tui-chrome-border: #cfcfcf;

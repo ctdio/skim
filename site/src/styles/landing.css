@@ -174,8 +174,8 @@ body.sk-landing {
   color: var(--sk-bg);
 }
 .sk-btn-primary:hover {
-  background: var(--sk-accent-strong);
-  color: #fff;
+  background: var(--sk-accent-hover);
+  color: var(--sk-on-accent);
 }
 .sk-btn-ghost {
   border-color: var(--sk-border-strong);
