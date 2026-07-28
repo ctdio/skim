@@ -8,7 +8,7 @@
  * on a timer; it bails entirely under `prefers-reduced-motion` (leaving the
  * first scene static) and pauses via IntersectionObserver while off-screen.
  *
- * The frame is locked to a 2:3 portrait box (`aspect-ratio` on `.term`); the
+ * The frame is locked to a 4:3 landscape box (`aspect-ratio` on `.term`); the
  * stage flexes to fill it and every scene overfills with real code, so
  * switching tabs never resizes the box and there is never a blank gap — extra
  * rows clip at the bottom like a real terminal viewport onto a longer file.
@@ -132,7 +132,7 @@
           <div class="d-diff">
             <div class="d-split">
               <div class="d-split-col">
-                <div class="d-row"><span class="d-gutter">37</span><span class="d-sign"> </span><span class="d-code"><span class="t-kw">pub fn</span> <span class="t-fn">handleEvent</span>(self: *App, ev: Event) !<span class="t-type">void</span> &#123;</span></div>
+                <div class="d-row"><span class="d-gutter">37</span><span class="d-sign"> </span><span class="d-code"><span class="t-kw">fn</span> <span class="t-fn">handleEvent</span>(self: *App, ev: Event) !<span class="t-type">void</span> &#123;</span></div>
                 <div class="d-row"><span class="d-gutter">38</span><span class="d-sign"> </span><span class="d-code">  <span class="t-kw">const</span> key = ev.key;</span></div>
                 <div class="d-row"><span class="d-gutter">39</span><span class="d-sign"> </span><span class="d-code">  <span class="t-kw">if</span> (key.mods.ctrl <span class="t-kw">and</span> key.cp == <span class="t-str">'c'</span>) &#123;</span></div>
                 <div class="d-row"><span class="d-gutter">40</span><span class="d-sign"> </span><span class="d-code">    self.<span class="t-fn">requestQuit</span>();</span></div>
@@ -165,7 +165,7 @@
                 <div class="d-row"><span class="d-gutter">66</span><span class="d-sign"> </span><span class="d-code">&#125;</span></div>
               </div>
               <div class="d-split-col">
-                <div class="d-row"><span class="d-gutter">37</span><span class="d-sign"> </span><span class="d-code"><span class="t-kw">pub fn</span> <span class="t-fn">handleEvent</span>(self: *App, ev: Event) !<span class="t-type">void</span> &#123;</span></div>
+                <div class="d-row"><span class="d-gutter">37</span><span class="d-sign"> </span><span class="d-code"><span class="t-kw">fn</span> <span class="t-fn">handleEvent</span>(self: *App, ev: Event) !<span class="t-type">void</span> &#123;</span></div>
                 <div class="d-row"><span class="d-gutter">38</span><span class="d-sign"> </span><span class="d-code">  <span class="t-kw">const</span> key = ev.key;</span></div>
                 <div class="d-row"><span class="d-gutter">39</span><span class="d-sign"> </span><span class="d-code">  <span class="t-kw">if</span> (key.mods.ctrl <span class="t-kw">and</span> key.cp == <span class="t-str">'c'</span>) &#123;</span></div>
                 <div class="d-row"><span class="d-gutter">40</span><span class="d-sign"> </span><span class="d-code">    self.<span class="t-fn">requestQuit</span>();</span></div>

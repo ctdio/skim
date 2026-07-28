@@ -335,13 +335,14 @@ body.sk-landing {
    ============================================================ */
 .sk-hero-term {
   margin: clamp(2rem, 5vw, 3.25rem) auto 0;
-  /* Portrait frame: the 2:3 ratio makes height 1.5× the width, so cap the
-     width well below the page column — a 60rem-wide portrait box would be
-     90rem tall. ~30rem holds a tall-but-tasteful showcase (~45rem tall) at
-     desktop and shrinks to fit narrower viewports, preserving the ratio. */
-  max-width: 30rem;
+  /* Landscape frame: the 4:3 ratio makes width 1.333× the height, so the box
+     is wider than tall. At ~60rem wide it is ~45rem tall — a roomy showcase
+     that keeps the whole tab row on one line and holds the longest diff lines
+     without truncating them — and it shrinks to fit narrower viewports,
+     preserving the ratio. */
+  max-width: 60rem;
 }
-/* Lock the hero frame to a 2:3 (portrait) box: the stage flexes to fill
+/* Lock the hero frame to a 4:3 (landscape) box: the stage flexes to fill
    whatever height the ratio yields at the current width, and each scene
    overfills with real code so there is never a blank gap (surplus rows clip
    like a real terminal viewport). Scoped to the hero so the supporting
@@ -349,7 +350,7 @@ body.sk-landing {
 .sk-hero-term .term {
   display: flex;
   flex-direction: column;
-  aspect-ratio: 2 / 3;
+  aspect-ratio: 4 / 3;
 }
 .sk-hero-term .term-stage {
   flex: 1 1 auto;
@@ -409,7 +410,7 @@ body.sk-landing {
   opacity: 1;
   pointer-events: auto;
 }
-/* The stage owns its height (flex-filled from the 5:4 `.term` box), so every
+/* The stage owns its height (flex-filled from the 4:3 `.term` box), so every
    scene — including the first — overlays absolutely at the same size. Nothing
    reflows as they cross-fade. */
 .term-scene.term-scene-flow {
