@@ -1,0 +1,300 @@
+/* ============================================================
+   Skim site — shared theme tokens
+   ============================================================
+   Loaded as Starlight `customCss` (so it applies to the docs) and
+   imported by the custom landing layout. Two jobs:
+
+   1. Re-skin Starlight's `--sl-color-*` accent ramp to Skim's blue.
+   2. Define the site's own design tokens (`--sk-*`) and the
+      terminal-mockup palette (`--tui-*`) used by the hand-built
+      animated diff mockups on the landing page.
+
+   Starlight toggles `data-theme="dark" | "light"` on <html> and is
+   dark-first, so dark values live in `:root` and light values under
+   `:root[data-theme='light']`. The landing layout ships the same
+   theme bootstrap + toggle Starlight uses (localStorage key
+   `starlight-theme`), so both surfaces stay in sync. A
+   prefers-color-scheme fallback covers the pre-hydration / no-JS case.
+   ============================================================ */
+
+/* ----- Starlight accent + gray re-skin (Skim blue) ----- */
+:root {
+  --sl-color-accent-low: #10243e;
+  --sl-color-accent: #2563eb;
+  --sl-color-accent-high: #bfdbfe;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #eceef2;
+  --sl-color-gray-2: #c0c2c7;
+  --sl-color-gray-3: #888b96;
+  --sl-color-gray-4: #545861;
+  --sl-color-gray-5: #353841;
+  --sl-color-gray-6: #24272f;
+  --sl-color-black: #17181c;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #c7ddff;
+  --sl-color-accent: #2563eb;
+  --sl-color-accent-high: #1e3a8a;
+  --sl-color-white: #17181c;
+  --sl-color-gray-1: #24272f;
+  --sl-color-gray-2: #353841;
+  --sl-color-gray-3: #545861;
+  --sl-color-gray-4: #888b96;
+  --sl-color-gray-5: #c0c2c7;
+  --sl-color-gray-6: #eceef2;
+  --sl-color-gray-7: #f6f7f9;
+  --sl-color-black: #ffffff;
+}
+
+/* ============================================================
+   Site design tokens (`--sk-*`) — dark defaults
+   ============================================================ */
+:root {
+  --sk-font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --sk-font-mono: ui-monospace, 'SF Mono', 'SFMono-Regular', 'JetBrains Mono', 'Cascadia Code',
+    Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+
+  --sk-bg: #0b0d10;
+  --sk-bg-subtle: #101317;
+  --sk-fg: #f2f4f8;
+  --sk-muted: #aeb4c0;
+  --sk-dim: #6b7280;
+  --sk-border: #23272e;
+  --sk-border-strong: #333842;
+  --sk-card: #101317;
+  --sk-accent: #60a5fa;
+  --sk-accent-strong: #3b82f6;
+  /* Primary-button hover fill + its label color. The hover fill is a step
+     darker than --sk-accent-strong so white text clears WCAG AA (white on
+     #2563eb ≈ 5.2:1; white on #3b82f6 was only ~3.7:1). */
+  --sk-accent-hover: #2563eb;
+  --sk-on-accent: #ffffff;
+  --sk-add: #4ade80;
+  --sk-del: #f87171;
+}
+
+:root[data-theme='light'] {
+  --sk-bg: #ffffff;
+  --sk-bg-subtle: #f7f8fa;
+  --sk-fg: #101317;
+  --sk-muted: #4b5563;
+  --sk-dim: #8b909a;
+  --sk-border: #e4e7ec;
+  --sk-border-strong: #d0d5dd;
+  --sk-card: #fafbfc;
+  --sk-accent: #2563eb;
+  --sk-accent-strong: #1d4ed8;
+  /* Hover fill already dark enough for white text (≈6.7:1). */
+  --sk-accent-hover: #1d4ed8;
+  --sk-on-accent: #ffffff;
+  --sk-add: #16a34a;
+  --sk-del: #dc2626;
+}
+
+/* ============================================================
+   Terminal-mockup palette (`--tui-*`) — dark defaults
+   ============================================================
+   The landing page's hand-built diff mockups render a captured
+   terminal via inline color/background reading these variables, so
+   they invert with the theme for free. Dark mirrors a typical
+   dark-terminal Skim session; the light override darkens + saturates
+   the syntax accents so they stay legible on a light canvas.
+   ============================================================ */
+:root {
+  --tui-chrome-bg: #2b2b2b;
+  --tui-chrome-border: #1a1a1a;
+  --tui-chrome-title: #c7c7c7;
+
+  --tui-bg: #16181d;
+  --tui-fg: #d7dae0;
+  --tui-dim: #6b7280; /* line numbers, dim chrome */
+  --tui-divider: #2a2e35;
+  --tui-gutter: #1b1e24;
+  --tui-sel-bg: #2d3748;
+  --tui-cursor: #d7dae0;
+
+  /* Diff */
+  --tui-add-fg: #7ee2a8;
+  --tui-add-bg: #10261a;
+  --tui-add-gutter: #1b7f47;
+  --tui-del-fg: #f4a3a3;
+  --tui-del-bg: #2a1516;
+  --tui-del-gutter: #b3403f;
+  --tui-hunk: #4ec9b0; /* cyan @@ hunk headers */
+  --tui-filehdr: #6ea8fe;
+
+  /* Syntax */
+  --tui-kw: #c586c0; /* keyword / magenta */
+  --tui-str: #b5cea8; /* string / green */
+  --tui-fn: #6ea8fe; /* function / blue */
+  --tui-num: #d19a66; /* number / orange */
+  --tui-type: #4ec9b0; /* type / cyan */
+  --tui-comment: #7c8595; /* comment */
+  --tui-punct: #9aa1ab;
+
+  /* Status bar + modes */
+  --tui-status-bg: #1f6feb;
+  --tui-status-fg: #ffffff;
+  --tui-mode-search: #d19a66;
+  --tui-mode-visual: #c586c0;
+
+  /* Comment thread accent */
+  --tui-comment-accent: #d9a441;
+  --tui-comment-bg: #241f14;
+}
+
+:root[data-theme='light'] {
+  --tui-chrome-bg: #e6e6e6;
+  --tui-chrome-border: #cfcfcf;
+  --tui-chrome-title: #4a4a4a;
+
+  --tui-bg: #fbfbfc;
+  --tui-fg: #1f2328;
+  --tui-dim: #99a0aa;
+  --tui-divider: #e6e8ec;
+  --tui-gutter: #f2f3f5;
+  --tui-sel-bg: #dce6f5;
+  --tui-cursor: #1f2328;
+
+  --tui-add-fg: #116329;
+  --tui-add-bg: #e6ffec;
+  --tui-add-gutter: #2da44e;
+  --tui-del-fg: #b31d28;
+  --tui-del-bg: #ffebe9;
+  --tui-del-gutter: #cf222e;
+  --tui-hunk: #0f766e;
+  --tui-filehdr: #0a5bd3;
+
+  --tui-kw: #a21caf;
+  --tui-str: #1a7f37;
+  --tui-fn: #0a5bd3;
+  --tui-num: #b35900;
+  --tui-type: #0f766e;
+  --tui-comment: #8b909a;
+  --tui-punct: #57606a;
+
+  --tui-status-bg: #1f6feb;
+  --tui-status-fg: #ffffff;
+  --tui-mode-search: #b35900;
+  --tui-mode-visual: #a21caf;
+
+  --tui-comment-accent: #9a6a05;
+  --tui-comment-bg: #fdf6e3;
+}
+
+/* Pre-hydration / no-JS fallback: honor the OS preference when no
+   explicit data-theme is set yet. The inline bootstrap sets
+   data-theme before paint, so this only covers the JS-disabled case. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --sk-bg: #ffffff;
+    --sk-bg-subtle: #f7f8fa;
+    --sk-fg: #101317;
+    --sk-muted: #4b5563;
+    --sk-dim: #8b909a;
+    --sk-border: #e4e7ec;
+    --sk-border-strong: #d0d5dd;
+    --sk-card: #fafbfc;
+    --sk-accent: #2563eb;
+    --sk-accent-strong: #1d4ed8;
+    --sk-accent-hover: #1d4ed8;
+    --sk-on-accent: #ffffff;
+
+    --tui-chrome-bg: #e6e6e6;
+    --tui-chrome-border: #cfcfcf;
+    --tui-chrome-title: #4a4a4a;
+    --tui-bg: #fbfbfc;
+    --tui-fg: #1f2328;
+    --tui-dim: #99a0aa;
+    --tui-divider: #e6e8ec;
+    --tui-gutter: #f2f3f5;
+    --tui-sel-bg: #dce6f5;
+    --tui-cursor: #1f2328;
+    --tui-add-fg: #116329;
+    --tui-add-bg: #e6ffec;
+    --tui-add-gutter: #2da44e;
+    --tui-del-fg: #b31d28;
+    --tui-del-bg: #ffebe9;
+    --tui-del-gutter: #cf222e;
+    --tui-hunk: #0f766e;
+    --tui-filehdr: #0a5bd3;
+    --tui-kw: #a21caf;
+    --tui-str: #1a7f37;
+    --tui-fn: #0a5bd3;
+    --tui-num: #b35900;
+    --tui-type: #0f766e;
+    --tui-comment: #8b909a;
+    --tui-punct: #57606a;
+    --tui-comment-accent: #9a6a05;
+    --tui-comment-bg: #fdf6e3;
+  }
+}
+
+/* Docs: a touch more polish on the Starlight hero + cards inherited
+   from the shared accent, nothing structural. */
+.sl-markdown-content kbd {
+  font-family: var(--sk-font-mono);
+}
+
+/* ============================================================
+   Expressive Code: attach the "Copied!" success tooltip to the
+   copy button.
+   ============================================================
+   The copy control (`.copy`) is a flex row containing an empty
+   `[aria-live]` wrapper followed by the copy `<button>`; when you
+   click copy, EC appends the green `.feedback` bubble into that
+   wrapper. `.copy` ships a `gap: 0.25rem`, so the wrapper (now
+   holding the bubble) and the button sit 0.25rem apart — which,
+   on top of the bubble's own arrow margin, leaves the bubble and
+   its pointer/arrow floating a few px short of the button.
+
+   EC exposes success *color* tokens (`frames.tooltipSuccess*`, set
+   via astro.config styleOverrides) but no *positioning* token for
+   this gap, so collapse it here instead. With the gap removed, the
+   bubble's arrow tip meets the button edge (EC's arrow offset is
+   pre-tuned for the zero-gap case), so the tooltip reads as anchored
+   to the button. The success color/foreground are left to EC's
+   theme defaults, which are already legible (white on green) in both
+   light and dark. */
+.expressive-code .copy {
+  gap: 0;
+}
+
+/* With the gap gone, the bubble sits one margin-width from the button.
+   That margin (`--tooltip-arrow-size`) is exactly the room EC reserves
+   for the arrow, and EC's arrow offset lands the tip ~1px short of the
+   button edge. Trim 1px so the arrow tip meets the button with no
+   residual sub-pixel gap.
+
+   Specificity note (applies to this and the `::after` rule below): EC
+   ships its own `.expressive-code .copy .feedback…` rules, and its
+   stylesheet is injected *after* Starlight inlines this customCss — so a
+   same-specificity override loses the source-order tie and is silently
+   ignored. Chaining the always-present `.frame` ancestor (the EC
+   `<figure>` wrapping `.copy`) raises specificity above EC's selectors,
+   so these overrides win regardless of load order. */
+.expressive-code .frame .copy .feedback {
+  margin-inline-end: calc(var(--tooltip-arrow-size) - 1px);
+}
+
+/* Kill the seam / dark line where the arrow meets the bubble.
+
+   EC draws the pointer as a CSS border-triangle (`.feedback::after`):
+   `border: <arrow-size> solid transparent` with only the inline-start
+   border colored to `--tooltip-bg` (the same fill as the bubble body).
+   Its default `inset-inline-end` lands the triangle's base just 1px
+   inside the bubble. At fractional device-pixel ratios that 1px rounds
+   to zero, so the arrow's anti-aliased base abuts the bubble's edge
+   instead of overlapping it — two independently anti-aliased edges of
+   the same color meeting produce the faint darker seam.
+
+   Color already matches (both sides read `--tooltip-bg`), so the fix is
+   purely geometric: shift the arrow ~2px further into the bubble so its
+   base is solidly inside the fill regardless of sub-pixel rounding. The
+   colored base overlapping the body reads as one connected shape; the
+   tip still points outward toward the button. Works in both themes
+   because the color token is unchanged. */
+.expressive-code .frame .copy .feedback::after {
+  inset-inline-end: calc(-2 * var(--tooltip-arrow-size) + 2px);
+}

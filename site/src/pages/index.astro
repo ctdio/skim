@@ -1,0 +1,274 @@
+---
+import Landing from '../layouts/Landing.astro';
+import HeroTerminal from '../components/HeroTerminal.astro';
+import ArrowLongRight from 'astro-heroicons/outline/ArrowLongRight.astro';
+import { withBase } from '../lib/base';
+
+const docsHref = withBase('/docs/getting-started/overview');
+const buildHref = withBase('/docs/getting-started/build-from-source');
+const keybindingsHref = withBase('/docs/reference/keybindings');
+const repoHref = 'https://github.com/ctdio/skim';
+
+// Paste-friendly form of the install snippet: shell commands only — no leading
+// `$ ` prompts, no trailing `# …` inline comments — so the copy button drops a
+// runnable block onto the clipboard.
+const installCommands = [
+  'git clone https://github.com/ctdio/skim.git',
+  'cd skim',
+  'zig build -Doptimize=ReleaseFast',
+  './zig-out/bin/skim',
+].join('\n');
+
+const problems = [
+  {
+    lead: 'Diffs scroll past in a pager.',
+    body: 'Reviewing in `less` means paging through walls of text with no sense of which file you are in or what changed.',
+  },
+  {
+    lead: 'GUI tools break your flow.',
+    body: 'Opening a browser or desktop app pulls you out of the terminal and off the keyboard you already live on.',
+  },
+  {
+    lead: 'There is nowhere to take notes.',
+    body: '`git diff` gives you no way to leave a comment on a line as you read, so feedback lands in a separate window.',
+  },
+  {
+    lead: 'Navigating means re-running commands.',
+    body: 'Jump to another file, stage a change, or compare a branch and you are back at the shell retyping git invocations.',
+  },
+];
+
+const features = [
+  {
+    kb: 'hjkl · Ctrl-n/p',
+    title: 'Vim-style modal navigation',
+    body: 'Move by line, jump between files, and hop change-to-change with the motions already in your fingers.',
+  },
+  {
+    kb: 's · Tab',
+    title: 'Unified & side-by-side',
+    body: 'Toggle layouts instantly, and cycle hunk modes to show all lines, additions only, or deletions only.',
+  },
+  {
+    kb: 'async',
+    title: 'Tree-sitter highlighting',
+    body: 'Real syntax highlighting via tree-sitter, processed asynchronously so scrolling stays at 60 FPS.',
+  },
+  {
+    kb: 'Ctrl-p · :',
+    title: 'Command palette',
+    body: 'Fuzzy-jump to any file with Ctrl-p, or run commands vim-style with a colon — no menus to hunt through.',
+  },
+  {
+    kb: '/ · f t F T',
+    title: 'Search & find',
+    body: 'Smart-case search across every file in the diff, plus vim character-find to dart along a line.',
+  },
+  {
+    kb: 'Enter · y · Y',
+    title: 'Inline comments & export',
+    body: 'Leave comments on any line as you read, then yank one or all of them to the clipboard to paste anywhere.',
+  },
+  {
+    kb: 'r · B',
+    title: 'Live refresh & blame',
+    body: 'Reload the diff from git without leaving your place, and toggle git blame right in the gutter.',
+  },
+  {
+    kb: 'a · A · S',
+    title: 'Staging & Graphite',
+    body: 'Stage a file or everything from inside the TUI, and navigate stacked PRs with Graphite integration.',
+  },
+  {
+    kb: 'Ctrl-e',
+    title: 'AI agent panel',
+    body: 'A built-in agent panel over ACP, with @file fuzzy-embed — pull an agent into your review without leaving skim.',
+  },
+];
+---
+
+<Landing>
+  <!-- Hero -->
+  <section class="sk-hero">
+    <div class="sk-wrap">
+      <p class="sk-eyebrow">Built in Zig · sub-10ms startup · 60 FPS</p>
+      <h1 class="sk-h1">Review code at the speed of vim.</h1>
+      <p class="sk-lede">
+        Skim is a keyboard-driven TUI for code reviews. Navigate diffs
+        file-by-file, switch between unified and side-by-side, leave inline
+        comments, and stage changes — all without leaving the terminal.
+      </p>
+      <div class="sk-cta-row">
+        <a class="sk-btn sk-btn-primary" href={buildHref}>
+          Build from source <ArrowLongRight class="sk-btn-arrow" />
+        </a>
+        <a class="sk-btn sk-btn-ghost" href={docsHref}>Read the docs</a>
+      </div>
+    </div>
+    <div class="sk-wrap">
+      <HeroTerminal />
+    </div>
+  </section>
+
+  <!-- Problem -->
+  <section class="sk-section" aria-labelledby="problem-h">
+    <div class="sk-wrap">
+      <p class="sk-kicker">The old way</p>
+      <h2 class="sk-h2" id="problem-h">Terminal review shouldn't mean squinting at a pager.</h2>
+      <div class="sk-two">
+        <ol class="sk-prob-list">
+          {
+            problems.map((p, i) => (
+              <li>
+                <span class="n">{String(i + 1).padStart(2, '0')}</span>
+                <span class="body">
+                  <b>{p.lead}</b> {p.body}
+                </span>
+              </li>
+            ))
+          }
+        </ol>
+
+        <!-- Supporting mini-mockup: a diff whose cursor steps through changes -->
+        <div class="term mini" aria-hidden="true">
+          <div class="term-chrome">
+            <div class="term-lights">
+              <span style="background:#ff5f57"></span>
+              <span style="background:#febc2e"></span>
+              <span style="background:#28c840"></span>
+            </div>
+            <span class="term-title">skim — ]h next change</span>
+          </div>
+          <div class="term-body">
+            <div class="d-filehdr">▾ src/line_map.zig</div>
+            <div class="d-diff">
+              <div class="mini-cursor"></div>
+              <div class="d-row d-add"><span class="d-gutter">   20</span><span class="d-sign">+</span><span class="d-code"> <span class="t-kw">const</span> n = self.lines.items.len;</span></div>
+              <div class="d-row"><span class="d-gutter">21 21</span><span class="d-sign"> </span><span class="d-code"> <span class="t-kw">for</span> (self.lines.items) |ln| &#123;</span></div>
+              <div class="d-row d-del"><span class="d-gutter">22   </span><span class="d-sign">−</span><span class="d-code">   ln.<span class="t-fn">reindex</span>();</span></div>
+              <div class="d-row d-add"><span class="d-gutter">   22</span><span class="d-sign">+</span><span class="d-code">   ln.<span class="t-fn">reindex</span>(n);</span></div>
+              <div class="d-row"><span class="d-gutter">23 23</span><span class="d-sign"> </span><span class="d-code"> &#125;</span></div>
+              <div class="d-row d-add"><span class="d-gutter">   24</span><span class="d-sign">+</span><span class="d-code"> self.<span class="t-fn">dirty</span> = <span class="t-kw">false</span>;</span></div>
+              <div class="d-hunk">@@ -47,6 +48,8 @@ <span class="t-kw">fn</span> <span class="t-fn">append</span></div>
+              <div class="d-row"><span class="d-gutter">47 48</span><span class="d-sign"> </span><span class="d-code"> <span class="t-kw">pub fn</span> <span class="t-fn">append</span>(self: *<span class="t-type">LineMap</span>, ln: <span class="t-type">Line</span>) !<span class="t-type">void</span> &#123;</span></div>
+              <div class="d-row d-del"><span class="d-gutter">48   </span><span class="d-sign">−</span><span class="d-code">   self.count += <span class="t-num">1</span>;</span></div>
+              <div class="d-row d-add"><span class="d-gutter">   49</span><span class="d-sign">+</span><span class="d-code">   <span class="t-kw">try</span> self.lines.<span class="t-fn">append</span>(ln);</span></div>
+              <div class="d-row d-add"><span class="d-gutter">   50</span><span class="d-sign">+</span><span class="d-code">   self.count = self.lines.items.len;</span></div>
+              <div class="d-row"><span class="d-gutter">49 51</span><span class="d-sign"> </span><span class="d-code">   self.<span class="t-fn">dirty</span> = <span class="t-kw">true</span>;</span></div>
+              <div class="d-row"><span class="d-gutter">50 52</span><span class="d-sign"> </span><span class="d-code"> &#125;</span></div>
+            </div>
+            <div class="term-status">
+              <span class="mode">NORMAL</span>
+              <span class="sep"></span>
+              <span>press <b>]h</b> · next change</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="sk-section" aria-labelledby="features-h">
+    <div class="sk-wrap">
+      <p class="sk-kicker">What's inside</p>
+      <h2 class="sk-h2" id="features-h">Everything you reach for, on the home row.</h2>
+      <p class="sk-section-lead">
+        Skim shells out to git and respects your config, so it drops into any
+        repo. Here's what it gives you on top.
+      </p>
+      <div class="sk-features">
+        {
+          features.map((f) => (
+            <article class="sk-feat">
+              <span class="kb sk-mono">{f.kb}</span>
+              <h3>{f.title}</h3>
+              <p>{f.body}</p>
+            </article>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <!-- Install -->
+  <section class="sk-section sk-install" aria-labelledby="install-h">
+    <div class="sk-wrap">
+      <p class="sk-kicker">Get started</p>
+      <h2 class="sk-h2" id="install-h" style="margin-inline:auto">Build it in under a minute.</h2>
+      <p class="sk-section-lead" style="margin-inline:auto;text-align:center">
+        Skim needs Zig 0.15.1 and git. Clone, build, and run — the binary lands
+        at <code class="sk-mono">./zig-out/bin/skim</code>.
+      </p>
+      <div class="sk-codeblock">
+        <div class="sk-copy">
+          <span aria-live="polite"></span>
+          <button
+            type="button"
+            class="sk-copy-btn"
+            aria-label="Copy"
+            data-copied="Copied!"
+            data-code={installCommands}
+          ></button>
+        </div>
+        <pre><code><span class="cprompt">$</span> git clone https://github.com/ctdio/skim.git
+<span class="cprompt">$</span> cd skim
+<span class="cprompt">$</span> zig build -Doptimize=ReleaseFast   <span class="ccomment"># optimized binary</span>
+<span class="cprompt">$</span> ./zig-out/bin/skim                 <span class="ccomment"># review working-dir changes</span></code></pre>
+      </div>
+      <div class="sk-cta-row" style="margin-top:1.5rem">
+        <a class="sk-btn sk-btn-primary" href={buildHref}>Build from source <ArrowLongRight class="sk-btn-arrow" /></a>
+        <a class="sk-btn sk-btn-ghost" href={keybindingsHref}>See all keybindings</a>
+      </div>
+    </div>
+  </section>
+</Landing>
+
+<!-- Landing-scoped copy-on-hover for the install block. Mirrors the docs
+     (Expressive Code) UX — click the button, the runnable commands land on the
+     clipboard, and a green "Copied!" bubble confirms — without touching the
+     shared EC copy styling. -->
+<script>
+  function fallbackCopy(text: string): boolean {
+    const el = document.createElement('textarea');
+    el.value = text;
+    el.setAttribute('readonly', '');
+    el.style.position = 'absolute';
+    el.style.left = '-9999px';
+    document.body.appendChild(el);
+    el.select();
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch {
+      ok = false;
+    }
+    document.body.removeChild(el);
+    return ok;
+  }
+
+  document.querySelectorAll<HTMLButtonElement>('.sk-codeblock .sk-copy-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const code = btn.getAttribute('data-code') ?? '';
+      let ok = false;
+      try {
+        await navigator.clipboard.writeText(code);
+        ok = true;
+      } catch {
+        ok = fallbackCopy(code);
+      }
+      const live = btn.parentElement?.querySelector('[aria-live]');
+      if (!ok || !live || live.querySelector('.feedback')) return;
+
+      const bubble = document.createElement('div');
+      bubble.className = 'feedback';
+      bubble.textContent = btn.getAttribute('data-copied') ?? 'Copied!';
+      live.append(bubble);
+      // Force a reflow so the entry transition runs from the hidden state.
+      void bubble.offsetWidth;
+      requestAnimationFrame(() => bubble.classList.add('show'));
+      setTimeout(() => bubble.classList.remove('show'), 1500);
+      setTimeout(() => bubble.remove(), 2500);
+    });
+  });
+</script>
