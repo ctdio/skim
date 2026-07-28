@@ -298,6 +298,25 @@ body.sk-landing {
   margin: clamp(2rem, 5vw, 3.25rem) auto 0;
   max-width: 60rem;
 }
+/* Lock the hero frame to a 5:4 box: the stage flexes to fill whatever height
+   the ratio yields at the current width, and each scene overfills with real
+   code so there is never a blank gap (surplus rows clip like a real terminal
+   viewport). Scoped to the hero so the supporting `.mini` mockup keeps its
+   natural, content-sized height. */
+.sk-hero-term .term {
+  display: flex;
+  flex-direction: column;
+  aspect-ratio: 5 / 4;
+}
+.sk-hero-term .term-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.sk-hero-term .d-diff {
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .term-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -339,11 +358,11 @@ body.sk-landing {
   opacity: 1;
   pointer-events: auto;
 }
-/* The first scene is in normal flow so the stage takes its height; the
-   rest overlay it absolutely. All scenes are the same fixed height so
-   nothing reflows as they cross-fade. */
+/* The stage owns its height (flex-filled from the 5:4 `.term` box), so every
+   scene — including the first — overlays absolutely at the same size. Nothing
+   reflows as they cross-fade. */
 .term-scene.term-scene-flow {
-  position: relative;
+  position: absolute;
 }
 .term-body {
   height: 100%;
