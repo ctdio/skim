@@ -9,6 +9,16 @@ const buildHref = withBase('/docs/getting-started/build-from-source');
 const keybindingsHref = withBase('/docs/reference/keybindings');
 const repoHref = 'https://github.com/ctdio/skim';
 
+// Paste-friendly form of the install snippet: shell commands only — no leading
+// `$ ` prompts, no trailing `# …` inline comments — so the copy button drops a
+// runnable block onto the clipboard.
+const installCommands = [
+  'git clone https://github.com/ctdio/skim.git',
+  'cd skim',
+  'zig build -Doptimize=ReleaseFast',
+  './zig-out/bin/skim',
+].join('\n');
+
 const problems = [
   {
     lead: 'Diffs scroll past in a pager.',
@@ -139,6 +149,13 @@ const features = [
               <div class="d-row d-add"><span class="d-gutter">   22</span><span class="d-sign">+</span><span class="d-code">   ln.<span class="t-fn">reindex</span>(n);</span></div>
               <div class="d-row"><span class="d-gutter">23 23</span><span class="d-sign"> </span><span class="d-code"> &#125;</span></div>
               <div class="d-row d-add"><span class="d-gutter">   24</span><span class="d-sign">+</span><span class="d-code"> self.<span class="t-fn">dirty</span> = <span class="t-kw">false</span>;</span></div>
+              <div class="d-hunk">@@ -47,6 +48,8 @@ <span class="t-kw">fn</span> <span class="t-fn">append</span></div>
+              <div class="d-row"><span class="d-gutter">47 48</span><span class="d-sign"> </span><span class="d-code"> <span class="t-kw">pub fn</span> <span class="t-fn">append</span>(self: *<span class="t-type">LineMap</span>, ln: <span class="t-type">Line</span>) !<span class="t-type">void</span> &#123;</span></div>
+              <div class="d-row d-del"><span class="d-gutter">48   </span><span class="d-sign">−</span><span class="d-code">   self.count += <span class="t-num">1</span>;</span></div>
+              <div class="d-row d-add"><span class="d-gutter">   49</span><span class="d-sign">+</span><span class="d-code">   <span class="t-kw">try</span> self.lines.<span class="t-fn">append</span>(ln);</span></div>
+              <div class="d-row d-add"><span class="d-gutter">   50</span><span class="d-sign">+</span><span class="d-code">   self.count = self.lines.items.len;</span></div>
+              <div class="d-row"><span class="d-gutter">49 51</span><span class="d-sign"> </span><span class="d-code">   self.<span class="t-fn">dirty</span> = <span class="t-kw">true</span>;</span></div>
+              <div class="d-row"><span class="d-gutter">50 52</span><span class="d-sign"> </span><span class="d-code"> &#125;</span></div>
             </div>
             <div class="term-status">
               <span class="mode">NORMAL</span>
@@ -184,6 +201,16 @@ const features = [
         at <code class="sk-mono">./zig-out/bin/skim</code>.
       </p>
       <div class="sk-codeblock">
+        <div class="sk-copy">
+          <span aria-live="polite"></span>
+          <button
+            type="button"
+            class="sk-copy-btn"
+            aria-label="Copy"
+            data-copied="Copied!"
+            data-code={installCommands}
+          ></button>
+        </div>
         <pre><code><span class="cprompt">$</span> git clone https://github.com/ctdio/skim.git
 <span class="cprompt">$</span> cd skim
 <span class="cprompt">$</span> zig build -Doptimize=ReleaseFast   <span class="ccomment"># optimized binary</span>
@@ -196,3 +223,52 @@ const features = [
     </div>
   </section>
 </Landing>
+
+<!-- Landing-scoped copy-on-hover for the install block. Mirrors the docs
+     (Expressive Code) UX — click the button, the runnable commands land on the
+     clipboard, and a green "Copied!" bubble confirms — without touching the
+     shared EC copy styling. -->
+<script>
+  function fallbackCopy(text: string): boolean {
+    const el = document.createElement('textarea');
+    el.value = text;
+    el.setAttribute('readonly', '');
+    el.style.position = 'absolute';
+    el.style.left = '-9999px';
+    document.body.appendChild(el);
+    el.select();
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch {
+      ok = false;
+    }
+    document.body.removeChild(el);
+    return ok;
+  }
+
+  document.querySelectorAll<HTMLButtonElement>('.sk-codeblock .sk-copy-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const code = btn.getAttribute('data-code') ?? '';
+      let ok = false;
+      try {
+        await navigator.clipboard.writeText(code);
+        ok = true;
+      } catch {
+        ok = fallbackCopy(code);
+      }
+      const live = btn.parentElement?.querySelector('[aria-live]');
+      if (!ok || !live || live.querySelector('.feedback')) return;
+
+      const bubble = document.createElement('div');
+      bubble.className = 'feedback';
+      bubble.textContent = btn.getAttribute('data-copied') ?? 'Copied!';
+      live.append(bubble);
+      // Force a reflow so the entry transition runs from the hidden state.
+      void bubble.offsetWidth;
+      requestAnimationFrame(() => bubble.classList.add('show'));
+      setTimeout(() => bubble.classList.remove('show'), 1500);
+      setTimeout(() => bubble.remove(), 2500);
+    });
+  });
+</script>

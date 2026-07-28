@@ -764,7 +764,10 @@ body.sk-landing {
 }
 .sk-codeblock pre {
   margin: 0;
-  padding: 1rem 1.15rem;
+  /* Extra inline-end room so the overlaid copy button never sits on top of the
+     command text (mirrors Expressive Code padding the first line for its
+     button). */
+  padding: 1rem 3rem 1rem 1.15rem;
   overflow-x: auto;
   font-family: var(--sk-font-mono);
   font-size: 0.86rem;
@@ -777,6 +780,117 @@ body.sk-landing {
 }
 .sk-codeblock .ccomment {
   color: var(--tui-comment);
+}
+
+/* ------------------------------------------------------------
+   Copy-on-hover control for the install block.
+   ------------------------------------------------------------
+   A landing-scoped clone of the docs' Expressive Code copy button: a small
+   square button pinned top-right that fades in on hover / keyboard focus,
+   copies the runnable commands, and shows a green "Copied!" bubble. Kept
+   entirely local to the landing page (markup in `index.astro`, behavior in the
+   inline script) so it never touches the shared EC copy styling in `theme.css`.
+   The `.copy` layout mirrors EC: a flex row of an `[aria-live]` wrapper (where
+   the `.feedback` bubble is injected) followed by the button, with zero gap so
+   the bubble's arrow meets the button edge. */
+.sk-copy {
+  position: absolute;
+  inset-block-start: 0.5rem;
+  inset-inline-end: 0.5rem;
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+  /* Code is always LTR; keep the button out of the start-of-line region. */
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+/* Without JS the button does nothing, so hide it (matches EC). */
+@media (scripting: none) {
+  .sk-copy {
+    display: none;
+  }
+}
+.sk-copy-btn {
+  position: relative;
+  align-self: flex-end;
+  width: 2rem;
+  height: 2rem;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--tui-chrome-border);
+  border-radius: 0.3rem;
+  background: var(--tui-bg);
+  color: var(--tui-fg);
+  cursor: pointer;
+  /* Visible by default on touch (no-hover) devices; the hover query below
+     hides it until hover/focus when a pointer is available. */
+  opacity: 0.75;
+  transition: opacity 0.2s, background 0.2s, border-color 0.2s;
+}
+/* Copy glyph, drawn as a mask so it inherits the button's `color`. Same icon
+   geometry as Expressive Code's copy button. */
+.sk-copy-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: 0.45rem;
+  background-color: currentColor;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.75'%3E%3Cpath d='M3 19a2 2 0 0 1-1-2V2a2 2 0 0 1 1-1h13a2 2 0 0 1 2 1'/%3E%3Crect x='6' y='5' width='16' height='18' rx='1.5' ry='1.5'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.75'%3E%3Cpath d='M3 19a2 2 0 0 1-1-2V2a2 2 0 0 1 1-1h13a2 2 0 0 1 2 1'/%3E%3Crect x='6' y='5' width='16' height='18' rx='1.5' ry='1.5'/%3E%3C/svg%3E");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+@media (hover: hover) {
+  /* Hidden until the block is hovered or something inside it is focused. */
+  .sk-copy-btn {
+    opacity: 0;
+  }
+  .sk-codeblock:hover .sk-copy-btn,
+  .sk-codeblock:focus-within .sk-copy-btn {
+    opacity: 0.75;
+  }
+}
+.sk-copy-btn:hover,
+.sk-copy-btn:focus-visible {
+  opacity: 1;
+  background: var(--sk-bg-subtle);
+  border-color: var(--sk-border-strong);
+}
+/* "Copied!" confirmation bubble, injected by the inline script. Dark green
+   with white text reads clearly in both themes. */
+.sk-copy .feedback {
+  --sk-tip-arrow: 0.35rem;
+  --sk-tip-bg: #12784c;
+  align-self: center;
+  position: relative;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  margin-inline-end: var(--sk-tip-arrow);
+  padding: 0.125rem 0.6rem;
+  border-radius: 0.3rem;
+  background: var(--sk-tip-bg);
+  color: #fff;
+  font-family: var(--sk-font-mono);
+  font-size: 0.78rem;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translate3d(0, 0.25rem, 0);
+  transition: opacity 0.2s ease-in-out, transform 0.2s ease-in-out;
+}
+.sk-copy .feedback::after {
+  content: '';
+  position: absolute;
+  top: calc(50% - var(--sk-tip-arrow));
+  inset-inline-end: calc(-2 * (var(--sk-tip-arrow) - 0.5px));
+  border: var(--sk-tip-arrow) solid transparent;
+  border-inline-start-color: var(--sk-tip-bg);
+}
+.sk-copy .feedback.show {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
 }
 
 /* ============================================================
@@ -951,9 +1065,17 @@ body.sk-landing {
 .mini {
   max-width: 26rem;
 }
+/* The mini mockup lives outside `.sk-hero-term`, so it never picks up the
+   hero's `.term-stage` typography. Set the same monospace family and the
+   matching size/line-height here so the two terminals read as one family.
+   `1.55` line-height keeps each row exactly `1.55em` tall, which the
+   `.mini-cursor` step offsets below rely on. */
 .mini .term-body {
   height: auto;
   padding-bottom: 0.25rem;
+  font-family: var(--sk-font-mono);
+  font-size: clamp(0.62rem, 1.35vw, 0.86rem);
+  line-height: 1.55;
 }
 .mini .d-diff {
   height: auto;
@@ -971,27 +1093,34 @@ body.sk-landing {
 
 @media (prefers-reduced-motion: no-preference) {
   .mini-cursor {
-    animation: sk-step 6s steps(1) infinite;
+    animation: sk-step 9s steps(1) infinite;
   }
-  /* Four dwell positions over the loop; each row is 1.55em tall and the
-     first data row starts at 1.55em from the diff top (after the +/- rows
-     layout in the mini mockup). */
+  /* Five dwell positions stepping through the change lines across both hunks
+     (like repeatedly pressing `]h`). Every row — including the hunk header —
+     is exactly 1.55em tall, so an offset of N×1.55em lands on row N (0-based
+     from the diff top): row 0 (+const n), row 3 (+reindex(n)), row 5 (+dirty),
+     then across the second hunk to row 8 (−count += 1) and row 9 (+try append).
+     Ends back at 0 for a seamless loop. */
   @keyframes sk-step {
     0%,
-    22% {
+    16% {
       transform: translateY(0);
     }
-    25%,
-    47% {
-      transform: translateY(1.55em);
-    }
-    50%,
-    72% {
+    20%,
+    36% {
       transform: translateY(4.65em);
     }
-    75%,
-    97% {
-      transform: translateY(6.2em);
+    40%,
+    56% {
+      transform: translateY(7.75em);
+    }
+    60%,
+    76% {
+      transform: translateY(12.4em);
+    }
+    80%,
+    96% {
+      transform: translateY(13.95em);
     }
     100% {
       transform: translateY(0);
