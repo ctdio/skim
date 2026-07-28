@@ -265,7 +265,36 @@
    That margin (`--tooltip-arrow-size`) is exactly the room EC reserves
    for the arrow, and EC's arrow offset lands the tip ~1px short of the
    button edge. Trim 1px so the arrow tip meets the button with no
-   residual sub-pixel gap. */
-.expressive-code .copy .feedback {
+   residual sub-pixel gap.
+
+   Specificity note (applies to this and the `::after` rule below): EC
+   ships its own `.expressive-code .copy .feedback…` rules, and its
+   stylesheet is injected *after* Starlight inlines this customCss — so a
+   same-specificity override loses the source-order tie and is silently
+   ignored. Chaining the always-present `.frame` ancestor (the EC
+   `<figure>` wrapping `.copy`) raises specificity above EC's selectors,
+   so these overrides win regardless of load order. */
+.expressive-code .frame .copy .feedback {
   margin-inline-end: calc(var(--tooltip-arrow-size) - 1px);
+}
+
+/* Kill the seam / dark line where the arrow meets the bubble.
+
+   EC draws the pointer as a CSS border-triangle (`.feedback::after`):
+   `border: <arrow-size> solid transparent` with only the inline-start
+   border colored to `--tooltip-bg` (the same fill as the bubble body).
+   Its default `inset-inline-end` lands the triangle's base just 1px
+   inside the bubble. At fractional device-pixel ratios that 1px rounds
+   to zero, so the arrow's anti-aliased base abuts the bubble's edge
+   instead of overlapping it — two independently anti-aliased edges of
+   the same color meeting produce the faint darker seam.
+
+   Color already matches (both sides read `--tooltip-bg`), so the fix is
+   purely geometric: shift the arrow ~2px further into the bubble so its
+   base is solidly inside the fill regardless of sub-pixel rounding. The
+   colored base overlapping the body reads as one connected shape; the
+   tip still points outward toward the button. Works in both themes
+   because the color token is unchanged. */
+.expressive-code .frame .copy .feedback::after {
+  inset-inline-end: calc(-2 * var(--tooltip-arrow-size) + 2px);
 }
