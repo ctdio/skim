@@ -119,6 +119,45 @@ body.sk-landing {
     display: none;
   }
 }
+/* GitHub icon link — a square control sized/colored to match the theme toggle
+   sitting next to it. The compound `.sk-nav-links a.sk-icon-link` selector
+   overrides the text-link padding/color from `.sk-nav-links a` above. */
+.sk-nav-links a.sk-icon-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border: 1px solid var(--sk-border);
+  border-radius: 0.5rem;
+  background: var(--sk-bg-subtle);
+  color: var(--sk-muted);
+}
+.sk-nav-links a.sk-icon-link:hover,
+.sk-nav-links a.sk-icon-link:focus-visible {
+  color: var(--sk-fg);
+  border-color: var(--sk-border-strong);
+  background: var(--sk-bg-subtle);
+}
+.sk-icon-link svg {
+  width: 1.15rem;
+  height: 1.15rem;
+  display: block;
+}
+
+/* Screen-reader-only label (paired with an aria-hidden icon). */
+.sk-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* Theme toggle button */
 .sk-theme-toggle {
@@ -296,17 +335,21 @@ body.sk-landing {
    ============================================================ */
 .sk-hero-term {
   margin: clamp(2rem, 5vw, 3.25rem) auto 0;
-  max-width: 60rem;
+  /* Portrait frame: the 2:3 ratio makes height 1.5× the width, so cap the
+     width well below the page column — a 60rem-wide portrait box would be
+     90rem tall. ~30rem holds a tall-but-tasteful showcase (~45rem tall) at
+     desktop and shrinks to fit narrower viewports, preserving the ratio. */
+  max-width: 30rem;
 }
-/* Lock the hero frame to a 5:4 box: the stage flexes to fill whatever height
-   the ratio yields at the current width, and each scene overfills with real
-   code so there is never a blank gap (surplus rows clip like a real terminal
-   viewport). Scoped to the hero so the supporting `.mini` mockup keeps its
-   natural, content-sized height. */
+/* Lock the hero frame to a 2:3 (portrait) box: the stage flexes to fill
+   whatever height the ratio yields at the current width, and each scene
+   overfills with real code so there is never a blank gap (surplus rows clip
+   like a real terminal viewport). Scoped to the hero so the supporting
+   `.mini` mockup keeps its natural, content-sized height. */
 .sk-hero-term .term {
   display: flex;
   flex-direction: column;
-  aspect-ratio: 5 / 4;
+  aspect-ratio: 2 / 3;
 }
 .sk-hero-term .term-stage {
   flex: 1 1 auto;
@@ -316,6 +359,14 @@ body.sk-landing {
   height: auto;
   flex: 1 1 auto;
   min-height: 0;
+}
+/* The first scene's diff rows live in this inner track, which is taller than
+   the clipped `.d-diff` viewport and translates upward to scroll through the
+   hunks (see the erratic `sk-hero-scroll` keyframes under the motion query).
+   Static by default so no-JS / reduced-motion renders a readable diff from
+   the top. */
+.d-scroll {
+  will-change: transform;
 }
 .term-tabs {
   display: flex;
@@ -839,6 +890,58 @@ body.sk-landing {
       opacity: 0.35;
     }
   }
+
+  /* First hero scene: scroll the diff track through the hunks with a subtly
+     erratic cadence — read a few lines, pause, hop to the next hunk, an
+     occasional slight backtrack — as if navigating by j/k/n. The uneven stop
+     percentages (not evenly spaced) and paired keyframes (a moving segment
+     then a dwell at the same offset) produce the stop-start rhythm. Offsets
+     are in `em` so they track the responsive row height (1.55em/row), and the
+     track is much taller than the viewport so no offset reveals a blank gap.
+     Starts and ends at 0 for a seamless loop. */
+  .d-scroll {
+    animation: sk-hero-scroll 22s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+  }
+  @keyframes sk-hero-scroll {
+    0%,
+    7% {
+      transform: translateY(0);
+    }
+    /* hop down a few lines, then read */
+    11%,
+    20% {
+      transform: translateY(-3.1em);
+    }
+    /* jump toward the second hunk */
+    25%,
+    33% {
+      transform: translateY(-9.3em);
+    }
+    /* small backtrack (k) to re-read a line */
+    36%,
+    42% {
+      transform: translateY(-7.75em);
+    }
+    /* next-hunk jump (n), longer dwell */
+    47%,
+    58% {
+      transform: translateY(-15.5em);
+    }
+    /* creep further down */
+    62%,
+    70% {
+      transform: translateY(-20.15em);
+    }
+    /* reach the tail of the diff */
+    75%,
+    85% {
+      transform: translateY(-26.35em);
+    }
+    /* scroll back to the top to loop (gg) */
+    100% {
+      transform: translateY(0);
+    }
+  }
 }
 
 /* ============================================================
@@ -904,5 +1007,10 @@ body.sk-landing {
   }
   .mini-cursor {
     top: 0;
+  }
+  /* Static, readable diff: no scroll, pinned to the top. */
+  .d-scroll {
+    animation: none;
+    transform: none;
   }
 }
