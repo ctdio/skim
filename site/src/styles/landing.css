@@ -249,6 +249,11 @@ body.sk-landing {
    Terminal frame (shared by hero + vignettes)
    ============================================================ */
 .term {
+  /* The terminal frame is dropped into centered contexts (`.sk-hero` and
+     centered sections), so reset alignment here — a real terminal is
+     left-aligned. Right-aligned clusters (status bar `.sep`) and the centered
+     chrome title use flexbox, not `text-align`, so they're unaffected. */
+  text-align: left;
   border-radius: 0.7rem;
   overflow: hidden;
   border: 1px solid var(--tui-chrome-border);
