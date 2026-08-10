@@ -40,6 +40,10 @@ pub const Color = struct {
     pub const comment_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 35, 35, 35 } }; // Dark gray background for comments #232323
     pub const comment_hover_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 25, 25, 25 } }; // Very dark gray for hover state #191919
 
+    // Selected row in a list/picker - a blue-tinted lift that reads as selection
+    // while leaving per-token foreground colors legible (unlike inverse video)
+    pub const list_selected_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 30, 38, 51 } }; // #1E2633
+
     // Cursor line highlighting - slightly darker gray background
     pub const cursor_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 80, 80, 80 } }; // Darker gray #505050
     pub const cursor_fg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 255, 255, 255 } }; // White text

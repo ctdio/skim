@@ -733,7 +733,8 @@ pub const UI = struct {
     /// Full-screen PR picker. Reuses the pure PR renderer, which clears the
     /// window first, so it overlays whatever diff sat underneath.
     pub fn renderPrReviewDialog(app: *App, win: vaxis.Window) !void {
-        const rows: usize = if (win.height > 2) win.height - 2 else 0;
+        // Chrome is 4 rows: header, search, rule, and the hint footer.
+        const rows: usize = if (win.height > 4) win.height - 4 else 0;
         pr_controller.clampScroll(&app.state.pr, rows);
         pr.render.draw(win, pr_controller.view(&app.state.pr));
     }
