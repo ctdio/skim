@@ -55,16 +55,12 @@ pub const Hunk = struct {
         if (self.old_line_highlight_indices) |indices| {
             allocator.free(indices);
         }
+        // `category` is borrowed from the syntax highlighter's cached Query
+        // (freed with the highlighter), so only the arrays are owned here.
         if (self.highlights) |highlights| {
-            for (highlights) |h| {
-                allocator.free(h.category);
-            }
             allocator.free(highlights);
         }
         if (self.old_highlights) |old_highlights| {
-            for (old_highlights) |h| {
-                allocator.free(h.category);
-            }
             allocator.free(old_highlights);
         }
     }

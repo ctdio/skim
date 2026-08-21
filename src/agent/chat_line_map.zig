@@ -229,10 +229,8 @@ pub const ChatLineMap = struct {
     /// Free highlight arrays starting from index
     fn freeHighlights(self: *ChatLineMap, start_idx: usize) void {
         for (self.highlights.items[start_idx..]) |hl_array| {
-            // Free each category string in the highlight
-            for (hl_array) |h| {
-                self.allocator.free(h.category);
-            }
+            // `category` is borrowed from the syntax highlighter's cached Query,
+            // so only the array itself is owned here.
             self.allocator.free(hl_array);
         }
     }

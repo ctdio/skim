@@ -328,12 +328,9 @@ pub const SyntaxHighlighter = struct {
         self.cache.deinit();
     }
 
-    // Free highlights returned by highlightFile/highlightContent
+    // Free highlights returned by highlightFile/highlightContent.
+    // `category` is borrowed from the cached Query and must NOT be freed here.
     pub fn freeHighlights(self: *SyntaxHighlighter, highlights: []Highlight) void {
-        // Free each category string (they were duplicated during parsing)
-        for (highlights) |h| {
-            self.allocator.free(h.category);
-        }
         self.allocator.free(highlights);
     }
 
@@ -425,17 +422,14 @@ pub const SyntaxHighlighter = struct {
         const parser = ts.Parser.create();
         errdefer parser.destroy();
 
-        parser.setLanguage(ts_lang) catch {
-            parser.destroy();
-            return error.LanguageSetFailed;
-        };
+        // These paths must not destroy the parser themselves: the errdefer
+        // above already does it, and doing both is a double-free.
+        parser.setLanguage(ts_lang) catch return error.LanguageSetFailed;
 
         // Create query
         var error_offset: u32 = 0;
-        const query = ts.Query.create(ts_lang, query_str, &error_offset) catch {
-            parser.destroy();
-            return error.QueryInitFailed;
-        };
+        const query = ts.Query.create(ts_lang, query_str, &error_offset) catch return error.QueryInitFailed;
+        errdefer query.destroy();
 
         // Store in cache
         try self.cache.put(lang, .{
@@ -484,15 +478,14 @@ pub const SyntaxHighlighter = struct {
 
                 if (capture_name.len == 0) continue;
 
-                // IMPORTANT: duplicate the category string!
-                // capture_name points to memory inside the Query object,
-                // which is now cached and persists for the lifetime of SyntaxHighlighter
-                const category_copy = try self.allocator.dupe(u8, capture_name);
-
+                // Borrowed, not duplicated: capture_name points into the Query,
+                // which this cache owns and only destroys in deinit, so it
+                // outlives every Highlight derived from it. Duplicating here
+                // cost an alloc+free per capture on the hot path.
                 try highlights.append(self.allocator, .{
                     .start_byte = node.startByte(),
                     .end_byte = node.endByte(),
-                    .category = category_copy,
+                    .category = capture_name,
                 });
             }
         }

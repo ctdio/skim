@@ -245,20 +245,14 @@ fn allocTestHighlights(allocator: std.mem.Allocator, count: usize) ![]syntax.Hig
     const highlights = try allocator.alloc(syntax.Highlight, count);
     errdefer allocator.free(highlights);
 
-    var initialized: usize = 0;
-    errdefer {
-        for (highlights[0..initialized]) |highlight| {
-            allocator.free(highlight.category);
-        }
-    }
-
+    // Borrowed like real highlights: `category` points at long-lived memory
+    // (here a literal, in production the cached Query) and is never freed.
     for (highlights, 0..) |*highlight, idx| {
         highlight.* = .{
             .start_byte = idx,
             .end_byte = idx + 1,
-            .category = try allocator.dupe(u8, "keyword"),
+            .category = "keyword",
         };
-        initialized += 1;
     }
 
     return highlights;
