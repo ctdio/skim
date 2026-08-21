@@ -62,11 +62,16 @@ pub fn getBlame(allocator: Allocator, file_path: []const u8, ref: ?[]const u8) !
 
     try child.spawn();
 
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 50 * 1024 * 1024); // 50MB limit
-    errdefer allocator.free(stdout);
+    // Drain both pipes concurrently; a sequential stdout-then-stderr read
+    // deadlocks once the child fills the stderr pipe buffer.
+    var stdout_buf: std.ArrayList(u8) = .{};
+    defer stdout_buf.deinit(allocator);
+    var stderr_buf: std.ArrayList(u8) = .{};
+    defer stderr_buf.deinit(allocator);
+    try child.collectOutput(allocator, &stdout_buf, &stderr_buf, 50 * 1024 * 1024);
 
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, 1 * 1024 * 1024);
-    defer allocator.free(stderr);
+    const stdout = try allocator.dupe(u8, stdout_buf.items);
+    errdefer allocator.free(stdout);
 
     const term = try child.wait();
 

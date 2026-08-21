@@ -143,13 +143,18 @@ fn runGitCommand(allocator: Allocator, args: []const []const u8) ![]u8 {
 
     try child.spawn();
 
-    // Read stdout
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 100 * 1024 * 1024); // 100MB limit
-    errdefer allocator.free(stdout);
+    // Both pipes must be drained concurrently: reading stdout to EOF first
+    // deadlocks if the child fills the ~64KB stderr pipe buffer meanwhile,
+    // because it then blocks on write(stderr) and never closes stdout.
+    var stdout_buf: std.ArrayList(u8) = .{};
+    defer stdout_buf.deinit(allocator);
+    var stderr_buf: std.ArrayList(u8) = .{};
+    defer stderr_buf.deinit(allocator);
+    try child.collectOutput(allocator, &stdout_buf, &stderr_buf, 100 * 1024 * 1024);
 
-    // Read stderr (for error messages)
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, 1 * 1024 * 1024);
-    defer allocator.free(stderr);
+    const stdout = try allocator.dupe(u8, stdout_buf.items);
+    errdefer allocator.free(stdout);
+    const stderr = stderr_buf.items;
 
     const term = try child.wait();
 
@@ -480,12 +485,16 @@ pub fn getUntrackedFileDiff(allocator: Allocator, file_path: []const u8) ![]u8 {
 
     try child.spawn();
 
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 100 * 1024 * 1024);
-    errdefer allocator.free(stdout);
+    // Drain both pipes concurrently — see runGitCommand for why sequential
+    // stdout-then-stderr reads can deadlock.
+    var stdout_buf: std.ArrayList(u8) = .{};
+    defer stdout_buf.deinit(allocator);
+    var stderr_buf: std.ArrayList(u8) = .{};
+    defer stderr_buf.deinit(allocator);
+    try child.collectOutput(allocator, &stdout_buf, &stderr_buf, 100 * 1024 * 1024);
 
-    // Consume stderr but ignore it
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, 1 * 1024 * 1024);
-    defer allocator.free(stderr);
+    const stdout = try allocator.dupe(u8, stdout_buf.items);
+    errdefer allocator.free(stdout);
 
     const term = try child.wait();
 
