@@ -91,10 +91,14 @@ fn renderStdinDiff(allocator: Allocator, content: []const u8, max_lines: ?usize,
     defer allocator.free(clean_text);
 
     const files = try parser.parse(allocator, clean_text);
-    defer {
+    // Owned here only until it is handed to `app` below; from that point `app`
+    // is the sole owner and this cleanup must not also run, or any failure
+    // between the handoff and the end of this function double-frees.
+    var files_owned_here = true;
+    defer if (files_owned_here) {
         for (files) |*file| file.deinit(allocator);
         allocator.free(files);
-    }
+    };
 
     if (files.len == 0) {
         std.debug.print("No changes\n", .{});
@@ -111,18 +115,18 @@ fn renderStdinDiff(allocator: Allocator, content: []const u8, max_lines: ?usize,
     for (app.state.files) |*file| file.deinit(allocator);
     allocator.free(app.state.files);
 
-    // Assign our files
+    // Assign our files; `app.deinit()` owns them from here on.
     app.state.files = files;
+    files_owned_here = false;
 
-    // Rebuild line map
-    app.state.line_map.deinit();
+    // Rebuild line map. Build first and swap after, so a failure here leaves
+    // the existing map intact rather than deinit'd-then-dangling for app.deinit().
     const line_map_mod = @import("../line_map.zig");
-    app.state.line_map = try line_map_mod.LineMap.build(allocator, files, &app.state.comment_store, .all, true, &app.state.collapsed_folds, null);
+    const rebuilt = try line_map_mod.LineMap.build(allocator, files, &app.state.comment_store, .all, true, &app.state.collapsed_folds, null);
+    app.state.line_map.deinit();
+    app.state.line_map = rebuilt;
 
     try renderAndOutput(allocator, &app, max_lines, width);
-
-    // Prevent double-free - mark as stolen
-    app.state.files = &[_]parser.FileDiff{};
 }
 
 fn renderAndOutput(allocator: Allocator, app: *App, max_diff_lines: ?usize, width: u16) !void {
@@ -142,6 +146,17 @@ fn renderAndOutput(allocator: Allocator, app: *App, max_diff_lines: ?usize, widt
     const truncated = total_diff_lines > (max_diff_lines orelse total_diff_lines);
 
     const height: u16 = @intCast(@min(lines_to_render, 10000));
+
+    // Print renders the whole diff as ONE frame, so the frame scratch buffer
+    // must hold every row's text at once — the TUI's fixed 256 KiB is sized for
+    // a single viewport and overflows here, failing the command with no output.
+    // Worst case is 4 UTF-8 bytes per cell, plus slack for per-row decoration.
+    const needed_frame_bytes = @as(usize, height) * @as(usize, width) * 4 + 256 * 1024;
+    if (needed_frame_bytes > app.frame_text_buffer.len) {
+        const grown = try app.allocator.realloc(app.frame_text_buffer, needed_frame_bytes);
+        app.frame_text_buffer = grown;
+        app.frame_text_used = 0;
+    }
 
     // Create test context (mock vaxis screen)
     var ctx = try harness.createTestContext(allocator, width, height);
