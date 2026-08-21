@@ -49,6 +49,13 @@ pub const Blame = struct {
     pending_mutex: std.Thread.Mutex,
     pending_ready: std.atomic.Value(bool),
     requests_in_flight: std.StringHashMapUnmanaged(void),
+    /// Blame workers are detached, so `deinit` cannot join them. It waits on
+    /// this count instead: a worker dereferences the controller (mutex, pending
+    /// results) after it finishes, so tearing the controller down while any are
+    /// outstanding is a use-after-free.
+    outstanding: usize,
+    outstanding_mutex: std.Thread.Mutex,
+    outstanding_done: std.Thread.Condition,
 
     pub fn init(allocator: Allocator) Blame {
         return .{
@@ -58,10 +65,21 @@ pub const Blame = struct {
             .pending_mutex = .{},
             .pending_ready = std.atomic.Value(bool).init(false),
             .requests_in_flight = .{},
+            .outstanding = 0,
+            .outstanding_mutex = .{},
+            .outstanding_done = .{},
         };
     }
 
     pub fn deinit(self: *Blame) void {
+        if (!self.waitForWorkers()) {
+            // A worker is still live and holds a pointer to this struct.
+            // Freeing now would be a use-after-free; the process is on its way
+            // out, so intentionally leak instead.
+            std.log.warn("blame worker still running at shutdown; skipping teardown to avoid use-after-free", .{});
+            return;
+        }
+
         var cache_iter = self.cache.iterator();
         while (cache_iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -89,6 +107,36 @@ pub const Blame = struct {
     pub fn getForLine(self: *const Blame, file_path: []const u8, lineno: u32) ?*const blame.BlameLine {
         const data = self.cache.get(file_path) orelse return null;
         return data.getLine(lineno);
+    }
+
+    fn workerStarted(self: *Blame) void {
+        self.outstanding_mutex.lock();
+        defer self.outstanding_mutex.unlock();
+        self.outstanding += 1;
+    }
+
+    fn workerFinished(self: *Blame) void {
+        self.outstanding_mutex.lock();
+        defer self.outstanding_mutex.unlock();
+        self.outstanding -= 1;
+        if (self.outstanding == 0) self.outstanding_done.broadcast();
+    }
+
+    /// Waits until every detached blame worker has stopped touching `self`.
+    /// Returns false if they did not all finish in time — a wedged `git blame`
+    /// must not hang quit, so the caller leaks instead of freeing under them.
+    fn waitForWorkers(self: *Blame) bool {
+        const deadline_ns: u64 = 2 * std.time.ns_per_s;
+        var timer = std.time.Timer.start() catch null;
+
+        self.outstanding_mutex.lock();
+        defer self.outstanding_mutex.unlock();
+        while (self.outstanding != 0) {
+            const elapsed = if (timer) |*t| t.read() else deadline_ns;
+            if (elapsed >= deadline_ns) return false;
+            self.outstanding_done.timedWait(&self.outstanding_mutex, deadline_ns - elapsed) catch return self.outstanding == 0;
+        }
+        return true;
     }
 };
 
@@ -200,6 +248,11 @@ fn startAsyncBlameFetch(self: *Blame, file_path: []const u8) !void {
     };
     errdefer ctx.deinit();
 
+    // Registered before the spawn so deinit can never observe a gap between
+    // "thread exists" and "thread counted".
+    self.workerStarted();
+    errdefer self.workerFinished();
+
     const thread = try std.Thread.spawn(.{}, blameFetchWorker, .{ctx});
     thread.detach();
 }
@@ -224,12 +277,16 @@ fn blameFetchWorker(ctx: *BlameFetchContext) void {
             owned_data.deinit();
         }
         ctx.deinit();
+        // Must be the last touch of `controller`: deinit may free it the
+        // instant the count reaches zero.
+        controller.workerFinished();
         return;
     };
     controller.pending_mutex.unlock();
     controller.pending_ready.store(true, .release);
 
     std.heap.c_allocator.destroy(ctx);
+    controller.workerFinished();
 }
 
 fn drainPending(self: *Blame) void {
