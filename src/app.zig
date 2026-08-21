@@ -1526,11 +1526,9 @@ pub const App = struct {
         const vx = &(self.vx orelse return error.HeadlessMode);
         const writer = tty.writer();
 
-        try vx.enterAltScreen(writer);
-
-        // Query terminal capabilities (50ms timeout - enough for modern terminals)
-        try vx.queryTerminal(writer, 50 * std.time.ns_per_ms);
-
+        // The event loop's reader thread must be running before queryTerminal:
+        // vaxis only wakes the query futex from that thread (on the DA1 reply),
+        // so querying first would block for the full timeout every launch.
         var loop: vaxis.Loop(Event) = .{
             .tty = tty,
             .vaxis = vx,
@@ -1538,6 +1536,17 @@ pub const App = struct {
         try loop.init();
         try loop.start();
         defer loop.stop();
+
+        try vx.enterAltScreen(writer);
+
+        // Kick off the streaming diff load before the capability query so git
+        // runs concurrently with the round-trip instead of after it. Safe here
+        // and not in init(): init returns App by value, so the worker's
+        // *DiffLoad only has a stable address once run() is executing.
+        diff_loader.startIfRequested(&self.state.diff_load, self.allocator, self.state.diff_source);
+
+        // Query terminal capabilities (50ms timeout - enough for modern terminals)
+        try vx.queryTerminal(writer, 50 * std.time.ns_per_ms);
 
         // Enable mouse reporting so the wheel can scroll the diff and panels.
         // vaxis disables it automatically on deinit.
@@ -1596,10 +1605,6 @@ pub const App = struct {
                 };
             }
         }
-
-        // Start the streaming diff load now that the App has a stable address
-        // (init returns App by value, so the worker's *DiffLoad must point here).
-        diff_loader.startIfRequested(&self.state.diff_load, self.allocator, self.state.diff_source);
 
         var first_render = true;
         var last_shimmer_render: i64 = 0;
