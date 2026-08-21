@@ -3202,20 +3202,8 @@ pub const App = struct {
     pub fn switchDiffMode(self: *App, mode: command_palette.DiffMode) !void {
         if (!try self.ensureGitRepositoryContext()) return;
 
-        // Free old diff_source if needed
-        switch (self.state.diff_source) {
-            .working_dir, .stdin => {},
-            .single_ref => |sr| {
-                self.allocator.free(sr.ref);
-            },
-            .two_refs => |tr| {
-                self.allocator.free(tr.ref1);
-                self.allocator.free(tr.ref2);
-            },
-        }
-
         // Update diff_source based on mode
-        self.state.diff_source = switch (mode) {
+        const new_source: DiffSource = switch (mode) {
             .working => DiffSource{ .working_dir = .{ .staged = false } },
             .staged => DiffSource{ .working_dir = .{ .staged = true } },
             .main => blk: {
@@ -3233,6 +3221,22 @@ pub const App = struct {
                 } };
             },
         };
+
+        // An in-flight loader borrows the old source's ref strings (it does not
+        // copy them), and it is only joined inside refresh(). Freeing them here
+        // would pull them out from under the worker mid-stream, so hold them
+        // until refresh() has returned.
+        const old_source = self.state.diff_source;
+        defer switch (old_source) {
+            .working_dir, .stdin => {},
+            .single_ref => |sr| self.allocator.free(sr.ref),
+            .two_refs => |tr| {
+                self.allocator.free(tr.ref1);
+                self.allocator.free(tr.ref2);
+            },
+        };
+
+        self.state.diff_source = new_source;
 
         // Refresh to load new diff
         self.state.pager_mode = false;
