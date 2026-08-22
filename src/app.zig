@@ -3716,19 +3716,30 @@ fn initPagerModeAppFromWorkingDiff(allocator: Allocator) !App {
     return App.initForRenderBench(allocator, files);
 }
 
-/// Sleeps for up to `max_ms`, waking as soon as the tty reader thread queues an
-/// event. Background work (highlighting, agent polling, diff loading) keeps the
-/// loop off the blocking `pollEvent` path; sleeping the full interval there adds
-/// up to a frame of latency to every keystroke, which is exactly when scrolling
-/// a freshly-opened diff feels sluggish.
+/// Waits up to `max_ms` for the tty reader thread to queue an event, returning
+/// immediately once one lands. This is `Queue.poll` with a deadline.
+///
+/// The loop only reaches here when something needs polling on a timer, which in
+/// practice is always: `should_poll` requires `!server_active`, and the TUI
+/// server starts unconditionally. Sleeping the interval out unconditionally
+/// therefore added its full duration to the latency of every keystroke, and
+/// polling for it in short naps would burn a wakeup per nap. Blocking on the
+/// queue's own condition variable costs one wakeup and no added latency.
 fn sleepUntilInput(queue: anytype, max_ms: u64) void {
-    const slice_ns = 1 * std.time.ns_per_ms;
-    var remaining_ns = max_ms * std.time.ns_per_ms;
-    while (remaining_ns > 0) {
-        if (!queue.isEmpty()) return;
-        const nap_ns = @min(slice_ns, remaining_ns);
-        std.Thread.sleep(nap_ns);
-        remaining_ns -= nap_ns;
+    const budget_ns = max_ms * std.time.ns_per_ms;
+    var timer = std.time.Timer.start() catch {
+        std.Thread.sleep(budget_ns);
+        return;
+    };
+
+    queue.mutex.lock();
+    defer queue.mutex.unlock();
+    // Mirrors Queue.isEmptyLH, which is private. Waiting (rather than popping)
+    // leaves the event for the caller's tryEvent drain, like Queue.poll.
+    while (queue.write_index == queue.read_index) {
+        const elapsed_ns = timer.read();
+        if (elapsed_ns >= budget_ns) return;
+        queue.not_empty.timedWait(&queue.mutex, budget_ns - elapsed_ns) catch return;
     }
 }
 

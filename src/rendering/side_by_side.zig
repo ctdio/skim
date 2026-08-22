@@ -84,16 +84,12 @@ pub const SideBySideRenderer = struct {
             // file headers, and review threads (thread blocks are full-width and
             // draw their own left border, like comment boxes).
             if (record.line_type != .spacer and record.line_type != .file_header and record.line_type != .review_thread) {
-                var left_seg = [_]vaxis.Cell.Segment{.{
-                    .text = "┃",
+                cells.fillGlyph(win, "┃", .{ .col = 0, .row = @intCast(row), .style = sidebar_style });
+                cells.fillGlyph(win, FrameChars.vertical, .{
+                    .col = @intCast(middle_col),
+                    .row = @intCast(row),
                     .style = sidebar_style,
-                }};
-                _ = cells.print(win, &left_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
-                var middle_seg = [_]vaxis.Cell.Segment{.{
-                    .text = FrameChars.vertical,
-                    .style = sidebar_style,
-                }};
-                _ = cells.print(win, &middle_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(middle_col) });
+                });
             }
 
             // Render based on line type
@@ -692,7 +688,7 @@ pub const SideBySideRenderer = struct {
                         .{ .fg = Color.gray_234, .bg = Color.cursor_bg }
                     else
                         .{ .fg = Color.gray_234 };
-                    try renderDiagonalFill(app, win, current_row, right_col + gutter_width + Layout.gutter_spacing, right_width, fill_style);
+                    renderDiagonalFill(win, current_row, right_col + gutter_width + Layout.gutter_spacing, right_width, fill_style);
 
                     byte_offset_in_content += chunk.len;
                     current_row += 1;
@@ -724,7 +720,7 @@ pub const SideBySideRenderer = struct {
                         .{ .fg = Color.gray_234, .bg = Color.cursor_bg }
                     else
                         .{ .fg = Color.gray_234 };
-                    try renderDiagonalFill(app, win, current_row, 1 + gutter_width + Layout.gutter_spacing, left_width, left_fill_style);
+                    renderDiagonalFill(win, current_row, 1 + gutter_width + Layout.gutter_spacing, left_width, left_fill_style);
 
                     // Render right side
                     try RenderUtils.renderGutterAtColumn(app, win, current_row, right_col, is_cursor, is_in_visual, show_lineno, line.new_lineno, line.line_type, gutter_width);
@@ -1178,24 +1174,12 @@ pub const SideBySideRenderer = struct {
     }
 
     /// Render diagonal fill pattern using Unicode box drawing diagonal character
-    fn renderDiagonalFill(app: *App, win: vaxis.Window, row: usize, col: usize, width: usize, style: vaxis.Style) !void {
-        if (width == 0) return;
-
-        // Build string of diagonal characters (╱ is 3 bytes in UTF-8)
-        const diagonal = "╱";
-        const diagonal_len = diagonal.len; // 3 bytes
-        const total_bytes = width * diagonal_len;
-
-        const fill_pattern = try RenderUtils.frameTextSlice(app, total_bytes);
-        var i: usize = 0;
-        while (i < width) : (i += 1) {
-            @memcpy(fill_pattern[i * diagonal_len ..][0..diagonal_len], diagonal);
-        }
-
-        var fill_seg = [_]vaxis.Cell.Segment{.{
-            .text = fill_pattern,
+    fn renderDiagonalFill(win: vaxis.Window, row: usize, col: usize, width: usize, style: vaxis.Style) void {
+        cells.fillGlyph(win, "╱", .{
+            .col = @intCast(col),
+            .row = @intCast(row),
+            .count = @intCast(width),
             .style = style,
-        }};
-        _ = cells.print(win, &fill_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
+        });
     }
 };

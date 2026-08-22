@@ -23,6 +23,11 @@ pub fn gwidth(str: []const u8) u16 {
 /// Calculate the display width of a UTF-8 string in terminal cells, accounting
 /// for wide characters (emoji, CJK) that take 2 terminal cells.
 pub fn displayWidth(text: []const u8) usize {
+    // Printable ASCII is one cell per byte. Diff content is overwhelmingly
+    // ASCII and side-by-side calls this once per visible line for its wrap
+    // math, so skipping the per-codepoint `gwidth` calls below matters.
+    if (isPrintableAscii(text)) return text.len;
+
     var width: usize = 0;
     var byte_pos: usize = 0;
 
@@ -162,6 +167,19 @@ fn wrapSegment(text: []const u8, byte_start: usize, max_width: usize) WrapSegmen
     return .{ .seg_end = seg_end, .next_start = next_start, .done = false };
 }
 
+test "displayWidth: ascii fast path agrees with the per-codepoint measurement" {
+    try std.testing.expectEqual(@as(usize, 0), displayWidth(""));
+    try std.testing.expectEqual(@as(usize, 17), displayWidth("const value = 42;"));
+    // Tab is a control byte, so it falls to the per-codepoint path where
+    // gwidth reports 0 — same as before the fast path existed.
+    try std.testing.expectEqual(@as(usize, 0), displayWidth("\t"));
+}
+
+test "displayWidth: non-ascii still measures wide characters" {
+    try std.testing.expectEqual(@as(usize, 4), displayWidth("日本"));
+    try std.testing.expectEqual(@as(usize, 6), displayWidth("ab日本"));
+}
+
 test "wrapText: wide grapheme wider than max_width makes forward progress" {
     // A 2-cell emoji at max_width == 1 makes sliceByDisplayWidth return an empty
     // chunk. Without a forward-progress guard the iterator loops forever; this
@@ -187,6 +205,15 @@ fn ensureData() ?*const DisplayWidth {
         return null;
     };
     return &width_data.?;
+}
+
+/// True when every byte is a printable ASCII character, so the string occupies
+/// exactly `len` cells. Matches the fast-path scan in `sliceByDisplayWidth`.
+fn isPrintableAscii(text: []const u8) bool {
+    for (text) |byte| {
+        if (byte < 0x20 or byte >= 0x7f) return false;
+    }
+    return true;
 }
 
 fn fallbackWidth(str: []const u8) u16 {

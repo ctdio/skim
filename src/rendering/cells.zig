@@ -6,6 +6,15 @@ const Segment = vaxis.Cell.Segment;
 const PrintOptions = Window.PrintOptions;
 const PrintResult = Window.PrintResult;
 
+/// Placement for `fillGlyph`, mirroring the shape of `PrintOptions`.
+pub const GlyphOptions = struct {
+    col: u16,
+    row: u16,
+    /// Number of consecutive cells to fill, clipped to the window width.
+    count: u16 = 1,
+    style: vaxis.Cell.Style = .{},
+};
+
 /// Drop-in replacement for `vaxis.Window.print` that skips the grapheme
 /// iterator and the Unicode width tables when every segment is printable ASCII
 /// — which covers nearly all diff content plus every background-padding run.
@@ -29,6 +38,31 @@ pub fn print(win: Window, segments: []const Segment, opts: PrintOptions) PrintRe
 /// Convenience wrapper mirroring `vaxis.Window.printSegment`.
 pub fn printSegment(win: Window, segment: Segment, opts: PrintOptions) PrintResult {
     return print(win, &.{segment}, opts);
+}
+
+/// Writes a horizontal run of one single-width glyph, skipping the width
+/// machinery entirely. `print` cannot help here: borders, dividers, and the
+/// side-by-side diagonal fill are all non-ASCII, so they take the `win.print`
+/// fallback and pay a grapheme-break pass plus a `DisplayWidth` lookup for
+/// every cell — for the diagonal fill, across half the terminal on every
+/// changed row.
+///
+/// The caller asserts the glyph occupies exactly one cell. Anything wider (CJK,
+/// emoji) must go through `print`, which measures it.
+pub fn fillGlyph(win: Window, grapheme: []const u8, opts: GlyphOptions) void {
+    if (opts.count == 0 or opts.row >= win.height or opts.col >= win.width) return;
+
+    const end = @min(opts.col +| opts.count, win.width);
+    var col = opts.col;
+    while (col < end) : (col += 1) {
+        win.writeCell(col, opts.row, .{
+            .char = .{ .grapheme = grapheme, .width = 1 },
+            .style = opts.style,
+            // Mirrors the `.grapheme` branch of `vaxis.Window.print`, which
+            // these call sites used before.
+            .wrapped = col + 1 >= win.width,
+        });
+    }
 }
 
 /// Mirrors the `.grapheme`/`.none` branches of `vaxis.Window.print` byte for
@@ -122,6 +156,25 @@ const TestScreens = struct {
         };
     }
 
+    /// Prints `segments` into a child window of both screens, so the
+    /// window-to-screen offset translation in `writeRun` is exercised rather
+    /// than the degenerate zero-offset case.
+    fn expectChildMatches(
+        self: *TestScreens,
+        child: vaxis.Window.ChildOptions,
+        segments: []const Segment,
+        opts: PrintOptions,
+    ) !void {
+        const expected = self.window(&self.reference).child(child).print(segments, opts);
+        const actual = print(self.window(&self.fast).child(child), segments, opts);
+
+        try std.testing.expectEqual(expected.row, actual.row);
+        try std.testing.expectEqual(expected.col, actual.col);
+        try std.testing.expectEqual(expected.overflow, actual.overflow);
+
+        try self.expectCellsMatch();
+    }
+
     /// Prints `segments` through both `vaxis.Window.print` and `cells.print`,
     /// then asserts the results and every screen cell match.
     fn expectMatches(self: *TestScreens, segments: []const Segment, opts: PrintOptions) !void {
@@ -132,6 +185,11 @@ const TestScreens = struct {
         try std.testing.expectEqual(expected.col, actual.col);
         try std.testing.expectEqual(expected.overflow, actual.overflow);
 
+        try self.expectCellsMatch();
+    }
+
+    /// Asserts every cell of the two screens is identical.
+    fn expectCellsMatch(self: *TestScreens) !void {
         for (self.reference.buf, self.fast.buf) |ref_cell, fast_cell| {
             try std.testing.expectEqualStrings(ref_cell.char.grapheme, fast_cell.char.grapheme);
             try std.testing.expectEqual(ref_cell.char.width, fast_cell.char.width);
@@ -244,6 +302,124 @@ test "print: matches vaxis for a long padded ascii run" {
         .{ .text = "+added line" },
         .{ .text = "                                                       ", .style = .{ .bg = .{ .index = 2 } } },
     }, .{});
+}
+
+test "print: matches vaxis inside an offset child window" {
+    var screens = try TestScreens.init(std.testing.allocator, 24, 6);
+    defer screens.deinit();
+
+    try screens.expectChildMatches(
+        .{ .x_off = 5, .y_off = 2, .width = 10, .height = 3 },
+        &.{.{ .text = "hello world", .style = .{ .fg = .{ .index = 5 } } }},
+        .{},
+    );
+}
+
+test "print: matches vaxis when a child window clips the run at its right edge" {
+    var screens = try TestScreens.init(std.testing.allocator, 24, 6);
+    defer screens.deinit();
+
+    try screens.expectChildMatches(
+        .{ .x_off = 18, .y_off = 1, .width = 6, .height = 2 },
+        &.{.{ .text = "abcdefghijkl" }},
+        .{},
+    );
+}
+
+test "print: matches vaxis when a child window clips the run at its bottom edge" {
+    var screens = try TestScreens.init(std.testing.allocator, 12, 6);
+    defer screens.deinit();
+
+    try screens.expectChildMatches(
+        .{ .x_off = 2, .y_off = 4, .width = 4, .height = 2 },
+        &.{.{ .text = "abcdefghijklmnop" }},
+        .{},
+    );
+}
+
+test "print: matches vaxis in a child window with wrap none" {
+    var screens = try TestScreens.init(std.testing.allocator, 24, 6);
+    defer screens.deinit();
+
+    try screens.expectChildMatches(
+        .{ .x_off = 6, .y_off = 3, .width = 5, .height = 2 },
+        &.{.{ .text = "truncate" }},
+        .{ .wrap = .none },
+    );
+}
+
+test "print: matches vaxis in a negatively offset child window" {
+    var screens = try TestScreens.init(std.testing.allocator, 20, 5);
+    defer screens.deinit();
+
+    // Negative offsets take writeRun's fallback branch, where vaxis's per-cell
+    // sign checks do the clipping.
+    try screens.expectChildMatches(
+        .{ .x_off = -3, .y_off = -1, .width = 10, .height = 4 },
+        &.{.{ .text = "clipped left edge" }},
+        .{},
+    );
+}
+
+test "fillGlyph: matches vaxis for a run of a box-drawing glyph" {
+    var screens = try TestScreens.init(std.testing.allocator, 20, 4);
+    defer screens.deinit();
+
+    _ = screens.window(&screens.reference).print(
+        &.{.{ .text = "╱╱╱╱╱╱", .style = .{ .fg = .{ .index = 4 } } }},
+        .{ .row_offset = 2, .col_offset = 3 },
+    );
+    fillGlyph(screens.window(&screens.fast), "╱", .{
+        .col = 3,
+        .row = 2,
+        .count = 6,
+        .style = .{ .fg = .{ .index = 4 } },
+    });
+
+    try screens.expectCellsMatch();
+}
+
+test "fillGlyph: clips a run at the window edge instead of wrapping" {
+    var screens = try TestScreens.init(std.testing.allocator, 8, 2);
+    defer screens.deinit();
+
+    // fillGlyph never wraps, so the reference prints only the glyphs that fit
+    // on the row. Cells past the edge must stay untouched on both screens.
+    _ = screens.window(&screens.reference).print(
+        &.{.{ .text = "┃┃┃" }},
+        .{ .row_offset = 0, .col_offset = 5 },
+    );
+    fillGlyph(screens.window(&screens.fast), "┃", .{ .col = 5, .row = 0, .count = 5 });
+
+    try screens.expectCellsMatch();
+}
+
+test "fillGlyph: matches vaxis wrapped flag when the run reaches the right edge" {
+    var screens = try TestScreens.init(std.testing.allocator, 6, 2);
+    defer screens.deinit();
+
+    _ = screens.window(&screens.reference).print(&.{.{ .text = "╱╱╱╱╱╱" }}, .{});
+    fillGlyph(screens.window(&screens.fast), "╱", .{ .col = 0, .row = 0, .count = 6 });
+
+    try screens.expectCellsMatch();
+}
+
+test "fillGlyph: writes nothing for a row outside the window" {
+    var screens = try TestScreens.init(std.testing.allocator, 8, 2);
+    defer screens.deinit();
+
+    fillGlyph(screens.window(&screens.fast), "┃", .{ .col = 0, .row = 9, .count = 4 });
+
+    try screens.expectCellsMatch();
+}
+
+test "fillGlyph: writes nothing for a zero count" {
+    var screens = try TestScreens.init(std.testing.allocator, 8, 2);
+    defer screens.deinit();
+
+    fillGlyph(screens.window(&screens.fast), "┃", .{ .col = 0, .row = 0, .count = 0 });
+
+    try screens.expectCellsMatch();
 }
 
 test "isPrintableAscii: rejects control bytes past the vector chunk boundary" {

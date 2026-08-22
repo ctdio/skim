@@ -148,22 +148,16 @@ pub const RenderUtils = struct {
 
     /// Render sidebar border
     pub fn renderSidebar(win: vaxis.Window, row: usize) !void {
-        const sidebar_style: vaxis.Cell.Style = .{ .fg = Color.dim };
-        var sidebar_seg = [_]vaxis.Cell.Segment{.{
-            .text = "┃",
-            .style = sidebar_style,
-        }};
-        _ = cells.print(win, &sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
+        cells.fillGlyph(win, "┃", .{ .col = 0, .row = @intCast(row), .style = .{ .fg = Color.dim } });
     }
 
     /// Render middle divider for side-by-side view
     pub fn renderMiddleDivider(win: vaxis.Window, row: usize, col: usize) !void {
-        const divider_style: vaxis.Cell.Style = .{ .fg = Color.dim };
-        var divider_seg = [_]vaxis.Cell.Segment{.{
-            .text = FrameChars.vertical,
-            .style = divider_style,
-        }};
-        _ = cells.print(win, &divider_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
+        cells.fillGlyph(win, FrameChars.vertical, .{
+            .col = @intCast(col),
+            .row = @intCast(row),
+            .style = .{ .fg = Color.dim },
+        });
     }
 
     /// Render continuation row borders (sidebar + optional middle divider)
@@ -681,11 +675,11 @@ pub const RenderUtils = struct {
                 .context => .{ .fg = Color.dim },
             } else .{ .fg = Color.dim };
 
-            var separator_seg = [_]vaxis.Cell.Segment{.{
-                .text = FrameChars.vertical,
+            cells.fillGlyph(win, FrameChars.vertical, .{
+                .col = @intCast(col_offset),
+                .row = @intCast(row),
                 .style = separator_style,
-            }};
-            _ = cells.print(win, &separator_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+            });
             col_offset += 1;
         }
 

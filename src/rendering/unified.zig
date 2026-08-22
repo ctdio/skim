@@ -69,11 +69,7 @@ pub const UnifiedRenderer = struct {
             // Render sidebar for all line types except spacers, file headers, and
             // review threads (thread blocks draw their own left border at col 0).
             if (record.line_type != .spacer and record.line_type != .file_header and record.line_type != .review_thread) {
-                var sidebar_seg = [_]vaxis.Cell.Segment{.{
-                    .text = "┃",
-                    .style = sidebar_style,
-                }};
-                _ = cells.print(win, &sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
+                cells.fillGlyph(win, "┃", .{ .col = 0, .row = @intCast(row), .style = sidebar_style });
             }
 
             // Render based on line type
@@ -126,11 +122,11 @@ pub const UnifiedRenderer = struct {
                                     // Render sidebar for all comment input rows
                                     var comment_row_idx: usize = 0;
                                     while (comment_row_idx < comment_rows and comment_start_row + comment_row_idx < win.height) : (comment_row_idx += 1) {
-                                        var comment_sidebar = [_]vaxis.Cell.Segment{.{
-                                            .text = "┃",
+                                        cells.fillGlyph(win, "┃", .{
+                                            .col = 0,
+                                            .row = @intCast(comment_start_row + comment_row_idx),
                                             .style = sidebar_style,
-                                        }};
-                                        _ = cells.print(win, &comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0) });
+                                        });
                                     }
                                     row += comment_rows;
                                 }
