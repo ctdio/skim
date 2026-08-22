@@ -93,8 +93,11 @@ const PendingJob = struct {
     old_content: []const u8, // Owned OLD hunk content
 };
 
-// Static buffer for vaxis Tty writer (must persist for lifetime of Tty)
-var tty_static_buffer: [4096]u8 = undefined;
+// Static buffer for vaxis Tty writer (must persist for lifetime of Tty).
+// Sized to hold a whole frame: a full-screen repaint of a wide terminal runs
+// ~30-45KB of escape sequences, and any frame larger than this buffer is split
+// across several blocking writes to the pty mid-render.
+var tty_static_buffer: [128 * 1024]u8 = undefined;
 
 /// Case-insensitive substring search
 fn parseEnvBool(value: []const u8) bool {
@@ -1639,7 +1642,7 @@ pub const App = struct {
                 const is_high_activity = manager_active or replay_playing or shell_cmd_running;
                 const is_medium_activity = connecting or server_active;
                 const sleep_ms: u64 = if (is_high_activity) 5 else if (is_medium_activity) 8 else 16;
-                std.Thread.sleep(sleep_ms * std.time.ns_per_ms);
+                sleepUntilInput(&loop.queue, sleep_ms);
             }
             // When not blocking (acp_active, mcp_active, etc.), events are still
             // captured by the vaxis reader thread and available via tryEvent()
@@ -3711,6 +3714,22 @@ fn initPagerModeAppFromWorkingDiff(allocator: Allocator) !App {
 
     parser.markUntrackedFiles(files, diff_result.untracked_paths);
     return App.initForRenderBench(allocator, files);
+}
+
+/// Sleeps for up to `max_ms`, waking as soon as the tty reader thread queues an
+/// event. Background work (highlighting, agent polling, diff loading) keeps the
+/// loop off the blocking `pollEvent` path; sleeping the full interval there adds
+/// up to a frame of latency to every keystroke, which is exactly when scrolling
+/// a freshly-opened diff feels sluggish.
+fn sleepUntilInput(queue: anytype, max_ms: u64) void {
+    const slice_ns = 1 * std.time.ns_per_ms;
+    var remaining_ns = max_ms * std.time.ns_per_ms;
+    while (remaining_ns > 0) {
+        if (!queue.isEmpty()) return;
+        const nap_ns = @min(slice_ns, remaining_ns);
+        std.Thread.sleep(nap_ns);
+        remaining_ns -= nap_ns;
+    }
 }
 
 fn diffContainsLine(files: []const parser.FileDiff, expected: []const u8) bool {

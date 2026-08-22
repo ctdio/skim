@@ -1,5 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const cells = @import("cells.zig");
 const parser = @import("../git/parser.zig");
 const rendering_common = @import("common.zig");
 const render_utils = @import("utils.zig");
@@ -103,7 +104,7 @@ pub const FileHeader = struct {
                 .{ .text = untracked_text, .style = untracked_style },
                 .{ .text = lines_copy, .style = lines_style },
             };
-            _ = win.print(&segments, .{
+            _ = cells.print(win, &segments, .{
                 .row_offset = @intCast(row),
                 .col_offset = 0,
             });
@@ -115,7 +116,7 @@ pub const FileHeader = struct {
                 .{ .text = del_copy, .style = del_style },
                 .{ .text = lines_copy, .style = lines_style },
             };
-            _ = win.print(&segments, .{
+            _ = cells.print(win, &segments, .{
                 .row_offset = @intCast(row),
                 .col_offset = 0,
             });

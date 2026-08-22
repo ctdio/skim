@@ -1,5 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const cells = @import("cells.zig");
 const parser = @import("../git/parser.zig");
 const blame = @import("../git/blame.zig");
 const comments = @import("../comments/store.zig");
@@ -152,7 +153,7 @@ pub const RenderUtils = struct {
             .text = "┃",
             .style = sidebar_style,
         }};
-        _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
+        _ = cells.print(win, &sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
     }
 
     /// Render middle divider for side-by-side view
@@ -162,7 +163,7 @@ pub const RenderUtils = struct {
             .text = FrameChars.vertical,
             .style = divider_style,
         }};
-        _ = win.print(&divider_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
+        _ = cells.print(win, &divider_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
     }
 
     /// Render continuation row borders (sidebar + optional middle divider)
@@ -319,7 +320,7 @@ pub const RenderUtils = struct {
                     .{ .text = number_text, .style = number_style },
                     .{ .text = sign_text, .style = sign_style },
                 };
-                _ = win.print(&segments, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                _ = cells.print(win, &segments, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             } else {
                 if (is_cursor or is_in_visual) {
                     const spaces_slice = try frameTextSlice(app, gutter_width);
@@ -328,7 +329,7 @@ pub const RenderUtils = struct {
                         .text = spaces_slice,
                         .style = base_style,
                     }};
-                    _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                    _ = cells.print(win, &seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
                 }
             }
         } else {
@@ -339,7 +340,7 @@ pub const RenderUtils = struct {
                 .text = spaces_slice,
                 .style = empty_gutter_style,
             }};
-            _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+            _ = cells.print(win, &seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
         }
 
         // Render spacing after gutter with appropriate diff background color
@@ -359,7 +360,7 @@ pub const RenderUtils = struct {
             .text = spacing,
             .style = spacing_style,
         }};
-        _ = win.print(&spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset + gutter_width) });
+        _ = cells.print(win, &spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset + gutter_width) });
     }
 
     // Frame buffer management
@@ -646,7 +647,7 @@ pub const RenderUtils = struct {
                         .text = blame_text,
                         .style = blame_style,
                     }};
-                    _ = win.print(&blame_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                    _ = cells.print(win, &blame_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
                 } else {
                     // No blame info - render empty space
                     const spaces = try frameTextSlice(app, blame_width);
@@ -655,7 +656,7 @@ pub const RenderUtils = struct {
                         .text = spaces,
                         .style = blame_style,
                     }};
-                    _ = win.print(&blame_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                    _ = cells.print(win, &blame_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
                 }
             } else {
                 // No line number - render empty blame space
@@ -665,7 +666,7 @@ pub const RenderUtils = struct {
                     .text = spaces,
                     .style = if (show_number) base_style else empty_gutter_style,
                 }};
-                _ = win.print(&blame_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                _ = cells.print(win, &blame_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             }
             col_offset += blame_width;
 
@@ -684,7 +685,7 @@ pub const RenderUtils = struct {
                 .text = FrameChars.vertical,
                 .style = separator_style,
             }};
-            _ = win.print(&separator_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+            _ = cells.print(win, &separator_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             col_offset += 1;
         }
 
@@ -763,7 +764,7 @@ pub const RenderUtils = struct {
                     .{ .text = number_text, .style = number_style },
                     .{ .text = sign_text, .style = sign_style },
                 };
-                _ = win.print(&segments, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                _ = cells.print(win, &segments, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             } else {
                 // For hunk headers or other lines without file line numbers, always show empty gutter
                 const spaces_slice = try frameTextSlice(app, lineno_width);
@@ -772,7 +773,7 @@ pub const RenderUtils = struct {
                     .text = spaces_slice,
                     .style = base_style,
                 }};
-                _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+                _ = cells.print(win, &seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
             }
         } else {
             // For wrapped continuation lines, show empty gutter with diff background
@@ -782,7 +783,7 @@ pub const RenderUtils = struct {
                 .text = spaces_slice,
                 .style = empty_gutter_style,
             }};
-            _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+            _ = cells.print(win, &seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
         }
 
         // Render spacing after gutter with appropriate diff background color
@@ -802,7 +803,7 @@ pub const RenderUtils = struct {
             .text = spacing,
             .style = spacing_style,
         }};
-        _ = win.print(&spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 + gutter_width) });
+        _ = cells.print(win, &spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 + gutter_width) });
     }
 
     pub fn renderGutterSpacing(
@@ -826,7 +827,7 @@ pub const RenderUtils = struct {
             .text = spacing,
             .style = spacing_style,
         }};
-        _ = win.print(&spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+        _ = cells.print(win, &spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
     }
 
     /// Wrap text to fit within max_width (in display cells), breaking at word boundaries when possible
@@ -870,7 +871,7 @@ pub const RenderUtils = struct {
         const top_spacer = try frameTextSlice(app, content_width - 1);
         @memset(top_spacer, ' ');
         try segments.append(app.allocator, .{ .text = top_spacer, .style = .{ .bg = Color.comment_hover_bg } });
-        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+        _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
         current_row += 1;
 
         // Render gutter for label line
@@ -924,7 +925,7 @@ pub const RenderUtils = struct {
         try segments.append(app.allocator, .{ .text = try copyFrameText(app, "┃"), .style = border_style });
         try appendInputHeaderHints(app, &segments, content_width, 1, label, label_style, hints, hints_style);
 
-        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+        _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
         current_row += 1;
 
         // Line 3+: ┃ > [text] (multiple lines if newlines present)
@@ -974,7 +975,7 @@ pub const RenderUtils = struct {
                 };
 
                 try segments.append(app.allocator, .{ .text = display_text, .style = text_style });
-                _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+                _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
 
                 // Draw cursor and visual selection if in this wrapped segment
                 const segment_start = char_offset + segment_offset;
@@ -1007,7 +1008,7 @@ pub const RenderUtils = struct {
                                     .text = try copyFrameText(app, highlight_text),
                                     .style = .{ .fg = Color.white, .bg = Color.blue },
                                 }};
-                                _ = win.print(&highlight_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(highlight_col_start) });
+                                _ = cells.print(win, &highlight_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(highlight_col_start) });
                             }
                         }
                     }
@@ -1062,7 +1063,7 @@ pub const RenderUtils = struct {
         const bottom_spacer = try frameTextSlice(app, content_width - 1);
         @memset(bottom_spacer, ' ');
         try segments.append(app.allocator, .{ .text = bottom_spacer, .style = .{ .bg = Color.comment_hover_bg } });
-        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+        _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
         current_row += 1;
 
         return current_row - row; // Return actual number of rows used
@@ -1142,7 +1143,7 @@ pub const RenderUtils = struct {
         const top_spacer = try frameTextSlice(app, content_width - 1);
         @memset(top_spacer, ' ');
         try segments.append(app.allocator, .{ .text = top_spacer, .style = bg_style });
-        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+        _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
         current_row += 1;
 
         // Render gutter for label line
@@ -1180,7 +1181,7 @@ pub const RenderUtils = struct {
             try segments.append(app.allocator, .{ .text = label_spacer, .style = bg_style });
         }
 
-        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+        _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
         current_row += 1;
 
         // Render comment text lines with word wrapping
@@ -1242,7 +1243,7 @@ pub const RenderUtils = struct {
                 };
 
                 try segments.append(app.allocator, .{ .text = display_text, .style = text_style });
-                _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+                _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
                 current_row += 1;
                 text_lines_rendered += 1;
                 is_first_line = false;
@@ -1279,7 +1280,7 @@ pub const RenderUtils = struct {
                 };
 
                 try segments.append(app.allocator, .{ .text = display_text, .style = hints_style });
-                _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+                _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
                 current_row += 1;
             }
         }
@@ -1297,7 +1298,7 @@ pub const RenderUtils = struct {
         const bottom_spacer = try frameTextSlice(app, content_width - 1);
         @memset(bottom_spacer, ' ');
         try segments.append(app.allocator, .{ .text = bottom_spacer, .style = bg_style });
-        _ = win.print(segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+        _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
         current_row += 1;
 
         return current_row - row;
@@ -1325,7 +1326,7 @@ pub const RenderUtils = struct {
             .text = gutter_spaces,
             .style = gutter_style,
         }};
-        _ = win.print(&gutter_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1) });
+        _ = cells.print(win, &gutter_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1) });
 
         // Render gutter spacing with comment hover background
         const spacing_style: vaxis.Style = if (is_cursor)
@@ -1338,7 +1339,7 @@ pub const RenderUtils = struct {
             .text = spacing,
             .style = spacing_style,
         }};
-        _ = win.print(&spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 + gutter_width) });
+        _ = cells.print(win, &spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 + gutter_width) });
     }
 
     /// Render empty gutter for continuation lines of comment boxes
@@ -1363,7 +1364,7 @@ pub const RenderUtils = struct {
             .text = gutter_spaces,
             .style = gutter_style,
         }};
-        _ = win.print(&gutter_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1) });
+        _ = cells.print(win, &gutter_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1) });
 
         // Render gutter spacing with comment hover background
         const spacing_style: vaxis.Style = if (is_cursor)
@@ -1376,7 +1377,7 @@ pub const RenderUtils = struct {
             .text = spacing,
             .style = spacing_style,
         }};
-        _ = win.print(&spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 + gutter_width) });
+        _ = cells.print(win, &spacing_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(1 + gutter_width) });
     }
 
     // =========================================================================
@@ -1552,7 +1553,7 @@ pub const RenderUtils = struct {
         var ind_seg = [_]vaxis.Cell.Segment{
             .{ .text = indicator, .style = style },
         };
-        _ = win.print(&ind_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
+        _ = cells.print(win, &ind_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col_offset) });
 
         // Name
         const name_col = col_offset + 2;
@@ -1560,7 +1561,7 @@ pub const RenderUtils = struct {
         var name_seg = [_]vaxis.Cell.Segment{
             .{ .text = name[0..name_max], .style = style },
         };
-        _ = win.print(&name_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(name_col) });
+        _ = cells.print(win, &name_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(name_col) });
 
         // Description (if space allows)
         const desc_col = name_col + name_max + 2;
@@ -1570,7 +1571,7 @@ pub const RenderUtils = struct {
                 var desc_seg = [_]vaxis.Cell.Segment{
                     .{ .text = description[0..desc_max], .style = if (is_selected) style else desc_style },
                 };
-                _ = win.print(&desc_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(desc_col) });
+                _ = cells.print(win, &desc_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(desc_col) });
             }
         }
     }

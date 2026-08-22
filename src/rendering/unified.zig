@@ -1,5 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const cells = @import("cells.zig");
 const parser = @import("../git/parser.zig");
 const syntax = @import("../highlighting/core.zig");
 const rendering_common = @import("common.zig");
@@ -72,7 +73,7 @@ pub const UnifiedRenderer = struct {
                     .text = "┃",
                     .style = sidebar_style,
                 }};
-                _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
+                _ = cells.print(win, &sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
             }
 
             // Render based on line type
@@ -129,7 +130,7 @@ pub const UnifiedRenderer = struct {
                                             .text = "┃",
                                             .style = sidebar_style,
                                         }};
-                                        _ = win.print(&comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0) });
+                                        _ = cells.print(win, &comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0) });
                                     }
                                     row += comment_rows;
                                 }
@@ -165,7 +166,7 @@ pub const UnifiedRenderer = struct {
                                 .text = "┃",
                                 .style = sidebar_style,
                             }};
-                            _ = win.print(&comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0) });
+                            _ = cells.print(win, &comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0) });
                         }
                         row += comment_rows;
                     }
@@ -199,7 +200,7 @@ pub const UnifiedRenderer = struct {
                                         .text = "┃",
                                         .style = sidebar_style,
                                     }};
-                                    _ = win.print(&comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0) });
+                                    _ = cells.print(win, &comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0) });
                                 }
                                 row += comment_rows;
                             }
@@ -218,7 +219,7 @@ pub const UnifiedRenderer = struct {
                                 .text = fill_text,
                                 .style = .{ .bg = Color.cursor_bg },
                             }};
-                            _ = win.print(&fill_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(fill_start) });
+                            _ = cells.print(win, &fill_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(fill_start) });
                         }
                     }
                     row += 1;
@@ -240,14 +241,14 @@ pub const UnifiedRenderer = struct {
                 .text = fill_text,
                 .style = .{},
             }};
-            _ = win.print(&fill_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
+            _ = cells.print(win, &fill_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
 
             // Then render the sidebar
             var sidebar_seg = [_]vaxis.Cell.Segment{.{
                 .text = "┃",
                 .style = sidebar_style,
             }};
-            _ = win.print(&sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
+            _ = cells.print(win, &sidebar_seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(0) });
         }
 
         // Render scrollbar if content is scrollable
@@ -333,7 +334,7 @@ pub const UnifiedRenderer = struct {
                     .text = fill_text,
                     .style = fill_style,
                 }};
-                _ = win.print(&fill_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(fill_start) });
+                _ = cells.print(win, &fill_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(fill_start) });
             }
 
             // Render spaces in gutter (no bar)
@@ -347,7 +348,7 @@ pub const UnifiedRenderer = struct {
                 .text = gutter_spaces,
                 .style = gutter_style,
             }};
-            _ = win.print(&gutter_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(Layout.sidebar_width) });
+            _ = cells.print(win, &gutter_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(Layout.sidebar_width) });
 
             // Render spacing after gutter
             try RenderUtils.renderGutterSpacing(app, win, current_row, 1 + gutter_width, is_cursor, null);
@@ -374,7 +375,7 @@ pub const UnifiedRenderer = struct {
                             .text = range_text,
                             .style = range_style,
                         }};
-                        _ = win.print(&seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+                        _ = cells.print(win, &seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
                     } else {
                         // Mixed: range + context - split at the boundary
                         const range_codepoints = range_display_len - display_start;
@@ -389,7 +390,7 @@ pub const UnifiedRenderer = struct {
                             .{ .text = range_text, .style = range_style },
                             .{ .text = context_text, .style = context_style },
                         };
-                        _ = win.print(&segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+                        _ = cells.print(win, &segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
                     }
                 } else {
                     // Pure context
@@ -398,7 +399,7 @@ pub const UnifiedRenderer = struct {
                         .text = context_text,
                         .style = context_style,
                     }};
-                    _ = win.print(&seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
+                    _ = cells.print(win, &seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start) });
                 }
             }
 
@@ -511,7 +512,7 @@ pub const UnifiedRenderer = struct {
                 .text = display_text,
                 .style = style,
             }};
-            _ = win.print(&seg, .{ .row_offset = @intCast(start_row), .col_offset = @intCast(Layout.sidebar_width + gutter_width + Layout.gutter_spacing) });
+            _ = cells.print(win, &seg, .{ .row_offset = @intCast(start_row), .col_offset = @intCast(Layout.sidebar_width + gutter_width + Layout.gutter_spacing) });
 
             return 1;
         }
@@ -547,7 +548,7 @@ pub const UnifiedRenderer = struct {
                     .text = chunk,
                     .style = style,
                 }};
-                _ = win.print(&plain_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });
+                _ = cells.print(win, &plain_seg, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });
                 byte_offset_in_text += chunk.len;
                 rows_rendered += 1;
                 continue;
@@ -567,12 +568,12 @@ pub const UnifiedRenderer = struct {
                 if (current_width < available_width) {
                     const padded_segments = try app.profilePadSegments(segments, current_width, available_width, style);
                     defer app.frameSegmentAllocator().free(padded_segments);
-                    _ = win.print(padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });
+                    _ = cells.print(win, padded_segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });
                 } else {
-                    _ = win.print(segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });
+                    _ = cells.print(win, segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });
                 }
             } else {
-                _ = win.print(segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });
+                _ = cells.print(win, segments, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(content_start_col) });
             }
 
             // Caret rendering removed with FOCUSED mode (show_caret is always false)

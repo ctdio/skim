@@ -134,6 +134,27 @@ pub fn build(b: *std.Build) void {
     const render_content_step = b.step("bench-render-content", "Run render content benchmark");
     render_content_step.dependOn(&render_content_run.step);
 
+    // Scroll session benchmark executable
+    const scroll_exe = b.addExecutable(.{
+        .name = "bench_scroll",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_scroll.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    scroll_exe.root_module.addImport("vaxis", vaxis);
+    scroll_exe.root_module.addImport("tree-sitter", tree_sitter);
+    scroll_exe.root_module.addImport("build_options", build_options_module);
+    for (grammars) |grammar| {
+        scroll_exe.linkLibrary(grammar);
+    }
+    scroll_exe.linkLibC();
+    b.installArtifact(scroll_exe);
+    const scroll_run = b.addRunArtifact(scroll_exe);
+    const scroll_step = b.step("bench-scroll", "Run diff scroll session benchmark");
+    scroll_step.dependOn(&scroll_run.step);
+
     // Agent render benchmark executable
     const agent_render_exe = b.addExecutable(.{
         .name = "bench_agent_render",
@@ -300,6 +321,22 @@ pub fn build(b: *std.Build) void {
     width_tests.linkLibC();
     const run_width_tests = b.addRunArtifact(width_tests);
     test_step.dependOn(&run_width_tests.step);
+
+    // Cell-writing fast-path tests. cells.zig is self-contained (std + vaxis
+    // only) and its tests assert byte-for-byte equivalence with
+    // vaxis.Window.print, so it roots its own step for the same reason
+    // width.zig does.
+    const cells_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rendering/cells.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    cells_tests.root_module.addImport("vaxis", vaxis);
+    cells_tests.linkLibC();
+    const run_cells_tests = b.addRunArtifact(cells_tests);
+    test_step.dependOn(&run_cells_tests.step);
 
     // PR review-thread tests. The helper file lives in src/testing/ but reaches
     // production code (git/, rendering/, pr/) through the src/-rooted

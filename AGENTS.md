@@ -45,6 +45,36 @@ zig build test
 ./scripts/ziglint.sh src/app.zig
 ```
 
+### Render benchmarks
+
+Always benchmark with `-Doptimize=ReleaseFast`; debug numbers are meaningless.
+
+```bash
+# Full per-keystroke scroll cost: frame.render + vaxis diff/encode + bytes emitted
+zig build bench-scroll -Doptimize=ReleaseFast
+
+# Isolated content-renderer cost at a fixed scroll offset
+zig build bench-render-content -Doptimize=ReleaseFast
+```
+
+`bench_scroll` is also installed to `./zig-out/bin/bench_scroll` so knobs can be
+swept without rebuilding. Shared setup (synthetic diff generation, env parsing,
+synchronous highlighting, stats) lives in `src/testing/bench_support.zig`.
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `SKIM_BENCH_DIFF_PATH` | — | Bench a real `git diff` file instead of a synthetic one |
+| `SKIM_BENCH_FILES` / `_HUNKS` / `_LINES` | 10 / 6 / 60 | Synthetic diff shape |
+| `SKIM_BENCH_WIDTH` / `_HEIGHT` | 190 / 60 | Terminal size |
+| `SKIM_BENCH_VIEW` | `unified` | `unified`, `side_by_side`, or `both` |
+| `SKIM_BENCH_MOTION` | `line` | `line` (`j`), `half_page`, `page`, `file` — scroll only |
+| `SKIM_BENCH_HIGHLIGHT` | `1` | Pre-highlight every hunk (steady state) — scroll only |
+| `SKIM_BENCH_ITERS` / `_WARMUP` | 200 / 20 | Sample counts |
+
+**`bytes/frame` is the number to watch.** It is what the terminal emulator has
+to parse, and on a slow terminal or over SSH it dominates everything measured
+inside the process.
+
 **IMPORTANT for debugging**: Always use `zig build` (debug mode) when debugging. Debug builds have:
 
 - Better stack traces

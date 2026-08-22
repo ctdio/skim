@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const vaxis = @import("vaxis");
+const cells = @import("cells.zig");
 const common = @import("common.zig");
 const width_util = @import("width.zig");
 const review_parse = @import("../pr/review_parse.zig");
@@ -230,7 +231,7 @@ fn drawRow(win: vaxis.Window, row: PlannedRow, row_offset: usize, is_cursor: boo
         },
     }
 
-    _ = win.print(segs.items, .{ .row_offset = @intCast(row_offset), .col_offset = 0, .wrap = .none });
+    _ = cells.print(win, segs.items, .{ .row_offset = @intCast(row_offset), .col_offset = 0, .wrap = .none });
 }
 
 // =============================================================================
