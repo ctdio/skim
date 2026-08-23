@@ -44,3 +44,5 @@ pub const FileDiff = parser.FileDiff;
 pub const Hunk = parser.Hunk;
 pub const HunkHeader = parser.HunkHeader;
 pub const Line = parser.Line;
+
+pub const Color = @import("rendering/common.zig").Color;

@@ -955,7 +955,7 @@ pub const SideBySideRenderer = struct {
     }
 
     /// Render saved comment display in side-by-side mode with optional truncation
-    fn renderSideBySideComment(
+    pub fn renderSideBySideComment(
         app: *App,
         win: vaxis.Window,
         comment: *const comments.Comment,
@@ -1000,27 +1000,27 @@ pub const SideBySideRenderer = struct {
         const border_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
         else
-            .{ .fg = Color.cyan, .bold = true };
+            .{ .fg = Color.cyan, .bg = Color.comment_bg, .bold = true };
 
         const text_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.white, .bg = Color.comment_hover_bg }
         else
-            .{ .fg = Color.white };
+            .{ .fg = Color.white, .bg = Color.comment_bg };
 
         const label_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
         else
-            .{ .fg = Color.cyan, .bold = true };
+            .{ .fg = Color.cyan, .bg = Color.comment_bg, .bold = true };
 
         const hints_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true }
         else
-            .{};
+            .{ .fg = Color.cyan, .bg = Color.comment_bg, .dim = true };
 
         const bg_style: vaxis.Style = if (is_cursor)
             .{ .bg = Color.comment_hover_bg }
         else
-            .{};
+            .{ .bg = Color.comment_bg };
 
         var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
         defer segments.deinit(app.allocator);

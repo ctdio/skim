@@ -833,6 +833,79 @@ test "snapshot: review_side_by_side_edit_input" {
 }
 
 // =============================================================================
+// side-by-side saved comment: background parity with the unified view
+// =============================================================================
+
+test "side-by-side comment keeps the comment background when not focused" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    app.state.expanded_comments = std.AutoHashMap(usize, void).init(allocator);
+    defer app.state.expanded_comments.deinit();
+
+    var ctx = try harness.createTestContext(allocator, 100, 24);
+    defer ctx.deinit();
+
+    const comment = comments.Comment{
+        .file_path = "src/x.zig",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "needs a guard",
+        .end_hunk_idx = null,
+        .end_line_idx = null,
+        .line_type = .context,
+        .line_content = "    foo();",
+        .old_lineno = 10,
+        .new_lineno = 10,
+    };
+
+    const rows = try SideBySideRenderer.renderSideBySideComment(&app, ctx.window(), &comment, 0, 0, 40, 40, 4, .context, false);
+    try testing.expect(rows > 0);
+
+    // Every cell of the box, border through trailing spacer, carries comment_bg.
+    var row: u16 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u16 = 9; // 1 sidebar + 4 gutter + 4 gutter spacing
+        while (col < 90) : (col += 1) {
+            const cell = ctx.screen.readCell(col, row).?;
+            try testing.expectEqual(review.Color.comment_bg, cell.style.bg);
+        }
+    }
+}
+
+test "side-by-side comment uses the hover background when focused" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    app.state.expanded_comments = std.AutoHashMap(usize, void).init(allocator);
+    defer app.state.expanded_comments.deinit();
+
+    var ctx = try harness.createTestContext(allocator, 100, 24);
+    defer ctx.deinit();
+
+    const comment = comments.Comment{
+        .file_path = "src/x.zig",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "needs a guard",
+        .end_hunk_idx = null,
+        .end_line_idx = null,
+        .line_type = .context,
+        .line_content = "    foo();",
+        .old_lineno = 10,
+        .new_lineno = 10,
+    };
+
+    const rows = try SideBySideRenderer.renderSideBySideComment(&app, ctx.window(), &comment, 0, 0, 40, 40, 4, .context, true);
+    try testing.expect(rows > 0);
+
+    const cell = ctx.screen.readCell(9, 0).?;
+    try testing.expectEqual(review.Color.comment_hover_bg, cell.style.bg);
+}
+
+// =============================================================================
 // Test builders
 // =============================================================================
 
