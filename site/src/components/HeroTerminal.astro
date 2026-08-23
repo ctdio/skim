@@ -238,6 +238,12 @@
 
   let autoplay: Autoplay | null = null;
 
+  // What the caption is written from: which chapter is on screen, and who has
+  // the terminal. Both change on their own schedule, so they are kept here and
+  // the caption is repainted from the pair.
+  let chapter = 0;
+  let status: TourStatus = { kind: 'playing' };
+
   async function mount(): Promise<void> {
     const terminal = await mountLiveTerminal({
       host: live!,
@@ -305,8 +311,6 @@
       buttons[next].focus();
     });
 
-    let chapter = 0;
-
     autoplay = createAutoplay({
       terminal,
       host: root!,
@@ -317,21 +321,28 @@
           button.setAttribute('aria-pressed', String(n === index)),
         );
         runProgress(bars, index, duration);
+        paintCaption();
       },
-      onStatus: (status) => {
-        const paused = status.kind !== 'playing';
-        hintText!.textContent = captionFor(status, chapter);
-        hint!.classList.toggle('is-paused', paused);
-        tabs!.classList.toggle('is-paused', paused);
+      onStatus: (next) => {
+        status = next;
+        paintCaption();
         // A paused chapter restarts from its first key rather than carrying on,
         // so the bar goes back to empty rather than freezing part-way.
-        if (paused) runProgress(bars, -1, 0);
+        if (next.kind !== 'playing') runProgress(bars, -1, 0);
       },
     });
 
     // xterm puts the focus on a textarea inside the host, so watch the host.
     live!.addEventListener('focusin', () => autoplay?.setFocused(true));
     live!.addEventListener('focusout', () => autoplay?.setFocused(false));
+  }
+
+  /** Write the caption, and mark the strip and the dot when the tour is idle. */
+  function paintCaption(): void {
+    const paused = status.kind !== 'playing';
+    hintText!.textContent = captionFor(status, chapter);
+    hint!.classList.toggle('is-paused', paused);
+    tabs!.classList.toggle('is-paused', paused);
   }
 
   /**

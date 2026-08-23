@@ -172,7 +172,7 @@ export function createAutoplay({
       stopCountdown();
       cancel();
       report();
-      void run(next);
+      void run(next, true);
     },
     yieldToVisitor(): void {
       cancel();
@@ -251,22 +251,33 @@ export function createAutoplay({
     window.clearTimeout(timer);
   }
 
-  async function run(from: number): Promise<void> {
+  /**
+   * Play from `from` and keep going. `now` is for a chapter the visitor asked
+   * for by name: it drops the settling beat and the chapter's own opening
+   * pause, both of which are pacing for a tour that moved on by itself. A
+   * click is not paced — it is answered, in the tick it arrives in.
+   */
+  async function run(from: number, now = false): Promise<void> {
     const mine = (token += 1);
     running = true;
     index = from;
+    let asked = now;
 
     while (token === mine) {
       settle();
-      await wait(RESET_MS);
-      if (token !== mine) return;
+      if (!asked) {
+        await wait(RESET_MS);
+        if (token !== mine) return;
+      }
 
       const chapter = chapters[index];
+      const keys = asked ? afterOpeningPause(chapter.keys) : chapter.keys;
+      asked = false;
       pendingExit = chapter.exit ?? [];
       pendingCycle = chapter.cycle ? { ...chapter.cycle, pressed: 0 } : null;
-      onChapter?.(index, durationOf(chapter));
+      onChapter?.(index, durationOf(keys, chapter.hold));
 
-      for (const step of chapter.keys) {
+      for (const step of keys) {
         if (typeof step === "number") {
           await wait(step);
         } else {
@@ -323,17 +334,25 @@ export function createAutoplay({
 }
 
 /**
- * How long a chapter takes from the moment it starts.
+ * How long this pass through a chapter takes from the moment it starts.
  *
  * Only the pauses and the closing hold cost time — a keypress is drawn in the
- * same tick it is sent.
+ * same tick it is sent. The steps are passed in rather than read off the
+ * chapter, because a chapter the visitor asked for skips its opening pause and
+ * the progress bar has to agree with what is actually about to run.
  */
-function durationOf(chapter: Chapter): number {
-  const pauses = chapter.keys.reduce<number>(
+function durationOf(keys: Step[], hold: number): number {
+  const pauses = keys.reduce<number>(
     (total, step) => (typeof step === "number" ? total + step : total),
     0,
   );
-  return pauses + chapter.hold;
+  return pauses + hold;
+}
+
+/** The chapter from its first keypress, dropping any pause in front of it. */
+function afterOpeningPause(keys: Step[]): Step[] {
+  const first = keys.findIndex((step) => typeof step === "string");
+  return first > 0 ? keys.slice(first) : keys;
 }
 
 /** A string as one key per character, spaced out so it reads as typing. */

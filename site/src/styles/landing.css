@@ -402,10 +402,14 @@ body.sk-landing {
   padding: 0.25rem 0.7rem;
   background: var(--sk-bg-subtle);
   cursor: pointer;
+  /* A tap must not wait on a double-tap-to-zoom gesture. */
+  touch-action: manipulation;
+  /* Short, because this transition also runs when a click moves the pressed
+     state, and a tab that fades over a fifth of a second reads as lag. */
   transition:
-    color 0.2s,
-    border-color 0.2s,
-    background 0.2s;
+    color 0.12s,
+    border-color 0.12s,
+    background 0.12s;
 }
 .term-tab:hover {
   color: var(--sk-fg);
