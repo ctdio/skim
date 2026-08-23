@@ -1,6 +1,7 @@
 const std = @import("std");
 const git = @import("git/diff.zig");
 const App = @import("app.zig").App;
+const platform = @import("platform.zig");
 
 /// Context passed to the stats fetching thread
 const MenuStatsContext = struct {
@@ -10,6 +11,9 @@ const MenuStatsContext = struct {
 /// Start async fetching of menu stats (non-blocking)
 /// Call this on first render of empty menu, then check menu_stats_cached on subsequent renders
 pub fn startMenuStatsFetch(app: *App) void {
+    // The browser build has neither git nor threads, and the empty menu it draws
+    // there is a static screen. Leave the stats unfetched.
+    if (platform.is_web) return;
     if (app.state.menu_stats_cached or app.state.menu_stats_loading) return;
 
     app.state.menu_stats_loading = true;

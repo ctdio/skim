@@ -6,14 +6,15 @@ const App = @import("../app.zig").App;
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
     var palette_state = &app.state.command_palette_state;
 
-    // Handle Ctrl+n and Ctrl+p for navigation
+    // Ctrl+n/Ctrl+p for navigation, with Ctrl+j/Ctrl+k as aliases. A browser
+    // keeps Ctrl+n for itself, so the demo build needs a chord it can reach.
     if (key.mods.ctrl) {
         switch (key.codepoint) {
-            'n' => {
+            'n', 'j' => {
                 palette_state.moveSelectionDown();
                 return;
             },
-            'p' => {
+            'p', 'k' => {
                 palette_state.moveSelectionUp();
                 return;
             },

@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
 const log = std.log.scoped(.clipboard);
+const platform = @import("platform.zig");
 
 var tty_fd: ?posix.fd_t = null;
 
@@ -13,6 +14,10 @@ pub fn setTtyFd(fd: posix.fd_t) void {
 /// Copy content to system clipboard via OSC 52 (if tty available) with
 /// platform-appropriate command fallback. Never crashes on failure.
 pub fn copyToClipboard(allocator: Allocator, content: []const u8) !void {
+    // The browser build has no tty and no processes, and wasm cannot reach the
+    // page clipboard on its own. A copy there does nothing.
+    if (platform.is_web) return;
+
     if (tty_fd) |fd| {
         writeOsc52(allocator, fd, content) catch |err| {
             log.warn("OSC 52 clipboard write failed: {}", .{err});
@@ -32,6 +37,8 @@ pub fn copyToClipboard(allocator: Allocator, content: []const u8) !void {
 /// Read content from system clipboard using platform-appropriate command.
 /// Returns null on failure.
 pub fn readFromClipboard(allocator: Allocator) ?[]const u8 {
+    if (platform.is_web) return null;
+
     return readViaCommand(allocator) catch |err| {
         log.debug("platform clipboard read failed: {}", .{err});
         return null;

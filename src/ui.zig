@@ -5,6 +5,7 @@ const render_utils = @import("rendering/utils.zig");
 const state_helpers = @import("state.zig");
 const git = @import("git/diff.zig");
 const sessions = @import("acp/sessions.zig");
+const platform = @import("platform.zig");
 
 const App = @import("app.zig").App;
 const graphite = @import("git/graphite.zig");
@@ -1640,7 +1641,12 @@ pub const UI = struct {
                 break :blk "Enter:Save  |  ESC:Cancel";
             },
             .search => "Type to search  |  Enter:Execute  |  ESC:Cancel",
-            .visual => "j/k:Extend  |  y:Yank  |  ESC:Exit",
+            // The browser build has no clipboard, so it advertises the key
+            // that does work on a selection instead.
+            .visual => if (platform.is_web)
+                "j/k:Extend  |  Enter:Comment  |  ESC:Exit"
+            else
+                "j/k:Extend  |  y:Yank  |  ESC:Exit",
             .command_palette => "Type to filter  |  '>':Commands  |  ↑↓:Select  |  ESC:Cancel",
             .help => "j/k:Scroll  |  Ctrl-d/u:Page  |  ?/ESC:Close",
             .branch_selection => "j/k:Move  |  Enter:Select  |  ESC:Back",

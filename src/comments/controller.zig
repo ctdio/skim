@@ -15,6 +15,7 @@ const hunk_view = @import("../hunk_view.zig");
 const thread_anchor = @import("../pr/thread_anchor.zig");
 const review_controller = @import("../pr/review_controller.zig");
 const parser = @import("../git/parser.zig");
+const platform = @import("../platform.zig");
 
 const Navigation = navigation.Navigation;
 
@@ -271,11 +272,15 @@ pub const CommentController = struct {
         const input = app.state.active_comment_input.?;
 
         // Thread conversation editors (reply / edit-own) dispatch a thread
-        // mutation instead of the diff-coordinate comment path (FR-5).
-        switch (input.edit_context) {
-            .none => {},
-            .reply => |r| return saveReply(app, r.thread_id, input),
-            .edit_own => |e| return saveEditOwn(app, e.comment_id, input),
+        // mutation instead of the diff-coordinate comment path (FR-5). The
+        // browser build never opens a review session, so the branch is dead
+        // there — and it spawns a thread and `gh`, which wasm has neither of.
+        if (!platform.is_web) {
+            switch (input.edit_context) {
+                .none => {},
+                .reply => |r| return saveReply(app, r.thread_id, input),
+                .edit_own => |e| return saveEditOwn(app, e.comment_id, input),
+            }
         }
 
         if (std.mem.trim(u8, input.vim.text_buffer[0..input.vim.text_len], " \t\r\n").len == 0) {
@@ -306,9 +311,12 @@ pub const CommentController = struct {
         const line = &hunk.lines[input.target_line_idx];
 
         // GitHub draft target: post an optimistic thread rather than storing a
-        // local comment (AD-7). Editing existing comments stays local.
-        if (input.target == .github) {
-            return postDraftComment(app, .{ .input = input, .file = file, .line = line, .comment_text = comment_text });
+        // local comment (AD-7). Editing existing comments stays local. Dead in
+        // the browser build for the same reason as the thread editors above.
+        if (!platform.is_web) {
+            if (input.target == .github) {
+                return postDraftComment(app, .{ .input = input, .file = file, .line = line, .comment_text = comment_text });
+            }
         }
 
         // Track the comment index for cursor positioning after save

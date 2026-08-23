@@ -5,6 +5,7 @@ const line_map = @import("line_map.zig");
 const git = @import("git/diff.zig");
 const DiffSource = git.DiffSource;
 const DiffStats = git.DiffStats;
+const platform = @import("platform.zig");
 const state_helpers = @import("state.zig");
 const render_utils = @import("rendering/utils.zig");
 const Color = @import("rendering/common.zig").Color;
@@ -106,17 +107,23 @@ pub const CommandPaletteState = struct {
     pub fn buildCommandRegistry(self: *CommandPaletteState, app: *App, files: []const parser.FileDiff) !void {
         self.commands.clearRetainingCapacity();
 
-        // Pre-fetch stats for all diff sources (fast with --shortstat)
-        const working_stats = git.getDiffStats(self.allocator, DiffSource{ .working_dir = .{ .staged = false } }) catch DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
-        const staged_stats = git.getDiffStats(self.allocator, DiffSource{ .working_dir = .{ .staged = true } }) catch DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+        // Stats for the diff-source commands. The browser build has no git to
+        // ask, and drops those commands anyway, so it skips the calls.
+        const zero = DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+        var working_stats = zero;
+        var staged_stats = zero;
+        var main_stats = zero;
+        if (!platform.is_web) {
+            working_stats = git.getDiffStats(self.allocator, DiffSource{ .working_dir = .{ .staged = false } }) catch zero;
+            staged_stats = git.getDiffStats(self.allocator, DiffSource{ .working_dir = .{ .staged = true } }) catch zero;
 
-        // For main branch, try to detect default branch
-        const default_branch = git.detectDefaultBranch(self.allocator) catch null;
-        const main_stats = if (default_branch) |branch| blk: {
-            const stats = git.getDiffStats(self.allocator, DiffSource{ .single_ref = .{ .ref = branch, .staged = false } }) catch DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
-            self.allocator.free(branch);
-            break :blk stats;
-        } else DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
+            // For main branch, try to detect default branch
+            const default_branch = git.detectDefaultBranch(self.allocator) catch null;
+            if (default_branch) |branch| {
+                main_stats = git.getDiffStats(self.allocator, DiffSource{ .single_ref = .{ .ref = branch, .staged = false } }) catch zero;
+                self.allocator.free(branch);
+            }
+        }
 
         // Add file navigation commands with stats
         for (files, 0..) |*file, idx| {
@@ -142,127 +149,123 @@ pub const CommandPaletteState = struct {
             });
         }
 
-        // Add built-in commands (no stats for non-file commands)
-        try self.commands.append(self.allocator, .{
-            .name = "Toggle View Mode",
-            .display_name = "Toggle View Mode",
-            .aliases = &[_][]const u8{ ":v", ":view" },
-            .description = "Switch between unified and side-by-side",
-            .action = .toggle_view_mode,
-            .category = .view,
-            .owns_display_name = false,
-            .additions = 0,
-            .deletions = 0,
-        });
-
-        try self.commands.append(self.allocator, .{
-            .name = "Refresh Diff",
-            .display_name = "Refresh Diff",
-            .aliases = &[_][]const u8{ ":e", ":refresh" },
-            .description = "Reload the diff from git",
-            .action = .refresh_diff,
-            .category = .view,
-            .owns_display_name = false,
-            .additions = 0,
-            .deletions = 0,
-        });
-
-        try self.commands.append(self.allocator, .{
-            .name = "Show Help",
-            .display_name = "Show Help",
-            .aliases = &[_][]const u8{ ":h", ":help" },
-            .description = "Display help overlay",
-            .action = .show_help,
-            .category = .help,
-            .owns_display_name = false,
-            .additions = 0,
-            .deletions = 0,
-        });
-
-        try self.commands.append(self.allocator, .{
-            .name = "Switch Agent",
-            .display_name = "Switch Agent",
-            .aliases = &[_][]const u8{":agent"},
-            .description = "Select a different AI agent",
-            .action = .switch_agent,
-            .category = .view,
-            .owns_display_name = false,
-            .additions = 0,
-            .deletions = 0,
-        });
-
-        try self.commands.append(self.allocator, .{
-            .name = "Quit",
-            .display_name = "Quit",
-            .aliases = &[_][]const u8{ ":q", ":quit", ":qa" },
-            .description = "Exit Skim",
-            .action = .quit,
-            .category = .navigation,
-            .owns_display_name = false,
-            .additions = 0,
-            .deletions = 0,
-        });
-
-        // Diff mode switching commands with stats
-        try self.commands.append(self.allocator, .{
-            .name = "diff:working",
-            .display_name = "diff:working",
-            .aliases = &[_][]const u8{ ":dw", ":working" },
-            .description = "Switch to working directory changes",
-            .action = .{ .switch_diff_mode = .working },
-            .category = .diff,
-            .owns_display_name = false,
-            .additions = working_stats.additions,
-            .deletions = working_stats.deletions,
-        });
-
-        try self.commands.append(self.allocator, .{
-            .name = "diff:staged",
-            .display_name = "diff:staged",
-            .aliases = &[_][]const u8{ ":ds", ":staged" },
-            .description = "Switch to staged changes",
-            .action = .{ .switch_diff_mode = .staged },
-            .category = .diff,
-            .owns_display_name = false,
-            .additions = staged_stats.additions,
-            .deletions = staged_stats.deletions,
-        });
-
-        try self.commands.append(self.allocator, .{
-            .name = "diff:main",
-            .display_name = "diff:main",
-            .aliases = &[_][]const u8{ ":dm", ":main" },
-            .description = "Compare against main branch",
-            .action = .{ .switch_diff_mode = .main },
-            .category = .diff,
-            .owns_display_name = false,
-            .additions = main_stats.additions,
-            .deletions = main_stats.deletions,
-        });
-
-        try self.commands.append(self.allocator, .{
-            .name = "Select Commit...",
-            .display_name = "Select Commit...",
-            .aliases = &[_][]const u8{ ":dc", ":commit" },
-            .description = "Diff against a specific commit",
-            .action = .select_commit,
-            .category = .diff,
-            .owns_display_name = false,
-            .additions = 0,
-            .deletions = 0,
-        });
-
-        try self.commands.append(self.allocator, .{
-            .name = "Review Pull Request...",
-            .display_name = "Review Pull Request...",
-            .aliases = &[_][]const u8{ ":pr", ":prs" },
-            .description = "Browse and review open pull requests",
-            .action = .enter_pr_review,
-            .category = .diff,
-            .owns_display_name = false,
-            .additions = 0,
-            .deletions = 0,
-        });
+        // Built-in commands (no stats except the diff sources above).
+        const builtins = [_]Command{
+            .{
+                .name = "Toggle View Mode",
+                .display_name = "Toggle View Mode",
+                .aliases = &[_][]const u8{ ":v", ":view" },
+                .description = "Switch between unified and side-by-side",
+                .action = .toggle_view_mode,
+                .category = .view,
+                .owns_display_name = false,
+                .additions = 0,
+                .deletions = 0,
+            },
+            .{
+                .name = "Refresh Diff",
+                .display_name = "Refresh Diff",
+                .aliases = &[_][]const u8{ ":e", ":refresh" },
+                .description = "Reload the diff from git",
+                .action = .refresh_diff,
+                .category = .view,
+                .owns_display_name = false,
+                .additions = 0,
+                .deletions = 0,
+            },
+            .{
+                .name = "Show Help",
+                .display_name = "Show Help",
+                .aliases = &[_][]const u8{ ":h", ":help" },
+                .description = "Display help overlay",
+                .action = .show_help,
+                .category = .help,
+                .owns_display_name = false,
+                .additions = 0,
+                .deletions = 0,
+            },
+            .{
+                .name = "Switch Agent",
+                .display_name = "Switch Agent",
+                .aliases = &[_][]const u8{":agent"},
+                .description = "Select a different AI agent",
+                .action = .switch_agent,
+                .category = .view,
+                .owns_display_name = false,
+                .additions = 0,
+                .deletions = 0,
+            },
+            .{
+                .name = "Quit",
+                .display_name = "Quit",
+                .aliases = &[_][]const u8{ ":q", ":quit", ":qa" },
+                .description = "Exit Skim",
+                .action = .quit,
+                .category = .navigation,
+                .owns_display_name = false,
+                .additions = 0,
+                .deletions = 0,
+            },
+            .{
+                .name = "diff:working",
+                .display_name = "diff:working",
+                .aliases = &[_][]const u8{ ":dw", ":working" },
+                .description = "Switch to working directory changes",
+                .action = .{ .switch_diff_mode = .working },
+                .category = .diff,
+                .owns_display_name = false,
+                .additions = working_stats.additions,
+                .deletions = working_stats.deletions,
+            },
+            .{
+                .name = "diff:staged",
+                .display_name = "diff:staged",
+                .aliases = &[_][]const u8{ ":ds", ":staged" },
+                .description = "Switch to staged changes",
+                .action = .{ .switch_diff_mode = .staged },
+                .category = .diff,
+                .owns_display_name = false,
+                .additions = staged_stats.additions,
+                .deletions = staged_stats.deletions,
+            },
+            .{
+                .name = "diff:main",
+                .display_name = "diff:main",
+                .aliases = &[_][]const u8{ ":dm", ":main" },
+                .description = "Compare against main branch",
+                .action = .{ .switch_diff_mode = .main },
+                .category = .diff,
+                .owns_display_name = false,
+                .additions = main_stats.additions,
+                .deletions = main_stats.deletions,
+            },
+            .{
+                .name = "Select Commit...",
+                .display_name = "Select Commit...",
+                .aliases = &[_][]const u8{ ":dc", ":commit" },
+                .description = "Diff against a specific commit",
+                .action = .select_commit,
+                .category = .diff,
+                .owns_display_name = false,
+                .additions = 0,
+                .deletions = 0,
+            },
+            .{
+                .name = "Review Pull Request...",
+                .display_name = "Review Pull Request...",
+                .aliases = &[_][]const u8{ ":pr", ":prs" },
+                .description = "Browse and review open pull requests",
+                .action = .enter_pr_review,
+                .category = .diff,
+                .owns_display_name = false,
+                .additions = 0,
+                .deletions = 0,
+            },
+        };
+        for (builtins) |command| {
+            if (!availableOn(command.action, platform.is_web)) continue;
+            try self.commands.append(self.allocator, command);
+        }
 
         // Initialize with files by default (no '>' prefix)
         try self.filterCommands();
@@ -445,6 +448,17 @@ fn containsAlias(aliases: []const []const u8, query: []const u8) bool {
 // Fixed width for command palette - prevents jarring resize on content change
 const COMMAND_PALETTE_WIDTH: usize = 100;
 const DIALOG_PADDING: usize = 1; // Horizontal padding inside dialogs
+
+/// Whether a build can run the command. `web` is true for the browser build,
+/// which has no git, no agent, and nothing to quit into: those commands are
+/// left out of the registry rather than listed and ignored.
+pub fn availableOn(action: CommandAction, web: bool) bool {
+    if (!web) return true;
+    return switch (action) {
+        .jump_to_file, .toggle_view_mode, .show_help => true,
+        .refresh_diff, .quit, .switch_diff_mode, .switch_agent, .select_commit, .enter_pr_review => false,
+    };
+}
 
 pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
     const state = &app.state.command_palette_state;
@@ -700,4 +714,25 @@ test "truncatePath: 3 or fewer components returns unchanged" {
     // Even if it exceeds max_length, with only 3 components we return as-is
     const result = try truncatePath(allocator, path, 10);
     try std.testing.expectEqualStrings(path, result);
+}
+
+test "availableOn: the browser keeps the commands it can run" {
+    try std.testing.expect(availableOn(.{ .jump_to_file = 0 }, true));
+    try std.testing.expect(availableOn(.toggle_view_mode, true));
+    try std.testing.expect(availableOn(.show_help, true));
+}
+
+test "availableOn: the browser drops the commands that need git or a process" {
+    try std.testing.expect(!availableOn(.refresh_diff, true));
+    try std.testing.expect(!availableOn(.quit, true));
+    try std.testing.expect(!availableOn(.switch_agent, true));
+    try std.testing.expect(!availableOn(.{ .switch_diff_mode = .staged }, true));
+    try std.testing.expect(!availableOn(.select_commit, true));
+    try std.testing.expect(!availableOn(.enter_pr_review, true));
+}
+
+test "availableOn: the terminal build keeps every command" {
+    try std.testing.expect(availableOn(.refresh_diff, false));
+    try std.testing.expect(availableOn(.quit, false));
+    try std.testing.expect(availableOn(.enter_pr_review, false));
 }

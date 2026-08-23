@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 
 const App = @import("app.zig").App;
+const platform = @import("platform.zig");
 const review_controller = @import("pr/review_controller.zig");
 const Color = @import("rendering/common.zig").Color;
 const FrameChars = @import("rendering/common.zig").FrameChars;
@@ -71,6 +72,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "[h / ]h", .desc = "Previous / next hunk" },
         .{ .key = "[c / ]c", .desc = "Previous / next comment" },
         .{ .key = "{ / }", .desc = "Previous / next empty line" },
+        .{ .key = "f / t / F / T", .desc = "Find character in line" },
         .{ .key = "/", .desc = "Search" },
         .{ .key = "n / N", .desc = "Next / previous match" },
         .{ .key = "Ctrl-p", .desc = "File picker" },
@@ -90,6 +92,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "Ctrl-g", .desc = "Open in $EDITOR" },
     };
     for (core_bindings) |b| {
+        if (unavailable(b.key)) continue;
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
     try content_lines.append(app.allocator, .{ .blank = true });
@@ -128,6 +131,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "v / Esc", .desc = "Exit" },
     };
     for (visual_bindings) |b| {
+        if (unavailable(b.key)) continue;
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
     try content_lines.append(app.allocator, .{ .blank = true });
@@ -170,23 +174,25 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
     }
 
     // AGENT MODE
-    try content_lines.append(app.allocator, .{ .section = "AGENT MODE" });
-    const agent_bindings = [_]Binding{
-        .{ .key = "Ctrl-e", .desc = "Close panel" },
-        .{ .key = "Ctrl-l", .desc = "Clear history" },
-        .{ .key = "Ctrl-d / u", .desc = "Page down / up" },
-        .{ .key = "Ctrl-t", .desc = "Cycle thinking effort / variant" },
-        .{ .key = "Ctrl-w h/j/k/l", .desc = "Focus pane / diff edge" },
-        .{ .key = "Ctrl-w v / s", .desc = "Split vertically / horizontally" },
-        .{ .key = "Ctrl-w c / o", .desc = "Close pane / only pane" },
-        .{ .key = "Ctrl-w H/J/K/L", .desc = "Move pane to edge" },
-        .{ .key = "Ctrl-w =", .desc = "Equalize pane sizes" },
-        .{ .key = "Ctrl-w + - < >", .desc = "Resize pane" },
-        .{ .key = "gg / G", .desc = "Top / bottom" },
-        .{ .key = "?", .desc = "Agent help (detailed)" },
-    };
-    for (agent_bindings) |b| {
-        try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
+    if (!platform.is_web) {
+        try content_lines.append(app.allocator, .{ .section = "AGENT MODE" });
+        const agent_bindings = [_]Binding{
+            .{ .key = "Ctrl-e", .desc = "Close panel" },
+            .{ .key = "Ctrl-l", .desc = "Clear history" },
+            .{ .key = "Ctrl-d / u", .desc = "Page down / up" },
+            .{ .key = "Ctrl-t", .desc = "Cycle thinking effort / variant" },
+            .{ .key = "Ctrl-w h/j/k/l", .desc = "Focus pane / diff edge" },
+            .{ .key = "Ctrl-w v / s", .desc = "Split vertically / horizontally" },
+            .{ .key = "Ctrl-w c / o", .desc = "Close pane / only pane" },
+            .{ .key = "Ctrl-w H/J/K/L", .desc = "Move pane to edge" },
+            .{ .key = "Ctrl-w =", .desc = "Equalize pane sizes" },
+            .{ .key = "Ctrl-w + - < >", .desc = "Resize pane" },
+            .{ .key = "gg / G", .desc = "Top / bottom" },
+            .{ .key = "?", .desc = "Agent help (detailed)" },
+        };
+        for (agent_bindings) |b| {
+            try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
+        }
     }
 
     // Calculate scroll bounds
@@ -239,6 +245,20 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         var footer_seg = [_]vaxis.Cell.Segment{.{ .text = footer, .style = .{ .fg = Color.dim_gray, .bg = Color.dialog_bg } }};
         _ = popup_win.print(&footer_seg, .{ .row_offset = @intCast(footer_row), .col_offset = @intCast(footer_x) });
     }
+}
+
+/// True when this build cannot serve the binding. The browser build has no git,
+/// no editor, no agent, and no clipboard, so a key that needs one of those is
+/// left out of the overlay rather than listed and ignored.
+fn unavailable(key: []const u8) bool {
+    if (!platform.is_web) return false;
+    const web_cannot = [_][]const u8{
+        "y", "Y", "Ctrl-e", "gY", "Ctrl-w h/l", "r", "Ctrl-g",
+    };
+    for (web_cannot) |unsupported| {
+        if (std.mem.eql(u8, unsupported, key)) return true;
+    }
+    return false;
 }
 
 fn drawBoxBorder(win: vaxis.Window, width: usize, height: usize, style: vaxis.Style) void {

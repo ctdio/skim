@@ -13,6 +13,13 @@ const net = std.net;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
+const platform = @import("../platform.zig");
+
+/// `net.Server` embeds a `net.Address`, whose `sockaddr` members do not exist on
+/// wasm. `App` holds a `?TuiServer` by value, so that type is resolved even for
+/// the web build, which never listens. Collapse it to a placeholder there.
+const Listener = if (platform.is_web) ?void else ?net.Server;
+
 // =============================================================================
 // Protocol Types
 // =============================================================================
@@ -53,7 +60,7 @@ pub const RequestHandler = *const fn (request: Request, user_data: ?*anyopaque) 
 /// TCP server that TUI runs to accept commands from CLI/MCP
 pub const TuiServer = struct {
     allocator: Allocator,
-    listener: ?net.Server,
+    listener: Listener,
     port: u16,
     handler: RequestHandler,
     user_data: ?*anyopaque,

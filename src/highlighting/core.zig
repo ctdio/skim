@@ -1,5 +1,6 @@
 const std = @import("std");
 const ts = @import("tree-sitter");
+const platform = @import("../platform.zig");
 
 // Embed highlight query files at compile time
 // Programming languages
@@ -161,21 +162,32 @@ pub const Language = enum {
     // Get the tree-sitter language for this enum value
     fn getTreeSitterLanguage(self: Language) ?*const ts.Language {
         return switch (self) {
-            .javascript => tree_sitter_javascript(),
-            .typescript => tree_sitter_typescript(),
-            .python => tree_sitter_python(),
-            .rust => tree_sitter_rust(),
-            .go => tree_sitter_go(),
-            .zig => tree_sitter_zig(),
-            .c => tree_sitter_c(),
-            .cpp => tree_sitter_cpp(),
-            .json => tree_sitter_json(),
-            .toml => tree_sitter_toml(),
-            .markdown => tree_sitter_markdown(),
-            .css => tree_sitter_css(),
-            .bash => tree_sitter_bash(),
+            .javascript => grammar("javascript", tree_sitter_javascript),
+            .typescript => grammar("typescript", tree_sitter_typescript),
+            .python => grammar("python", tree_sitter_python),
+            .rust => grammar("rust", tree_sitter_rust),
+            .go => grammar("go", tree_sitter_go),
+            .zig => grammar("zig", tree_sitter_zig),
+            .c => grammar("c", tree_sitter_c),
+            .cpp => grammar("cpp", tree_sitter_cpp),
+            .json => grammar("json", tree_sitter_json),
+            .toml => grammar("toml", tree_sitter_toml),
+            .markdown => grammar("markdown", tree_sitter_markdown),
+            .css => grammar("css", tree_sitter_css),
+            .bash => grammar("bash", tree_sitter_bash),
             .unknown => null,
         };
+    }
+
+    /// Entry point of a grammar, or null when this build does not link it. The
+    /// web build ships a subset (see `platform.web_grammars`); the unlinked
+    /// arms never call `entry`, so the linker never asks for the symbol.
+    fn grammar(
+        comptime name: []const u8,
+        comptime entry: fn () callconv(.c) *const ts.Language,
+    ) ?*const ts.Language {
+        if (comptime !platform.linksGrammar(name)) return null;
+        return entry();
     }
 };
 

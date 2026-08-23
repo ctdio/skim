@@ -1,5 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const platform = @import("platform.zig");
 const git = @import("git/diff.zig");
 const blame_ctrl = @import("git/blame_controller.zig");
 const diff_loader = @import("git/diff_loader.zig");
@@ -2598,6 +2599,9 @@ pub const App = struct {
         }
     }
 
+    /// Run a palette command. The arms below the platform gate need git, an
+    /// agent, or a process to quit into, so the browser build stops there —
+    /// `command_palette.availableOn` keeps those commands out of its registry.
     pub fn executeCommand(self: *App, action: command_palette.CommandAction) !void {
         switch (action) {
             .jump_to_file => |file_idx| {
@@ -2618,11 +2622,17 @@ pub const App = struct {
                     .side_by_side => .unified,
                 };
             },
-            .refresh_diff => {
-                try self.refresh();
-            },
             .show_help => {
                 self.mode = .help;
+            },
+            else => {},
+        }
+
+        if (platform.is_web) return;
+
+        switch (action) {
+            .refresh_diff => {
+                try self.refresh();
             },
             .quit => {
                 self.should_quit = true;
@@ -2652,6 +2662,7 @@ pub const App = struct {
                 try pr_controller.startListLoad(&self.state.pr, self.allocator);
                 self.mode = .pr_review;
             },
+            else => {},
         }
     }
 
