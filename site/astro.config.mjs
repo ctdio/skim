@@ -15,6 +15,16 @@ export default defineConfig({
   site: 'https://ctdio.github.io',
   base: '/skim',
   trailingSlash: 'ignore',
+  // The landing hero imports the wasm loader from `web/skim.js` at the repo
+  // root, which is outside this Astro project. Serving a file from there is
+  // exactly what the dev server refuses by default.
+  vite: {
+    server: {
+      fs: {
+        allow: ['..'],
+      },
+    },
+  },
   integrations: [
     starlight({
       title: 'Skim',

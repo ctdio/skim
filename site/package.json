@@ -8,10 +8,16 @@
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "sync:demo": "../scripts/sync-web-assets.sh",
+    "predev": "npm run sync:demo",
+    "prestart": "npm run sync:demo",
+    "prebuild": "npm run sync:demo"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.41.4",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "astro": "^7.1.4",
     "astro-heroicons": "^2.1.5-1",
     "sharp": "^0.35.3"

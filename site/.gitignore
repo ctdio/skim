@@ -9,3 +9,5 @@ node_modules/
 .env.production
 # macOS
 .DS_Store
+# demo assets built by scripts/sync-web-assets.sh
+public/demo/

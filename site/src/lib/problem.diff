@@ -1,0 +1,24 @@
+diff --git a/src/line_map.zig b/src/line_map.zig
+index 7c1d0a4..2ef5b93 100644
+--- a/src/line_map.zig
++++ b/src/line_map.zig
+@@ -18,7 +18,9 @@ pub const LineMap = struct {
+     pub fn rebuild(self: *LineMap) void {
++        const n = self.lines.items.len;
+         for (self.lines.items) |ln| {
+-            ln.reindex();
++            ln.reindex(n);
+         }
++        self.dirty = false;
+     }
+ 
+     pub fn len(self: *const LineMap) usize {
+@@ -47,6 +49,8 @@ pub const LineMap = struct {
+     pub fn append(self: *LineMap, ln: Line) !void {
+-        self.count += 1;
++        try self.lines.append(ln);
++        self.count = self.lines.items.len;
+         self.dirty = true;
+     }
+ 
+ };
