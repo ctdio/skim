@@ -66,10 +66,9 @@ export async function createSkim({
   wasmModule,
   onProgress,
 } = {}) {
-  const imports = { wasi_snapshot_preview1: wasiStubs() };
   const compiled =
     wasmModule ?? (await loadSkimModule({ wasmUrl, wasmBytes, onProgress }));
-  const instance = await WebAssembly.instantiate(compiled, imports);
+  const instance = await WebAssembly.instantiate(compiled, wasiStubs(compiled));
 
   instance.exports._start();
   const wasm = instance.exports;
@@ -214,23 +213,26 @@ function check(status) {
 // The module never reads a file, writes a file, or reads the clock for anything
 // the caller can observe. Every syscall returns success with no data, except
 // `proc_exit`, which only runs if the module panics.
-function wasiStubs() {
+//
+// The list comes from the module itself, not from a list written here by hand.
+// A change to the Zig standard library or to the code the browser build pulls
+// in adds a syscall to the module, and a hand-written list then misses it. That
+// is a LinkError, which stops the whole demo: `poll_oneoff` broke it this way.
+function wasiStubs(module) {
   const ok = () => 0;
-  return {
-    args_get: ok,
-    args_sizes_get: ok,
-    fd_close: ok,
-    fd_fdstat_get: ok,
-    fd_fdstat_set_flags: ok,
-    fd_filestat_get: ok,
-    fd_pread: ok,
-    fd_pwrite: ok,
-    fd_read: ok,
-    fd_seek: ok,
-    fd_write: ok,
-    clock_time_get: ok,
-    proc_exit: (code) => {
-      throw new Error(`skim: the module exited with code ${code}`);
-    },
-  };
+  const stubs = {};
+
+  for (const entry of WebAssembly.Module.imports(module)) {
+    if (entry.module !== "wasi_snapshot_preview1") {
+      throw new Error(`skim: the module needs ${entry.module}.${entry.name}`);
+    }
+    stubs[entry.name] =
+      entry.name === "proc_exit"
+        ? (code) => {
+            throw new Error(`skim: the module exited with code ${code}`);
+          }
+        : ok;
+  }
+
+  return { wasi_snapshot_preview1: stubs };
 }
