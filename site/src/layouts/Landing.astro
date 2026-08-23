@@ -8,15 +8,25 @@ import Moon from 'astro-heroicons/outline/Moon.astro';
 interface Props {
   title?: string;
   description?: string;
+  /**
+   * Whether the page carries the site header and footer.
+   *
+   * `/try` sets this false: it is one full-viewport terminal with a bar of its
+   * own, and a sticky header above a `100dvh` frame would push it off screen.
+   * The head, the theme bootstrap, and the palette are the same either way.
+   */
+  chrome?: boolean;
 }
 
 const {
   title = 'Skim — a keyboard-driven TUI for code reviews',
   description = 'Skim is a keyboard-driven TUI for code reviews, built in Zig. Vim-style navigation, unified & side-by-side diffs, tree-sitter highlighting, inline comments — with sub-10ms startup and 60 FPS scrolling.',
+  chrome = true,
 } = Astro.props;
 
 const canonical = new URL(Astro.url.pathname, Astro.site).href;
 const docsHref = withBase('/docs/getting-started/overview');
+const tryHref = withBase('/try');
 const repoHref = 'https://github.com/ctdio/skim';
 const year = new Date().getFullYear();
 ---
@@ -26,7 +36,7 @@ const year = new Date().getFullYear();
      the no-JS / pre-hydration case is dark regardless of the OS
      `prefers-color-scheme`. The inline bootstrap below overrides it to light
      only when an explicit `starlight-theme` choice says so. -->
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" class:list={{ 'sk-full': !chrome }}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -56,108 +66,113 @@ const year = new Date().getFullYear();
       })();
     </script>
   </head>
-  <body class="sk-landing">
-    <a href="#main" class="sk-skip">Skip to content</a>
-    <header class="sk-header">
-      <div class="sk-wrap sk-nav">
-        <a class="sk-brand" href={withBase('/')} aria-label="Skim home">
-          <svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-            <rect
-              x="1.5"
-              y="3.5"
-              width="29"
-              height="25"
-              rx="5"
-              fill="var(--tui-bg)"
-              stroke="var(--sk-accent)"
-              stroke-width="2"></rect>
-            <rect x="7" y="10" width="12" height="2.4" rx="1.2" fill="var(--sk-add)"></rect>
-            <rect x="7" y="15" width="16" height="2.4" rx="1.2" fill="var(--sk-del)"></rect>
-            <rect x="7" y="20" width="9" height="2.4" rx="1.2" fill="var(--sk-dim)"></rect>
-          </svg>
-          <span>Skim</span>
-        </a>
-        <div class="sk-nav-spacer"></div>
-        <nav class="sk-nav-links" aria-label="Primary">
-          <a href={docsHref}>Docs</a>
-          <a
-            href={withBase('/docs/reference/keybindings')}
-            class="sk-hide-sm">Keybindings</a
-          >
-          <a href={repoHref} rel="noopener" class="sk-icon-link" aria-label="GitHub">
-            <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
-              <path
-                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
-              ></path>
+  <body class:list={['sk-landing', { 'sk-full': !chrome }]}>
+    {chrome && <a href="#main" class="sk-skip">Skip to content</a>}
+    {chrome && (
+      <header class="sk-header">
+        <div class="sk-wrap sk-nav">
+          <a class="sk-brand" href={withBase('/')} aria-label="Skim home">
+            <svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+              <rect
+                x="1.5"
+                y="3.5"
+                width="29"
+                height="25"
+                rx="5"
+                fill="var(--tui-bg)"
+                stroke="var(--sk-accent)"
+                stroke-width="2"></rect>
+              <rect x="7" y="10" width="12" height="2.4" rx="1.2" fill="var(--sk-add)"></rect>
+              <rect x="7" y="15" width="16" height="2.4" rx="1.2" fill="var(--sk-del)"></rect>
+              <rect x="7" y="20" width="9" height="2.4" rx="1.2" fill="var(--sk-dim)"></rect>
             </svg>
-            <span class="sk-visually-hidden">GitHub</span>
+            <span>Skim</span>
           </a>
-        </nav>
-        <button
-          class="sk-theme-toggle"
-          type="button"
-          id="sk-theme-toggle"
-          aria-label="Toggle color theme"
-        >
-          <Moon class="sk-icon-moon" />
-          <Sun class="sk-icon-sun" />
-        </button>
-      </div>
-    </header>
+          <div class="sk-nav-spacer"></div>
+          <nav class="sk-nav-links" aria-label="Primary">
+            <a href={tryHref} class="sk-nav-try">Try it</a>
+            <a href={docsHref}>Docs</a>
+            <a
+              href={withBase('/docs/reference/keybindings')}
+              class="sk-hide-sm">Keybindings</a
+            >
+            <a href={repoHref} rel="noopener" class="sk-icon-link" aria-label="GitHub">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+                <path
+                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+                ></path>
+              </svg>
+              <span class="sk-visually-hidden">GitHub</span>
+            </a>
+          </nav>
+          <button
+            class="sk-theme-toggle"
+            type="button"
+            id="sk-theme-toggle"
+            aria-label="Toggle color theme"
+          >
+            <Moon class="sk-icon-moon" />
+            <Sun class="sk-icon-sun" />
+          </button>
+        </div>
+      </header>
+    )}
 
     <main id="main">
       <slot />
     </main>
 
-    <footer class="sk-footer">
-      <div class="sk-wrap">
-        <div class="sk-footer-grid">
-          <div>
-            <a class="sk-brand" href={withBase('/')} aria-label="Skim home">
-              <svg width="24" height="24" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-                <rect
-                  x="1.5"
-                  y="3.5"
-                  width="29"
-                  height="25"
-                  rx="5"
-                  fill="var(--tui-bg)"
-                  stroke="var(--sk-accent)"
-                  stroke-width="2"></rect>
-                <rect x="7" y="10" width="12" height="2.4" rx="1.2" fill="var(--sk-add)"></rect>
-                <rect x="7" y="15" width="16" height="2.4" rx="1.2" fill="var(--sk-del)"></rect>
-                <rect x="7" y="20" width="9" height="2.4" rx="1.2" fill="var(--sk-dim)"></rect>
-              </svg>
-              <span>Skim</span>
-            </a>
-            <p class="sk-footer-blurb">
-              A keyboard-driven TUI for code reviews, built in Zig. Review diffs
-              at the speed of vim.
-            </p>
+    {chrome && (
+      <footer class="sk-footer">
+        <div class="sk-wrap">
+          <div class="sk-footer-grid">
+            <div>
+              <a class="sk-brand" href={withBase('/')} aria-label="Skim home">
+                <svg width="24" height="24" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                  <rect
+                    x="1.5"
+                    y="3.5"
+                    width="29"
+                    height="25"
+                    rx="5"
+                    fill="var(--tui-bg)"
+                    stroke="var(--sk-accent)"
+                    stroke-width="2"></rect>
+                  <rect x="7" y="10" width="12" height="2.4" rx="1.2" fill="var(--sk-add)"></rect>
+                  <rect x="7" y="15" width="16" height="2.4" rx="1.2" fill="var(--sk-del)"></rect>
+                  <rect x="7" y="20" width="9" height="2.4" rx="1.2" fill="var(--sk-dim)"></rect>
+                </svg>
+                <span>Skim</span>
+              </a>
+              <p class="sk-footer-blurb">
+                A keyboard-driven TUI for code reviews, built in Zig. Review diffs
+                at the speed of vim.
+              </p>
+            </div>
+            <div>
+              <h4>Docs</h4>
+              <ul>
+                <li><a href={withBase('/docs/getting-started/overview')}>Getting Started</a></li>
+                <li><a href={withBase('/docs/guides/navigating-diffs')}>Guides</a></li>
+                <li><a href={withBase('/docs/reference/keybindings')}>Keybindings</a></li>
+                <li><a href={withBase('/docs/integrations/agent-panel')}>Integrations</a></li>
+              </ul>
+            </div>
+            <div>
+              <h4>Project</h4>
+              <ul>
+                <li><a href={repoHref} rel="noopener">GitHub</a></li>
+                <li><a href={`${repoHref}/blob/main/LICENSE`} rel="noopener">License (MIT)</a></li>
+                <li><a href={`${repoHref}/issues`} rel="noopener">Issues</a></li>
+              </ul>
+            </div>
           </div>
-          <div>
-            <h4>Docs</h4>
-            <ul>
-              <li><a href={withBase('/docs/getting-started/overview')}>Getting Started</a></li>
-              <li><a href={withBase('/docs/guides/navigating-diffs')}>Guides</a></li>
-              <li><a href={withBase('/docs/reference/keybindings')}>Keybindings</a></li>
-              <li><a href={withBase('/docs/integrations/agent-panel')}>Integrations</a></li>
-            </ul>
-          </div>
-          <div>
-            <h4>Project</h4>
-            <ul>
-              <li><a href={repoHref} rel="noopener">GitHub</a></li>
-              <li><a href={`${repoHref}/blob/main/LICENSE`} rel="noopener">License (MIT)</a></li>
-              <li><a href={`${repoHref}/issues`} rel="noopener">Issues</a></li>
-            </ul>
+          <div class="sk-footer-bottom">
+            © {year} Charlie Duong · MIT License · Built with Astro + Starlight
           </div>
         </div>
-        <div class="sk-footer-bottom">
-          © {year} Charlie Duong · MIT License · Built with Astro + Starlight
-        </div>
-      </div>
-    </footer>
+      </footer>
+    )}
 
     <script is:inline>
       (() => {

@@ -329,6 +329,24 @@ body.sk-landing {
   color: var(--tui-chrome-title);
   white-space: nowrap;
 }
+/* The invitation, in the chrome bar the visitor is already reading. It is a
+   label, not a control — the chip under the frame is the button, and a second
+   tab stop here would say the same thing twice. */
+.term-chrome-hint {
+  position: absolute;
+  right: 0.75rem;
+  font-family: var(--sk-font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  color: var(--sk-accent);
+  white-space: nowrap;
+}
+/* The centered title and the hint share one row, and the title wins it. */
+@media (max-width: 720px) {
+  .term-chrome-hint {
+    display: none;
+  }
+}
 
 /* ============================================================
    Hero terminal — cross-faded scenes
@@ -563,9 +581,12 @@ body.sk-landing {
   overflow: hidden;
 }
 
-/* The box the loading panel and the live terminal both fill. */
+/* The box the loading panel and the live terminal both fill. The background is
+   the terminal's own, because the terminal itself paints transparent so the
+   rounded frame can clip it. */
 .term-stage {
   position: relative;
+  background: var(--sk-term-bg);
 }
 /* What a frame holds until the wasm module lands. Same box as the terminal
    that replaces it, so the swap moves nothing. The meter beside the label
@@ -580,11 +601,11 @@ body.sk-landing {
   justify-content: center;
   gap: 0.8rem;
   padding-inline: 1.5rem;
-  background: var(--tui-bg);
+  background: var(--sk-term-bg);
   font-family: var(--sk-font-mono);
   font-size: 0.78rem;
   letter-spacing: 0.02em;
-  color: var(--sk-dim);
+  color: color-mix(in srgb, var(--sk-term-fg) 62%, transparent);
   text-align: center;
 }
 .sk-term-loading-label {
@@ -923,6 +944,58 @@ body.sk-landing {
 }
 
 /* ============================================================
+   The invitation under the hero frame
+   ============================================================
+   The hero terminal answers the keyboard, but a visitor watching
+   a tour play has no way to know that. This chip says so, and
+   once the terminal is taken it reports that the keyboard is
+   there. It is never removed, because a chip that disappears
+   moves the page under the visitor who just clicked it.
+   ============================================================ */
+.sk-hero-grab {
+  /* Both labels share one grid cell, so the chip is always as wide as the
+     longer of them and swapping them moves nothing. The label that is not in
+     use holds its space through `visibility`, which also keeps it out of the
+     accessibility tree. */
+  display: grid;
+  width: fit-content;
+  margin: 0.9rem auto 0;
+  padding: 0.35rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--sk-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--sk-accent) 10%, transparent);
+  color: var(--sk-accent);
+  font-family: var(--sk-font-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+.sk-hero-grab-face {
+  grid-area: 1 / 1;
+}
+.sk-hero-grab-live,
+.sk-hero-grab.is-focused .sk-hero-grab-face {
+  visibility: hidden;
+}
+.sk-hero-grab.is-focused .sk-hero-grab-live {
+  visibility: visible;
+}
+.sk-hero-grab:not(.is-focused):hover {
+  background: color-mix(in srgb, var(--sk-accent) 18%, transparent);
+  border-color: var(--sk-accent);
+}
+/* Taken: the chip is a light now, not a button. */
+.sk-hero-grab.is-focused {
+  border-color: color-mix(in srgb, var(--sk-add) 45%, transparent);
+  background: color-mix(in srgb, var(--sk-add) 10%, transparent);
+  color: var(--sk-add);
+  cursor: default;
+}
+
+/* ============================================================
    Motion — everything below only runs when motion is allowed
    ============================================================ */
 @media (prefers-reduced-motion: no-preference) {
@@ -943,6 +1016,10 @@ body.sk-landing {
     transform: translateY(-3px);
     box-shadow: 0 14px 30px -18px rgba(0, 0, 0, 0.5);
   }
+  /* A slow ring, so the chip reads as an offer and not a label. */
+  .sk-hero-grab:not(.is-taken) {
+    animation: sk-grab-pulse 2.8s ease-out infinite;
+  }
 }
 
 /* ============================================================
@@ -952,4 +1029,146 @@ body.sk-landing {
    ============================================================ */
 .mini {
   max-width: 26rem;
+}
+
+/* ============================================================
+   `/try` — skim over the whole viewport
+   ============================================================
+   The page is one column that fills the screen: a bar of fixed
+   height and a stage that takes the rest. Nothing scrolls, so
+   the terminal never has to share the height with the document.
+   ============================================================ */
+/* The height and the clip go on both elements, not on the body alone. A body
+   that clips while the root does not relies on overflow propagating up to the
+   viewport, and that is one rule too subtle to hang a full-screen page on. */
+html.sk-full,
+html.sk-full > body.sk-landing {
+  height: 100dvh;
+  overflow: hidden;
+}
+html.sk-full #main {
+  height: 100%;
+}
+.sk-try {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.sk-try-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.9rem;
+  padding: 0.55rem 0.9rem;
+  border-bottom: 1px solid var(--sk-border);
+  background: var(--sk-bg);
+}
+.sk-try-brand {
+  font-size: 0.95rem;
+}
+/* The diff picker takes whatever the bar has left, down to a width that still
+   shows a pull request URL. Below that the bar wraps and it gets a line. */
+.sk-try-form {
+  display: flex;
+  gap: 0.4rem;
+  flex: 1 1 20rem;
+  min-width: 0;
+  max-width: 34rem;
+}
+.sk-try-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.42rem 0.6rem;
+  border-radius: 0.45rem;
+  border: 1px solid var(--sk-border-strong);
+  background: var(--sk-bg-subtle);
+  color: var(--sk-fg);
+  font-size: 0.82rem;
+}
+.sk-try-input::placeholder {
+  color: var(--sk-dim);
+}
+.sk-try-input:focus {
+  border-color: var(--sk-accent);
+  outline: none;
+}
+.sk-btn.sk-try-open {
+  padding: 0.42rem 0.85rem;
+  font-size: 0.82rem;
+}
+/* The diff that is open. It gives up width before anything else in the bar. */
+.sk-try-label {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  color: var(--sk-muted);
+}
+/* Why a diff did not load. GitHub writes a full sentence, so this takes a row
+   of its own rather than squeezing the picker. A failure never replaces the
+   name of the diff the visitor still has. */
+.sk-try-note {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--sk-del);
+}
+.sk-try-note:empty {
+  display: none;
+}
+.sk-try-links {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: auto;
+  font-size: 0.82rem;
+  color: var(--sk-muted);
+}
+.sk-try-links a:hover {
+  color: var(--sk-fg);
+}
+.sk-try-tip kbd {
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--sk-border-strong);
+  border-radius: 0.25rem;
+  font-family: var(--sk-font-mono);
+  font-size: 0.75rem;
+}
+@media (max-width: 720px) {
+  /* A phone has room for the picker and the terminal, and nothing else. */
+  .sk-try-links,
+  .sk-try-label {
+    display: none;
+  }
+}
+.sk-try-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--sk-term-bg);
+}
+/* No padding, unlike the framed terminals above: xterm's fit addon reads the
+   host's full box, so a gutter here would make it lay out one row more than
+   fits and clip the status bar off the bottom of the screen. */
+.sk-try-live {
+  position: absolute;
+  inset: 0;
+}
+.sk-try-live .xterm,
+.sk-try-live .xterm-viewport {
+  height: 100%;
+  background: transparent;
+}
+.sk-try-live .xterm-viewport {
+  overflow: hidden;
+}
+/* The "Try it" link is the one thing in the nav that is not a document. */
+.sk-nav-links a.sk-nav-try {
+  color: var(--sk-fg);
+  border: 1px solid var(--sk-border-strong);
+}
+.sk-nav-links a.sk-nav-try:hover {
+  border-color: var(--sk-accent);
 }

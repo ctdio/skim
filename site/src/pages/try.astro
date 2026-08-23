@@ -1,0 +1,263 @@
+---
+/**
+ * `/try` — skim, full screen, in the browser.
+ *
+ * The same wasm build the hero runs (`zig build web`, loaded through
+ * `web/skim.js`), given the whole viewport and no tour: the terminal takes the
+ * keyboard as soon as it is up and every key goes to skim.
+ *
+ * It opens a commit from skim's own history, and a visitor can point it at any
+ * public pull request, commit, or comparison on GitHub. The diff is fetched
+ * from GitHub's API and parsed here — nothing is uploaded, and there is no
+ * server in this page at all.
+ *
+ * The address bar carries the open diff as `?diff=`, so a loaded review is a
+ * link someone can send.
+ */
+import Landing from '../layouts/Landing.astro';
+import { withBase } from '../lib/base';
+
+const keybindingsHref = withBase('/docs/reference/keybindings');
+const repoHref = 'https://github.com/ctdio/skim';
+---
+
+<Landing
+  chrome={false}
+  title="Try Skim in your browser"
+  description="Run skim on any public GitHub pull request or commit, without installing anything. The real Zig renderer, compiled to WebAssembly."
+>
+  <div class="sk-try">
+    <header class="sk-try-bar">
+      <a class="sk-brand sk-try-brand" href={withBase('/')} aria-label="Skim home">
+        <svg width="22" height="22" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+          <rect
+            x="1.5"
+            y="3.5"
+            width="29"
+            height="25"
+            rx="5"
+            fill="var(--tui-bg)"
+            stroke="var(--sk-accent)"
+            stroke-width="2"></rect>
+          <rect x="7" y="10" width="12" height="2.4" rx="1.2" fill="var(--sk-add)"></rect>
+          <rect x="7" y="15" width="16" height="2.4" rx="1.2" fill="var(--sk-del)"></rect>
+          <rect x="7" y="20" width="9" height="2.4" rx="1.2" fill="var(--sk-dim)"></rect>
+        </svg>
+        <span>Skim</span>
+      </a>
+
+      <form class="sk-try-form" data-try-form>
+        <label class="sk-visually-hidden" for="sk-try-input">
+          A GitHub pull request, commit, or comparison
+        </label>
+        <input
+          class="sk-try-input sk-mono"
+          id="sk-try-input"
+          type="text"
+          inputmode="url"
+          spellcheck="false"
+          autocapitalize="off"
+          autocorrect="off"
+          placeholder="github.com/owner/repo/pull/123"
+          data-try-input
+        />
+        <button class="sk-btn sk-btn-primary sk-try-open" type="submit">Open</button>
+      </form>
+
+      <p class="sk-try-label sk-mono" data-try-label></p>
+
+      <div class="sk-try-links">
+        <span class="sk-try-tip"><kbd>?</kbd> lists every key</span>
+        <a href={keybindingsHref}>Keybindings</a>
+        <a href={repoHref} rel="noopener">GitHub</a>
+      </div>
+
+      <!-- A failure takes the whole width and its own line, because GitHub
+           writes a long sentence and it must not squeeze the bar's own row.
+           It is empty until there is one, and empty it takes no space. -->
+      <p class="sk-try-note sk-mono" role="status" data-try-note></p>
+    </header>
+
+    <div class="sk-try-stage">
+      <!-- One panel for every state the terminal is not in: the module
+           downloading, a diff being fetched, a diff being parsed, and a
+           failure that leaves nothing to show. -->
+      <div class="sk-term-loading" data-try-panel>
+        <p class="sk-term-loading-label" data-try-panel-label>Loading skim…</p>
+        <span class="sk-hero-progress" data-try-progress>
+          <span class="sk-hero-progress-fill" data-try-progress-fill></span>
+        </span>
+      </div>
+      <div class="sk-try-live" data-try-live hidden></div>
+    </div>
+  </div>
+</Landing>
+
+<script>
+  // Static, like the hero: Vite hoists xterm's stylesheet into the page
+  // stylesheet, and a dynamic import leaves a CSS chunk reference that 404s.
+  import '@xterm/xterm/css/xterm.css';
+  import { DEMO_DIFF } from '../lib/demo-diff';
+  import { fetchGitHubDiff } from '../lib/github-diff';
+  import { mountLiveTerminal, wantsLiveTerminal } from '../lib/live-terminal';
+  import type { LiveTerminal, Progress } from '../lib/live-terminal';
+
+  /** An open diff: what skim holds, and what the bar says it is. */
+  type Source = { label: string; diff: string; url: string | null };
+
+  const DEMO: Source = {
+    label: 'ctdio/skim — the commit that made diffs stream',
+    diff: DEMO_DIFF,
+    url: null,
+  };
+
+  // Full screen, so the grid is wider than the hero's and the glyph is bigger.
+  // 120 columns is about what a maximised terminal holds on a laptop.
+  const FONT = { cols: 120, min: 9, max: 16 };
+
+  const live = document.querySelector<HTMLElement>('[data-try-live]');
+  const panel = document.querySelector<HTMLElement>('[data-try-panel]');
+  const panelLabel = document.querySelector<HTMLElement>('[data-try-panel-label]');
+  const meter = document.querySelector<HTMLElement>('[data-try-progress]');
+  const meterFill = document.querySelector<HTMLElement>('[data-try-progress-fill]');
+  const form = document.querySelector<HTMLFormElement>('[data-try-form]');
+  const input = document.querySelector<HTMLInputElement>('[data-try-input]');
+  const label = document.querySelector<HTMLElement>('[data-try-label]');
+  const note = document.querySelector<HTMLElement>('[data-try-note]');
+
+  // What skim has open. Kept so a diff that fails to parse can be rolled back:
+  // a failed load leaves the module with no session at all.
+  let current: Source = DEMO;
+  let terminal: LiveTerminal | null = null;
+
+  if (live && panel && panelLabel && meter && meterFill && form && input && label && note) {
+    // The requested diff is fetched before the terminal is asked to open it,
+    // and the fetch is started here so it runs while the module downloads.
+    const requested = new URLSearchParams(location.search).get('diff');
+    const pending = requested ? fetchGitHubDiff(requested) : null;
+    // A rejection that nothing is awaiting yet is an unhandled rejection, and
+    // the module download is between here and the `await` below.
+    pending?.catch(() => {});
+
+    if (requested) input.value = requested;
+
+    if (wantsLiveTerminal()) {
+      mount(pending).catch(() => {
+        live.hidden = true;
+        showPanel('The live demo could not load.');
+      });
+    } else {
+      showPanel('The live demo is off while Data Saver is on.');
+    }
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const value = input.value.trim();
+      if (value.length === 0 || terminal === null) return;
+      load(value);
+    });
+  }
+
+  /** Bring the terminal up on `pending`, or on the bundled diff when there is none. */
+  async function mount(pending: Promise<Source> | null): Promise<void> {
+    terminal = await mountLiveTerminal({
+      host: live!,
+      diff: DEMO.diff,
+      font: FONT,
+      onProgress: showProgress,
+      reveal: () => {
+        live!.hidden = false;
+        // The panel stays up over the terminal while a requested diff is still
+        // in flight, so the bundled one is never seen in its place. Nothing
+        // paints between here and `ready` below, so there is no flash either way.
+        if (pending) showPanel('Fetching the diff from GitHub…');
+      },
+    });
+
+    if (!pending) return ready(DEMO);
+    try {
+      openDiff(await pending);
+    } catch (err) {
+      ready(DEMO);
+      fail(err);
+    }
+  }
+
+  /** Fetch `input` from GitHub, then hand it to skim. */
+  async function load(target: string): Promise<void> {
+    note!.textContent = '';
+    showPanel('Fetching the diff from GitHub…');
+    try {
+      openDiff(await fetchGitHubDiff(target));
+    } catch (err) {
+      ready(current);
+      fail(err);
+    }
+  }
+
+  /**
+   * Open a fetched diff.
+   *
+   * `terminal.open` parses and highlights the whole diff in one synchronous
+   * call, so nothing else paints until it returns. Two frames of headroom let
+   * the panel land first — one alone only queues the paint.
+   */
+  function openDiff(source: Source): void {
+    showPanel(`Opening ${source.label}…`);
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        try {
+          terminal!.open(source.diff);
+          current = source;
+        } catch {
+          // A failed load left no session behind, so put back the diff that
+          // worked before drawing anything.
+          terminal!.open(current.diff);
+          ready(current);
+          note!.textContent = 'Skim could not parse that diff.';
+          return;
+        }
+        ready(source);
+      }),
+    );
+  }
+
+  /**
+   * Hand the terminal over: hide the panel, name the diff, take the keyboard,
+   * and put the diff in the address bar so the page can be linked.
+   */
+  function ready(source: Source): void {
+    panel!.hidden = true;
+    label!.textContent = source.label;
+    document.title = `${source.label} — Skim`;
+    terminal?.focus();
+
+    const url = new URL(location.href);
+    if (source.url) url.searchParams.set('diff', source.url);
+    else url.searchParams.delete('diff');
+    history.replaceState(null, '', url);
+  }
+
+  /**
+   * Cover the terminal with `text`. The meter belongs to the module download,
+   * which the markup starts in and nothing returns to, so every call hides it.
+   */
+  function showPanel(text: string): void {
+    panelLabel!.textContent = text;
+    meter!.hidden = true;
+    panel!.hidden = false;
+  }
+
+  /** Say why a diff did not load, and let the visitor keep the one they have. */
+  function fail(err: unknown): void {
+    note!.textContent =
+      err instanceof Error ? err.message : 'Could not load that diff.';
+  }
+
+  /** Fill the meter as the module arrives, the way the hero does. */
+  function showProgress({ loaded, total }: Progress): void {
+    if (!total) return;
+    meter!.classList.add('is-measured');
+    meterFill!.style.width = `${Math.min(100, Math.round((loaded / total) * 100))}%`;
+  }
+</script>

@@ -42,9 +42,22 @@ export type View = {
 };
 
 export type LiveTerminal = {
+  /** The open diff. `open` replaces it, so read it at the point of use. */
   view: View;
   /** Redraw the current frame, or a frame a caller produced with `view.key`. */
   draw(frame: Frame): void;
+  /**
+   * Replace the open diff and draw its first frame.
+   *
+   * The module holds one session at a time, so this closes the one that is
+   * open. It is synchronous and it parses and highlights the whole diff, so a
+   * large one blocks the tab: paint whatever says so before the call. It throws
+   * when skim cannot parse the text, and the module is left with no session —
+   * open a diff that works before you draw again.
+   */
+  open(diff: string): void;
+  /** Put the keyboard on the terminal. */
+  focus(): void;
 };
 
 type SkimLoader = {
@@ -114,9 +127,10 @@ export async function mountLiveTerminal({
     cursorStyle: "bar",
     cursorBlink: true,
     allowTransparency: true,
+    // Fixed, not the themed `--tui-*` pair: see the token definition.
     theme: {
-      background: styles.getPropertyValue("--tui-bg").trim() || "#0b0d10",
-      foreground: styles.getPropertyValue("--tui-fg").trim() || "#c9d1d9",
+      background: styles.getPropertyValue("--sk-term-bg").trim() || "#16181d",
+      foreground: styles.getPropertyValue("--sk-term-fg").trim() || "#d7dae0",
     },
   });
   const fit = new FitAddon();
@@ -129,8 +143,20 @@ export async function mountLiveTerminal({
   term.options.fontSize = fontSizeFor(host.clientWidth, font);
   fit.fit();
 
-  const view = skim.open({ diff, cols: term.cols, rows: term.rows });
-  const live: LiveTerminal = { view, draw: (frame) => draw(term, frame) };
+  let view = skim.open({ diff, cols: term.cols, rows: term.rows });
+  const live: LiveTerminal = {
+    // A getter, because `open` replaces the session and a caller that read the
+    // field once would go on driving the diff that is no longer on screen.
+    get view() {
+      return view;
+    },
+    draw: (frame) => draw(term, frame),
+    open(next) {
+      view = skim.open({ diff: next, cols: term.cols, rows: term.rows });
+      live.draw(view.render());
+    },
+    focus: () => term.focus(),
+  };
   live.draw(view.render());
 
   term.attachCustomKeyEventHandler((event) => {

@@ -56,6 +56,12 @@
         <span style="background:#28c840"></span>
       </div>
       <span class="term-title">skim — reviewing the browser build</span>
+      <!-- The same invitation as the chip under the frame, in the chrome bar a
+           visitor is already reading. The script shows it once the terminal is
+           live and drops it with the chip the first time the terminal is taken. -->
+      <span class="term-chrome-hint" data-hero-chrome-hint hidden>
+        Click to take over
+      </span>
     </div>
 
     <div class="term-stage">
@@ -72,6 +78,17 @@
       <div class="sk-hero-live" data-hero-live hidden></div>
     </div>
   </div>
+
+  <!-- The invitation, and after it is taken, the focus light. The terminal is a
+       real one and it answers the keyboard, but a visitor watching a tour play
+       has no way to know that. The script shows this once the terminal is live,
+       and from then on it says whether the keyboard is on the terminal. It is
+       never removed: the chip sits under the frame, and a chip that disappears
+       moves the page under the visitor who just clicked it. -->
+  <button class="sk-hero-grab" type="button" data-hero-grab hidden>
+    <span class="sk-hero-grab-face">Click to take over</span>
+    <span class="sk-hero-grab-face sk-hero-grab-live">Focused — keys go to skim</span>
+  </button>
 </div>
 
 <script>
@@ -198,8 +215,10 @@
   const meter = document.querySelector<HTMLElement>('[data-hero-progress]');
   const meterFill = document.querySelector<HTMLElement>('[data-hero-progress-fill]');
   const tabs = document.querySelector<HTMLElement>('[data-hero-tabs]');
+  const grab = document.querySelector<HTMLButtonElement>('[data-hero-grab]');
+  const chromeHint = document.querySelector<HTMLElement>('[data-hero-chrome-hint]');
 
-  if (root && live && placeholder && label && hint && hintText && meter && meterFill && tabs) {
+  if (root && live && placeholder && label && hint && hintText && meter && meterFill && tabs && grab && chromeHint) {
     if (wantsLiveTerminal()) {
       const io = new IntersectionObserver(
         ([entry]) => {
@@ -333,8 +352,24 @@
     });
 
     // xterm puts the focus on a textarea inside the host, so watch the host.
-    live!.addEventListener('focusin', () => autoplay?.setFocused(true));
-    live!.addEventListener('focusout', () => autoplay?.setFocused(false));
+    // `is-focused` flips the chip's label, and `is-taken` stops its pulse for
+    // good: it is there to be noticed, and once it has been there is nothing
+    // left to advertise.
+    live!.addEventListener('focusin', () => {
+      autoplay?.setFocused(true);
+      grab!.classList.add('is-focused', 'is-taken');
+      // The chrome bar carries the same invitation. It is out of flow, so
+      // dropping it costs no layout, and one focus light is enough.
+      chromeHint!.remove();
+    });
+    live!.addEventListener('focusout', () => {
+      autoplay?.setFocused(false);
+      grab!.classList.remove('is-focused');
+    });
+
+    grab!.addEventListener('click', () => terminal.focus());
+    grab!.hidden = false;
+    chromeHint!.hidden = false;
   }
 
   /** Write the caption, and mark the strip and the dot when the tour is idle. */

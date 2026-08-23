@@ -114,6 +114,14 @@
   --tui-sel-bg: #2d3748;
   --tui-cursor: #d7dae0;
 
+  /* The canvas the live terminals run on. Skim has one palette — GitHub Dark,
+     in `src/rendering/common.zig` — and it writes its own colors for every diff
+     line, so these two must not invert with the page: a light canvas under a
+     dark-terminal palette is dark on dark. The `--tui-*` pair does invert, and
+     dresses the window frame around the terminal. */
+  --sk-term-bg: #16181d;
+  --sk-term-fg: #d7dae0;
+
   /* Diff */
   --tui-add-fg: #7ee2a8;
   --tui-add-bg: #10261a;
