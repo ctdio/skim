@@ -56,6 +56,106 @@ pub const LineRecord = struct {
     line_type: LineType,
 };
 
+/// A comment location: the file path plus the coordinate inside it.
+const CommentLoc = struct {
+    file_path: []const u8,
+    hunk_idx: usize,
+    line_idx: usize,
+};
+
+const CommentLocContext = struct {
+    pub fn hash(_: CommentLocContext, key: CommentLoc) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(key.file_path);
+        hasher.update(std.mem.asBytes(&key.hunk_idx));
+        hasher.update(std.mem.asBytes(&key.line_idx));
+        return hasher.final();
+    }
+
+    pub fn eql(_: CommentLocContext, a: CommentLoc, b: CommentLoc) bool {
+        return a.hunk_idx == b.hunk_idx and
+            a.line_idx == b.line_idx and
+            std.mem.eql(u8, a.file_path, b.file_path);
+    }
+};
+
+const CommentLocMap = std.HashMapUnmanaged(
+    CommentLoc,
+    usize,
+    CommentLocContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+/// Location index over the comment store, built once per `LineMap.build`.
+///
+/// The record loop needs two questions answered per code line: does a range
+/// comment end here, and is there a comment starting here. Answering them by
+/// scanning the whole comment list made a build cost O(lines x comments), with
+/// a path string compare per candidate — and a build runs on every comment add
+/// or delete, so that landed on a keystroke. Both questions are now one
+/// integer-and-path hash lookup.
+///
+/// Both maps keep the LOWEST comment index on collision, which reproduces the
+/// old "first match from the start of the list wins" order exactly.
+const CommentIndex = struct {
+    /// Range comments keyed by the location they END at.
+    range_end: CommentLocMap = .{},
+    /// Every comment keyed by the location it STARTS at, whatever its kind.
+    /// A range comment starting here shadows a later single comment, matching
+    /// the old lookup, which took the first match and then rejected it.
+    first_at: CommentLocMap = .{},
+
+    fn build(allocator: Allocator, store: *const comments.CommentStore) !CommentIndex {
+        var self = CommentIndex{};
+        errdefer self.deinit(allocator);
+
+        for (store.comments.items, 0..) |*comment, idx| {
+            const start = CommentLoc{
+                .file_path = comment.file_path,
+                .hunk_idx = comment.hunk_idx,
+                .line_idx = comment.line_idx,
+            };
+            const start_slot = try self.first_at.getOrPut(allocator, start);
+            if (!start_slot.found_existing) start_slot.value_ptr.* = idx;
+
+            if (comment.end_hunk_idx) |end_hunk| {
+                if (comment.end_line_idx) |end_line| {
+                    const end = CommentLoc{
+                        .file_path = comment.file_path,
+                        .hunk_idx = end_hunk,
+                        .line_idx = end_line,
+                    };
+                    const end_slot = try self.range_end.getOrPut(allocator, end);
+                    if (!end_slot.found_existing) end_slot.value_ptr.* = idx;
+                }
+            }
+        }
+
+        return self;
+    }
+
+    fn deinit(self: *CommentIndex, allocator: Allocator) void {
+        self.range_end.deinit(allocator);
+        self.first_at.deinit(allocator);
+    }
+
+    /// The comment to render below this line, or null. Mirrors the old order:
+    /// a range comment ending here first, otherwise a single comment starting
+    /// here.
+    fn commentFor(
+        self: *const CommentIndex,
+        store: *const comments.CommentStore,
+        loc: CommentLoc,
+    ) ?usize {
+        if (self.range_end.get(loc)) |idx| return idx;
+
+        const idx = self.first_at.get(loc) orelse return null;
+        const comment = store.getComment(idx) orelse return null;
+        if (comment.end_hunk_idx == null and comment.end_line_idx == null) return idx;
+        return null;
+    }
+};
+
 /// Complete map of all lines in the diff
 pub const LineMap = struct {
     records: []LineRecord,
@@ -108,6 +208,9 @@ pub const LineMap = struct {
         // Pre-allocate file header cache
         const file_header_lines = try allocator.alloc(usize, files.len);
         errdefer allocator.free(file_header_lines);
+
+        var comment_index = try CommentIndex.build(allocator, comment_store);
+        defer comment_index.deinit(allocator);
 
         var global_line: usize = 0;
 
@@ -233,25 +336,14 @@ pub const LineMap = struct {
                     });
                     global_line += 1;
 
-                    // Check for comments on this line:
-                    // 1. First check for range comments that END at this line (displayed at lowest point)
-                    // 2. Then check for single-line comments that START at this line
-                    const comment_idx = blk: {
-                        // Check if a range comment ends here
-                        if (comment_store.findRangeCommentEndingAt(file_path, hunk_idx, line_idx_in_hunk)) |idx| {
-                            break :blk idx;
-                        }
-                        // Check if a single-line comment is at this location
-                        if (comment_store.findCommentAt(file_path, hunk_idx, line_idx_in_hunk)) |idx| {
-                            // Make sure it's actually a single-line comment (not a range comment that starts here)
-                            if (comment_store.getComment(idx)) |comment| {
-                                if (comment.end_hunk_idx == null and comment.end_line_idx == null) {
-                                    break :blk idx;
-                                }
-                            }
-                        }
-                        break :blk null;
-                    };
+                    // Check for comments on this line: a range comment that
+                    // ENDS here (displayed at its lowest point) takes priority
+                    // over a single-line comment that STARTS here.
+                    const comment_idx = comment_index.commentFor(comment_store, .{
+                        .file_path = file_path,
+                        .hunk_idx = hunk_idx,
+                        .line_idx = line_idx_in_hunk,
+                    });
 
                     if (comment_idx) |idx| {
                         try records.append(allocator, .{
@@ -535,6 +627,97 @@ test "line map with comments" {
     try std.testing.expect(record4.line_type == .comment_line);
     try std.testing.expectEqual(@as(usize, 0), record4.line_type.comment_line.parent_hunk_idx);
     try std.testing.expectEqual(@as(usize, 0), record4.line_type.comment_line.parent_line_idx);
+}
+
+test "a range comment starting on a line suppresses a later single comment there" {
+    // Precedence rule the record loop depends on: the lookup takes the FIRST
+    // comment at a location, and accepts it only when it is single-line. A
+    // range comment that starts there wins the lookup and is then rejected, so
+    // no comment record is emitted even though a single comment also sits on
+    // that line. Pinned because an index keyed per location must keep the same
+    // first-wins order.
+    const allocator = std.testing.allocator;
+    const diff =
+        \\diff --git a/test.txt b/test.txt
+        \\--- a/test.txt
+        \\+++ b/test.txt
+        \\@@ -1,2 +1,2 @@
+        \\-old
+        \\+new
+    ;
+
+    const files = try parser.parse(allocator, diff);
+    defer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    // Range comment spanning both lines, added first.
+    try store.addRangeComment("test.txt", 0, 0, 0, 1, "range", .delete, "old", 1, null);
+    // Single comment on the same start line, added second.
+    try store.addComment("test.txt", 0, 0, "single", .delete, "old", 1, null);
+
+    var map = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    defer map.deinit();
+
+    // The range comment renders at its END line (line_idx 1), and the start
+    // line emits nothing because the range comment shadowed the single one.
+    var comment_records: usize = 0;
+    var range_parent_line: ?usize = null;
+    for (map.records) |record| {
+        if (record.line_type != .comment_line) continue;
+        comment_records += 1;
+        range_parent_line = record.line_type.comment_line.parent_line_idx;
+    }
+    try std.testing.expectEqual(@as(usize, 1), comment_records);
+    try std.testing.expectEqual(@as(usize, 1), range_parent_line.?);
+}
+
+test "comments attach to the file whose path matches" {
+    // Two files with comments at identical (hunk_idx, line_idx) coordinates.
+    // Only the path distinguishes them, so an index must key on the path.
+    const allocator = std.testing.allocator;
+    const diff =
+        \\diff --git a/one.txt b/one.txt
+        \\--- a/one.txt
+        \\+++ b/one.txt
+        \\@@ -1,1 +1,1 @@
+        \\-a
+        \\+b
+        \\diff --git a/two.txt b/two.txt
+        \\--- a/two.txt
+        \\+++ b/two.txt
+        \\@@ -1,1 +1,1 @@
+        \\-c
+        \\+d
+    ;
+
+    const files = try parser.parse(allocator, diff);
+    defer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+    try std.testing.expectEqual(@as(usize, 2), files.len);
+
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+    try store.addComment("two.txt", 0, 0, "on two", .delete, "c", 1, null);
+
+    var map = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    defer map.deinit();
+
+    var owner_file_idx: ?usize = null;
+    var comment_records: usize = 0;
+    for (map.records) |record| {
+        if (record.line_type != .comment_line) continue;
+        comment_records += 1;
+        owner_file_idx = record.file_idx;
+    }
+    try std.testing.expectEqual(@as(usize, 1), comment_records);
+    try std.testing.expectEqual(@as(usize, 1), owner_file_idx.?);
 }
 
 test "comment deletion scroll anchoring" {

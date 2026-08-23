@@ -307,6 +307,26 @@ pub fn build(b: *std.Build) void {
     const run_pr_controller_tests = b.addRunArtifact(pr_controller_tests);
     test_step.dependOn(&run_pr_controller_tests.step);
 
+    // Core diff-path tests: parser, line_map, comment store, streaming loader.
+    // Same reason as width_tests below — these are only reachable from main.zig
+    // through app.zig, so their test blocks need a direct root to be collected.
+    const diff_core_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/diff_core_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    diff_core_tests.root_module.addImport("vaxis", vaxis);
+    diff_core_tests.root_module.addImport("tree-sitter", tree_sitter);
+    diff_core_tests.root_module.addImport("build_options", build_options_module);
+    for (grammars) |grammar| {
+        diff_core_tests.linkLibrary(grammar);
+    }
+    diff_core_tests.linkLibC();
+    const run_diff_core_tests = b.addRunArtifact(diff_core_tests);
+    test_step.dependOn(&run_diff_core_tests.step);
+
     // Rendering width/wrap tests. width.zig is self-contained (std + vaxis only)
     // and holds colocated wrap tests, so it roots its own step — main.zig's tree
     // does not reliably pull test blocks from transitively-imported files.

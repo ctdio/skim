@@ -145,24 +145,6 @@ pub const CommentStore = struct {
         return self.findCommentAt(file_path, hunk_idx, line_idx) != null;
     }
 
-    /// Find a range comment that ENDS at this location (returns index or null)
-    /// Range comments should be displayed after their END line (lowest point)
-    pub fn findRangeCommentEndingAt(self: *const CommentStore, file_path: []const u8, hunk_idx: usize, line_idx: usize) ?usize {
-        for (self.comments.items, 0..) |*comment, idx| {
-            // Check if this is a range comment
-            if (comment.end_hunk_idx == null or comment.end_line_idx == null) continue;
-
-            // Check if it ends at this location
-            if (std.mem.eql(u8, comment.file_path, file_path) and
-                comment.end_hunk_idx.? == hunk_idx and
-                comment.end_line_idx.? == line_idx)
-            {
-                return idx;
-            }
-        }
-        return null;
-    }
-
     /// Get comment at index
     pub fn getComment(self: *const CommentStore, idx: usize) ?*const Comment {
         if (idx >= self.comments.items.len) return null;

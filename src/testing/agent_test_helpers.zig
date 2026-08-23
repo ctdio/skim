@@ -327,71 +327,6 @@ pub fn renderAgentMessage(
     });
 }
 
-/// Render a tool call to a window
-/// Format: "[status] name: command" or "[status] name" with optional stdout below
-pub fn renderToolCall(
-    win: vaxis.Window,
-    name: []const u8,
-    command: ?[]const u8,
-    status: ToolStatus,
-    stdout: ?[]const u8,
-    row: usize,
-) usize {
-    if (row >= win.height) return row;
-
-    var current_row = row;
-
-    // Build status indicator
-    var status_buf: [32]u8 = undefined;
-    const status_text = std.fmt.bufPrint(&status_buf, "[{s}] ", .{status.label()}) catch "[?] ";
-
-    const status_style: vaxis.Style = .{ .fg = status.color(), .bold = true };
-    const name_style: vaxis.Style = .{ .fg = Color.white, .bold = true };
-    const cmd_style: vaxis.Style = .{ .fg = Color.dim };
-
-    // First line: [status] name: command
-    if (command) |cmd| {
-        var segments = [_]vaxis.Cell.Segment{
-            .{ .text = status_text, .style = status_style },
-            .{ .text = name, .style = name_style },
-            .{ .text = ": ", .style = name_style },
-            .{ .text = cmd, .style = cmd_style },
-        };
-        _ = win.print(&segments, .{
-            .row_offset = @intCast(current_row),
-            .col_offset = 0,
-        });
-    } else {
-        var segments = [_]vaxis.Cell.Segment{
-            .{ .text = status_text, .style = status_style },
-            .{ .text = name, .style = name_style },
-        };
-        _ = win.print(&segments, .{
-            .row_offset = @intCast(current_row),
-            .col_offset = 0,
-        });
-    }
-    current_row += 1;
-
-    // Output line if present (for completed tools)
-    if (stdout) |output| {
-        if (current_row < win.height and output.len > 0) {
-            const output_style: vaxis.Style = .{ .fg = Color.dim };
-            var output_seg = [_]vaxis.Cell.Segment{
-                .{ .text = "  ", .style = output_style },
-                .{ .text = output, .style = output_style },
-            };
-            _ = win.print(&output_seg, .{
-                .row_offset = @intCast(current_row),
-                .col_offset = 0,
-            });
-            current_row += 1;
-        }
-    }
-
-    return current_row;
-}
-
 /// Render a plan entry to a window
 /// Format: "[x] content" or "[ ] content"
 pub fn renderPlanEntry(
@@ -1031,7 +966,7 @@ test "renderToolCall renders pending status" {
     defer ctx.deinit();
 
     const win = ctx.window();
-    _ = renderToolCall(win, "Bash", "ls", .pending, null, 0);
+    _ = renderToolCallAlloc(win, "Bash", "ls", .pending, null, 0, ctx.frameAllocator());
 
     // Verify status indicator is rendered
     const cell0 = ctx.screen.readCell(0, 0);
@@ -1050,7 +985,7 @@ test "renderToolCall renders completed status with output" {
     defer ctx.deinit();
 
     const win = ctx.window();
-    const next_row = renderToolCall(win, "Bash", "echo hi", .completed, "hi", 0);
+    const next_row = renderToolCallAlloc(win, "Bash", "echo hi", .completed, "hi", 0, ctx.frameAllocator());
 
     // Verify we advanced to row 2 (tool header + output)
     try std.testing.expectEqual(@as(usize, 2), next_row);

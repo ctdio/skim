@@ -516,7 +516,7 @@ test "Language detection from file extensions" {
     try std.testing.expectEqual(Language.c, Language.fromFilePath("header.h"));
     try std.testing.expectEqual(Language.cpp, Language.fromFilePath("app.cpp"));
     try std.testing.expectEqual(Language.cpp, Language.fromFilePath("lib.hpp"));
-    try std.testing.expectEqual(Language.unknown, Language.fromFilePath("README.md"));
+    try std.testing.expectEqual(Language.markdown, Language.fromFilePath("README.md"));
 }
 
 test "Language detection for special filenames" {

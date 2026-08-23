@@ -83,6 +83,14 @@ pub const DiffLoad = struct {
 pub const IncrementalParser = struct {
     buf: std.ArrayListUnmanaged(u8) = .{},
     parsed_up_to: usize = 0,
+    /// How far `buf` has been examined for a file boundary. Every byte below
+    /// this has already been read once and is never read again, so a stream
+    /// that carries one very large file does not rescan its growing tail on
+    /// every chunk (that made a big single-file diff cost O(n^2)).
+    scanned_up_to: usize = 0,
+    /// Absolute index of the newline starting the last boundary found but not
+    /// yet emitted, or null when none is outstanding.
+    last_boundary: ?usize = null,
 
     pub fn deinit(self: *IncrementalParser, allocator: Allocator) void {
         self.buf.deinit(allocator);
@@ -97,11 +105,37 @@ pub const IncrementalParser = struct {
         out: *std.ArrayListUnmanaged(parser.FileDiff),
     ) !void {
         try self.buf.appendSlice(allocator, chunk);
-        const end = completeFilesEnd(self.buf.items, self.parsed_up_to);
-        if (end > self.parsed_up_to) {
-            try emitRange(allocator, self.buf.items[self.parsed_up_to..end], out);
-            self.parsed_up_to = end;
+        self.scanForBoundary();
+
+        const boundary = self.last_boundary orelse return;
+        // The boundary newline is the final byte of the preceding file, so the
+        // complete range ends just after it.
+        const end = boundary + 1;
+        self.last_boundary = null;
+        if (end <= self.parsed_up_to) return;
+
+        try emitRange(allocator, self.buf.items[self.parsed_up_to..end], out);
+        self.parsed_up_to = end;
+    }
+
+    /// Scan only the bytes that arrived since the last scan, and remember the
+    /// last boundary in them. Re-reads the final `FILE_BOUNDARY.len - 1` bytes
+    /// of the previous scan so a separator split across two chunks still
+    /// matches.
+    fn scanForBoundary(self: *IncrementalParser) void {
+        const overlap = FILE_BOUNDARY.len - 1;
+        var from = self.scanned_up_to -| overlap;
+        // Never look back into bytes already emitted as complete files.
+        if (from < self.parsed_up_to) from = self.parsed_up_to;
+
+        const hay = self.buf.items[from..];
+        var off: usize = 0;
+        while (std.mem.indexOfPos(u8, hay, off, FILE_BOUNDARY)) |rel| {
+            self.last_boundary = from + rel;
+            off = rel + 1;
         }
+
+        self.scanned_up_to = self.buf.items.len;
     }
 
     /// Emit the trailing (final) file once the stream has ended.
@@ -327,16 +361,6 @@ fn freeUnconsumed(self: *DiffLoad, allocator: Allocator) void {
     }
 }
 
-/// Offset up to which `buf[parsed_up_to..]` forms complete file diffs, i.e. the
-/// start of the last (possibly incomplete) file. Returns `parsed_up_to` when no
-/// further file boundary has arrived yet.
-fn completeFilesEnd(buf: []const u8, parsed_up_to: usize) usize {
-    const tail = buf[parsed_up_to..];
-    const rel = std.mem.lastIndexOf(u8, tail, FILE_BOUNDARY) orelse return parsed_up_to;
-    // rel points at the '\n'; the next file begins at the following 'd'.
-    return parsed_up_to + rel + 1;
-}
-
 fn emitRange(
     allocator: Allocator,
     slice: []const u8,
@@ -427,13 +451,17 @@ test "incremental parse emits first file before second arrives" {
     defer ip.deinit(allocator);
 
     // First file plus the header of the second: only the first is complete.
+    // The cut must clear the whole "\ndiff --git " separator, which ends 11
+    // bytes past the start of the second header; a shorter prefix leaves the
+    // separator incomplete and no file can be recognised as finished.
     const first_boundary = std.mem.indexOf(u8, SAMPLE_TWO_FILES, "diff --git a/bar").?;
-    try ip.feed(allocator, SAMPLE_TWO_FILES[0 .. first_boundary + 10], &out);
+    const cut = first_boundary + 12;
+    try ip.feed(allocator, SAMPLE_TWO_FILES[0..cut], &out);
     try testing.expectEqual(@as(usize, 1), out.items.len);
     try testing.expectEqualStrings("foo.txt", out.items[0].new_path);
 
     // Remainder completes the second file.
-    try ip.feed(allocator, SAMPLE_TWO_FILES[first_boundary + 10 ..], &out);
+    try ip.feed(allocator, SAMPLE_TWO_FILES[cut..], &out);
     try ip.finish(allocator, &out);
     try testing.expectEqual(@as(usize, 2), out.items.len);
 }
@@ -472,6 +500,48 @@ test "empty diff yields no files" {
 
     try feedAllAtOnce(allocator, "", &out);
     try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "boundary scan does not revisit bytes it has already examined" {
+    const allocator = testing.allocator;
+
+    var out: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    defer freeFiles(allocator, &out);
+
+    var ip = IncrementalParser{};
+    defer ip.deinit(allocator);
+
+    // One huge file arrives in many chunks, so no boundary ever shows up. The
+    // scan cursor must still reach the buffer end on every feed; if it lags,
+    // the next feed rescans the whole grown tail and the load turns O(n^2).
+    try ip.feed(allocator, "diff --git a/big.txt b/big.txt\n@@ -1 +1 @@\n", &out);
+    var chunk: usize = 0;
+    while (chunk < 64) : (chunk += 1) {
+        try ip.feed(allocator, "+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", &out);
+        try testing.expectEqual(ip.buf.items.len, ip.scanned_up_to);
+    }
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "boundary split across a chunk edge is still found" {
+    const allocator = testing.allocator;
+
+    var out: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    defer freeFiles(allocator, &out);
+
+    var ip = IncrementalParser{};
+    defer ip.deinit(allocator);
+
+    // Split the stream in the middle of the "\ndiff --git " separator. A
+    // forward scan that forgets to overlap the previous chunk loses this file.
+    const cut = std.mem.indexOf(u8, SAMPLE_TWO_FILES, "diff --git a/bar").? + 5;
+    try ip.feed(allocator, SAMPLE_TWO_FILES[0..cut], &out);
+    try ip.feed(allocator, SAMPLE_TWO_FILES[cut..], &out);
+    try ip.finish(allocator, &out);
+
+    try testing.expectEqual(@as(usize, 2), out.items.len);
+    try testing.expectEqualStrings("foo.txt", out.items[0].new_path);
+    try testing.expectEqualStrings("bar.txt", out.items[1].new_path);
 }
 
 test "DiffLoad streams the working-dir diff end to end" {
