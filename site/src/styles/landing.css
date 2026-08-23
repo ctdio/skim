@@ -356,6 +356,16 @@ body.sk-landing {
   flex: 1 1 auto;
   min-height: 0;
 }
+/* A phone cannot hold a landscape frame and a readable grid at the same time:
+   4:3 across a 350px viewport is a 260px-tall terminal, and the glyph has
+   already shrunk to its floor by then (see `FontScale` in live-terminal.ts).
+   Square the box instead, which buys about ten more rows of diff for the
+   height a phone has to spare. */
+@media (max-width: 640px) {
+  .sk-hero-term .term {
+    aspect-ratio: 1 / 1;
+  }
+}
 /* Chapter tabs above the hero frame. The script adds them once the terminal is
    live; each one replays a leg of the scripted tour (see `demo-autoplay.ts`),
    and the pressed one is whichever leg is on screen. */
@@ -435,6 +445,19 @@ body.sk-landing {
 .term-tab-key,
 .term-tab-label {
   position: relative;
+}
+/* Seven pills wrap to three rows on a phone, which is more of the screen than
+   a legend deserves above the thing it describes. Tighten them to two. */
+@media (max-width: 640px) {
+  .term-tab {
+    gap: 0.3rem;
+    font-size: 0.66rem;
+    padding: 0.2rem 0.55rem;
+  }
+  .term-tabs {
+    gap: 0.3rem;
+    margin-bottom: 0.7rem;
+  }
 }
 
 /* Status line above the hero frame. It reads as a preview until the wasm
@@ -516,6 +539,11 @@ body.sk-landing {
 .sk-mini-stage {
   position: relative;
   aspect-ratio: 4 / 3;
+}
+@media (max-width: 640px) {
+  .sk-mini-stage {
+    aspect-ratio: 1 / 1;
+  }
 }
 .sk-mini-live {
   position: absolute;

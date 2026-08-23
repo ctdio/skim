@@ -18,6 +18,19 @@ export type Frame = {
 
 export type Progress = { loaded: number; total: number | null };
 
+/**
+ * How a terminal picks its font size from the width it is given.
+ *
+ * `cols` is the column count to hold: a monospace cell is about 0.6em wide, so
+ * a box `w` pixels across shows `w / (0.6 * size)` columns, and solving that
+ * for the size keeps the same view at every width. A phone cannot have both,
+ * though — holding 100 columns across 350px means a six-pixel glyph — so the
+ * size stops at `min` and the terminal shows fewer columns instead. Skim reflows to
+ * whatever grid it is handed, so that is the honest answer for a small screen:
+ * what the real thing looks like in a narrow terminal.
+ */
+export type FontScale = { cols: number; min: number; max: number };
+
 export type View = {
   render(): Frame;
   key(
@@ -44,6 +57,9 @@ type SkimLoader = {
   }>;
 };
 
+/** Width of a monospace cell, as a fraction of the font size. */
+const CELL_RATIO = 0.6;
+
 // Keys the page keeps for itself.
 //
 // Tab is not among them: skim binds it to the hunk view cycle, so a focused
@@ -68,14 +84,14 @@ const PAGE_CTRL_KEYS = new Set(["w", "t", "r", "l"]);
 export async function mountLiveTerminal({
   host,
   diff,
-  fontSize = 13,
+  font = { cols: 100, min: 8, max: 13 },
   onProgress,
   onInput,
   reveal,
 }: {
   host: HTMLElement;
   diff: string;
-  fontSize?: number;
+  font?: FontScale;
   onProgress?: (progress: Progress) => void;
   onInput?: () => void;
   reveal?: () => void;
@@ -93,7 +109,7 @@ export async function mountLiveTerminal({
   const styles = getComputedStyle(document.documentElement);
   const term = new Terminal({
     fontFamily: styles.getPropertyValue("--sk-font-mono").trim() || "monospace",
-    fontSize,
+    fontSize: font.max,
     lineHeight: 1.15,
     cursorStyle: "bar",
     cursorBlink: true,
@@ -108,6 +124,9 @@ export async function mountLiveTerminal({
 
   reveal?.();
   term.open(host);
+  // The host was hidden until `reveal`, so this is the first moment it has a
+  // width to scale against.
+  term.options.fontSize = fontSizeFor(host.clientWidth, font);
   fit.fit();
 
   const view = skim.open({ diff, cols: term.cols, rows: term.rows });
@@ -129,11 +148,14 @@ export async function mountLiveTerminal({
     live.draw(frame);
   });
 
-  // The frame changes size with the viewport. Redraw at the new grid.
+  // The frame changes size with the viewport. Rescale the glyph, then redraw at
+  // the new grid. A phone that turns landscape crosses most of the scale.
   let pending = 0;
   new ResizeObserver(() => {
     window.clearTimeout(pending);
     pending = window.setTimeout(() => {
+      const size = fontSizeFor(host.clientWidth, font);
+      if (term.options.fontSize !== size) term.options.fontSize = size;
       fit.fit();
       live.draw(view.resize(term.cols, term.rows));
     }, 120);
@@ -153,6 +175,16 @@ export function wantsLiveTerminal(): boolean {
   const connection = (navigator as { connection?: { saveData?: boolean } })
     .connection;
   return connection?.saveData !== true;
+}
+
+/**
+ * The font size that shows `font.cols` columns across `width` pixels, held
+ * inside the legible range. Rounded to a half pixel, which keeps the resize
+ * handler from setting a new size on every pixel of a drag.
+ */
+function fontSizeFor(width: number, font: FontScale): number {
+  const fits = width / (font.cols * CELL_RATIO);
+  return Math.round(Math.min(font.max, Math.max(font.min, fits)) * 2) / 2;
 }
 
 // One download, one compile, however many terminals. The second caller joins

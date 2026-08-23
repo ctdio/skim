@@ -83,7 +83,9 @@
     const terminal = await mountLiveTerminal({
       host: live!,
       diff: PROBLEM_DIFF,
-      fontSize: 11,
+      // Half a grid column on a wide screen, the full width on a phone, so it
+      // asks for fewer columns than the hero and starts from a smaller glyph.
+      font: { cols: 80, min: 8, max: 11 },
       onInput: () => autoplay?.yieldToVisitor(),
       reveal: () => {
         live!.hidden = false;
