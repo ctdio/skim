@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("src/platform.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -200,6 +201,72 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    // Web build: `zig build web` emits zig-out/web/skim.wasm, the engine behind
+    // the browser demo. Always wasm32-wasi + ReleaseSmall — the host target and
+    // optimize flags do not apply, and size is what matters over the wire. The
+    // grammars and dependency modules are re-resolved for wasm rather than reused
+    // from the native ones above.
+    const web_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+    const web_optimize: std.builtin.OptimizeMode = .ReleaseSmall;
+    const web_vaxis = b.dependency("vaxis", .{
+        .target = web_target,
+        .optimize = web_optimize,
+    }).module("vaxis");
+    const web_tree_sitter = b.dependency("tree-sitter", .{
+        .target = web_target,
+        .optimize = web_optimize,
+    }).module("tree_sitter");
+
+    const web_exe = b.addExecutable(.{
+        .name = "skim",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/web/main.zig"),
+            .target = web_target,
+            .optimize = web_optimize,
+        }),
+    });
+    web_exe.root_module.addImport("vaxis", web_vaxis);
+    web_exe.root_module.addImport("web_core", webCoreModule(b, .{
+        .target = web_target,
+        .optimize = web_optimize,
+        .vaxis = web_vaxis,
+        .tree_sitter = web_tree_sitter,
+        .build_options = build_options_module,
+    }));
+    for (buildWebGrammars(b, web_target, web_optimize)) |grammar| {
+        web_exe.linkLibrary(grammar);
+    }
+    web_exe.linkLibC();
+    web_exe.root_module.strip = true;
+    // Name the ABI exports rather than using rdynamic, which would also export
+    // every tree-sitter symbol and keep the linker from dropping unused ones.
+    web_exe.root_module.export_symbol_names = &.{
+        "skimAlloc",
+        "skimFree",
+        "skimLoad",
+        "skimUnload",
+        "skimKey",
+        "skimResize",
+        "skimRender",
+        "skimOutPtr",
+        "skimOutLen",
+        "skimCursorRow",
+        "skimCursorCol",
+        "skimCursorVisible",
+    };
+
+    const web_install = b.addInstallArtifact(web_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "web" } },
+    });
+    const web_step = b.step("web", "Build the WebAssembly module for the browser demo");
+    web_step.dependOn(&web_install.step);
+    // Put the loader and the demo page beside the module so zig-out/web/ can be
+    // served as-is.
+    for ([_][]const u8{ "web/skim.js", "web/index.html" }) |page| {
+        const install_page = b.addInstallFileWithDir(b.path(page), .{ .custom = "web" }, std.fs.path.basename(page));
+        web_step.dependOn(&install_page.step);
+    }
+
     const lint_cmd = b.addSystemCommand(&.{b.pathFromRoot("scripts/ziglint.sh")});
     lint_cmd.setCwd(b.path("."));
     const lint_step = b.step("lint", "Run ziglint");
@@ -326,6 +393,33 @@ pub fn build(b: *std.Build) void {
     diff_core_tests.linkLibC();
     const run_diff_core_tests = b.addRunArtifact(diff_core_tests);
     test_step.dependOn(&run_diff_core_tests.step);
+
+    // Web (wasm) session tests. Rooted at src/web/session.zig so its own tests are
+    // collected, reaching production code through the src/-rooted `web_core` NAMED
+    // module — a named import keeps app.zig's and its neighbours' test blocks out
+    // of this binary (mirrors review_test_root). Runs on the host target: the
+    // session engine is target-independent, only its ABI wrapper is wasm-only.
+    const web_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/web/session.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    web_tests.root_module.addImport("vaxis", vaxis);
+    web_tests.root_module.addImport("web_core", webCoreModule(b, .{
+        .target = target,
+        .optimize = optimize,
+        .vaxis = vaxis,
+        .tree_sitter = tree_sitter,
+        .build_options = build_options_module,
+    }));
+    for (grammars) |grammar| {
+        web_tests.linkLibrary(grammar);
+    }
+    web_tests.linkLibC();
+    const run_web_tests = b.addRunArtifact(web_tests);
+    test_step.dependOn(&run_web_tests.step);
 
     // Rendering width/wrap tests. width.zig is self-contained (std + vaxis only)
     // and holds colocated wrap tests, so it roots its own step — main.zig's tree
@@ -581,6 +675,30 @@ const grammar_infos = [_]GrammarInfo{
     .{ .name = "bash", .dep_name = "tree-sitter-bash", .has_scanner = true, .scanner_is_cpp = false, .subdir = null },
 };
 
+/// The subset of grammars the wasm module links, named by
+/// `platform.web_grammars`. The parse tables are about 90% of the module, so
+/// the browser build drops every language its demo does not need.
+fn buildWebGrammars(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) [platform.web_grammars.len]*std.Build.Step.Compile {
+    var libs: [platform.web_grammars.len]*std.Build.Step.Compile = undefined;
+
+    inline for (platform.web_grammars, 0..) |name, i| {
+        libs[i] = buildGrammar(b, grammarInfo(name), target, optimize);
+    }
+
+    return libs;
+}
+
+fn grammarInfo(comptime name: []const u8) GrammarInfo {
+    inline for (grammar_infos) |info| {
+        if (comptime std.mem.eql(u8, info.name, name)) return info;
+    }
+    @compileError("no tree-sitter grammar named '" ++ name ++ "'");
+}
+
 fn buildGrammars(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -648,3 +766,25 @@ fn buildGrammar(
 
     return lib;
 }
+
+/// Build the `web_core` named module: the src/-rooted re-export root that
+/// `web/session.zig` reaches production code through. See src/web_core.zig.
+fn webCoreModule(b: *std.Build, opts: WebCoreOptions) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/web_core.zig"),
+        .target = opts.target,
+        .optimize = opts.optimize,
+    });
+    module.addImport("vaxis", opts.vaxis);
+    module.addImport("tree-sitter", opts.tree_sitter);
+    module.addImport("build_options", opts.build_options);
+    return module;
+}
+
+const WebCoreOptions = struct {
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    vaxis: *std.Build.Module,
+    tree_sitter: *std.Build.Module,
+    build_options: *std.Build.Module,
+};

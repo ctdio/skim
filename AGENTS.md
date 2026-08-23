@@ -24,6 +24,9 @@ zig build
 # Build optimized release binary (for production use)
 zig build -Doptimize=ReleaseFast
 
+# Build the browser (wasm) demo into zig-out/web/
+zig build web
+
 # Run repo-configured ziglint checks
 zig build lint
 
