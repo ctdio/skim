@@ -108,7 +108,9 @@ body.sk-landing {
   border-radius: 0.4rem;
   color: var(--sk-muted);
   font-size: 0.9rem;
-  transition: color 0.15s, background 0.15s;
+  transition:
+    color 0.15s,
+    background 0.15s;
 }
 .sk-nav-links a:hover {
   color: var(--sk-fg);
@@ -171,7 +173,9 @@ body.sk-landing {
   background: var(--sk-bg-subtle);
   color: var(--sk-muted);
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
 }
 .sk-theme-toggle:hover {
   color: var(--sk-fg);
@@ -184,10 +188,10 @@ body.sk-landing {
 .sk-theme-toggle .sk-icon-sun {
   display: none;
 }
-:root[data-theme='light'] .sk-theme-toggle .sk-icon-sun {
+:root[data-theme="light"] .sk-theme-toggle .sk-icon-sun {
   display: block;
 }
-:root[data-theme='light'] .sk-theme-toggle .sk-icon-moon {
+:root[data-theme="light"] .sk-theme-toggle .sk-icon-moon {
   display: none;
 }
 
@@ -206,7 +210,11 @@ body.sk-landing {
   font-family: var(--sk-font-mono);
   border: 1px solid transparent;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.15s;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    color 0.15s,
+    transform 0.15s;
 }
 /* The primary/ghost label colors are set with a `.sk-btn.sk-btn-*` compound
    selector (specificity 0,2,0) so they beat `.sk-landing a { color: inherit }`
@@ -247,14 +255,6 @@ body.sk-landing {
   padding-top: clamp(2.5rem, 6vw, 5rem);
   padding-bottom: clamp(2rem, 4vw, 3.5rem);
   text-align: center;
-}
-.sk-eyebrow {
-  font-family: var(--sk-font-mono);
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.22em;
-  color: var(--sk-accent);
-  margin: 0 0 1rem;
 }
 .sk-h1 {
   font-size: clamp(2.4rem, 6vw, 4.25rem);
@@ -356,27 +356,33 @@ body.sk-landing {
   flex: 1 1 auto;
   min-height: 0;
 }
-.sk-hero-term .d-diff {
-  height: auto;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-/* The first scene's diff rows live in this inner track, which is taller than
-   the clipped `.d-diff` viewport and translates upward to scroll through the
-   hunks (see the erratic `sk-hero-scroll` keyframes under the motion query).
-   Static by default so no-JS / reduced-motion renders a readable diff from
-   the top. */
-.d-scroll {
-  will-change: transform;
-}
+/* Chapter tabs above the hero frame. The script adds them once the terminal is
+   live; each one replays a leg of the scripted tour (see `demo-autoplay.ts`),
+   and the pressed one is whichever leg is on screen. */
 .term-tabs {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.4rem;
   margin-bottom: 0.85rem;
+  transition: opacity 0.25s;
+}
+/* While the visitor has the terminal, no chapter is advancing. The strip fades
+   to say so, and comes back the moment a pointer or the keyboard reaches it,
+   because every tab is still a live control. */
+.term-tabs.is-paused {
+  opacity: 0.55;
+}
+.term-tabs.is-paused:hover,
+.term-tabs.is-paused:focus-within {
+  opacity: 1;
 }
 .term-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  overflow: hidden;
   font-family: var(--sk-font-mono);
   font-size: 0.72rem;
   letter-spacing: 0.02em;
@@ -385,247 +391,175 @@ body.sk-landing {
   border-radius: 999px;
   padding: 0.25rem 0.7rem;
   background: var(--sk-bg-subtle);
-  transition: color 0.2s, border-color 0.2s, background 0.2s;
+  cursor: pointer;
+  transition:
+    color 0.2s,
+    border-color 0.2s,
+    background 0.2s;
 }
-.term-tab[aria-current='true'] {
+.term-tab:hover {
+  color: var(--sk-fg);
+}
+.term-tab[aria-pressed="true"] {
   color: var(--sk-accent);
   border-color: color-mix(in srgb, var(--sk-accent) 55%, var(--sk-border));
   background: color-mix(in srgb, var(--sk-accent) 12%, var(--sk-bg-subtle));
 }
-
-.term-stage {
-  position: relative;
-  font-family: var(--sk-font-mono);
-  font-size: clamp(0.62rem, 1.35vw, 0.86rem);
-  line-height: 1.55;
+/* The key the chapter is about. The strip doubles as the keybinding legend, so
+   this is the part a visitor is meant to take away. */
+.term-tab-key {
+  font-family: inherit;
+  font-size: 0.92em;
+  color: var(--sk-fg);
+  border: 1px solid var(--sk-border-strong);
+  border-radius: 0.25rem;
+  padding: 0 0.25rem;
+  background: var(--sk-bg);
 }
-.term-scene {
+.term-tab[aria-pressed="true"] .term-tab-key {
+  color: var(--sk-accent);
+  border-color: color-mix(in srgb, var(--sk-accent) 45%, var(--sk-border));
+}
+/* The chapter clock: the active tab fills left to right over the length of the
+   chapter. A fill rather than a bottom rule, because the pill radius would clip
+   a 2px line into something that reads as a rendering fault. The script sets
+   both the width and the transition duration — only it knows how long the
+   chapter runs. */
+.term-tab-progress {
   position: absolute;
-  inset: 0;
-  opacity: 0;
-  transition: opacity 0.5s ease;
-  pointer-events: none;
+  inset: 0 auto 0 0;
+  width: 0;
+  background: color-mix(in srgb, var(--sk-accent) 16%, transparent);
 }
-.term-scene.is-active {
-  opacity: 1;
-  pointer-events: auto;
-}
-/* The stage owns its height (flex-filled from the 4:3 `.term` box), so every
-   scene — including the first — overlays absolutely at the same size. Nothing
-   reflows as they cross-fade. */
-.term-scene.term-scene-flow {
-  position: absolute;
-}
-.term-body {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  padding-top: 0.35rem;
-  background: var(--tui-bg);
-  color: var(--tui-fg);
-  overflow: hidden;
-}
-/* Fixed-height diff region so every cross-faded scene is the same size and
-   nothing reflows as the story advances. Sized in `em` so it tracks the
-   responsive terminal font-size. */
-.d-diff {
+/* Positioned, so both paint over the fill that precedes them in the markup. */
+.term-tab-key,
+.term-tab-label {
   position: relative;
-  height: 16.2em;
-  overflow: hidden;
-  flex: 0 0 auto;
-}
-.term-status {
-  margin-top: auto;
 }
 
-/* Diff rows */
-.d-row {
-  display: flex;
-  align-items: baseline;
-  white-space: pre;
-  padding-inline: 0.15rem 0.75rem;
-}
-.d-gutter {
-  flex: 0 0 auto;
-  width: 4.5em;
-  padding-right: 0.75em;
-  text-align: right;
-  color: var(--tui-dim);
-  background: var(--tui-gutter);
-  user-select: none;
-}
-.d-sign {
-  flex: 0 0 auto;
-  width: 1.4em;
-  text-align: center;
-  user-select: none;
-}
-.d-code {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.d-add {
-  background: var(--tui-add-bg);
-}
-.d-add .d-sign {
-  color: var(--tui-add-fg);
-}
-.d-add .d-gutter {
-  color: var(--tui-add-fg);
-  background: color-mix(in srgb, var(--tui-add-bg) 70%, var(--tui-gutter));
-}
-.d-del {
-  background: var(--tui-del-bg);
-}
-.d-del .d-sign {
-  color: var(--tui-del-fg);
-}
-.d-del .d-gutter {
-  color: var(--tui-del-fg);
-  background: color-mix(in srgb, var(--tui-del-bg) 70%, var(--tui-gutter));
-}
-.d-hunk {
-  color: var(--tui-hunk);
-  padding-inline: 0.5rem;
-}
-.d-filehdr {
-  color: var(--tui-filehdr);
-  font-weight: 600;
-  padding: 0.1rem 0.6rem 0.35rem;
-  border-bottom: 1px solid var(--tui-divider);
-  margin-bottom: 0.2rem;
-}
-.d-cursor-line {
-  box-shadow: inset 2px 0 0 0 var(--sk-accent);
-  background: color-mix(in srgb, var(--sk-accent) 10%, transparent);
-}
-
-/* Syntax token colors */
-.t-kw { color: var(--tui-kw); }
-.t-str { color: var(--tui-str); }
-.t-fn { color: var(--tui-fn); }
-.t-num { color: var(--tui-num); }
-.t-type { color: var(--tui-type); }
-.t-com { color: var(--tui-comment); font-style: italic; }
-.t-punct { color: var(--tui-punct); }
-.t-dim { color: var(--tui-dim); }
-
-/* search highlight */
-.d-match {
-  background: color-mix(in srgb, var(--tui-mode-search) 40%, transparent);
-  color: var(--tui-fg);
-  border-radius: 2px;
-}
-
-/* Status bar */
-.term-status {
+/* Status line above the hero frame. It reads as a preview until the wasm
+   module mounts, then says the terminal is live and how to drive it. */
+.sk-hero-hint {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.15rem 0.65rem;
-  font-size: 0.92em;
-  background: var(--tui-status-bg);
-  color: var(--tui-status-fg);
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 0 0 0.85rem;
+  font-family: var(--sk-font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  color: var(--sk-dim);
 }
-.term-status .mode {
-  font-weight: 700;
-  letter-spacing: 0.04em;
+.sk-hero-hint.is-live {
+  color: var(--sk-accent);
 }
-.term-status .sep {
-  flex: 1;
+.sk-hero-dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--sk-dim);
 }
-.term-status.is-search {
-  background: var(--tui-mode-search);
+.sk-hero-hint.is-live .sk-hero-dot {
+  background: var(--sk-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sk-accent) 22%, transparent);
 }
-.term-status.is-visual {
-  background: var(--tui-mode-visual);
+/* The tour is standing down while the visitor drives. A filled accent dot reads
+   as "something is happening", so the paused state empties it to a ring. */
+.sk-hero-hint.is-live.is-paused {
+  color: var(--sk-muted);
 }
-
-/* Side-by-side */
-.d-split {
-  display: flex;
+.sk-hero-hint.is-live.is-paused .sk-hero-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--sk-muted);
 }
-.d-split-col {
-  flex: 1 1 50%;
-  min-width: 0;
+/* Download meter, beside the hint while the wasm module loads. The track is
+   always drawn; the fill sweeps until the response reports a `Content-Length`,
+   then `is-measured` switches it to the real byte count. */
+.sk-hero-progress {
+  position: relative;
+  width: 5rem;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--sk-dim) 32%, transparent);
 }
-.d-split-col + .d-split-col {
-  border-left: 1px solid var(--tui-divider);
+.sk-hero-progress-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  background: var(--sk-accent);
 }
-
-/* Command palette overlay */
-.palette-dim {
+.sk-hero-progress.is-measured .sk-hero-progress-fill {
+  transition: width 0.2s linear;
+}
+/* The live terminal overlays the stage exactly like the loading panel it
+   replaces, so the swap moves nothing. */
+.sk-hero-live {
   position: absolute;
   inset: 0;
-  background: color-mix(in srgb, #000 45%, transparent);
+  padding: 0.35rem 0 0 0.45rem;
 }
-.palette {
-  position: absolute;
-  left: 50%;
-  top: 12%;
-  transform: translateX(-50%);
-  width: min(85%, 30rem);
-  background: var(--tui-bg);
-  border: 1px solid var(--tui-divider);
-  border-radius: 0.5rem;
-  box-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.6);
+.sk-hero-live .xterm,
+.sk-hero-live .xterm-viewport {
+  height: 100%;
+  background: transparent;
+}
+.sk-hero-live .xterm-viewport {
   overflow: hidden;
 }
-.palette-input {
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid var(--tui-divider);
-  color: var(--tui-fg);
+
+/* The terminal in "The old way" loads the same way the hero does, in a smaller
+   box. The ratio is what holds the height, since nothing inside the stage has a
+   size of its own until the terminal arrives. */
+.sk-mini-stage {
+  position: relative;
+  aspect-ratio: 4 / 3;
 }
-.palette-input .prompt {
-  color: var(--tui-hunk);
+.sk-mini-live {
+  position: absolute;
+  inset: 0;
+  padding: 0.35rem 0 0 0.45rem;
 }
-.palette-item {
-  padding: 0.35rem 0.75rem;
-  color: var(--tui-fg);
+.sk-mini-live .xterm,
+.sk-mini-live .xterm-viewport {
+  height: 100%;
+  background: transparent;
 }
-.palette-item .desc {
-  color: var(--tui-dim);
-}
-.palette-item.sel {
-  background: var(--tui-sel-bg);
-  box-shadow: inset 2px 0 0 0 var(--sk-accent);
+.sk-mini-live .xterm-viewport {
+  overflow: hidden;
 }
 
-/* Search input line */
-.search-line {
-  padding: 0.15rem 0.65rem;
-  color: var(--tui-fg);
-  background: var(--tui-gutter);
-  border-top: 1px solid var(--tui-divider);
+/* The box the loading panel and the live terminal both fill. */
+.term-stage {
+  position: relative;
 }
-.search-line .prompt {
-  color: var(--tui-mode-search);
+/* What a frame holds until the wasm module lands. Same box as the terminal
+   that replaces it, so the swap moves nothing. The meter beside the label
+   reports the download, because the module is about half a megabyte and the
+   frame shows nothing until it arrives. */
+.sk-term-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8rem;
+  padding-inline: 1.5rem;
+  background: var(--tui-bg);
+  font-family: var(--sk-font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  color: var(--sk-dim);
+  text-align: center;
 }
-
-/* Comment thread */
-.comment-thread {
-  margin: 0.15rem 0.4rem 0.15rem 4.9em;
-  padding: 0.3rem 0.6rem;
-  border-left: 2px solid var(--tui-comment-accent);
-  background: var(--tui-comment-bg);
-  color: var(--tui-fg);
-  border-radius: 0 0.3rem 0.3rem 0;
-  white-space: normal;
+.sk-term-loading-label {
+  margin: 0;
 }
-.comment-thread .who {
-  color: var(--tui-comment-accent);
-  font-weight: 600;
-}
-
-/* blinking block cursor */
-.blink {
-  display: inline-block;
-  width: 0.55em;
-  height: 1.05em;
-  transform: translateY(0.18em);
-  background: var(--tui-cursor);
+.sk-term-loading .sk-hero-progress {
+  width: 8rem;
 }
 
 /* ============================================================
@@ -637,9 +571,8 @@ body.sk-landing {
 }
 .sk-kicker {
   font-family: var(--sk-font-mono);
-  font-size: 0.8rem;
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
+  font-size: 0.82rem;
+  letter-spacing: 0;
   color: var(--sk-accent);
   margin: 0 0 0.6rem;
 }
@@ -720,7 +653,10 @@ body.sk-landing {
   border-radius: 0.85rem;
   background: var(--sk-card);
   padding: 1.35rem;
-  transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+  transition:
+    border-color 0.2s,
+    transform 0.2s,
+    box-shadow 0.2s;
 }
 .sk-feat:hover {
   border-color: var(--sk-border-strong);
@@ -826,12 +762,15 @@ body.sk-landing {
   /* Visible by default on touch (no-hover) devices; the hover query below
      hides it until hover/focus when a pointer is available. */
   opacity: 0.75;
-  transition: opacity 0.2s, background 0.2s, border-color 0.2s;
+  transition:
+    opacity 0.2s,
+    background 0.2s,
+    border-color 0.2s;
 }
 /* Copy glyph, drawn as a mask so it inherits the button's `color`. Same icon
    geometry as Expressive Code's copy button. */
 .sk-copy-btn::after {
-  content: '';
+  content: "";
   position: absolute;
   inset: 0;
   margin: 0.45rem;
@@ -879,10 +818,12 @@ body.sk-landing {
   white-space: nowrap;
   opacity: 0;
   transform: translate3d(0, 0.25rem, 0);
-  transition: opacity 0.2s ease-in-out, transform 0.2s ease-in-out;
+  transition:
+    opacity 0.2s ease-in-out,
+    transform 0.2s ease-in-out;
 }
 .sk-copy .feedback::after {
-  content: '';
+  content: "";
   position: absolute;
   top: calc(50% - var(--sk-tip-arrow));
   inset-inline-end: calc(-2 * (var(--sk-tip-arrow) - 0.5px));
@@ -914,9 +855,8 @@ body.sk-landing {
 }
 .sk-footer h4 {
   font-family: var(--sk-font-mono);
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  font-size: 0.78rem;
+  letter-spacing: 0;
   color: var(--sk-muted);
   margin: 0 0 0.85rem;
 }
@@ -954,193 +894,30 @@ body.sk-landing {
    Motion — everything below only runs when motion is allowed
    ============================================================ */
 @media (prefers-reduced-motion: no-preference) {
-  .blink {
-    animation: sk-blink 1.1s steps(1) infinite;
+  /* No byte count yet: sweep, so the meter reads as work in progress. */
+  .sk-hero-progress:not(.is-measured) .sk-hero-progress-fill {
+    width: 40%;
+    animation: sk-hero-sweep 1.2s ease-in-out infinite;
   }
-  @keyframes sk-blink {
-    0%,
-    50% {
-      opacity: 1;
+  @keyframes sk-hero-sweep {
+    from {
+      transform: translateX(-110%);
     }
-    50.01%,
-    100% {
-      opacity: 0;
+    to {
+      transform: translateX(275%);
     }
   }
   .sk-feat:hover {
     transform: translateY(-3px);
     box-shadow: 0 14px 30px -18px rgba(0, 0, 0, 0.5);
   }
-  /* feature vignette ambient/hover motion */
-  .fv-cursor {
-    transition: transform 0.3s ease;
-  }
-  .sk-feat:hover .fv-step {
-    transform: translateY(var(--fv-row, 1.4em));
-  }
-  .fv-step {
-    transition: transform 0.3s ease;
-  }
-  .sk-feat:hover .fv-reveal {
-    max-height: 3em;
-    opacity: 1;
-  }
-  .fv-reveal {
-    max-height: 0;
-    opacity: 0;
-    overflow: hidden;
-    transition:
-      max-height 0.3s ease,
-      opacity 0.3s ease;
-  }
-  .fv-pulse {
-    animation: sk-pulse 1.8s ease-in-out infinite;
-  }
-  @keyframes sk-pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.35;
-    }
-  }
-
-  /* First hero scene: scroll the diff track through the hunks with a subtly
-     erratic cadence — read a few lines, pause, hop to the next hunk, an
-     occasional slight backtrack — as if navigating by j/k/n. The uneven stop
-     percentages (not evenly spaced) and paired keyframes (a moving segment
-     then a dwell at the same offset) produce the stop-start rhythm. Offsets
-     are in `em` so they track the responsive row height (1.55em/row), and the
-     track is much taller than the viewport so no offset reveals a blank gap.
-     Starts and ends at 0 for a seamless loop. */
-  .d-scroll {
-    animation: sk-hero-scroll 22s cubic-bezier(0.5, 0, 0.5, 1) infinite;
-  }
-  @keyframes sk-hero-scroll {
-    0%,
-    7% {
-      transform: translateY(0);
-    }
-    /* hop down a few lines, then read */
-    11%,
-    20% {
-      transform: translateY(-3.1em);
-    }
-    /* jump toward the second hunk */
-    25%,
-    33% {
-      transform: translateY(-9.3em);
-    }
-    /* small backtrack (k) to re-read a line */
-    36%,
-    42% {
-      transform: translateY(-7.75em);
-    }
-    /* next-hunk jump (n), longer dwell */
-    47%,
-    58% {
-      transform: translateY(-15.5em);
-    }
-    /* creep further down */
-    62%,
-    70% {
-      transform: translateY(-20.15em);
-    }
-    /* reach the tail of the diff */
-    75%,
-    85% {
-      transform: translateY(-26.35em);
-    }
-    /* scroll back to the top to loop (gg) */
-    100% {
-      transform: translateY(0);
-    }
-  }
 }
 
 /* ============================================================
-   Supporting mini-mockup — a small diff whose cursor line steps
-   through the four code changes on a loop (like pressing ]h).
+   Supporting mini terminal — the same load as the hero in a
+   smaller box. The stage holds a ratio so the loading panel and
+   the terminal that replaces it are the same size.
    ============================================================ */
 .mini {
   max-width: 26rem;
-}
-/* The mini mockup lives outside `.sk-hero-term`, so it never picks up the
-   hero's `.term-stage` typography. Set the same monospace family and the
-   matching size/line-height here so the two terminals read as one family.
-   `1.55` line-height keeps each row exactly `1.55em` tall, which the
-   `.mini-cursor` step offsets below rely on. */
-.mini .term-body {
-  height: auto;
-  padding-bottom: 0.25rem;
-  font-family: var(--sk-font-mono);
-  font-size: clamp(0.62rem, 1.35vw, 0.86rem);
-  line-height: 1.55;
-}
-.mini .d-diff {
-  height: auto;
-}
-.mini-cursor {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  height: 1.55em;
-  background: color-mix(in srgb, var(--sk-accent) 12%, transparent);
-  box-shadow: inset 2px 0 0 0 var(--sk-accent);
-  pointer-events: none;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .mini-cursor {
-    animation: sk-step 9s steps(1) infinite;
-  }
-  /* Five dwell positions stepping through the change lines across both hunks
-     (like repeatedly pressing `]h`). Every row — including the hunk header —
-     is exactly 1.55em tall, so an offset of N×1.55em lands on row N (0-based
-     from the diff top): row 0 (+const n), row 3 (+reindex(n)), row 5 (+dirty),
-     then across the second hunk to row 8 (−count += 1) and row 9 (+try append).
-     Ends back at 0 for a seamless loop. */
-  @keyframes sk-step {
-    0%,
-    16% {
-      transform: translateY(0);
-    }
-    20%,
-    36% {
-      transform: translateY(4.65em);
-    }
-    40%,
-    56% {
-      transform: translateY(7.75em);
-    }
-    60%,
-    76% {
-      transform: translateY(12.4em);
-    }
-    80%,
-    96% {
-      transform: translateY(13.95em);
-    }
-    100% {
-      transform: translateY(0);
-    }
-  }
-}
-
-/* Reduced motion: only the first hero scene shows; JS also bails, but
-   guard here too in case JS toggles a class before the query is read. */
-@media (prefers-reduced-motion: reduce) {
-  .term-scene {
-    transition: none;
-  }
-  .mini-cursor {
-    top: 0;
-  }
-  /* Static, readable diff: no scroll, pinned to the top. */
-  .d-scroll {
-    animation: none;
-    transform: none;
-  }
 }

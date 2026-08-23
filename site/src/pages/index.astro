@@ -1,6 +1,7 @@
 ---
 import Landing from '../layouts/Landing.astro';
 import HeroTerminal from '../components/HeroTerminal.astro';
+import ProblemTerminal from '../components/ProblemTerminal.astro';
 import ArrowLongRight from 'astro-heroicons/outline/ArrowLongRight.astro';
 import { withBase } from '../lib/base';
 
@@ -19,70 +20,72 @@ const installCommands = [
   './zig-out/bin/skim',
 ].join('\n');
 
-const problems = [
+// Each of these is checkable against the source. Keep it that way — if a claim
+// here stops being true, it is a bug in the page, not a rounding error.
+const mechanics = [
   {
-    lead: 'Diffs scroll past in a pager.',
-    body: 'Reviewing in `less` means paging through walls of text with no sense of which file you are in or what changed.',
+    lead: 'It runs `git diff`.',
+    body: 'Not a reimplementation. Skim spawns git, parses the output, and renders it. Working directory, staged, a single ref, or a range.',
   },
   {
-    lead: 'GUI tools break your flow.',
-    body: 'Opening a browser or desktop app pulls you out of the terminal and off the keyboard you already live on.',
+    lead: 'It draws the diff itself.',
+    body: 'The command runs with `--no-color --no-ext-diff`, so what you see is skim rendering the change, not your pager and not an external diff tool.',
   },
   {
-    lead: 'There is nowhere to take notes.',
-    body: '`git diff` gives you no way to leave a comment on a line as you read, so feedback lands in a separate window.',
+    lead: 'The diff streams.',
+    body: 'Files render as they parse, so the first one is on screen while git is still writing the rest. A 20MB single-file diff parses in 13ms.',
   },
   {
-    lead: 'Navigating means re-running commands.',
-    body: 'Jump to another file, stage a change, or compare a branch and you are back at the shell retyping git invocations.',
+    lead: 'Highlighting runs on its own thread.',
+    body: 'Tree-sitter parses in a background worker. A slow parse costs you a late repaint, never a dropped keystroke.',
   },
 ];
 
 const features = [
   {
     kb: 'hjkl · Ctrl-n/p',
-    title: 'Vim-style modal navigation',
-    body: 'Move by line, jump between files, and hop change-to-change with the motions already in your fingers.',
+    title: 'Modal navigation',
+    body: 'hjkl moves by line, Ctrl-n and Ctrl-p move file to file. The modes and motions are the vim ones.',
   },
   {
     kb: 's · Tab',
-    title: 'Unified & side-by-side',
-    body: 'Toggle layouts instantly, and cycle hunk modes to show all lines, additions only, or deletions only.',
+    title: 'Unified and side-by-side',
+    body: 'One key switches the layout. Hunk mode cycles between all lines, additions only, and deletions only.',
   },
   {
-    kb: 'async',
+    kb: '13 grammars',
     title: 'Tree-sitter highlighting',
-    body: 'Real syntax highlighting via tree-sitter, processed asynchronously so scrolling stays at 60 FPS.',
+    body: 'Real grammars, not regex. Parsing runs off the render thread, so a large file does not stall the scroll.',
   },
   {
     kb: 'Ctrl-p · :',
     title: 'Command palette',
-    body: 'Fuzzy-jump to any file with Ctrl-p, or run commands vim-style with a colon — no menus to hunt through.',
+    body: 'Ctrl-p fuzzy-finds a file in the diff. A colon runs a command by name. Neither one is a menu.',
   },
   {
     kb: '/ · f t F T',
-    title: 'Search & find',
-    body: 'Smart-case search across every file in the diff, plus vim character-find to dart along a line.',
+    title: 'Search and find',
+    body: 'Smart-case search runs across every file in the diff. f, t, F, and T move within the current line.',
   },
   {
     kb: 'Enter · y · Y',
-    title: 'Inline comments & export',
-    body: 'Leave comments on any line as you read, then yank one or all of them to the clipboard to paste anywhere.',
+    title: 'Inline comments',
+    body: 'Enter attaches a comment to the line under the cursor. y copies one to the clipboard, Y copies all of them.',
   },
   {
     kb: 'r · B',
-    title: 'Live refresh & blame',
-    body: 'Reload the diff from git without leaving your place, and toggle git blame right in the gutter.',
+    title: 'Refresh and blame',
+    body: 'r reloads the diff from git and keeps your position. B toggles git blame in the gutter.',
   },
   {
     kb: 'a · A · S',
-    title: 'Staging & Graphite',
-    body: 'Stage a file or everything from inside the TUI, and navigate stacked PRs with Graphite integration.',
+    title: 'Staging and Graphite',
+    body: 'a stages the current file, A stages all of them. S opens the Graphite stack to move between stacked PRs.',
   },
   {
     kb: 'Ctrl-e',
-    title: 'AI agent panel',
-    body: 'A built-in agent panel over ACP, with @file fuzzy-embed — pull an agent into your review without leaving skim.',
+    title: 'Agent panel',
+    body: 'An agent runs in a side panel over ACP. @file embeds a file from the diff into the prompt.',
   },
 ];
 ---
@@ -91,12 +94,12 @@ const features = [
   <!-- Hero -->
   <section class="sk-hero">
     <div class="sk-wrap">
-      <p class="sk-eyebrow">Built in Zig · sub-10ms startup · 60 FPS</p>
-      <h1 class="sk-h1">Review code at the speed of vim.</h1>
+      <h1 class="sk-h1">A code review TUI that stays out of the way.</h1>
       <p class="sk-lede">
-        Skim is a keyboard-driven TUI for code reviews. Navigate diffs
-        file-by-file, switch between unified and side-by-side, leave inline
-        comments, and stage changes — all without leaving the terminal.
+        Skim reads <code class="sk-mono">git diff</code> and renders it as a
+        navigable buffer. Move file to file, switch unified and side-by-side,
+        comment on a line, stage a hunk. It shells out to git, so it runs in any
+        repo without setup.
       </p>
       <div class="sk-cta-row">
         <a class="sk-btn sk-btn-primary" href={buildHref}>
@@ -110,60 +113,34 @@ const features = [
     </div>
   </section>
 
-  <!-- Problem -->
-  <section class="sk-section" aria-labelledby="problem-h">
+  <!-- How it works -->
+  <section class="sk-section" aria-labelledby="mechanics-h">
     <div class="sk-wrap">
-      <p class="sk-kicker">The old way</p>
-      <h2 class="sk-h2" id="problem-h">Terminal review shouldn't mean squinting at a pager.</h2>
+      <p class="sk-kicker">How it works</p>
+      <h2 class="sk-h2" id="mechanics-h">It shells out to git.</h2>
       <div class="sk-two">
-        <ol class="sk-prob-list">
+        <ul class="sk-prob-list">
           {
-            problems.map((p, i) => (
+            mechanics.map((p, i) => (
               <li>
-                <span class="n">{String(i + 1).padStart(2, '0')}</span>
+                <span class="n" aria-hidden="true">{String(i + 1).padStart(2, '0')}</span>
                 <span class="body">
-                  <b>{p.lead}</b> {p.body}
+                  <b>{p.lead}</b>{' '}
+                  {/* `body` is authored with markdown-style backticks, but this is
+                      plain-text interpolation, not markdown — split them out into
+                      real code spans or the backticks print as characters. */}
+                  {p.body
+                    .split(/(`[^`]+`)/)
+                    .map((part) =>
+                      part.startsWith('`') ? <code class="sk-mono">{part.slice(1, -1)}</code> : part,
+                    )}
                 </span>
               </li>
             ))
           }
-        </ol>
+        </ul>
 
-        <!-- Supporting mini-mockup: a diff whose cursor steps through changes -->
-        <div class="term mini" aria-hidden="true">
-          <div class="term-chrome">
-            <div class="term-lights">
-              <span style="background:#ff5f57"></span>
-              <span style="background:#febc2e"></span>
-              <span style="background:#28c840"></span>
-            </div>
-            <span class="term-title">skim — ]h next change</span>
-          </div>
-          <div class="term-body">
-            <div class="d-filehdr">▾ src/line_map.zig</div>
-            <div class="d-diff">
-              <div class="mini-cursor"></div>
-              <div class="d-row d-add"><span class="d-gutter">   20</span><span class="d-sign">+</span><span class="d-code"> <span class="t-kw">const</span> n = self.lines.items.len;</span></div>
-              <div class="d-row"><span class="d-gutter">21 21</span><span class="d-sign"> </span><span class="d-code"> <span class="t-kw">for</span> (self.lines.items) |ln| &#123;</span></div>
-              <div class="d-row d-del"><span class="d-gutter">22   </span><span class="d-sign">−</span><span class="d-code">   ln.<span class="t-fn">reindex</span>();</span></div>
-              <div class="d-row d-add"><span class="d-gutter">   22</span><span class="d-sign">+</span><span class="d-code">   ln.<span class="t-fn">reindex</span>(n);</span></div>
-              <div class="d-row"><span class="d-gutter">23 23</span><span class="d-sign"> </span><span class="d-code"> &#125;</span></div>
-              <div class="d-row d-add"><span class="d-gutter">   24</span><span class="d-sign">+</span><span class="d-code"> self.<span class="t-fn">dirty</span> = <span class="t-kw">false</span>;</span></div>
-              <div class="d-hunk">@@ -47,6 +48,8 @@ <span class="t-kw">fn</span> <span class="t-fn">append</span></div>
-              <div class="d-row"><span class="d-gutter">47 48</span><span class="d-sign"> </span><span class="d-code"> <span class="t-kw">pub fn</span> <span class="t-fn">append</span>(self: *<span class="t-type">LineMap</span>, ln: <span class="t-type">Line</span>) !<span class="t-type">void</span> &#123;</span></div>
-              <div class="d-row d-del"><span class="d-gutter">48   </span><span class="d-sign">−</span><span class="d-code">   self.count += <span class="t-num">1</span>;</span></div>
-              <div class="d-row d-add"><span class="d-gutter">   49</span><span class="d-sign">+</span><span class="d-code">   <span class="t-kw">try</span> self.lines.<span class="t-fn">append</span>(ln);</span></div>
-              <div class="d-row d-add"><span class="d-gutter">   50</span><span class="d-sign">+</span><span class="d-code">   self.count = self.lines.items.len;</span></div>
-              <div class="d-row"><span class="d-gutter">49 51</span><span class="d-sign"> </span><span class="d-code">   self.<span class="t-fn">dirty</span> = <span class="t-kw">true</span>;</span></div>
-              <div class="d-row"><span class="d-gutter">50 52</span><span class="d-sign"> </span><span class="d-code"> &#125;</span></div>
-            </div>
-            <div class="term-status">
-              <span class="mode">NORMAL</span>
-              <span class="sep"></span>
-              <span>press <b>]h</b> · next change</span>
-            </div>
-          </div>
-        </div>
+        <ProblemTerminal />
       </div>
     </div>
   </section>
@@ -172,10 +149,10 @@ const features = [
   <section class="sk-section" aria-labelledby="features-h">
     <div class="sk-wrap">
       <p class="sk-kicker">What's inside</p>
-      <h2 class="sk-h2" id="features-h">Everything you reach for, on the home row.</h2>
+      <h2 class="sk-h2" id="features-h">What it does.</h2>
       <p class="sk-section-lead">
-        Skim shells out to git and respects your config, so it drops into any
-        repo. Here's what it gives you on top.
+        Every feature is a keybinding. The keys are listed with each one, and
+        the full set is in the keybindings reference.
       </p>
       <div class="sk-features">
         {
@@ -194,11 +171,11 @@ const features = [
   <!-- Install -->
   <section class="sk-section sk-install" aria-labelledby="install-h">
     <div class="sk-wrap">
-      <p class="sk-kicker">Get started</p>
-      <h2 class="sk-h2" id="install-h" style="margin-inline:auto">Build it in under a minute.</h2>
+      <p class="sk-kicker">Install</p>
+      <h2 class="sk-h2" id="install-h" style="margin-inline:auto">Build it from source.</h2>
       <p class="sk-section-lead" style="margin-inline:auto;text-align:center">
-        Skim needs Zig 0.15.1 and git. Clone, build, and run — the binary lands
-        at <code class="sk-mono">./zig-out/bin/skim</code>.
+        Skim needs Zig 0.15.1 and git. There is no other dependency. The binary
+        lands at <code class="sk-mono">./zig-out/bin/skim</code>.
       </p>
       <div class="sk-codeblock">
         <div class="sk-copy">
