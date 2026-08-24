@@ -1,4 +1,7 @@
 const std = @import("std");
+// Mirrors `is_web` in src/platform.zig. This subtree has its own test target
+// rooted at its own directory, so it cannot import across the parent boundary.
+const is_web = @import("builtin").target.cpu.arch.isWasm();
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
@@ -163,6 +166,9 @@ pub const AgentProcess = struct {
     /// Terminate the agent process gracefully
     /// Kills the entire process group to ensure child subprocesses are also terminated
     pub fn terminate(self: *AgentProcess) void {
+        // The browser build never spawns, and wasi has no pid to signal.
+        if (is_web) return;
+
         if (self.status != .running) return;
 
         if (self.child.stdin) |_| {
@@ -184,6 +190,9 @@ pub const AgentProcess = struct {
     /// Force kill the agent process
     /// Kills the entire process group to ensure child subprocesses are also terminated
     pub fn kill(self: *AgentProcess) void {
+        // The browser build never spawns, and wasi has no pid to signal.
+        if (is_web) return;
+
         if (self.status != .running) return;
 
         // Kill entire process group (negative PID) to terminate child subprocesses

@@ -47,6 +47,34 @@ pub const Config = struct {
         left,
         right,
     };
+
+    /// Free everything `parseConfig` allocated. A default `Config{}` owns
+    /// nothing, so this is safe on the value `load` returns after an error.
+    pub fn deinit(self: *const Config, allocator: Allocator) void {
+        const servers = self.agent_servers orelse return;
+        for (servers) |server| {
+            allocator.free(server.name);
+            allocator.free(server.command);
+            if (server.args) |args| {
+                for (args) |arg| allocator.free(arg);
+                allocator.free(args);
+            }
+            if (server.env) |env| {
+                for (env) |entry| {
+                    allocator.free(entry.name);
+                    allocator.free(entry.value);
+                }
+                allocator.free(env);
+            }
+            if (server.skim) |ext| {
+                if (ext.mode) |mode| allocator.free(mode);
+                if (ext.model) |model| allocator.free(model);
+            }
+            if (server.approval_policy) |policy| allocator.free(policy);
+            if (server.sandbox_mode) |mode| allocator.free(mode);
+        }
+        allocator.free(servers);
+    }
 };
 
 // =============================================================================

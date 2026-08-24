@@ -9,11 +9,23 @@
 //   draw(view.render());
 //   term.onKey(({ domEvent }) => draw(view.sendKey(domEvent)));
 //
+// `agentReplay` opens the agent panel on a recorded ACP session and `agentStep`
+// plays it one entry at a time. The caller owns the pacing:
+//
+//   draw(view.agentReplay(transcript));
+//   const frame = view.agentStep();   // null once the transcript runs out
+//
+// `agentRender` draws that panel into a screen of its own, for a page that puts
+// it in a second terminal beside the diff.
+//
+// `addComment` and `listComments` serve the two MCP requests a browser can
+// answer, through the same handlers skim's stdio MCP server calls.
+//
 // `wasmUrl` may point at a gzipped module. The loader unpacks it when the host
 // sent it verbatim, so a host that does not compress `application/wasm` itself
 // still sends the small file.
 //
-// `render`, `key`, `sendKey`, and `resize` all return a frame:
+// `render`, `key`, `sendKey`, `scroll`, and `resize` all return a frame:
 //
 //   { ansi: string, cursor: { row, col } | null }
 //
@@ -23,10 +35,12 @@
 const STATUS = {
   0: "ok",
   "-1": "no session",
-  "-2": "failed to parse the diff",
+  "-2": "failed to load the input",
   "-3": "failed to render",
   "-4": "failed to handle the key",
   "-5": "failed to resize",
+  "-6": "failed to scroll",
+  "-7": "failed to serve the request",
 };
 
 // Special keys, matching vaxis src/Key.zig.
@@ -68,22 +82,18 @@ export async function createSkim({
 } = {}) {
   const compiled =
     wasmModule ?? (await loadSkimModule({ wasmUrl, wasmBytes, onProgress }));
-  const instance = await WebAssembly.instantiate(compiled, wasiStubs(compiled));
+  const wasi = wasiStubs(compiled);
+  const instance = await WebAssembly.instantiate(compiled, wasi.imports);
+  wasi.useMemory(instance.exports.memory);
 
   instance.exports._start();
   const wasm = instance.exports;
 
   return {
     open({ diff, cols = 100, rows = 32 }) {
-      const bytes = new TextEncoder().encode(diff);
-      const ptr = wasm.skimAlloc(bytes.length);
-      if (ptr === 0) throw new Error("skim: out of memory");
-
-      new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
-      const status = wasm.skimLoad(ptr, bytes.length, cols, rows);
-      wasm.skimFree(ptr, bytes.length);
-      check(status);
-
+      check(
+        withText(wasm, diff, (ptr, len) => wasm.skimLoad(ptr, len, cols, rows)),
+      );
       return view(wasm);
     },
     close() {
@@ -114,15 +124,100 @@ function view(wasm) {
       return this.key(codepoint, event);
     },
 
+    /// Scroll the surface skim is showing by whole lines: negative up,
+    /// positive down. This is what a mouse wheel maps to. The caller turns a
+    /// wheel event into a line count, because only it knows how tall a cell is
+    /// on screen and which unit the wheel reported.
+    scroll(lines) {
+      check(wasm.skimScroll(lines));
+      return this.render();
+    },
+
     resize(cols, rows) {
       check(wasm.skimResize(cols, rows));
       return readFrame(wasm);
+    },
+
+    /// Open the agent panel on a recorded ACP session, in the JSONL shape
+    /// `skim debug acp` reads. The panel opens paused on entry one.
+    agentReplay(session) {
+      check(
+        withText(wasm, session, (ptr, len) => wasm.skimAgentReplay(ptr, len)),
+      );
+      return this.render();
+    },
+
+    /// Put `text` in the panel's input box, as if it had been typed there.
+    /// Call it with each prefix of a prompt to type one out, and with an empty
+    /// string to clear the box. Read the panel back with `agentRender`.
+    agentInput(text) {
+      check(withText(wasm, text, (ptr, len) => wasm.skimAgentInput(ptr, len)));
+    },
+
+    /// Play the next entry of the session. Returns null once it runs out, so a
+    /// caller can stop its own timer.
+    agentStep() {
+      if (wasm.skimAgentStep() === 0) return null;
+      return this.render();
+    },
+
+    /// Draw the agent panel alone, into a screen of its own, for a page that
+    /// gives it a terminal beside the diff rather than the right 30% of one
+    /// frame. Skim draws the panel either way; only the box around it differs.
+    ///
+    /// Asking for this frame is also what tells `render` to keep the diff full
+    /// width, so a caller that asks once must keep asking.
+    agentRender(cols, rows) {
+      check(wasm.skimAgentRender(cols, rows));
+      return readAgentFrame(wasm);
+    },
+
+    /// Serve an MCP `add_comment` request against the open diff. `params` is
+    /// the tool's own arguments object: `file`, `line`, `line_type`, `text`.
+    /// The request goes through the handler the stdio MCP server calls, so the
+    /// comment arrives the way an agent's comment arrives. Returns the new
+    /// frame and skim's own answer. Throws when skim rejects it — a line that
+    /// is not in the diff, for one.
+    addComment(params) {
+      const json = JSON.stringify(params);
+      check(withText(wasm, json, (ptr, len) => wasm.skimAddComment(ptr, len)));
+      const answer = readJson(wasm);
+      if (answer.error) throw new Error(`skim: ${answer.error.message}`);
+      return { frame: this.render(), answer };
+    },
+
+    /// Serve an MCP `list_comments` request. Returns every comment on the open
+    /// diff, whoever wrote it.
+    listComments() {
+      check(wasm.skimListComments());
+      return readJson(wasm).comments;
     },
 
     close() {
       wasm.skimUnload();
     },
   };
+}
+
+/// Copy `text` into the module, run `call` on it, and free it again. The module
+/// owns nothing it is handed: every entry point copies what it needs.
+function withText(wasm, text, call) {
+  const bytes = new TextEncoder().encode(text);
+
+  // Ask for a byte even when there is nothing to copy. A zero-length request
+  // comes back as a sentinel address rather than a place in the buffer, and
+  // reading the buffer there throws. The module is handed the real length, so
+  // an empty text arrives empty.
+  const size = Math.max(bytes.length, 1);
+  const ptr = wasm.skimAlloc(size);
+  if (ptr === 0) throw new Error("skim: out of memory");
+
+  try {
+    new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
+    return call(ptr, bytes.length);
+  } finally {
+    wasm.skimFree(ptr, size);
+  }
 }
 
 function codepointFor(event) {
@@ -137,6 +232,26 @@ function packMods({ ctrlKey, altKey, shiftKey }) {
     (altKey ? MOD_ALT : 0) |
     (shiftKey ? MOD_SHIFT : 0)
   );
+}
+
+function readJson(wasm) {
+  const bytes = new Uint8Array(
+    wasm.memory.buffer,
+    wasm.skimJsonPtr(),
+    wasm.skimJsonLen(),
+  );
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+function readAgentFrame(wasm) {
+  const bytes = new Uint8Array(
+    wasm.memory.buffer,
+    wasm.skimAgentOutPtr(),
+    wasm.skimAgentOutLen(),
+  );
+  // The panel never wants a text cursor: skim shows one for the comment
+  // editor, which lives in the diff.
+  return { ansi: new TextDecoder().decode(bytes), cursor: null };
 }
 
 function readFrame(wasm) {
@@ -210,29 +325,87 @@ function check(status) {
     throw new Error(`skim: ${STATUS[status] ?? `error ${status}`}`);
 }
 
-// The module never reads a file, writes a file, or reads the clock for anything
-// the caller can observe. Every syscall returns success with no data, except
-// `proc_exit`, which only runs if the module panics.
+// The module never reads a file and never writes one, so most syscalls here
+// return success and write nothing. Four do not, and each one has to be what it
+// is:
+//
+//   `fd_prestat_get` must report EBADF. Zig walks the preopened directories at
+//   start-up by asking for descriptor 3, then 4, and so on until one comes back
+//   bad. Answering "success" without filling the struct in leaves it reading
+//   whatever was in that memory, and the walk then runs off into a trap inside
+//   `_start` — before a single export is reachable.
+//
+//   `args_sizes_get` and `environ_sizes_get` must write their two counts. Same
+//   hazard: the caller reads the counts whatever the return code says.
+//
+//   `clock_time_get` must return a real time. The agent panel stamps every
+//   message it holds and lays the transcript out from those stamps, so a clock
+//   stuck at one value collapses the panel to its first message. A diff on its
+//   own never asks.
+//
+//   `proc_exit` throws, and only runs if the module panics.
 //
 // The list comes from the module itself, not from a list written here by hand.
 // A change to the Zig standard library or to the code the browser build pulls
 // in adds a syscall to the module, and a hand-written list then misses it. That
 // is a LinkError, which stops the whole demo: `poll_oneoff` broke it this way.
+const WASI_EBADF = 8;
+
 function wasiStubs(module) {
-  const ok = () => 0;
   const stubs = {};
+  // Filled in after instantiation: the stubs that write need the memory, and
+  // the module does not have one until it is instantiated with these.
+  let memory = null;
+
+  // Realtime in nanoseconds for the wall clock, and the page's monotonic timer
+  // for everything else. `id` 0 is realtime; 1 and up are monotonic or
+  // per-process, none of which may run backwards.
+  const readClock = (id, precision, outPtr) => {
+    const ms = Date.now();
+    new DataView(memory.buffer).setBigUint64(
+      outPtr,
+      BigInt(Math.round(ms * 1e6)),
+      true,
+    );
+    return 0;
+  };
+
+  const zeroCounts = (countPtr, sizePtr) => {
+    const view = new DataView(memory.buffer);
+    view.setUint32(countPtr, 0, true);
+    view.setUint32(sizePtr, 0, true);
+    return 0;
+  };
 
   for (const entry of WebAssembly.Module.imports(module)) {
     if (entry.module !== "wasi_snapshot_preview1") {
       throw new Error(`skim: the module needs ${entry.module}.${entry.name}`);
     }
-    stubs[entry.name] =
-      entry.name === "proc_exit"
-        ? (code) => {
-            throw new Error(`skim: the module exited with code ${code}`);
-          }
-        : ok;
+    switch (entry.name) {
+      case "proc_exit":
+        stubs[entry.name] = (code) => {
+          throw new Error(`skim: the module exited with code ${code}`);
+        };
+        break;
+      case "fd_prestat_get":
+        stubs[entry.name] = () => WASI_EBADF;
+        break;
+      case "args_sizes_get":
+      case "environ_sizes_get":
+        stubs[entry.name] = zeroCounts;
+        break;
+      case "clock_time_get":
+        stubs[entry.name] = readClock;
+        break;
+      default:
+        stubs[entry.name] = () => 0;
+    }
   }
 
-  return { wasi_snapshot_preview1: stubs };
+  return {
+    imports: { wasi_snapshot_preview1: stubs },
+    useMemory(exported) {
+      memory = exported;
+    },
+  };
 }

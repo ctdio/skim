@@ -1,11 +1,13 @@
 ---
 import Landing from '../layouts/Landing.astro';
 import HeroTerminal from '../components/HeroTerminal.astro';
-import ProblemTerminal from '../components/ProblemTerminal.astro';
+import MovementTerminal from '../components/MovementTerminal.astro';
+import McpTerminals from '../components/McpTerminals.astro';
 import ArrowLongRight from 'astro-heroicons/outline/ArrowLongRight.astro';
 import { withBase } from '../lib/base';
 
 const docsHref = withBase('/docs/getting-started/overview');
+const tryHref = withBase('/try');
 const buildHref = withBase('/docs/getting-started/build-from-source');
 const keybindingsHref = withBase('/docs/reference/keybindings');
 const repoHref = 'https://github.com/ctdio/skim';
@@ -20,72 +22,52 @@ const installCommands = [
   './zig-out/bin/skim',
 ].join('\n');
 
-// Each of these is checkable against the source. Keep it that way — if a claim
-// here stops being true, it is a bug in the page, not a rounding error.
-const mechanics = [
+// The two card groups of the tour. The first leg — moving through the diff — is
+// not here: it is the live legend in `MovementTerminal.astro`, because a motion
+// is worth more watched than described. Every card leads with its keys, because
+// in skim a feature *is* its keybinding.
+const groups = [
   {
-    lead: 'It runs `git diff`.',
-    body: 'Not a reimplementation. Skim spawns git, parses the output, and renders it. Working directory, staged, a single ref, or a range.',
+    title: 'Read the change',
+    lead: 'One key per question: how it is laid out, what the code means, and who wrote the line under the cursor.',
+    features: [
+      {
+        kb: 's · Tab',
+        title: 'Unified and side-by-side',
+        body: 'One key switches the layout. Tab cycles the hunk between all lines, additions only, and deletions only.',
+      },
+      {
+        kb: '13 grammars',
+        title: 'Tree-sitter highlighting',
+        body: 'Real grammars, not regex. Parsing runs off the render thread, so a large file does not stall the scroll.',
+      },
+      {
+        kb: 'r · B',
+        title: 'Refresh and blame',
+        body: 'r reloads the diff from git and keeps your position. B toggles git blame in the gutter.',
+      },
+    ],
   },
   {
-    lead: 'It draws the diff itself.',
-    body: 'The command runs with `--no-color --no-ext-diff`, so what you see is skim rendering the change, not your pager and not an external diff tool.',
-  },
-  {
-    lead: 'The diff streams.',
-    body: 'Files render as they parse, so the first one is on screen while git is still writing the rest. A 20MB single-file diff parses in 13ms.',
-  },
-  {
-    lead: 'Highlighting runs on its own thread.',
-    body: 'Tree-sitter parses in a background worker. A slow parse costs you a late repaint, never a dropped keystroke.',
-  },
-];
-
-const features = [
-  {
-    kb: 'hjkl · Ctrl-n/p',
-    title: 'Modal navigation',
-    body: 'hjkl moves by line, Ctrl-n and Ctrl-p move file to file. The modes and motions are the vim ones.',
-  },
-  {
-    kb: 's · Tab',
-    title: 'Unified and side-by-side',
-    body: 'One key switches the layout. Hunk mode cycles between all lines, additions only, and deletions only.',
-  },
-  {
-    kb: '13 grammars',
-    title: 'Tree-sitter highlighting',
-    body: 'Real grammars, not regex. Parsing runs off the render thread, so a large file does not stall the scroll.',
-  },
-  {
-    kb: 'Ctrl-p · :',
-    title: 'Command palette',
-    body: 'Ctrl-p fuzzy-finds a file in the diff. A colon runs a command by name. Neither one is a menu.',
-  },
-  {
-    kb: '/ · f t F T',
-    title: 'Search and find',
-    body: 'Smart-case search runs across every file in the diff. f, t, F, and T move within the current line.',
-  },
-  {
-    kb: 'Enter · y · Y',
-    title: 'Inline comments',
-    body: 'Enter attaches a comment to the line under the cursor. y copies one to the clipboard, Y copies all of them.',
-  },
-  {
-    kb: 'r · B',
-    title: 'Refresh and blame',
-    body: 'r reloads the diff from git and keeps your position. B toggles git blame in the gutter.',
-  },
-  {
-    kb: 'a · A · S',
-    title: 'Staging and Graphite',
-    body: 'a stages the current file, A stages all of them. S opens the Graphite stack to move between stacked PRs.',
-  },
-  {
-    kb: 'Ctrl-e',
-    title: 'Agent panel',
-    body: 'An agent runs in a side panel over ACP. @file embeds a file from the diff into the prompt.',
+    title: 'Act on it',
+    lead: 'A review ends in comments and staged work. Both happen in the diff, with no second window.',
+    features: [
+      {
+        kb: 'Enter · y · Y',
+        title: 'Inline comments',
+        body: 'Enter attaches a comment to the line under the cursor. y copies one to the clipboard, Y copies all of them.',
+      },
+      {
+        kb: 'a · A · S',
+        title: 'Staging and Graphite',
+        body: 'a stages the current file, A stages all of them. S opens the Graphite stack to move between stacked PRs.',
+      },
+      {
+        kb: 'Ctrl-e',
+        title: 'Agent panel',
+        body: 'An agent runs in a side panel over ACP. @file embeds a file from the diff into the prompt.',
+      },
+    ],
   },
 ];
 ---
@@ -94,12 +76,12 @@ const features = [
   <!-- Hero -->
   <section class="sk-hero">
     <div class="sk-wrap">
-      <h1 class="sk-h1">A code review TUI that stays out of the way.</h1>
+      <h1 class="sk-h1">Fast diffs for people who live in the terminal</h1>
       <p class="sk-lede">
-        Skim reads <code class="sk-mono">git diff</code> and renders it as a
-        navigable buffer. Move file to file, switch unified and side-by-side,
-        comment on a line, stage a hunk. It shells out to git, so it runs in any
-        repo without setup.
+        Your agents move fast; the review should too. Move file to file, switch
+        unified and side-by-side, comment on a line, stage a file, then hand the
+        diff to an agent in the side panel without leaving. Skim shells out to
+        git, so it runs in any repo without setup.
       </p>
       <div class="sk-cta-row">
         <a class="sk-btn sk-btn-primary" href={buildHref}>
@@ -113,89 +95,141 @@ const features = [
     </div>
   </section>
 
-  <!-- How it works -->
-  <section class="sk-section" aria-labelledby="mechanics-h">
+  <!-- The tour -->
+  <section class="sk-section" aria-labelledby="tour-h">
     <div class="sk-wrap">
-      <p class="sk-kicker">How it works</p>
-      <h2 class="sk-h2" id="mechanics-h">It shells out to git.</h2>
-      <div class="sk-two">
-        <ul class="sk-prob-list">
-          {
-            mechanics.map((p, i) => (
-              <li>
-                <span class="n" aria-hidden="true">{String(i + 1).padStart(2, '0')}</span>
-                <span class="body">
-                  <b>{p.lead}</b>{' '}
-                  {/* `body` is authored with markdown-style backticks, but this is
-                      plain-text interpolation, not markdown — split them out into
-                      real code spans or the backticks print as characters. */}
-                  {p.body
-                    .split(/(`[^`]+`)/)
-                    .map((part) =>
-                      part.startsWith('`') ? <code class="sk-mono">{part.slice(1, -1)}</code> : part,
-                    )}
-                </span>
-              </li>
-            ))
-          }
-        </ul>
-
-        <ProblemTerminal />
-      </div>
-    </div>
-  </section>
-
-  <!-- Features -->
-  <section class="sk-section" aria-labelledby="features-h">
-    <div class="sk-wrap">
-      <p class="sk-kicker">What's inside</p>
-      <h2 class="sk-h2" id="features-h">What it does.</h2>
+      <p class="sk-kicker">The tour</p>
+      <h2 class="sk-h2" id="tour-h">Familiar motions</h2>
       <p class="sk-section-lead">
-        Every feature is a keybinding. The keys are listed with each one, and
-        the full set is in the keybindings reference.
+        <code class="sk-mono">hjkl</code> moves, <code class="sk-mono">/</code>
+        searches, <code class="sk-mono">n</code> walks the matches,
+        <code class="sk-mono">gg</code> and <code class="sk-mono">G</code> go to
+        the ends. Vim's keys, on a diff. Getting to the line, reading the
+        change, and acting on it are all keystrokes. The full list is in the
+        <a href={keybindingsHref}>keybindings reference</a>.
       </p>
-      <div class="sk-features">
-        {
-          features.map((f) => (
-            <article class="sk-feat">
-              <span class="kb sk-mono">{f.kb}</span>
-              <h3>{f.title}</h3>
-              <p>{f.body}</p>
-            </article>
-          ))
-        }
+
+      <div class="sk-tour-group">
+        <h3 class="sk-tour-h">Move through it</h3>
+        <p class="sk-tour-lead">
+          The terminal below is running skim, and it makes every move the
+          legend names. Click into it to take over: the tour stands down and
+          hands back the keys.
+        </p>
+        <MovementTerminal />
       </div>
+
+      {
+        groups.map((group) => (
+          <div class="sk-tour-group">
+            <h3 class="sk-tour-h">{group.title}</h3>
+            <p class="sk-tour-lead">{group.lead}</p>
+            <div class="sk-features">
+              {group.features.map((f) => (
+                <article class="sk-feat">
+                  <span class="kb sk-mono">{f.kb}</span>
+                  <h4>{f.title}</h4>
+                  <p>{f.body}</p>
+                </article>
+              ))}
+            </div>
+          </div>
+        ))
+      }
     </div>
   </section>
 
-  <!-- Install -->
-  <section class="sk-section sk-install" aria-labelledby="install-h">
+  <!-- Agents -->
+  <section class="sk-section" aria-labelledby="agents-h">
     <div class="sk-wrap">
-      <p class="sk-kicker">Install</p>
-      <h2 class="sk-h2" id="install-h" style="margin-inline:auto">Build it from source.</h2>
-      <p class="sk-section-lead" style="margin-inline:auto;text-align:center">
-        Skim needs Zig 0.15.1 and git. There is no other dependency. The binary
-        lands at <code class="sk-mono">./zig-out/bin/skim</code>.
+      <p class="sk-kicker">Agents</p>
+      <h2 class="sk-h2" id="agents-h">Comments go both ways</h2>
+      <p class="sk-section-lead">
+        Skim exposes an MCP server and a CLI for reading and writing comments,
+        so an agent reaches a running session either way:{' '}
+        <code class="sk-mono">get_comments</code> and{' '}
+        <code class="sk-mono">add_comment</code> over MCP, or{' '}
+        <code class="sk-mono">skim comment list</code> and{' '}
+        <code class="sk-mono">skim comment add</code> from a shell. It reads the
+        comment you wrote on a line, and writes its own back onto the diff you
+        are reading. Below is one skim: the diff on the left, its agent panel on
+        the right, and the comments crossing between them.
       </p>
-      <div class="sk-codeblock">
-        <div class="sk-copy">
-          <span aria-live="polite"></span>
-          <button
-            type="button"
-            class="sk-copy-btn"
-            aria-label="Copy"
-            data-copied="Copied!"
-            data-code={installCommands}
-          ></button>
-        </div>
-        <pre><code><span class="cprompt">$</span> git clone https://github.com/ctdio/skim.git
+      <McpTerminals />
+    </div>
+  </section>
+
+  <!-- Try it: terminal or browser, one section -->
+  <section class="sk-section sk-get" aria-labelledby="get-h">
+    <div class="sk-wrap">
+      <p class="sk-kicker">Try it</p>
+      <h2 class="sk-h2" id="get-h">Run it in your terminal, or here on the web</h2>
+      <p class="sk-section-lead">
+        Skim compiles to a native binary and to WebAssembly, so a browser tab
+        runs the same renderer a terminal does. Build it for the repo on your
+        disk, or paste a pull request and read it right here.
+      </p>
+
+      <div class="sk-get-grid">
+        <article class="sk-get-card">
+          <h3 class="sk-get-h">In your own terminal</h3>
+          <p class="sk-get-lead">
+            Skim needs Zig 0.15.1 and git. There is no other dependency. The
+            binary lands at <code class="sk-mono">./zig-out/bin/skim</code>.
+          </p>
+          <div class="sk-codeblock">
+            <div class="sk-copy">
+              <span aria-live="polite"></span>
+              <button
+                type="button"
+                class="sk-copy-btn"
+                aria-label="Copy"
+                data-copied="Copied!"
+                data-code={installCommands}
+              ></button>
+            </div>
+            <pre><code><span class="cprompt">$</span> git clone https://github.com/ctdio/skim.git
 <span class="cprompt">$</span> cd skim
 <span class="cprompt">$</span> zig build -Doptimize=ReleaseFast   <span class="ccomment"># optimized binary</span>
 <span class="cprompt">$</span> ./zig-out/bin/skim                 <span class="ccomment"># review working-dir changes</span></code></pre>
-      </div>
-      <div class="sk-cta-row" style="margin-top:1.5rem">
-        <a class="sk-btn sk-btn-primary" href={buildHref}>Build from source <ArrowLongRight class="sk-btn-arrow" /></a>
-        <a class="sk-btn sk-btn-ghost" href={keybindingsHref}>See all keybindings</a>
+          </div>
+          <p class="sk-get-note">
+            <a href={buildHref}>Build from source</a>{' · '}<a href={keybindingsHref}>See all keybindings</a>
+          </p>
+        </article>
+
+        <article class="sk-get-card">
+          <h3 class="sk-get-h">Here on the web</h3>
+          <p class="sk-get-lead">
+            Paste any public pull request and review it full screen. The diff is
+            read from GitHub and parsed in the tab. Nothing is uploaded, and
+            there is nothing to install.
+          </p>
+          {/* A plain GET form: the browser builds `/try?diff=…` itself, so this
+              needs no script and works before anything hydrates. */}
+          <form class="sk-get-form" action={tryHref} method="get">
+            <label class="sk-visually-hidden" for="sk-get-input">
+              A GitHub pull request, commit, or comparison
+            </label>
+            <input
+              class="sk-get-input sk-mono"
+              id="sk-get-input"
+              type="text"
+              name="diff"
+              inputmode="url"
+              spellcheck="false"
+              autocapitalize="off"
+              autocorrect="off"
+              placeholder="github.com/owner/repo/pull/123"
+            />
+            <button class="sk-btn sk-btn-primary" type="submit">
+              Open in skim <ArrowLongRight class="sk-btn-arrow" />
+            </button>
+          </form>
+          <p class="sk-get-note">
+            Or <a href={tryHref}>open it full screen</a> on the demo diff.
+          </p>
+        </article>
       </div>
     </div>
   </section>

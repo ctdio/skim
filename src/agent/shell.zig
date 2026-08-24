@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Allocator = std.mem.Allocator;
 
 /// Queued shell command output to be sent with next prompt
@@ -35,8 +36,9 @@ pub const RunningShellCommand = struct {
         self.allocator.free(self.tool_id);
         self.stdout_buf.deinit(self.allocator);
         self.stderr_buf.deinit(self.allocator);
-        // Kill the process if still running
-        _ = self.child.kill() catch {};
+        // Kill the process if still running. The browser build never spawns,
+        // and wasi has no pid to signal.
+        if (!platform.is_web) _ = self.child.kill() catch {};
     }
 
     /// Get the last N lines of stdout for display, processing carriage returns

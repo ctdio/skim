@@ -1,6 +1,6 @@
 ---
 title: Your First Review
-description: A guided tour of the Skim interface — open a diff and move through it.
+description: A guided tour of the Skim interface. Open a diff and move through it.
 ---
 
 With Skim [built](../build-from-source/) and on your `PATH`, open a diff from
@@ -22,7 +22,7 @@ Skim launches into **NORMAL mode** showing the first changed file.
 
 ## Move around
 
-The essentials — everything is vim-shaped:
+The essentials, all vim-shaped:
 
 | Key | Action |
 | --- | --- |
@@ -46,7 +46,7 @@ commands like *Toggle View Mode*, *Refresh Diff*, and *Quit*.
 
 Put the cursor on any line and press `Enter` to attach a comment. When you're
 done reviewing, press `y` to yank the comment under the cursor to your
-clipboard, or `Y` to yank **all** comments at once — ready to paste into a PR
+clipboard, or `Y` to yank **all** comments at once, ready to paste into a PR
 or chat.
 
 ## Refresh as you work
@@ -60,7 +60,7 @@ Press `:` and run `quit`, or use the command palette.
 
 ## Where to next
 
-- [Navigating diffs](../../guides/navigating-diffs/) — motions in depth.
-- [View modes](../../guides/view-modes/) — unified, side-by-side, and hunk modes.
-- [Comments & export](../../guides/comments-and-export/) — the full comment workflow.
-- [Keybindings & commands](../../reference/keybindings/) — the complete keymap.
+- [Navigating diffs](../../guides/navigating-diffs/): motions in depth.
+- [View modes](../../guides/view-modes/): unified, side-by-side, and hunk modes.
+- [Comments & export](../../guides/comments-and-export/): the full comment workflow.
+- [Keybindings & commands](../../reference/keybindings/): the complete keymap.

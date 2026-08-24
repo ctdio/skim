@@ -5,15 +5,15 @@ description: The built-in agent panel (ACP) and MCP server for driving Skim with
 
 Skim integrates with AI agents in two ways:
 
-1. **Agent panel** — a built-in chat interface (`Ctrl-e`) that speaks the
+1. **Agent panel**: a built-in chat interface (`Ctrl-e`) that speaks the
    [Agent Client Protocol](https://agentclientprotocol.com/) (ACP).
-2. **External integration** — CLI commands (`skim session …`) and an MCP server
+2. **External integration**: CLI commands (`skim session …`) and an MCP server
    so agents can drive a running Skim instance.
 
 ## The agent panel
 
 Press `Ctrl-e` to toggle a chat panel alongside your diff. Agents are spawned
-as subprocesses that communicate over stdio — no daemon.
+as subprocesses that communicate over stdio. There is no daemon.
 
 ```bash
 # 1. Configure agents in ~/.skim/config.json (see below)
@@ -61,16 +61,16 @@ Configure agents and panel settings in `~/.skim/config.json`:
 | `skim.model` | string | No | Model to use (e.g. `"opus"`, `"sonnet"`) |
 | `skim.mode` | string | No | Session mode (e.g. `"plan"`, `"code"`) |
 
-For native Codex, set `"protocol": "codex"` with `"command": "codex"` — Skim
+For native Codex, set `"protocol": "codex"` with `"command": "codex"`. Skim
 launches `codex app-server` and applies `sandbox_mode` / `web_search` as
 first-class settings.
 
 **Agent selection:**
 
-- **Single agent** — auto-connects immediately.
-- **Multiple agents with a default** — auto-connects to the one marked
+- **Single agent**: auto-connects immediately.
+- **Multiple agents with a default**: auto-connects to the one marked
   `"default": true`.
-- **Multiple agents, no default** — shows a selection menu (`j` / `k` to
+- **Multiple agents, no default**: shows a selection menu (`j` / `k` to
   navigate, `Enter` to select).
 
 Switch agents anytime via the command palette (`Ctrl-p`, then `>Switch Agent`).

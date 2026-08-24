@@ -1,0 +1,132 @@
+---
+/**
+ * The movement tour: a key legend beside a second, real skim.
+ *
+ * Same load as the hero (`HeroTerminal.astro`) — the frame paints as a loading
+ * panel, then the wasm build takes it over. The two share one download and one
+ * compiled module (see `src/lib/live-terminal.ts`), and they open the same
+ * eight-file diff, because a tour about moving between files needs files to
+ * move between.
+ *
+ * The legend is the point of the pairing. Each row names a move, and the row
+ * lights up while the terminal beside it makes that move, so a visitor reads
+ * the key and watches it land in the same glance. Rows and chapters come from
+ * one list, `MOVES` in `src/lib/movement-tour.ts`, so they cannot drift apart.
+ *
+ * The tour is driven by `src/lib/demo-autoplay.ts`: it pauses off screen,
+ * stands down the moment the visitor presses a key of their own, and comes back
+ * once they go idle.
+ */
+import { MOVES } from '../lib/movement-tour';
+---
+
+<div class="sk-move" data-move-root>
+  <ul class="sk-move-list">
+    {
+      MOVES.map((move, i) => (
+        <li class="sk-move-row" data-move-row={i}>
+          <kbd class="sk-move-kb sk-mono">{move.kb}</kbd>
+          <span>
+            <b>{move.label}</b>
+            <span class="sk-move-note">{move.note}</span>
+          </span>
+        </li>
+      ))
+    }
+  </ul>
+
+  <div class="term">
+    <div class="term-chrome">
+      <div class="term-lights">
+        <span style="background:#ff5f57"></span>
+        <span style="background:#febc2e"></span>
+        <span style="background:#28c840"></span>
+      </div>
+      <span class="term-title" data-move-title>skim: moving through a diff</span>
+    </div>
+    <div class="sk-mini-stage">
+      <div class="sk-term-loading" data-move-placeholder>
+        <p class="sk-term-loading-label" data-move-loading-label>Loading skim…</p>
+      </div>
+      <div class="sk-mini-live" data-move-live hidden aria-label="Live skim demo"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  import '@xterm/xterm/css/xterm.css';
+  import { DEMO_DIFF } from '../lib/demo-diff';
+  import { createAutoplay } from '../lib/demo-autoplay';
+  import type { Autoplay } from '../lib/demo-autoplay';
+  import { MOVES } from '../lib/movement-tour';
+  import { mountLiveTerminal, wantsLiveTerminal } from '../lib/live-terminal';
+
+  const root = document.querySelector<HTMLElement>('[data-move-root]');
+  const live = document.querySelector<HTMLElement>('[data-move-live]');
+  const placeholder = document.querySelector<HTMLElement>('[data-move-placeholder]');
+  const label = document.querySelector<HTMLElement>('[data-move-loading-label]');
+  const title = document.querySelector<HTMLElement>('[data-move-title]');
+  const rows = Array.from(document.querySelectorAll<HTMLElement>('[data-move-row]'));
+
+  if (root && live && placeholder && label && title) {
+    if (wantsLiveTerminal()) {
+      const io = new IntersectionObserver(
+        ([entry]) => {
+          if (!entry.isIntersecting) return;
+          io.disconnect();
+          mount().catch(() => {
+            live.hidden = true;
+            placeholder.hidden = false;
+            label.textContent = 'The live demo could not load.';
+          });
+        },
+        { rootMargin: '200px' },
+      );
+      io.observe(root);
+    } else {
+      label.textContent = 'The live demo is off while Data Saver is on.';
+    }
+  }
+
+  let autoplay: Autoplay | null = null;
+
+  async function mount(): Promise<void> {
+    const terminal = await mountLiveTerminal({
+      host: live!,
+      diff: DEMO_DIFF,
+      // Half a grid column on a wide screen, the full width on a phone, so it
+      // asks for fewer columns than the hero and starts from a smaller glyph.
+      font: { cols: 80, min: 8, max: 11 },
+      onInput: () => autoplay?.yieldToVisitor(),
+      reveal: () => {
+        live!.hidden = false;
+        placeholder!.hidden = true;
+      },
+    });
+
+    autoplay = createAutoplay({
+      terminal,
+      host: root!,
+      chapters: MOVES,
+      // Mark the row the terminal is acting out, and say the same thing in the
+      // chrome bar for anyone reading the frame rather than the legend.
+      onChapter: (index) => {
+        rows.forEach((row, n) => row.classList.toggle('is-active', n === index));
+        title!.textContent = `skim: ${MOVES[index].kb}`;
+      },
+      // The visitor has the terminal, so no row is being acted out. Clear the
+      // marks rather than leave one lit against a frame that is not moving.
+      onStatus: (status) => {
+        if (status.kind === 'playing') return;
+        rows.forEach((row) => row.classList.remove('is-active'));
+        title!.textContent = 'skim: the terminal is yours';
+      },
+    });
+
+    // xterm puts the focus on a textarea inside the host, so watch the host.
+    // The stepping stops while the visitor is in the terminal, whether or not
+    // they have pressed anything yet.
+    live!.addEventListener('focusin', () => autoplay?.setFocused(true));
+    live!.addEventListener('focusout', () => autoplay?.setFocused(false));
+  }
+</script>

@@ -807,6 +807,13 @@ pub const AgentState = struct {
         step_delay_override_ms: ?i64,
         last_step_ms: i64,
         previewing_current_line: bool,
+        /// Whether the title bar advertises the replay and its position.
+        ///
+        /// True for `skim debug acp`, where the counter is the point. False for
+        /// a host that plays a recorded session as content rather than as a
+        /// debugging aid — the browser demo on the landing page — where it is
+        /// noise on top of a caption that already says the session is recorded.
+        show_progress: bool,
 
         pub fn init(
             kind: DebugReplayKind,
@@ -829,6 +836,7 @@ pub const AgentState = struct {
                 .step_delay_override_ms = null,
                 .last_step_ms = now - debug_replay_step_interval_ms,
                 .previewing_current_line = false,
+                .show_progress = true,
             };
         }
 
@@ -1689,6 +1697,12 @@ pub const AgentState = struct {
         self.clearDebugReplay();
         self.resetForDebugReplay();
         self.debug_replay = DebugReplayState.init(kind, lines, initial_manager_status, autoplay, exit_quits_app);
+    }
+
+    /// Stop the title bar advertising that the panel is playing a replay. The
+    /// replay itself is unchanged; only the counter goes.
+    pub fn hideDebugReplayProgress(self: *AgentState) void {
+        if (self.debug_replay) |*replay| replay.show_progress = false;
     }
 
     pub fn clearDebugReplay(self: *AgentState) void {

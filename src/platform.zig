@@ -22,12 +22,24 @@ pub const web_grammars = [_][]const u8{
     "rust",
     "go",
     "zig",
+    "markdown",
+    "markdown_inline",
+};
+
+/// Grammars linked for something other than diff highlighting.
+const web_highlight_grammars = [_][]const u8{
+    "javascript",
+    "typescript",
+    "python",
+    "rust",
+    "go",
+    "zig",
 };
 
 /// True when the current build links the named tree-sitter grammar.
 pub fn linksGrammar(comptime name: []const u8) bool {
     if (!is_web) return true;
-    for (web_grammars) |grammar| {
+    for (web_highlight_grammars) |grammar| {
         if (comptime std.mem.eql(u8, grammar, name)) return true;
     }
     return false;

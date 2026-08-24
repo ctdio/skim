@@ -6,8 +6,13 @@
 //! Call order from JavaScript:
 //!   1. `skimAlloc(len)` — get a buffer, write the diff bytes into it
 //!   2. `skimLoad(ptr, len, width, height)` — parse, highlight, first frame
-//!   3. `skimRender()` / `skimKey(codepoint, mods)` / `skimResize(w, h)`
+//!   3. `skimRender()` / `skimKey(codepoint, mods)` / `skimScroll(lines)` /
+//!      `skimResize(w, h)`
 //!   4. `skimOutPtr()` + `skimOutLen()` — read the ANSI frame, feed it to xterm.js
+//!
+//! `skimAddComment` and `skimListComments` serve the two MCP requests a browser
+//! can answer, and put their JSON in a second buffer read with `skimJsonPtr`
+//! and `skimJsonLen`.
 //!
 //! Every call returns a `Status`. Any negative value means the frame did not
 //! change and the output buffer must not be read.
@@ -27,6 +32,8 @@ pub const Status = enum(i32) {
     render_failed = -3,
     key_failed = -4,
     resize_failed = -5,
+    scroll_failed = -6,
+    request_failed = -7,
 };
 
 /// Modifier bits `skimKey` accepts, matching the order of `vaxis.Key.Modifiers`.
@@ -88,6 +95,15 @@ export fn skimKey(codepoint: u32, mods: u8) i32 {
     return @intFromEnum(Status.ok);
 }
 
+/// Scroll the active surface by whole lines: negative up, positive down. This
+/// is the mouse wheel. The host owns the arithmetic, because only it knows how
+/// tall a cell is on screen and which unit the wheel reported.
+export fn skimScroll(lines: i32) i32 {
+    var session = &(active orelse return @intFromEnum(Status.no_session));
+    session.scroll(lines) catch return @intFromEnum(Status.scroll_failed);
+    return @intFromEnum(Status.ok);
+}
+
 /// Change the terminal size and redraw.
 export fn skimResize(width: u16, height: u16) i32 {
     var session = &(active orelse return @intFromEnum(Status.no_session));
@@ -100,6 +116,85 @@ export fn skimRender() i32 {
     var session = &(active orelse return @intFromEnum(Status.no_session));
     _ = session.render() catch return @intFromEnum(Status.render_failed);
     return @intFromEnum(Status.ok);
+}
+
+/// Open the agent panel on a recorded ACP session. `ptr[0..len]` is a session
+/// log in the format `skim debug acp` reads. There is no subprocess in a
+/// browser, so the panel is driven entirely by this replay.
+export fn skimAgentReplay(ptr: [*]const u8, len: usize) i32 {
+    var session = &(active orelse return @intFromEnum(Status.no_session));
+    session.startAgentReplay(ptr[0..len]) catch return @intFromEnum(Status.load_failed);
+    return @intFromEnum(Status.ok);
+}
+
+/// Put `ptr[0..len]` in the panel's input box, for a host that types a prompt
+/// out one character at a time. An empty text clears the box. Read the panel
+/// back with `skimAgentRender`.
+export fn skimAgentInput(ptr: [*]const u8, len: usize) i32 {
+    var session = &(active orelse return @intFromEnum(Status.no_session));
+    session.agentInput(ptr[0..len]) catch return @intFromEnum(Status.request_failed);
+    return @intFromEnum(Status.ok);
+}
+
+/// Advance the replay if its next entry is due. Returns 1 when the frame
+/// changed, so the host knows to call `skimRender` and read a new one.
+export fn skimAgentStep() i32 {
+    var session = &(active orelse return 0);
+    return if (session.stepAgent()) 1 else 0;
+}
+
+/// Draw the agent panel alone, into a screen of its own, for a host that gives
+/// it a terminal beside the diff rather than the right 30% of one frame. Read
+/// the result with `skimAgentOutPtr` and `skimAgentOutLen`.
+///
+/// Asking for this frame is also what tells `skimRender` to keep the diff full
+/// width, so a host that calls it once must keep calling it.
+export fn skimAgentRender(width: u16, height: u16) i32 {
+    var session = &(active orelse return @intFromEnum(Status.no_session));
+    _ = session.renderAgent(width, height) catch return @intFromEnum(Status.render_failed);
+    return @intFromEnum(Status.ok);
+}
+
+/// Start of the last agent-panel frame. Valid until the next `skimAgentRender`.
+export fn skimAgentOutPtr() [*]const u8 {
+    const session = &(active orelse return "");
+    return session.agentAnsi().ptr;
+}
+
+/// Byte length of the last agent-panel frame.
+export fn skimAgentOutLen() usize {
+    const session = &(active orelse return 0);
+    return session.agentAnsi().len;
+}
+
+/// Serve an MCP `add_comment` request. `ptr[0..len]` is the JSON params object
+/// the tool sends. The comment goes in through `mcp/handlers.zig`, the same
+/// function the stdio MCP server calls. Read the answer with `skimJsonPtr` and
+/// `skimJsonLen`.
+export fn skimAddComment(ptr: [*]const u8, len: usize) i32 {
+    var session = &(active orelse return @intFromEnum(Status.no_session));
+    _ = session.addComment(ptr[0..len]) catch return @intFromEnum(Status.request_failed);
+    return @intFromEnum(Status.ok);
+}
+
+/// Serve an MCP `list_comments` request. Read the answer with `skimJsonPtr` and
+/// `skimJsonLen`.
+export fn skimListComments() i32 {
+    var session = &(active orelse return @intFromEnum(Status.no_session));
+    _ = session.listComments() catch return @intFromEnum(Status.request_failed);
+    return @intFromEnum(Status.ok);
+}
+
+/// Start of the JSON answer to the last MCP request. Valid until the next one.
+export fn skimJsonPtr() [*]const u8 {
+    const session = &(active orelse return "");
+    return session.json.ptr;
+}
+
+/// Byte length of the JSON answer to the last MCP request.
+export fn skimJsonLen() usize {
+    const session = &(active orelse return 0);
+    return session.json.len;
 }
 
 /// Row of the text cursor in the last frame, 0-based from the top. Only

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>skim — try it in the browser</title>
+    <title>skim: try it in the browser</title>
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
@@ -197,6 +197,17 @@ index 1111111..2222222 100644
           event.metaKey ||
           (event.ctrlKey && "wtnr".includes(event.key))
         );
+      });
+
+      // The wheel scrolls the diff. The terminal is the whole page here, so a
+      // notch is taken whatever has the keyboard. Three lines is what a notch
+      // scrolls in the terminal; a page that shares room with other content
+      // should read the delta properly instead.
+      term.attachCustomWheelEventHandler((event) => {
+        if (!view) return false;
+        event.preventDefault();
+        draw(view.scroll(Math.sign(event.deltaY) * 3));
+        return false;
       });
 
       window.addEventListener("resize", () => {

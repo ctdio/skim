@@ -1114,6 +1114,7 @@ pub const App = struct {
     pub fn ensureTabManager(self: *App) !*agent.TabManager {
         if (self.tab_manager == null) {
             const config = app_config.load(self.allocator) catch app_config.Config{};
+            defer config.deinit(self.allocator);
             const panel_side: agent.AgentState.PanelSide = switch (config.agent_panel_side) {
                 .left => .left,
                 .right => .right,

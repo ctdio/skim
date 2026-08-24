@@ -22,7 +22,7 @@ zig build -Doptimize=ReleaseFast
 The binary is written to `./zig-out/bin/skim`.
 
 :::tip
-Use the **debug build** (`zig build`) while developing or debugging — it keeps
+Use the **debug build** (`zig build`) while developing or debugging. It keeps
 assertions on, produces better stack traces, and emits `std.log.debug` output.
 Use `-Doptimize=ReleaseFast` for day-to-day use; release builds strip symbols
 and are around 209 KB.
@@ -61,8 +61,8 @@ prefers a locally installed `ziglint` binary and otherwise falls back to
 
 Skim pulls its dependencies through `build.zig.zon`:
 
-- **libvaxis** — TUI rendering.
-- **tree-sitter** plus language grammars — syntax highlighting for JavaScript,
+- **libvaxis**: TUI rendering.
+- **tree-sitter** plus language grammars: syntax highlighting for JavaScript,
   TypeScript, Zig, Python, Rust, Go, C, C++, JSON, YAML, TOML, Markdown, HTML,
   CSS, and Bash.
 

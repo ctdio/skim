@@ -1826,6 +1826,7 @@ pub const ChatLineMap = struct {
                     // Find a good break point (word boundary) without splitting UTF-8 graphemes.
                     const fitting = width_util.sliceByDisplayWidth(remaining, space_left);
                     var break_at: usize = fitting.len;
+                    var found_break = false;
 
                     // Prefer the last natural break point in the fitting slice.
                     if (space_left > 0 and fitting.len > 0) {
@@ -1835,11 +1836,22 @@ pub const ChatLineMap = struct {
                         }
                         if (last_breakable) |idx| {
                             break_at = idx + 1;
+                            found_break = true;
                         }
                     }
 
-                    // If we couldn't find a break point and current line has content, flush it first
-                    if (break_at == 0 and current_line.items.len > 0) {
+                    // No break point of its own, and something already on the
+                    // line: flush the line and try the whole run again on an
+                    // empty one.
+                    //
+                    // A styled run is a segment of its own, so a word inside one
+                    // is a segment that starts and ends mid-sentence — an inline
+                    // code span, a link, a bold word. Breaking it at the first
+                    // column that does not fit splits the word itself, which is
+                    // the one thing a wrap is meant to avoid. On the retry the
+                    // run either fits, or it is longer than a whole line and the
+                    // forced break below is then the right answer.
+                    if (!found_break and current_line.items.len > 0) {
                         try self.outputSegmentLine(global_line, msg_idx, line_idx, current_line.items, indent, is_code_block);
                         current_line.clearRetainingCapacity();
                         current_width = 0;

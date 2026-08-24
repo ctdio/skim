@@ -35,7 +35,7 @@ number first), just like vim.
 
 ## Hopping between changes
 
-These are the motions you'll lean on most in a review — they skip the unchanged
+These are the motions you'll lean on most in a review. They skip the unchanged
 context and land you on what actually changed.
 
 | Key | Action |
@@ -45,7 +45,7 @@ context and land you on what actually changed.
 | `{` / `}` | Previous / next empty line (accepts a count prefix) |
 
 :::tip
-Combine `]h` with a count — e.g. `3]h` jumps forward three changes at once.
+Combine `]h` with a count: `3]h` jumps forward three changes at once.
 :::
 
 ## Folding

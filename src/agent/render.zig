@@ -1158,7 +1158,13 @@ fn renderTitleBar(app: *App, win: vaxis.Window, tab: *AgentTab, is_focused: bool
             .@"error" => " Error",
         },
         .opencode => |m| if (m.isThinking()) " Thinking..." else " Active",
-    } else " Not connected";
+    } else if (agent_state.getDebugReplayConst()) |replay|
+        // No manager, but a replay that stands in for one. Report the state it
+        // is replaying rather than "Not connected", which describes the process
+        // that is missing instead of the session on screen.
+        replayStatusText(replay.manager_status)
+    else
+        " Not connected";
 
     const title_style = vaxis.Style{
         .fg = Color.white,
@@ -1186,7 +1192,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, tab: *AgentTab, is_focused: bool
 
     var replay_buf: [48]u8 = undefined;
     var replay_text: ?[]const u8 = null;
-    if (agent_state.getDebugReplayConst()) |replay| {
+    if (agent_state.getDebugReplayConst()) |replay| if (replay.show_progress) {
         const replay_state: []const u8 = if (replay.isComplete())
             "done"
         else if (replay.playing)
@@ -1201,7 +1207,7 @@ fn renderTitleBar(app: *App, win: vaxis.Window, tab: *AgentTab, is_focused: bool
         if (replay_text) |text| {
             replay_text = try RenderUtils.copyFrameText(app, text);
         }
-    }
+    };
 
     // Codex token usage and rate limit display (between title and status)
     var token_buf: [64]u8 = undefined;
@@ -1286,6 +1292,38 @@ fn renderTitleBar(app: *App, win: vaxis.Window, tab: *AgentTab, is_focused: bool
         .{ .text = status_text, .style = status_style },
     };
     _ = win.print(&status_seg, .{ .row_offset = 0, .col_offset = @intCast(status_col) });
+}
+
+/// The status a replay stands in for, worded the way the live manager words it.
+fn replayStatusText(status: state.DebugReplayManagerStatus) []const u8 {
+    return switch (status) {
+        .acp => |acp| switch (acp) {
+            .disconnected => " Disconnected",
+            .discovering => " Discovering...",
+            .connecting => " Connecting...",
+            .connected => " Creating session...",
+            .session_active => " Active",
+            .prompting => " Thinking...",
+            .failed => " Failed",
+        },
+        .codex => |codex| switch (codex) {
+            .disconnected => " Disconnected",
+            .connecting => " Connecting...",
+            .initialized => " Connected",
+            .thread_active => " Active",
+            .turn_active => " Thinking...",
+            .@"error" => " Error",
+        },
+        .opencode => |opencode| switch (opencode) {
+            .idle => " Idle",
+            .starting_server => " Starting...",
+            .connecting => " Connecting...",
+            .session_active => " Active",
+            .prompting => " Thinking...",
+            .disconnected => " Disconnected",
+            .failed => " Failed",
+        },
+    };
 }
 
 fn printTitleInfoSegmentClipped(win: vaxis.Window, row: usize, col: *usize, end_col: usize, text: []const u8, style: vaxis.Style) void {

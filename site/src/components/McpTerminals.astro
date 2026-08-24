@@ -1,0 +1,359 @@
+---
+/**
+ * Two terminals, one skim.
+ *
+ * The left pane is the diff. The right pane is skim's agent panel, the one
+ * `Ctrl-e` opens, and it is the agent in there making the MCP calls. They
+ * interleave: the visitor writes a comment on a line, the agent pulls it back
+ * with `get_comments`, and its own finding goes onto the diff with
+ * `add_comment` while you watch.
+ *
+ * Both panes are skim rendering itself. One wasm session drives them, so the
+ * comment the agent writes lands on the diff beside the call it came from.
+ *
+ * The agent's answers are a recording — the browser has no subprocess to talk
+ * to, and the caption says so. Two things in it are not recorded. The
+ * `get_comments` result is what the running skim answers, and the `add_comment`
+ * call goes through `src/mcp/handlers.zig`, the function skim's stdio MCP
+ * server calls. That is why the diff really changes.
+ */
+---
+
+<div class="sk-mcp" data-mcp-root>
+  <div class="sk-mcp-panes">
+    <div class="term sk-mcp-pane">
+      <div class="term-chrome">
+        <div class="term-lights">
+          <span style="background:#ff5f57"></span>
+          <span style="background:#febc2e"></span>
+          <span style="background:#28c840"></span>
+        </div>
+        <span class="term-title">skim: src/line_map.zig</span>
+      </div>
+      <div class="term-stage">
+        <div class="sk-term-loading" data-mcp-placeholder>
+          <p class="sk-term-loading-label" data-mcp-loading-label>
+            Loading skim…
+          </p>
+        </div>
+        <div class="sk-mcp-live" data-mcp-live hidden aria-label="Live skim demo">
+        </div>
+      </div>
+    </div>
+
+    <div class="term sk-mcp-pane">
+      <div class="term-chrome">
+        <div class="term-lights">
+          <span style="background:#ff5f57"></span>
+          <span style="background:#febc2e"></span>
+          <span style="background:#28c840"></span>
+        </div>
+        <span class="term-title">skim: agent panel</span>
+      </div>
+      <div class="term-stage">
+        <div class="sk-mcp-live" data-mcp-agent hidden aria-hidden="true"></div>
+      </div>
+    </div>
+  </div>
+
+  <p class="sk-mcp-note">
+    The agent's replies are a recording. Its reads and writes are not. Skim
+    answers <code>get_comments</code> and <code>add_comment</code> here through
+    the same handlers its MCP server calls.
+    <button type="button" class="sk-mcp-replay" data-mcp-replay hidden>
+      Play again
+    </button>
+  </p>
+</div>
+
+<script>
+  import '@xterm/xterm/css/xterm.css';
+  import { PROBLEM_DIFF } from '../lib/demo-diff';
+  import { AGENT_TWO_WAY, COMMENTS_PLACEHOLDER } from '../lib/agent-sessions';
+  import { mountLiveTerminal, wantsLiveTerminal } from '../lib/live-terminal';
+  import type { LiveTerminal } from '../lib/live-terminal';
+
+  /** Special keys, matching vaxis src/Key.zig. */
+  const ENTER = 0x0d;
+
+  /** Milliseconds a keystroke takes in the diff pane. */
+  const KEY_MS = 55;
+
+  /**
+   * How long a replayed turn holds the screen.
+   *
+   * A tool call is a line of chrome and reads at a glance. A paragraph of prose
+   * is not. So the hold is read off the entry itself: a base beat, plus time for
+   * whatever text it put on screen, capped so the closing summary does not park
+   * the demo.
+   */
+  const BASE_MS = 800;
+  const MS_PER_CHAR = 22;
+  const MAX_MS = 6500;
+
+  /** How long the finished scene holds before it starts over. */
+  const REST_MS = 4500;
+
+  /**
+   * A visitor who asked for less motion gets the conversation, not the
+   * performance: every delay collapses and both panes land on their end state.
+   */
+  const STILL = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const root = document.querySelector<HTMLElement>('[data-mcp-root]');
+  const live = document.querySelector<HTMLElement>('[data-mcp-live]');
+  const agent = document.querySelector<HTMLElement>('[data-mcp-agent]');
+  const placeholder = document.querySelector<HTMLElement>(
+    '[data-mcp-placeholder]',
+  );
+  const label = document.querySelector<HTMLElement>('[data-mcp-loading-label]');
+  const replay = document.querySelector<HTMLButtonElement>('[data-mcp-replay]');
+
+  if (root && live && agent && placeholder && label && replay) {
+    if (wantsLiveTerminal()) {
+      const io = new IntersectionObserver(
+        ([entry]) => {
+          if (!entry.isIntersecting) return;
+          io.disconnect();
+          mount().catch(() => {
+            live.hidden = true;
+            placeholder.hidden = false;
+            label.textContent = 'The live demo could not load.';
+          });
+        },
+        { rootMargin: '200px' },
+      );
+      io.observe(root);
+    } else {
+      label.textContent = 'The live demo is off while Data Saver is on.';
+    }
+  }
+
+  let terminal: LiveTerminal | null = null;
+
+  async function mount(): Promise<void> {
+    // Which run owns the panes. Raised by every `play`, and by a visitor who
+    // takes the keyboard — a demo that types underneath them is worse than no
+    // demo at all.
+    let sceneRun = 0;
+
+    // Whether the section is on screen, and the loop waiting for it to be.
+    // A demo that plays to an empty viewport is a tab that runs hot for
+    // nothing.
+    let visible = true;
+    let waiting: (() => void) | null = null;
+    new IntersectionObserver(([entry]) => {
+      visible = entry.isIntersecting;
+      if (!visible || !waiting) return;
+      waiting();
+      waiting = null;
+    }).observe(root!);
+
+    terminal = await mountLiveTerminal({
+      host: live!,
+      agentHost: agent!,
+      diff: PROBLEM_DIFF,
+      font: { cols: 88, min: 7, max: 12 },
+      onInput: () => {
+        sceneRun += 1;
+        terminal?.stopAgentSession();
+        replay!.hidden = false;
+      },
+      reveal: () => {
+        live!.hidden = false;
+        agent!.hidden = false;
+        placeholder!.hidden = true;
+      },
+    });
+
+    // A scene that fails part way leaves both panes drawn, so the button is
+    // the whole recovery: press it and the loop starts over.
+    const start = (): void => {
+      replay!.hidden = true;
+      loop().catch(() => {
+        replay!.hidden = false;
+      });
+    };
+    replay!.addEventListener('click', start);
+    start();
+
+    /**
+     * Play the scene over and over.
+     *
+     * The section is one thing happening, not a thing to press play on, so it
+     * runs on its own. It gives up for good when a visitor takes the keyboard —
+     * `onInput` raises the run token, and the button it reveals is the way back.
+     *
+     * Two guards keep an idle tab quiet. A visitor who asked for less motion
+     * gets one pass and keeps the end state. And a scene that has scrolled off
+     * screen waits where it is rather than replaying to nobody.
+     */
+    async function loop(): Promise<void> {
+      for (;;) {
+        const run = await play();
+        if (run !== sceneRun || STILL) return;
+
+        await new Promise((resolve) => window.setTimeout(resolve, REST_MS));
+        if (run !== sceneRun) return;
+
+        await onScreen();
+        if (run !== sceneRun) return;
+      }
+    }
+
+    /** Resolves once the section is in view, at once when it already is. */
+    function onScreen(): Promise<void> {
+      if (visible) return Promise.resolve();
+      return new Promise((resolve) => {
+        waiting = resolve;
+      });
+    }
+
+    /** Run the scene once. Returns the token it ran under. */
+    async function play(): Promise<number> {
+      const term = terminal!;
+      const run = (sceneRun += 1);
+      const alive = () => run === sceneRun;
+
+      term.open(PROBLEM_DIFF);
+
+      /** Hold, then report whether this run still owns the panes. */
+      const beat = async (ms: number): Promise<boolean> => {
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, STILL ? 0 : ms),
+        );
+        return alive();
+      };
+      const press = (codepoint: number): void =>
+        term.draw(term.view.key(codepoint));
+      const typeKeys = async (text: string): Promise<boolean> => {
+        for (const char of text) {
+          if (!(await beat(KEY_MS))) return false;
+          press(char.codePointAt(0)!);
+        }
+        return true;
+      };
+
+      if (!(await beat(900))) return run;
+
+      // Act one. The visitor finds the line and comments on it, with the keys
+      // they would really press: search, enter, type, enter.
+      if (!(await typeKeys('/reindex(n)'))) return run;
+      if (!(await beat(400))) return run;
+      press(ENTER);
+      if (!(await beat(700))) return run;
+
+      press(ENTER);
+      if (!(await beat(400))) return run;
+      if (!(await typeKeys('same n for every line here?'))) return run;
+      if (!(await beat(500))) return run;
+      press(ENTER);
+      if (!(await beat(1100))) return run;
+
+      // Act two. The prompt is typed into the panel's own input box, one
+      // character at a time, the way the comment was typed into the diff. Then
+      // the agent reads that comment back out of the running session and writes
+      // one of its own onto the diff. Only the prose is a recording.
+      await term.playAgentSession({
+        session: withRealComments(AGENT_TWO_WAY, term),
+        pacing: (entry) => (STILL ? 0 : holdFor(entry)),
+        onEntry: (entry) => serveToolCalls(entry, term),
+        onOpen: () => typePrompt(term, openingPrompt(AGENT_TWO_WAY), beat),
+      });
+      return run;
+    }
+  }
+
+  /**
+   * Type `text` into the panel's input box, a character at a time.
+   *
+   * The same beat as the diff pane, because it is the same person typing: they
+   * wrote the comment on the line, then turned to the panel and asked about it.
+   * `beat` reports false once the run no longer owns the panes, which is how a
+   * visitor who takes the keyboard stops the typing mid-word.
+   */
+  async function typePrompt(
+    term: LiveTerminal,
+    text: string,
+    beat: (ms: number) => Promise<boolean>,
+  ): Promise<void> {
+    if (STILL) {
+      term.showAgentPrompt(text);
+      return;
+    }
+
+    await beat(600);
+    let typed = '';
+    for (const char of text) {
+      if (!(await beat(KEY_MS))) return;
+      typed += char;
+      term.showAgentPrompt(typed);
+    }
+    await beat(700);
+  }
+
+  /** The prompt the transcript opens with: its first user turn. */
+  function openingPrompt(session: string): string {
+    const first = session.split('\n').find((line) => line.trim() !== '') ?? '';
+    const content = JSON.parse(first).message?.content;
+    return typeof content === 'string' ? content : '';
+  }
+
+  /**
+   * Fill the `get_comments` result with what the running skim answers.
+   *
+   * The transcript is handed to the module whole, before the replay starts, so
+   * the substitution happens here rather than at the entry that carries it. The
+   * placeholder sits inside a JSON string, hence the escaping.
+   */
+  function withRealComments(session: string, term: LiveTerminal): string {
+    const comments = JSON.stringify(term.view.listComments());
+    return session.replace(
+      COMMENTS_PLACEHOLDER,
+      JSON.stringify(comments).slice(1, -1),
+    );
+  }
+
+  /**
+   * Serve any `add_comment` in this entry against the open diff, with the
+   * arguments the transcript names. The transcript stays the source of truth
+   * for what the agent asked for; skim decides what that does.
+   */
+  function serveToolCalls(entry: string, term: LiveTerminal): void {
+    for (const block of contentBlocks(entry)) {
+      if (block.type !== 'tool_use' || block.name !== 'add_comment') continue;
+      const input = block.input as {
+        file: string;
+        line: number;
+        line_type: 'new' | 'old';
+        text: string;
+      };
+      term.view.addComment({
+        file: input.file,
+        line: input.line,
+        line_type: input.line_type,
+        text: input.text,
+      });
+    }
+  }
+
+  type ContentBlock = {
+    type: string;
+    name?: string;
+    text?: string;
+    input?: unknown;
+  };
+
+  function contentBlocks(entry: string): ContentBlock[] {
+    const content = JSON.parse(entry).message?.content;
+    return Array.isArray(content) ? content : [];
+  }
+
+  /** Characters of visible prose in one entry. Tool blocks carry none. */
+  function holdFor(entry: string): number {
+    const prose = contentBlocks(entry)
+      .filter((block) => block.type === 'text')
+      .reduce((total, block) => total + (block.text?.length ?? 0), 0);
+    return Math.min(MAX_MS, BASE_MS + prose * MS_PER_CHAR);
+  }
+</script>

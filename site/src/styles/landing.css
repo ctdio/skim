@@ -364,11 +364,28 @@ body.sk-landing {
    whatever height the ratio yields at the current width, and each scene
    overfills with real code so there is never a blank gap (surplus rows clip
    like a real terminal viewport). Scoped to the hero so the supporting
-   `.mini` mockup keeps its natural, content-sized height. */
+   terminal keeps its natural, content-sized height. */
 .sk-hero-term .term {
   display: flex;
   flex-direction: column;
   aspect-ratio: 4 / 3;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.25s;
+}
+/* While the visitor holds the terminal, the frame carries a glow. The tour has
+   stood down and every key goes to skim, and nothing else on the page says so:
+   the terminal paints its own cursor, not the browser's focus ring. */
+.sk-hero-term .term:focus-within {
+  border-color: color-mix(
+    in srgb,
+    var(--sk-accent) 55%,
+    var(--tui-chrome-border)
+  );
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--sk-accent) 30%, transparent),
+    0 0 2.75rem -0.25rem color-mix(in srgb, var(--sk-accent) 32%, transparent),
+    0 24px 60px -24px rgba(0, 0, 0, 0.55);
 }
 .sk-hero-term .term-stage {
   flex: 1 1 auto;
@@ -541,18 +558,144 @@ body.sk-landing {
 }
 /* The live terminal overlays the stage exactly like the loading panel it
    replaces, so the swap moves nothing. */
-.sk-hero-live {
+.sk-hero-live,
+.sk-agent-live {
   position: absolute;
   inset: 0;
   padding: 0.35rem 0 0 0.45rem;
 }
 .sk-hero-live .xterm,
-.sk-hero-live .xterm-viewport {
+.sk-hero-live .xterm-viewport,
+.sk-agent-live .xterm,
+.sk-agent-live .xterm-viewport {
   height: 100%;
   background: transparent;
 }
-.sk-hero-live .xterm-viewport {
+.sk-hero-live .xterm-viewport,
+.sk-agent-live .xterm-viewport {
   overflow: hidden;
+}
+
+/* ============================================================
+   Agent terminal — the two recorded MCP sessions
+   ============================================================ */
+/* Wider and shallower than the hero. The agent panel takes the right 30% of
+   the frame, so this box has two columns to hold rather than one: a diff that
+   still reads, and a panel wide enough for a wrapped paragraph. */
+.sk-agent-term {
+  margin: clamp(1.5rem, 4vw, 2.5rem) auto 0;
+  max-width: 68rem;
+}
+.sk-agent-term .term {
+  display: flex;
+  flex-direction: column;
+  aspect-ratio: 16 / 9;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.25s;
+}
+.sk-agent-term .term:focus-within {
+  border-color: color-mix(
+    in srgb,
+    var(--sk-accent) 55%,
+    var(--tui-chrome-border)
+  );
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--sk-accent) 30%, transparent),
+    0 0 2.75rem -0.25rem color-mix(in srgb, var(--sk-accent) 32%, transparent),
+    0 24px 60px -24px rgba(0, 0, 0, 0.55);
+}
+.sk-agent-term .term-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* The frame says which session is playing and that it is a recording. It is
+   the one claim on this page that the terminal cannot make for itself. */
+.sk-agent-note {
+  margin: 0.85rem auto 0;
+  max-width: 46rem;
+  text-align: center;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: var(--sk-muted);
+}
+/* A phone has no room for two columns side by side. The grid keeps reflowing,
+   so the demo still runs — it just shows a narrow diff and a narrow panel.
+   Squaring the box buys back the rows that costs. */
+@media (max-width: 640px) {
+  .sk-agent-term .term {
+    aspect-ratio: 1 / 1;
+  }
+}
+
+/* ============================================================
+   MCP demo — the diff and the agent panel, side by side
+   ============================================================ */
+.sk-mcp {
+  margin: clamp(1.5rem, 4vw, 2.5rem) auto 0;
+  max-width: 74rem;
+}
+.sk-mcp-panes {
+  display: grid;
+  /* The diff takes the wider half. It holds code, which does not reflow; the
+     panel holds prose, which does. */
+  grid-template-columns: 1.1fr 1fr;
+  gap: 1rem;
+}
+.sk-mcp-pane {
+  display: flex;
+  flex-direction: column;
+  height: clamp(22rem, 42vw, 31rem);
+}
+.sk-mcp-pane .term-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.sk-mcp-live {
+  position: absolute;
+  inset: 0;
+  padding: 0.35rem 0 0 0.45rem;
+}
+.sk-mcp-live .xterm,
+.sk-mcp-live .xterm-viewport {
+  height: 100%;
+  background: transparent;
+}
+.sk-mcp-live .xterm-viewport {
+  overflow: hidden;
+}
+
+/* The claim the terminals cannot make for themselves, and the way back to the
+   start once the visitor has taken the keyboard. */
+.sk-mcp-note {
+  margin: 0.85rem auto 0;
+  max-width: 48rem;
+  text-align: center;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: var(--sk-muted);
+}
+.sk-mcp-replay {
+  margin-left: 0.4rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--sk-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+
+/* A phone has no room for two panes across. Stacking keeps both readable, and
+   the diff goes first because it is the one the section is about. */
+@media (max-width: 860px) {
+  .sk-mcp-panes {
+    grid-template-columns: 1fr;
+  }
+  .sk-mcp-pane {
+    height: clamp(17rem, 62vw, 22rem);
+  }
 }
 
 /* The terminal in "The old way" loads the same way the hero does, in a smaller
@@ -644,47 +787,103 @@ body.sk-landing {
   font-size: 1.05rem;
 }
 
-/* Problem → solution two-up */
-.sk-two {
+/* ============================================================
+   Movement tour — key legend beside a live terminal
+   ============================================================
+   The legend is the wider half's partner, not its caption: it
+   is read while the terminal beside it makes the move, so the
+   row for the running chapter is marked as it plays.
+   ============================================================ */
+.sk-move {
   display: grid;
   gap: 2rem;
-  margin-top: 2.5rem;
+  margin-top: 2rem;
 }
 @media (min-width: 860px) {
-  .sk-two {
-    grid-template-columns: 1fr 1fr;
+  .sk-move {
+    grid-template-columns: minmax(0, 21rem) minmax(0, 1fr);
     gap: 3rem;
     align-items: center;
   }
 }
-.sk-prob-list {
+.sk-move-list {
   list-style: none;
   margin: 0;
   padding: 0;
   border-top: 1px solid var(--sk-border);
 }
-.sk-prob-list li {
+.sk-move-row {
   display: grid;
-  grid-template-columns: 2rem 1fr;
-  gap: 0.75rem;
-  padding: 0.95rem 0;
+  grid-template-columns: minmax(4.5rem, auto) 1fr;
+  gap: 0.85rem;
+  padding: 0.8rem 0;
   border-bottom: 1px solid var(--sk-border);
 }
-.sk-prob-list .n {
-  font-family: var(--sk-font-mono);
-  color: var(--sk-dim);
-  font-size: 0.85rem;
-}
-.sk-prob-list b {
+.sk-move-row b {
+  display: block;
   color: var(--sk-fg);
+  font-weight: 600;
+  font-size: 0.95rem;
 }
-.sk-prob-list span.body {
+.sk-move-note {
+  display: block;
+  margin-top: 0.15rem;
   color: var(--sk-muted);
+  font-size: 0.88rem;
+}
+/* The key chip. It reads as dim type until the terminal is running that row,
+   which is the whole tie between the two halves. */
+.sk-move-kb {
+  align-self: start;
+  justify-self: start;
+  font-family: var(--sk-font-mono);
+  font-size: 0.72rem;
+  color: var(--sk-dim);
+  background: transparent;
+  border: 1px solid var(--sk-border);
+  border-radius: 0.3rem;
+  padding: 0.15rem 0.45rem;
+  white-space: nowrap;
+  transition:
+    color 0.2s,
+    border-color 0.2s,
+    background 0.2s;
+}
+.sk-move-row.is-active .sk-move-kb {
+  color: var(--sk-accent);
+  border-color: color-mix(in srgb, var(--sk-accent) 45%, var(--sk-border));
+  background: color-mix(in srgb, var(--sk-accent) 12%, transparent);
+}
+.sk-move-row.is-active b {
+  color: var(--sk-accent);
 }
 
 /* ============================================================
-   Feature grid
+   Tour groups + feature grid
+   ============================================================
+   One group per leg of the walk-through: a named heading, a
+   line of context, then that leg's keys as cards.
    ============================================================ */
+.sk-tour-group {
+  margin-top: clamp(2.5rem, 5vw, 3.5rem);
+}
+.sk-tour-h {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.sk-tour-lead {
+  margin: 0.45rem 0 0;
+  max-width: 46rem;
+  color: var(--sk-muted);
+  font-size: 0.98rem;
+}
+/* The grid carries its own top margin for a section that opens with it. Inside
+   a group the lead is already there, so it needs less. */
+.sk-tour-group .sk-features {
+  margin-top: 1.5rem;
+}
 .sk-features {
   display: grid;
   gap: 1.25rem;
@@ -714,7 +913,7 @@ body.sk-landing {
 .sk-feat:hover {
   border-color: var(--sk-border-strong);
 }
-.sk-feat h3 {
+.sk-feat h4 {
   margin: 0 0 0.4rem;
   font-size: 1.02rem;
   font-weight: 650;
@@ -739,14 +938,9 @@ body.sk-landing {
 /* ============================================================
    Install block
    ============================================================ */
-.sk-install {
-  text-align: center;
-}
 .sk-codeblock {
   position: relative;
-  margin: 1.5rem auto 0;
-  max-width: 42rem;
-  text-align: left;
+  margin: 1.25rem 0 0;
   border: 1px solid var(--tui-chrome-border);
   border-radius: 0.6rem;
   overflow: hidden;
@@ -996,6 +1190,83 @@ body.sk-landing {
 }
 
 /* ============================================================
+   Get it — one section, two ways to run skim
+   ============================================================
+   A terminal card (build from source) beside a browser card
+   (paste a PR into the wasm build). Both cards carry the same
+   shape, so neither reads as the fallback. The form is a plain
+   GET to `/try`, so the browser builds the query itself and
+   nothing here needs a script.
+   ============================================================ */
+.sk-get-grid {
+  display: grid;
+  gap: 1.5rem;
+  margin-top: 2.25rem;
+}
+@media (min-width: 860px) {
+  .sk-get-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+  }
+}
+.sk-get-card {
+  display: flex;
+  flex-direction: column;
+  padding: 1.5rem;
+  border: 1px solid var(--sk-border);
+  border-radius: 0.8rem;
+  background: var(--sk-bg-subtle);
+}
+.sk-get-h {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: -0.01em;
+}
+.sk-get-lead {
+  margin: 0.6rem 0 0;
+  color: var(--sk-muted);
+  font-size: 0.95rem;
+}
+/* Push the note to the card floor so both cards end on the same line. */
+.sk-get-note {
+  margin: 1rem 0 0;
+  font-size: 0.88rem;
+  color: var(--sk-muted);
+}
+.sk-get-card > .sk-get-note:last-child {
+  margin-top: auto;
+  padding-top: 1rem;
+}
+.sk-landing .sk-get-note a {
+  color: var(--sk-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sk-get-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+.sk-get-input {
+  flex: 1 1 100%;
+  min-width: 0;
+  padding: 0.6rem 0.9rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--sk-border-strong);
+  background: var(--sk-bg);
+  color: var(--sk-fg);
+  font-size: 0.88rem;
+}
+.sk-get-input::placeholder {
+  color: var(--sk-dim);
+}
+.sk-get-input:focus {
+  border-color: var(--sk-accent);
+  outline: none;
+}
+
+/* ============================================================
    Motion — everything below only runs when motion is allowed
    ============================================================ */
 @media (prefers-reduced-motion: no-preference) {
@@ -1020,15 +1291,14 @@ body.sk-landing {
   .sk-hero-grab:not(.is-taken) {
     animation: sk-grab-pulse 2.8s ease-out infinite;
   }
-}
-
-/* ============================================================
-   Supporting mini terminal — the same load as the hero in a
-   smaller box. The stage holds a ratio so the loading panel and
-   the terminal that replaces it are the same size.
-   ============================================================ */
-.mini {
-  max-width: 26rem;
+  @keyframes sk-grab-pulse {
+    from {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--sk-accent) 40%, transparent);
+    }
+    to {
+      box-shadow: 0 0 0 0.6rem transparent;
+    }
+  }
 }
 
 /* ============================================================

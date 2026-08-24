@@ -4,7 +4,7 @@ description: Stage files with git add without leaving Skim.
 ---
 
 While reviewing your working-directory changes, you can stage files directly
-from Skim — no need to drop back to the shell to run `git add`.
+from Skim, with no need to drop back to the shell to run `git add`.
 
 | Key | Action |
 | --- | --- |

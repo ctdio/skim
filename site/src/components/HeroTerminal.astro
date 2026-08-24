@@ -55,7 +55,7 @@
         <span style="background:#febc2e"></span>
         <span style="background:#28c840"></span>
       </div>
-      <span class="term-title">skim — reviewing the browser build</span>
+      <span class="term-title">skim: reviewing the browser build</span>
       <!-- The same invitation as the chip under the frame, in the chrome bar a
            visitor is already reading. The script shows it once the terminal is
            live and drops it with the chip the first time the terminal is taken. -->
@@ -87,7 +87,7 @@
        moves the page under the visitor who just clicked it. -->
   <button class="sk-hero-grab" type="button" data-hero-grab hidden>
     <span class="sk-hero-grab-face">Click to take over</span>
-    <span class="sk-hero-grab-face sk-hero-grab-live">Focused — keys go to skim</span>
+    <span class="sk-hero-grab-face sk-hero-grab-live">Focused. Keys go to skim</span>
   </button>
 </div>
 
@@ -247,10 +247,10 @@
    */
   function captionFor(status: TourStatus, chapter: number): string {
     if (status.kind === 'playing') {
-      return `Live in your browser — ${CHAPTERS[chapter].blurb}`;
+      return `Try it below: ${CHAPTERS[chapter].blurb}`;
     }
     if (status.kind === 'held') {
-      return 'Paused — the terminal is yours. Type anything; ? lists every key.';
+      return 'Paused. The terminal is yours. Type anything; ? lists every key.';
     }
     return `The tour resumes in ${status.seconds}s. Click the terminal to keep it.`;
   }

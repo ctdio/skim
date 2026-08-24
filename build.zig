@@ -246,8 +246,19 @@ pub fn build(b: *std.Build) void {
         "skimLoad",
         "skimUnload",
         "skimKey",
+        "skimScroll",
         "skimResize",
         "skimRender",
+        "skimAgentReplay",
+        "skimAgentStep",
+        "skimAgentInput",
+        "skimAgentRender",
+        "skimAgentOutPtr",
+        "skimAgentOutLen",
+        "skimAddComment",
+        "skimListComments",
+        "skimJsonPtr",
+        "skimJsonLen",
         "skimOutPtr",
         "skimOutLen",
         "skimCursorRow",
@@ -377,6 +388,30 @@ pub fn build(b: *std.Build) void {
     // Core diff-path tests: parser, line_map, comment store, streaming loader.
     // Same reason as width_tests below — these are only reachable from main.zig
     // through app.zig, so their test blocks need a direct root to be collected.
+    const session_replay_root_module = b.createModule(.{
+        .root_source_file = b.path("src/session_replay_test_root.zig"),
+    });
+    session_replay_root_module.addImport("vaxis", vaxis);
+    session_replay_root_module.addImport("tree-sitter", tree_sitter);
+    session_replay_root_module.addImport("build_options", build_options_module);
+    const session_replay_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/session_replay_scenarios.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    session_replay_tests.root_module.addImport("session_replay_root", session_replay_root_module);
+    session_replay_tests.root_module.addImport("vaxis", vaxis);
+    session_replay_tests.root_module.addImport("tree-sitter", tree_sitter);
+    session_replay_tests.root_module.addImport("build_options", build_options_module);
+    for (grammars) |grammar| {
+        session_replay_tests.linkLibrary(grammar);
+    }
+    session_replay_tests.linkLibC();
+    const run_session_replay_tests = b.addRunArtifact(session_replay_tests);
+    test_step.dependOn(&run_session_replay_tests.step);
+
     const diff_core_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/diff_core_test_root.zig"),

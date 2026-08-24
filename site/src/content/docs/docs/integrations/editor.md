@@ -4,7 +4,7 @@ description: Jump from a diff line straight into your $EDITOR.
 ---
 
 When a change needs more than a comment, open the file in your editor at the
-exact line — without hunting for it.
+exact line, without hunting for it.
 
 | Key | Action |
 | --- | --- |
@@ -24,7 +24,7 @@ export EDITOR="code --wait"
 ```
 
 Most terminal editors (`vim`, `nvim`, `nano`, `hx`) support jumping to a line
-directly. GUI editors that provide a CLI (such as VS Code's `code`) work too —
-use their wait flag so Skim knows when you're done.
+directly. GUI editors that provide a CLI (such as VS Code's `code`) work too.
+Use their wait flag so Skim knows when you're done.
 
 Next: [AI agent panel](../agent-panel/).

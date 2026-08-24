@@ -3,7 +3,7 @@ title: Visual Selection
 description: Select multiple lines to yank or comment on them at once.
 ---
 
-VISUAL mode lets you select a range of lines and act on the whole range —
+VISUAL mode lets you select a range of lines and act on the whole range,
 either copying it or attaching a single comment that spans it.
 
 ## Enter visual mode

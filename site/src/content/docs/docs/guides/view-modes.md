@@ -10,9 +10,9 @@ hunk shows.
 
 Press `s` to toggle between the two layouts:
 
-- **Unified** — the classic single-column diff, additions and deletions
+- **Unified**: the classic single-column diff, additions and deletions
   interleaved with context.
-- **Side-by-side** — old on the left, new on the right, aligned so you can scan
+- **Side-by-side**: old on the left, new on the right, aligned so you can scan
   a change across both columns.
 
 | Key | Action |
@@ -34,9 +34,9 @@ about what was added, or want to review deletions in isolation.
 
 The three modes are:
 
-1. **All lines** — additions, deletions, and context (the default).
-2. **Additions only** — just the added lines.
-3. **Deletions only** — just the removed lines.
+1. **All lines**: additions, deletions, and context (the default).
+2. **Additions only**: just the added lines.
+3. **Deletions only**: just the removed lines.
 
 ## Git blame
 

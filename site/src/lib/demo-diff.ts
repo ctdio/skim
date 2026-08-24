@@ -8,9 +8,11 @@
 // hero advertises has somewhere to go: `l` for the next file, `]h` for the next
 // change, `/` for a search that spans files.
 //
-// `PROBLEM_DIFF` is short on purpose. The terminal in "The old way" is half a
-// column wide, and it steps through the changes with `]h` on its own until a
-// visitor takes over.
+// `DEMO_DIFF` is also what the movement tour opens: a tour about moving between
+// files needs files to move between.
+//
+// `PROBLEM_DIFF` is short on purpose. The agent recordings replay against it,
+// and a one-file diff keeps a comment thread and its answer on one screen.
 
 import demo from './demo.diff?raw';
 import problem from './problem.diff?raw';

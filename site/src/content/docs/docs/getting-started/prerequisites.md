@@ -34,15 +34,15 @@ git --version
 ```
 
 Because Skim runs git in your current working directory, it automatically
-respects your existing git configuration — including diff settings, pager
+respects your existing git configuration, including diff settings, pager
 config, and credentials.
 
 ## Optional
 
-- **[Graphite](https://graphite.dev/) (`gt`)** — enables the stacked-PR
+- **[Graphite](https://graphite.dev/) (`gt`)**: enables the stacked-PR
   navigation described in [Graphite stacks](../../integrations/graphite/).
-- **An `$EDITOR`** — used by the `Ctrl-g` [editor integration](../../integrations/editor/).
-- **An agent CLI** (e.g. Claude Code, Codex) — for the
+- **An `$EDITOR`**: used by the `Ctrl-g` [editor integration](../../integrations/editor/).
+- **An agent CLI** (e.g. Claude Code, Codex): for the
   [AI agent panel](../../integrations/agent-panel/).
 
 Next: [build from source](../build-from-source/).

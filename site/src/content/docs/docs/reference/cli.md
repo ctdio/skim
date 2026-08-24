@@ -98,9 +98,9 @@ skim session comment delete 0
 
 **Common options:**
 
-- `--id <PID>` — target a specific session when several are running.
-- `--json` — emit JSON for programmatic parsing.
-- `--type <old|new>` — for comments: `new` for added lines, `old` for deleted
+- `--id <PID>`: target a specific session when several are running.
+- `--json`: emit JSON for programmatic parsing.
+- `--type <old|new>`: for comments: `new` for added lines, `old` for deleted
   lines.
 
 **Diff output format:**
@@ -128,5 +128,5 @@ details and agent configuration.
 
 Skim writes logs to `~/.skim/` (stdout/stderr are used for TUI rendering):
 
-- `~/.skim/tui.log` — TUI client logs.
-- `~/.skim/mcp.log` — MCP adapter logs.
+- `~/.skim/tui.log`: TUI client logs.
+- `~/.skim/mcp.log`: MCP adapter logs.

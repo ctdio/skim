@@ -1,6 +1,6 @@
 ---
 title: Git Diff Sources
-description: Every way to tell Skim what to review — working dir, staged, and ref comparisons.
+description: Every way to tell Skim what to review, from working dir to staged to ref comparisons.
 ---
 
 Skim shells out to `git` in your current directory and follows git's own diff
@@ -13,7 +13,7 @@ you pass to `skim`.
 skim
 ```
 
-Shows unstaged changes in your working tree — the same set `git diff` would
+Shows unstaged changes in your working tree: the same set `git diff` would
 show.
 
 ## Staged changes
@@ -22,7 +22,7 @@ show.
 skim --staged
 ```
 
-Shows what you've staged — the equivalent of `git diff --staged`. You can stage
+Shows what you've staged: the equivalent of `git diff --staged`. You can stage
 files from inside the TUI with `a` / `A`; see [staging](../../guides/staging/).
 
 ## Against a branch or ref
@@ -55,7 +55,7 @@ compare the two endpoints directly.
 skim main...feature
 ```
 
-The three-dot form compares against the **merge base** — it shows the changes
+The three-dot form compares against the **merge base**. It shows the changes
 made on `feature` since it diverged from `main`, ignoring changes that landed on
 `main` in the meantime. This is usually what you want when reviewing a branch
 for merge.
@@ -72,7 +72,7 @@ Any ref git understands works, including `HEAD~n`, tags, and SHAs.
 ## Respecting your git config
 
 Because Skim runs git in your working directory, it inherits your git
-configuration automatically — diff settings, includes, and credentials all
+configuration automatically: diff settings, includes, and credentials all
 apply exactly as they would on the command line.
 
 See also the [command-line usage](../../reference/cli/) reference.

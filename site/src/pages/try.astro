@@ -106,14 +106,15 @@ const repoHref = 'https://github.com/ctdio/skim';
   type Source = { label: string; diff: string; url: string | null };
 
   const DEMO: Source = {
-    label: 'ctdio/skim — the commit that made diffs stream',
+    label: 'ctdio/skim: the commit that made diffs stream',
     diff: DEMO_DIFF,
     url: null,
   };
 
-  // Full screen, so the grid is wider than the hero's and the glyph is bigger.
-  // 120 columns is about what a maximised terminal holds on a laptop.
-  const FONT = { cols: 120, min: 9, max: 16 };
+  // Full screen, so the grid is wider than the hero's. The glyph stays close to
+  // a real terminal's: 150 columns is about what a maximised window holds on a
+  // laptop, and the cap keeps a wide monitor from blowing the diff text up.
+  const FONT = { cols: 150, min: 9, max: 13 };
 
   const live = document.querySelector<HTMLElement>('[data-try-live]');
   const panel = document.querySelector<HTMLElement>('[data-try-panel]');
@@ -229,7 +230,7 @@ const repoHref = 'https://github.com/ctdio/skim';
   function ready(source: Source): void {
     panel!.hidden = true;
     label!.textContent = source.label;
-    document.title = `${source.label} — Skim`;
+    document.title = `${source.label} | Skim`;
     terminal?.focus();
 
     const url = new URL(location.href);

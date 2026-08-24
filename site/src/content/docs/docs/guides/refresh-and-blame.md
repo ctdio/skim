@@ -15,7 +15,7 @@ go.
 | `r` | Refresh the diff (reload from git) |
 
 Because Skim always reflects the live state of git, refresh also picks up
-changes from [staging](../staging/) — stage a file with `a`, refresh, and see
+changes from [staging](../staging/): stage a file with `a`, refresh, and see
 it move.
 
 ## Git blame

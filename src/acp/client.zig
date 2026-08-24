@@ -1,4 +1,7 @@
 const std = @import("std");
+// Mirrors `is_web` in src/platform.zig. This subtree has its own test target
+// rooted at its own directory, so it cannot import across the parent boundary.
+const is_web = @import("builtin").target.cpu.arch.isWasm();
 const Allocator = std.mem.Allocator;
 const process = @import("process.zig");
 const transport = @import("transport.zig");
@@ -924,7 +927,8 @@ pub const Client = struct {
                 defer params.deinit(self.allocator);
 
                 if (self.terminals.getPtr(params.terminal_id)) |entry| {
-                    _ = entry.child.kill() catch {};
+                    // The browser build never spawns, and wasi has no pid to signal.
+                    if (!is_web) _ = entry.child.kill() catch {};
                     try self.transport.sendResponse(id, "{}");
                 } else {
                     try self.transport.sendErrorResponse(id, -32001, "Terminal not found");

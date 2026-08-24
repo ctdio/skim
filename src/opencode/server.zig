@@ -1,4 +1,7 @@
 const std = @import("std");
+// Mirrors `is_web` in src/platform.zig. This subtree has its own test target
+// rooted at its own directory, so it cannot import across the parent boundary.
+const is_web = @import("builtin").target.cpu.arch.isWasm();
 const Allocator = std.mem.Allocator;
 const client_mod = @import("client.zig");
 const Client = client_mod.Client;
@@ -109,6 +112,9 @@ pub fn waitForHealth(client_ptr: *Client, timeout_ms: u64) ServerError!void {
 
 /// Terminate the server process gracefully (SIGTERM), then force (SIGKILL) after timeout
 pub fn terminateServer(process: *std.process.Child) void {
+    // The browser build never spawns, and wasi has no pid to signal.
+    if (is_web) return;
+
     // Send SIGTERM for graceful shutdown
     _ = std.posix.kill(process.id, std.posix.SIG.TERM) catch {
         log.warn("Failed to send SIGTERM to server", .{});

@@ -1,4 +1,7 @@
 const std = @import("std");
+// Mirrors `is_web` in src/platform.zig. This subtree has its own test target
+// rooted at its own directory, so it cannot import across the parent boundary.
+const is_web = @import("builtin").target.cpu.arch.isWasm();
 const Allocator = std.mem.Allocator;
 const client = @import("client.zig");
 const process = @import("process.zig");
@@ -38,7 +41,8 @@ const TerminalEntry = struct {
             thread.join();
         }
         self.output_buffer.deinit(self.allocator);
-        _ = self.child.kill() catch {};
+        // The browser build never spawns, and wasi has no pid to signal.
+        if (!is_web) _ = self.child.kill() catch {};
     }
 };
 
@@ -1018,6 +1022,11 @@ pub const AcpManager = struct {
     /// Handle terminal/create request - spawns shell per command with marker-based completion.
     /// Uses marker detection to reliably capture all output.
     fn handleTerminalCreate(self: *AcpManager, acp: *client.Client, id: codec.JsonRpcId, params_json: ?[]const u8) !void {
+        // Terminals spawn a process and a worker thread. The browser build has
+        // neither, and a replay never sends this request, so refuse it here
+        // rather than compile the spawn path for wasm.
+        if (is_web) return acp.transport.sendErrorResponse(id, -32601, "terminal/create is unavailable in the browser build");
+
         const pjson = params_json orelse {
             try acp.transport.sendErrorResponse(id, -32600, "Missing params");
             return;
@@ -1301,7 +1310,8 @@ pub const AcpManager = struct {
         };
 
         // Kill the child process
-        _ = entry.child.kill() catch {};
+        // The browser build never spawns, and wasi has no pid to signal.
+        if (!is_web) _ = entry.child.kill() catch {};
 
         // Join worker thread (exits quickly after kill)
         if (entry.worker_thread) |thread| {

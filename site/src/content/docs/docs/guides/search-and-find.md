@@ -27,10 +27,10 @@ Once you've searched, move between matches from NORMAL mode:
 
 **Search behavior:**
 
-- **Smart case** — a lowercase query is case-insensitive; include any uppercase
+- **Smart case**: a lowercase query is case-insensitive; include any uppercase
   letter and the search becomes case-sensitive.
 - Searches across **all files** in the diff at once.
-- Matches diff content only — added, deleted, and context lines.
+- Matches diff content only: added, deleted, and context lines.
 
 ## Character find
 
@@ -39,10 +39,10 @@ line.
 
 | Key | Action |
 | --- | --- |
-| `f{char}` | Find character forward — cursor lands **on** the character |
-| `F{char}` | Find character backward — cursor lands **on** the character |
-| `t{char}` | Find character forward — cursor lands **before** the character |
-| `T{char}` | Find character backward — cursor lands **after** the character |
+| `f{char}` | Find character forward, cursor lands **on** the character |
+| `F{char}` | Find character backward, cursor lands **on** the character |
+| `t{char}` | Find character forward, cursor lands **before** the character |
+| `T{char}` | Find character backward, cursor lands **after** the character |
 | `;` | Repeat the last find in the same direction |
 
 Next: [visual selection](../visual-selection/).

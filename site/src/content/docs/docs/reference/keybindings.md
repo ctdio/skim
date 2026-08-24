@@ -125,7 +125,7 @@ movements.
 
 | Key | Action |
 | --- | --- |
-| *(type)* | Enter a query (smart case — lowercase ignores case, uppercase is exact) |
+| *(type)* | Enter a query (smart case: lowercase ignores case, uppercase is exact) |
 | `Enter` | Execute the search and jump to the first match |
 | `ESC` | Cancel and return to NORMAL mode |
 | `Backspace` | Delete a character from the query |
@@ -149,9 +149,9 @@ Quick access to files and commands.
 
 **Two modes:**
 
-- **File mode** (`Ctrl-p`) — filter and jump to files. Type `>` to switch to
+- **File mode** (`Ctrl-p`): filter and jump to files. Type `>` to switch to
   command mode.
-- **Command mode** (`:`) — built-in commands (vim-style): Toggle View Mode,
+- **Command mode** (`:`): built-in commands (vim-style): Toggle View Mode,
   Refresh Diff, Show Help, Quit. Backspace over the leading `>` to switch back
   to file mode.
 
