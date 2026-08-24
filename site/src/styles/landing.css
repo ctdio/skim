@@ -121,6 +121,16 @@ body.sk-landing {
     display: none;
   }
 }
+/* The narrowest phone still in use. The row does not wrap, so the gaps and the
+   link padding give up what the theme toggle needs to stay on screen. */
+@media (max-width: 380px) {
+  .sk-nav {
+    gap: 0.5rem;
+  }
+  .sk-nav-links a {
+    padding-inline: 0.45rem;
+  }
+}
 /* GitHub icon link — a square control sized/colored to match the theme toggle
    sitting next to it. The compound `.sk-nav-links a.sk-icon-link` selector
    overrides the text-link padding/color from `.sk-nav-links a` above. */
@@ -1205,13 +1215,17 @@ body.sk-landing {
 }
 @media (min-width: 860px) {
   .sk-get-grid {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 2rem;
   }
 }
 .sk-get-card {
   display: flex;
   flex-direction: column;
+  /* The install block holds unbreakable command lines. Without this floor the
+     card takes its min-content width from them and drags the page wider than
+     the viewport; with it the card fits and the `pre` scrolls on its own. */
+  min-width: 0;
   padding: 1.5rem;
   border: 1px solid var(--sk-border);
   border-radius: 0.8rem;
