@@ -3,6 +3,7 @@
 This document provides a comprehensive overview of Skim's codebase architecture, design decisions, and guidelines for maintainers.
 
 ## Table of Contents
+
 1. [Architecture Overview](#architecture-overview)
 2. [Module Organization](#module-organization)
 3. [Key Design Patterns](#key-design-patterns)
@@ -70,12 +71,14 @@ Skim is organized into several main layers:
 ### Layer Responsibilities
 
 **CLI Layer** (`main.zig`)
+
 - Parse command-line arguments (working dir, staged, ref comparison)
 - Route subcommands (`mcp`, `session`)
 - Initialize terminal and vaxis
 - Create and run App instance
 
 **Application Layer** (`app.zig`)
+
 - Central state machine managing 14 modes (see Mode System below)
 - Event loop handling keyboard and terminal events
 - Coordinate rendering pipeline
@@ -83,30 +86,59 @@ Skim is organized into several main layers:
 - **Size:** ~5,000 lines
 
 **Mode Handlers** (`src/modes/`)
+
 - Isolated logic for each interaction mode
 - See [Mode System](#mode-system) for details
 
 **UI Components** (`ui.zig`)
+
 - Header rendering (file info, stats)
 - Status bar (mode indicator, keybindings)
 - Empty state screens
 - Branch selection menu
 
 **Core Systems**
+
 - **LineMap** (`line_map.zig`): Pre-computed position registry for all renderable lines
 - **Navigation** (`navigation.zig`): Cursor movement and scrolling logic
 - **State Helpers** (`state.zig`): Async highlighting, diff stats
 
 **Git Integration** (`git/`)
+
 - Execute git commands (`git diff`, `git log`, etc.)
 - Parse unified diff format
 - Track file and hunk metadata
 
 **Rendering System** (`rendering/`)
+
 - Unified diff view (single column)
 - Side-by-side diff view (split columns)
 - Syntax highlighting integration
 - Comment display
+- Scroll-region redraw (`scroll_region.zig`)
+
+### Scroll-region redraw
+
+vaxis diffs a new frame against the frame on screen cell by cell. A scroll moves
+every content row, so that diff reports the whole screen as changed and
+re-encodes it — about 28 KB for one `j` on a 190x60 terminal.
+
+`scroll_region.apply` runs between `frame.render` and `vaxis.render`. It finds
+the frames that are the previous frame shifted by whole rows, writes a `DECSTBM`
+region plus `IND`/`RI`, and rewrites `vaxis.screen_last` to what the terminal
+now shows. The render that follows then draws only the rows the scroll exposed.
+That cuts a real diff from about 7000 to about 880 bytes per keystroke.
+
+Two properties keep it safe:
+
+- The rewrite of `screen_last` is exact for any shift, so correctness does not
+  depend on how many rows matched. The match threshold only decides whether the
+  scroll saves bytes.
+- The file header and the status bar sit outside the scroll region, so the
+  terminal leaves them alone and the normal cell diff redraws them.
+
+`apply` does nothing when a full redraw is queued, when the terminal is not on
+the alt screen, when the screen is too short, or when no shift matches.
 
 ---
 
@@ -135,6 +167,7 @@ Key root-level files: `line_map.zig` (position registry), `navigation.zig` (curs
 ### File Size Guidelines
 
 **Target Sizes:**
+
 - **Small:** < 200 lines (focused, single-purpose)
 - **Medium:** 200-600 lines (well-defined subsystem)
 - **Large:** 600-1,000 lines (complex but cohesive)
@@ -170,11 +203,13 @@ const Mode = enum {
 ```
 
 **Event Flow:**
+
 ```
 User Input → handleKey() → Mode Switch → Mode Handler → Update State → Render
 ```
 
 **Adding a New Mode:**
+
 1. Add enum variant to `Mode` in `app.zig`
 2. Create `src/modes/your_mode.zig` with `pub fn handleKey(app: *App, key: vaxis.Key) !void`
 3. Add case to `handleKey()` switch in `app.zig`
@@ -185,6 +220,7 @@ User Input → handleKey() → Mode Switch → Mode Handler → Update State →
 **Definition:** Every renderable line has a unique zero-based index called a "global line number."
 
 **What counts as a line:**
+
 - File headers ("diff --git a/file.txt b/file.txt")
 - Hunk headers ("@@ -1,3 +1,4 @@")
 - Code lines (add/delete/context)
@@ -192,11 +228,13 @@ User Input → handleKey() → Mode Switch → Mode Handler → Update State →
 - Spacer lines (3 blank lines between files)
 
 **Purpose:**
+
 - Single source of truth for positioning
 - Prevents sync issues between navigation and rendering
 - Makes cursor and scroll calculations simple
 
 **Example:**
+
 ```
 Global Line | Type         | Content
 -----------|--------------|---------------------------
@@ -213,6 +251,7 @@ Global Line | Type         | Content
 ```
 
 **Usage:**
+
 - `app.state.global_cursor_line` - cursor position
 - `app.state.global_scroll_offset` - first visible line
 - `LineMap.getLineRecord(global_line)` - get line metadata
@@ -224,10 +263,12 @@ Global Line | Type         | Content
 The LineMap pre-computes all line positions during initialization.
 
 **Why?**
+
 - Previously, navigation and rendering calculated positions independently → sync bugs
 - LineMap ensures one source of truth
 
 **Lifecycle:**
+
 ```
 Init/Refresh → Build LineMap → Navigation uses it → Rendering uses it
                     ↑
@@ -235,6 +276,7 @@ Init/Refresh → Build LineMap → Navigation uses it → Rendering uses it
 ```
 
 **LineRecord Structure:**
+
 ```zig
 const LineRecord = struct {
     global_line: usize,
@@ -244,6 +286,7 @@ const LineRecord = struct {
 ```
 
 **When to Rebuild:**
+
 - `app.init()` - initial build
 - `app.refresh()` - diff reload
 - `saveCurrentComment()` - after adding comment
@@ -271,6 +314,7 @@ renderStatus()         (mode, position, keybindings)
 ```
 
 **Frame Text Buffer:**
+
 - 256KB pre-allocated buffer in `app.state.frame_text_buffer`
 - Used for temporary string allocations during rendering
 - Reset at start of each frame
@@ -279,6 +323,7 @@ renderStatus()         (mode, position, keybindings)
 ### 5. Syntax Highlighting
 
 **Architecture:**
+
 ```
 Code Line → Request Highlights → Check Cache → If Missing:
                                                ├─ Spawn Background Thread
@@ -290,15 +335,18 @@ Apply Highlights → Render with Colors
 ```
 
 **Key Components:**
+
 - `syntax.zig` - Tree-sitter integration
 - `state.zig` - HighlightWorker, AsyncHighlightJob
 - Cache stored in `FileDiff.cached_highlights`
 
 **Supported Languages:**
+
 - JavaScript, TypeScript (with JSX/TSX)
 - Zig, Python, Rust, Go, C, C++
 
 **How it Works:**
+
 1. Highlighting is requested for visible files only
 2. Background thread parses file and runs tree-sitter queries
 3. Results cached in file struct
@@ -369,6 +417,7 @@ saveCurrentComment()
 **1. Identify the mode** (normal, comment, visual, etc.)
 
 **2. Edit the mode handler:**
+
 ```zig
 // src/modes/normal_mode.zig
 switch (key.codepoint) {
@@ -378,6 +427,7 @@ switch (key.codepoint) {
 ```
 
 **3. Implement the feature in app.zig:**
+
 ```zig
 pub fn yourNewFeature(self: *App) !void {
     // Implementation
@@ -385,6 +435,7 @@ pub fn yourNewFeature(self: *App) !void {
 ```
 
 **4. Update status bar help text:**
+
 ```zig
 // src/ui.zig - renderStatus()
 // Add your keybinding to the help text
@@ -399,6 +450,7 @@ See [Modal State Machine](#1-modal-state-machine) section.
 **1. Add tree-sitter grammar to `build.zig.zon`**
 
 **2. Add language detection in `syntax.zig`:**
+
 ```zig
 fn detectLanguage(path: []const u8) ?Language {
     // Add file extension mapping
@@ -406,6 +458,7 @@ fn detectLanguage(path: []const u8) ?Language {
 ```
 
 **3. Add query file:**
+
 - Create `queries/your-language.scm` with tree-sitter queries
 - Embed in `build.zig`
 
@@ -418,6 +471,7 @@ fn detectLanguage(path: []const u8) ?Language {
 ### From CLAUDE.md
 
 **File Structure (top-down):**
+
 ```zig
 // 1. Imports (all at top, no gaps)
 const std = @import("std");
@@ -437,13 +491,16 @@ fn helper() void { ... }
 ```
 
 **Function Rules:**
+
 - Use `fn` keyword (not arrow functions)
 - Public functions first, helpers at bottom
 - Keep functions focused (< 100 lines ideal)
 
 **Error Handling:**
+
 - Use `err` in catch blocks (not `e`, `error`, or `ex`)
 - Pass full error object to logger
+
 ```zig
 catch (err) {
     logger.error({ err, context }, "Operation failed");
@@ -451,6 +508,7 @@ catch (err) {
 ```
 
 **Type Safety:**
+
 - Avoid `any` - use proper interfaces
 - Use `unknown` with type guards when needed
 - Prefer explicit types over inference in public APIs
@@ -460,6 +518,7 @@ catch (err) {
 **Principle:** Behavior should be obvious from looking at the code.
 
 **Good:**
+
 ```zig
 pub fn handleSearch(app: *App) void {
     const query = app.getQuery();
@@ -469,6 +528,7 @@ pub fn handleSearch(app: *App) void {
 ```
 
 **Bad:**
+
 ```zig
 // Behavior hidden in event subscriptions elsewhere
 pub fn handleSearch(app: *App) void {
@@ -479,12 +539,14 @@ pub fn handleSearch(app: *App) void {
 ### When to Extract Code
 
 **Extract to new file when:**
+
 - Module exceeds 1,000 lines
 - Clear subsystem with distinct responsibility
 - Code is reused across multiple files
 - Testing in isolation would be valuable
 
 **Keep together when:**
+
 - Tightly coupled (changes together)
 - Small and focused (< 500 lines)
 - Only used in one place
@@ -518,6 +580,7 @@ The LineMap is the source of truth for all renderable lines (file headers, hunk 
 **Why it matters:** Navigation and rendering both need to know "what's at line N?" If they computed this independently, they'd drift out of sync. The LineMap ensures both use the same data.
 
 **Rebuild triggers:**
+
 - Initial load
 - Diff refresh
 - Comment add/delete
@@ -543,6 +606,7 @@ This keeps render time constant regardless of diff size.
 During agent responses, text streams in continuously. Naive approaches would rebuild the entire line map on every chunk, causing stuttering.
 
 **Optimizations:**
+
 - **Throttled rebuilds:** Line map updates capped at ~30fps (32ms intervals)
 - **Incremental updates:** `updateLastMessage()` only recomputes the streaming message, not the entire history
 - **Append-only content:** Streaming text appends to a buffer; no reallocations until message completes
@@ -656,14 +720,17 @@ tail -f debug.log
 ### Common Issues
 
 **LineMap out of sync:**
+
 - Check if LineMap was rebuilt after state changes
 - Verify global line bounds checking
 
 **Rendering glitches:**
+
 - Check frame text buffer hasn't overflowed
 - Verify segment widths calculated correctly
 
 **Mode confusion:**
+
 - Add logging to mode transitions
 - Check mode state in status bar
 
@@ -674,24 +741,28 @@ tail -f debug.log
 ### Potential Refactorings (Not Prioritized)
 
 **1. Context Structs (High Impact, High Complexity)**
+
 - Replace `app: *App` with focused contexts
 - `RenderContext`, `NavigationContext`, `StateContext`
 - Benefits: Better testability, clearer dependencies
 - Effort: Touches many files
 
 **2. Rendering Base Consolidation (Medium Impact, High Complexity)**
+
 - Extract common logic from unified.zig and side_by_side.zig
 - ~200 lines of duplicated hunk header rendering
 - Benefits: DRY, easier to maintain
 - Effort: Requires careful testing of both renderers
 
 **3. Comment System Organization (Medium Impact, Medium Complexity)**
+
 - Create `src/comments/` directory
 - Consolidate: storage, editor, rendering, operations
 - Benefits: Better organization
 - Effort: Moderate refactoring
 
 **4. Split rendering/utils.zig (Low-Medium Impact, Medium Complexity)**
+
 - Create: text_utils.zig, comment_rendering.zig, gutter_rendering.zig
 - Benefits: Smaller, focused files
 - Effort: Extract ~1,100 lines
@@ -724,28 +795,33 @@ The built-in agent panel uses direct subprocess communication. Agents are spawne
 **Key Components:**
 
 **ACP Manager (`acp/manager.zig`)**
+
 - Session lifecycle management
 - Agent discovery from `~/.skim/config.json` or `~/.acp/agents.json`
 - State machine: initializing → ready → connected
 - Permission handling for agent actions
 
 **ACP Client (`acp/client.zig`)**
+
 - Spawns agent subprocess
 - Sends prompts, receives streaming responses
 - Tool call handling
 - Message aggregation from streaming chunks
 
 **ACP Codec (`acp/codec.zig`)**
+
 - JSON-RPC encoding/decoding
 - Streaming JSON handling (agents send partial responses)
 - Message ID tracking for request-response correlation
 
 **Session Adapters (`acp/sessions/`)**
+
 - Vendor-specific adapters (Claude, Codex)
 - Session history parsing for resumption
 - Agent capability detection
 
 **Agent UI (`agent/`)**
+
 - `state.zig`: Agent panel state machine, input handling
 - `render.zig`: Chat panel rendering with message streaming
 - `chat_line_map.zig`: Message line registry (like LineMap for diff)
@@ -770,6 +846,7 @@ For AI agents that support MCP (Model Context Protocol), skim provides a stdio-b
 ```
 
 **MCP Tools (`mcp/tools.zig`)**
+
 - `list_clients`: List connected TUI instances
 - `add_comment`: Add comment to specific file/line
 - `get_comments`: Retrieve all comments
@@ -777,6 +854,7 @@ For AI agents that support MCP (Model Context Protocol), skim provides a stdio-b
 - `get_file_diff`: Get full diff content for a file
 
 **Framework (`mcp/framework.zig`)**
+
 - Mini MCP JSON-RPC 2.0 implementation
 - Tool registration with JSON schema generation
 - Request/response encoding
@@ -825,6 +903,7 @@ skim session comment list   # List all comments
 ### Initialization
 
 Each component initializes logging with its type:
+
 ```zig
 logging.init(.tui);      // In TUI main
 logging.init(.mcp);      // In mcp command
@@ -908,6 +987,7 @@ Logs are written to `~/.skim/tui.log` with `profile_render` and `profile_loop` s
 ## Conclusion
 
 Skim's architecture emphasizes:
+
 - **Clarity:** Modal state machine with isolated mode handlers
 - **Performance:** Pre-allocation, virtual scrolling, async highlighting
 - **Maintainability:** Focused modules, clear data flow

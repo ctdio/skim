@@ -471,6 +471,21 @@ pub fn build(b: *std.Build) void {
     const run_width_tests = b.addRunArtifact(width_tests);
     test_step.dependOn(&run_width_tests.step);
 
+    // Scroll-region redraw tests. scroll_region.zig is self-contained (std +
+    // vaxis + rendering/common.zig) and its tests drive a real vaxis screen
+    // through two frames, so it roots its own step like width.zig does.
+    const scroll_region_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rendering/scroll_region.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    scroll_region_tests.root_module.addImport("vaxis", vaxis);
+    scroll_region_tests.linkLibC();
+    const run_scroll_region_tests = b.addRunArtifact(scroll_region_tests);
+    test_step.dependOn(&run_scroll_region_tests.step);
+
     // Cell-writing fast-path tests. cells.zig is self-contained (std + vaxis
     // only) and its tests assert byte-for-byte equivalence with
     // vaxis.Window.print, so it roots its own step for the same reason

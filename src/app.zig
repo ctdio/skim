@@ -20,6 +20,7 @@ const rendering_common = @import("rendering/common.zig");
 const render_utils = @import("rendering/utils.zig");
 const width_util = @import("rendering/width.zig");
 const frame = @import("rendering/frame.zig");
+const scroll_region = @import("rendering/scroll_region.zig");
 const state_helpers = @import("state.zig");
 const ui_components = @import("ui.zig");
 const editor = @import("editor.zig");
@@ -1794,21 +1795,24 @@ pub const App = struct {
                         const render_ns: u64 = if (render_timer_opt) |*timer| timer.read() else 0;
 
                         var vx_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        const shifted = try scroll_region.apply(vx, tty.writer());
                         try vx.render(tty.writer());
                         const vx_ns: u64 = if (vx_timer_opt) |*timer| timer.read() else 0;
 
                         profile_log.debug(
-                            "frame {d}: render_ns={d} vx_ns={d} events={} needs_render={} pending_jobs={d}",
-                            .{ self.profile_frame_counter, render_ns, vx_ns, had_events, self.needs_render, self.pending_highlight_jobs.count() },
+                            "frame {d}: render_ns={d} vx_ns={d} scrolled_rows={d} events={} needs_render={} pending_jobs={d}",
+                            .{ self.profile_frame_counter, render_ns, vx_ns, shifted, had_events, self.needs_render, self.pending_highlight_jobs.count() },
                         );
                     } else {
                         try frame.render(self, win);
+                        _ = try scroll_region.apply(vx, tty.writer());
                         try vx.render(tty.writer());
                     }
 
                     self.profile_active_frame = false;
                 } else {
                     try frame.render(self, win);
+                    _ = try scroll_region.apply(vx, tty.writer());
                     try vx.render(tty.writer());
                 }
                 // Don't clear needs_render if we're about to suspend for editor

@@ -16,6 +16,7 @@ const vaxis = @import("vaxis");
 const app_mod = @import("app.zig");
 const parser = @import("git/parser.zig");
 const frame = @import("rendering/frame.zig");
+const scroll_region = @import("rendering/scroll_region.zig");
 const navigation = @import("navigation.zig");
 const bench = @import("testing/bench_support.zig");
 
@@ -156,6 +157,7 @@ fn runView(
         const build_ns = timer.read();
 
         out.clearRetainingCapacity();
+        _ = try scroll_region.apply(&vx, &out.writer);
         try vx.render(&out.writer);
         try out.writer.flush();
         const total_ns = timer.read();
