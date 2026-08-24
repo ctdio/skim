@@ -37,3 +37,6 @@ zig-out
 .zig-cache
 
 erl_crash.dump
+
+# Astro generated types (written at the root when astro runs from here)
+.astro
