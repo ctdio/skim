@@ -9,6 +9,10 @@
 // Every chapter here is a *move*. Nothing in this tour changes the diff, the
 // layout, or the file on disk — the point it makes is that getting to a line in
 // skim costs one keystroke, so a chapter that did anything else would dilute it.
+//
+// `]c [c` is a move like the rest, but it needs comments to move between, so
+// `TOUR_COMMENTS` goes on the diff before the tour starts. That is setup, not a
+// chapter: the tour itself still only moves.
 
 import { typed } from './demo-autoplay';
 import type { Chapter } from './demo-autoplay';
@@ -18,6 +22,14 @@ export type Move = Chapter & {
   kb: string;
   /** One line on what the keys are for. */
   note: string;
+};
+
+/** One comment to put on the diff, in the shape `add_comment` takes. */
+export type TourComment = {
+  file: string;
+  line: number;
+  line_type: 'new' | 'old';
+  text: string;
 };
 
 export const MOVES: Move[] = [
@@ -36,16 +48,16 @@ export const MOVES: Move[] = [
     hold: 1600,
   },
   {
-    label: 'File to file',
-    kb: 'Ctrl-n',
-    note: 'Step through the files in the diff. h and l walk them too.',
-    keys: [300, 'Ctrl-n', 1100, 'Ctrl-n', 1100, 'Ctrl-n'],
+    label: 'Comment to comment',
+    kb: ']c [c',
+    note: 'Walk the comments on the review, wherever in the diff they landed.',
+    keys: [300, ']', 'c', 1300, ']', 'c', 1300, '[', 'c'],
     hold: 1600,
   },
   {
     label: 'Any file by name',
     kb: 'Ctrl-p',
-    note: 'Fuzzy-find a file in the review. Three of these eight match "loading".',
+    note: 'Fuzzy-find a file, or walk them in order with h and l. Three of these eight match "loading".',
     keys: [300, 'Ctrl-p', 700, ...typed('loading'), 700, 'Enter'],
     hold: 2200,
   },
@@ -58,5 +70,34 @@ export const MOVES: Move[] = [
     // again does clear it: `App.startSearch` resets the state before it reads.
     exit: ['/', 'Escape'],
     hold: 1800,
+  },
+];
+
+/**
+ * The comments the `]c [c` chapter walks, in the order the diff holds them.
+ *
+ * Three files apart, so the jump is worth watching: one in `src/app.zig`, one
+ * in the new loader, one in the new loading screen. The lines are lines
+ * `demo.diff` really has — skim rejects a comment on a line the diff does not
+ * carry, so a wrong number here fails the mount rather than passing quietly.
+ */
+export const TOUR_COMMENTS: TourComment[] = [
+  {
+    file: 'src/app.zig',
+    line: 1362,
+    line_type: 'new',
+    text: 'This runs every frame. Is the idle path really free?',
+  },
+  {
+    file: 'src/git/diff_loader.zig',
+    line: 93,
+    line_type: 'new',
+    text: 'Does feed keep the tail when a file splits across two reads?',
+  },
+  {
+    file: 'src/rendering/loading.zig',
+    line: 10,
+    line_type: 'new',
+    text: 'No App state here, so snapshot it.',
   },
 ];

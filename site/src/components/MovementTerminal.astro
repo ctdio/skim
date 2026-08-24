@@ -58,7 +58,7 @@ import { MOVES } from '../lib/movement-tour';
   import { DEMO_DIFF } from '../lib/demo-diff';
   import { createAutoplay } from '../lib/demo-autoplay';
   import type { Autoplay } from '../lib/demo-autoplay';
-  import { MOVES } from '../lib/movement-tour';
+  import { MOVES, TOUR_COMMENTS } from '../lib/movement-tour';
   import { mountLiveTerminal, wantsLiveTerminal } from '../lib/live-terminal';
 
   const root = document.querySelector<HTMLElement>('[data-move-root]');
@@ -103,6 +103,15 @@ import { MOVES } from '../lib/movement-tour';
         placeholder!.hidden = true;
       },
     });
+
+    // The comments the ']c [c' chapter walks. They arrive through the handler
+    // skim's MCP server calls, so the chapter jumps between real comment lines.
+    // Adding one scrolls the diff to it, so end on `gg` and draw that frame:
+    // the first frame a visitor sees is the top of the diff, as it was before.
+    for (const comment of TOUR_COMMENTS) terminal.view.addComment(comment);
+    const g = 'g'.codePointAt(0)!;
+    terminal.view.key(g);
+    terminal.draw(terminal.view.key(g));
 
     autoplay = createAutoplay({
       terminal,
