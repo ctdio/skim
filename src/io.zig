@@ -26,6 +26,23 @@ pub fn init(process_init: std.process.Init) void {
     environ_map_instance = process_init.environ_map;
 }
 
+/// Adopt the standard library's process-wide single-threaded `Io`, with an
+/// empty environment.
+///
+/// This is for a host that never receives a `std.process.Init`. The browser
+/// build is one: it is a WASI command module whose exports are called long
+/// after `_start` returned, so the `Init` that `main` was handed -- and the
+/// `Io` inside it -- is gone by the time the first key arrives. The static
+/// instance in the standard library outlives every call instead.
+///
+/// It supports neither concurrency nor cancelation, which the browser build
+/// needs from neither: it spawns no agent subprocess and runs no MCP socket.
+pub fn initSingleThreaded() void {
+    io_instance = std.Io.Threaded.global_single_threaded.io();
+    environ_instance = .empty;
+    environ_map_instance = fallbackEnvironMap();
+}
+
 pub fn get() std.Io {
     if (builtin.is_test) return std.testing.io;
     return io_instance;
@@ -39,14 +56,18 @@ pub fn environ() std.process.Environ {
 /// The parsed environment vaxis wants a handle on. The test runner has no
 /// equivalent, so test binaries get an empty map instead.
 pub fn environMap() *std.process.Environ.Map {
-    if (builtin.is_test) {
-        if (test_environ_map == null) test_environ_map = .init(std.heap.page_allocator);
-        return &test_environ_map.?;
-    }
+    if (builtin.is_test) return fallbackEnvironMap();
     return environ_map_instance;
 }
 
-var test_environ_map: ?std.process.Environ.Map = null;
+/// The empty map handed to a binary with no environment of its own: a test
+/// binary, or the browser build.
+fn fallbackEnvironMap() *std.process.Environ.Map {
+    if (empty_environ_map == null) empty_environ_map = .init(std.heap.page_allocator);
+    return &empty_environ_map.?;
+}
+
+var empty_environ_map: ?std.process.Environ.Map = null;
 
 /// Borrowed environment lookup. Replaces 0.15's `std.posix.getenv`, which 0.16
 /// removed along with the rest of the process-global environment access.

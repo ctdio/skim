@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const vaxis = @import("vaxis");
+const skim_io = @import("skim_io");
 
 const session_mod = @import("session.zig");
 
@@ -231,4 +232,11 @@ export fn skimOutLen() usize {
 
 /// WASI command modules must define an entry point. The host runs it once to
 /// initialise libc and then drives the module through the exports above.
-pub fn main() void {}
+///
+/// It also publishes the `Io` every subsystem reaches through `skim_io.get()`.
+/// The one `std.process.Init` carries cannot serve: `_start` returns before the
+/// first export is called, and takes that `Io` with it. `initSingleThreaded`
+/// adopts the standard library's static instance, which does not go anywhere.
+pub fn main() void {
+    skim_io.initSingleThreaded();
+}
