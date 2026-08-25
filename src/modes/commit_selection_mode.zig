@@ -9,11 +9,11 @@ const containsIgnoreCase = @import("../pr/filter.zig").containsIgnoreCase;
 /// lazy-load bookkeeping, and the diff-mode submenu. All fields default so it
 /// stays out of the State init literal.
 pub const CommitSelectState = struct {
-    list: std.ArrayList(git.CommitInfo) = .{}, // Loaded commits
+    list: std.ArrayList(git.CommitInfo) = .empty, // Loaded commits
     selection: usize = 0, // Selected index in commit selection menu
     search_query: [256]u8 = undefined, // Search query buffer for filtering commits
     search_len: usize = 0, // Length of search query
-    filtered: std.ArrayList(usize) = .{}, // Indices of commits matching search query
+    filtered: std.ArrayList(usize) = .empty, // Indices of commits matching search query
     loaded_count: usize = 0, // Total commits loaded (for lazy loading)
     loading: bool = false, // Whether commits are being loaded
     selected_for_diff: ?git.CommitInfo = null, // Commit selected for diff submenu (owned copy)

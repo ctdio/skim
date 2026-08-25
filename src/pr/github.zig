@@ -6,6 +6,7 @@ const std = @import("std");
 const review_parse = @import("review_parse.zig");
 const filter = @import("filter.zig");
 const git = @import("git.zig");
+const skim_io = @import("skim_io");
 
 pub const Error = error{ GhCommandFailed, GhNotFound };
 
@@ -216,7 +217,7 @@ pub fn parseOwnerRepo(allocator: std.mem.Allocator, remote_url: []const u8) !Own
     if (rest[0] != ':' and rest[0] != '/') return error.InvalidRemoteUrl;
     rest = rest[1..];
 
-    rest = std.mem.trimRight(u8, rest, "/");
+    rest = std.mem.trimEnd(u8, rest, "/");
     if (std.mem.endsWith(u8, rest, ".git")) rest = rest[0 .. rest.len - ".git".len];
 
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.InvalidRemoteUrl;
@@ -330,7 +331,7 @@ const create_review_mutation =
 const add_thread_mutation =
     \\mutation ($rid: ID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) {
     \\  addPullRequestReviewThread(input: {pullRequestReviewId: $rid, path: $path, line: $line, side: $side, body: $body}) {
-    ++ "\n" ++ thread_node_selection ++ "\n" ++
+++ "\n" ++ thread_node_selection ++ "\n" ++
     \\  }
     \\}
 ;
@@ -338,7 +339,7 @@ const add_thread_mutation =
 const add_thread_range_mutation =
     \\mutation ($rid: ID!, $path: String!, $line: Int!, $side: DiffSide!, $sl: Int!, $ss: DiffSide!, $body: String!) {
     \\  addPullRequestReviewThread(input: {pullRequestReviewId: $rid, path: $path, line: $line, side: $side, startLine: $sl, startSide: $ss, body: $body}) {
-    ++ "\n" ++ thread_node_selection ++ "\n" ++
+++ "\n" ++ thread_node_selection ++ "\n" ++
     \\  }
     \\}
 ;
@@ -613,10 +614,10 @@ pub fn kindMessage(kind: GhErrorKind) []const u8 {
 }
 
 fn runGhCapture(allocator: std.mem.Allocator, argv: []const []const u8, label: []const u8) !GhFetch {
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, skim_io.get(), .{
         .argv = argv,
-        .max_output_bytes = 16 * 1024 * 1024,
+        .stdout_limit = .limited(16 * 1024 * 1024),
+        .stderr_limit = .limited(16 * 1024 * 1024),
     }) catch |err| switch (err) {
         error.FileNotFound => return .{ .failed = .not_installed },
         else => return err,
@@ -625,7 +626,7 @@ fn runGhCapture(allocator: std.mem.Allocator, argv: []const []const u8, label: [
     defer allocator.free(result.stderr);
 
     const code: u32 = switch (result.term) {
-        .Exited => |c| c,
+        .exited => |c| c,
         else => 1,
     };
     if (code != 0) {
@@ -644,10 +645,10 @@ fn runGhCapture(allocator: std.mem.Allocator, argv: []const []const u8, label: [
 /// than a generic classified error (FR-6/AD-8). Genuine transport failures (no
 /// errors envelope on stdout) still return `.failed`.
 fn runGhCaptureAllowErrorBody(allocator: std.mem.Allocator, argv: []const []const u8, label: []const u8) !GhFetch {
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, skim_io.get(), .{
         .argv = argv,
-        .max_output_bytes = 16 * 1024 * 1024,
+        .stdout_limit = .limited(16 * 1024 * 1024),
+        .stderr_limit = .limited(16 * 1024 * 1024),
     }) catch |err| switch (err) {
         error.FileNotFound => return .{ .failed = .not_installed },
         else => return err,
@@ -656,7 +657,7 @@ fn runGhCaptureAllowErrorBody(allocator: std.mem.Allocator, argv: []const []cons
     defer allocator.free(result.stderr);
 
     const code: u32 = switch (result.term) {
-        .Exited => |c| c,
+        .exited => |c| c,
         else => 1,
     };
     if (code != 0) {
@@ -671,7 +672,7 @@ fn runGhCaptureAllowErrorBody(allocator: std.mem.Allocator, argv: []const []cons
 }
 
 fn buildGraphqlArgv(allocator: std.mem.Allocator, query: []const u8, string_vars: []const KV, int_vars: []const KVInt) ![][]const u8 {
-    var argv: std.ArrayList([]const u8) = .{};
+    var argv: std.ArrayList([]const u8) = .empty;
     errdefer freeArgv(allocator, argv.items);
 
     try argv.append(allocator, try allocator.dupe(u8, "gh"));
@@ -698,10 +699,10 @@ fn freeArgv(allocator: std.mem.Allocator, argv: [][]const u8) void {
 }
 
 fn runGit(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, skim_io.get(), .{
         .argv = argv,
-        .max_output_bytes = 1024 * 1024,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
     }) catch |err| switch (err) {
         error.FileNotFound => return Error.GhNotFound,
         else => return err,
@@ -710,7 +711,7 @@ fn runGit(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.log.err("git fetch failed ({d}): {s}", .{ code, result.stderr });
             return Error.GhCommandFailed;
         },

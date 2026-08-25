@@ -3,10 +3,11 @@
 //! Provides connection management and request/response handling for CLI commands.
 
 const std = @import("std");
-const net = std.net;
+const net = @import("../net.zig");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const session_mgr = @import("../mcp/session.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Error Types
@@ -33,8 +34,7 @@ pub const Client = struct {
 
     /// Connect to a TUI server on the specified port
     pub fn connect(allocator: Allocator, port: u16) !Client {
-        const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-        const stream = net.tcpConnectToAddress(address) catch {
+        const stream = net.connectLoopback(port) catch {
             return error.ConnectionFailed;
         };
 
@@ -52,10 +52,10 @@ pub const Client = struct {
     /// Returns the parsed JSON response or an error
     pub fn request(self: *Client, method: []const u8, id: []const u8, params: ?std.json.Value) !Response {
         // Build request JSON
-        var request_buf: std.ArrayList(u8) = .{};
-        defer request_buf.deinit(self.allocator);
+        var request_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer request_buf.deinit();
 
-        const writer = request_buf.writer(self.allocator);
+        const writer = &request_buf.writer;
         try writer.print("{{\"method\":{f},\"id\":{f}", .{
             std.json.fmt(method, .{}),
             std.json.fmt(id, .{}),
@@ -64,7 +64,7 @@ pub const Client = struct {
         if (params) |p| {
             try writer.writeAll(",\"params\":");
             // Serialize params using Stringify
-            var alloc_writer: std.io.Writer.Allocating = .init(self.allocator);
+            var alloc_writer: std.Io.Writer.Allocating = .init(self.allocator);
             defer alloc_writer.deinit();
             var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
             stringify.write(p) catch return error.RequestFailed;
@@ -74,7 +74,7 @@ pub const Client = struct {
         try writer.writeAll("}\n");
 
         // Send request
-        self.stream.writeAll(request_buf.items) catch return error.RequestFailed;
+        self.stream.writeAll(request_buf.written()) catch return error.RequestFailed;
 
         // Read response (newline-delimited)
         var response_buf: [65536]u8 = undefined;
@@ -205,7 +205,7 @@ pub fn autoConnect(allocator: Allocator, session_pid: ?posix.pid_t) !Client {
     }
 
     // Multiple sessions - try cwd match
-    const cwd = std.process.getCwdAlloc(allocator) catch {
+    const cwd = std.process.currentPathAlloc(skim_io.get(), allocator) catch {
         return error.AmbiguousSessions;
     };
     defer allocator.free(cwd);
@@ -239,12 +239,12 @@ fn cloneJsonValue(allocator: Allocator, value: std.json.Value) !std.json.Value {
             break :blk .{ .array = new_arr };
         },
         .object => |obj| blk: {
-            var new_obj = std.json.ObjectMap.init(allocator);
+            var new_obj: std.json.ObjectMap = .empty;
             var it = obj.iterator();
             while (it.next()) |entry| {
                 const key = try allocator.dupe(u8, entry.key_ptr.*);
                 const val = try cloneJsonValue(allocator, entry.value_ptr.*);
-                try new_obj.put(key, val);
+                try new_obj.put(allocator, key, val);
             }
             break :blk .{ .object = new_obj };
         },
@@ -260,7 +260,7 @@ fn freeJsonValue(allocator: Allocator, value: std.json.Value) void {
                 allocator.free(entry.key_ptr.*);
                 freeJsonValue(allocator, entry.value_ptr.*);
             }
-            map.deinit();
+            map.deinit(allocator);
         },
         .array => |arr| {
             var list = arr;

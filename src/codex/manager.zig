@@ -4,6 +4,7 @@ const process_mod = @import("process.zig");
 const transport_mod = @import("transport.zig");
 const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Codex Manager
@@ -238,7 +239,7 @@ pub const CodexManager = struct {
             .mcp_servers = null,
             .pending_approval = null,
             .request_id_counter = 0,
-            .pending_messages = .{},
+            .pending_messages = .empty,
         };
     }
 
@@ -1059,15 +1060,15 @@ pub const CodexManager = struct {
     /// Poll a specific transport until we get a response matching expected_id or timeout.
     /// Used during connect() before self.transport is assigned.
     fn waitForResponseOn(self: *CodexManager, transport: *transport_mod.StdioTransport, expected_id: codec.RequestId, timeout_ms: u64) Error!?codec.DecodedMessage {
-        const start = std.time.milliTimestamp();
+        const start = skim_io.milliTimestamp();
 
         while (true) {
-            const elapsed = std.time.milliTimestamp() - start;
+            const elapsed = skim_io.milliTimestamp() - start;
             if (elapsed > @as(i64, @intCast(timeout_ms))) return null;
 
             const messages = try transport.drainMessages();
             if (messages.len == 0) {
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                skim_io.sleep(10 * std.time.ns_per_ms);
                 continue;
             }
 
@@ -1097,7 +1098,7 @@ pub const CodexManager = struct {
 
             if (found) |f| return f;
 
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            skim_io.sleep(10 * std.time.ns_per_ms);
         }
     }
 
@@ -1196,15 +1197,13 @@ pub const CodexManager = struct {
     }
 
     fn parseThreadFromValue(self: *CodexManager, thread_val: std.json.Value, fail_err: Error) Error!protocol.Thread {
-        var thread_json_buf: std.ArrayList(u8) = .{};
+        var thread_json_buf: std.ArrayList(u8) = .empty;
         defer thread_json_buf.deinit(self.allocator);
-        const tw = thread_json_buf.writer(self.allocator);
-        tw.print("{f}", .{std.json.fmt(thread_val, .{})}) catch return fail_err;
+        thread_json_buf.print(self.allocator, "{f}", .{std.json.fmt(thread_val, .{})}) catch return fail_err;
 
-        var wrapper_buf: std.ArrayList(u8) = .{};
+        var wrapper_buf: std.ArrayList(u8) = .empty;
         defer wrapper_buf.deinit(self.allocator);
-        const ww = wrapper_buf.writer(self.allocator);
-        ww.print("{{\"data\":[{s}]}}", .{thread_json_buf.items}) catch return fail_err;
+        wrapper_buf.print(self.allocator, "{{\"data\":[{s}]}}", .{thread_json_buf.items}) catch return fail_err;
 
         var decoder = codec.Decoder.init(self.allocator);
         const list_result = decoder.parseThreadListResult(wrapper_buf.items) catch return fail_err;
@@ -1254,13 +1253,13 @@ pub const CodexManager = struct {
         const rate_limits_value = parsed.value.rateLimits orelse parsed.value.rate_limits;
         if (rate_limits_value) |rl_val| {
             // Serialize the inner object back to JSON for the decoder
-            var buf: std.ArrayList(u8) = .{};
-            defer buf.deinit(self.allocator);
-            const writer = buf.writer(self.allocator);
+            var buf: std.Io.Writer.Allocating = .init(self.allocator);
+            defer buf.deinit();
+            const writer = &buf.writer;
             writer.print("{f}", .{std.json.fmt(rl_val, .{})}) catch return null;
 
             var decoder = codec.Decoder.init(self.allocator);
-            const rate_limits = decoder.parseRateLimits(buf.items) catch return null;
+            const rate_limits = decoder.parseRateLimits(buf.written()) catch return null;
 
             self.rate_limits = rate_limits;
             return .{ .rate_limits_updated = rate_limits };
@@ -2153,13 +2152,12 @@ test "deinit from disconnected state is safe" {
 }
 
 fn codexAvailable() bool {
-    const result = std.process.Child.run(.{
-        .allocator = std.testing.allocator,
+    const result = std.process.run(std.testing.allocator, skim_io.get(), .{
         .argv = &.{ "which", "codex" },
     }) catch return false;
     defer std.testing.allocator.free(result.stdout);
     defer std.testing.allocator.free(result.stderr);
-    return result.term.Exited == 0;
+    return result.term.exited == 0;
 }
 
 fn consumeProcessEventForTest(manager: *CodexManager, msg: codec.DecodedMessage) void {
@@ -2444,7 +2442,7 @@ test "codex manager handshake" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
 
-    try manager.connect("codex", &.{"app-server"}, "/home/ctdio/projects/open-source/skim-wta");
+    try manager.connect("codex", &.{"app-server"}, null);
 
     try std.testing.expectEqual(CodexManager.Status.initialized, manager.status);
     try std.testing.expect(manager.process != null);
@@ -2457,10 +2455,10 @@ test "codex manager thread start" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
 
-    try manager.connect("codex", &.{"app-server"}, "/home/ctdio/projects/open-source/skim-wta");
+    try manager.connect("codex", &.{"app-server"}, null);
     try std.testing.expectEqual(CodexManager.Status.initialized, manager.status);
 
-    try manager.startThread(null, "/home/ctdio/projects/open-source/skim-wta");
+    try manager.startThread(null, null);
     try std.testing.expectEqual(CodexManager.Status.thread_active, manager.status);
     try std.testing.expect(manager.thread_id != null);
     try std.testing.expect(manager.model != null);
@@ -2889,7 +2887,7 @@ test "codex manager listThreads" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
 
-    try manager.connect("codex", &.{"app-server"}, "/home/ctdio/projects/open-source/skim-wta");
+    try manager.connect("codex", &.{"app-server"}, null);
     try std.testing.expectEqual(CodexManager.Status.initialized, manager.status);
 
     const threads = try manager.listThreads();
@@ -2905,7 +2903,7 @@ test "codex manager listModels" {
     var manager = CodexManager.init(std.testing.allocator);
     defer manager.deinit();
 
-    try manager.connect("codex", &.{"app-server"}, "/home/ctdio/projects/open-source/skim-wta");
+    try manager.connect("codex", &.{"app-server"}, null);
     try std.testing.expectEqual(CodexManager.Status.initialized, manager.status);
 
     const models = try manager.listModels();

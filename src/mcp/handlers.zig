@@ -12,6 +12,7 @@ const session_mgr = @import("session.zig");
 const line_map = @import("../line_map.zig");
 const hunk_view = @import("../hunk_view.zig");
 const parser = @import("../git/parser.zig");
+const skim_io = @import("skim_io");
 
 /// Start TUI server and write session file
 pub fn startTuiServer(app: *App) !void {
@@ -68,16 +69,16 @@ pub fn getSessionPort(app: *const App) ?u16 {
 
 /// Handle get_context request - returns session state
 pub fn handleGetContext(app: *App) tui_server.Response {
-    var result = std.json.ObjectMap.init(app.allocator);
+    var result: std.json.ObjectMap = .empty;
 
     // Add diff_ref
     const diff_ref = getDiffRefString(app);
-    result.put("diff_ref", .{ .string = app.allocator.dupe(u8, diff_ref) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
+    result.put(app.allocator, "diff_ref", .{ .string = app.allocator.dupe(u8, diff_ref) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
         return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
     };
 
     // Add cwd
-    result.put("cwd", .{ .string = app.allocator.dupe(u8, app.state.git_repo_root) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
+    result.put(app.allocator, "cwd", .{ .string = app.allocator.dupe(u8, app.state.git_repo_root) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
         return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
     };
 
@@ -86,7 +87,7 @@ pub fn handleGetContext(app: *App) tui_server.Response {
         .unified => "unified",
         .side_by_side => "side_by_side",
     };
-    result.put("view_mode", .{ .string = app.allocator.dupe(u8, view_mode_str) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
+    result.put(app.allocator, "view_mode", .{ .string = app.allocator.dupe(u8, view_mode_str) catch return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed") }) catch {
         return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Allocation failed");
     };
 
@@ -96,10 +97,10 @@ pub fn handleGetContext(app: *App) tui_server.Response {
         const path = if (file.new_path.len > 0) file.new_path else file.old_path;
         files_arr.append(.{ .string = app.allocator.dupe(u8, path) catch continue }) catch {};
     }
-    result.put("files", .{ .array = files_arr }) catch {};
+    result.put(app.allocator, "files", .{ .array = files_arr }) catch {};
 
     // Add comment count
-    result.put("comment_count", .{ .integer = @intCast(app.state.comment_store.comments.items.len) }) catch {};
+    result.put(app.allocator, "comment_count", .{ .integer = @intCast(app.state.comment_store.comments.items.len) }) catch {};
 
     return .{ .result = .{ .object = result } };
 }
@@ -117,8 +118,8 @@ pub fn handleGetDiff(app: *App, params: ?std.json.Value) tui_server.Response {
         break :blk file_val.string;
     };
 
-    var output: std.ArrayList(u8) = .{};
-    const writer = output.writer(app.allocator);
+    var output: std.Io.Writer.Allocating = .init(app.allocator);
+    const writer = &output.writer;
 
     for (app.state.files) |*file| {
         const path = if (file.new_path.len > 0) file.new_path else file.old_path;
@@ -173,13 +174,13 @@ pub fn handleGetDiff(app: *App, params: ?std.json.Value) tui_server.Response {
         writer.writeAll("\n") catch {};
     }
 
-    const diff_text = output.toOwnedSlice(app.allocator) catch {
-        output.deinit(app.allocator);
+    const diff_text = output.toOwnedSlice() catch {
+        output.deinit();
         return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to build diff");
     };
 
-    var result = std.json.ObjectMap.init(app.allocator);
-    result.put("diff", .{ .string = diff_text }) catch {
+    var result: std.json.ObjectMap = .empty;
+    result.put(app.allocator, "diff", .{ .string = diff_text }) catch {
         app.allocator.free(diff_text);
         return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to build result");
     };
@@ -285,28 +286,28 @@ pub fn handleAddComment(app: *App, params: ?std.json.Value) tui_server.Response 
         app.state.global_cursor_line = comment_line;
     }
 
-    var result = std.json.ObjectMap.init(app.allocator);
-    result.put("success", .{ .bool = true }) catch {};
-    result.put("comment_index", .{ .integer = @intCast(comment_idx) }) catch {};
+    var result: std.json.ObjectMap = .empty;
+    result.put(app.allocator, "success", .{ .bool = true }) catch {};
+    result.put(app.allocator, "comment_index", .{ .integer = @intCast(comment_idx) }) catch {};
     return .{ .result = .{ .object = result } };
 }
 
 /// Handle list_comments request
 pub fn handleListComments(app: *App) tui_server.Response {
-    var result = std.json.ObjectMap.init(app.allocator);
+    var result: std.json.ObjectMap = .empty;
 
     var comments_arr = std.json.Array.init(app.allocator);
     for (app.state.comment_store.comments.items, 0..) |comment, idx| {
-        var comment_obj = std.json.ObjectMap.init(app.allocator);
-        comment_obj.put("index", .{ .integer = @intCast(idx) }) catch continue;
-        comment_obj.put("file_path", .{ .string = app.allocator.dupe(u8, comment.file_path) catch continue }) catch continue;
-        comment_obj.put("hunk_idx", .{ .integer = @intCast(comment.hunk_idx) }) catch continue;
-        comment_obj.put("line_idx", .{ .integer = @intCast(comment.line_idx) }) catch continue;
-        comment_obj.put("text", .{ .string = app.allocator.dupe(u8, comment.text) catch continue }) catch continue;
+        var comment_obj: std.json.ObjectMap = .empty;
+        comment_obj.put(app.allocator, "index", .{ .integer = @intCast(idx) }) catch continue;
+        comment_obj.put(app.allocator, "file_path", .{ .string = app.allocator.dupe(u8, comment.file_path) catch continue }) catch continue;
+        comment_obj.put(app.allocator, "hunk_idx", .{ .integer = @intCast(comment.hunk_idx) }) catch continue;
+        comment_obj.put(app.allocator, "line_idx", .{ .integer = @intCast(comment.line_idx) }) catch continue;
+        comment_obj.put(app.allocator, "text", .{ .string = app.allocator.dupe(u8, comment.text) catch continue }) catch continue;
         comments_arr.append(.{ .object = comment_obj }) catch {};
     }
 
-    result.put("comments", .{ .array = comments_arr }) catch {};
+    result.put(app.allocator, "comments", .{ .array = comments_arr }) catch {};
     return .{ .result = .{ .object = result } };
 }
 
@@ -343,8 +344,8 @@ pub fn handleDeleteComment(app: *App, params: ?std.json.Value) tui_server.Respon
     };
     app.needs_render = true;
 
-    var result = std.json.ObjectMap.init(app.allocator);
-    result.put("success", .{ .bool = true }) catch {};
+    var result: std.json.ObjectMap = .empty;
+    result.put(app.allocator, "success", .{ .bool = true }) catch {};
     return .{ .result = .{ .object = result } };
 }
 
@@ -354,7 +355,7 @@ fn writeSessionMetadata(app: *App) !void {
     const sm = &(app.session_manager orelse return);
     const server = &(app.tui_server orelse return);
 
-    var file_list: std.ArrayList([]const u8) = .{};
+    var file_list: std.ArrayList([]const u8) = .empty;
     defer file_list.deinit(app.allocator);
 
     for (app.state.files) |file| {
@@ -368,7 +369,7 @@ fn writeSessionMetadata(app: *App) !void {
         .cwd = app.state.git_repo_root,
         .diff_ref = getDiffRefString(app),
         .files = file_list.items,
-        .started_at = std.time.timestamp(),
+        .started_at = skim_io.timestamp(),
     });
 }
 

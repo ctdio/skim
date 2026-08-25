@@ -1,10 +1,11 @@
 const std = @import("std");
+const skim_io = @import("skim_io");
 const Allocator = std.mem.Allocator;
 
 /// Get all files in the git repository (tracked + untracked, respecting .gitignore)
 /// Returns owned slice of owned strings - caller must free each path and the slice.
 pub fn getAllFiles(allocator: Allocator) ![][]const u8 {
-    var files: std.ArrayList([]const u8) = .{};
+    var files: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (files.items) |f| allocator.free(f);
         files.deinit(allocator);
@@ -65,18 +66,18 @@ fn getUntrackedFiles(allocator: Allocator) ![][]const u8 {
 
 /// Run a git ls-files command and parse the output into a list of paths
 fn runGitLsFiles(allocator: Allocator, args: []const []const u8) ![][]const u8 {
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
 
-    try child.spawn();
-
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 100 * 1024 * 1024); // 100MB limit
+    const stdout = try skim_io.readAllAlloc(child.stdout.?, allocator, 100 * 1024 * 1024); // 100MB limit
     defer allocator.free(stdout);
 
-    const term = try child.wait();
+    const term = try child.wait(skim_io.get());
 
-    if (term != .Exited or term.Exited != 0) {
+    if (term != .exited or term.exited != 0) {
         return error.GitCommandFailed;
     }
 
@@ -85,7 +86,7 @@ fn runGitLsFiles(allocator: Allocator, args: []const []const u8) ![][]const u8 {
 
 /// Parse newline-separated file paths from git ls-files output
 fn parseGitLsFilesOutput(allocator: Allocator, output: []const u8) ![][]const u8 {
-    var files: std.ArrayList([]const u8) = .{};
+    var files: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (files.items) |f| allocator.free(f);
         files.deinit(allocator);
@@ -103,17 +104,17 @@ fn parseGitLsFilesOutput(allocator: Allocator, output: []const u8) ![][]const u8
 }
 
 /// Check if we're in a git repository
-pub fn isGitRepository(allocator: Allocator) bool {
+pub fn isGitRepository() bool {
     const args = &[_][]const u8{ "git", "rev-parse", "--is-inside-work-tree" };
 
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+    var child = std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return false;
+    const term = child.wait(skim_io.get()) catch return false;
 
-    child.spawn() catch return false;
-    const term = child.wait() catch return false;
-
-    return term == .Exited and term.Exited == 0;
+    return term == .exited and term.exited == 0;
 }
 
 /// Free a file list returned by getAllFiles

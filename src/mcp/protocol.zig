@@ -276,10 +276,10 @@ pub const InputSchema = struct {
 
 /// Encode a hello message
 pub fn encodeHello(allocator: Allocator, payload: HelloPayload) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"hello\",\"id\":{f},\"cwd\":{f},\"diff_ref\":{f},\"files\":[", .{
         std.json.fmt(payload.id, .{}),
         std.json.fmt(payload.cwd, .{}),
@@ -296,40 +296,40 @@ pub fn encodeHello(allocator: Allocator, payload: HelloPayload) ![]u8 {
     }
 
     try writer.writeAll("]}\n");
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Encode a welcome message
 pub fn encodeWelcome(allocator: Allocator, id: []const u8) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"welcome\",\"id\":{f}}}\n", .{std.json.fmt(id, .{})});
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Encode an add_comment message
 pub fn encodeAddComment(allocator: Allocator, payload: AddCommentPayload) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"add_comment\",\"file\":{f},\"line\":{d},\"line_type\":{f},\"text\":{f}}}\n", .{
         std.json.fmt(payload.file, .{}),
         payload.line,
         std.json.fmt(payload.line_type, .{}),
         std.json.fmt(payload.text, .{}),
     });
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Encode a comment_added response
 pub fn encodeCommentAdded(allocator: Allocator, success: bool, comment_idx: ?usize, err_msg: ?[]const u8) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"comment_added\",\"success\":{}", .{success});
 
     if (comment_idx) |idx| {
@@ -341,12 +341,12 @@ pub fn encodeCommentAdded(allocator: Allocator, success: bool, comment_idx: ?usi
     }
 
     try writer.writeAll("}\n");
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Encode a get_comments request
 pub fn encodeGetComments(allocator: Allocator) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
+    var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
 
     try output.appendSlice(allocator, "{\"event\":\"get_comments\"}\n");
@@ -355,10 +355,10 @@ pub fn encodeGetComments(allocator: Allocator) ![]u8 {
 
 /// Encode a comments response
 pub fn encodeComments(allocator: Allocator, comments: []const CommentInfo) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.writeAll("{\"event\":\"comments\",\"comments\":[");
 
     for (comments, 0..) |comment, i| {
@@ -374,25 +374,25 @@ pub fn encodeComments(allocator: Allocator, comments: []const CommentInfo) ![]u8
     }
 
     try writer.writeAll("]}\n");
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Encode an error message
 pub fn encodeError(allocator: Allocator, code: []const u8, message: []const u8) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"error\",\"code\":{f},\"message\":{f}}}\n", .{
         std.json.fmt(code, .{}),
         std.json.fmt(message, .{}),
     });
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Encode ping
 pub fn encodePing(allocator: Allocator) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
+    var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     try output.appendSlice(allocator, "{\"event\":\"ping\"}\n");
     return output.toOwnedSlice(allocator);
@@ -400,7 +400,7 @@ pub fn encodePing(allocator: Allocator) ![]u8 {
 
 /// Encode pong
 pub fn encodePong(allocator: Allocator) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
+    var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     try output.appendSlice(allocator, "{\"event\":\"pong\"}\n");
     return output.toOwnedSlice(allocator);
@@ -408,7 +408,7 @@ pub fn encodePong(allocator: Allocator) ![]u8 {
 
 /// Encode a get_diff_context request
 pub fn encodeGetDiffContext(allocator: Allocator) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
+    var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     try output.appendSlice(allocator, "{\"event\":\"get_diff_context\"}\n");
     return output.toOwnedSlice(allocator);
@@ -416,20 +416,20 @@ pub fn encodeGetDiffContext(allocator: Allocator) ![]u8 {
 
 /// Encode a get_file_diff request
 pub fn encodeGetFileDiff(allocator: Allocator, file: []const u8) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"get_file_diff\",\"file\":{f}}}\n", .{std.json.fmt(file, .{})});
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Encode a diff_context response
 pub fn encodeDiffContext(allocator: Allocator, payload: DiffContextPayload) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"diff_context\",\"diff_ref\":{f},\"cwd\":{f},\"diff_files\":[", .{
         std.json.fmt(payload.diff_ref, .{}),
         std.json.fmt(payload.cwd, .{}),
@@ -448,15 +448,15 @@ pub fn encodeDiffContext(allocator: Allocator, payload: DiffContextPayload) ![]u
     }
 
     try writer.writeAll("]}\n");
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 /// Encode a file_diff response
 pub fn encodeFileDiff(allocator: Allocator, payload: FileDiffPayload) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"file_diff\",\"file\":{f},\"old_file\":{f},\"status\":{f},\"hunks\":[", .{
         std.json.fmt(payload.file, .{}),
         std.json.fmt(payload.old_file, .{}),
@@ -496,7 +496,7 @@ pub fn encodeFileDiff(allocator: Allocator, payload: FileDiffPayload) ![]u8 {
     }
 
     try writer.writeAll("]}\n");
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 // =============================================================================
@@ -523,7 +523,7 @@ pub const ParsedMessage = union(enum) {
 /// Decode a JSON message line
 pub fn decode(allocator: Allocator, json_line: []const u8) !ParsedMessage {
     // Trim trailing newline if present
-    const trimmed = std.mem.trimRight(u8, json_line, "\n\r");
+    const trimmed = std.mem.trimEnd(u8, json_line, "\n\r");
 
     const parsed = std.json.parseFromSlice(RawMessage, allocator, trimmed, .{
         .ignore_unknown_fields = true,

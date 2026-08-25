@@ -5,6 +5,7 @@ const protocol = @import("protocol.zig");
 const patch = @import("patch.zig");
 const sse = @import("sse.zig");
 const server = @import("server.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Opencode Manager
@@ -257,13 +258,13 @@ pub const Event = union(enum) {
 
 /// Thread-safe message queue for SSE thread -> main thread communication
 pub const MessageQueue = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     events: std.ArrayList(Event),
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) MessageQueue {
         return .{
-            .events = .{},
+            .events = .empty,
             .allocator = allocator,
         };
     }
@@ -278,8 +279,8 @@ pub const MessageQueue = struct {
 
     /// Push an event to the queue (thread-safe)
     pub fn push(self: *MessageQueue, event: Event) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(skim_io.get());
+        defer self.mutex.unlock(skim_io.get());
         self.events.append(self.allocator, event) catch {
             // If append fails, clean up the event
             var e = event;
@@ -290,24 +291,24 @@ pub const MessageQueue = struct {
     /// Pop an event from the queue (thread-safe)
     /// Returns null if queue is empty
     pub fn pop(self: *MessageQueue) ?Event {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(skim_io.get());
+        defer self.mutex.unlock(skim_io.get());
         if (self.events.items.len == 0) return null;
         return self.events.orderedRemove(0);
     }
 
     /// Get the number of pending events (thread-safe)
     pub fn len(self: *MessageQueue) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(skim_io.get());
+        defer self.mutex.unlock(skim_io.get());
         return self.events.items.len;
     }
 
     /// Drain all pending events, freeing their resources (thread-safe).
     /// Use event_allocator since events are allocated by the SSE thread.
     pub fn drain(self: *MessageQueue, event_allocator: Allocator) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(skim_io.get());
+        defer self.mutex.unlock(skim_io.get());
         for (self.events.items) |*event| {
             event.deinit(event_allocator);
         }
@@ -428,8 +429,8 @@ pub const OpencodeManager = struct {
     server_process: ?std.process.Child,
     session_id: ?[]const u8,
     message_queue: MessageQueue,
-    event_log_file: ?std.fs.File,
-    event_log_mutex: std.Thread.Mutex,
+    event_log_file: ?skim_io.AppendFile,
+    event_log_mutex: std.Io.Mutex,
 
     // SSE reader thread
     sse_thread: ?std.Thread,
@@ -440,7 +441,7 @@ pub const OpencodeManager = struct {
 
     // SSE connection (stored so we can close it to unblock the reader thread)
     sse_connection: ?*client_mod.Client.EventStreamConnection,
-    sse_conn_mutex: std.Thread.Mutex,
+    sse_conn_mutex: std.Io.Mutex,
 
     // Connection config (stored for reconnection)
     connect_config: ?ConnectConfig,
@@ -505,14 +506,14 @@ pub const OpencodeManager = struct {
             .session_id = null,
             .message_queue = MessageQueue.init(std.heap.c_allocator),
             .event_log_file = null,
-            .event_log_mutex = .{},
+            .event_log_mutex = .init,
             .sse_thread = null,
             .should_stop = std.atomic.Value(bool).init(false),
             .thread_exited = std.atomic.Value(bool).init(true), // No thread running initially
             .thread_was_detached = false,
             .stream_complete = std.atomic.Value(bool).init(false),
             .sse_connection = null,
-            .sse_conn_mutex = .{},
+            .sse_conn_mutex = .init,
             .connect_config = null,
             .connect_cwd_owned = null,
             .base_url = null,
@@ -530,14 +531,14 @@ pub const OpencodeManager = struct {
             .pending_permission = false,
             .is_compacting = false,
             .deferred_completion = false,
-            .child_tool_counts = .{},
-            .child_last_tool = .{},
-            .child_to_parent_tool = .{},
-            .child_tokens = .{},
-            .child_start_times = .{},
+            .child_tool_counts = .empty,
+            .child_last_tool = .empty,
+            .child_to_parent_tool = .empty,
+            .child_tokens = .empty,
+            .child_start_times = .empty,
             .active_child_count = std.atomic.Value(u32).init(0),
             .parent_tokens = .{},
-            .available_models = .{},
+            .available_models = .empty,
             .current_model_id = null,
         };
     }
@@ -603,7 +604,7 @@ pub const OpencodeManager = struct {
                 self.allocator.free(entry.key_ptr.*);
             }
             self.child_tool_counts.deinit(self.allocator);
-            self.child_tool_counts = .{};
+            self.child_tool_counts = .empty;
             self.active_child_count.store(0, .release);
         }
         {
@@ -613,7 +614,7 @@ pub const OpencodeManager = struct {
                 self.allocator.free(entry.value_ptr.*);
             }
             self.child_last_tool.deinit(self.allocator);
-            self.child_last_tool = .{};
+            self.child_last_tool = .empty;
         }
         {
             var iter = self.child_to_parent_tool.iterator();
@@ -622,7 +623,7 @@ pub const OpencodeManager = struct {
                 self.allocator.free(entry.value_ptr.*);
             }
             self.child_to_parent_tool.deinit(self.allocator);
-            self.child_to_parent_tool = .{};
+            self.child_to_parent_tool = .empty;
         }
         {
             var iter = self.child_tokens.iterator();
@@ -631,7 +632,7 @@ pub const OpencodeManager = struct {
                 entry.value_ptr.deinitMessageId(self.allocator);
             }
             self.child_tokens.deinit(self.allocator);
-            self.child_tokens = .{};
+            self.child_tokens = .empty;
         }
         {
             var iter = self.child_start_times.iterator();
@@ -639,7 +640,7 @@ pub const OpencodeManager = struct {
                 self.allocator.free(entry.key_ptr.*);
             }
             self.child_start_times.deinit(self.allocator);
-            self.child_start_times = .{};
+            self.child_start_times = .empty;
         }
     }
 
@@ -649,7 +650,7 @@ pub const OpencodeManager = struct {
             model.deinit(self.allocator);
         }
         self.available_models.deinit(self.allocator);
-        self.available_models = .{};
+        self.available_models = .empty;
     }
 
     /// Check if manager can be safely destroyed.
@@ -689,7 +690,7 @@ pub const OpencodeManager = struct {
             log.info("Starting opencode server...", .{});
 
             // Get log file path
-            const home = std.process.getEnvVarOwned(self.allocator, "HOME") catch null;
+            const home = skim_io.getEnvVarOwned(self.allocator, "HOME") catch null;
             defer if (home) |h| self.allocator.free(h);
 
             const log_file = if (home) |h|
@@ -705,7 +706,7 @@ pub const OpencodeManager = struct {
                 .log_file = log_file,
             };
 
-            self.server_process = server.spawnServer(self.allocator, server_config) catch |err| {
+            self.server_process = server.spawnServer(server_config) catch |err| {
                 log.err("Failed to spawn server: {}", .{err});
                 self.status = .failed;
                 return error.SpawnFailed;
@@ -795,10 +796,10 @@ pub const OpencodeManager = struct {
         // We must do this BEFORE joining to avoid deadlock.
         // Set sse_connection to null first so thread's defer knows not to double-free.
         {
-            self.sse_conn_mutex.lock();
+            self.sse_conn_mutex.lockUncancelable(skim_io.get());
             const conn = self.sse_connection;
             self.sse_connection = null;
-            self.sse_conn_mutex.unlock();
+            self.sse_conn_mutex.unlock(skim_io.get());
 
             if (conn) |c| {
                 log.info("Closing SSE connection to unblock reader...", .{});
@@ -820,7 +821,7 @@ pub const OpencodeManager = struct {
                     log.info("SSE thread joined", .{});
                     break;
                 }
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                skim_io.sleep(10 * std.time.ns_per_ms);
             }
 
             // If thread didn't exit in time, detach it
@@ -949,9 +950,9 @@ pub const OpencodeManager = struct {
         const c = self.client orelse return error.NotConnected;
 
         // Build JSON: {"answers": [["label1"], ["label2", "label3"]]}
-        var json: std.ArrayList(u8) = .{};
-        defer json.deinit(self.allocator);
-        const w = json.writer(self.allocator);
+        var json: std.Io.Writer.Allocating = .init(self.allocator);
+        defer json.deinit();
+        const w = &json.writer;
 
         try w.writeAll("{\"answers\":[");
         for (answers, 0..) |question_answers, qi| {
@@ -965,7 +966,7 @@ pub const OpencodeManager = struct {
         }
         try w.writeAll("]}");
 
-        try c.replyToQuestion(request_id, json.items);
+        try c.replyToQuestion(request_id, json.written());
 
         self.pending_question = false;
 
@@ -1168,7 +1169,7 @@ pub const OpencodeManager = struct {
                 var variants_slice: ?[]const []const u8 = null;
                 if (model_val.object.get("variants")) |variants_val| {
                     if (variants_val == .object) {
-                        var variants: std.ArrayListUnmanaged([]const u8) = .{};
+                        var variants: std.ArrayListUnmanaged([]const u8) = .empty;
 
                         var variant_iter = variants_val.object.iterator();
                         while (variant_iter.next()) |variant_entry| {
@@ -1353,7 +1354,7 @@ pub const OpencodeManager = struct {
 
         const sessions = extractSessionsArray(parsed.value) orelse return;
 
-        var candidates: std.ArrayListUnmanaged(SessionCandidate) = .{};
+        var candidates: std.ArrayListUnmanaged(SessionCandidate) = .empty;
         defer {
             for (candidates.items) |cand| {
                 self.allocator.free(cand.id);
@@ -1418,7 +1419,7 @@ pub const OpencodeManager = struct {
             return;
         }
 
-        var commands_list: std.ArrayListUnmanaged(AvailableCommand) = .{};
+        var commands_list: std.ArrayListUnmanaged(AvailableCommand) = .empty;
         errdefer {
             for (commands_list.items) |cmd| freeAvailableCommand(self.event_allocator, cmd);
             commands_list.deinit(self.event_allocator);
@@ -1560,7 +1561,7 @@ pub const OpencodeManager = struct {
         }
 
         self.pending_abort = true;
-        self.pending_abort_since_ms = std.time.milliTimestamp();
+        self.pending_abort_since_ms = skim_io.milliTimestamp();
         self.abort_error_grace_until_ms = self.pending_abort_since_ms + 3000;
         if (self.last_event_ms == 0) {
             self.last_event_ms = self.pending_abort_since_ms;
@@ -1608,15 +1609,15 @@ pub const OpencodeManager = struct {
 
         // Store connection so disconnect() can close it to unblock us
         {
-            manager.sse_conn_mutex.lock();
-            defer manager.sse_conn_mutex.unlock();
+            manager.sse_conn_mutex.lockUncancelable(skim_io.get());
+            defer manager.sse_conn_mutex.unlock(skim_io.get());
             manager.sse_connection = conn;
         }
 
         // Clean up connection on exit (unless disconnect() already did)
         defer {
-            manager.sse_conn_mutex.lock();
-            defer manager.sse_conn_mutex.unlock();
+            manager.sse_conn_mutex.lockUncancelable(skim_io.get());
+            defer manager.sse_conn_mutex.unlock(skim_io.get());
             if (manager.sse_connection) |stored_conn| {
                 // We still own the connection, clean it up
                 if (stored_conn == conn) {
@@ -1656,7 +1657,7 @@ pub const OpencodeManager = struct {
                     break;
                 }
                 // Brief sleep to avoid busy loop on spurious null returns
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                skim_io.sleep(10 * std.time.ns_per_ms);
             }
         }
 
@@ -1666,25 +1667,25 @@ pub const OpencodeManager = struct {
     fn ensureEventLog(self: *OpencodeManager) void {
         if (self.event_log_file != null) return;
         const sid = self.session_id orelse return;
-        const home = std.posix.getenv("HOME") orelse return;
+        const home = skim_io.getEnv("HOME") orelse return;
 
         var path_buf: [512]u8 = undefined;
         const skim_dir = std.fmt.bufPrint(&path_buf, "{s}/.skim", .{home}) catch return;
-        std.fs.makeDirAbsolute(skim_dir) catch |err| switch (err) {
+        std.Io.Dir.createDirAbsolute(skim_io.get(), skim_dir, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
         var opencode_buf: [512]u8 = undefined;
         const opencode_dir = std.fmt.bufPrint(&opencode_buf, "{s}/.skim/opencode", .{home}) catch return;
-        std.fs.makeDirAbsolute(opencode_dir) catch |err| switch (err) {
+        std.Io.Dir.createDirAbsolute(skim_io.get(), opencode_dir, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
         var events_buf: [512]u8 = undefined;
         const events_dir = std.fmt.bufPrint(&events_buf, "{s}/.skim/opencode/events", .{home}) catch return;
-        std.fs.makeDirAbsolute(events_dir) catch |err| switch (err) {
+        std.Io.Dir.createDirAbsolute(skim_io.get(), events_dir, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return,
         };
@@ -1692,20 +1693,18 @@ pub const OpencodeManager = struct {
         var log_buf: [512]u8 = undefined;
         const log_path = std.fmt.bufPrint(&log_buf, "{s}/.skim/opencode/events/ses_{s}.log", .{ home, sid }) catch return;
 
-        const file = std.fs.createFileAbsolute(log_path, .{ .truncate = false }) catch return;
-        file.seekFromEnd(0) catch {};
-        self.event_log_file = file;
+        self.event_log_file = skim_io.AppendFile.open(log_path) catch return;
         log.info("Opencode SSE log: {s}", .{log_path});
     }
 
     fn logSseEvent(self: *OpencodeManager, data: []const u8) void {
-        self.event_log_mutex.lock();
-        defer self.event_log_mutex.unlock();
+        self.event_log_mutex.lockUncancelable(skim_io.get());
+        defer self.event_log_mutex.unlock(skim_io.get());
 
         self.ensureEventLog();
-        const file = self.event_log_file orelse return;
+        const file = &(self.event_log_file orelse return);
 
-        const timestamp_ms = std.time.milliTimestamp();
+        const timestamp_ms = skim_io.milliTimestamp();
         const seconds = @divFloor(timestamp_ms, 1000);
         const millis = @mod(timestamp_ms, 1000);
         const hours = @mod(@divFloor(seconds, 3600), 24);
@@ -1720,16 +1719,16 @@ pub const OpencodeManager = struct {
             @as(u64, @intCast(millis)),
         }) catch return;
 
-        _ = file.write(header) catch return;
-        _ = file.write(data) catch return;
-        _ = file.write("\n") catch return;
+        file.write(header) catch return;
+        file.write(data) catch return;
+        file.write("\n") catch return;
     }
 
     fn closeEventLog(self: *OpencodeManager) void {
-        self.event_log_mutex.lock();
-        defer self.event_log_mutex.unlock();
+        self.event_log_mutex.lockUncancelable(skim_io.get());
+        defer self.event_log_mutex.unlock(skim_io.get());
 
-        if (self.event_log_file) |file| {
+        if (self.event_log_file) |*file| {
             file.close();
             self.event_log_file = null;
         }
@@ -2061,7 +2060,7 @@ pub const OpencodeManager = struct {
                 self.message_queue.push(.{ .session_compacted = {} });
             },
             .session_error => {
-                const now_ms = std.time.milliTimestamp();
+                const now_ms = skim_io.milliTimestamp();
                 if (self.pending_abort or (self.abort_error_grace_until_ms != 0 and now_ms <= self.abort_error_grace_until_ms)) {
                     log.info("Session error after abort; treating as cancelled", .{});
                     self.pending_abort = false;
@@ -2346,7 +2345,7 @@ pub const OpencodeManager = struct {
             };
             // Record start time for this child session
             const time_key = self.allocator.dupe(u8, child_sid) catch return;
-            self.child_start_times.put(self.allocator, time_key, std.time.milliTimestamp()) catch {
+            self.child_start_times.put(self.allocator, time_key, skim_io.milliTimestamp()) catch {
                 self.allocator.free(time_key);
             };
             // New child session — increment atomic counter
@@ -2861,7 +2860,7 @@ pub const OpencodeManager = struct {
                 if (summary_val == .array) {
                     info.tool_count = summary_val.array.items.len;
                     has_any = true;
-                    var summaries: std.ArrayList(Event.SubagentToolSummary) = .{};
+                    var summaries: std.ArrayList(Event.SubagentToolSummary) = .empty;
                     for (summary_val.array.items) |entry_val| {
                         if (entry_val != .object) continue;
                         const entry_obj = entry_val.object;
@@ -2917,7 +2916,7 @@ pub const OpencodeManager = struct {
     fn parseQuestionItems(self: *OpencodeManager, questions_val: std.json.Value) ?[]Event.QuestionItem {
         if (questions_val != .array) return null;
 
-        var questions_list: std.ArrayList(Event.QuestionItem) = .{};
+        var questions_list: std.ArrayList(Event.QuestionItem) = .empty;
         errdefer {
             for (questions_list.items) |*item| item.deinit(self.event_allocator);
             questions_list.deinit(self.event_allocator);
@@ -2935,7 +2934,7 @@ pub const OpencodeManager = struct {
                 break :blk false;
             } else false;
 
-            var options_list: std.ArrayList(Event.QuestionOption) = .{};
+            var options_list: std.ArrayList(Event.QuestionOption) = .empty;
             errdefer {
                 for (options_list.items) |*opt| opt.deinit(self.event_allocator);
                 options_list.deinit(self.event_allocator);
@@ -3580,7 +3579,7 @@ test "opencode event: session_error after abort treated as cancelled" {
     defer manager.deinit();
 
     manager.pending_abort = true;
-    manager.pending_abort_since_ms = std.time.milliTimestamp();
+    manager.pending_abort_since_ms = skim_io.milliTimestamp();
     manager.abort_error_grace_until_ms = manager.pending_abort_since_ms + 3000;
 
     const data = "{\"payload\":{\"type\":\"session.error\",\"properties\":{}}}";
@@ -3640,7 +3639,7 @@ test "opencode event: session.updated idle clears abort" {
     defer manager.deinit();
 
     manager.pending_abort = true;
-    manager.pending_abort_since_ms = std.time.milliTimestamp();
+    manager.pending_abort_since_ms = skim_io.milliTimestamp();
     manager.abort_error_grace_until_ms = manager.pending_abort_since_ms + 3000;
 
     const data = "{\"payload\":{\"type\":\"session.updated\",\"properties\":{\"session\":{\"status\":\"idle\"}}}}";

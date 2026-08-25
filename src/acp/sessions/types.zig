@@ -1,4 +1,5 @@
 const std = @import("std");
+const skim_io = @import("skim_io");
 const Allocator = std.mem.Allocator;
 
 // =============================================================================
@@ -60,7 +61,7 @@ pub const SessionInfo = struct {
 
     /// Format timestamp as relative time (e.g., "2 hours ago", "yesterday")
     pub fn formatRelativeTime(self: SessionInfo, buf: []u8) []const u8 {
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = skim_io.milliTimestamp();
         const diff_ms = now_ms - self.timestamp;
         const diff_secs = @divFloor(diff_ms, 1000);
         const diff_mins = @divFloor(diff_secs, 60);
@@ -145,7 +146,7 @@ test "SessionInfo formatRelativeTime" {
         .agent_type = .claude_code,
         .project_path = "",
         .display = "",
-        .timestamp = std.time.milliTimestamp() - (2 * 60 * 60 * 1000), // 2 hours ago
+        .timestamp = skim_io.milliTimestamp() - (2 * 60 * 60 * 1000), // 2 hours ago
     };
 
     var buf: [32]u8 = undefined;

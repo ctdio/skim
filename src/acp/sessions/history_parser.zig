@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Session History Parser
@@ -33,7 +34,7 @@ pub fn parseClaudeSession(
     session_id: []const u8,
     project_path: []const u8,
 ) ParseError![]HistoryMessage {
-    const home = std.posix.getenv("HOME") orelse return error.FileNotFound;
+    const home = skim_io.getEnv("HOME") orelse return error.FileNotFound;
 
     // Escape project path (/ -> -)
     var escaped_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -68,7 +69,7 @@ pub fn parseCodexSession(
 }
 
 pub fn findCodexSessionFile(allocator: Allocator, session_id: []const u8) ParseError![]const u8 {
-    const home = std.posix.getenv("HOME") orelse return error.FileNotFound;
+    const home = skim_io.getEnv("HOME") orelse return error.FileNotFound;
 
     var sessions_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const sessions_dir = std.fmt.bufPrint(&sessions_path_buf, "{s}/.codex/sessions", .{home}) catch {
@@ -80,41 +81,41 @@ pub fn findCodexSessionFile(allocator: Allocator, session_id: []const u8) ParseE
 
 fn findCodexSessionFileInDir(allocator: Allocator, base_dir: []const u8, session_id: []const u8) ![]const u8 {
     // Walk year directories
-    var base = std.fs.openDirAbsolute(base_dir, .{ .iterate = true }) catch return error.FileNotFound;
-    defer base.close();
+    var base = std.Io.Dir.openDirAbsolute(skim_io.get(), base_dir, .{ .iterate = true }) catch return error.FileNotFound;
+    defer base.close(skim_io.get());
 
     var year_iter = base.iterate();
-    while (year_iter.next() catch null) |year_entry| {
+    while (year_iter.next(skim_io.get()) catch null) |year_entry| {
         if (year_entry.kind != .directory) continue;
 
         var year_path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const year_path = std.fmt.bufPrint(&year_path_buf, "{s}/{s}", .{ base_dir, year_entry.name }) catch continue;
 
-        var year_dir = std.fs.openDirAbsolute(year_path, .{ .iterate = true }) catch continue;
-        defer year_dir.close();
+        var year_dir = std.Io.Dir.openDirAbsolute(skim_io.get(), year_path, .{ .iterate = true }) catch continue;
+        defer year_dir.close(skim_io.get());
 
         var month_iter = year_dir.iterate();
-        while (month_iter.next() catch null) |month_entry| {
+        while (month_iter.next(skim_io.get()) catch null) |month_entry| {
             if (month_entry.kind != .directory) continue;
 
             var month_path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const month_path = std.fmt.bufPrint(&month_path_buf, "{s}/{s}", .{ year_path, month_entry.name }) catch continue;
 
-            var month_dir = std.fs.openDirAbsolute(month_path, .{ .iterate = true }) catch continue;
-            defer month_dir.close();
+            var month_dir = std.Io.Dir.openDirAbsolute(skim_io.get(), month_path, .{ .iterate = true }) catch continue;
+            defer month_dir.close(skim_io.get());
 
             var day_iter = month_dir.iterate();
-            while (day_iter.next() catch null) |day_entry| {
+            while (day_iter.next(skim_io.get()) catch null) |day_entry| {
                 if (day_entry.kind != .directory) continue;
 
                 var day_path_buf: [std.fs.max_path_bytes]u8 = undefined;
                 const day_path = std.fmt.bufPrint(&day_path_buf, "{s}/{s}", .{ month_path, day_entry.name }) catch continue;
 
-                var day_dir = std.fs.openDirAbsolute(day_path, .{ .iterate = true }) catch continue;
-                defer day_dir.close();
+                var day_dir = std.Io.Dir.openDirAbsolute(skim_io.get(), day_path, .{ .iterate = true }) catch continue;
+                defer day_dir.close(skim_io.get());
 
                 var file_iter = day_dir.iterate();
-                while (file_iter.next() catch null) |file_entry| {
+                while (file_iter.next(skim_io.get()) catch null) |file_entry| {
                     if (file_entry.kind != .file) continue;
                     if (!std.mem.endsWith(u8, file_entry.name, ".jsonl")) continue;
 
@@ -137,14 +138,14 @@ fn parseSessionFile(
     path: []const u8,
     format: AgentFormat,
 ) ParseError![]HistoryMessage {
-    const file = std.fs.openFileAbsolute(path, .{}) catch return error.FileNotFound;
-    defer file.close();
+    const file = std.Io.Dir.openFileAbsolute(skim_io.get(), path, .{}) catch return error.FileNotFound;
+    defer file.close(skim_io.get());
 
     // Read file (limit to 50MB for safety)
-    const content = file.readToEndAlloc(allocator, 50 * 1024 * 1024) catch return error.IoError;
+    const content = skim_io.readAllAlloc(file, allocator, 50 * 1024 * 1024) catch return error.IoError;
     defer allocator.free(content);
 
-    var messages: std.ArrayList(HistoryMessage) = .{};
+    var messages: std.ArrayList(HistoryMessage) = .empty;
     errdefer {
         for (messages.items) |*m| m.deinit();
         messages.deinit(allocator);
@@ -234,7 +235,7 @@ fn extractClaudeContent(allocator: Allocator, message: std.json.ObjectMap) ![]co
 
     // Array content (assistant messages)
     if (content_val == .array) {
-        var result: std.ArrayList(u8) = .{};
+        var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(allocator);
 
         for (content_val.array.items) |item| {
@@ -287,7 +288,7 @@ fn parseCodexLine(allocator: Allocator, line: []const u8) !?HistoryMessage {
 
     // Extract text content
     const content_blocks = payload.content orelse return null;
-    var result: std.ArrayList(u8) = .{};
+    var result: std.ArrayList(u8) = .empty;
     defer result.deinit(allocator);
 
     for (content_blocks) |block| {

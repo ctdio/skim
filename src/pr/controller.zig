@@ -15,13 +15,14 @@ const authors = @import("authors.zig");
 const stack = @import("stack.zig");
 const render = @import("render.zig");
 const graphite = @import("../git/graphite.zig");
+const skim_io = @import("skim_io");
 
 /// Thread-safe handoff of a background `gh pr list` fetch to the main loop.
 /// Worker writes the parsed list (or a failure flag) under the mutex; the main
 /// loop polls `ready` and consumes it. The list arena is built with c_allocator
 /// so it survives the thread boundary independent of the App allocator.
 pub const PendingPrFetch = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     result: ?parse.PullRequestList = null,
     fail_kind: ?github.GhErrorKind = null,
@@ -32,7 +33,7 @@ pub const PendingPrFetch = struct {
 /// modal loop. All fields default, so it stays out of the State init literal.
 pub const PrReviewState = struct {
     list: ?parse.PullRequestList = null,
-    filtered: std.ArrayList(usize) = .{},
+    filtered: std.ArrayList(usize) = .empty,
     selection: usize = 0,
     scroll: usize = 0,
 
@@ -53,7 +54,7 @@ pub const PrReviewState = struct {
     // Author-filter overlay.
     picking_author: bool = false,
     author_list: []authors.AuthorCount = &.{},
-    author_filtered: std.ArrayList(usize) = .{},
+    author_filtered: std.ArrayList(usize) = .empty,
     author_selection: usize = 0,
     author_scroll: usize = 0,
     author_query_buf: [256]u8 = undefined,
@@ -110,12 +111,12 @@ pub fn startListLoad(self: *PrReviewState, allocator: Allocator) !void {
 pub fn pollPendingFetch(self: *PrReviewState, allocator: Allocator) bool {
     if (!self.fetch.ready.load(.acquire)) return false;
 
-    self.fetch.mutex.lock();
+    self.fetch.mutex.lockUncancelable(skim_io.get());
     const maybe = self.fetch.result;
     const fail_kind = self.fetch.fail_kind;
     self.fetch.result = null;
     self.fetch.fail_kind = null;
-    self.fetch.mutex.unlock();
+    self.fetch.mutex.unlock(skim_io.get());
     self.fetch.ready.store(false, .release);
 
     if (self.fetch_thread) |t| {
@@ -214,16 +215,17 @@ pub fn backspaceQuery(self: *PrReviewState, allocator: Allocator) void {
     rebuildFilter(self, allocator);
 }
 
-pub fn openInBrowser(self: *PrReviewState, allocator: Allocator) void {
+pub fn openInBrowser(self: *PrReviewState) void {
     const pull = selected(self) orelse return;
     var buf: [16]u8 = undefined;
     const num = std.fmt.bufPrint(&buf, "{d}", .{pull.number}) catch return;
-    var child = std.process.Child.init(&.{ "gh", "pr", "view", num, "--web" }, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return;
-    _ = child.wait() catch {};
+    var child = std.process.spawn(skim_io.get(), .{
+        .argv = &.{ "gh", "pr", "view", num, "--web" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return;
+    _ = child.wait(skim_io.get()) catch {};
 }
 
 pub fn view(self: *const PrReviewState) render.View {
@@ -344,11 +346,11 @@ fn fetchWorker(self: *PrReviewState) void {
         .failed => |kind| fail_kind = kind,
     }
 
-    self.fetch.mutex.lock();
+    self.fetch.mutex.lockUncancelable(skim_io.get());
     if (self.fetch.result) |*stale| stale.deinit();
     self.fetch.result = list;
     self.fetch.fail_kind = fail_kind;
-    self.fetch.mutex.unlock();
+    self.fetch.mutex.unlock(skim_io.get());
     self.fetch.ready.store(true, .release);
 }
 

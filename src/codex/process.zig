@@ -2,6 +2,7 @@ const std = @import("std");
 // Mirrors `is_web` in src/platform.zig. This subtree has its own test target
 // rooted at its own directory, so it cannot import across the parent boundary.
 const is_web = @import("builtin").target.cpu.arch.isWasm();
+const skim_io = @import("skim_io");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
@@ -14,9 +15,9 @@ const Allocator = std.mem.Allocator;
 pub const CodexProcess = struct {
     allocator: Allocator,
     child: std.process.Child,
-    stdin: std.fs.File,
-    stdout: std.fs.File,
-    stderr: ?std.fs.File,
+    stdin: std.Io.File,
+    stdout: std.Io.File,
+    stderr: ?std.Io.File,
     status: Status,
 
     pub const Status = enum {
@@ -27,7 +28,7 @@ pub const CodexProcess = struct {
 
     pub const SpawnError = error{
         SpawnFailed,
-    } || Allocator.Error || std.process.Child.SpawnError;
+    } || Allocator.Error || std.process.SpawnError;
 
     /// Spawn a new codex process for app-server transport.
     /// The command should be the path to the codex binary or a wrapper.
@@ -40,26 +41,24 @@ pub const CodexProcess = struct {
         const argv = try buildArgv(allocator, command, extra);
         defer allocator.free(argv);
 
+        const child = std.process.spawn(skim_io.get(), .{
+            .argv = argv,
+            .cwd = if (cwd) |dir| .{ .path = dir } else .inherit,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .ignore,
+        }) catch |err| {
+            std.log.err("Codex: Failed to spawn process: {}", .{err});
+            return error.SpawnFailed;
+        };
+
         self.* = .{
             .allocator = allocator,
-            .child = std.process.Child.init(argv, allocator),
+            .child = child,
             .stdin = undefined,
             .stdout = undefined,
             .stderr = null,
             .status = .running,
-        };
-
-        if (cwd) |dir| {
-            self.child.cwd = dir;
-        }
-
-        self.child.stdin_behavior = .Pipe;
-        self.child.stdout_behavior = .Pipe;
-        self.child.stderr_behavior = .Ignore;
-
-        self.child.spawn() catch |err| {
-            std.log.err("Codex: Failed to spawn process: {}", .{err});
-            return error.SpawnFailed;
         };
 
         self.stdin = self.child.stdin.?;
@@ -74,22 +73,23 @@ pub const CodexProcess = struct {
         const self = try allocator.create(CodexProcess);
         errdefer allocator.destroy(self);
 
+        const child = std.process.spawn(skim_io.get(), .{
+            .argv = argv,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .ignore,
+        }) catch |err| {
+            std.log.err("Codex: Failed to spawn process: {}", .{err});
+            return error.SpawnFailed;
+        };
+
         self.* = .{
             .allocator = allocator,
-            .child = std.process.Child.init(argv, allocator),
+            .child = child,
             .stdin = undefined,
             .stdout = undefined,
             .stderr = null,
             .status = .running,
-        };
-
-        self.child.stdin_behavior = .Pipe;
-        self.child.stdout_behavior = .Pipe;
-        self.child.stderr_behavior = .Ignore;
-
-        self.child.spawn() catch |err| {
-            std.log.err("Codex: Failed to spawn process: {}", .{err});
-            return error.SpawnFailed;
         };
 
         self.stdin = self.child.stdin.?;
@@ -101,7 +101,7 @@ pub const CodexProcess = struct {
     /// Write data to the process stdin
     pub fn write(self: *CodexProcess, data: []const u8) !void {
         if (self.status != .running) return error.BrokenPipe;
-        try self.stdin.writeAll(data);
+        try self.stdin.writeStreamingAll(skim_io.get(), data);
     }
 
     /// Check if process is still running
@@ -118,15 +118,15 @@ pub const CodexProcess = struct {
         if (self.status != .running) return;
 
         if (self.child.stdin) |_| {
-            self.stdin.close();
+            self.stdin.close(skim_io.get());
             self.child.stdin = null;
         }
 
         // Kill entire process group to terminate child subprocesses
-        _ = posix.kill(-self.child.id, posix.SIG.TERM) catch {
-            _ = posix.kill(self.child.id, posix.SIG.TERM) catch {};
+        if (self.child.id) |child_pid| _ = posix.kill(-child_pid, posix.SIG.TERM) catch {
+            _ = posix.kill(child_pid, posix.SIG.TERM) catch {};
         };
-        _ = self.child.wait() catch {};
+        _ = self.child.wait(skim_io.get()) catch {};
         self.status = .exited;
     }
 
@@ -137,10 +137,10 @@ pub const CodexProcess = struct {
 
         if (self.status != .running) return;
 
-        _ = posix.kill(-self.child.id, posix.SIG.KILL) catch {
-            _ = posix.kill(self.child.id, posix.SIG.KILL) catch {};
+        if (self.child.id) |child_pid| _ = posix.kill(-child_pid, posix.SIG.KILL) catch {
+            _ = posix.kill(child_pid, posix.SIG.KILL) catch {};
         };
-        _ = self.child.wait() catch {};
+        _ = self.child.wait(skim_io.get()) catch {};
         self.status = .crashed;
     }
 

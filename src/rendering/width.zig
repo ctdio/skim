@@ -1,23 +1,11 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 
-const DisplayWidth = vaxis.DisplayWidth;
-
-// vaxis (zg-based) measures grapheme width against a DisplayWidth instance built
-// from the Unicode tables. We own a single instance loaded lazily on first use
-// and kept for the process lifetime, so width queries work uniformly across the
-// TUI, headless, and test paths without threading the instance through every
-// render helper. Access is single-threaded (the render loop), so the lazy init
-// needs no synchronization.
-var width_data: ?DisplayWidth = null;
-var load_failed: bool = false;
-
 /// Display width of a UTF-8 string in terminal cells, accounting for wide
-/// characters (CJK, emoji). Falls back to a codepoint count if the Unicode
-/// tables cannot be loaded.
+/// characters (CJK, emoji). vaxis measures against uucode's comptime tables,
+/// so there is no instance to load or thread through render helpers.
 pub fn gwidth(str: []const u8) u16 {
-    const data = ensureData() orelse return fallbackWidth(str);
-    return vaxis.gwidth.gwidth(str, .unicode, data);
+    return vaxis.gwidth.gwidth(str, .unicode);
 }
 
 /// Calculate the display width of a UTF-8 string in terminal cells, accounting
@@ -103,7 +91,7 @@ pub const WrapIterator = struct {
 
 /// Word-wrap `text` to `max_width` display cells. Caller owns the returned list.
 pub fn wrapText(allocator: std.mem.Allocator, text: []const u8, max_width: usize) !std.ArrayList([]const u8) {
-    var lines: std.ArrayList([]const u8) = .{};
+    var lines: std.ArrayList([]const u8) = .empty;
     errdefer lines.deinit(allocator);
 
     var it = WrapIterator{ .text = text, .max_width = max_width };
@@ -196,17 +184,6 @@ test "wrapRowCount: wide grapheme wider than max_width terminates" {
     try std.testing.expectEqual(@as(usize, 3), wrapRowCount("😀😀😀", 1));
 }
 
-fn ensureData() ?*const DisplayWidth {
-    if (width_data) |*data| return data;
-    if (load_failed) return null;
-
-    width_data = DisplayWidth.init(std.heap.page_allocator) catch {
-        load_failed = true;
-        return null;
-    };
-    return &width_data.?;
-}
-
 /// True when every byte is a printable ASCII character, so the string occupies
 /// exactly `len` cells. Matches the fast-path scan in `sliceByDisplayWidth`.
 fn isPrintableAscii(text: []const u8) bool {
@@ -214,8 +191,4 @@ fn isPrintableAscii(text: []const u8) bool {
         if (byte < 0x20 or byte >= 0x7f) return false;
     }
     return true;
-}
-
-fn fallbackWidth(str: []const u8) u16 {
-    return @intCast(std.unicode.utf8CountCodepoints(str) catch str.len);
 }

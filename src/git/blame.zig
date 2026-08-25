@@ -1,4 +1,5 @@
 const std = @import("std");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 
@@ -41,7 +42,7 @@ pub const BlameData = struct {
 /// For new files (additions), we blame against HEAD
 /// For deleted lines, we blame against the parent commit
 pub fn getBlame(allocator: Allocator, file_path: []const u8, ref: ?[]const u8) !BlameData {
-    var args: std.ArrayList([]const u8) = .{};
+    var args: std.ArrayList([]const u8) = .empty;
     defer args.deinit(allocator);
 
     try args.append(allocator, "git");
@@ -56,39 +57,22 @@ pub fn getBlame(allocator: Allocator, file_path: []const u8, ref: ?[]const u8) !
 
     try args.append(allocator, file_path);
 
-    var child = std.process.Child.init(args.items, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    // `process.run` drains both pipes concurrently; a sequential
+    // stdout-then-stderr read deadlocks once the child fills the stderr pipe.
+    const result = try std.process.run(allocator, skim_io.get(), .{
+        .argv = args.items,
+        .stdout_limit = .limited(50 * 1024 * 1024),
+        .stderr_limit = .limited(50 * 1024 * 1024),
+    });
+    const stdout = result.stdout;
+    defer allocator.free(stdout);
+    allocator.free(result.stderr);
 
-    try child.spawn();
-
-    // Drain both pipes concurrently; a sequential stdout-then-stderr read
-    // deadlocks once the child fills the stderr pipe buffer.
-    var stdout_buf: std.ArrayList(u8) = .{};
-    defer stdout_buf.deinit(allocator);
-    var stderr_buf: std.ArrayList(u8) = .{};
-    defer stderr_buf.deinit(allocator);
-    try child.collectOutput(allocator, &stdout_buf, &stderr_buf, 50 * 1024 * 1024);
-
-    const stdout = try allocator.dupe(u8, stdout_buf.items);
-    errdefer allocator.free(stdout);
-
-    const term = try child.wait();
-
-    switch (term) {
-        .Exited => |code| {
-            if (code != 0) {
-                allocator.free(stdout);
-                return error.GitCommandFailed;
-            }
-        },
-        else => {
-            allocator.free(stdout);
-            return error.GitCommandFailed;
-        },
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.GitCommandFailed,
+        else => return error.GitCommandFailed,
     }
 
-    defer allocator.free(stdout);
     return parseBlameOutput(allocator, stdout);
 }
 
@@ -101,7 +85,7 @@ pub fn getBlame(allocator: Allocator, file_path: []const u8, ref: ?[]const u8) !
 /// ...
 /// \t<line-content>
 fn parseBlameOutput(allocator: Allocator, output: []const u8) !BlameData {
-    var lines_list: std.ArrayList(BlameLine) = .{};
+    var lines_list: std.ArrayList(BlameLine) = .empty;
     errdefer {
         for (lines_list.items) |*line| {
             line.deinit(allocator);
@@ -415,7 +399,7 @@ pub fn formatDate(buf: []u8, timestamp: i64) []const u8 {
 
 /// Format relative time from timestamp (short form)
 pub fn formatRelativeTime(buf: []u8, timestamp: i64) []const u8 {
-    const now = std.time.timestamp();
+    const now = skim_io.timestamp();
     const diff = now - timestamp;
 
     if (diff < 0) {

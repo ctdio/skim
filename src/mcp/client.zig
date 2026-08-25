@@ -1,8 +1,9 @@
 const std = @import("std");
-const net = std.net;
+const net = @import("../net.zig");
 const posix = std.posix;
 const protocol = @import("protocol.zig");
 const discovery = @import("discovery.zig");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 
@@ -18,7 +19,7 @@ pub const McpClient = struct {
 
     // Thread-safe message queue (reader thread -> main thread)
     message_queue: std.ArrayList(protocol.ParsedMessage),
-    queue_mutex: std.Thread.Mutex,
+    queue_mutex: std.Io.Mutex,
 
     // Reader thread management
     reader_thread: ?std.Thread,
@@ -36,8 +37,8 @@ pub const McpClient = struct {
             .session_id = null,
             .last_connect_port = null,
             .last_reconnect_attempt = 0,
-            .message_queue = .{},
-            .queue_mutex = .{},
+            .message_queue = .empty,
+            .queue_mutex = .init,
             .reader_thread = null,
             .shutdown_flag = std.atomic.Value(bool).init(false),
             .needs_reconnect = std.atomic.Value(bool).init(false),
@@ -48,12 +49,12 @@ pub const McpClient = struct {
         self.disconnect();
 
         // Clear any remaining messages in queue
-        self.queue_mutex.lock();
+        self.queue_mutex.lockUncancelable(skim_io.get());
         for (self.message_queue.items) |*msg| {
             freeMessageStatic(self.allocator, msg);
         }
         self.message_queue.deinit(self.allocator);
-        self.queue_mutex.unlock();
+        self.queue_mutex.unlock(skim_io.get());
 
         if (self.session_id) |id| {
             self.allocator.free(id);
@@ -66,8 +67,7 @@ pub const McpClient = struct {
         if (self.connected) return;
 
         self.last_connect_port = port;
-        const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-        self.stream = try net.tcpConnectToAddress(address);
+        self.stream = try net.connectLoopback(port);
         self.connected = true;
         self.shutdown_flag.store(false, .release);
         self.needs_reconnect.store(false, .release);
@@ -88,7 +88,7 @@ pub const McpClient = struct {
             self.connect(port) catch |err| {
                 if (retries + 1 < max_retries) {
                     // Wait before retry (50ms, 100ms, 150ms...)
-                    std.Thread.sleep((retries + 1) * 50 * std.time.ns_per_ms);
+                    skim_io.sleep((retries + 1) * 50 * std.time.ns_per_ms);
                     continue;
                 }
                 return err;
@@ -109,7 +109,7 @@ pub const McpClient = struct {
         const port = self.last_connect_port orelse return false;
 
         // Cooldown: only try once every 2 seconds
-        const now = std.time.timestamp();
+        const now = skim_io.timestamp();
         if (now - self.last_reconnect_attempt < 2) {
             return false;
         }
@@ -248,20 +248,20 @@ pub const McpClient = struct {
 
     /// Check if there are pending messages to process (non-blocking)
     pub fn hasPendingMessages(self: *McpClient) bool {
-        self.queue_mutex.lock();
-        defer self.queue_mutex.unlock();
+        self.queue_mutex.lockUncancelable(skim_io.get());
+        defer self.queue_mutex.unlock(skim_io.get());
         return self.message_queue.items.len > 0;
     }
 
     /// Get and clear pending messages (called from main thread)
     pub fn consumeMessages(self: *McpClient) []protocol.ParsedMessage {
-        self.queue_mutex.lock();
-        defer self.queue_mutex.unlock();
+        self.queue_mutex.lockUncancelable(skim_io.get());
+        defer self.queue_mutex.unlock(skim_io.get());
 
         const messages = self.message_queue.toOwnedSlice(self.allocator) catch {
             return &[_]protocol.ParsedMessage{};
         };
-        self.message_queue = .{};
+        self.message_queue = .empty;
         return messages;
     }
 
@@ -406,12 +406,12 @@ pub const McpClient = struct {
                         };
 
                         // Add to queue (thread-safe)
-                        self.queue_mutex.lock();
+                        self.queue_mutex.lockUncancelable(skim_io.get());
                         self.message_queue.append(self.allocator, msg) catch {
                             // Queue full or OOM, drop message
                             freeMessageStatic(self.allocator, @constCast(&msg));
                         };
-                        self.queue_mutex.unlock();
+                        self.queue_mutex.unlock(skim_io.get());
                     }
 
                     start = end + 1;

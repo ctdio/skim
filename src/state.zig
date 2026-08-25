@@ -172,7 +172,7 @@ pub const StateHelpers = struct {
 
         // Build the NEW file content from hunks
         // Skip deletions (old file), include additions and context (new file)
-        var content: std.ArrayList(u8) = .{};
+        var content: std.ArrayList(u8) = .empty;
         defer content.deinit(app.allocator);
 
         for (file.hunks) |hunk| {
@@ -477,7 +477,7 @@ pub const StateHelpers = struct {
             .old => hunk.old_line_offsets,
         } orelse return error.MissingLineOffsets;
 
-        var spans: std.ArrayList(parser.LineHighlightSpan) = .{};
+        var spans: std.ArrayList(parser.LineHighlightSpan) = .empty;
         errdefer spans.deinit(allocator);
 
         const indices = try allocator.alloc(parser.LineHighlightIndex, hunk.lines.len);

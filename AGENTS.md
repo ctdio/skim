@@ -12,7 +12,7 @@ Skim is a keyboard-driven TUI for code reviews built in Zig. Vim-style navigatio
 
 ### Prerequisites
 
-- Zig 0.15.1 or later
+- Zig 0.16.0 or later
 - Git must be available in PATH
 
 ### Common Commands
@@ -101,6 +101,7 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 
 - **CLI Layer** (`main.zig`): Arg parsing, init, subcommand routing
 - **Application Layer** (`app.zig`): Modal state machine, event handling
+- **I/O Handle** (`io.zig`): Process-wide `std.Io` + environment, plus 0.16 shims
 - **Line Tracking** (`line_map.zig`): Position registry
 - **Git Integration** (`git/`): Command execution, diff parsing
 - **Rendering** (`rendering/`): Unified/side-by-side views
@@ -108,8 +109,32 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 - **ACP System** (`acp/`): Agent Client Protocol for built-in agent panel
 - **Agent UI** (`agent/`): Chat panel, markdown rendering, message history
 - **MCP Server** (`mcp/`): Model Context Protocol for external agent integration
+- **Sockets** (`net.zig`): Non-blocking loopback TCP for the MCP server/clients
 - **CLI Commands** (`cli/`): Session management, comment operations
 - **Logging** (`logging.zig`): File logging to `~/.skim/*.log`
+
+### The `skim_io` module (read before touching I/O)
+
+Zig 0.16 put file, process, and synchronization operations behind an `Io` value
+that every call takes as a parameter. Rather than thread it through several
+hundred signatures, `main` adopts `std.process.Init` and stashes the handle in
+`src/io.zig`; everything else reaches it through `skim_io.get()`.
+
+Two rules follow:
+
+- **Import it by name — `@import("skim_io")`, never a relative path.** It is
+  wired into every module in `build.zig`, which is what lets a test step rooted
+  at `src/acp/` or `src/testing/` import it at all. A relative import fails to
+  compile in exactly those steps.
+- **Every executable must call `skim_io.init(process_init)` first.** A `main`
+  that skips it leaves the handle `undefined` and the first file, timer, or
+  lock operation crashes. That includes the benchmarks in `src/bench_*.zig`.
+
+`io.zig` also holds the shims for APIs 0.16 removed outright: `Timer`,
+`sleep`/`timestamp` helpers, `getEnv`, `readFile`/`readAllAlloc`, `AppendFile`
+(0.16 dropped `File.seek`), `absolutePathAlloc` (replaces `realpathAlloc`), and
+`setNonBlocking` (replaces `posix.fcntl`). Prefer extending it over
+reimplementing a workaround locally.
 
 **Key Design Principles:**
 

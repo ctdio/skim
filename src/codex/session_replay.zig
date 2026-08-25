@@ -4,6 +4,7 @@ const agent_state_mod = @import("../agent/state.zig");
 const AgentState = agent_state_mod.AgentState;
 const AgentMessage = agent_state_mod.Message;
 const CodexManager = @import("manager.zig").CodexManager;
+const skim_io = @import("skim_io");
 
 pub const ReplaySummary = struct {
     manager_status: CodexManager.Status = .thread_active,
@@ -11,19 +12,19 @@ pub const ReplaySummary = struct {
 
 pub fn loadReplayLines(allocator: std.mem.Allocator, path: []const u8) ![][]const u8 {
     const file = if (std.fs.path.isAbsolute(path))
-        try std.fs.openFileAbsolute(path, .{})
+        try std.Io.Dir.openFileAbsolute(skim_io.get(), path, .{})
     else
-        try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+        try std.Io.Dir.cwd().openFile(skim_io.get(), path, .{});
+    defer file.close(skim_io.get());
 
-    const content = try file.readToEndAlloc(allocator, 8 * 1024 * 1024);
+    const content = try skim_io.readAllAlloc(file, allocator, 8 * 1024 * 1024);
     defer allocator.free(content);
 
     return loadReplayLinesFromString(allocator, content);
 }
 
 pub fn loadReplayLinesFromString(allocator: std.mem.Allocator, content: []const u8) ![][]const u8 {
-    var lines_out: std.ArrayList([]const u8) = .{};
+    var lines_out: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (lines_out.items) |line| allocator.free(line);
         lines_out.deinit(allocator);
@@ -46,12 +47,12 @@ pub fn freeReplayLines(allocator: std.mem.Allocator, lines: [][]const u8) void {
 
 pub fn replaySessionFile(allocator: std.mem.Allocator, agent_state: *AgentState, path: []const u8) !ReplaySummary {
     const file = if (std.fs.path.isAbsolute(path))
-        try std.fs.openFileAbsolute(path, .{})
+        try std.Io.Dir.openFileAbsolute(skim_io.get(), path, .{})
     else
-        try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+        try std.Io.Dir.cwd().openFile(skim_io.get(), path, .{});
+    defer file.close(skim_io.get());
 
-    const content = try file.readToEndAlloc(allocator, 8 * 1024 * 1024);
+    const content = try skim_io.readAllAlloc(file, allocator, 8 * 1024 * 1024);
     defer allocator.free(content);
 
     return replaySessionFromString(allocator, agent_state, content);
@@ -375,7 +376,7 @@ fn selectReplayQuestionAnswer(
 }
 
 fn extractMessageText(allocator: std.mem.Allocator, blocks: []const std.json.Value) ![]const u8 {
-    var result: std.ArrayList(u8) = .{};
+    var result: std.ArrayList(u8) = .empty;
     defer result.deinit(allocator);
 
     for (blocks) |block| {
@@ -396,7 +397,7 @@ fn extractMessageText(allocator: std.mem.Allocator, blocks: []const std.json.Val
 }
 
 fn extractReasoningText(allocator: std.mem.Allocator, payload: std.json.ObjectMap) ![]const u8 {
-    var result: std.ArrayList(u8) = .{};
+    var result: std.ArrayList(u8) = .empty;
     defer result.deinit(allocator);
 
     if (getObjectValue(payload, "summary")) |summary_value| {

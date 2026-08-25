@@ -1,6 +1,7 @@
 const std = @import("std");
 const opencode = @import("../opencode/opencode.zig");
 const App = @import("../app.zig").App;
+const skim_io = @import("skim_io");
 
 /// Context for subagent modal fetch thread
 pub const SubagentFetchContext = struct {
@@ -17,7 +18,7 @@ pub const SubagentFetchContext = struct {
 /// Thread-safe pending result from subagent fetch worker.
 /// Worker writes under mutex, main loop polls via atomic flag.
 pub const PendingSubagentFetch = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     messages: ?[]opencode.Client.ModalMessage = null,
     error_message: ?[]const u8 = null, // String literal, not owned
@@ -75,12 +76,12 @@ pub fn pollSubagentFetch(app: *App) void {
     if (!app.pending_subagent_fetch.ready.load(.acquire)) return;
 
     // Take pending data under mutex
-    app.pending_subagent_fetch.mutex.lock();
+    app.pending_subagent_fetch.mutex.lockUncancelable(skim_io.get());
     const messages = app.pending_subagent_fetch.messages;
     const err_msg = app.pending_subagent_fetch.error_message;
     app.pending_subagent_fetch.messages = null;
     app.pending_subagent_fetch.error_message = null;
-    app.pending_subagent_fetch.mutex.unlock();
+    app.pending_subagent_fetch.mutex.unlock(skim_io.get());
     app.pending_subagent_fetch.ready.store(false, .release);
 
     processSubagentFetchResult(app, messages, err_msg);
@@ -94,9 +95,9 @@ fn subagentFetchWorker(ctx: *SubagentFetchContext) void {
 
     // Create a temporary client for the fetch
     var client = opencode.Client.init(std.heap.c_allocator, ctx.base_url) catch {
-        pending.mutex.lock();
+        pending.mutex.lockUncancelable(skim_io.get());
         pending.error_message = "Failed to connect to server";
-        pending.mutex.unlock();
+        pending.mutex.unlock(skim_io.get());
         pending.ready.store(true, .release);
         app.needs_render = true;
         ctx.deinit(std.heap.c_allocator);
@@ -114,9 +115,9 @@ fn subagentFetchWorker(ctx: *SubagentFetchContext) void {
             else => "Failed to fetch messages",
         };
         std.log.err("Subagent fetch failed: {s} ({})", .{ err_msg, err });
-        pending.mutex.lock();
+        pending.mutex.lockUncancelable(skim_io.get());
         pending.error_message = err_msg;
-        pending.mutex.unlock();
+        pending.mutex.unlock(skim_io.get());
         pending.ready.store(true, .release);
         app.needs_render = true;
         ctx.deinit(std.heap.c_allocator);
@@ -124,9 +125,9 @@ fn subagentFetchWorker(ctx: *SubagentFetchContext) void {
         return;
     };
 
-    pending.mutex.lock();
+    pending.mutex.lockUncancelable(skim_io.get());
     pending.messages = modal_messages;
-    pending.mutex.unlock();
+    pending.mutex.unlock(skim_io.get());
     pending.ready.store(true, .release);
     app.needs_render = true;
     ctx.deinit(std.heap.c_allocator);

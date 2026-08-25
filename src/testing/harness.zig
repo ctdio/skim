@@ -15,7 +15,6 @@ pub const Cell = vaxis.Cell;
 pub const TestContext = struct {
     allocator: std.mem.Allocator,
     screen: Screen,
-    unicode: vaxis.Unicode,
     arena: std.heap.ArenaAllocator,
 
     /// Returns a Window that covers the entire screen.
@@ -28,7 +27,6 @@ pub const TestContext = struct {
             .width = self.screen.width,
             .height = self.screen.height,
             .screen = &self.screen,
-            .unicode = &self.unicode,
         };
     }
 
@@ -44,7 +42,7 @@ pub const TestContext = struct {
     /// - Trims trailing whitespace from each row
     /// - Trims trailing empty lines
     pub fn captureToText(self: *TestContext) ![]const u8 {
-        var result: std.ArrayList(u8) = .{};
+        var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(self.allocator);
 
         var row: u16 = 0;
@@ -109,7 +107,7 @@ pub const TestContext = struct {
     /// - Handles fg/bg colors (index and RGB) and bold/dim attributes
     /// - Trims trailing whitespace from each row (unless they have background color)
     pub fn captureToAnsi(self: *TestContext) ![]const u8 {
-        var result: std.ArrayList(u8) = .{};
+        var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(self.allocator);
 
         var current_style: vaxis.Style = .{};
@@ -192,7 +190,6 @@ pub const TestContext = struct {
     pub fn deinit(self: *TestContext) void {
         self.arena.deinit();
         self.screen.deinit(self.allocator);
-        self.unicode.deinit(self.allocator);
     }
 };
 
@@ -321,12 +318,9 @@ pub fn createTestContext(allocator: std.mem.Allocator, cols: u16, rows: u16) !Te
     });
     errdefer screen.deinit(allocator);
 
-    const unicode = try vaxis.Unicode.init(allocator);
-
     return .{
         .allocator = allocator,
         .screen = screen,
-        .unicode = unicode,
         .arena = std.heap.ArenaAllocator.init(allocator),
     };
 }

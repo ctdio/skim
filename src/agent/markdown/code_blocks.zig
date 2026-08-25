@@ -10,6 +10,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const types = @import("types.zig");
 const colors_mod = @import("colors.zig");
+const skim_io = @import("skim_io");
 
 const StyledSpan = types.StyledSpan;
 const NodeType = types.NodeType;
@@ -90,7 +91,7 @@ pub const CodeBlockRenderer = struct {
     /// Render a fenced code block into styled spans
     /// Returns owned slice of spans
     pub fn render(self: *CodeBlockRenderer, code: []const u8, language_hint: ?[]const u8) !std.ArrayList(StyledSpan) {
-        var spans: std.ArrayList(StyledSpan) = .{};
+        var spans: std.ArrayList(StyledSpan) = .empty;
         errdefer spans.deinit(self.allocator);
 
         const bg_style = vaxis.Style{ .bg = self.colors.code_block_bg };
@@ -153,11 +154,11 @@ pub const CodeBlockRenderer = struct {
     /// Render code with syntax highlighting
     fn renderHighlighted(self: *CodeBlockRenderer, spans: *std.ArrayList(StyledSpan), code: []const u8, language_hint: ?[]const u8, indent: usize) !void {
         // Strip trailing whitespace/newlines from code
-        var trimmed_code = std.mem.trimRight(u8, code, " \t\n\r");
+        var trimmed_code = std.mem.trimEnd(u8, code, " \t\n\r");
 
         // Also strip trailing fence markers (```) that might be included by parser
         while (std.mem.endsWith(u8, trimmed_code, "```")) {
-            trimmed_code = std.mem.trimRight(u8, trimmed_code[0 .. trimmed_code.len - 3], " \t\n\r");
+            trimmed_code = std.mem.trimEnd(u8, trimmed_code[0 .. trimmed_code.len - 3], " \t\n\r");
         }
 
         if (trimmed_code.len == 0) {

@@ -476,7 +476,7 @@ fn convertSubagentInfo(allocator: Allocator, src: OpencodeEvent.SubagentEventInf
     info.title = if (src.title) |t| allocator.dupe(u8, t) catch null else null;
 
     if (src.summary.len > 0) {
-        var summaries: std.ArrayList(SubagentToolSummary) = .{};
+        var summaries: std.ArrayList(SubagentToolSummary) = .empty;
         defer summaries.deinit(allocator);
         summaries.ensureTotalCapacity(allocator, src.summary.len) catch return info;
         for (src.summary) |entry| {
@@ -507,7 +507,7 @@ fn convertSubagentInfo(allocator: Allocator, src: OpencodeEvent.SubagentEventInf
 /// Used for partial updates (child tool progress) where we merge into existing info.
 fn convertSummaryOnly(allocator: Allocator, src: []opencode_manager.Event.SubagentToolSummary) []SubagentToolSummary {
     if (src.len == 0) return &.{};
-    var summaries: std.ArrayList(SubagentToolSummary) = .{};
+    var summaries: std.ArrayList(SubagentToolSummary) = .empty;
     defer summaries.deinit(allocator);
     summaries.ensureTotalCapacity(allocator, src.len) catch return &.{};
     for (src) |entry| {

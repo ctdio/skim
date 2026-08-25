@@ -36,6 +36,7 @@ const RenderUtils = rendering_utils.RenderUtils;
 
 // Import markdown rendering for agent messages
 const markdown = @import("markdown/markdown.zig");
+const skim_io = @import("skim_io");
 const MarkdownColors = markdown.MarkdownColors;
 
 const PaneRenderOptions = struct {
@@ -591,7 +592,7 @@ const FileRefRange = struct {
 /// Find all valid @file references in the input text (files that exist)
 /// Returns a list of ranges. Caller owns the returned slice.
 fn findFileRefRanges(allocator: std.mem.Allocator, file_picker: *const state.FilePickerState, text: []const u8) ![]FileRefRange {
-    var ranges: std.ArrayList(FileRefRange) = .{};
+    var ranges: std.ArrayList(FileRefRange) = .empty;
     errdefer ranges.deinit(allocator);
 
     var i: usize = 0;
@@ -1082,7 +1083,7 @@ fn renderPane(app: *App, win: vaxis.Window, options: PaneRenderOptions) !void {
     try renderInputArea(app, input_win, options.tab, agent_state, options.is_focused, pending_approval, pending_question, show_plan_acceptance_hint);
 
     if (agent_state.slash_menu.visible) {
-        try renderSlashMenu(win, agent_state, input_top);
+        try renderSlashMenu(app, win, agent_state, input_top);
     }
 
     if (agent_state.file_picker.visible) {
@@ -1116,8 +1117,11 @@ fn renderTitleBar(app: *App, win: vaxis.Window, tab: *AgentTab, is_focused: bool
     else
         "Agent";
     var title_buf: [160]u8 = undefined;
+    // Through the frame arena like every other formatted string here: vaxis cells
+    // hold a slice to the grapheme bytes rather than a copy, and the screen is
+    // drawn after this returns, so `title_buf` would be gone by then.
     const title: []const u8 = if (show_tab_name)
-        std.fmt.bufPrint(&title_buf, "{s} · {s}", .{ tab.name, base_title }) catch base_title
+        try RenderUtils.copyFrameText(app, std.fmt.bufPrint(&title_buf, "{s} · {s}", .{ tab.name, base_title }) catch base_title)
     else
         base_title;
 
@@ -2227,7 +2231,7 @@ const waiting_messages = [_][]const u8{
 fn renderThinkingIndicator(win: vaxis.Window, row: usize, is_thinking: bool, is_compacting: bool, turn_seed: usize) void {
     if (win.width < 20 or row >= win.height) return;
 
-    const now = std.time.milliTimestamp();
+    const now = skim_io.milliTimestamp();
 
     // Select message: compacting overrides thinking, time-based cycling for waiting
     const text = if (is_compacting) "Compacting..." else if (is_thinking) blk: {
@@ -2275,7 +2279,7 @@ fn renderThinkingIndicator(win: vaxis.Window, row: usize, is_thinking: bool, is_
 // =============================================================================
 
 /// Render the slash command menu as a popup above the input area
-fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize) !void {
+fn renderSlashMenu(app: *App, win: vaxis.Window, agent_state: *AgentState, input_top: usize) !void {
     // Get filtered commands
     var indices: [32]usize = undefined;
     const filtered_count = agent_state.getFilteredCommandIndices(&indices);
@@ -2396,10 +2400,10 @@ fn renderSlashMenu(win: vaxis.Window, agent_state: *AgentState, input_top: usize
         }
     }
 
-    renderSlashMenuDetail(menu_win, selected_cmd, visible_count + 1, menu_width);
+    renderSlashMenuDetail(app, menu_win, selected_cmd, visible_count + 1, menu_width);
 }
 
-fn renderSlashMenuDetail(menu_win: vaxis.Window, cmd: *const state.OwnedCommand, row: usize, menu_width: usize) void {
+fn renderSlashMenuDetail(app: *App, menu_win: vaxis.Window, cmd: *const state.OwnedCommand, row: usize, menu_width: usize) void {
     const detail_style = vaxis.Style{ .fg = Color.dim_gray, .bg = Color.dialog_bg };
     const available_width = if (menu_width > MENU_PADDING * 2) menu_width - (MENU_PADDING * 2) else 0;
     if (available_width == 0) return;
@@ -2410,15 +2414,19 @@ fn renderSlashMenuDetail(menu_win: vaxis.Window, cmd: *const state.OwnedCommand,
     var truncated_buf: [256]u8 = undefined;
     const text = truncateSlashMenuDetail(&truncated_buf, detail, available_width);
 
+    // Copy into the frame buffer: vaxis cells hold a slice to the grapheme bytes
+    // (no copy), and rendering happens after this function returns, so both
+    // stack buffers above would be gone out from under the cells.
+    const frame_text = RenderUtils.copyFrameText(app, text) catch return;
+
     var detail_seg = [_]vaxis.Cell.Segment{
-        .{ .text = text, .style = detail_style },
+        .{ .text = frame_text, .style = detail_style },
     };
     _ = menu_win.print(&detail_seg, .{ .row_offset = @intCast(row), .col_offset = MENU_PADDING });
 }
 
 fn formatSlashMenuDetail(buf: []u8, cmd: *const state.OwnedCommand) []const u8 {
-    var stream = std.io.fixedBufferStream(buf);
-    const writer = stream.writer();
+    var writer: std.Io.Writer = .fixed(buf);
 
     writer.writeByte('/') catch {};
     writer.writeAll(cmd.name) catch {};
@@ -2435,7 +2443,7 @@ fn formatSlashMenuDetail(buf: []u8, cmd: *const state.OwnedCommand) []const u8 {
         writer.writeAll(cmd.description) catch {};
     }
 
-    return stream.getWritten();
+    return writer.buffered();
 }
 
 fn truncateSlashMenuDetail(buf: []u8, text: []const u8, max_width: usize) []const u8 {

@@ -4,6 +4,7 @@ const agent = @import("agent/agent.zig");
 const app_mod = @import("app.zig");
 const parser = @import("git/parser.zig");
 const harness = @import("testing/harness.zig");
+const skim_io = @import("skim_io");
 
 const App = app_mod.App;
 
@@ -42,7 +43,9 @@ const STREAM_CHUNK =
     "- reuse parsed markdown\n" ++
     "- avoid paint-time AST work\n";
 
-pub fn main() !void {
+pub fn main(process_init: std.process.Init) !void {
+    skim_io.init(process_init);
+
     const allocator = std.heap.c_allocator;
 
     const config = TranscriptConfig{
@@ -122,9 +125,9 @@ fn runColdRenderBench(
     while (i < config.warmup + config.iterations) : (i += 1) {
         resetTranscript(agent_state, config.turns, false) catch return error.BenchSetupFailed;
 
-        const start = std.time.nanoTimestamp();
+        const start = skim_io.nanoTimestamp();
         try agent.renderAgentPanel(app, win);
-        const elapsed = @as(u64, @intCast(std.time.nanoTimestamp() - start));
+        const elapsed = @as(u64, @intCast(skim_io.nanoTimestamp() - start));
 
         if (i >= config.warmup) {
             samples[i - config.warmup] = elapsed;
@@ -148,9 +151,9 @@ fn runSteadyStateBench(
 
     var i: usize = 0;
     while (i < config.warmup + config.iterations) : (i += 1) {
-        const start = std.time.nanoTimestamp();
+        const start = skim_io.nanoTimestamp();
         try agent.renderAgentPanel(app, win);
-        const elapsed = @as(u64, @intCast(std.time.nanoTimestamp() - start));
+        const elapsed = @as(u64, @intCast(skim_io.nanoTimestamp() - start));
 
         if (i >= config.warmup) {
             samples[i - config.warmup] = elapsed;
@@ -174,10 +177,10 @@ fn runStreamingBench(
         resetTranscript(agent_state, config.turns, true) catch return error.BenchSetupFailed;
         try agent.renderAgentPanel(app, win);
 
-        const start = std.time.nanoTimestamp();
+        const start = skim_io.nanoTimestamp();
         try agent_state.appendToLastAgentMessage(STREAM_CHUNK);
         try agent.renderAgentPanel(app, win);
-        const elapsed = @as(u64, @intCast(std.time.nanoTimestamp() - start));
+        const elapsed = @as(u64, @intCast(skim_io.nanoTimestamp() - start));
 
         if (i >= config.warmup) {
             samples[i - config.warmup] = elapsed;
@@ -279,7 +282,7 @@ fn addUserTurn(agent_state: *agent.AgentState, turn_idx: usize) !void {
 }
 
 fn addAgentTurn(agent_state: *agent.AgentState, turn_idx: usize, streaming_tail: bool) !void {
-    var content: std.ArrayList(u8) = .{};
+    var content: std.ArrayList(u8) = .empty;
     defer content.deinit(agent_state.allocator);
 
     try content.writer(agent_state.allocator).print(
@@ -297,21 +300,21 @@ fn addAgentTurn(agent_state: *agent.AgentState, turn_idx: usize, streaming_tail:
 }
 
 fn readEnvUsize(allocator: std.mem.Allocator, name: []const u8, default_value: usize) usize {
-    const env_value = std.process.getEnvVarOwned(allocator, name) catch return default_value;
+    const env_value = skim_io.getEnvVarOwned(allocator, name) catch return default_value;
     defer allocator.free(env_value);
     if (env_value.len == 0) return default_value;
     return std.fmt.parseInt(usize, env_value, 10) catch default_value;
 }
 
 fn readEnvU16(allocator: std.mem.Allocator, name: []const u8, default_value: u16) u16 {
-    const env_value = std.process.getEnvVarOwned(allocator, name) catch return default_value;
+    const env_value = skim_io.getEnvVarOwned(allocator, name) catch return default_value;
     defer allocator.free(env_value);
     if (env_value.len == 0) return default_value;
     return std.fmt.parseInt(u16, env_value, 10) catch default_value;
 }
 
 fn readEnvPhase(allocator: std.mem.Allocator, name: []const u8, default_value: BenchPhase) BenchPhase {
-    const env_value = std.process.getEnvVarOwned(allocator, name) catch return default_value;
+    const env_value = skim_io.getEnvVarOwned(allocator, name) catch return default_value;
     defer allocator.free(env_value);
     if (env_value.len == 0) return default_value;
 

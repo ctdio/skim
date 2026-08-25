@@ -5,6 +5,7 @@ const acp_session_replay = @import("../acp/session_replay.zig");
 const codex_session_replay = @import("../codex/session_replay.zig");
 const opencode_session_replay = @import("../opencode/session_replay.zig");
 const ManagerHandle = @import("manager_handle.zig").ManagerHandle;
+const skim_io = @import("skim_io");
 
 const AgentState = agent_state_mod.AgentState;
 const DebugReplayManagerStatus = agent_state_mod.DebugReplayManagerStatus;
@@ -65,7 +66,7 @@ pub fn step(ctx: StepContext) !bool {
         if (try codex_session_replay.previewPendingQuestionResolution(ctx.allocator, agent_state, current_line)) {
             replay.previewing_current_line = true;
             replay.step_delay_override_ms = agent_state_mod.debug_replay_question_answer_preview_linger_ms;
-            replay.last_step_ms = std.time.milliTimestamp();
+            replay.last_step_ms = skim_io.milliTimestamp();
             syncManagerStatus(ctx.manager, replay.manager_status);
             if (!agent_state.isInHistoryMode() and agent_state.messages.items.len > 0) {
                 agent_state.enterHistoryMode();
@@ -128,7 +129,7 @@ pub fn step(ctx: StepContext) !bool {
             null,
         else => null,
     };
-    replay.last_step_ms = std.time.milliTimestamp();
+    replay.last_step_ms = skim_io.milliTimestamp();
     if (replay.isComplete()) {
         replay.playing = false;
     }
@@ -146,7 +147,7 @@ pub fn advanceIfDue(ctx: StepContext) void {
     const replay = agent_state.getDebugReplay() orelse return;
     if (!replay.playing or replay.isComplete()) return;
 
-    const now = std.time.milliTimestamp();
+    const now = skim_io.milliTimestamp();
     const step_delay_ms = replay.step_delay_override_ms orelse replay.step_interval_ms;
     if (now - replay.last_step_ms < step_delay_ms) return;
 

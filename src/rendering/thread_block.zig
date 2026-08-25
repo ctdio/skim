@@ -94,7 +94,7 @@ pub fn threadDisplayHeight(allocator: Allocator, info: ThreadRenderInfo, width: 
 const min_content_width = 12;
 
 fn planRows(arena: Allocator, info: ThreadRenderInfo, width: usize) ![]PlannedRow {
-    var rows: std.ArrayList(PlannedRow) = .{};
+    var rows: std.ArrayList(PlannedRow) = .empty;
 
     const thread = info.thread;
     const comments = thread.comments;
@@ -190,7 +190,7 @@ fn drawRow(win: vaxis.Window, row: PlannedRow, row_offset: usize, is_cursor: boo
         .{ .fg = Color.white };
     const dim_style: vaxis.Style = .{ .fg = Color.dim_gray };
 
-    var segs: std.ArrayList(vaxis.Cell.Segment) = .{};
+    var segs: std.ArrayList(vaxis.Cell.Segment) = .empty;
 
     switch (row.kind) {
         .collapsed => {
@@ -262,7 +262,7 @@ fn formatByline(arena: Allocator, parts: BylineParts) ![]const u8 {
 
 /// Space-prefixed badge string (e.g. " [RESOLVED] [OUTDATED]"). Empty if none.
 fn badges(arena: Allocator, info: ThreadRenderInfo, draft: bool) ![]const u8 {
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     if (info.thread.is_resolved) try buf.appendSlice(arena, " [RESOLVED]");
     if (info.bucket_reason) |reason| {
         switch (reason) {
@@ -296,7 +296,7 @@ fn splitSuggestion(body: []const u8) SuggestionParts {
     while (idx <= body.len) : (idx += 1) {
         const at_end = idx == body.len;
         if (at_end or body[idx] == '\n') {
-            const line = std.mem.trimRight(u8, body[line_start..idx], " \t\r");
+            const line = std.mem.trimEnd(u8, body[line_start..idx], " \t\r");
             if (std.mem.eql(u8, line, "```")) {
                 const suggestion = trimTrailingNewline(body[content_start..line_start]);
                 const after_start = @min(idx + 1, body.len);
@@ -325,8 +325,8 @@ fn findFenceOpen(body: []const u8) ?FenceOpen {
     while (idx <= body.len) : (idx += 1) {
         const at_end = idx == body.len;
         if (at_end or body[idx] == '\n') {
-            const line = std.mem.trimRight(u8, body[line_start..idx], " \t\r");
-            const info_str = std.mem.trimLeft(u8, line, " \t");
+            const line = std.mem.trimEnd(u8, body[line_start..idx], " \t\r");
+            const info_str = std.mem.trimStart(u8, line, " \t");
             if (std.mem.eql(u8, info_str, "```suggestion")) {
                 return .{ .fence_start = line_start, .content_start = @min(idx + 1, body.len) };
             }
@@ -337,7 +337,7 @@ fn findFenceOpen(body: []const u8) ?FenceOpen {
 }
 
 fn trimTrailingNewline(s: []const u8) []const u8 {
-    return std.mem.trimRight(u8, s, "\n");
+    return std.mem.trimEnd(u8, s, "\n");
 }
 
 fn datePart(created_at: []const u8) []const u8 {

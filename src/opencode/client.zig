@@ -1,4 +1,5 @@
 const std = @import("std");
+const skim_io = @import("skim_io");
 const protocol = @import("protocol.zig");
 const sse = @import("sse.zig");
 
@@ -37,7 +38,7 @@ pub const Client = struct {
         return .{
             .allocator = allocator,
             .base_url = try allocator.dupe(u8, base_url),
-            .http_client = .{ .allocator = allocator },
+            .http_client = .{ .allocator = allocator, .io = skim_io.get() },
         };
     }
 
@@ -362,7 +363,7 @@ pub const Client = struct {
 
         // Create a temporary HTTP client to avoid thread safety issues
         // The main http_client may be in use by the SSE reader thread
-        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        var temp_client: std.http.Client = .{ .allocator = self.allocator, .io = skim_io.get() };
         defer temp_client.deinit();
 
         var req = temp_client.request(.POST, uri, .{}) catch return error.ConnectionFailed;
@@ -440,7 +441,7 @@ pub const Client = struct {
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
 
-        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        var temp_client: std.http.Client = .{ .allocator = self.allocator, .io = skim_io.get() };
         defer temp_client.deinit();
 
         var req = temp_client.request(.POST, uri, .{
@@ -479,7 +480,7 @@ pub const Client = struct {
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
 
-        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        var temp_client: std.http.Client = .{ .allocator = self.allocator, .io = skim_io.get() };
         defer temp_client.deinit();
 
         var req = temp_client.request(.POST, uri, .{}) catch return error.ConnectionFailed;
@@ -520,7 +521,7 @@ pub const Client = struct {
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
 
         // Use a separate HTTP client to avoid thread safety issues with SSE connection
-        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        var temp_client: std.http.Client = .{ .allocator = self.allocator, .io = skim_io.get() };
         defer temp_client.deinit();
 
         var req = temp_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
@@ -704,7 +705,7 @@ pub const Client = struct {
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
 
-        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        var temp_client: std.http.Client = .{ .allocator = self.allocator, .io = skim_io.get() };
         defer temp_client.deinit();
 
         var req = temp_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
@@ -740,7 +741,7 @@ pub const Client = struct {
 
         const uri = std.Uri.parse(uri_str) catch return error.InvalidResponse;
 
-        var temp_client: std.http.Client = .{ .allocator = self.allocator };
+        var temp_client: std.http.Client = .{ .allocator = self.allocator, .io = skim_io.get() };
         defer temp_client.deinit();
 
         var req = temp_client.request(.GET, uri, .{}) catch return error.ConnectionFailed;
@@ -800,7 +801,7 @@ fn parseSessionMessages(allocator: Allocator, body: []const u8) ![]Client.ModalM
 }
 
 fn convertMessages(allocator: Allocator, messages: []const Client.SessionMessage) ![]Client.ModalMessage {
-    var result: std.ArrayList(Client.ModalMessage) = .{};
+    var result: std.ArrayList(Client.ModalMessage) = .empty;
     errdefer {
         for (result.items) |*m| m.deinit(allocator);
         result.deinit(allocator);
@@ -952,7 +953,7 @@ test "parseSessionMessages with structured response" {
 test "parseSessionMessages with empty session" {
     const allocator = std.testing.allocator;
 
-    const json = 
+    const json =
         \\{"messages":[]}
     ;
 
@@ -983,7 +984,7 @@ test "parseSessionMessages with raw array format" {
 test "parseSessionMessages with malformed response" {
     const allocator = std.testing.allocator;
 
-    const json = 
+    const json =
         \\not valid json at all
     ;
 

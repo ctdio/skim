@@ -16,7 +16,7 @@ pub const SearchState = struct {
         return .{
             .query_buffer = undefined,
             .query_len = 0,
-            .matches = .{},
+            .matches = .empty,
             .current_match_idx = null,
             .allocator = allocator,
         };

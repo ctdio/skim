@@ -39,6 +39,7 @@ const help_mode = @import("modes/help_mode.zig");
 const branch_selection_mode = @import("modes/branch_selection_mode.zig");
 const commit_selection_mode = @import("modes/commit_selection_mode.zig");
 const graphite_mode = @import("modes/graphite_mode.zig");
+const skim_io = @import("skim_io");
 const model_selection_mode = @import("modes/model_selection_mode.zig");
 const permission_selection_mode = @import("modes/permission_selection_mode.zig");
 const agent_selection_mode = @import("modes/agent_selection_mode.zig");
@@ -112,13 +113,13 @@ fn parseEnvBool(value: []const u8) bool {
 }
 
 fn readEnvBool(allocator: Allocator, name: []const u8) bool {
-    const env_value = std.process.getEnvVarOwned(allocator, name) catch return false;
+    const env_value = skim_io.getEnvVarOwned(allocator, name) catch return false;
     defer allocator.free(env_value);
     return parseEnvBool(env_value);
 }
 
 fn readEnvU32(allocator: Allocator, name: []const u8, default_value: u32) u32 {
-    const env_value = std.process.getEnvVarOwned(allocator, name) catch return default_value;
+    const env_value = skim_io.getEnvVarOwned(allocator, name) catch return default_value;
     defer allocator.free(env_value);
     if (env_value.len == 0) return default_value;
     return std.fmt.parseInt(u32, env_value, 10) catch default_value;
@@ -469,12 +470,12 @@ pub const App = struct {
 
         // Now initialize TUI (after git operations complete successfully)
         // This ensures git errors print correctly before terminal enters raw mode
-        var tty = try vaxis.Tty.init(&tty_static_buffer);
+        var tty = try vaxis.Tty.init(skim_io.get(), &tty_static_buffer);
         errdefer tty.deinit();
 
-        clipboard.setTtyFd(tty.fd);
+        clipboard.setTtyFile(tty.fd);
 
-        var vx = try Vaxis.init(allocator, .{
+        var vx = try Vaxis.init(skim_io.get(), allocator, skim_io.environMap(), .{
             .kitty_keyboard_flags = .{
                 .disambiguate = true,
                 .report_events = false,
@@ -1090,7 +1091,7 @@ pub const App = struct {
     /// Check if waiting for a second Ctrl+C press (for normal/comment modes)
     pub fn isPendingCtrlC(self: *const App) bool {
         if (self.last_ctrl_c == 0) return false;
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = @intCast(skim_io.nanoTimestamp());
         return (now - self.last_ctrl_c) < App.CTRL_C_TIMEOUT_NS;
     }
 
@@ -1399,7 +1400,7 @@ pub const App = struct {
 
     /// Move newly-streamed files into the view (initial incremental load).
     fn drainIncrementalFiles(self: *App) !void {
-        var new_files: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+        var new_files: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
         defer new_files.deinit(self.allocator);
 
         const n = try diff_loader.drainNewFiles(&self.state.diff_load, &new_files, self.allocator);
@@ -1412,7 +1413,7 @@ pub const App = struct {
 
     /// Take the full loaded diff and hand it to the refresh swap (refresh load).
     fn applyReplaceLoad(self: *App) !void {
-        var all: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+        var all: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
         defer all.deinit(self.allocator);
 
         _ = try diff_loader.drainNewFiles(&self.state.diff_load, &all, self.allocator);
@@ -1483,13 +1484,13 @@ pub const App = struct {
         git.stageFile(self.allocator, file_path) catch {
             // Show error in status message
             self.state.status_message = "Failed to stage file";
-            self.state.status_message_time = std.time.milliTimestamp();
+            self.state.status_message_time = skim_io.milliTimestamp();
             return;
         };
 
         // Show success message
         self.state.status_message = "File staged";
-        self.state.status_message_time = std.time.milliTimestamp();
+        self.state.status_message_time = skim_io.milliTimestamp();
 
         // Refresh to reflect changes
         try self.refresh();
@@ -1503,13 +1504,13 @@ pub const App = struct {
         // Stage all files
         git.stageAllFiles(self.allocator) catch {
             self.state.status_message = "Failed to stage files";
-            self.state.status_message_time = std.time.milliTimestamp();
+            self.state.status_message_time = skim_io.milliTimestamp();
             return;
         };
 
         // Show success message
         self.state.status_message = "All files staged";
-        self.state.status_message_time = std.time.milliTimestamp();
+        self.state.status_message_time = skim_io.milliTimestamp();
 
         // Switch to staged view to show what was staged
         try self.switchDiffMode(.staged);
@@ -1535,11 +1536,8 @@ pub const App = struct {
         // The event loop's reader thread must be running before queryTerminal:
         // vaxis only wakes the query futex from that thread (on the DA1 reply),
         // so querying first would block for the full timeout every launch.
-        var loop: vaxis.Loop(Event) = .{
-            .tty = tty,
-            .vaxis = vx,
-        };
-        try loop.init();
+        var loop: vaxis.Loop(Event) = .init(skim_io.get(), tty, vx);
+        try loop.installResizeHandler();
         try loop.start();
         defer loop.stop();
 
@@ -1552,7 +1550,7 @@ pub const App = struct {
         diff_loader.startIfRequested(&self.state.diff_load, self.allocator, self.state.diff_source);
 
         // Query terminal capabilities (50ms timeout - enough for modern terminals)
-        try vx.queryTerminal(writer, 50 * std.time.ns_per_ms);
+        try vx.queryTerminal(writer, .{ .nanoseconds = 50 * std.time.ns_per_ms });
 
         // Enable mouse reporting so the wheel can scroll the diff and panels.
         // vaxis disables it automatically on deinit.
@@ -1636,7 +1634,7 @@ pub const App = struct {
             const diff_loading = self.state.diff_load.isLoading();
             const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active and !review_active and !diff_loading;
             if (should_poll) {
-                loop.pollEvent();
+                try loop.pollEvent();
             } else {
                 // Adaptive sleep based on activity level:
                 // - High activity (prompting): 5ms for smooth streaming (~200 FPS)
@@ -1675,7 +1673,7 @@ pub const App = struct {
                     // If this was a prompt edit, read the content back
                     if (self.editor_is_prompt_edit) {
                         // Read the edited content from the temp file
-                        if (std.fs.cwd().readFileAlloc(self.allocator, file_path, 1024 * 1024)) |content| {
+                        if (std.Io.Dir.cwd().readFileAlloc(skim_io.get(), file_path, self.allocator, .limited(1024 * 1024))) |content| {
                             defer self.allocator.free(content);
                             if (self.getActiveAgentState()) |agent_state| {
                                 // Trim trailing newlines (editors often add them)
@@ -1692,7 +1690,7 @@ pub const App = struct {
                             std.log.err("Failed to read edited prompt: {any}", .{err});
                         }
                         // Delete the temp file
-                        std.fs.cwd().deleteFile(file_path) catch |err| {
+                        std.Io.Dir.cwd().deleteFile(skim_io.get(), file_path) catch |err| {
                             std.log.warn("Failed to delete temp file: {any}", .{err});
                         };
                     }
@@ -1725,7 +1723,7 @@ pub const App = struct {
 
             // Process all pending events
             var had_events = false;
-            while (loop.tryEvent()) |event| {
+            while (try loop.tryEvent()) |event| {
                 try self.handleEvent(event);
                 had_events = true;
             }
@@ -1750,7 +1748,7 @@ pub const App = struct {
             // Throttled re-render for the shimmer animation on the thinking indicator.
             // The shimmer changes phase every 80ms, so re-rendering faster is wasted work.
             if (manager_active and !self.needs_render) {
-                const now_ms = std.time.milliTimestamp();
+                const now_ms = skim_io.milliTimestamp();
                 if (now_ms - last_shimmer_render >= 80) {
                     self.needs_render = true;
                     last_shimmer_render = now_ms;
@@ -1790,11 +1788,11 @@ pub const App = struct {
                     _ = self.shouldProfileFrame();
 
                     if (self.profile_active_frame) {
-                        var render_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        var render_timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                         try frame.render(self, win);
                         const render_ns: u64 = if (render_timer_opt) |*timer| timer.read() else 0;
 
-                        var vx_timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        var vx_timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                         const shifted = try scroll_region.apply(vx, tty.writer());
                         try vx.render(tty.writer());
                         const vx_ns: u64 = if (vx_timer_opt) |*timer| timer.read() else 0;
@@ -1836,7 +1834,7 @@ pub const App = struct {
 
             // Check for completed highlighting results
             if (self.highlight_worker) |worker| {
-                var results: std.ArrayList(state_helpers.HighlightResult) = .{};
+                var results: std.ArrayList(state_helpers.HighlightResult) = .empty;
                 defer results.deinit(self.allocator);
 
                 worker.pollResults(self.allocator, &results) catch {};
@@ -2528,7 +2526,7 @@ pub const App = struct {
         const input_text = agent_state.input.getText();
 
         // Generate a unique filename with full path
-        const timestamp = std.time.timestamp();
+        const timestamp = skim_io.timestamp();
         var path_buf: [256]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "/tmp/skim-prompt-{d}.txt", .{timestamp}) catch {
             std.log.err("Failed to build temp file path", .{});
@@ -2536,16 +2534,16 @@ pub const App = struct {
         };
 
         // Create and write the temp file
-        const file = std.fs.cwd().createFile(full_path, .{}) catch |err| {
+        const file = std.Io.Dir.cwd().createFile(skim_io.get(), full_path, .{}) catch |err| {
             std.log.err("Failed to create temp file: {any}", .{err});
             return;
         };
-        file.writeAll(input_text) catch |err| {
-            file.close();
+        file.writeStreamingAll(skim_io.get(), input_text) catch |err| {
+            file.close(skim_io.get());
             std.log.err("Failed to write to temp file: {any}", .{err});
             return;
         };
-        file.close();
+        file.close(skim_io.get());
 
         // Check if editor is terminal-based
         const is_terminal = try editor.isCurrentEditorTerminal(self.allocator);
@@ -2564,7 +2562,7 @@ pub const App = struct {
             // For now, just show a message
             std.log.warn("GUI editors not supported for prompt editing", .{});
             // Clean up the temp file
-            std.fs.cwd().deleteFile(full_path) catch {};
+            std.Io.Dir.cwd().deleteFile(skim_io.get(), full_path) catch {};
         }
     }
 
@@ -2767,7 +2765,7 @@ pub const App = struct {
 
         if (!self.state.graphite.available) {
             self.state.status_message = "Graphite CLI (gt) not installed";
-            self.state.status_message_time = std.time.milliTimestamp();
+            self.state.status_message_time = skim_io.milliTimestamp();
             return;
         }
 
@@ -2778,7 +2776,7 @@ pub const App = struct {
             self.mode = .graphite_stack;
         } else {
             self.state.status_message = "Not in a Graphite stack";
-            self.state.status_message_time = std.time.milliTimestamp();
+            self.state.status_message_time = skim_io.milliTimestamp();
         }
     }
 
@@ -3171,7 +3169,7 @@ pub const App = struct {
         } else {
             // No parent - shouldn't happen for non-trunk branches
             self.state.status_message = "No parent branch found";
-            self.state.status_message_time = std.time.milliTimestamp();
+            self.state.status_message_time = skim_io.milliTimestamp();
             return;
         }
 
@@ -3188,13 +3186,13 @@ pub const App = struct {
     pub fn navigateStackToParent(self: *App) !void {
         const stack = self.state.graphite.stack orelse {
             self.state.status_message = "Not in a Graphite stack";
-            self.state.status_message_time = std.time.milliTimestamp();
+            self.state.status_message_time = skim_io.milliTimestamp();
             return;
         };
 
         if (stack.current_idx == 0) {
             self.state.status_message = "Already at trunk (bottom of stack)";
-            self.state.status_message_time = std.time.milliTimestamp();
+            self.state.status_message_time = skim_io.milliTimestamp();
             return;
         }
 
@@ -3205,13 +3203,13 @@ pub const App = struct {
     pub fn navigateStackToChild(self: *App) !void {
         const stack = self.state.graphite.stack orelse {
             self.state.status_message = "Not in a Graphite stack";
-            self.state.status_message_time = std.time.milliTimestamp();
+            self.state.status_message_time = skim_io.milliTimestamp();
             return;
         };
 
         if (stack.current_idx + 1 >= stack.branches.len) {
             self.state.status_message = "Already at tip (top of stack)";
-            self.state.status_message_time = std.time.milliTimestamp();
+            self.state.status_message_time = skim_io.milliTimestamp();
             return;
         }
 
@@ -3349,7 +3347,7 @@ pub const App = struct {
             if (!self.profile_active_frame) {
                 return width_util.sliceByDisplayWidth(text, max_width);
             }
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             const slice = width_util.sliceByDisplayWidth(text, max_width);
             if (timer_opt) |*timer| {
                 self.profile_counters.slice_ns += timer.read();
@@ -3373,7 +3371,7 @@ pub const App = struct {
             if (!self.profile_active_frame) {
                 return RenderUtils.padSegments(self, allocator, segments, current_width, available_width, style);
             }
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             const padded = try RenderUtils.padSegments(self, allocator, segments, current_width, available_width, style);
             if (timer_opt) |*timer| {
                 self.profile_counters.pad_ns += timer.read();
@@ -3402,7 +3400,7 @@ pub const App = struct {
             if (!self.profile_active_frame) {
                 return RenderUtils.renderGutterWithBlame(self, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
             }
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try RenderUtils.renderGutterWithBlame(self, win, line_idx, row, is_cursor_or_visual, show_number, file_lineno, line_type, gutter_width, file_path, is_first_line_in_hunk);
             if (timer_opt) |*timer| {
                 self.profile_counters.gutter_ns += timer.read();
@@ -3418,7 +3416,7 @@ pub const App = struct {
         const selection = self.getVisualSelection() orelse return;
 
         // Build text from selected lines
-        var buffer: std.ArrayList(u8) = .{};
+        var buffer: std.ArrayList(u8) = .empty;
         defer buffer.deinit(self.allocator);
 
         var line_idx = selection.start;
@@ -3510,14 +3508,14 @@ pub const App = struct {
         self.state.status_message_owned = owned;
         self.state.status_message = owned;
         self.state.status_message_severity = severity;
-        self.state.status_message_time = std.time.timestamp();
+        self.state.status_message_time = skim_io.timestamp();
         self.needs_render = true;
     }
 
     /// Clear status message if it has expired (after 3 seconds)
     pub fn clearExpiredStatusMessage(self: *App) void {
         if (self.state.status_message != null) {
-            const elapsed = std.time.timestamp() - self.state.status_message_time;
+            const elapsed = skim_io.timestamp() - self.state.status_message_time;
             if (elapsed >= 3) {
                 // Free owned message if any
                 if (self.state.status_message_owned) |owned| {
@@ -3646,7 +3644,7 @@ test "isSessionInitializing returns true for queued agent connection" {
 test "stdin-backed app can switch to staged diff" {
     const allocator = std.testing.allocator;
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try std.Io.Dir.cwd().openDir(skim_io.get(), ".", .{});
     defer original_cwd.close();
 
     var tmp = std.testing.tmpDir(.{});
@@ -3677,7 +3675,7 @@ test "stdin-backed app can switch to staged diff" {
 test "stdin-backed app can open commit selection" {
     const allocator = std.testing.allocator;
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try std.Io.Dir.cwd().openDir(skim_io.get(), ".", .{});
     defer original_cwd.close();
 
     var tmp = std.testing.tmpDir(.{});
@@ -3701,7 +3699,7 @@ test "stdin-backed app can open commit selection" {
     try std.testing.expect(app.state.commit_select.list.items.len > 0);
 }
 
-fn setupGitRepoWithWorkingAndStagedChanges(allocator: Allocator, dir: std.fs.Dir) !void {
+fn setupGitRepoWithWorkingAndStagedChanges(allocator: Allocator, dir: std.Io.Dir) !void {
     try runTestCommand(allocator, &.{ "git", "init", "-q" });
     try runTestCommand(allocator, &.{ "git", "config", "user.email", "skim-test@example.com" });
     try runTestCommand(allocator, &.{ "git", "config", "user.name", "Skim Test" });
@@ -3733,30 +3731,31 @@ fn initPagerModeAppFromWorkingDiff(allocator: Allocator) !App {
 }
 
 /// Waits up to `max_ms` for the tty reader thread to queue an event, returning
-/// immediately once one lands. This is `Queue.poll` with a deadline.
+/// as soon as one lands.
 ///
 /// The loop only reaches here when something needs polling on a timer, which in
 /// practice is always: `should_poll` requires `!server_active`, and the TUI
 /// server starts unconditionally. Sleeping the interval out unconditionally
-/// therefore added its full duration to the latency of every keystroke, and
-/// polling for it in short naps would burn a wakeup per nap. Blocking on the
-/// queue's own condition variable costs one wakeup and no added latency.
+/// would add its full duration to the latency of every keystroke. Zig 0.16
+/// dropped `Condition.timedWait`, so instead of blocking on the queue's own
+/// condition variable this naps in short slices; the slice length, not the
+/// budget, bounds the added latency.
 fn sleepUntilInput(queue: anytype, max_ms: u64) void {
     const budget_ns = max_ms * std.time.ns_per_ms;
-    var timer = std.time.Timer.start() catch {
-        std.Thread.sleep(budget_ns);
-        return;
-    };
-
-    queue.mutex.lock();
-    defer queue.mutex.unlock();
-    // Mirrors Queue.isEmptyLH, which is private. Waiting (rather than popping)
-    // leaves the event for the caller's tryEvent drain, like Queue.poll.
-    while (queue.write_index == queue.read_index) {
-        const elapsed_ns = timer.read();
-        if (elapsed_ns >= budget_ns) return;
-        queue.not_empty.timedWait(&queue.mutex, budget_ns - elapsed_ns) catch return;
+    const slice_ns = @min(budget_ns, std.time.ns_per_ms);
+    var waited_ns: u64 = 0;
+    while (waited_ns < budget_ns) : (waited_ns += slice_ns) {
+        if (!queueIsEmpty(queue)) return;
+        skim_io.sleep(slice_ns);
     }
+}
+
+/// Mirrors `Queue.isEmptyLH`, which is private. Peeking (rather than popping)
+/// leaves the event for the caller's `tryEvent` drain.
+fn queueIsEmpty(queue: anytype) bool {
+    queue.mutex.lockUncancelable(skim_io.get());
+    defer queue.mutex.unlock(skim_io.get());
+    return queue.write_index == queue.read_index;
 }
 
 fn diffContainsLine(files: []const parser.FileDiff, expected: []const u8) bool {
@@ -3774,16 +3773,16 @@ fn diffContainsLine(files: []const parser.FileDiff, expected: []const u8) bool {
 }
 
 fn runTestCommand(allocator: Allocator, argv: []const []const u8) !void {
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+    const result = try std.process.run(allocator, skim_io.get(), .{
         .argv = argv,
-        .max_output_bytes = 1024 * 1024,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code == 0) return;
         },
         else => {},

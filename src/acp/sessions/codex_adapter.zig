@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
+const skim_io = @import("skim_io");
 const SessionInfo = types.SessionInfo;
 const SessionDiscoveryError = types.SessionDiscoveryError;
 
@@ -16,7 +17,7 @@ pub fn listSessions(
     cwd: []const u8,
     limit: usize,
 ) SessionDiscoveryError![]SessionInfo {
-    const home = std.posix.getenv("HOME") orelse return error.HomeDirectoryNotFound;
+    const home = skim_io.getEnv("HOME") orelse return error.HomeDirectoryNotFound;
 
     // Build path to sessions directory
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -25,12 +26,12 @@ pub fn listSessions(
     };
 
     // Open sessions directory
-    var sessions_dir = std.fs.openDirAbsolute(sessions_path, .{ .iterate = true }) catch {
+    var sessions_dir = std.Io.Dir.openDirAbsolute(skim_io.get(), sessions_path, .{ .iterate = true }) catch {
         return error.SessionDirectoryNotFound;
     };
-    defer sessions_dir.close();
+    defer sessions_dir.close(skim_io.get());
 
-    var sessions: std.ArrayList(SessionInfo) = .{};
+    var sessions: std.ArrayList(SessionInfo) = .empty;
     errdefer {
         for (sessions.items) |*s| s.deinit();
         sessions.deinit(allocator);
@@ -38,31 +39,31 @@ pub fn listSessions(
 
     // Walk year directories (2025, 2024, etc.)
     var year_iter = sessions_dir.iterate();
-    while (year_iter.next() catch null) |year_entry| {
+    while (year_iter.next(skim_io.get()) catch null) |year_entry| {
         if (year_entry.kind != .directory) continue;
 
-        var year_dir = sessions_dir.openDir(year_entry.name, .{ .iterate = true }) catch continue;
-        defer year_dir.close();
+        var year_dir = sessions_dir.openDir(skim_io.get(), year_entry.name, .{ .iterate = true }) catch continue;
+        defer year_dir.close(skim_io.get());
 
         // Walk month directories (01-12)
         var month_iter = year_dir.iterate();
-        while (month_iter.next() catch null) |month_entry| {
+        while (month_iter.next(skim_io.get()) catch null) |month_entry| {
             if (month_entry.kind != .directory) continue;
 
-            var month_dir = year_dir.openDir(month_entry.name, .{ .iterate = true }) catch continue;
-            defer month_dir.close();
+            var month_dir = year_dir.openDir(skim_io.get(), month_entry.name, .{ .iterate = true }) catch continue;
+            defer month_dir.close(skim_io.get());
 
             // Walk day directories (01-31)
             var day_iter = month_dir.iterate();
-            while (day_iter.next() catch null) |day_entry| {
+            while (day_iter.next(skim_io.get()) catch null) |day_entry| {
                 if (day_entry.kind != .directory) continue;
 
-                var day_dir = month_dir.openDir(day_entry.name, .{ .iterate = true }) catch continue;
-                defer day_dir.close();
+                var day_dir = month_dir.openDir(skim_io.get(), day_entry.name, .{ .iterate = true }) catch continue;
+                defer day_dir.close(skim_io.get());
 
                 // Find rollout files
                 var file_iter = day_dir.iterate();
-                while (file_iter.next() catch null) |file_entry| {
+                while (file_iter.next(skim_io.get()) catch null) |file_entry| {
                     if (file_entry.kind != .file) continue;
                     if (!std.mem.startsWith(u8, file_entry.name, "rollout-")) continue;
                     if (!std.mem.endsWith(u8, file_entry.name, ".jsonl")) continue;
@@ -102,15 +103,15 @@ pub fn listSessions(
 /// Parse a rollout file to extract session info
 fn parseRolloutFile(
     allocator: Allocator,
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     filename: []const u8,
 ) !SessionInfo {
     // Open and read file content
-    const file = dir.openFile(filename, .{}) catch return error.IoError;
-    defer file.close();
+    const file = dir.openFile(skim_io.get(), filename, .{}) catch return error.IoError;
+    defer file.close(skim_io.get());
 
     // Read file content (limit to 256KB - enough to find session_meta and first user message)
-    const content = file.readToEndAlloc(allocator, 256 * 1024) catch return error.IoError;
+    const content = skim_io.readAllAlloc(file, allocator, 256 * 1024) catch return error.IoError;
     defer allocator.free(content);
 
     // Get first line (session_meta)
@@ -133,7 +134,7 @@ fn parseRolloutFile(
     // Parse timestamp from ISO format or filename
     const timestamp = parseTimestamp(entry.timestamp) orelse
         parseFilenameTimestamp(filename) orelse
-        std.time.milliTimestamp();
+        skim_io.milliTimestamp();
 
     // Find first user message by scanning for response_item entries
     // Note: findFirstUserMessage returns a slice into content, so we must dupe it

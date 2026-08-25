@@ -16,6 +16,7 @@ const RenderUtils = render_utils.RenderUtils;
 
 // Forward declare App type (will be imported by app.zig)
 const App = @import("app.zig").App;
+const skim_io = @import("skim_io");
 
 pub const Category = enum {
     navigation,
@@ -70,8 +71,8 @@ pub const CommandPaletteState = struct {
         return .{
             .query_buffer = undefined,
             .query_len = 0,
-            .commands = .{},
-            .filtered_commands = .{},
+            .commands = .empty,
+            .filtered_commands = .empty,
             .selected_idx = 0,
             .scroll_offset = 0,
             .allocator = allocator,
@@ -365,7 +366,7 @@ fn truncatePath(allocator: Allocator, path: []const u8, max_length: usize) ![]co
     if (path.len <= max_length) return path;
 
     // Split path by '/'
-    var components: std.ArrayList([]const u8) = .{};
+    var components: std.ArrayList([]const u8) = .empty;
     defer components.deinit(allocator);
 
     var iter = std.mem.splitScalar(u8, path, '/');
@@ -383,7 +384,7 @@ fn truncatePath(allocator: Allocator, path: []const u8, max_length: usize) ![]co
     const keep_left: usize = 2;
     const keep_right: usize = 2;
 
-    var result: std.ArrayList(u8) = .{};
+    var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
 
     // Add left components
@@ -607,7 +608,7 @@ pub fn renderCommandPalette(app: *App, win: vaxis.Window) !void {
             const spacing = "  ";
 
             // Build left-side segments (indicator, name, description)
-            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
             defer segments.deinit(app.allocator);
 
             try segments.append(app.allocator, .{ .text = indicator, .style = indicator_style });

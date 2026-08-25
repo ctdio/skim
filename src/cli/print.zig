@@ -11,6 +11,7 @@ const App = @import("../app.zig").App;
 const render_unified = @import("../rendering/unified.zig");
 const syntax = @import("../highlighting/core.zig");
 const state_helpers = @import("../state.zig").StateHelpers;
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 const UnifiedRenderer = render_unified.UnifiedRenderer;
@@ -20,8 +21,8 @@ const DEFAULT_WIDTH: u16 = 120;
 /// Returns null if not a TTY or detection fails.
 fn getTerminalWidth() ?u16 {
     // Try stderr first (often remains a TTY when stdout is piped)
-    const stderr = std.fs.File.stderr();
-    if (!std.posix.isatty(stderr.handle)) return null;
+    const stderr = std.Io.File.stderr();
+    if (!(stderr.isTty(skim_io.get()) catch false)) return null;
 
     var ws: std.posix.winsize = undefined;
     const result = std.posix.system.ioctl(stderr.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));
@@ -178,7 +179,7 @@ fn renderAndOutput(allocator: Allocator, app: *App, max_diff_lines: ?usize, widt
 
     // Write to stdout
     var stdout_buffer: [4096]u8 = undefined;
-    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     try file_writer.interface.writeAll(ansi_output);
     try file_writer.interface.writeByte('\n');
 
@@ -278,7 +279,7 @@ fn parseArgs(allocator: Allocator, args: []const []const u8) !Config {
     var staged = false;
     var max_lines: ?usize = DEFAULT_MAX_LINES;
     var width: ?u16 = null;
-    var positional_args: std.ArrayList([]const u8) = .{};
+    var positional_args: std.ArrayList([]const u8) = .empty;
     defer positional_args.deinit(allocator);
 
     // Skip "skim" and "print"
@@ -372,20 +373,20 @@ fn parseArgs(allocator: Allocator, args: []const []const u8) !Config {
 }
 
 fn readStdinIfPiped(allocator: Allocator) !?[]const u8 {
-    const stdin_file = std.fs.File.stdin();
-    const stdin_is_tty = std.posix.isatty(stdin_file.handle);
+    const stdin_file = std.Io.File.stdin();
+    const stdin_is_tty = (stdin_file.isTty(skim_io.get()) catch false);
 
     if (stdin_is_tty) {
         return null;
     }
 
     const max_size = 50 * 1024 * 1024;
-    return try stdin_file.readToEndAlloc(allocator, max_size);
+    return try skim_io.readAllAlloc(stdin_file, allocator, max_size);
 }
 
 fn printHelp() !void {
     var stdout_buffer: [4096]u8 = undefined;
-    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer file_writer.interface.flush() catch {};
     const stdout = &file_writer.interface;
     try stdout.writeAll(

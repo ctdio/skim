@@ -35,6 +35,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 zig-out
 .zig-cache
+# Zig 0.16 unpacks fetched dependencies here when building from this root
+zig-pkg
 
 erl_crash.dump
 

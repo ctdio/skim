@@ -188,7 +188,7 @@ pub const UI = struct {
             const item_col = menu_start_col;
 
             // Build segments dynamically
-            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
             defer segments.deinit(app.allocator);
 
             // Label
@@ -335,7 +335,7 @@ pub const UI = struct {
                 };
 
                 // Build segments with colored stats
-                var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+                var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
                 defer segments.deinit(app.allocator);
 
                 // Branch name
@@ -487,7 +487,7 @@ pub const UI = struct {
                     const is_selected = idx == app.state.commit_select.selection;
 
                     // Build segments for commit display
-                    var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+                    var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
                     defer segments.deinit(app.allocator);
 
                     // Caret
@@ -689,7 +689,7 @@ pub const UI = struct {
             const is_selected = array_idx == app.state.graphite.selection;
             const is_current = array_idx == stack.current_idx;
 
-            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
             defer segments.deinit(app.allocator);
 
             // Selection caret
@@ -1015,7 +1015,7 @@ pub const UI = struct {
                 const is_current = if (current_model_id) |cid| std.mem.eql(u8, model.model_id, cid) else false;
 
                 // Line 1: Selection caret + model name + current marker
-                var name_segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+                var name_segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
                 defer name_segments.deinit(app.allocator);
 
                 const caret = if (is_selected) "▶ " else "  ";
@@ -1159,7 +1159,7 @@ pub const UI = struct {
             const is_selected = idx == app.state.permission_selection;
             const is_current = if (current_policy) |policy| policy == opt.policy else false;
 
-            var line_segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            var line_segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
             defer line_segments.deinit(app.allocator);
 
             const caret = if (is_selected) "▶ " else "  ";
@@ -1260,7 +1260,7 @@ pub const UI = struct {
             const row = DIALOG_PADDING + 2 + idx;
             const is_selected = idx == app.state.agent_selection_idx;
 
-            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
             defer segments.deinit(app.allocator);
 
             // Selection caret
@@ -1381,7 +1381,7 @@ pub const UI = struct {
             const time_str = session.formatRelativeTime(&time_buf);
 
             // Build line: caret + time + display
-            var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+            var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
             defer segments.deinit(app.allocator);
 
             const caret = if (is_selected) "▶ " else "  ";
@@ -1519,7 +1519,7 @@ pub const UI = struct {
         win.clear();
 
         // Build status bar using segments with colors
-        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
         defer segments.deinit(app.allocator);
 
         // Add panel indicator when both panels are visible

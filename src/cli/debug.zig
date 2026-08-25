@@ -17,6 +17,7 @@ const github = @import("../pr/github.zig");
 const review_parse = @import("../pr/review_parse.zig");
 const parser = @import("../git/parser.zig");
 const thread_anchor = @import("../pr/thread_anchor.zig");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 
@@ -138,7 +139,7 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
         return;
     }
 
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     defer stderr_writer.interface.flush() catch {};
     try stderr_writer.interface.print("Unknown debug subcommand: {s}\n", .{subcmd});
     try stderr_writer.interface.writeAll("Use 'skim debug --help' for usage.\n");
@@ -168,7 +169,7 @@ fn runPrView(allocator: Allocator, args: []const []const u8) !void {
 /// the totality invariant (every thread is inline, bucketed, or unplaced —
 /// nothing silently dropped) and exits non-zero if it is ever violated.
 fn runPrAnchor(allocator: Allocator, args: []const []const u8) !void {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
 
     const raw = try fetchReviewJson(allocator, args, "pr-anchor");
     defer allocator.free(raw);
@@ -224,7 +225,7 @@ fn runPrAnchor(allocator: Allocator, args: []const []const u8) !void {
 /// uses (AD-2). Reuses the viewer's existing pending review if present, else
 /// creates one first. Prints the created thread's id + first comment.
 fn runPrComment(allocator: Allocator, args: []const []const u8) !void {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
 
     const opts = parsePrCommentArgs(args) catch |err| {
         try stderr_writer.interface.print("pr-comment: {s}\n", .{prCommentErrMsg(err)});
@@ -273,7 +274,7 @@ fn runPrComment(allocator: Allocator, args: []const []const u8) !void {
     };
     defer created.deinit();
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
     const t = created.thread;
@@ -289,7 +290,7 @@ fn runPrComment(allocator: Allocator, args: []const []const u8) !void {
 /// the same `github.deletePendingReview` core the TUI uses (AD-2). No-op (exit 0)
 /// when there is no pending review.
 fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
 
     const raw = try fetchReviewJson(allocator, args, "pr-discard");
     defer allocator.free(raw);
@@ -297,7 +298,7 @@ fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
     var data = parsePrDetailsOrExit(allocator, raw);
     defer data.deinit();
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
 
@@ -337,7 +338,7 @@ fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
 /// inline comments. A rejected submit (self-approval etc.) is a 200-with-errors
 /// envelope: prints the classified message to stderr and exits non-zero.
 fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     const usage = "Usage: skim debug pr-submit <number|url> --event comment|approve|request-changes [--body TEXT]";
 
     const event_arg = flagValueOrExit(args, "--event", "pr-submit", usage);
@@ -395,7 +396,7 @@ fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
         flushAndExit(&stderr_writer);
     }
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
     try w.print("Submitted review {s} (state: {s})\n", .{ result.id, @tagName(result.state) });
@@ -405,7 +406,7 @@ fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
 /// to an existing thread through the SAME `github.replyToThread`/`review_parse`
 /// cores the TUI uses (AD-2). Prints the created comment.
 fn runPrReply(allocator: Allocator, args: []const []const u8) !void {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     const thread_id = flagValueOrExit(args, "--thread", "pr-reply", "Usage: skim debug pr-reply <number|url> --thread PRRT_… --body TEXT");
     const body = flagValueOrExit(args, "--body", "pr-reply", "Usage: skim debug pr-reply <number|url> --thread PRRT_… --body TEXT");
 
@@ -422,7 +423,7 @@ fn runPrReply(allocator: Allocator, args: []const []const u8) !void {
     };
     defer created.deinit();
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
     try w.print("Replied to thread {s}\n", .{thread_id});
@@ -433,7 +434,7 @@ fn runPrReply(allocator: Allocator, args: []const []const u8) !void {
 /// `skim debug pr-resolve|pr-unresolve <number|url> --thread PRRT_…`: toggle a
 /// thread's resolved state through `github.resolveThread`/`unresolveThread`.
 fn runPrResolve(allocator: Allocator, args: []const []const u8, resolve: bool) !void {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     const cmd = if (resolve) "pr-resolve" else "pr-unresolve";
     const usage = if (resolve)
         "Usage: skim debug pr-resolve <number|url> --thread PRRT_…"
@@ -457,7 +458,7 @@ fn runPrResolve(allocator: Allocator, args: []const []const u8, resolve: bool) !
     };
     defer result.deinit();
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
     try w.print("Thread {s}  resolved={}\n", .{ result.thread_id, result.is_resolved });
@@ -466,7 +467,7 @@ fn runPrResolve(allocator: Allocator, args: []const []const u8, resolve: bool) !
 /// `skim debug pr-edit <number|url> --comment PRRC_… --body TEXT`: edit a review
 /// comment through `github.updateReviewComment`. Prints the new body.
 fn runPrEdit(allocator: Allocator, args: []const []const u8) !void {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     const comment_id = flagValueOrExit(args, "--comment", "pr-edit", "Usage: skim debug pr-edit <number|url> --comment PRRC_… --body TEXT");
     const body = flagValueOrExit(args, "--body", "pr-edit", "Usage: skim debug pr-edit <number|url> --comment PRRC_… --body TEXT");
 
@@ -483,7 +484,7 @@ fn runPrEdit(allocator: Allocator, args: []const []const u8) !void {
     };
     defer updated.deinit();
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
     try w.print("Updated comment {s}\n", .{updated.id});
@@ -493,7 +494,7 @@ fn runPrEdit(allocator: Allocator, args: []const []const u8) !void {
 /// `skim debug pr-delete <number|url> --comment PRRC_…`: delete a review comment
 /// through `github.deleteReviewComment`. Prints the deleted comment's id.
 fn runPrDelete(allocator: Allocator, args: []const []const u8) !void {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     const comment_id = flagValueOrExit(args, "--comment", "pr-delete", "Usage: skim debug pr-delete <number|url> --comment PRRC_…");
 
     const fetch = github.deleteReviewComment(allocator, comment_id) catch {
@@ -509,7 +510,7 @@ fn runPrDelete(allocator: Allocator, args: []const []const u8) !void {
     };
     defer allocator.free(del_id);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
     try w.print("Deleted comment {s}\n", .{del_id});
@@ -549,7 +550,7 @@ fn eventStringFromArg(arg: []const u8) ?[]const u8 {
 
 /// Flush `w` (best-effort) and exit non-zero. Terminal failure tail shared by
 /// every `skim debug` error path.
-fn flushAndExit(w: *std.fs.File.Writer) noreturn {
+fn flushAndExit(w: *std.Io.File.Writer) noreturn {
     w.interface.flush() catch {};
     std.process.exit(1);
 }
@@ -562,7 +563,7 @@ fn flagValueOrExit(args: []const []const u8, flag: []const u8, cmd: []const u8, 
             break;
         }
     }
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     stderr_writer.interface.print("{s}: missing {s}\n", .{ cmd, flag }) catch {};
     stderr_writer.interface.print("{s}\n", .{usage}) catch {};
     flushAndExit(&stderr_writer);
@@ -572,7 +573,7 @@ fn flagValueOrExit(args: []const []const u8, flag: []const u8, cmd: []const u8, 
 /// the returned data (`defer data.deinit()`).
 fn parsePrDetailsOrExit(allocator: Allocator, raw: []const u8) review_parse.PrReviewData {
     return review_parse.parsePrDetails(allocator, raw) catch {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         stderr_writer.interface.writeAll("Failed to parse the review payload from gh.\n") catch {};
         flushAndExit(&stderr_writer);
     };
@@ -583,7 +584,7 @@ fn parsePrDetailsOrExit(allocator: Allocator, raw: []const u8) review_parse.PrRe
 fn ghOkOrExit(fetch: github.GhFetch) []u8 {
     switch (fetch) {
         .failed => |kind| {
-            var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+            var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
             stderr_writer.interface.print("{s}\n", .{github.kindMessage(kind)}) catch {};
             flushAndExit(&stderr_writer);
         },
@@ -593,7 +594,7 @@ fn ghOkOrExit(fetch: github.GhFetch) []u8 {
 
 /// Create a pending review and return its id, or exit non-zero with a diagnostic.
 fn createReviewOrExit(allocator: Allocator, pr_node_id: []const u8, commit_oid: []const u8) ![]u8 {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     const fetch = github.createPendingReview(allocator, pr_node_id, commit_oid) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (addPullRequestReview).\n");
         flushAndExit(&stderr_writer);
@@ -711,7 +712,7 @@ fn prCommentErrMsg(err: PrCommentError) []const u8 {
 /// Shared arg → gh review-data resolution for pr-view/pr-anchor. Returns the
 /// raw JSON bytes (caller owns) or exits non-zero with a diagnostic.
 fn fetchReviewJson(allocator: Allocator, args: []const []const u8, comptime cmd: []const u8) ![]u8 {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
 
     if (args.len < 4) {
         try stderr_writer.interface.writeAll(cmd ++ " requires a PR number or github.com PR URL.\n");
@@ -763,7 +764,7 @@ fn fetchReviewJson(allocator: Allocator, args: []const []const u8, comptime cmd:
 /// invariant is violated (inline + bucketed + unplaced != thread count), so the
 /// caller can exit non-zero.
 fn printPrAnchor(details: review_parse.PrDetails, files: []const parser.FileDiff, anchored: []const thread_anchor.AnchoredThread) !bool {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
 
@@ -839,7 +840,7 @@ fn bucketReasonLbl(reason: thread_anchor.BucketReason) []const u8 {
 }
 
 fn printPrView(details: review_parse.PrDetails) !void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
 
@@ -884,7 +885,7 @@ fn printPrView(details: review_parse.PrDetails) !void {
 /// thread-lifecycle harness greps these `PRRT_`/`PRRC_` ids to drive the other
 /// pr-* subcommands.
 fn printPrIds(details: review_parse.PrDetails) !void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
 
@@ -989,7 +990,7 @@ fn runReplayHeadless(allocator: Allocator, command: ReplayCommand, session_path:
     const ansi_output = try ctx.captureToAnsi();
     defer allocator.free(ansi_output);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     try stdout_writer.interface.writeAll(ansi_output);
     try stdout_writer.interface.writeByte('\n');
@@ -1113,7 +1114,7 @@ fn parseReplayArgs(allocator: Allocator, args: []const []const u8, command: Repl
 }
 
 fn printHelp() !void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     try stdout_writer.interface.writeAll(
         \\skim debug - Debugging utilities
@@ -1164,7 +1165,7 @@ fn printHelp() !void {
 }
 
 fn printReplayHelp(command: ReplayCommand) !void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     try stdout_writer.interface.print(
         \\skim debug {s} - Render a saved {s}
@@ -1186,7 +1187,7 @@ fn printReplayHelp(command: ReplayCommand) !void {
 }
 
 fn printReplayError(command: ReplayCommand, err: anyerror) !void {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     defer stderr_writer.interface.flush() catch {};
 
     switch (err) {
@@ -1278,8 +1279,8 @@ fn deinitReplayApp(app: *App) void {
 }
 
 fn getTerminalSize() ?TerminalSize {
-    const stderr = std.fs.File.stderr();
-    if (!std.posix.isatty(stderr.handle)) return null;
+    const stderr = std.Io.File.stderr();
+    if (!(stderr.isTty(skim_io.get()) catch false)) return null;
 
     var ws: std.posix.winsize = undefined;
     const result = std.posix.system.ioctl(stderr.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));

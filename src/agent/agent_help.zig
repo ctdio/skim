@@ -45,7 +45,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window, agent_state: *AgentState) !
     _ = popup_win.print(&title_seg, .{ .row_offset = 0, .col_offset = @intCast(title_x) });
 
     // Build scrollable content
-    var content_lines: std.ArrayList(ContentLine) = .{};
+    var content_lines: std.ArrayList(ContentLine) = .empty;
     defer content_lines.deinit(app.allocator);
 
     const section_style = vaxis.Style{ .fg = Color.yellow, .bg = Color.dialog_bg, .bold = true };

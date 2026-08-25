@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const vaxis = @import("vaxis");
+const skim_io = @import("skim_io");
 
 const Style = vaxis.Cell.Style;
 const Color = vaxis.Cell.Color;
@@ -36,7 +37,7 @@ pub const LineWriter = struct {
     }
 
     pub fn text(self: *LineWriter, value: []const u8) void {
-        var iter = self.win.unicode.graphemeIterator(value);
+        var iter = vaxis.unicode.graphemeIterator(value);
         while (iter.next()) |item| {
             const bytes = item.bytes(value);
             if (std.mem.eql(u8, bytes, "\n")) return;

@@ -2,47 +2,45 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const process = @import("process.zig");
 const codec = @import("codec.zig");
+const skim_io = @import("skim_io");
 
 // ACP protocol logging (opt-in via ACP_DEBUG=1 environment variable)
-var acp_log_file: ?std.fs.File = null;
+var acp_log_file: ?skim_io.AppendFile = null;
 var acp_log_initialized: bool = false;
-var acp_log_mutex: std.Thread.Mutex = .{};
+var acp_log_mutex: std.Io.Mutex = .init;
 
 fn initAcpLog() void {
     if (acp_log_initialized) return;
     acp_log_initialized = true;
 
     // Only enable if ACP_DEBUG environment variable is set
-    const debug_env = std.posix.getenv("ACP_DEBUG") orelse return;
+    const debug_env = skim_io.getEnv("ACP_DEBUG") orelse return;
     if (debug_env.len == 0 or std.mem.eql(u8, debug_env, "0")) return;
 
-    const home = std.posix.getenv("HOME") orelse return;
+    const home = skim_io.getEnv("HOME") orelse return;
 
     // Ensure ~/.skim/ exists
     var path_buf: [512]u8 = undefined;
     const skim_dir = std.fmt.bufPrint(&path_buf, "{s}/.skim", .{home}) catch return;
-    std.fs.makeDirAbsolute(skim_dir) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(skim_io.get(), skim_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return,
     };
 
     const log_path = std.fmt.bufPrint(&path_buf, "{s}/.skim/acp.log", .{home}) catch return;
-    acp_log_file = std.fs.createFileAbsolute(log_path, .{ .truncate = false }) catch return;
-    if (acp_log_file) |f| {
-        f.seekFromEnd(0) catch {};
-    }
+    acp_log_file = skim_io.AppendFile.open(log_path) catch return;
 }
 
 fn logAcpMessage(direction: []const u8, message: []const u8) void {
-    acp_log_mutex.lock();
-    defer acp_log_mutex.unlock();
+    acp_log_mutex.lockUncancelable(skim_io.get());
+    defer acp_log_mutex.unlock(skim_io.get());
 
     initAcpLog();
 
-    const file = acp_log_file orelse return;
+    const file = &(acp_log_file orelse return);
 
     // Get timestamp
-    const timestamp = std.time.timestamp();
+    const timestamp = skim_io.timestamp();
     const hours = @mod(@divFloor(timestamp, 3600), 24);
     const minutes = @mod(@divFloor(timestamp, 60), 60);
     const seconds = @mod(timestamp, 60);
@@ -57,9 +55,9 @@ fn logAcpMessage(direction: []const u8, message: []const u8) void {
         direction,
     }) catch return;
 
-    _ = file.write(header) catch return;
-    _ = file.write(message) catch return;
-    _ = file.write("\n") catch return;
+    file.write(header) catch return;
+    file.write(message) catch return;
+    file.write("\n") catch return;
 }
 
 // =============================================================================
@@ -87,7 +85,7 @@ pub const StdioTransport = struct {
     // Background reader thread
     reader_thread: ?std.Thread,
     reader_running: std.atomic.Value(bool),
-    message_mutex: std.Thread.Mutex,
+    message_mutex: std.Io.Mutex,
 
     // Optional callback for processing messages in background thread
     message_callback: ?MessageCallback,
@@ -110,11 +108,11 @@ pub const StdioTransport = struct {
             .agent = agent,
             .decoder = codec.Decoder.init(allocator),
             .encoder = codec.Encoder.init(allocator),
-            .read_buffer = .{},
-            .pending_messages = .{},
+            .read_buffer = .empty,
+            .pending_messages = .empty,
             .reader_thread = null,
             .reader_running = std.atomic.Value(bool).init(false),
-            .message_mutex = .{},
+            .message_mutex = .init,
             .message_callback = null,
             .message_callback_ctx = null,
         };
@@ -159,7 +157,7 @@ pub const StdioTransport = struct {
         // Reader thread started - runs until agent exits
 
         var local_buffer: [8192]u8 = undefined;
-        var line_buffer: std.ArrayListUnmanaged(u8) = .{};
+        var line_buffer: std.ArrayListUnmanaged(u8) = .empty;
         defer line_buffer.deinit(self.allocator);
 
         while (self.reader_running.load(.acquire)) {
@@ -190,7 +188,7 @@ pub const StdioTransport = struct {
 
             // Read available data
             if (fds[0].revents & posix.POLL.IN != 0) {
-                const n = self.agent.stdout.read(&local_buffer) catch {
+                const n = skim_io.readFile(self.agent.stdout, &local_buffer) catch {
                     continue;
                 };
 
@@ -241,9 +239,9 @@ pub const StdioTransport = struct {
 
                     // Only queue the message if callback didn't handle it
                     if (!handled) {
-                        self.message_mutex.lock();
+                        self.message_mutex.lockUncancelable(skim_io.get());
                         self.pending_messages.append(self.allocator, message) catch {};
-                        self.message_mutex.unlock();
+                        self.message_mutex.unlock(skim_io.get());
                     } else {
                         message.deinit(self.allocator);
                     }
@@ -315,8 +313,8 @@ pub const StdioTransport = struct {
     /// This method moves messages out of the queue atomically, so the reader thread
     /// can continue appending without affecting the returned slice.
     pub fn poll(self: *StdioTransport) Error![]codec.DecodedMessage {
-        self.message_mutex.lock();
-        defer self.message_mutex.unlock();
+        self.message_mutex.lockUncancelable(skim_io.get());
+        defer self.message_mutex.unlock(skim_io.get());
 
         if (self.pending_messages.items.len == 0) {
             return &[_]codec.DecodedMessage{};
@@ -353,17 +351,17 @@ pub const StdioTransport = struct {
     /// Wait for a response with specific ID (blocking with timeout).
     /// Uses the background reader thread's message queue.
     pub fn waitForResponse(self: *StdioTransport, request_id: i64, timeout_ms: u64) Error!?codec.DecodedMessage {
-        const start = std.time.milliTimestamp();
+        const start = skim_io.milliTimestamp();
 
         while (true) {
             // Check timeout
-            const elapsed = std.time.milliTimestamp() - start;
+            const elapsed = skim_io.milliTimestamp() - start;
             if (elapsed > @as(i64, @intCast(timeout_ms))) {
                 return null; // Timeout
             }
 
             // Check for matching response in queue (filled by background thread)
-            self.message_mutex.lock();
+            self.message_mutex.lockUncancelable(skim_io.get());
             for (self.pending_messages.items, 0..) |msg, i| {
                 switch (msg) {
                     .response => |resp| {
@@ -372,7 +370,7 @@ pub const StdioTransport = struct {
                                 .number => |int_id| {
                                     if (int_id == request_id) {
                                         const result = self.pending_messages.orderedRemove(i);
-                                        self.message_mutex.unlock();
+                                        self.message_mutex.unlock(skim_io.get());
                                         return result;
                                     }
                                 },
@@ -383,10 +381,10 @@ pub const StdioTransport = struct {
                     else => {},
                 }
             }
-            self.message_mutex.unlock();
+            self.message_mutex.unlock(skim_io.get());
 
             // Sleep briefly before checking again
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            skim_io.sleep(10 * std.time.ns_per_ms);
         }
     }
 
@@ -395,11 +393,11 @@ pub const StdioTransport = struct {
         self.stopReaderThread();
 
         // Free any remaining messages in the queue
-        self.message_mutex.lock();
+        self.message_mutex.lockUncancelable(skim_io.get());
         for (self.pending_messages.items) |*msg| {
             msg.deinit(self.allocator);
         }
-        self.message_mutex.unlock();
+        self.message_mutex.unlock(skim_io.get());
 
         self.pending_messages.deinit(self.allocator);
         self.read_buffer.deinit(self.allocator);

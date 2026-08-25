@@ -5,6 +5,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const session_mgr = @import("../mcp/session.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Write Buffers (Zig 0.15 requires buffers for file.writer())
@@ -27,7 +28,7 @@ pub const Args = struct {
 
 pub fn run(allocator: Allocator, args: Args) !void {
     var sm = session_mgr.SessionManager.init(allocator) catch |err| {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         defer stderr_writer.interface.flush() catch {};
         try stderr_writer.interface.print("Error: Failed to initialize session manager: {}\n", .{err});
         std.process.exit(1);
@@ -35,7 +36,7 @@ pub fn run(allocator: Allocator, args: Args) !void {
     defer sm.deinit();
 
     const sessions = sm.listSessions() catch |err| {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         defer stderr_writer.interface.flush() catch {};
         try stderr_writer.interface.print("Error: Failed to list sessions: {}\n", .{err});
         std.process.exit(1);
@@ -48,7 +49,7 @@ pub fn run(allocator: Allocator, args: Args) !void {
         allocator.free(sessions);
     }
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     const stdout = &stdout_writer.interface;
 
@@ -56,7 +57,7 @@ pub fn run(allocator: Allocator, args: Args) !void {
         if (args.json) {
             try stdout.writeAll("[]\n");
         } else {
-            var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+            var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
             defer stderr_writer.interface.flush() catch {};
             try stderr_writer.interface.writeAll("No skim sessions running.\n");
         }

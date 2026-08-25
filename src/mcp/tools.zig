@@ -3,6 +3,7 @@ const framework = @import("framework.zig");
 const registry = @import("registry.zig");
 const protocol = @import("protocol.zig");
 const internal_protocol = @import("internal_protocol.zig");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 const Context = framework.Context;
@@ -83,7 +84,7 @@ pub const DaemonState = struct {
             },
             .method = try self.allocator.dupe(u8, method),
             .tui_client_id = tui_client_id,
-            .created_at = std.time.timestamp(),
+            .created_at = skim_io.timestamp(),
         });
     }
 };
@@ -108,7 +109,7 @@ pub fn listClients(ctx: *Context, _: ?std.json.Value) Result {
 
     // Build response text
     // Zig 0.15: ArrayList is unmanaged
-    var output: std.ArrayList(u8) = .{};
+    var output: std.ArrayList(u8) = .empty;
     defer output.deinit(ctx.allocator);
 
     output.appendSlice(ctx.allocator, "Connected skim clients:\n") catch

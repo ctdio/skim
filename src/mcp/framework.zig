@@ -123,7 +123,7 @@ pub const Server = struct {
             .allocator = allocator,
             .config = config,
             // Zig 0.15: ArrayList is unmanaged
-            .tools = .{},
+            .tools = .empty,
         };
     }
 
@@ -237,7 +237,7 @@ pub const Server = struct {
 
     /// Encode the initialize response
     pub fn encodeInitializeResponse(self: *Server, allocator: Allocator) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
+        var output: std.ArrayList(u8) = .empty;
         errdefer output.deinit(allocator);
 
         try output.appendSlice(allocator, "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"");
@@ -251,7 +251,7 @@ pub const Server = struct {
 
     /// Encode the tools/list response
     pub fn encodeToolsListResponse(self: *Server, allocator: Allocator) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
+        var output: std.ArrayList(u8) = .empty;
         errdefer output.deinit(allocator);
 
         try output.appendSlice(allocator, "{\"tools\":[");
@@ -276,7 +276,7 @@ pub const Server = struct {
     pub fn encodeToolResult(self: *Server, allocator: Allocator, result: Result) ![]u8 {
         _ = self;
         // Zig 0.15: ArrayList is unmanaged
-        var output: std.ArrayList(u8) = .{};
+        var output: std.ArrayList(u8) = .empty;
         errdefer output.deinit(allocator);
 
         switch (result) {
@@ -288,7 +288,9 @@ pub const Server = struct {
                     try output.appendSlice(allocator, @tagName(c.type));
                     try output.appendSlice(allocator, "\"");
                     if (c.text) |text| {
-                        try output.writer(allocator).print(",\"text\":{f}", .{std.json.fmt(text, .{})});
+                        var text_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+                        defer output = text_writer.toArrayList();
+                        try text_writer.writer.print(",\"text\":{f}", .{std.json.fmt(text, .{})});
                     }
                     try output.append(allocator, '}');
                 }
@@ -484,10 +486,10 @@ test "parse params from json" {
     };
 
     // Create a mock JSON object
-    var obj = std.json.ObjectMap.init(allocator);
-    defer obj.deinit();
-    try obj.put("name", .{ .string = "test" });
-    try obj.put("count", .{ .integer = 42 });
+    var obj: std.json.ObjectMap = .empty;
+    defer obj.deinit(allocator);
+    try obj.put(allocator, "name", .{ .string = "test" });
+    try obj.put(allocator, "count", .{ .integer = 42 });
 
     const params = try parseParams(TestParams, allocator, .{ .object = obj });
     defer allocator.free(params.name);

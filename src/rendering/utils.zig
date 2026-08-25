@@ -13,6 +13,7 @@ const review_controller = @import("../pr/review_controller.zig");
 const thread_placement = @import("../pr/thread_placement.zig");
 
 const App = @import("../app.zig").App;
+const skim_io = @import("skim_io");
 const StateHelpers = state_helpers.StateHelpers;
 const Color = rendering_common.Color;
 const FrameChars = rendering_common.FrameChars;
@@ -855,7 +856,7 @@ pub const RenderUtils = struct {
         const label_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true };
         const hints_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true };
 
-        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
         defer segments.deinit(app.allocator);
 
         var current_row = row;
@@ -1127,7 +1128,7 @@ pub const RenderUtils = struct {
         else
             .{ .bg = Color.comment_bg };
 
-        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
         defer segments.deinit(app.allocator);
 
         var current_row = row;

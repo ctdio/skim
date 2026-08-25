@@ -9,6 +9,7 @@ const codec = @import("codec.zig");
 const protocol = @import("protocol.zig");
 const capabilities = @import("capabilities.zig");
 const types = @import("types.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Terminal Entry for tracking spawned terminals
@@ -197,7 +198,7 @@ pub const Client = struct {
         if (self.session_id != null) return error.SessionAlreadyActive;
 
         // Give the agent a moment to fully initialize after handshake
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        skim_io.sleep(100 * std.time.ns_per_ms);
 
         // Drain any pending notifications from the agent
         const drained = try self.transport.poll();
@@ -294,7 +295,7 @@ pub const Client = struct {
         }
 
         // Give the agent a moment to prepare
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        skim_io.sleep(100 * std.time.ns_per_ms);
 
         // Drain any pending notifications
         const drained = try self.transport.poll();
@@ -375,7 +376,7 @@ pub const Client = struct {
         }
 
         // Give the agent a moment to prepare
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        skim_io.sleep(100 * std.time.ns_per_ms);
 
         // Drain any pending notifications
         const drained = try self.transport.poll();
@@ -595,7 +596,7 @@ pub const Client = struct {
                 }
             }
 
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            skim_io.sleep(1 * std.time.ns_per_ms);
         }
     }
 
@@ -647,13 +648,13 @@ pub const Client = struct {
                 };
 
                 // Read file content
-                const file = std.fs.openFileAbsolute(params.path, .{}) catch {
+                const file = std.Io.Dir.openFileAbsolute(skim_io.get(), params.path, .{}) catch {
                     try self.transport.sendErrorResponse(id, -32001, "File not found");
                     return;
                 };
-                defer file.close();
+                defer file.close(skim_io.get());
 
-                const content = file.readToEndAlloc(self.allocator, 10 * 1024 * 1024) catch {
+                const content = skim_io.readAllAlloc(file, self.allocator, 10 * 1024 * 1024) catch {
                     try self.transport.sendErrorResponse(id, -32002, "Read error");
                     return;
                 };
@@ -692,7 +693,7 @@ pub const Client = struct {
 
                 // Create parent directories if needed
                 if (std.fs.path.dirname(params.path)) |dir| {
-                    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+                    std.Io.Dir.createDirAbsolute(skim_io.get(), dir, .default_dir) catch |err| switch (err) {
                         error.PathAlreadyExists => {},
                         else => {
                             std.log.err("ACP Client: failed to create directory: {any}", .{err});
@@ -703,12 +704,12 @@ pub const Client = struct {
                 }
 
                 // Write file content
-                const file = std.fs.createFileAbsolute(params.path, .{ .truncate = true }) catch |err| {
+                const file = std.Io.Dir.createFileAbsolute(skim_io.get(), params.path, .{ .truncate = true }) catch |err| {
                     std.log.err("ACP Client: failed to create file: {any}", .{err});
                     try self.transport.sendErrorResponse(id, -32001, "Failed to create file");
                     return;
                 };
-                defer file.close();
+                defer file.close(skim_io.get());
 
                 file.writeAll(params.content) catch |err| {
                     std.log.err("ACP Client: failed to write file: {any}", .{err});
@@ -734,7 +735,7 @@ pub const Client = struct {
 
                 // Build the full command string for shell execution
                 // We need to run through a shell to handle redirections, pipes, &&, etc.
-                var cmd_buf: std.ArrayListUnmanaged(u8) = .{};
+                var cmd_buf: std.ArrayListUnmanaged(u8) = .empty;
                 defer cmd_buf.deinit(self.allocator);
 
                 // If env vars are provided, prepend export statements to the command
@@ -778,16 +779,16 @@ pub const Client = struct {
 
                 // Use user's shell from $SHELL env var, fallback to /bin/sh
                 // Child inherits environment from skim (which inherits from user's terminal)
-                const user_shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+                const user_shell = skim_io.getEnv("SHELL") orelse "/bin/sh";
                 const argv = [_][]const u8{ user_shell, "-c", cmd_buf.items };
 
                 // Spawn process
-                var child = std.process.Child.init(&argv, self.allocator);
-                child.cwd = params.cwd;
-                child.stdout_behavior = .Pipe;
-                child.stderr_behavior = .Pipe;
-
-                child.spawn() catch |err| {
+                const child = std.process.spawn(skim_io.get(), .{
+                    .argv = &argv,
+                    .cwd = if (params.cwd) |cwd| .{ .path = cwd } else .inherit,
+                    .stdout = .pipe,
+                    .stderr = .pipe,
+                }) catch |err| {
                     std.log.err("ACP Client: failed to spawn terminal: {any}", .{err});
                     try self.transport.sendErrorResponse(id, -32001, "Failed to spawn process");
                     return;
@@ -798,7 +799,7 @@ pub const Client = struct {
                 const entry = TerminalEntry{
                     .allocator = self.allocator,
                     .child = child,
-                    .output_buffer = .{},
+                    .output_buffer = .empty,
                     .output_byte_limit = params.output_byte_limit orelse 1024 * 1024,
                     .exited = false,
                     .exit_code = null,
@@ -879,14 +880,14 @@ pub const Client = struct {
 
                 if (self.terminals.getPtr(params.terminal_id)) |entry| {
                     // Wait for process to exit (blocking)
-                    const term = entry.child.wait() catch {
+                    const term = entry.child.wait(skim_io.get()) catch {
                         try self.transport.sendErrorResponse(id, -32001, "Wait failed");
                         return;
                     };
 
                     var result_json: []const u8 = undefined;
                     switch (term.term) {
-                        .Exited => |code| {
+                        .exited => |code| {
                             entry.exited = true;
                             entry.exit_code = code;
                             result_json = std.fmt.allocPrint(self.allocator, "{{\"exit_code\":{d}}}", .{code}) catch {
@@ -894,7 +895,7 @@ pub const Client = struct {
                                 return;
                             };
                         },
-                        .Signal => |sig| {
+                        .signal => |sig| {
                             entry.exited = true;
                             entry.signal = sig;
                             result_json = std.fmt.allocPrint(self.allocator, "{{\"signal\":{d}}}", .{sig}) catch {
@@ -928,7 +929,7 @@ pub const Client = struct {
 
                 if (self.terminals.getPtr(params.terminal_id)) |entry| {
                     // The browser build never spawns, and wasi has no pid to signal.
-                    if (!is_web) _ = entry.child.kill() catch {};
+                    if (!is_web) entry.child.kill(skim_io.get());
                     try self.transport.sendResponse(id, "{}");
                 } else {
                     try self.transport.sendErrorResponse(id, -32001, "Terminal not found");
@@ -1024,7 +1025,7 @@ pub const Client = struct {
         if (entry.child.stdout) |stdout| {
             var buf: [4096]u8 = undefined;
             while (true) {
-                const n = stdout.read(&buf) catch break;
+                const n = skim_io.readFile(stdout, &buf) catch break;
                 if (n == 0) break;
 
                 // Respect output limit
@@ -1037,13 +1038,13 @@ pub const Client = struct {
         }
 
         // Check if process has exited
-        const result = entry.child.wait() catch return;
+        const result = entry.child.wait(skim_io.get()) catch return;
         switch (result.term) {
-            .Exited => |code| {
+            .exited => |code| {
                 entry.exited = true;
                 entry.exit_code = code;
             },
-            .Signal => |sig| {
+            .signal => |sig| {
                 entry.exited = true;
                 entry.signal = sig;
             },

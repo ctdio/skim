@@ -4,6 +4,7 @@ const rendering = @import("rendering/common.zig");
 const state_helpers = @import("state.zig");
 const CommentController = @import("comments/controller.zig").CommentController;
 const RenderUtils = @import("rendering/utils.zig").RenderUtils;
+const skim_io = @import("skim_io");
 const Layout = rendering.Layout;
 const StateHelpers = state_helpers.StateHelpers;
 

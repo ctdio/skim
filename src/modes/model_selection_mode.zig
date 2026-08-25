@@ -11,7 +11,7 @@ pub const ModelSelectState = struct {
     selection: usize = 0, // Selected index in model picker (within filtered list)
     filter_query: [256]u8 = [_]u8{0} ** 256, // Search query for filtering models
     filter_len: usize = 0, // Length of search query
-    filtered_indices: std.ArrayList(usize) = .{}, // Indices of models matching filter
+    filtered_indices: std.ArrayList(usize) = .empty, // Indices of models matching filter
 
     pub fn deinit(self: *ModelSelectState, allocator: std.mem.Allocator) void {
         self.filtered_indices.deinit(allocator);

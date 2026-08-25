@@ -35,7 +35,7 @@ pub const PlanState = struct {
     pub fn init(allocator: Allocator) PlanState {
         return .{
             .allocator = allocator,
-            .entries = .{},
+            .entries = .empty,
             .visible = true, // Show by default when entries exist
             .expanded = false, // Collapsed by default
         };

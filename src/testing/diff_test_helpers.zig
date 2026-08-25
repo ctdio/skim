@@ -94,7 +94,7 @@ pub const TestDiffBuilder = struct {
             .old_path = path,
             .new_path = path,
             .is_untracked = false,
-            .hunks = .{},
+            .hunks = .empty,
             .current_hunk = null,
         };
     }
@@ -133,7 +133,7 @@ pub const TestDiffBuilder = struct {
                 .new_count = new_count,
                 .context = "",
             },
-            .lines = .{},
+            .lines = .empty,
         };
         return self;
     }
@@ -597,7 +597,7 @@ pub fn renderDiffLineAlloc(
     };
 
     const gutter_text = blk: {
-        var list: std.ArrayList(u8) = .{};
+        var list: std.ArrayList(u8) = .empty;
         list.appendNTimes(alloc, ' ', padding_needed) catch {};
         list.appendSlice(alloc, num_str) catch {};
         list.append(alloc, sign) catch {};

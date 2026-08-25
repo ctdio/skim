@@ -4,6 +4,7 @@ const std = @import("std");
 const is_web = @import("builtin").target.cpu.arch.isWasm();
 const Allocator = std.mem.Allocator;
 const client_mod = @import("client.zig");
+const skim_io = @import("skim_io");
 const Client = client_mod.Client;
 
 // =============================================================================
@@ -38,11 +39,11 @@ pub const ServerError = error{
 } || Allocator.Error;
 
 /// Spawn the opencode serve process
-pub fn spawnServer(allocator: Allocator, config: ServerConfig) ServerError!std.process.Child {
+pub fn spawnServer(config: ServerConfig) ServerError!std.process.Child {
     // Validate executable exists (only for absolute paths)
     // For relative paths (e.g., "opencode"), rely on PATH resolution during spawn
     if (std.fs.path.isAbsolute(config.opencode_path)) {
-        std.fs.accessAbsolute(config.opencode_path, .{}) catch {
+        std.Io.Dir.accessAbsolute(skim_io.get(), config.opencode_path, .{}) catch {
             return error.ExecutableNotFound;
         };
     }
@@ -59,31 +60,25 @@ pub fn spawnServer(allocator: Allocator, config: ServerConfig) ServerError!std.p
         port_str,
     };
 
-    var child = std.process.Child.init(&argv, allocator);
-
-    // Set working directory
-    if (config.cwd) |cwd| {
-        child.cwd = cwd;
-    }
-
-    // Redirect stderr to log file if specified
-    // Note: Zig 0.15.1 StdIo doesn't support direct file redirect via enum,
-    // so we simply ignore stderr. The server should have its own logging.
+    // StdIo has no direct file redirect, so stderr is ignored rather than
+    // captured. The server has its own logging.
     _ = config.log_file; // Acknowledge the field
-    child.stderr_behavior = .Ignore;
 
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
+    const child = std.process.spawn(skim_io.get(), .{
+        .argv = &argv,
+        .cwd = if (config.cwd) |cwd| .{ .path = cwd } else .inherit,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return error.SpawnFailed;
 
-    child.spawn() catch return error.SpawnFailed;
-
-    log.info("Spawned opencode server on port {d}, pid={d}", .{ config.port, child.id });
+    log.info("Spawned opencode server on port {d}, pid={?d}", .{ config.port, child.id });
     return child;
 }
 
 /// Wait for the server to become healthy with exponential backoff
 pub fn waitForHealth(client_ptr: *Client, timeout_ms: u64) ServerError!void {
-    const start = std.time.milliTimestamp();
+    const start = skim_io.milliTimestamp();
     var backoff: u64 = 50;
 
     while (true) {
@@ -98,14 +93,14 @@ pub fn waitForHealth(client_ptr: *Client, timeout_ms: u64) ServerError!void {
         }
 
         // Check timeout
-        const elapsed: u64 = @intCast(std.time.milliTimestamp() - start);
+        const elapsed: u64 = @intCast(skim_io.milliTimestamp() - start);
         if (elapsed >= timeout_ms) {
             log.err("Server health check timed out after {d}ms", .{timeout_ms});
             return error.ServerStartTimeout;
         }
 
         // Sleep with backoff
-        std.Thread.sleep(backoff * std.time.ns_per_ms);
+        skim_io.sleep(backoff * std.time.ns_per_ms);
         backoff = @min(backoff * 2, 1000);
     }
 }
@@ -115,30 +110,33 @@ pub fn terminateServer(process: *std.process.Child) void {
     // The browser build never spawns, and wasi has no pid to signal.
     if (is_web) return;
 
+    const server_pid = process.id orelse return;
+
     // Send SIGTERM for graceful shutdown
-    _ = std.posix.kill(process.id, std.posix.SIG.TERM) catch {
+    _ = std.posix.kill(server_pid, std.posix.SIG.TERM) catch {
         log.warn("Failed to send SIGTERM to server", .{});
     };
 
-    // Wait up to 2 seconds for graceful exit
-    const start = std.time.milliTimestamp();
-    while (std.time.milliTimestamp() - start < 2000) {
-        // Non-blocking check for exit
-        const wait_result = std.posix.waitpid(process.id, std.c.W.NOHANG);
-        if (wait_result.pid != 0) {
+    // Wait up to 2 seconds for graceful exit. `Child.wait` blocks, and 0.16
+    // dropped `posix.waitpid`, so the polling reap goes straight to libc.
+    const start = skim_io.milliTimestamp();
+    while (skim_io.milliTimestamp() - start < 2000) {
+        var status: c_int = undefined;
+        if (std.c.waitpid(server_pid, &status, std.c.W.NOHANG) != 0) {
             log.info("Server terminated gracefully", .{});
             return;
         }
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        skim_io.sleep(100 * std.time.ns_per_ms);
     }
 
     // Force kill if still running
-    _ = std.posix.kill(process.id, std.posix.SIG.KILL) catch {
+    _ = std.posix.kill(server_pid, std.posix.SIG.KILL) catch {
         log.warn("Failed to send SIGKILL to server", .{});
     };
 
     // Collect the zombie
-    _ = std.posix.waitpid(process.id, 0);
+    var status: c_int = undefined;
+    _ = std.c.waitpid(server_pid, &status, 0);
     log.info("Server terminated forcefully", .{});
 }
 
@@ -147,13 +145,12 @@ pub fn terminateServer(process: *std.process.Child) void {
 // =============================================================================
 
 test "spawn missing executable" {
-    const allocator = std.testing.allocator;
     const config = ServerConfig{
         .opencode_path = "/nonexistent/path/to/opencode",
         .port = 4096,
     };
 
-    const result = spawnServer(allocator, config);
+    const result = spawnServer(config);
     try std.testing.expectError(error.ExecutableNotFound, result);
 }
 
@@ -174,18 +171,17 @@ test "integration: spawn and terminate server" {
     // Skip in normal test runs - requires opencode binary
     if (true) return error.SkipZigTest;
 
-    const allocator = std.testing.allocator;
     const config = ServerConfig{
         .opencode_path = "/usr/local/bin/opencode",
         .port = 14096, // Use non-default port for testing
     };
 
-    var child = try spawnServer(allocator, config);
+    var child = try spawnServer(config);
     defer terminateServer(&child);
 
     // Give it a moment to start
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    skim_io.sleep(100 * std.time.ns_per_ms);
 
     // Verify process is running
-    try std.testing.expect(child.id > 0);
+    try std.testing.expect(child.id != null);
 }

@@ -25,6 +25,7 @@ pub const ShellState = shell_mod.ShellState;
 pub const QueuedShellOutput = shell_mod.QueuedShellOutput;
 pub const RunningShellCommand = shell_mod.RunningShellCommand;
 const markdown = @import("markdown/markdown.zig");
+const skim_io = @import("skim_io");
 pub const MarkdownParser = markdown.MarkdownParser;
 
 pub const DebugReplayKind = enum {
@@ -90,7 +91,7 @@ pub const FilePickerState = struct {
     loading_thread: ?std.Thread, // Background thread loading files
     loading_complete: std.atomic.Value(bool), // Signals loading finished
     pending_files: std.ArrayList([]const u8), // Files loaded by background thread
-    pending_files_mutex: std.Thread.Mutex, // Protects pending_files
+    pending_files_mutex: std.Io.Mutex, // Protects pending_files
     load_requested: bool, // True if load has been requested (prevents multiple loads)
 
     pub fn init(_: Allocator) FilePickerState {
@@ -99,9 +100,9 @@ pub const FilePickerState = struct {
         // Use native fzf-like scoring by default (faster, no subprocess)
         // fzf subprocess can be enabled with use_fzf = true
         state.visible = false;
-        state.files = .{};
-        state.filtered_indices = .{};
-        state.filtered_paths = .{};
+        state.files = .empty;
+        state.filtered_indices = .empty;
+        state.filtered_paths = .empty;
         state.selection = 0;
         state.scroll_offset = 0;
         state.last_filter_update = 0;
@@ -111,21 +112,22 @@ pub const FilePickerState = struct {
         state.use_fzf = false; // Native scoring by default (faster)
         state.loading_thread = null;
         state.loading_complete = std.atomic.Value(bool).init(false);
-        state.pending_files = .{};
-        state.pending_files_mutex = .{};
+        state.pending_files = .empty;
+        state.pending_files_mutex = .init;
         state.load_requested = false;
         return state;
     }
 
     /// Check if fzf binary is available (called lazily)
     pub fn checkFzfAvailable() bool {
-        var child = std.process.Child.init(&.{ "fzf", "--version" }, std.heap.page_allocator);
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        child.stdin_behavior = .Ignore;
-        _ = child.spawn() catch return false;
-        const term = child.wait() catch return false;
-        return term.Exited == 0;
+        var child = std.process.spawn(skim_io.get(), .{
+            .argv = &.{ "fzf", "--version" },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch return false;
+        const term = child.wait(skim_io.get()) catch return false;
+        return term.exited == 0;
     }
 
     pub fn deinit(self: *FilePickerState) void {
@@ -134,12 +136,12 @@ pub const FilePickerState = struct {
             thread.join();
         }
         // Free pending files
-        self.pending_files_mutex.lock();
+        self.pending_files_mutex.lockUncancelable(skim_io.get());
         for (self.pending_files.items) |f| {
             self.allocator.free(f);
         }
         self.pending_files.deinit(self.allocator);
-        self.pending_files_mutex.unlock();
+        self.pending_files_mutex.unlock(skim_io.get());
 
         for (self.files.items) |f| {
             self.allocator.free(f);
@@ -204,8 +206,8 @@ pub const FilePickerState = struct {
         };
 
         // Transfer to pending_files under mutex
-        self.pending_files_mutex.lock();
-        defer self.pending_files_mutex.unlock();
+        self.pending_files_mutex.lockUncancelable(skim_io.get());
+        defer self.pending_files_mutex.unlock(skim_io.get());
 
         for (files) |f| {
             self.pending_files.append(self.allocator, f) catch {
@@ -233,8 +235,8 @@ pub const FilePickerState = struct {
         }
 
         // Transfer pending files to main files list
-        self.pending_files_mutex.lock();
-        defer self.pending_files_mutex.unlock();
+        self.pending_files_mutex.lockUncancelable(skim_io.get());
+        defer self.pending_files_mutex.unlock(skim_io.get());
 
         if (self.pending_files.items.len == 0) {
             return self.files.items.len > 0;
@@ -345,7 +347,7 @@ pub const FilePickerState = struct {
         }
 
         // Throttle updates (50ms)
-        const now = std.time.milliTimestamp();
+        const now = skim_io.milliTimestamp();
         if (now - self.last_filter_update < 50 and self.last_filter_update != 0 and !filter_changed) {
             return;
         }
@@ -399,20 +401,20 @@ pub const FilePickerState = struct {
         }
 
         // Build fzf command
-        var child = std.process.Child.init(&.{ "fzf", "--filter", filter }, self.allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-        child.stdin_behavior = .Pipe;
-
-        try child.spawn();
+        var child = try std.process.spawn(skim_io.get(), .{
+            .argv = &.{ "fzf", "--filter", filter },
+            .stdout = .pipe,
+            .stderr = .ignore,
+            .stdin = .pipe,
+        });
 
         // Write file list to stdin
         if (child.stdin) |stdin| {
             for (self.files.items) |path| {
-                stdin.writeAll(path) catch break;
-                stdin.writeAll("\n") catch break;
+                stdin.writeStreamingAll(skim_io.get(), path) catch break;
+                stdin.writeStreamingAll(skim_io.get(), "\n") catch break;
             }
-            stdin.close();
+            stdin.close(skim_io.get());
             child.stdin = null;
         }
 
@@ -420,8 +422,8 @@ pub const FilePickerState = struct {
         if (child.stdout) |stdout| {
             // Read all output at once
             const max_output = 1024 * 1024; // 1MB max
-            const output = stdout.readToEndAlloc(self.allocator, max_output) catch {
-                _ = child.wait() catch {};
+            const output = skim_io.readAllAlloc(stdout, self.allocator, max_output) catch {
+                _ = child.wait(skim_io.get()) catch {};
                 return error.ReadFailed;
             };
             defer self.allocator.free(output);
@@ -440,7 +442,7 @@ pub const FilePickerState = struct {
             }
         }
 
-        _ = child.wait() catch {};
+        _ = child.wait(skim_io.get()) catch {};
     }
 
     /// Update filter using fzf-like scoring (native, no subprocess)
@@ -455,7 +457,7 @@ pub const FilePickerState = struct {
         }
 
         // Collect scored matches
-        var scored: std.ArrayList(ScoredMatch) = .{};
+        var scored: std.ArrayList(ScoredMatch) = .empty;
         defer scored.deinit(self.allocator);
 
         for (self.files.items, 0..) |path, idx| {
@@ -822,7 +824,7 @@ pub const AgentState = struct {
             autoplay: bool,
             exit_quits_app: bool,
         ) DebugReplayState {
-            const now = std.time.milliTimestamp();
+            const now = skim_io.milliTimestamp();
             std.debug.assert(std.meta.activeTag(initial_manager_status) == kind);
             return .{
                 .kind = kind,
@@ -853,7 +855,7 @@ pub const AgentState = struct {
     pub fn init(allocator: Allocator, panel_side: PanelSide) AgentState {
         var self = AgentState{
             .allocator = allocator,
-            .messages = .{}, // Zig 0.15: ArrayList is unmanaged
+            .messages = .empty, // Zig 0.15: ArrayList is unmanaged
             .input = InputEditor.State.init(),
             .stash_buffer = undefined,
             .stash_len = 0,
@@ -868,7 +870,7 @@ pub const AgentState = struct {
             .earlier_message_dirty = false,
             .last_line_map_rebuild = 0,
             .plan = PlanState.init(allocator),
-            .available_commands = .{},
+            .available_commands = .empty,
             .slash_menu = SlashMenuState.init(),
             .input_scroll_offset = 0,
             .last_esc_timestamp = 0,
@@ -1086,7 +1088,7 @@ pub const AgentState = struct {
     pub fn buildPendingQuestionAnswer(self: *AgentState, allocator: Allocator) !?[]const u8 {
         const pending = self.pending_question orelse return null;
 
-        var output: std.ArrayList(u8) = .{};
+        var output: std.ArrayList(u8) = .empty;
         errdefer output.deinit(allocator);
 
         const multi = pending.questions.len > 1;
@@ -1094,7 +1096,7 @@ pub const AgentState = struct {
         for (pending.questions, 0..) |question, idx| {
             const state = pending.states[idx];
 
-            var parts: std.ArrayList([]const u8) = .{};
+            var parts: std.ArrayList([]const u8) = .empty;
             defer parts.deinit(allocator);
 
             for (question.options, 0..) |opt, opt_idx| {
@@ -1118,11 +1120,11 @@ pub const AgentState = struct {
                     const fallback = std.fmt.bufPrint(&buf, "Question {d}", .{idx + 1}) catch "Question";
                     break :blk fallback;
                 };
-                try output.writer(allocator).print("{s}: ", .{header});
+                try output.print(allocator, "{s}: ", .{header});
             }
 
             if (parts.items.len == 0) {
-                try output.writer(allocator).writeAll("No answer");
+                try output.appendSlice(allocator, "No answer");
             } else {
                 for (parts.items, 0..) |part, part_idx| {
                     if (part_idx > 0) try output.append(allocator, ',');
@@ -1148,7 +1150,7 @@ pub const AgentState = struct {
         try self.messages.append(self.allocator, .{
             .role = role,
             .content = owned_content,
-            .timestamp = std.time.timestamp(),
+            .timestamp = skim_io.timestamp(),
         });
 
         // Log memory usage every 10 messages to track growth
@@ -1262,7 +1264,7 @@ pub const AgentState = struct {
         try self.messages.append(self.allocator, .{
             .role = .diff,
             .content = owned_title,
-            .timestamp = std.time.timestamp(),
+            .timestamp = skim_io.timestamp(),
             .diff_path = owned_path,
             .diff_old = owned_old,
             .diff_new = owned_new,
@@ -1430,7 +1432,7 @@ pub const AgentState = struct {
         try self.messages.append(self.allocator, .{
             .role = .tool,
             .content = owned_title,
-            .timestamp = std.time.timestamp(),
+            .timestamp = skim_io.timestamp(),
             .tool_call_id = owned_id,
             .tool_name = owned_name,
             .tool_status = .pending,
@@ -1467,7 +1469,7 @@ pub const AgentState = struct {
                         if (status == .completed or status == .failed) {
                             if (msg.subagent_info) |*info| {
                                 if (info.start_time_ms != 0 and info.end_time_ms == 0) {
-                                    info.end_time_ms = std.time.milliTimestamp();
+                                    info.end_time_ms = skim_io.milliTimestamp();
                                 }
                             }
                         }
@@ -1523,7 +1525,7 @@ pub const AgentState = struct {
         try self.messages.append(self.allocator, .{
             .role = .tool,
             .content = owned_title,
-            .timestamp = std.time.timestamp(),
+            .timestamp = skim_io.timestamp(),
             .tool_call_id = owned_id,
             .tool_name = null,
             .tool_status = status,
@@ -1717,7 +1719,7 @@ pub const AgentState = struct {
             if (!replay.isComplete()) {
                 replay.playing = !replay.playing;
                 if (replay.playing) {
-                    replay.last_step_ms = std.time.milliTimestamp() - replay.step_interval_ms;
+                    replay.last_step_ms = skim_io.milliTimestamp() - replay.step_interval_ms;
                 }
             }
             return replay.playing;
@@ -1733,7 +1735,7 @@ pub const AgentState = struct {
             replay.manager_status = replay.initial_manager_status;
             replay.playing = autoplay;
             replay.step_delay_override_ms = null;
-            replay.last_step_ms = std.time.milliTimestamp() - replay.step_interval_ms;
+            replay.last_step_ms = skim_io.milliTimestamp() - replay.step_interval_ms;
             replay.previewing_current_line = false;
         }
     }
@@ -2260,7 +2262,7 @@ pub const AgentState = struct {
     /// Extract text for a range of lines from the line map.
     /// Returns owned string that caller must free.
     pub fn getTextForLineRange(self: *const AgentState, alloc: Allocator, start: usize, end: usize) ![]const u8 {
-        var result: std.ArrayList(u8) = .{};
+        var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(alloc);
 
         const total_lines = self.line_map.getTotalLines();
@@ -2383,7 +2385,7 @@ pub const AgentState = struct {
         const needs_update = self.line_map_dirty or width_or_mode_changed;
 
         if (needs_update) {
-            const now = std.time.milliTimestamp();
+            const now = skim_io.milliTimestamp();
             const elapsed = now - self.last_line_map_rebuild;
 
             // Throttle updates to every 32ms (~30fps) during streaming
@@ -2469,7 +2471,7 @@ pub const AgentState = struct {
         try self.messages.append(self.allocator, .{
             .role = .plan_snapshot,
             .content = owned_content,
-            .timestamp = std.time.timestamp(),
+            .timestamp = skim_io.timestamp(),
             .plan_snapshot_entries = snapshot_entries,
         });
 
@@ -2695,7 +2697,7 @@ pub const AgentState = struct {
     /// Record an ESC key press and check if it's a double-ESC
     /// Returns true if this is a double-ESC (second ESC within threshold)
     pub fn recordEscPress(self: *AgentState) bool {
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = skim_io.milliTimestamp();
         const elapsed = now_ms - self.last_esc_timestamp;
 
         if (self.last_esc_timestamp != 0 and elapsed <= DOUBLE_KEY_THRESHOLD_MS) {
@@ -2712,7 +2714,7 @@ pub const AgentState = struct {
     /// Record a Ctrl+C key press and check if it's a double Ctrl+C
     /// Returns true if this is a second Ctrl+C within threshold
     pub fn recordCtrlCPress(self: *AgentState) bool {
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = skim_io.milliTimestamp();
         const elapsed = now_ms - self.last_ctrl_c_timestamp;
 
         if (self.last_ctrl_c_timestamp != 0 and elapsed <= DOUBLE_KEY_THRESHOLD_MS) {
@@ -2739,7 +2741,7 @@ pub const AgentState = struct {
     /// Check if waiting for a second Ctrl+C press (within threshold window)
     pub fn isPendingCtrlC(self: *const AgentState) bool {
         if (self.last_ctrl_c_timestamp == 0) return false;
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = skim_io.milliTimestamp();
         const elapsed = now_ms - self.last_ctrl_c_timestamp;
         return elapsed <= DOUBLE_KEY_THRESHOLD_MS;
     }
@@ -2747,7 +2749,7 @@ pub const AgentState = struct {
     /// Check if waiting for a second ESC press (within threshold window)
     pub fn isPendingEsc(self: *const AgentState) bool {
         if (self.last_esc_timestamp == 0) return false;
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = skim_io.milliTimestamp();
         const elapsed = now_ms - self.last_esc_timestamp;
         return elapsed <= DOUBLE_KEY_THRESHOLD_MS;
     }
@@ -2962,7 +2964,7 @@ pub const SubagentModalState = struct {
             .allocator = allocator,
             .session_id = try allocator.dupe(u8, session_id),
             .title = try allocator.dupe(u8, title),
-            .messages = .{},
+            .messages = .empty,
             .line_map = ChatLineMap.init(allocator),
             .line_map_dirty = false,
             .last_line_map_width = 0,
@@ -3009,7 +3011,7 @@ pub const Message = struct {
     content: []const u8, // Owned by AgentState (or points to content_buffer.items if streaming)
     timestamp: i64,
     // For streaming content - allows O(1) amortized appends instead of O(n) copy each time
-    content_buffer: std.ArrayListUnmanaged(u8) = .{},
+    content_buffer: std.ArrayListUnmanaged(u8) = .empty,
     // For diff messages
     diff_path: ?[]const u8 = null,
     diff_old: ?[]const u8 = null,

@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const vaxis = @import("vaxis");
+const skim_io = @import("skim_io");
 const rendering_common = @import("common.zig");
 
 const Layout = rendering_common.Layout;
@@ -53,7 +54,7 @@ const anchor_offsets = [_]u16{ 2, 4, 3 };
 ///
 /// Returns the number of rows scrolled, negative for a scroll toward the top of
 /// the screen, or 0 when the frame is not a shift of the frame on screen.
-pub fn apply(vx: *vaxis.Vaxis, writer: *std.io.Writer) !i32 {
+pub fn apply(vx: *vaxis.Vaxis, writer: *std.Io.Writer) !i32 {
     if (vx.refresh) return 0;
     if (!vx.state.alt_screen) return 0;
 
@@ -258,7 +259,7 @@ const alphabet = "abcdefghijklmnopqrstuvwxyz";
 /// read back what the scroll left behind.
 const TestScreen = struct {
     vx: vaxis.Vaxis,
-    out: std.io.Writer.Allocating,
+    out: std.Io.Writer.Allocating,
     /// A cell borrows its grapheme, so the label bytes must outlive the frame
     /// that vaxis keeps in `screen_last`.
     labels: [max_rows][label_width]u8,
@@ -269,7 +270,7 @@ const TestScreen = struct {
     fn init(cols: u16, rows: u16) !TestScreen {
         std.debug.assert(rows <= max_rows);
         var self: TestScreen = .{
-            .vx = try vaxis.init(testing.allocator, .{}),
+            .vx = try vaxis.init(skim_io.get(), testing.allocator, skim_io.environMap(), .{}),
             .out = .init(testing.allocator),
             .labels = undefined,
         };
@@ -287,7 +288,6 @@ const TestScreen = struct {
     fn deinit(self: *TestScreen) void {
         self.vx.screen.deinit(testing.allocator);
         self.vx.screen_last.deinit(testing.allocator);
-        self.vx.unicode.deinit(testing.allocator);
         self.out.deinit();
     }
 

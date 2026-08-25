@@ -104,7 +104,7 @@ pub const Line = struct {
 
 /// Parse unified diff format into structured data
 pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
-    var files: std.ArrayList(FileDiff) = .{};
+    var files: std.ArrayList(FileDiff) = .empty;
     errdefer {
         for (files.items) |*file| {
             file.deinit(allocator);
@@ -118,7 +118,14 @@ pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
     var current_hunk: ?PartialHunk = null;
 
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
+
+        // A hunk line that adds or removes a diff header is byte-for-byte a diff
+        // header itself: `+++ b/x` and `--- a/x` are what `+` or `-` prefixed onto
+        // `++ b/x` / `-- a/x` look like. The prefix alone cannot tell them apart,
+        // so the hunk header's line counts do: while the current hunk still owes
+        // lines, anything inside it is content.
+        const in_hunk_body = if (current_hunk) |hunk| !hunk.isComplete() else false;
 
         if (std.mem.startsWith(u8, line, "diff --git ")) {
             // Save previous file if exists
@@ -132,7 +139,7 @@ pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
 
             // Start new file
             current_file = PartialFileDiff.init();
-        } else if (std.mem.startsWith(u8, line, "--- ")) {
+        } else if (!in_hunk_body and std.mem.startsWith(u8, line, "--- ")) {
             // For standard unified diff (no "diff --git" header), start a new file here
             // If we already have a file with content, save it first (multi-file unified diff)
             if (current_file) |*file| {
@@ -151,11 +158,13 @@ pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
             }
             if (current_file) |*file| {
                 const path = parsePath(line[4..]);
+                if (file.old_path) |previous| allocator.free(previous);
                 file.old_path = try allocator.dupe(u8, path);
             }
-        } else if (std.mem.startsWith(u8, line, "+++ ")) {
+        } else if (!in_hunk_body and std.mem.startsWith(u8, line, "+++ ")) {
             if (current_file) |*file| {
                 const path = parsePath(line[4..]);
+                if (file.new_path) |previous| allocator.free(previous);
                 file.new_path = try allocator.dupe(u8, path);
             }
         } else if (std.mem.startsWith(u8, line, "@@ ")) {
@@ -194,11 +203,19 @@ pub fn parse(allocator: Allocator, diff_text: []const u8) ![]FileDiff {
 
             // Update line numbers
             switch (line_type) {
-                .add => hunk.new_lineno += 1,
-                .delete => hunk.old_lineno += 1,
+                .add => {
+                    hunk.new_lineno += 1;
+                    hunk.new_remaining -|= 1;
+                },
+                .delete => {
+                    hunk.old_lineno += 1;
+                    hunk.old_remaining -|= 1;
+                },
                 .context => {
                     hunk.old_lineno += 1;
                     hunk.new_lineno += 1;
+                    hunk.old_remaining -|= 1;
+                    hunk.new_remaining -|= 1;
                 },
             }
         }
@@ -226,7 +243,7 @@ const PartialFileDiff = struct {
         return .{
             .old_path = null,
             .new_path = null,
-            .hunks = .{},
+            .hunks = .empty,
         };
     }
 
@@ -245,6 +262,15 @@ const PartialHunk = struct {
     lines: std.ArrayList(Line),
     old_lineno: u32,
     new_lineno: u32,
+    /// Lines the `@@` header still promises, counted down as the body is read.
+    old_remaining: u32,
+    new_remaining: u32,
+
+    /// Whether the hunk has consumed every line its header accounted for. A
+    /// completed hunk releases the parser to read file headers again.
+    fn isComplete(self: PartialHunk) bool {
+        return self.old_remaining == 0 and self.new_remaining == 0;
+    }
 
     fn finalize(self: *PartialHunk, allocator: Allocator) !Hunk {
         const lines = try self.lines.toOwnedSlice(allocator);
@@ -344,9 +370,11 @@ fn parseHunkHeader(allocator: Allocator, line: []const u8) !PartialHunk {
             .new_count = new_range.count,
             .context = try allocator.dupe(u8, context_slice),
         },
-        .lines = .{},
+        .lines = .empty,
         .old_lineno = old_range.start,
         .new_lineno = new_range.start,
+        .old_remaining = old_range.count,
+        .new_remaining = new_range.count,
     };
 }
 
@@ -385,7 +413,7 @@ pub fn markUntrackedFiles(files: []FileDiff, untracked_paths: []const []const u8
 
 /// Strip ANSI escape sequences from text (for pager mode where git sends colored output)
 pub fn stripAnsi(allocator: Allocator, input: []const u8) ![]u8 {
-    var result: std.ArrayList(u8) = .{};
+    var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
 
     var i: usize = 0;
@@ -650,9 +678,55 @@ test "parse diff with merge conflict markers" {
     try std.testing.expectEqual(Line.LineType.add, hunk.lines[2].line_type);
     try std.testing.expectEqualStrings("||||||| fa1ef98", hunk.lines[2].content);
 
-    try std.testing.expectEqual(Line.LineType.add, hunk.lines[5].line_type);
-    try std.testing.expectEqualStrings("=======", hunk.lines[5].content);
+    try std.testing.expectEqual(Line.LineType.add, hunk.lines[6].line_type);
+    try std.testing.expectEqualStrings("=======", hunk.lines[6].content);
 
-    try std.testing.expectEqual(Line.LineType.add, hunk.lines[7].line_type);
-    try std.testing.expectEqualStrings(">>>>>>> feature", hunk.lines[7].content);
+    try std.testing.expectEqual(Line.LineType.add, hunk.lines[8].line_type);
+    try std.testing.expectEqualStrings(">>>>>>> feature", hunk.lines[8].content);
+}
+
+test "parse diff whose body lines look like file headers" {
+    const allocator = std.testing.allocator;
+
+    // A line reading `-- x` deleted, or `++ x` added, is emitted by git as
+    // `--- x` / `+++ x` -- byte-for-byte a file header. The hunk's line counts
+    // are what keeps them body lines.
+    const diff =
+        \\diff --git a/notes.md b/notes.md
+        \\--- a/notes.md
+        \\+++ b/notes.md
+        \\@@ -1,2 +1,3 @@
+        \\ heading
+        \\--- removed bullet
+        \\+++ added bullet
+        \\+++ another bullet
+    ;
+
+    const files = try parse(allocator, diff);
+    defer {
+        for (files) |*file| {
+            file.deinit(allocator);
+        }
+        allocator.free(files);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), files.len);
+    try std.testing.expectEqualStrings("notes.md", files[0].old_path);
+    try std.testing.expectEqualStrings("notes.md", files[0].new_path);
+    try std.testing.expectEqual(@as(usize, 1), files[0].hunks.len);
+
+    const hunk = files[0].hunks[0];
+    try std.testing.expectEqual(@as(usize, 4), hunk.lines.len);
+
+    try std.testing.expectEqual(Line.LineType.context, hunk.lines[0].line_type);
+    try std.testing.expectEqualStrings("heading", hunk.lines[0].content);
+
+    try std.testing.expectEqual(Line.LineType.delete, hunk.lines[1].line_type);
+    try std.testing.expectEqualStrings("-- removed bullet", hunk.lines[1].content);
+
+    try std.testing.expectEqual(Line.LineType.add, hunk.lines[2].line_type);
+    try std.testing.expectEqualStrings("++ added bullet", hunk.lines[2].content);
+
+    try std.testing.expectEqual(Line.LineType.add, hunk.lines[3].line_type);
+    try std.testing.expectEqualStrings("++ another bullet", hunk.lines[3].content);
 }

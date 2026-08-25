@@ -383,7 +383,7 @@ fn injectHistoryAsContext(app: *App, session_info: sessions.SessionInfo) !bool {
     std.log.info("Session picker: loaded {d} messages from session history", .{history.len});
 
     // Build context message from history
-    var context_buf: std.ArrayList(u8) = .{};
+    var context_buf: std.ArrayList(u8) = .empty;
     defer context_buf.deinit(app.allocator);
 
     context_buf.appendSlice(app.allocator, "This is a continuation of a previous conversation. Here's the conversation history:\n\n") catch return error.OutOfMemory;

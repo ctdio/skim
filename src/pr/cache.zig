@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const git = @import("git.zig");
+const skim_io = @import("skim_io");
 
 pub const subdir = ".skim/cache";
 
@@ -33,7 +34,7 @@ pub fn write(allocator: std.mem.Allocator, key: []const u8, json_bytes: []const 
     const path = try pathFor(allocator, key);
     defer allocator.free(path);
     if (std.fs.path.dirname(path)) |parent| {
-        try std.fs.cwd().makePath(parent);
+        try std.Io.Dir.cwd().createDirPath(skim_io.get(), parent);
     }
     try writeFile(path, json_bytes);
 }
@@ -43,7 +44,7 @@ pub fn write(allocator: std.mem.Allocator, key: []const u8, json_bytes: []const 
 // =============================================================================
 
 fn pathFor(allocator: std.mem.Allocator, key: []const u8) ![]u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try skim_io.getEnvVarOwned(allocator, "HOME");
     defer allocator.free(home);
     const name = try fileName(allocator, key);
     defer allocator.free(name);
@@ -56,15 +57,15 @@ fn fileName(allocator: std.mem.Allocator, key: []const u8) ![]u8 {
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
-    const file = std.fs.openFileAbsolute(path, .{}) catch return null;
-    defer file.close();
-    return file.readToEndAlloc(allocator, max_cache_bytes) catch null;
+    const file = std.Io.Dir.openFileAbsolute(skim_io.get(), path, .{}) catch return null;
+    defer file.close(skim_io.get());
+    return skim_io.readAllAlloc(file, allocator, max_cache_bytes) catch null;
 }
 
 fn writeFile(path: []const u8, bytes: []const u8) !void {
-    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(bytes);
+    const file = try std.Io.Dir.createFileAbsolute(skim_io.get(), path, .{ .truncate = true });
+    defer file.close(skim_io.get());
+    try file.writeStreamingAll(skim_io.get(), bytes);
 }
 
 // =============================================================================
@@ -100,10 +101,19 @@ test "pathFor lands under ~/.skim/cache with the hashed name" {
     try testing.expect(std.mem.endsWith(u8, path, name));
 }
 
+/// Absolute path of a `testing.tmpDir`. 0.16's `TmpDir` exposes only the random
+/// sub_path it created under `.zig-cache/tmp`, and `readFile`/`writeFile` here
+/// take absolute paths. Caller owns the result.
+fn tmpDirPath(tmp: *testing.TmpDir) ![]u8 {
+    const relative = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer testing.allocator.free(relative);
+    return skim_io.absolutePathAlloc(testing.allocator, relative);
+}
+
 test "writeFile then readFile round-trips bytes" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const dir = try tmpDirPath(&tmp);
     defer testing.allocator.free(dir);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/prs.json", .{dir});
     defer testing.allocator.free(path);
@@ -117,7 +127,7 @@ test "writeFile then readFile round-trips bytes" {
 test "readFile returns null for a missing file" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const dir = try tmpDirPath(&tmp);
     defer testing.allocator.free(dir);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/nope.json", .{dir});
     defer testing.allocator.free(path);

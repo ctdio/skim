@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
+const skim_io = @import("skim_io");
 const SessionInfo = types.SessionInfo;
 const SessionDiscoveryError = types.SessionDiscoveryError;
 
@@ -22,7 +23,7 @@ pub fn listSessions(
     cwd: []const u8,
     limit: usize,
 ) SessionDiscoveryError![]SessionInfo {
-    const home = std.posix.getenv("HOME") orelse return error.HomeDirectoryNotFound;
+    const home = skim_io.getEnv("HOME") orelse return error.HomeDirectoryNotFound;
 
     // Step 1: Read history.jsonl to find unique sessionIds for this project
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -30,18 +31,18 @@ pub fn listSessions(
         return error.IoError;
     };
 
-    const file = std.fs.openFileAbsolute(history_path, .{}) catch {
+    const file = std.Io.Dir.openFileAbsolute(skim_io.get(), history_path, .{}) catch {
         return error.SessionDirectoryNotFound;
     };
-    defer file.close();
+    defer file.close(skim_io.get());
 
-    const content = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
+    const content = skim_io.readAllAlloc(file, allocator, 10 * 1024 * 1024) catch {
         return error.IoError;
     };
     defer allocator.free(content);
 
     // Collect unique sessionIds with their first display text and last timestamp from history
-    var session_list: std.ArrayList(HistoryAggregate) = .{};
+    var session_list: std.ArrayList(HistoryAggregate) = .empty;
     defer {
         for (session_list.items) |*agg| {
             allocator.free(agg.session_id);
@@ -102,7 +103,7 @@ pub fn listSessions(
 
     // Step 3: Build SessionInfo list
     // Only read session files for the top MAX_SESSION_FILES_TO_READ sessions
-    var sessions: std.ArrayList(SessionInfo) = .{};
+    var sessions: std.ArrayList(SessionInfo) = .empty;
     errdefer {
         for (sessions.items) |*s| s.deinit();
         sessions.deinit(allocator);
@@ -300,14 +301,14 @@ fn extractTextContent(content_val: std.json.Value) []const u8 {
 /// Read a session file and extract metadata
 /// Optimized for speed - only parses what we need
 fn readSessionFile(allocator: Allocator, path: []const u8) !SessionFileData {
-    const file = std.fs.openFileAbsolute(path, .{}) catch return error.IoError;
-    defer file.close();
+    const file = std.Io.Dir.openFileAbsolute(skim_io.get(), path, .{}) catch return error.IoError;
+    defer file.close(skim_io.get());
 
     // Read file (limit to 50MB)
-    const content = file.readToEndAlloc(allocator, 50 * 1024 * 1024) catch return error.IoError;
+    const content = skim_io.readAllAlloc(file, allocator, 50 * 1024 * 1024) catch return error.IoError;
     defer allocator.free(content);
 
-    var branches: std.ArrayList(Branch) = .{};
+    var branches: std.ArrayList(Branch) = .empty;
     errdefer {
         for (branches.items) |b| {
             allocator.free(b.leaf_uuid);

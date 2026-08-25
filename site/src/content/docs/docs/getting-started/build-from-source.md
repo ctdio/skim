@@ -4,7 +4,7 @@ description: Clone the repository and build the Skim binary with Zig.
 ---
 
 Skim builds with the standard Zig build system. Make sure you have
-[Zig 0.15.1 and git](../prerequisites/) first.
+[Zig 0.16.0 and git](../prerequisites/) first.
 
 ## Clone and build
 

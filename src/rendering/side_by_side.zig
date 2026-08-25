@@ -15,6 +15,7 @@ const frame = @import("frame.zig");
 const CommentController = @import("../comments/controller.zig").CommentController;
 
 const App = @import("../app.zig").App;
+const skim_io = @import("skim_io");
 const Color = rendering_common.Color;
 const Layout = rendering_common.Layout;
 const FrameChars = rendering_common.FrameChars;
@@ -28,7 +29,7 @@ pub const SideBySideRenderer = struct {
         if (app.state.files.len == 0) return;
 
         const profile_frame = app.profile_active_frame;
-        var total_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
+        var total_timer_opt: ?skim_io.Timer = if (profile_frame) skim_io.Timer.start() catch null else null;
         var gutter_ns: u64 = 0;
         var records_scanned: usize = 0;
         var rows_rendered: usize = 0;
@@ -39,7 +40,7 @@ pub const SideBySideRenderer = struct {
 
         // Calculate global gutter width (consistent across all files)
         // Note: Blame is not shown in side-by-side view (too wide)
-        var gutter_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
+        var gutter_timer_opt: ?skim_io.Timer = if (profile_frame) skim_io.Timer.start() catch null else null;
         const gutter_width = app.getGlobalGutterWidth(false);
         if (gutter_timer_opt) |*timer| {
             gutter_ns = timer.read();
@@ -802,7 +803,7 @@ pub const SideBySideRenderer = struct {
         const label_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true };
         const hints_style: vaxis.Style = .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true };
 
-        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
         defer segments.deinit(app.allocator);
 
         var current_row = row;
@@ -1022,7 +1023,7 @@ pub const SideBySideRenderer = struct {
         else
             .{ .bg = Color.comment_bg };
 
-        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
         defer segments.deinit(app.allocator);
 
         var current_row = row;

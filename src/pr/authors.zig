@@ -19,7 +19,7 @@ pub const AuthorCount = struct {
 /// empty author are skipped. Caller owns the slice; each `login` aliases the
 /// backing `prs`, so it is only valid while they are.
 pub fn distinct(allocator: std.mem.Allocator, prs: []const PullRequest) ![]AuthorCount {
-    var list: std.ArrayList(AuthorCount) = .{};
+    var list: std.ArrayList(AuthorCount) = .empty;
     errdefer list.deinit(allocator);
 
     for (prs) |pr| {

@@ -328,10 +328,10 @@ pub const TabManager = struct {
     pub fn init(allocator: Allocator, panel_side: AgentState.PanelSide) TabManager {
         return .{
             .allocator = allocator,
-            .tabs = .{},
+            .tabs = .empty,
             .active_idx = 0,
             .next_id = 1,
-            .layout_nodes = .{},
+            .layout_nodes = .empty,
             .root_node_id = null,
             .focused_pane_id = null,
             .panel_visible = false,
@@ -606,8 +606,8 @@ pub const TabManager = struct {
     pub fn collectPaneLayout(self: *const TabManager, allocator: Allocator, width: usize, height: usize) !PaneLayoutSnapshot {
         var snapshot = PaneLayoutSnapshot{
             .allocator = allocator,
-            .panes = .{},
-            .dividers = .{},
+            .panes = .empty,
+            .dividers = .empty,
             .focused_pane_id = self.focused_pane_id,
         };
         if (self.root_node_id) |root_id| {
@@ -738,7 +738,7 @@ pub const TabManager = struct {
     }
 
     fn focusPaneByOffset(self: *TabManager, delta: isize) bool {
-        var leaves: std.ArrayList(usize) = .{};
+        var leaves: std.ArrayList(usize) = .empty;
         defer leaves.deinit(self.allocator);
         self.collectLeafIds(self.root_node_id, &leaves) catch return false;
         if (leaves.items.len <= 1) return false;
@@ -832,9 +832,9 @@ pub const TabManager = struct {
     }
 
     fn findDirectionalPane(self: *const TabManager, current_leaf_id: usize, direction: FocusDirection) ?usize {
-        var leaves: std.ArrayList(PaneLeaf) = .{};
+        var leaves: std.ArrayList(PaneLeaf) = .empty;
         defer leaves.deinit(self.allocator);
-        var dividers: std.ArrayList(PaneDivider) = .{};
+        var dividers: std.ArrayList(PaneDivider) = .empty;
         defer dividers.deinit(self.allocator);
         if (self.root_node_id) |root_id| {
             self.collectPaneLayoutRecursive(root_id, 0, 0, 1000, 1000, &leaves, &dividers) catch return null;
@@ -884,7 +884,7 @@ pub const TabManager = struct {
     }
 
     fn findAnyLeafExcept(self: *const TabManager, excluded_id: usize) ?usize {
-        var leaves: std.ArrayList(usize) = .{};
+        var leaves: std.ArrayList(usize) = .empty;
         defer leaves.deinit(self.allocator);
         self.collectLeafIds(self.root_node_id, &leaves) catch return null;
         for (leaves.items) |leaf_id| {

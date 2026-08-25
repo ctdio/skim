@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 
 const diff = @import("diff.zig");
 const parser = @import("parser.zig");
+const skim_io = @import("skim_io");
 
 pub const DiffSource = diff.DiffSource;
 
@@ -36,7 +37,7 @@ pub const LoadMode = enum {
 /// the event loop, where the App address is stable) spawns the worker.
 pub const DiffLoad = struct {
     thread: ?std.Thread = null,
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -45,7 +46,7 @@ pub const DiffLoad = struct {
     /// Files parsed by the worker, awaiting handoff to the main thread. Each is
     /// allocated with the App allocator (thread-safe) so the main thread can
     /// move it straight into `state.files`. Guarded by `mutex`.
-    files: std.ArrayListUnmanaged(parser.FileDiff) = .{},
+    files: std.ArrayListUnmanaged(parser.FileDiff) = .empty,
     /// How many of `files` the main thread has already taken.
     consumed: usize = 0,
 
@@ -81,7 +82,7 @@ pub const DiffLoad = struct {
 /// thread-free: feed it chunks in order, then call `finish` at EOF. A file is
 /// only emitted once the next file header (or EOF) proves it complete.
 pub const IncrementalParser = struct {
-    buf: std.ArrayListUnmanaged(u8) = .{},
+    buf: std.ArrayListUnmanaged(u8) = .empty,
     parsed_up_to: usize = 0,
     /// How far `buf` has been examined for a file boundary. Every byte below
     /// this has already been read once and is never read again, so a stream
@@ -211,8 +212,8 @@ pub fn drainNewFiles(
     out: *std.ArrayListUnmanaged(parser.FileDiff),
     out_allocator: Allocator,
 ) !usize {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(skim_io.get());
+    defer self.mutex.unlock(skim_io.get());
 
     const start_idx = self.consumed;
     const new_count = self.files.items.len - start_idx;
@@ -226,8 +227,8 @@ pub fn drainNewFiles(
 /// Count of files parsed so far (consumed + pending). Used to size an atomic
 /// snapshot for `.replace` mode.
 pub fn totalFileCount(self: *DiffLoad) usize {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    self.mutex.lockUncancelable(skim_io.get());
+    defer self.mutex.unlock(skim_io.get());
     return self.files.items.len;
 }
 
@@ -270,7 +271,7 @@ fn workerMain(self: *DiffLoad) void {
 }
 
 fn onChunk(self: *DiffLoad, chunk: []const u8) void {
-    var produced: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    var produced: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
     defer produced.deinit(self.worker_allocator);
 
     self.iparser.feed(self.worker_allocator, chunk, &produced) catch {
@@ -285,7 +286,7 @@ fn shouldCancel(self: *DiffLoad) bool {
 }
 
 fn flushTrailing(self: *DiffLoad) void {
-    var produced: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    var produced: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
     defer produced.deinit(self.worker_allocator);
 
     self.iparser.finish(self.worker_allocator, &produced) catch {
@@ -333,14 +334,14 @@ fn loadUntracked(self: *DiffLoad) void {
 fn pushFiles(self: *DiffLoad, files: []const parser.FileDiff) void {
     if (files.len == 0) return;
 
-    self.mutex.lock();
+    self.mutex.lockUncancelable(skim_io.get());
     for (files) |f| {
         self.files.append(self.worker_allocator, f) catch {
             var owned = f;
             owned.deinit(self.worker_allocator);
         };
     }
-    self.mutex.unlock();
+    self.mutex.unlock(skim_io.get());
     self.ready.store(true, .release);
 }
 
@@ -427,11 +428,11 @@ fn freeFiles(allocator: Allocator, files: *std.ArrayListUnmanaged(parser.FileDif
 test "incremental parse yields all files regardless of chunking" {
     const allocator = testing.allocator;
 
-    var whole: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    var whole: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
     defer freeFiles(allocator, &whole);
     try feedAllAtOnce(allocator, SAMPLE_TWO_FILES, &whole);
 
-    var streamed: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    var streamed: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
     defer freeFiles(allocator, &streamed);
     try feedByteByByte(allocator, SAMPLE_TWO_FILES, &streamed);
 
@@ -444,7 +445,7 @@ test "incremental parse yields all files regardless of chunking" {
 test "incremental parse emits first file before second arrives" {
     const allocator = testing.allocator;
 
-    var out: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    var out: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
     defer freeFiles(allocator, &out);
 
     var ip = IncrementalParser{};
@@ -478,7 +479,7 @@ test "single file only emitted at finish" {
         "-a\n" ++
         "+b\n";
 
-    var out: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    var out: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
     defer freeFiles(allocator, &out);
 
     var ip = IncrementalParser{};
@@ -495,7 +496,7 @@ test "single file only emitted at finish" {
 test "empty diff yields no files" {
     const allocator = testing.allocator;
 
-    var out: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    var out: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
     defer freeFiles(allocator, &out);
 
     try feedAllAtOnce(allocator, "", &out);
@@ -505,7 +506,7 @@ test "empty diff yields no files" {
 test "boundary scan does not revisit bytes it has already examined" {
     const allocator = testing.allocator;
 
-    var out: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    var out: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
     defer freeFiles(allocator, &out);
 
     var ip = IncrementalParser{};
@@ -526,7 +527,7 @@ test "boundary scan does not revisit bytes it has already examined" {
 test "boundary split across a chunk edge is still found" {
     const allocator = testing.allocator;
 
-    var out: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    var out: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
     defer freeFiles(allocator, &out);
 
     var ip = IncrementalParser{};
@@ -554,13 +555,13 @@ test "DiffLoad streams the working-dir diff end to end" {
 
     // Structs drained here are freed via `out`; deinitState only frees the
     // (empty) unconsumed tail, so ownership never overlaps.
-    var out: std.ArrayListUnmanaged(parser.FileDiff) = .{};
+    var out: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
     defer freeFiles(allocator, &out);
 
     var spins: usize = 0;
     while (!dl.isDone() and spins < 5000) : (spins += 1) {
         _ = drainNewFiles(&dl, &out, allocator) catch {};
-        std.Thread.sleep(std.time.ns_per_ms);
+        skim_io.sleep(std.time.ns_per_ms);
     }
     _ = drainNewFiles(&dl, &out, allocator) catch {};
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 
@@ -21,7 +22,7 @@ pub const DiffSource = union(enum) {
 /// Build common git diff arguments for a given source
 /// Returns the args list and an optional allocated range string that the caller must free
 fn buildDiffArgs(allocator: Allocator, source: DiffSource, extra_flags: []const []const u8) !struct { args: std.ArrayList([]const u8), range_owned: ?[]const u8 } {
-    var args: std.ArrayList([]const u8) = .{};
+    var args: std.ArrayList([]const u8) = .empty;
     errdefer args.deinit(allocator);
 
     try args.append(allocator, "git");
@@ -92,11 +93,11 @@ pub fn streamDiff(
     defer build.args.deinit(allocator);
     defer if (build.range_owned) |r| allocator.free(r);
 
-    var child = std.process.Child.init(build.args.items, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    try child.spawn();
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = build.args.items,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
 
     const stdout = child.stdout.?;
     var read_buf: [64 * 1024]u8 = undefined;
@@ -105,28 +106,28 @@ pub fn streamDiff(
     while (true) {
         if (shouldCancel(ctx)) {
             canceled = true;
-            _ = child.kill() catch {};
+            child.kill(skim_io.get());
             break;
         }
-        const n = stdout.read(&read_buf) catch break;
+        const n = skim_io.readFile(stdout, &read_buf) catch break;
         if (n == 0) break; // EOF
         onChunk(ctx, read_buf[0..n]);
     }
 
     // Drain stderr for diagnostics (bounded). git writes little/nothing here on
     // success, so the pipe cannot fill while we read stdout above.
-    const stderr = child.stderr.?.readToEndAlloc(allocator, 1 * 1024 * 1024) catch null;
+    const stderr = skim_io.readAllAlloc(child.stderr.?, allocator, 1 * 1024 * 1024) catch null;
     defer if (stderr) |s| allocator.free(s);
 
-    const term = child.wait() catch return error.GitCommandFailed;
+    const term = child.wait(skim_io.get()) catch return error.GitCommandFailed;
 
     if (canceled) return error.Canceled;
 
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 if (stderr) |s| {
-                    const trimmed = std.mem.trimRight(u8, s, &std.ascii.whitespace);
+                    const trimmed = std.mem.trimEnd(u8, s, &std.ascii.whitespace);
                     if (trimmed.len > 0) std.log.warn("git diff failed: {s}", .{trimmed});
                 }
                 return error.GitCommandFailed;
@@ -137,45 +138,33 @@ pub fn streamDiff(
 }
 
 fn runGitCommand(allocator: Allocator, args: []const []const u8) ![]u8 {
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    try child.spawn();
-
-    // Both pipes must be drained concurrently: reading stdout to EOF first
-    // deadlocks if the child fills the ~64KB stderr pipe buffer meanwhile,
+    // `process.run` drains both pipes concurrently. Reading stdout to EOF first
+    // would deadlock if the child filled the ~64KB stderr pipe buffer meanwhile,
     // because it then blocks on write(stderr) and never closes stdout.
-    var stdout_buf: std.ArrayList(u8) = .{};
-    defer stdout_buf.deinit(allocator);
-    var stderr_buf: std.ArrayList(u8) = .{};
-    defer stderr_buf.deinit(allocator);
-    try child.collectOutput(allocator, &stdout_buf, &stderr_buf, 100 * 1024 * 1024);
-
-    const stdout = try allocator.dupe(u8, stdout_buf.items);
+    const result = try std.process.run(allocator, skim_io.get(), .{
+        .argv = args,
+        .stdout_limit = .limited(100 * 1024 * 1024),
+        .stderr_limit = .limited(100 * 1024 * 1024),
+    });
+    const stdout = result.stdout;
     errdefer allocator.free(stdout);
-    const stderr = stderr_buf.items;
+    const stderr = result.stderr;
+    defer allocator.free(stderr);
 
-    const term = try child.wait();
-
-    switch (term) {
-        .Exited => |code| {
+    switch (result.term) {
+        .exited => |code| {
             if (code != 0) {
                 // Print git's error message (git already prefixes with "fatal:")
-                const trimmed = std.mem.trimRight(u8, stderr, &std.ascii.whitespace);
+                const trimmed = std.mem.trimEnd(u8, stderr, &std.ascii.whitespace);
                 if (trimmed.len > 0) {
                     std.debug.print("{s}\n", .{trimmed});
                 } else {
                     std.debug.print("error: git command failed (exit code {d})\n", .{code});
                 }
-                allocator.free(stdout);
                 return error.GitCommandFailed;
             }
         },
-        else => {
-            allocator.free(stdout);
-            return error.GitCommandFailed;
-        },
+        else => return error.GitCommandFailed,
     }
 
     return stdout;
@@ -272,7 +261,7 @@ pub const FileStatus = struct {
 };
 
 fn parseFileStatus(allocator: Allocator, output: []const u8) ![]FileStatus {
-    var files: std.ArrayList(FileStatus) = .{};
+    var files: std.ArrayList(FileStatus) = .empty;
     errdefer {
         for (files.items) |*file| {
             file.deinit(allocator);
@@ -309,21 +298,21 @@ fn parseFileStatus(allocator: Allocator, output: []const u8) ![]FileStatus {
 pub fn getBranches(allocator: Allocator) ![][]const u8 {
     const args = &[_][]const u8{ "git", "branch", "-a", "--format=%(refname:short)" };
 
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
 
-    try child.spawn();
-
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 10 * 1024 * 1024);
+    const stdout = try skim_io.readAllAlloc(child.stdout.?, allocator, 10 * 1024 * 1024);
     defer allocator.free(stdout);
 
-    const term = try child.wait();
-    if (term != .Exited or term.Exited != 0) {
+    const term = try child.wait(skim_io.get());
+    if (term != .exited or term.exited != 0) {
         return error.GitCommandFailed;
     }
 
-    var branches: std.ArrayList([]const u8) = .{};
+    var branches: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (branches.items) |branch| {
             allocator.free(branch);
@@ -345,13 +334,13 @@ pub fn getBranches(allocator: Allocator) ![][]const u8 {
 /// Detect the default branch (main or master) by checking which exists
 pub fn detectDefaultBranch(allocator: Allocator) ![]const u8 {
     // Try main first
-    const main_check = checkBranchExists(allocator, "main") catch false;
+    const main_check = checkBranchExists("main") catch false;
     if (main_check) {
         return try allocator.dupe(u8, "main");
     }
 
     // Fall back to master
-    const master_check = checkBranchExists(allocator, "master") catch false;
+    const master_check = checkBranchExists("master") catch false;
     if (master_check) {
         return try allocator.dupe(u8, "master");
     }
@@ -360,18 +349,18 @@ pub fn detectDefaultBranch(allocator: Allocator) ![]const u8 {
     return try allocator.dupe(u8, "main");
 }
 
-fn checkBranchExists(allocator: Allocator, branch: []const u8) !bool {
+fn checkBranchExists(branch: []const u8) !bool {
     const args = &[_][]const u8{ "git", "rev-parse", "--verify", branch };
 
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-    const term = try child.wait();
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    const term = try child.wait(skim_io.get());
 
     return switch (term) {
-        .Exited => |code| code == 0,
+        .exited => |code| code == 0,
         else => false,
     };
 }
@@ -397,31 +386,23 @@ pub fn isInMergeConflict(allocator: Allocator) bool {
     // Get the git directory path
     const args = &[_][]const u8{ "git", "rev-parse", "--git-dir" };
 
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    child.spawn() catch |err| {
-        log.debug("spawn failed: {}", .{err});
+    const result = std.process.run(allocator, skim_io.get(), .{
+        .argv = args,
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(0),
+    }) catch |err| {
+        log.debug("git rev-parse failed: {}", .{err});
         return false;
     };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1024) catch |err| {
-        log.debug("read stdout failed: {}", .{err});
-        return false;
-    };
-    defer allocator.free(stdout);
-
-    const term = child.wait() catch |err| {
-        log.debug("wait failed: {}", .{err});
-        return false;
-    };
-    if (term != .Exited or term.Exited != 0) {
-        log.debug("git rev-parse failed with exit code: {}", .{term});
+    if (result.term != .exited or result.term.exited != 0) {
+        log.debug("git rev-parse failed with exit code: {}", .{result.term});
         return false;
     }
 
-    const git_dir = std.mem.trim(u8, stdout, " \t\r\n");
+    const git_dir = std.mem.trim(u8, result.stdout, " \t\r\n");
     log.debug("git_dir: '{s}' (len={})", .{ git_dir, git_dir.len });
 
     // Check for conflict markers in git directory
@@ -437,7 +418,7 @@ pub fn isInMergeConflict(allocator: Allocator) bool {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     for (conflict_markers) |marker| {
         const path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{ git_dir, marker }) catch continue;
-        if (std.fs.cwd().access(path, .{})) {
+        if (std.Io.Dir.cwd().access(skim_io.get(), path, .{})) {
             log.debug("FOUND conflict marker: '{s}'", .{path});
             return true;
         } else |err| {
@@ -455,7 +436,7 @@ pub fn getUntrackedFiles(allocator: Allocator) ![][]const u8 {
     const output = try runGitCommand(allocator, args);
     defer allocator.free(output);
 
-    var files: std.ArrayList([]const u8) = .{};
+    var files: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (files.items) |file| {
             allocator.free(file);
@@ -479,40 +460,25 @@ pub fn getUntrackedFiles(allocator: Allocator) ![][]const u8 {
 pub fn getUntrackedFileDiff(allocator: Allocator, file_path: []const u8) ![]u8 {
     const args = &[_][]const u8{ "git", "diff", "--no-color", "--no-ext-diff", "-U10", "--no-index", "/dev/null", file_path };
 
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    try child.spawn();
-
-    // Drain both pipes concurrently — see runGitCommand for why sequential
-    // stdout-then-stderr reads can deadlock.
-    var stdout_buf: std.ArrayList(u8) = .{};
-    defer stdout_buf.deinit(allocator);
-    var stderr_buf: std.ArrayList(u8) = .{};
-    defer stderr_buf.deinit(allocator);
-    try child.collectOutput(allocator, &stdout_buf, &stderr_buf, 100 * 1024 * 1024);
-
-    const stdout = try allocator.dupe(u8, stdout_buf.items);
+    // `process.run` drains both pipes concurrently — see runGitCommand for why
+    // sequential stdout-then-stderr reads can deadlock.
+    const result = try std.process.run(allocator, skim_io.get(), .{
+        .argv = args,
+        .stdout_limit = .limited(100 * 1024 * 1024),
+        .stderr_limit = .limited(100 * 1024 * 1024),
+    });
+    const stdout = result.stdout;
     errdefer allocator.free(stdout);
-
-    const term = try child.wait();
+    allocator.free(result.stderr);
 
     // git diff --no-index exits with 1 when there are differences (which is expected)
     // Exit code 0 means no differences, 1 means differences, other codes are errors
-    switch (term) {
-        .Exited => |code| {
-            if (code == 0 or code == 1) {
-                return stdout;
-            } else {
-                allocator.free(stdout);
-                return error.GitCommandFailed;
-            }
-        },
-        else => {
-            allocator.free(stdout);
+    switch (result.term) {
+        .exited => |code| {
+            if (code == 0 or code == 1) return stdout;
             return error.GitCommandFailed;
         },
+        else => return error.GitCommandFailed,
     }
 }
 
@@ -586,14 +552,14 @@ pub fn getDiffWithUntracked(allocator: Allocator, source: DiffSource) !DiffWithU
     }
 
     // Build combined diff text
-    var combined: std.ArrayList(u8) = .{};
+    var combined: std.ArrayList(u8) = .empty;
     errdefer combined.deinit(allocator);
 
     try combined.appendSlice(allocator, tracked_diff);
     allocator.free(tracked_diff);
 
     // Keep track of which untracked files we successfully got diffs for
-    var successful_paths: std.ArrayList([]const u8) = .{};
+    var successful_paths: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (successful_paths.items) |p| allocator.free(p);
         successful_paths.deinit(allocator);
@@ -642,7 +608,7 @@ test "streamDiff reads the same bytes as getDiff" {
     defer allocator.free(buffered);
 
     const Ctx = struct {
-        buf: std.ArrayList(u8) = .{},
+        buf: std.ArrayList(u8) = .empty,
         alloc: Allocator,
 
         fn onChunk(self: *@This(), chunk: []const u8) void {
@@ -716,22 +682,22 @@ pub fn getCommits(allocator: Allocator, skip: usize, count: usize) ![]CommitInfo
         count_str,
     };
 
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
 
-    try child.spawn();
-
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 50 * 1024 * 1024); // 50MB limit
+    const stdout = try skim_io.readAllAlloc(child.stdout.?, allocator, 50 * 1024 * 1024); // 50MB limit
     defer allocator.free(stdout);
 
-    const term = try child.wait();
-    if (term != .Exited or term.Exited != 0) {
+    const term = try child.wait(skim_io.get());
+    if (term != .exited or term.exited != 0) {
         return error.GitCommandFailed;
     }
 
     // Parse output: each line is hash\0short\0subject\0author\0date
-    var commits: std.ArrayList(CommitInfo) = .{};
+    var commits: std.ArrayList(CommitInfo) = .empty;
     errdefer {
         for (commits.items) |*commit| {
             commit.deinit(allocator);
@@ -767,17 +733,17 @@ pub fn getCommits(allocator: Allocator, skip: usize, count: usize) ![]CommitInfo
 pub fn getCommitCount(allocator: Allocator) !usize {
     const args = &[_][]const u8{ "git", "rev-list", "--count", "HEAD" };
 
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
 
-    try child.spawn();
-
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 1024);
+    const stdout = try skim_io.readAllAlloc(child.stdout.?, allocator, 1024);
     defer allocator.free(stdout);
 
-    const term = try child.wait();
-    if (term != .Exited or term.Exited != 0) {
+    const term = try child.wait(skim_io.get());
+    if (term != .exited or term.exited != 0) {
         return error.GitCommandFailed;
     }
 

@@ -14,6 +14,7 @@ const command_palette = @import("../command_palette.zig");
 const help = @import("../help.zig");
 
 const App = @import("../app.zig").App;
+const skim_io = @import("skim_io");
 const Color = rendering_common.Color;
 const Layout = rendering_common.Layout;
 const UI = ui_components.UI;
@@ -23,7 +24,7 @@ const profiling_enabled = build_options.enable_profile;
 
 pub fn render(app: *App, win: vaxis.Window) !void {
     const profile_frame = if (profiling_enabled) app.profile_active_frame else false;
-    var total_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
+    var total_timer_opt: ?skim_io.Timer = if (profile_frame) skim_io.Timer.start() catch null else null;
     var header_ns: u64 = 0;
     var content_ns: u64 = 0;
     var status_ns: u64 = 0;
@@ -75,7 +76,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     .height = @intCast(content_height),
                 });
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try agent.renderAgentPanel(app, agent_win);
                     if (timer_opt) |*timer| agent_ns += timer.read();
                 } else {
@@ -91,7 +92,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 });
                 if (app.mode == .branch_selection) {
                     if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                         try UI.renderBranchSelectionMenu(app, content_win);
                         if (timer_opt) |*timer| overlay_ns += timer.read();
                     } else {
@@ -99,7 +100,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     }
                 } else if (app.mode == .commit_selection) {
                     if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                         try UI.renderCommitSelectionMenu(app, content_win);
                         if (timer_opt) |*timer| overlay_ns += timer.read();
                     } else {
@@ -107,10 +108,10 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     }
                 } else if (app.mode == .commit_diff_mode) {
                     if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                         try UI.renderCommitSelectionMenu(app, content_win);
                         if (timer_opt) |*timer| overlay_ns += timer.read();
-                        timer_opt = std.time.Timer.start() catch null;
+                        timer_opt = skim_io.Timer.start() catch null;
                         try UI.renderCommitDiffModeMenu(app, content_win);
                         if (timer_opt) |*timer| overlay_ns += timer.read();
                     } else {
@@ -119,7 +120,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     }
                 } else {
                     if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                         try UI.renderEmptyMenu(app, content_win);
                         if (timer_opt) |*timer| overlay_ns += timer.read();
                     } else {
@@ -136,7 +137,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 });
                 if (app.mode == .branch_selection) {
                     if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                         try UI.renderBranchSelectionMenu(app, content_win);
                         if (timer_opt) |*timer| overlay_ns += timer.read();
                     } else {
@@ -144,7 +145,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     }
                 } else if (app.mode == .commit_selection) {
                     if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                         try UI.renderCommitSelectionMenu(app, content_win);
                         if (timer_opt) |*timer| overlay_ns += timer.read();
                     } else {
@@ -152,10 +153,10 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     }
                 } else if (app.mode == .commit_diff_mode) {
                     if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                         try UI.renderCommitSelectionMenu(app, content_win);
                         if (timer_opt) |*timer| overlay_ns += timer.read();
-                        timer_opt = std.time.Timer.start() catch null;
+                        timer_opt = skim_io.Timer.start() catch null;
                         try UI.renderCommitDiffModeMenu(app, content_win);
                         if (timer_opt) |*timer| overlay_ns += timer.read();
                     } else {
@@ -164,7 +165,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     }
                 } else {
                     if (profile_frame) {
-                        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                        var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                         try UI.renderEmptyMenu(app, content_win);
                         if (timer_opt) |*timer| overlay_ns += timer.read();
                     } else {
@@ -180,7 +181,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     .height = @intCast(content_height),
                 });
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try agent.renderAgentPanel(app, agent_win);
                     if (timer_opt) |*timer| agent_ns += timer.read();
                 } else {
@@ -191,7 +192,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
             // No agent panel - full screen empty menu
             if (app.mode == .branch_selection) {
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try UI.renderBranchSelectionMenu(app, win);
                     if (timer_opt) |*timer| overlay_ns += timer.read();
                 } else {
@@ -199,7 +200,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 }
             } else if (app.mode == .commit_selection) {
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try UI.renderCommitSelectionMenu(app, win);
                     if (timer_opt) |*timer| overlay_ns += timer.read();
                 } else {
@@ -207,10 +208,10 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 }
             } else if (app.mode == .commit_diff_mode) {
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try UI.renderCommitSelectionMenu(app, win);
                     if (timer_opt) |*timer| overlay_ns += timer.read();
-                    timer_opt = std.time.Timer.start() catch null;
+                    timer_opt = skim_io.Timer.start() catch null;
                     try UI.renderCommitDiffModeMenu(app, win);
                     if (timer_opt) |*timer| overlay_ns += timer.read();
                 } else {
@@ -219,7 +220,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 }
             } else {
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try UI.renderEmptyMenu(app, win);
                     if (timer_opt) |*timer| overlay_ns += timer.read();
                 } else {
@@ -244,7 +245,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     .height = @intCast(content_height + Layout.header_height),
                 });
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try agent.renderAgentPanel(app, agent_win);
                     if (timer_opt) |*timer| agent_ns += timer.read();
                 } else {
@@ -259,7 +260,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     .height = @intCast(Layout.header_height),
                 });
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try UI.renderHeader(app, header_win);
                     if (timer_opt) |*timer| header_ns += timer.read();
                 } else {
@@ -274,7 +275,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     .height = @intCast(content_height),
                 });
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try renderContent(app, content_win);
                     if (timer_opt) |*timer| content_ns += timer.read();
                 } else {
@@ -290,7 +291,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     .height = @intCast(Layout.header_height),
                 });
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try UI.renderHeader(app, header_win);
                     if (timer_opt) |*timer| header_ns += timer.read();
                 } else {
@@ -305,7 +306,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     .height = @intCast(content_height),
                 });
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try renderContent(app, content_win);
                     if (timer_opt) |*timer| content_ns += timer.read();
                 } else {
@@ -320,7 +321,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                     .height = @intCast(content_height + Layout.header_height),
                 });
                 if (profile_frame) {
-                    var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                    var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                     try agent.renderAgentPanel(app, agent_win);
                     if (timer_opt) |*timer| agent_ns += timer.read();
                 } else {
@@ -336,7 +337,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 .height = @intCast(Layout.header_height),
             });
             if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                 try UI.renderHeader(app, header_win);
                 if (timer_opt) |*timer| header_ns += timer.read();
             } else {
@@ -350,7 +351,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 .height = @intCast(content_height),
             });
             if (profile_frame) {
-                var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+                var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
                 try renderContent(app, content_win);
                 if (timer_opt) |*timer| content_ns += timer.read();
             } else {
@@ -368,7 +369,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
         .height = @intCast(Layout.status_height),
     });
     if (profile_frame) {
-        var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+        var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
         try UI.renderStatus(app, status_win);
         if (timer_opt) |*timer| status_ns += timer.read();
     } else {
@@ -378,7 +379,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // Render command palette overlay if in command palette mode
     if (app.mode == .command_palette) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try command_palette.renderCommandPalette(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -389,7 +390,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // Render help overlay if in help mode
     if (app.mode == .help) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try help.renderHelpPopup(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -400,7 +401,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // Render graphite stack dialog if in graphite_stack mode
     if (app.mode == .graphite_stack) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try UI.renderGraphiteStackDialog(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -412,7 +413,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // window, so it overlays whatever diff was underneath).
     if (app.mode == .pr_review) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try UI.renderPrReviewDialog(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -423,7 +424,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // Render submit-review dialog if in review_submit mode
     if (app.mode == .review_submit) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try UI.renderReviewSubmitDialog(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -434,7 +435,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // Render read-only PR info panel if in pr_info mode
     if (app.mode == .pr_info) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try UI.renderPrInfoPanel(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -445,7 +446,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // Render model selection dialog if in model_selection mode
     if (app.mode == .model_selection) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try UI.renderModelSelectionDialog(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -456,7 +457,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // Render permission selection dialog if in permission_selection mode
     if (app.mode == .permission_selection) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try UI.renderPermissionSelectionDialog(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -467,7 +468,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // Render agent selection dialog if in agent_selection mode
     if (app.mode == .agent_selection) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try UI.renderAgentSelectionDialog(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -478,7 +479,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // Render session picker dialog if in session_picker mode
     if (app.mode == .session_picker) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try UI.renderSessionPickerDialog(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -489,7 +490,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     // Render commit selection overlay if in commit_selection or commit_diff_mode
     if (app.mode == .commit_selection) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try UI.renderCommitSelectionMenu(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -498,10 +499,10 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     }
     if (app.mode == .commit_diff_mode) {
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try UI.renderCommitSelectionMenu(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
-            timer_opt = std.time.Timer.start() catch null;
+            timer_opt = skim_io.Timer.start() catch null;
             try UI.renderCommitDiffModeMenu(app, win);
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
@@ -521,7 +522,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
             .height = if (win.height > Layout.status_height) win.height - Layout.status_height else win.height,
         });
         if (profile_frame) {
-            var timer_opt: ?std.time.Timer = std.time.Timer.start() catch null;
+            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
             try agent.renderAgentPanel(app, agent_win);
             if (timer_opt) |*timer| agent_ns += timer.read();
         } else {
@@ -582,9 +583,9 @@ pub fn createHighlightedSegments(
     base_style: vaxis.Style,
     global_line: usize,
 ) ![]vaxis.Cell.Segment {
-    var total_timer_opt: ?std.time.Timer = null;
+    var total_timer_opt: ?skim_io.Timer = null;
     if (app.profile_active_frame) {
-        total_timer_opt = std.time.Timer.start() catch null;
+        total_timer_opt = skim_io.Timer.start() catch null;
     }
     defer if (total_timer_opt) |*timer| {
         app.profile_counters.highlight_total_ns += timer.read();
@@ -619,12 +620,12 @@ pub fn createHighlightedSegments(
             return try applySearchHighlighting(app, segments, text, full_line_text, text_offset, global_line);
         }
 
-        var build_timer_opt: ?std.time.Timer = null;
+        var build_timer_opt: ?skim_io.Timer = null;
         if (app.profile_active_frame) {
-            build_timer_opt = std.time.Timer.start() catch null;
+            build_timer_opt = skim_io.Timer.start() catch null;
         }
 
-        var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+        var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
         errdefer segments.deinit(allocator);
 
         var pos: usize = 0;
@@ -697,9 +698,9 @@ pub fn createHighlightedSegments(
     const line_start = line_byte_offset;
     const line_end = line_byte_offset + text.len;
 
-    var overlap_timer_opt: ?std.time.Timer = null;
+    var overlap_timer_opt: ?skim_io.Timer = null;
     if (app.profile_active_frame) {
-        overlap_timer_opt = std.time.Timer.start() catch null;
+        overlap_timer_opt = skim_io.Timer.start() catch null;
     }
     const start_index = findHighlightStartIndex(file_highlights, line_start);
     if (overlap_timer_opt) |*timer| {
@@ -708,12 +709,12 @@ pub fn createHighlightedSegments(
     }
 
     // Build segments by walking highlights in order
-    var build_timer_opt: ?std.time.Timer = null;
+    var build_timer_opt: ?skim_io.Timer = null;
     if (app.profile_active_frame) {
-        build_timer_opt = std.time.Timer.start() catch null;
+        build_timer_opt = skim_io.Timer.start() catch null;
     }
 
-    var segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+    var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
     errdefer segments.deinit(allocator);
 
     var pos: usize = 0;
@@ -840,9 +841,9 @@ fn applySearchHighlighting(
     chunk_offset: usize,
     global_line: usize,
 ) ![]vaxis.Cell.Segment {
-    var search_timer_opt: ?std.time.Timer = null;
+    var search_timer_opt: ?skim_io.Timer = null;
     if (app.profile_active_frame) {
-        search_timer_opt = std.time.Timer.start() catch null;
+        search_timer_opt = skim_io.Timer.start() catch null;
     }
     defer if (search_timer_opt) |*timer| {
         app.profile_counters.search_ns += timer.read();
@@ -878,7 +879,7 @@ fn applySearchHighlighting(
     const is_case_sensitive = search.isCaseSensitive(query);
 
     // Find all matches in the chunk_text (this is the actual text to render)
-    var chunk_matches: std.ArrayList(struct { start: usize, end: usize }) = .{};
+    var chunk_matches: std.ArrayList(struct { start: usize, end: usize }) = .empty;
     defer chunk_matches.deinit(allocator);
 
     var search_pos: usize = 0;
@@ -902,7 +903,7 @@ fn applySearchHighlighting(
     }
 
     // Now map the matches from chunk_text coordinates to segment coordinates
-    var result_segments: std.ArrayList(vaxis.Cell.Segment) = .{};
+    var result_segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
     errdefer result_segments.deinit(allocator);
 
     var text_pos: usize = 0; // Current position in chunk_text
@@ -911,7 +912,7 @@ fn applySearchHighlighting(
         const seg_end = text_pos + seg.text.len;
 
         // Find matches that overlap with this segment
-        var seg_matches: std.ArrayList(struct { start: usize, end: usize }) = .{};
+        var seg_matches: std.ArrayList(struct { start: usize, end: usize }) = .empty;
         defer seg_matches.deinit(allocator);
 
         for (chunk_matches.items) |match| {

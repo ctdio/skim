@@ -17,6 +17,7 @@ const github = @import("github.zig");
 const review_parse = @import("review_parse.zig");
 const thread_placement = @import("thread_placement.zig");
 const width = @import("../rendering/width.zig");
+const skim_io = @import("skim_io");
 
 pub const AnchoredThread = thread_placement.AnchoredThread;
 
@@ -81,7 +82,7 @@ pub const MutationOutcome = union(enum) {
 /// `c_allocator`-owned so they survive the thread boundary; `pollMutations`
 /// frees them on consumption.
 pub const PendingMutation = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Inputs.
@@ -132,7 +133,7 @@ pub const ThreadMutationOutcome = union(enum) {
 /// `ready.store(true, .release)`. All buffers are `c_allocator`-owned so they
 /// survive the thread boundary; `pollThreadMutations` frees them on consumption.
 pub const ThreadMutation = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Inputs.
@@ -192,7 +193,7 @@ pub const SubmitState = struct {
 /// `ready.store(true, .release)`. All buffers are `c_allocator`-owned so they
 /// survive the thread boundary; `pollSubmit` frees them on consumption.
 pub const PendingSubmit = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     kind: SubmitKind = .submit,
@@ -234,7 +235,7 @@ pub const ThreadCounts = struct {
 /// writes results under the mutex, then `ready.store(true, .release)`. All
 /// buffers are `c_allocator`-owned so they survive the thread boundary.
 pub const PendingEntry = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     git_ok: bool = false, // fetchRef succeeded (a local head ref exists)
     fetched_head_ref: ?[]u8 = null, // local ref from fetchRef (refs/skim/pr-N)
@@ -280,9 +281,9 @@ pub const ReviewSession = struct {
     // Server-thread element strings point into `data_arena`; placeholder/posted
     // thread strings are session-allocator-owned (see `SessionThread.owned`). The
     // lists themselves are allocator-managed so they can be reused across refetches.
-    threads: std.ArrayList(SessionThread) = .{},
-    reviews: std.ArrayList(review_parse.Review) = .{},
-    checks: std.ArrayList(review_parse.CheckRun) = .{},
+    threads: std.ArrayList(SessionThread) = .empty,
+    reviews: std.ArrayList(review_parse.Review) = .empty,
+    checks: std.ArrayList(review_parse.CheckRun) = .empty,
 
     // Derived render placement of `threads` (AD-4: recomputed by the App on every
     // diff refresh, never persisted). Allocator-owned; replaced via `setAnchored`.
@@ -313,7 +314,7 @@ pub const ReviewSession = struct {
     mutation: PendingMutation = .{},
     mutation_thread: ?std.Thread = null,
     posting_worker_active: bool = false,
-    queued_posts: std.ArrayList(QueuedPost) = .{},
+    queued_posts: std.ArrayList(QueuedPost) = .empty,
     local_seq_counter: u64 = 0,
     // Draft safety (NFR-2): the body of the last failed post, preserved so the
     // next comment-open pre-fills the editor. Session-allocator-owned.
@@ -325,7 +326,7 @@ pub const ReviewSession = struct {
     thread_mutation: ThreadMutation = .{},
     thread_mutation_thread: ?std.Thread = null,
     thread_mut_active: bool = false,
-    queued_thread_mutations: std.ArrayList(QueuedThreadMutation) = .{},
+    queued_thread_mutations: std.ArrayList(QueuedThreadMutation) = .empty,
     // Two-step delete confirmation state (null = disarmed). See `DeleteConfirm`.
     delete_confirm: ?DeleteConfirm = null,
 
@@ -377,7 +378,7 @@ pub fn startRefetch(self: *ReviewSession, allocator: Allocator) !void {
 pub fn pollPending(self: *ReviewSession, allocator: Allocator) EntryOutcome {
     if (!self.entry.ready.load(.acquire)) return .none;
 
-    self.entry.mutex.lock();
+    self.entry.mutex.lockUncancelable(skim_io.get());
     const git_ok = self.entry.git_ok;
     const head_ref = self.entry.fetched_head_ref;
     const base_ref = self.entry.fetched_base_ref;
@@ -387,7 +388,7 @@ pub fn pollPending(self: *ReviewSession, allocator: Allocator) EntryOutcome {
     self.entry.fetched_head_ref = null;
     self.entry.fetched_base_ref = null;
     self.entry.raw_json = null;
-    self.entry.mutex.unlock();
+    self.entry.mutex.unlock(skim_io.get());
     self.entry.ready.store(false, .release);
 
     if (self.entry_thread) |t| {
@@ -459,7 +460,7 @@ pub fn applyFetchedData(self: *ReviewSession, allocator: Allocator, data: *revie
     // Preserve in-flight optimistic placeholders across the refetch (they are
     // local-only and not yet on the server). Move their values out before
     // clearData tears down the thread list, then re-append after rebuild.
-    var preserved: std.ArrayList(SessionThread) = .{};
+    var preserved: std.ArrayList(SessionThread) = .empty;
     defer preserved.deinit(allocator);
     for (self.threads.items) |st| {
         if (st.posting) {
@@ -657,7 +658,7 @@ pub fn startPostThread(self: *ReviewSession, allocator: Allocator, params: PostP
 pub fn pollMutations(self: *ReviewSession, allocator: Allocator) MutationOutcome {
     if (!self.mutation.ready.load(.acquire)) return .none;
 
-    self.mutation.mutex.lock();
+    self.mutation.mutex.lockUncancelable(skim_io.get());
     const out_review_id = self.mutation.out_review_id;
     const out_thread_raw = self.mutation.out_thread_raw;
     const failed = self.mutation.failed;
@@ -665,7 +666,7 @@ pub fn pollMutations(self: *ReviewSession, allocator: Allocator) MutationOutcome
     const seq = self.mutation.local_seq;
     self.mutation.out_review_id = null;
     self.mutation.out_thread_raw = null;
-    self.mutation.mutex.unlock();
+    self.mutation.mutex.unlock(skim_io.get());
     self.mutation.ready.store(false, .release);
 
     if (self.mutation_thread) |t| {
@@ -826,12 +827,12 @@ pub fn deleteConfirmArmed(self: *const ReviewSession) ?[]const u8 {
 pub fn pollThreadMutations(self: *ReviewSession, allocator: Allocator) ThreadMutationOutcome {
     if (!self.thread_mutation.ready.load(.acquire)) return .none;
 
-    self.thread_mutation.mutex.lock();
+    self.thread_mutation.mutex.lockUncancelable(skim_io.get());
     const out_raw = self.thread_mutation.out_raw;
     const failed = self.thread_mutation.failed;
     const fail_kind = self.thread_mutation.fail_kind;
     self.thread_mutation.out_raw = null;
-    self.thread_mutation.mutex.unlock();
+    self.thread_mutation.mutex.unlock(skim_io.get());
     self.thread_mutation.ready.store(false, .release);
 
     if (self.thread_mutation_thread) |t| {
@@ -1079,7 +1080,7 @@ pub fn startDiscard(self: *ReviewSession, allocator: Allocator) !SubmitAction {
 pub fn pollSubmit(self: *ReviewSession, allocator: Allocator) SubmitOutcome {
     if (!self.submit_mutation.ready.load(.acquire)) return .none;
 
-    self.submit_mutation.mutex.lock();
+    self.submit_mutation.mutex.lockUncancelable(skim_io.get());
     const out_review_id = self.submit_mutation.out_review_id;
     const out_error_msg = self.submit_mutation.out_error_msg;
     const failed = self.submit_mutation.failed;
@@ -1088,7 +1089,7 @@ pub fn pollSubmit(self: *ReviewSession, allocator: Allocator) SubmitOutcome {
     const verdict = self.submit_mutation.verdict;
     self.submit_mutation.out_review_id = null;
     self.submit_mutation.out_error_msg = null;
-    self.submit_mutation.mutex.unlock();
+    self.submit_mutation.mutex.unlock(skim_io.get());
     self.submit_mutation.ready.store(false, .release);
 
     if (self.submit_thread) |t| {
@@ -1287,14 +1288,14 @@ fn entryWorker(self: *ReviewSession) void {
         }
     }
 
-    self.entry.mutex.lock();
+    self.entry.mutex.lockUncancelable(skim_io.get());
     self.entry.git_ok = git_ok;
     self.entry.fetched_head_ref = head_ref;
     self.entry.fetched_base_ref = base_ref_out;
     self.entry.gh_ok = gh_ok;
     self.entry.raw_json = raw_json;
     self.entry.gh_kind = gh_kind;
-    self.entry.mutex.unlock();
+    self.entry.mutex.unlock(skim_io.get());
     self.entry.ready.store(true, .release);
 }
 
@@ -1568,12 +1569,12 @@ fn postThreadWorker(self: *ReviewSession) void {
         }
     }
 
-    self.mutation.mutex.lock();
+    self.mutation.mutex.lockUncancelable(skim_io.get());
     self.mutation.out_review_id = out_review_id;
     self.mutation.out_thread_raw = out_thread_raw;
     self.mutation.failed = failed;
     self.mutation.fail_kind = fail_kind;
-    self.mutation.mutex.unlock();
+    self.mutation.mutex.unlock(skim_io.get());
     self.mutation.ready.store(true, .release);
 }
 
@@ -1806,11 +1807,11 @@ fn threadMutationWorker(self: *ReviewSession) void {
         failed = true;
     }
 
-    m.mutex.lock();
+    m.mutex.lockUncancelable(skim_io.get());
     m.out_raw = out_raw;
     m.failed = failed;
     m.fail_kind = fail_kind;
-    m.mutex.unlock();
+    m.mutex.unlock(skim_io.get());
     m.ready.store(true, .release);
 }
 
@@ -1956,7 +1957,7 @@ fn removeThreadAt(self: *ReviewSession, allocator: Allocator, idx: usize) void {
 /// that key, shift higher keys down by one. On allocation failure the transient
 /// expansion state is simply cleared (view state, not review data).
 fn shiftExpandedAfterRemoval(self: *ReviewSession, allocator: Allocator, removed_idx: usize) void {
-    var kept: std.ArrayList(usize) = .{};
+    var kept: std.ArrayList(usize) = .empty;
     defer kept.deinit(allocator);
     var it = self.expanded_threads.iterator();
     while (it.next()) |e| {
@@ -2086,11 +2087,11 @@ fn submitWorker(self: *ReviewSession) void {
         } else {
             failed = true;
         }
-        m.mutex.lock();
+        m.mutex.lockUncancelable(skim_io.get());
         m.out_error_msg = out_error_msg;
         m.failed = failed;
         m.fail_kind = fail_kind;
-        m.mutex.unlock();
+        m.mutex.unlock(skim_io.get());
         m.ready.store(true, .release);
         return;
     }
@@ -2129,12 +2130,12 @@ fn submitWorker(self: *ReviewSession) void {
         }
     }
 
-    m.mutex.lock();
+    m.mutex.lockUncancelable(skim_io.get());
     m.out_review_id = out_review_id;
     m.out_error_msg = out_error_msg;
     m.failed = failed;
     m.fail_kind = fail_kind;
-    m.mutex.unlock();
+    m.mutex.unlock(skim_io.get());
     m.ready.store(true, .release);
 }
 

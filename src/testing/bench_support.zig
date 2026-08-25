@@ -4,6 +4,7 @@ const app_mod = @import("../app.zig");
 const parser = @import("../git/parser.zig");
 const state_helpers = @import("../state.zig");
 const syntax = @import("../highlighting/core.zig");
+const skim_io = @import("skim_io");
 
 const App = app_mod.App;
 const StateHelpers = state_helpers.StateHelpers;
@@ -25,7 +26,7 @@ pub const Stats = struct {
 
 /// Reads a `usize` knob from the environment, falling back to `default_value`.
 pub fn envUsize(allocator: std.mem.Allocator, name: []const u8, default_value: usize) usize {
-    const value = std.process.getEnvVarOwned(allocator, name) catch return default_value;
+    const value = skim_io.getEnvVarOwned(allocator, name) catch return default_value;
     defer allocator.free(value);
     if (value.len == 0) return default_value;
     return std.fmt.parseInt(usize, value, 10) catch default_value;
@@ -33,7 +34,7 @@ pub fn envUsize(allocator: std.mem.Allocator, name: []const u8, default_value: u
 
 /// Reads a `u16` knob from the environment, falling back to `default_value`.
 pub fn envU16(allocator: std.mem.Allocator, name: []const u8, default_value: u16) u16 {
-    const value = std.process.getEnvVarOwned(allocator, name) catch return default_value;
+    const value = skim_io.getEnvVarOwned(allocator, name) catch return default_value;
     defer allocator.free(value);
     if (value.len == 0) return default_value;
     return std.fmt.parseInt(u16, value, 10) catch default_value;
@@ -41,7 +42,7 @@ pub fn envU16(allocator: std.mem.Allocator, name: []const u8, default_value: u16
 
 /// Reads a boolean knob ("1"/"true"/"yes" are true), falling back to `default_value`.
 pub fn envBool(allocator: std.mem.Allocator, name: []const u8, default_value: bool) bool {
-    const value = std.process.getEnvVarOwned(allocator, name) catch return default_value;
+    const value = skim_io.getEnvVarOwned(allocator, name) catch return default_value;
     defer allocator.free(value);
     if (value.len == 0) return default_value;
     if (std.ascii.eqlIgnoreCase(value, "1")) return true;
@@ -52,7 +53,7 @@ pub fn envBool(allocator: std.mem.Allocator, name: []const u8, default_value: bo
 
 /// Reads an owned string knob; caller frees. Returns null when unset or empty.
 pub fn envString(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    const value = std.process.getEnvVarOwned(allocator, name) catch return null;
+    const value = skim_io.getEnvVarOwned(allocator, name) catch return null;
     if (value.len == 0) {
         allocator.free(value);
         return null;
@@ -62,7 +63,7 @@ pub fn envString(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
 
 /// Reads an enum knob by tag name (case-insensitive), falling back to `default_value`.
 pub fn envEnum(comptime T: type, allocator: std.mem.Allocator, name: []const u8, default_value: T) T {
-    const value = std.process.getEnvVarOwned(allocator, name) catch return default_value;
+    const value = skim_io.getEnvVarOwned(allocator, name) catch return default_value;
     defer allocator.free(value);
     if (value.len == 0) return default_value;
     inline for (@typeInfo(T).@"enum".fields) |field| {
@@ -77,7 +78,7 @@ pub fn loadDiffText(allocator: std.mem.Allocator, spec: SyntheticSpec) ![]u8 {
     if (envString(allocator, "SKIM_BENCH_DIFF_PATH")) |path| {
         defer allocator.free(path);
         std.log.info("diff source: file={s}", .{path});
-        return std.fs.cwd().readFileAlloc(allocator, path, 100 * 1024 * 1024);
+        return std.Io.Dir.cwd().readFileAlloc(skim_io.get(), path, allocator, .limited(100 * 1024 * 1024));
     }
     std.log.info("diff source: synthetic", .{});
     return buildDiffText(allocator, spec);
@@ -85,7 +86,7 @@ pub fn loadDiffText(allocator: std.mem.Allocator, spec: SyntheticSpec) ![]u8 {
 
 /// Builds a synthetic unified diff with code-shaped content for syntax highlighting.
 pub fn buildDiffText(allocator: std.mem.Allocator, spec: SyntheticSpec) ![]u8 {
-    var out: std.ArrayList(u8) = .{};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     var path_buf: [256]u8 = undefined;

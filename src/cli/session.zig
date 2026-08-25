@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const posix = std.posix;
 const client = @import("client.zig");
 const session_mgr = @import("../mcp/session.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Write Buffers
@@ -55,7 +56,7 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
     } else if (std.mem.eql(u8, subcmd, "--help") or std.mem.eql(u8, subcmd, "-h")) {
         printHelp();
     } else {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         stderr_writer.interface.print("Unknown subcommand: {s}\n", .{subcmd}) catch {};
         stderr_writer.interface.writeAll("Use 'skim session --help' for usage.\n") catch {};
         stderr_writer.interface.flush() catch {};
@@ -99,7 +100,7 @@ fn runList(allocator: Allocator, args: []const []const u8) !void {
         allocator.free(sessions);
     }
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     const stdout = &stdout_writer.interface;
 
@@ -169,7 +170,7 @@ fn runContext(allocator: Allocator, args: []const []const u8) !void {
     };
     defer response.deinit(allocator);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     const stdout = &stdout_writer.interface;
 
@@ -246,8 +247,8 @@ fn runDiff(allocator: Allocator, args: []const []const u8) !void {
     var req_params: ?std.json.Value = null;
     var params_obj: std.json.ObjectMap = undefined;
     if (file_filter) |f| {
-        params_obj = std.json.ObjectMap.init(allocator);
-        params_obj.put(allocator.dupe(u8, "file") catch unreachable, .{ .string = allocator.dupe(u8, f) catch unreachable }) catch {};
+        params_obj = .empty;
+        params_obj.put(allocator, allocator.dupe(u8, "file") catch unreachable, .{ .string = allocator.dupe(u8, f) catch unreachable }) catch {};
         req_params = .{ .object = params_obj };
     }
     defer if (file_filter != null) {
@@ -256,7 +257,7 @@ fn runDiff(allocator: Allocator, args: []const []const u8) !void {
             allocator.free(entry.key_ptr.*);
             if (entry.value_ptr.* == .string) allocator.free(entry.value_ptr.string);
         }
-        params_obj.deinit();
+        params_obj.deinit(allocator);
     };
 
     var response = conn.request("get_diff", "diff-1", req_params) catch {
@@ -265,7 +266,7 @@ fn runDiff(allocator: Allocator, args: []const []const u8) !void {
     };
     defer response.deinit(allocator);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     const stdout = &stdout_writer.interface;
 
@@ -371,12 +372,12 @@ fn runCommentAdd(allocator: Allocator, args: []const []const u8) !void {
     defer conn.deinit();
 
     // Build params
-    var params = std.json.ObjectMap.init(allocator);
-    defer params.deinit();
-    try params.put(try allocator.dupe(u8, "file"), .{ .string = try allocator.dupe(u8, file.?) });
-    try params.put(try allocator.dupe(u8, "line"), .{ .integer = @intCast(line.?) });
-    try params.put(try allocator.dupe(u8, "line_type"), .{ .string = try allocator.dupe(u8, line_type) });
-    try params.put(try allocator.dupe(u8, "text"), .{ .string = try allocator.dupe(u8, text.?) });
+    var params: std.json.ObjectMap = .empty;
+    defer params.deinit(allocator);
+    try params.put(allocator, try allocator.dupe(u8, "file"), .{ .string = try allocator.dupe(u8, file.?) });
+    try params.put(allocator, try allocator.dupe(u8, "line"), .{ .integer = @intCast(line.?) });
+    try params.put(allocator, try allocator.dupe(u8, "line_type"), .{ .string = try allocator.dupe(u8, line_type) });
+    try params.put(allocator, try allocator.dupe(u8, "text"), .{ .string = try allocator.dupe(u8, text.?) });
 
     var response = conn.request("add_comment", "add-1", .{ .object = params }) catch {
         printError("Request failed", .{});
@@ -384,7 +385,7 @@ fn runCommentAdd(allocator: Allocator, args: []const []const u8) !void {
     };
     defer response.deinit(allocator);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
 
     switch (response) {
@@ -427,7 +428,7 @@ fn runCommentList(allocator: Allocator, args: []const []const u8) !void {
     };
     defer response.deinit(allocator);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     const stdout = &stdout_writer.interface;
 
@@ -474,9 +475,9 @@ fn runCommentDelete(allocator: Allocator, args: []const []const u8) !void {
     var conn = connectOrExit(allocator, session_pid);
     defer conn.deinit();
 
-    var params = std.json.ObjectMap.init(allocator);
-    defer params.deinit();
-    try params.put(try allocator.dupe(u8, "index"), .{ .integer = @intCast(index.?) });
+    var params: std.json.ObjectMap = .empty;
+    defer params.deinit(allocator);
+    try params.put(allocator, try allocator.dupe(u8, "index"), .{ .integer = @intCast(index.?) });
 
     var response = conn.request("delete_comment", "del-1", .{ .object = params }) catch {
         printError("Request failed", .{});
@@ -484,7 +485,7 @@ fn runCommentDelete(allocator: Allocator, args: []const []const u8) !void {
     };
     defer response.deinit(allocator);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
 
     switch (response) {
@@ -515,7 +516,7 @@ fn connectOrExit(allocator: Allocator, session_pid: ?posix.pid_t) client.Client 
 }
 
 fn outputJson(allocator: Allocator, writer: anytype, result: std.json.Value) !void {
-    var alloc_writer: std.io.Writer.Allocating = .init(allocator);
+    var alloc_writer: std.Io.Writer.Allocating = .init(allocator);
     defer alloc_writer.deinit();
     var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
     stringify.write(result) catch return;
@@ -546,7 +547,7 @@ fn outputCommentsHuman(writer: anytype, result: std.json.Value) !void {
 }
 
 fn printError(comptime fmt: []const u8, fmtargs: anytype) void {
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     stderr_writer.interface.print("Error: " ++ fmt ++ "\n", fmtargs) catch {};
     stderr_writer.interface.flush() catch {};
 }
@@ -556,7 +557,7 @@ fn printError(comptime fmt: []const u8, fmtargs: anytype) void {
 // =============================================================================
 
 fn printHelp() void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     stdout_writer.interface.writeAll(
         \\skim session - Interact with running skim sessions
@@ -586,7 +587,7 @@ fn printHelp() void {
 }
 
 fn printListHelp() void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     stdout_writer.interface.writeAll(
         \\skim session list - List running skim sessions
@@ -602,7 +603,7 @@ fn printListHelp() void {
 }
 
 fn printContextHelp() void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     stdout_writer.interface.writeAll(
         \\skim session context - Get session context
@@ -619,7 +620,7 @@ fn printContextHelp() void {
 }
 
 fn printDiffHelp() void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     stdout_writer.interface.writeAll(
         \\skim session diff - Get diff content with line numbers
@@ -642,7 +643,7 @@ fn printDiffHelp() void {
 }
 
 fn printCommentHelp() void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     stdout_writer.interface.writeAll(
         \\skim session comment - Manage comments
@@ -661,7 +662,7 @@ fn printCommentHelp() void {
 }
 
 fn printCommentAddHelp() void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     stdout_writer.interface.writeAll(
         \\skim session comment add - Add a comment
@@ -684,7 +685,7 @@ fn printCommentAddHelp() void {
 }
 
 fn printCommentListHelp() void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     stdout_writer.interface.writeAll(
         \\skim session comment list - List all comments
@@ -701,7 +702,7 @@ fn printCommentListHelp() void {
 }
 
 fn printCommentDeleteHelp() void {
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     stdout_writer.interface.writeAll(
         \\skim session comment delete - Delete a comment

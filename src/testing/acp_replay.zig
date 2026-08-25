@@ -1,5 +1,6 @@
 const std = @import("std");
 const agent_helpers = @import("agent_test_helpers.zig");
+const skim_io = @import("skim_io");
 const TestAgentStateBuilder = agent_helpers.TestAgentStateBuilder;
 const ToolStatus = agent_helpers.ToolStatus;
 const PlanEntry = agent_helpers.PlanEntry;
@@ -56,15 +57,15 @@ pub const AcpLogEntry = struct {
 /// Each line is a separate JSON object.
 /// Returns a slice of AcpLogEntry (caller owns the memory).
 pub fn loadLog(allocator: Allocator, path: []const u8) ![]AcpLogEntry {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    const file = std.Io.Dir.cwd().openFile(skim_io.get(), path, .{}) catch |err| {
         if (err == error.FileNotFound) {
             return &[_]AcpLogEntry{};
         }
         return err;
     };
-    defer file.close();
+    defer file.close(skim_io.get());
 
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024); // Max 1MB
+    const content = try skim_io.readAllAlloc(file, allocator, 1024 * 1024); // Max 1MB
     defer allocator.free(content);
 
     return parseJsonl(allocator, content);
@@ -77,7 +78,7 @@ pub fn loadLogFromString(allocator: Allocator, content: []const u8) ![]AcpLogEnt
 
 /// Parse JSONL content into AcpLogEntry slice
 fn parseJsonl(allocator: Allocator, content: []const u8) ![]AcpLogEntry {
-    var entries: std.ArrayList(AcpLogEntry) = .{};
+    var entries: std.ArrayList(AcpLogEntry) = .empty;
     errdefer {
         for (entries.items) |*entry| {
             freeLogEntry(allocator, entry);
@@ -137,7 +138,7 @@ fn cloneLogEntry(allocator: Allocator, json: *const AcpLogEntryJson) !AcpLogEntr
     errdefer if (entry.tool_stdout) |s| allocator.free(s);
 
     if (json.plan_entries) |json_entries| {
-        var owned_entries: std.ArrayList(OwnedPlanEntry) = .{};
+        var owned_entries: std.ArrayList(OwnedPlanEntry) = .empty;
         errdefer {
             for (owned_entries.items) |pe| {
                 allocator.free(pe.content);
@@ -212,7 +213,7 @@ pub fn replayIntoBuilder(entries: []const AcpLogEntry, builder: *TestAgentStateB
         } else if (std.mem.eql(u8, entry.kind, "plan_update")) {
             if (entry.plan_entries) |owned_entries| {
                 // Convert owned entries to PlanEntry
-                var plan_entries: std.ArrayList(PlanEntry) = .{};
+                var plan_entries: std.ArrayList(PlanEntry) = .empty;
                 defer plan_entries.deinit(builder.allocator);
 
                 for (owned_entries) |oe| {

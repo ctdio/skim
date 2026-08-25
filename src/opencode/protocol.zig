@@ -108,9 +108,9 @@ pub const PromptAsyncRequest = struct {
 
     /// Serialize to JSON for HTTP request body
     pub fn toJson(self: PromptAsyncRequest, allocator: std.mem.Allocator) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(allocator);
-        const writer = output.writer(allocator);
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.writeByte('{');
 
@@ -151,7 +151,7 @@ pub const PromptAsyncRequest = struct {
 
         try writer.writeByte('}');
 
-        return output.toOwnedSlice(allocator);
+        return output.toOwnedSlice();
     }
 };
 

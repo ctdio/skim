@@ -6,9 +6,9 @@ description: What you need installed before building and running Skim.
 Skim is distributed as source and built with the Zig toolchain. You need two
 things on your `PATH`:
 
-## Zig 0.15.1
+## Zig 0.16.0
 
-Skim targets **Zig 0.15.1 or later**. Install it from
+Skim targets **Zig 0.16.0 or later**. Install it from
 [ziglang.org/download](https://ziglang.org/download/), your package manager, or
 a version manager such as [`mise`](https://mise.jdx.dev/).
 
@@ -16,12 +16,12 @@ Verify the version:
 
 ```bash
 zig version
-# 0.15.1
+# 0.16.0
 ```
 
 :::note
 Zig's language and build system still change between releases. If you hit build
-errors, confirm you're on 0.15.1 rather than an older or much newer release.
+errors, confirm you're on 0.16.0 rather than an older or much newer release.
 :::
 
 ## Git

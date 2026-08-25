@@ -1,4 +1,5 @@
 const std = @import("std");
+const skim_io = @import("skim_io");
 const Allocator = std.mem.Allocator;
 
 // =============================================================================
@@ -47,9 +48,9 @@ pub fn computeDiff(
     const new_start = new_start_line orelse 1;
 
     // Split into lines
-    var old_lines_list: std.ArrayList([]const u8) = .{};
+    var old_lines_list: std.ArrayList([]const u8) = .empty;
     defer old_lines_list.deinit(allocator);
-    var new_lines_list: std.ArrayList([]const u8) = .{};
+    var new_lines_list: std.ArrayList([]const u8) = .empty;
     defer new_lines_list.deinit(allocator);
 
     var old_iter = std.mem.splitScalar(u8, old_text, '\n');
@@ -65,7 +66,7 @@ pub fn computeDiff(
     const new_lines = new_lines_list.items;
 
     // Use Myers-like diff algorithm with LCS
-    var result: std.ArrayList(DiffLine) = .{};
+    var result: std.ArrayList(DiffLine) = .empty;
     errdefer result.deinit(allocator);
 
     var additions: usize = 0;
@@ -146,7 +147,7 @@ pub fn computeDiff(
     }
 
     // Backtrack to produce diff
-    var diff_lines: std.ArrayList(DiffLine) = .{};
+    var diff_lines: std.ArrayList(DiffLine) = .empty;
     defer diff_lines.deinit(allocator);
 
     var i: usize = m;

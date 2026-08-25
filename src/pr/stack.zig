@@ -145,7 +145,7 @@ pub fn analyzeWith(
         }
     }
 
-    var heights: std.ArrayList(usize) = .{};
+    var heights: std.ArrayList(usize) = .empty;
     errdefer heights.deinit(allocator);
 
     // Two passes keep ids stable and contiguous: number roots in input order,

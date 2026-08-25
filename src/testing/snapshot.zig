@@ -1,7 +1,9 @@
 const std = @import("std");
-const fs = std.fs;
+const skim_io = @import("skim_io");
+const Dir = std.Io.Dir;
 
 const SNAPSHOT_DIR = "src/testing/snapshots";
+const max_snapshot_bytes = 4 * 1024 * 1024;
 const UPDATE_ENV_VAR = "SKIM_UPDATE_SNAPSHOTS";
 
 /// Error returned when snapshot comparison fails
@@ -56,7 +58,7 @@ fn expectSnapshotQuiet(allocator: std.mem.Allocator, name: []const u8, actual: [
 
 /// Checks if the update environment variable is set
 fn shouldUpdate() bool {
-    return std.posix.getenv(UPDATE_ENV_VAR) != null;
+    return skim_io.getEnv(UPDATE_ENV_VAR) != null;
 }
 
 /// Loads snapshot content from file
@@ -64,19 +66,10 @@ fn loadSnapshot(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}.snap", .{ SNAPSHOT_DIR, name }) catch unreachable;
 
-    const file = try fs.cwd().openFile(path, .{});
-    defer file.close();
+    const file = try Dir.cwd().openFile(skim_io.get(), path, .{});
+    defer file.close(skim_io.get());
 
-    const stat = try file.stat();
-    const content = try allocator.alloc(u8, stat.size);
-    errdefer allocator.free(content);
-
-    const bytes_read = try file.readAll(content);
-    if (bytes_read != stat.size) {
-        return error.UnexpectedEndOfFile;
-    }
-
-    return content;
+    return skim_io.readAllAlloc(file, allocator, max_snapshot_bytes);
 }
 
 /// Writes content to snapshot file
@@ -85,15 +78,15 @@ fn writeSnapshot(name: []const u8, content: []const u8) !void {
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}.snap", .{ SNAPSHOT_DIR, name }) catch unreachable;
 
     // Ensure directory exists
-    fs.cwd().makePath(SNAPSHOT_DIR) catch |err| switch (err) {
+    Dir.cwd().createDirPath(skim_io.get(), SNAPSHOT_DIR) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return SnapshotError.SnapshotUpdateFailed,
     };
 
-    const file = fs.cwd().createFile(path, .{}) catch return SnapshotError.SnapshotUpdateFailed;
-    defer file.close();
+    const file = Dir.cwd().createFile(skim_io.get(), path, .{}) catch return SnapshotError.SnapshotUpdateFailed;
+    defer file.close(skim_io.get());
 
-    file.writeAll(content) catch return SnapshotError.SnapshotUpdateFailed;
+    file.writeStreamingAll(skim_io.get(), content) catch return SnapshotError.SnapshotUpdateFailed;
 
     std.debug.print("Updated snapshot: {s}\n", .{path});
 }

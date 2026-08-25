@@ -34,7 +34,7 @@ pub const CommentStore = struct {
 
     pub fn init(allocator: Allocator) CommentStore {
         return .{
-            .comments = .{},
+            .comments = .empty,
             .allocator = allocator,
         };
     }
@@ -160,17 +160,17 @@ pub const CommentStore = struct {
         context_lines_before: usize,
         context_lines_after: usize,
     ) ![]const u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(allocator);
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        errdefer output.deinit();
 
-        const writer = output.writer(allocator);
+        const writer = &output.writer;
 
         try writer.writeAll("<code_review>\n");
 
         if (self.comments.items.len == 0) {
             try writer.writeAll("No comments.\n");
             try writer.writeAll("</code_review>\n");
-            return output.toOwnedSlice(allocator);
+            return output.toOwnedSlice();
         }
 
         var current_file: ?[]const u8 = null;
@@ -215,7 +215,7 @@ pub const CommentStore = struct {
         }
 
         try writer.writeAll("</code_review>\n");
-        return output.toOwnedSlice(allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn exportSingleCommentWithContext(
@@ -230,10 +230,10 @@ pub const CommentStore = struct {
             return error.InvalidCommentIndex;
         }
 
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(allocator);
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        errdefer output.deinit();
 
-        const writer = output.writer(allocator);
+        const writer = &output.writer;
         const comment = &self.comments.items[comment_idx];
 
         try writer.writeAll("<code_review>\n");
@@ -268,7 +268,7 @@ pub const CommentStore = struct {
         try writer.writeAll("---\n");
 
         try writer.writeAll("</code_review>\n");
-        return output.toOwnedSlice(allocator);
+        return output.toOwnedSlice();
     }
 
     fn renderCommentContext(
@@ -353,17 +353,17 @@ pub const CommentStore = struct {
 
     /// Simple export without context (backwards compatibility)
     pub fn exportToMarkdown(self: *const CommentStore, allocator: Allocator) ![]const u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(allocator);
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        errdefer output.deinit();
 
-        const writer = output.writer(allocator);
+        const writer = &output.writer;
 
         try writer.writeAll("<code_review>\n");
 
         if (self.comments.items.len == 0) {
             try writer.writeAll("No comments.\n");
             try writer.writeAll("</code_review>\n");
-            return output.toOwnedSlice(allocator);
+            return output.toOwnedSlice();
         }
 
         var current_file: ?[]const u8 = null;
@@ -403,7 +403,7 @@ pub const CommentStore = struct {
         }
 
         try writer.writeAll("</code_review>\n");
-        return output.toOwnedSlice(allocator);
+        return output.toOwnedSlice();
     }
 };
 

@@ -96,9 +96,9 @@ pub const Encoder = struct {
     }
 
     pub fn encodeInitialize(self: *Encoder, id: i64, params: protocol.InitializeParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"method\":\"initialize\",\"id\":{d},\"params\":{{\"clientInfo\":{{", .{id});
 
@@ -122,22 +122,22 @@ pub const Encoder = struct {
             try writer.writeAll(",\"capabilities\":{\"experimentalApi\":true}");
         }
         try writer.writeAll("}}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeInitialized(self: *Encoder) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.writeAll("{\"method\":\"initialized\"}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeThreadStart(self: *Encoder, id: i64, params: protocol.ThreadStartParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":\"thread/start\",\"params\":{{", .{id});
 
@@ -182,13 +182,13 @@ pub const Encoder = struct {
         }
 
         try writer.writeAll("}}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeThreadResume(self: *Encoder, id: i64, params: protocol.ThreadResumeParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":\"thread/resume\",\"params\":{{\"threadId\":{f}", .{
             id,
@@ -198,13 +198,13 @@ pub const Encoder = struct {
             try writer.print(",\"cwd\":{f}", .{std.json.fmt(cwd, .{})});
         }
         try writer.writeAll("}}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeThreadFork(self: *Encoder, id: i64, params: protocol.ThreadForkParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":\"thread/fork\",\"params\":{{\"threadId\":{f}", .{
             id,
@@ -214,13 +214,13 @@ pub const Encoder = struct {
             try writer.print(",\"turnId\":{f}", .{std.json.fmt(turn_id, .{})});
         }
         try writer.writeAll("}}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeThreadList(self: *Encoder, id: i64, params: protocol.ThreadListParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":\"thread/list\",\"params\":{{", .{id});
 
@@ -235,13 +235,13 @@ pub const Encoder = struct {
         }
 
         try writer.writeAll("}}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeTurnStart(self: *Encoder, id: i64, params: protocol.TurnStartParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":\"turn/start\",\"params\":{{\"threadId\":{f}", .{
             id,
@@ -276,13 +276,13 @@ pub const Encoder = struct {
             try writer.writeByte(']');
         }
         try writer.writeAll("}}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeTurnSteer(self: *Encoder, id: i64, params: protocol.TurnSteerParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":\"turn/steer\",\"params\":{{\"threadId\":{f},\"turnId\":{f},\"input\":[", .{
             id,
@@ -294,35 +294,35 @@ pub const Encoder = struct {
             try self.writeInputItem(writer, item);
         }
         try writer.writeAll("]}}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeTurnInterrupt(self: *Encoder, id: i64, thread_id: []const u8, turn_id: []const u8) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":\"turn/interrupt\",\"params\":{{\"threadId\":{f},\"turnId\":{f}}}}}", .{
             id,
             std.json.fmt(thread_id, .{}),
             std.json.fmt(turn_id, .{}),
         });
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeModelList(self: *Encoder, id: i64) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":\"model/list\",\"params\":{{}}}}", .{id});
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeApprovalResponse(self: *Encoder, id: RequestId, decision_json: []const u8) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.writeAll("{\"id\":");
         try writeId(writer, id);
@@ -330,7 +330,7 @@ pub const Encoder = struct {
         try writer.writeAll(decision_json);
         try writer.writeAll("}}");
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeThreadCompact(self: *Encoder, id: i64, thread_id: []const u8) ![]u8 {
@@ -338,16 +338,16 @@ pub const Encoder = struct {
     }
 
     pub fn encodeThreadRollback(self: *Encoder, id: i64, thread_id: []const u8, turn_id: []const u8) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":\"thread/rollback\",\"params\":{{\"threadId\":{f},\"turnId\":{f}}}}}", .{
             id,
             std.json.fmt(thread_id, .{}),
             std.json.fmt(turn_id, .{}),
         });
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeThreadArchive(self: *Encoder, id: i64, thread_id: []const u8) ![]u8 {
@@ -359,12 +359,12 @@ pub const Encoder = struct {
     }
 
     pub fn encodeConfigRead(self: *Encoder, id: i64) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":\"config/read\",\"params\":{{}}}}", .{id});
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn encodeUserInputResponse(
@@ -373,9 +373,9 @@ pub const Encoder = struct {
         questions: anytype,
         answers: []const []const u8,
     ) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.writeAll("{\"id\":");
         try writeId(writer, id);
@@ -394,7 +394,7 @@ pub const Encoder = struct {
             try writer.writeAll("]}");
         }
         try writer.writeAll("}}}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     pub fn deinit(self: *Encoder) void {
@@ -406,16 +406,16 @@ pub const Encoder = struct {
     // -------------------------------------------------------------------------
 
     fn encodeSimpleThreadMethod(self: *Encoder, id: i64, method: []const u8, thread_id: []const u8) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"id\":{d},\"method\":{f},\"params\":{{\"threadId\":{f}}}}}", .{
             id,
             std.json.fmt(method, .{}),
             std.json.fmt(thread_id, .{}),
         });
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     fn writeInputItem(_: *Encoder, writer: anytype, item: protocol.InputItem) !void {
@@ -452,7 +452,7 @@ pub const Decoder = struct {
     }
 
     pub fn decode(self: *Decoder, line: []const u8) !DecodedMessage {
-        const trimmed = std.mem.trimRight(u8, line, "\n\r");
+        const trimmed = std.mem.trimEnd(u8, line, "\n\r");
 
         const parsed = std.json.parseFromSlice(RawMessage, self.allocator, trimmed, .{
             .ignore_unknown_fields = true,
@@ -572,7 +572,7 @@ pub const Decoder = struct {
         for (raw_data, 0..) |rm, i| {
             var efforts: ?[]protocol.ReasoningEffort = null;
             if (rm.supportedReasoningEfforts) |raw_efforts| {
-                var effort_list: std.ArrayListUnmanaged(protocol.ReasoningEffort) = .{};
+                var effort_list: std.ArrayListUnmanaged(protocol.ReasoningEffort) = .empty;
                 for (raw_efforts) |re| {
                     if (protocol.ReasoningEffort.fromString(re.reasoningEffort)) |e| {
                         try effort_list.append(self.allocator, e);
@@ -825,11 +825,11 @@ pub const Decoder = struct {
     fn stringifyValue(self: *Decoder, value: ?std.json.Value) !?[]u8 {
         if (value == null) return null;
 
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
         try writer.print("{f}", .{std.json.fmt(value.?, .{})});
-        return try output.toOwnedSlice(self.allocator);
+        return try output.toOwnedSlice();
     }
 
     fn convertRawThread(self: *Decoder, rt: RawThread) !protocol.Thread {
@@ -960,7 +960,7 @@ pub const Decoder = struct {
         };
         if (arr.items.len == 0) return null;
 
-        var list: std.ArrayListUnmanaged(protocol.TextContent) = .{};
+        var list: std.ArrayListUnmanaged(protocol.TextContent) = .empty;
         for (arr.items) |item| {
             const obj = switch (item) {
                 .object => |o| o,
@@ -985,7 +985,7 @@ pub const Decoder = struct {
             else => return try self.allocator.alloc([]const u8, 0),
         };
 
-        var list: std.ArrayListUnmanaged([]const u8) = .{};
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
         for (arr.items) |item| {
             if (item == .string) {
                 try list.append(self.allocator, try self.allocator.dupe(u8, item.string));

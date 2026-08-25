@@ -14,7 +14,7 @@ pub const BranchSelectState = struct {
     selection: usize = 0, // Selected branch index in branch selection menu
     search_query: [256]u8 = undefined, // Search query buffer for filtering branches
     search_len: usize = 0, // Length of search query
-    filtered: std.ArrayList(usize) = .{}, // Indices of branches matching search query
+    filtered: std.ArrayList(usize) = .empty, // Indices of branches matching search query
 
     pub fn deinit(self: *BranchSelectState, allocator: Allocator) void {
         for (self.list) |branch| {

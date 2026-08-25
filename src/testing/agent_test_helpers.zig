@@ -1,5 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 
@@ -135,7 +136,7 @@ pub const TestAgentStateBuilder = struct {
     pub fn init(allocator: Allocator) TestAgentStateBuilder {
         return .{
             .allocator = allocator,
-            .messages = .{},
+            .messages = .empty,
         };
     }
 
@@ -182,7 +183,7 @@ pub const TestAgentStateBuilder = struct {
     /// Add a plan snapshot message
     pub fn addPlanSnapshot(self: *TestAgentStateBuilder, entries: []const PlanEntry) *TestAgentStateBuilder {
         // Clone entries using ArrayList to build mutable slice
-        var entries_list: std.ArrayList(PlanEntry) = .{};
+        var entries_list: std.ArrayList(PlanEntry) = .empty;
         for (entries) |entry| {
             const cloned_entry = PlanEntry{
                 .content = self.allocator.dupe(u8, entry.content) catch "",

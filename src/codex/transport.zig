@@ -3,6 +3,7 @@ const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const process_mod = @import("process.zig");
 const codec = @import("codec.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Stdio Transport
@@ -18,7 +19,7 @@ pub const StdioTransport = struct {
 
     // Thread-safe message queue
     pending_messages: std.ArrayListUnmanaged(codec.DecodedMessage),
-    message_mutex: std.Thread.Mutex,
+    message_mutex: std.Io.Mutex,
 
     // Background reader thread
     reader_thread: ?std.Thread,
@@ -39,8 +40,8 @@ pub const StdioTransport = struct {
             .allocator = allocator,
             .process = proc,
             .decoder = codec.Decoder.init(allocator),
-            .pending_messages = .{},
-            .message_mutex = .{},
+            .pending_messages = .empty,
+            .message_mutex = .init,
             .reader_thread = null,
             .reader_running = std.atomic.Value(bool).init(false),
         };
@@ -85,8 +86,8 @@ pub const StdioTransport = struct {
     /// Take all pending messages from the queue.
     /// Returns an owned slice -- caller must call freeMessages() after processing.
     pub fn drainMessages(self: *StdioTransport) Allocator.Error![]codec.DecodedMessage {
-        self.message_mutex.lock();
-        defer self.message_mutex.unlock();
+        self.message_mutex.lockUncancelable(skim_io.get());
+        defer self.message_mutex.unlock(skim_io.get());
 
         if (self.pending_messages.items.len == 0) {
             return &[_]codec.DecodedMessage{};
@@ -99,8 +100,8 @@ pub const StdioTransport = struct {
 
     /// Return the number of queued messages waiting to be drained.
     pub fn pendingMessageCount(self: *StdioTransport) usize {
-        self.message_mutex.lock();
-        defer self.message_mutex.unlock();
+        self.message_mutex.lockUncancelable(skim_io.get());
+        defer self.message_mutex.unlock(skim_io.get());
         return self.pending_messages.items.len;
     }
 
@@ -117,11 +118,11 @@ pub const StdioTransport = struct {
         self.stopReader();
 
         // Free any remaining messages in the queue
-        self.message_mutex.lock();
+        self.message_mutex.lockUncancelable(skim_io.get());
         for (self.pending_messages.items) |*msg| {
             msg.deinit(self.allocator);
         }
-        self.message_mutex.unlock();
+        self.message_mutex.unlock(skim_io.get());
 
         self.pending_messages.deinit(self.allocator);
         self.decoder.deinit();
@@ -134,7 +135,7 @@ pub const StdioTransport = struct {
 
     fn readerThreadFn(self: *StdioTransport) void {
         var local_buffer: [8192]u8 = undefined;
-        var line_buffer: std.ArrayListUnmanaged(u8) = .{};
+        var line_buffer: std.ArrayListUnmanaged(u8) = .empty;
         defer line_buffer.deinit(self.allocator);
 
         while (self.reader_running.load(.acquire)) {
@@ -154,7 +155,7 @@ pub const StdioTransport = struct {
 
             // Read available data
             if (fds[0].revents & posix.POLL.IN != 0) {
-                const n = self.process.stdout.read(&local_buffer) catch continue;
+                const n = skim_io.readFile(self.process.stdout, &local_buffer) catch continue;
                 if (n == 0) break;
 
                 // Append to line buffer and process complete lines
@@ -185,9 +186,9 @@ pub const StdioTransport = struct {
                         continue;
                     };
 
-                    self.message_mutex.lock();
+                    self.message_mutex.lockUncancelable(skim_io.get());
                     self.pending_messages.append(self.allocator, message) catch {};
-                    self.message_mutex.unlock();
+                    self.message_mutex.unlock(skim_io.get());
                 }
             }
 
@@ -254,7 +255,7 @@ test "transport reader receives echoed json" {
     try transport.send("{\"method\":\"test/notification\",\"params\":{\"data\":\"hello\"}}");
 
     // Wait briefly for the reader thread to process the echo
-    std.Thread.sleep(200 * std.time.ns_per_ms);
+    skim_io.sleep(200 * std.time.ns_per_ms);
 
     const messages = try transport.drainMessages();
     defer transport.freeMessages(messages);

@@ -2,6 +2,7 @@ const std = @import("std");
 // Mirrors `is_web` in src/platform.zig. This subtree has its own test target
 // rooted at its own directory, so it cannot import across the parent boundary.
 const is_web = @import("builtin").target.cpu.arch.isWasm();
+const skim_io = @import("skim_io");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
@@ -13,9 +14,9 @@ const Allocator = std.mem.Allocator;
 pub const AgentProcess = struct {
     allocator: Allocator,
     child: std.process.Child,
-    stdin: std.fs.File,
-    stdout: std.fs.File,
-    stderr: ?std.fs.File,
+    stdin: std.Io.File,
+    stdout: std.Io.File,
+    stderr: ?std.Io.File,
     status: Status,
 
     pub const Status = enum {
@@ -27,7 +28,7 @@ pub const AgentProcess = struct {
     pub const SpawnError = error{
         CommandNotFound,
         SpawnFailed,
-    } || Allocator.Error || std.process.Child.SpawnError;
+    } || Allocator.Error || std.process.SpawnError;
 
     /// Spawn a new agent process
     pub fn spawn(allocator: Allocator, config: SpawnConfig) SpawnError!*AgentProcess {
@@ -39,43 +40,41 @@ pub const AgentProcess = struct {
         const argv = try buildArgvWithStdbuf(allocator, config.command, config.args);
         defer allocator.free(argv);
 
-        self.* = .{
-            .allocator = allocator,
-            .child = std.process.Child.init(argv, allocator),
-            .stdin = undefined,
-            .stdout = undefined,
-            .stderr = null,
-            .status = .running,
-        };
-
-        if (config.cwd) |cwd| {
-            self.child.cwd = cwd;
-        }
-
-        // Apply extra environment variables if provided
+        // Extra env vars mean a full copy of the parent environment, since the
+        // child either inherits it wholesale or replaces it wholesale.
+        var environ_map: ?*std.process.Environ.Map = null;
         if (config.extra_env.len > 0) {
-            // Allocate env_map on heap and inherit from parent environment
-            const env_ptr = try allocator.create(std.process.EnvMap);
-            env_ptr.* = try std.process.getEnvMap(allocator);
-            self.child.env_map = env_ptr;
+            const env_ptr = try allocator.create(std.process.Environ.Map);
+            env_ptr.* = try skim_io.environMap().clone(allocator);
+            environ_map = env_ptr;
 
-            // Add extra env vars
             for (config.extra_env) |ev| {
                 try env_ptr.put(ev.name, ev.value);
                 std.log.debug("ACP: Setting env {s}=<{d} chars>", .{ ev.name, ev.value.len });
             }
         }
 
-        // Log file descriptors for debugging
-        std.log.info("ACP: Spawning with stdin_behavior=Pipe, stdout_behavior=Pipe", .{});
+        std.log.info("ACP: Spawning with piped stdin, stdout, and stderr", .{});
 
-        self.child.stdin_behavior = .Pipe;
-        self.child.stdout_behavior = .Pipe;
-        self.child.stderr_behavior = .Pipe;
-
-        self.child.spawn() catch |err| {
+        const child = std.process.spawn(skim_io.get(), .{
+            .argv = argv,
+            .cwd = if (config.cwd) |cwd| .{ .path = cwd } else .inherit,
+            .environ_map = environ_map,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        }) catch |err| {
             std.log.err("Failed to spawn agent process: {}", .{err});
             return error.SpawnFailed;
+        };
+
+        self.* = .{
+            .allocator = allocator,
+            .child = child,
+            .stdin = undefined,
+            .stdout = undefined,
+            .stderr = null,
+            .status = .running,
         };
 
         self.stdin = self.child.stdin.?;
@@ -88,7 +87,7 @@ pub const AgentProcess = struct {
     /// Write data to agent's stdin
     pub fn write(self: *AgentProcess, data: []const u8) !void {
         if (self.status != .running) return error.ProcessNotRunning;
-        try self.stdin.writeAll(data);
+        try self.stdin.writeStreamingAll(skim_io.get(), data);
     }
 
     /// Check and log stderr output (for debugging)
@@ -110,7 +109,7 @@ pub const AgentProcess = struct {
         if (poll_result == 0) return;
 
         if (fds[0].revents & posix.POLL.IN != 0) {
-            _ = stderr_file.read(&buffer) catch return;
+            _ = skim_io.readFile(stderr_file, &buffer) catch return;
         }
     }
 
@@ -172,18 +171,18 @@ pub const AgentProcess = struct {
         if (self.status != .running) return;
 
         if (self.child.stdin) |_| {
-            self.stdin.close();
+            self.stdin.close(skim_io.get());
             self.child.stdin = null;
         }
 
         // Kill entire process group (negative PID) to terminate child subprocesses
         // claude-code-acp spawns a Node.js subprocess that would otherwise become orphaned
         // Use child.id as pgid since child processes typically inherit parent's pgid
-        _ = posix.kill(-self.child.id, posix.SIG.TERM) catch {
+        if (self.child.id) |child_pid| _ = posix.kill(-child_pid, posix.SIG.TERM) catch {
             // Fallback to killing just the direct child if process group kill fails
-            _ = posix.kill(self.child.id, posix.SIG.TERM) catch {};
+            _ = posix.kill(child_pid, posix.SIG.TERM) catch {};
         };
-        _ = self.child.wait() catch {};
+        _ = self.child.wait(skim_io.get()) catch {};
         self.status = .exited;
     }
 
@@ -196,33 +195,33 @@ pub const AgentProcess = struct {
         if (self.status != .running) return;
 
         // Kill entire process group (negative PID) to terminate child subprocesses
-        _ = posix.kill(-self.child.id, posix.SIG.KILL) catch {
+        if (self.child.id) |child_pid| _ = posix.kill(-child_pid, posix.SIG.KILL) catch {
             // Fallback to killing just the direct child if process group kill fails
-            _ = posix.kill(self.child.id, posix.SIG.KILL) catch {};
+            _ = posix.kill(child_pid, posix.SIG.KILL) catch {};
         };
-        _ = self.child.wait() catch {};
+        _ = self.child.wait(skim_io.get()) catch {};
         self.status = .crashed;
     }
 
     /// Wait for process to exit and get exit code
     pub fn wait(self: *AgentProcess) !u32 {
-        const term = try self.child.wait();
+        const term = try self.child.wait(skim_io.get());
 
         // Parse termination status
         return switch (term) {
-            .Exited => |code| blk: {
+            .exited => |code| blk: {
                 self.status = .exited;
                 break :blk code;
             },
-            .Signal => |sig| blk: {
+            .signal => |sig| blk: {
                 self.status = .crashed;
-                break :blk @intCast(sig + 128);
+                break :blk @as(u32, @intFromEnum(sig)) + 128;
             },
-            .Stopped => |sig| blk: {
+            .stopped => |sig| blk: {
                 self.status = .crashed;
-                break :blk @intCast(sig + 128);
+                break :blk @as(u32, @intFromEnum(sig)) + 128;
             },
-            .Unknown => blk: {
+            .unknown => blk: {
                 self.status = .crashed;
                 break :blk 128;
             },
@@ -311,9 +310,8 @@ fn buildArgvWithStdbuf(allocator: Allocator, command: []const u8, args: []const 
     }
 }
 
-fn setNonBlocking(file: std.fs.File) !void {
-    const flags = try posix.fcntl(file.handle, posix.F.GETFL, @as(u32, 0));
-    _ = try posix.fcntl(file.handle, posix.F.SETFL, flags | @as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
+fn setNonBlocking(file: std.Io.File) !void {
+    try skim_io.setNonBlocking(file.handle, true);
 }
 
 // =============================================================================
@@ -350,16 +348,15 @@ test "spawn cat and write/read" {
 
     // Close stdin to signal EOF to cat
     // Also null out child.stdin to prevent wait() from double-closing
-    process.stdin.close();
+    process.stdin.close(skim_io.get());
     process.child.stdin = null;
 
     // Set stdout to blocking for this test
-    const flags = try posix.fcntl(process.stdout.handle, posix.F.GETFL, @as(u32, 0));
-    _ = try posix.fcntl(process.stdout.handle, posix.F.SETFL, flags & ~@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
+    try skim_io.setNonBlocking(process.stdout.handle, false);
 
     // Read output before wait (data should be available)
     var buffer: [1024]u8 = undefined;
-    const n = try process.stdout.read(&buffer);
+    const n = try skim_io.readFile(process.stdout, &buffer);
     try std.testing.expectEqualStrings("hello\n", buffer[0..n]);
 
     // Now wait for process

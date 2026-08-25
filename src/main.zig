@@ -7,6 +7,7 @@ const adapter = @import("mcp/adapter.zig");
 const logging = @import("logging.zig");
 const cli = @import("cli/mod.zig");
 const github = @import("pr/github.zig");
+const skim_io = @import("skim_io");
 
 /// Override std.log to use file-based logging
 pub const std_options = std.Options{
@@ -14,20 +15,15 @@ pub const std_options = std.Options{
     .log_level = .debug,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer {
-        const deinit_status = gpa.deinit();
-        if (deinit_status == .leak) {
-            std.log.err("Memory leak detected!", .{});
-        }
-    }
-    var ts_allocator = std.heap.ThreadSafeAllocator{ .child_allocator = gpa.allocator() };
-    const allocator = ts_allocator.allocator();
+pub fn main(process_init: std.process.Init) !void {
+    // Zig 0.16 hands main the I/O implementation, environment, and a
+    // leak-checked threadsafe allocator; publish them before anything else runs.
+    skim_io.init(process_init);
+    const allocator = process_init.gpa;
 
     // Parse command line arguments
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // 0.16 hands argv to main; the arena outlives every consumer below.
+    const args = try process_init.minimal.args.toSlice(process_init.arena.allocator());
 
     // EARLY CHECK: Fallback to git for unknown diff flags
     // Must happen before ANY TUI/logging initialization
@@ -271,7 +267,7 @@ fn runAppEntry(app: *App, out_err: *?anyerror) void {
 }
 
 fn printPrHelp() !void {
-    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer file_writer.interface.flush() catch {};
     try file_writer.interface.writeAll(
         \\skim pr - Browse open pull requests and review them
@@ -353,7 +349,7 @@ fn runMcpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     try adapter.runAdapter(allocator);
 }
 
-/// Write buffer for stdout (Zig 0.15 requires buffer for file.writer())
+/// Write buffer for stdout (file.writer() takes its buffer from the caller)
 var stdout_buffer: [4096]u8 = undefined;
 
 fn runSessionsCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -362,7 +358,7 @@ fn runSessionsCommand(allocator: std.mem.Allocator, args: []const []const u8) !v
         const parsed = cli.sessions.parseArgs(args);
         try cli.sessions.run(allocator, parsed);
     } else if (args.len >= 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h"))) {
-        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
         defer file_writer.interface.flush() catch {};
         try cli.sessions.printHelp(&file_writer.interface);
     } else if (args.len == 2) {
@@ -380,7 +376,7 @@ fn runContextCommand(allocator: std.mem.Allocator, args: []const []const u8) !vo
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
-            var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+            var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
             defer file_writer.interface.flush() catch {};
             try cli.context.printHelp(&file_writer.interface);
             return;
@@ -393,7 +389,7 @@ fn runContextCommand(allocator: std.mem.Allocator, args: []const []const u8) !vo
 
 fn runCommentCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 3) {
-        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
         defer file_writer.interface.flush() catch {};
         try cli.comment.printHelp(&file_writer.interface);
         std.process.exit(1);
@@ -401,7 +397,7 @@ fn runCommentCommand(allocator: std.mem.Allocator, args: []const []const u8) !vo
 
     // Check for help
     if (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h")) {
-        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
         defer file_writer.interface.flush() catch {};
         try cli.comment.printHelp(&file_writer.interface);
         return;
@@ -424,7 +420,7 @@ fn runCommentCommand(allocator: std.mem.Allocator, args: []const []const u8) !vo
 }
 
 fn printMcpHelp() !void {
-    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer file_writer.interface.flush() catch {};
     const stdout = &file_writer.interface;
     try stdout.writeAll(
@@ -504,8 +500,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseResul
     var staged = false;
     var mcp_port: ?u16 = null;
     var serve_port: ?u16 = null;
-    // Zig 0.15: ArrayList is now unmanaged, pass allocator to methods
-    var positional_args: std.ArrayList([]const u8) = .{};
+    var positional_args: std.ArrayList([]const u8) = .empty;
     defer positional_args.deinit(allocator);
 
     // Parse flags and collect positional arguments
@@ -598,8 +593,8 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseResul
 }
 
 fn readStdinIfPiped(allocator: std.mem.Allocator) !?[]const u8 {
-    const stdin_file = std.fs.File.stdin();
-    const stdin_is_tty = std.posix.isatty(stdin_file.handle);
+    const stdin_file = std.Io.File.stdin();
+    const stdin_is_tty = (stdin_file.isTty(skim_io.get()) catch false);
 
     if (stdin_is_tty) {
         return null;
@@ -607,11 +602,11 @@ fn readStdinIfPiped(allocator: std.mem.Allocator) !?[]const u8 {
 
     // Read all stdin content (max 50MB for large diffs)
     const max_size = 50 * 1024 * 1024;
-    return try stdin_file.readToEndAlloc(allocator, max_size);
+    return try skim_io.readAllAlloc(stdin_file, allocator, max_size);
 }
 
 fn printHelp(_: std.mem.Allocator) !void {
-    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer file_writer.interface.flush() catch {};
     const stdout = &file_writer.interface;
 
@@ -687,7 +682,7 @@ fn printHelp(_: std.mem.Allocator) !void {
 }
 
 fn printVersion() !void {
-    var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer file_writer.interface.flush() catch {};
     const stdout = &file_writer.interface;
     try stdout.writeAll("skim 0.1.0\n");
@@ -753,22 +748,17 @@ fn fallbackToGit(args: []const []const u8) !void {
         git_args[3 + i] = arg;
     }
 
-    // Use a temporary GPA for the child process
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
     // Execute git diff with inherited stdio so output goes directly to terminal
-    var child = std.process.Child.init(git_args[0..git_args_len], alloc);
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    child.stdin_behavior = .Inherit;
-
-    try child.spawn();
-    const term = try child.wait();
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = git_args[0..git_args_len],
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .stdin = .inherit,
+    });
+    const term = try child.wait(skim_io.get());
 
     switch (term) {
-        .Exited => |code| std.process.exit(code),
+        .exited => |code| std.process.exit(code),
         else => std.process.exit(1),
     }
 }

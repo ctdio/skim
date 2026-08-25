@@ -16,6 +16,7 @@ const acpMessageToAgentEvent = @import("events.zig").acpMessageToAgentEvent;
 const opencodeEventToAgentEvent = @import("events.zig").opencodeEventToAgentEvent;
 const codexEventToAgentEvent = @import("events.zig").codexEventToAgentEvent;
 const git_parser = @import("../git/parser.zig");
+const skim_io = @import("skim_io");
 pub const ManagerHandle = union(enum) {
     acp: *AcpManager,
     opencode: *OpencodeManager,
@@ -395,7 +396,7 @@ fn pollOpencode(m: *OpencodeManager, allocator: Allocator, agent_state: *AgentSt
         var event = ev;
         defer event.deinit(m.event_allocator);
 
-        m.last_event_ms = std.time.milliTimestamp();
+        m.last_event_ms = skim_io.milliTimestamp();
 
         // Protocol-specific status management
         switch (event) {
@@ -449,7 +450,7 @@ fn pollOpencode(m: *OpencodeManager, allocator: Allocator, agent_state: *AgentSt
 
     // Post-poll maintenance: abort timeout
     if (m.pending_abort) {
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = skim_io.milliTimestamp();
         const last_event_ms = if (m.last_event_ms == 0) m.pending_abort_since_ms else m.last_event_ms;
         const idle_ms = now_ms - last_event_ms;
         const pending_ms = now_ms - m.pending_abort_since_ms;
@@ -735,9 +736,9 @@ fn buildOldNewFromUnifiedDiff(allocator: Allocator, file: git_parser.FileDiff) !
     old_text: []const u8,
     new_text: []const u8,
 } {
-    var old_lines: std.ArrayList([]const u8) = .{};
+    var old_lines: std.ArrayList([]const u8) = .empty;
     defer old_lines.deinit(allocator);
-    var new_lines: std.ArrayList([]const u8) = .{};
+    var new_lines: std.ArrayList([]const u8) = .empty;
     defer new_lines.deinit(allocator);
 
     for (file.hunks) |hunk| {
@@ -764,7 +765,7 @@ fn joinDiffLines(allocator: Allocator, lines: []const []const u8) ![]const u8 {
         return allocator.dupe(u8, "");
     }
 
-    var output: std.ArrayList(u8) = .{};
+    var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
 
     for (lines, 0..) |line, idx| {
@@ -788,7 +789,7 @@ test "pollCodex batches large delta bursts across frames" {
     manager.status = .thread_active;
 
     var decoder = CodexCodec.Decoder.init(allocator);
-    var expected_text: std.ArrayListUnmanaged(u8) = .{};
+    var expected_text: std.ArrayListUnmanaged(u8) = .empty;
     defer expected_text.deinit(allocator);
 
     const chunk_count: usize = 60;

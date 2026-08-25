@@ -1,9 +1,10 @@
 const std = @import("std");
-const net = std.net;
+const net = @import("../net.zig");
 const posix = std.posix;
 const builtin = @import("builtin");
 const protocol = @import("protocol.zig");
 const registry = @import("registry.zig");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 
@@ -43,7 +44,7 @@ pub const McpServer = struct {
             .port = port,
             .clients = registry.ClientRegistry.init(allocator),
             // Zig 0.15: ArrayList is unmanaged
-            .pending_connections = .{},
+            .pending_connections = .empty,
             .running = false,
             .mcp_initialized = false,
             .stdin_buffer = undefined,
@@ -66,17 +67,11 @@ pub const McpServer = struct {
 
     /// Start the TCP listener
     pub fn start(self: *McpServer) !void {
-        const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, self.port);
-        self.tcp_listener = try address.listen(.{
-            .reuse_address = true,
-        });
+        self.tcp_listener = try net.listenLoopback(self.port);
 
         // Set non-blocking mode for accept
         if (self.tcp_listener) |listener| {
-            const flags = try posix.fcntl(listener.stream.handle, posix.F.GETFL, @as(usize, 0));
-            const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
-            const new_flags = flags | O_NONBLOCK;
-            _ = try posix.fcntl(listener.stream.handle, posix.F.SETFL, new_flags);
+            try skim_io.setNonBlocking(listener.handle, true);
         }
 
         self.running = true;
@@ -116,7 +111,7 @@ pub const McpServer = struct {
             try self.pollSkimClients();
 
             // Small sleep to avoid busy-waiting
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            skim_io.sleep(1 * std.time.ns_per_ms);
         }
     }
 
@@ -128,25 +123,22 @@ pub const McpServer = struct {
         // Use pointer capture since accept() requires mutable reference
         if (self.tcp_listener) |*listener| {
             // Try to accept (non-blocking)
-            const conn = listener.accept() catch |err| switch (err) {
+            const stream = listener.accept() catch |err| switch (err) {
                 error.WouldBlock => return,
                 else => return err,
             };
 
-            std.log.info("New client connection from {any}", .{conn.address});
+            std.log.info("New client connection on port {d}", .{listener.port});
 
             // Set non-blocking mode on client socket
-            const flags = try posix.fcntl(conn.stream.handle, posix.F.GETFL, @as(usize, 0));
-            const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
-            const new_flags = flags | O_NONBLOCK;
-            _ = try posix.fcntl(conn.stream.handle, posix.F.SETFL, new_flags);
+            try skim_io.setNonBlocking(stream.handle, true);
 
             // Add to pending connections - will be registered when hello is received
             try self.pending_connections.append(self.allocator, .{
-                .stream = conn.stream,
+                .stream = stream,
                 .recv_buffer = undefined,
                 .recv_len = 0,
-                .connected_at = std.time.timestamp(),
+                .connected_at = skim_io.timestamp(),
             });
         }
     }
@@ -247,7 +239,7 @@ pub const McpServer = struct {
     }
 
     fn pollSkimClients(self: *McpServer) !void {
-        var to_remove: std.ArrayList(registry.SessionId) = .{};
+        var to_remove: std.ArrayList(registry.SessionId) = .empty;
         defer to_remove.deinit(self.allocator);
 
         var it = self.clients.iterator();
@@ -361,21 +353,14 @@ pub const McpServer = struct {
 
     fn setStdinNonBlocking(self: *McpServer, non_blocking: bool) !void {
         _ = self;
-        const stdin_fd = std.fs.File.stdin().handle;
-        const flags = try posix.fcntl(stdin_fd, posix.F.GETFL, @as(usize, 0));
-        const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
-        const new_flags: usize = if (non_blocking)
-            flags | O_NONBLOCK
-        else
-            flags & ~O_NONBLOCK;
-        _ = try posix.fcntl(stdin_fd, posix.F.SETFL, new_flags);
+        try skim_io.setNonBlocking(std.Io.File.stdin().handle, non_blocking);
     }
 
     fn pollMcpStdin(self: *McpServer) !void {
-        const stdin = std.fs.File.stdin();
+        const stdin = std.Io.File.stdin();
 
         // Try to read (non-blocking)
-        const bytes_read = stdin.read(self.stdin_buffer[self.stdin_len..]) catch |err| switch (err) {
+        const bytes_read = posix.read(stdin.handle, self.stdin_buffer[self.stdin_len..]) catch |err| switch (err) {
             error.WouldBlock => return,
             else => return err,
         };
@@ -418,9 +403,9 @@ pub const McpServer = struct {
     }
 
     fn handleMcpRequest(self: *McpServer, line: []const u8) !void {
-        // Zig 0.15: std.fs.File.stdout() and buffered writer
+        // Zig 0.15: std.Io.File.stdout() and buffered writer
         var stdout_buffer: [4096]u8 = undefined;
-        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
         const stdout = &file_writer.interface;
 
         // Parse JSON-RPC request
@@ -549,7 +534,7 @@ pub const McpServer = struct {
     fn handleListClients(self: *McpServer, writer: anytype, id: ?std.json.Value) !void {
         _ = id;
 
-        var output: std.ArrayList(u8) = .{};
+        var output: std.ArrayList(u8) = .empty;
         defer output.deinit(self.allocator);
 
         try output.appendSlice(self.allocator, "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"");
@@ -707,33 +692,30 @@ pub const McpServer = struct {
     fn sendMcpError(self: *McpServer, writer: anytype, id: ?std.json.Value, code: i32, message: []const u8) !void {
         _ = id;
 
-        var output: std.ArrayList(u8) = .{};
-        defer output.deinit(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        defer output.deinit();
 
-        const w = output.writer(self.allocator);
-        try w.print("{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":{d},\"message\":\"{s}\"}}}}\n", .{ code, message });
+        try output.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":{d},\"message\":\"{s}\"}}}}\n", .{ code, message });
 
-        try writer.writeAll(output.items);
+        try writer.writeAll(output.written());
     }
 
     fn sendToolError(self: *McpServer, writer: anytype, message: []const u8) !void {
-        var output: std.ArrayList(u8) = .{};
-        defer output.deinit(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        defer output.deinit();
 
-        const w = output.writer(self.allocator);
-        try w.print("{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Error: {s}\"}}],\"isError\":true}}}}\n", .{message});
+        try output.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Error: {s}\"}}],\"isError\":true}}}}\n", .{message});
 
-        try writer.writeAll(output.items);
+        try writer.writeAll(output.written());
     }
 
     fn sendToolSuccess(self: *McpServer, writer: anytype, message: []const u8) !void {
-        var output: std.ArrayList(u8) = .{};
-        defer output.deinit(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        defer output.deinit();
 
-        const w = output.writer(self.allocator);
-        try w.print("{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}}}\n", .{message});
+        try output.writer.print("{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}}}\n", .{message});
 
-        try writer.writeAll(output.items);
+        try writer.writeAll(output.written());
     }
 
     // =========================================================================
@@ -741,13 +723,13 @@ pub const McpServer = struct {
     // =========================================================================
 
     fn writeDiscoveryFile(self: *McpServer) !void {
-        const home = std.process.getEnvVarOwned(self.allocator, "HOME") catch return;
+        const home = skim_io.getEnvVarOwned(self.allocator, "HOME") catch return;
         defer self.allocator.free(home);
 
         const dir_path = try std.fmt.allocPrint(self.allocator, "{s}/.skim", .{home});
         defer self.allocator.free(dir_path);
 
-        std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
+        std.Io.Dir.createDirAbsolute(skim_io.get(), dir_path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -755,23 +737,23 @@ pub const McpServer = struct {
         const file_path = try std.fmt.allocPrint(self.allocator, "{s}/.skim/mcp.json", .{home});
         defer self.allocator.free(file_path);
 
-        const file = try std.fs.createFileAbsolute(file_path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.createFileAbsolute(skim_io.get(), file_path, .{});
+        defer file.close(skim_io.get());
 
         const pid = getCurrentPid();
-        var file_writer = file.writer(&file_write_buffer);
+        var file_writer = file.writer(skim_io.get(), &file_write_buffer);
         defer file_writer.interface.flush() catch {};
         try file_writer.interface.print("{{\"port\":{d},\"pid\":{d}}}\n", .{ self.port, pid });
     }
 
     fn deleteDiscoveryFile(self: *McpServer) void {
-        const home = std.process.getEnvVarOwned(self.allocator, "HOME") catch return;
+        const home = skim_io.getEnvVarOwned(self.allocator, "HOME") catch return;
         defer self.allocator.free(home);
 
         const file_path = std.fmt.allocPrint(self.allocator, "{s}/.skim/mcp.json", .{home}) catch return;
         defer self.allocator.free(file_path);
 
-        std.fs.deleteFileAbsolute(file_path) catch {};
+        std.Io.Dir.deleteFileAbsolute(skim_io.get(), file_path) catch {};
     }
 };
 

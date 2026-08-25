@@ -1,5 +1,6 @@
 const std = @import("std");
 const platform = @import("../platform.zig");
+const skim_io = @import("skim_io");
 const Allocator = std.mem.Allocator;
 
 /// Queued shell command output to be sent with next prompt
@@ -25,8 +26,8 @@ pub const RunningShellCommand = struct {
             .child = undefined, // Set by caller after spawn
             .command = try allocator.dupe(u8, command),
             .tool_id = try allocator.dupe(u8, tool_id),
-            .stdout_buf = .{},
-            .stderr_buf = .{},
+            .stdout_buf = .empty,
+            .stderr_buf = .empty,
             .allocator = allocator,
         };
     }
@@ -38,7 +39,7 @@ pub const RunningShellCommand = struct {
         self.stderr_buf.deinit(self.allocator);
         // Kill the process if still running. The browser build never spawns,
         // and wasi has no pid to signal.
-        if (!platform.is_web) _ = self.child.kill() catch {};
+        if (!platform.is_web) self.child.kill(skim_io.get());
     }
 
     /// Get the last N lines of stdout for display, processing carriage returns
@@ -127,7 +128,7 @@ pub const ShellState = struct {
         return .{
             .allocator = allocator,
             .mode = false,
-            .queued_outputs = .{},
+            .queued_outputs = .empty,
             .running_cmd = null,
             .cmd_counter = 0,
         };

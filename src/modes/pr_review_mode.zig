@@ -32,7 +32,7 @@ fn handleListKey(app: *App, key: vaxis.Key) !void {
             'd' => pr_controller.move(pr, @divTrunc(page, 2)),
             'u' => pr_controller.move(pr, -@divTrunc(page, 2)),
             'r' => try pr_controller.startListLoad(pr, app.allocator),
-            'o' => pr_controller.openInBrowser(pr, app.allocator),
+            'o' => pr_controller.openInBrowser(pr),
             'a' => pr_controller.openAuthorPicker(pr, app.allocator),
             else => {},
         }

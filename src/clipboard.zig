@@ -1,14 +1,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const posix = std.posix;
 const log = std.log.scoped(.clipboard);
 const platform = @import("platform.zig");
+const skim_io = @import("skim_io");
 
-var tty_fd: ?posix.fd_t = null;
+var tty_file: ?std.Io.File = null;
 
-pub fn setTtyFd(fd: posix.fd_t) void {
-    tty_fd = fd;
+pub fn setTtyFile(file: std.Io.File) void {
+    tty_file = file;
 }
 
 /// Copy content to system clipboard via OSC 52 (if tty available) with
@@ -18,19 +18,19 @@ pub fn copyToClipboard(allocator: Allocator, content: []const u8) !void {
     // page clipboard on its own. A copy there does nothing.
     if (platform.is_web) return;
 
-    if (tty_fd) |fd| {
-        writeOsc52(allocator, fd, content) catch |err| {
+    if (tty_file) |file| {
+        writeOsc52(allocator, file, content) catch |err| {
             log.warn("OSC 52 clipboard write failed: {}", .{err});
         };
     }
 
     // Also attempt platform tool — works as primary when no tty,
     // and as a belt-and-suspenders backup when OSC 52 is available.
-    copyViaCommand(allocator, content) catch |err| {
+    copyViaCommand(content) catch |err| {
         log.debug("platform clipboard command failed: {}", .{err});
         // If we already wrote via OSC 52, this is fine.
         // If we didn't, propagate the error.
-        if (tty_fd == null) return err;
+        if (tty_file == null) return err;
     };
 }
 
@@ -47,7 +47,7 @@ pub fn readFromClipboard(allocator: Allocator) ?[]const u8 {
 
 // --- OSC 52 ---
 
-fn writeOsc52(allocator: Allocator, fd: posix.fd_t, content: []const u8) !void {
+fn writeOsc52(allocator: Allocator, file: std.Io.File, content: []const u8) !void {
     const encoder = std.base64.standard.Encoder;
     const encoded_len = encoder.calcSize(content.len);
 
@@ -63,7 +63,7 @@ fn writeOsc52(allocator: Allocator, fd: posix.fd_t, content: []const u8) !void {
     _ = encoder.encode(buf[prefix.len .. prefix.len + encoded_len], content);
     @memcpy(buf[prefix.len + encoded_len ..], suffix);
 
-    _ = try posix.write(fd, buf);
+    try file.writeStreamingAll(skim_io.get(), buf);
 }
 
 // --- Platform commands ---
@@ -87,9 +87,9 @@ fn copyCommands() []const CopyCommand {
     }
 }
 
-fn copyViaCommand(allocator: Allocator, content: []const u8) !void {
+fn copyViaCommand(content: []const u8) !void {
     for (copyCommands()) |cmd| {
-        if (spawnCopyChild(allocator, cmd.argv, content)) |_| {
+        if (spawnCopyChild(cmd.argv, content)) |_| {
             return;
         } else |_| {
             continue;
@@ -98,21 +98,21 @@ fn copyViaCommand(allocator: Allocator, content: []const u8) !void {
     return error.NoClipboardCommandAvailable;
 }
 
-fn spawnCopyChild(allocator: Allocator, argv: []const []const u8, content: []const u8) !void {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
+fn spawnCopyChild(argv: []const []const u8, content: []const u8) !void {
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = argv,
+        .stdin = .pipe,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
 
     if (child.stdin) |stdin| {
-        stdin.writeAll(content) catch {};
-        stdin.close();
+        stdin.writeStreamingAll(skim_io.get(), content) catch {};
+        stdin.close(skim_io.get());
         child.stdin = null;
     }
 
-    _ = try child.wait();
+    _ = try child.wait(skim_io.get());
 }
 
 const PasteCommand = struct {
@@ -145,16 +145,16 @@ fn readViaCommand(allocator: Allocator) ![]const u8 {
 }
 
 fn spawnPasteChild(allocator: Allocator, argv: []const []const u8) ![]const u8 {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = argv,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
 
     const stdout = child.stdout.?;
-    const output = try stdout.readToEndAlloc(allocator, 1024 * 1024);
+    const output = try skim_io.readAllAlloc(stdout, allocator, 1024 * 1024);
 
-    _ = try child.wait();
+    _ = try child.wait(skim_io.get());
 
     return output;
 }

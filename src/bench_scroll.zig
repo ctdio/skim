@@ -19,6 +19,7 @@ const frame = @import("rendering/frame.zig");
 const scroll_region = @import("rendering/scroll_region.zig");
 const navigation = @import("navigation.zig");
 const bench = @import("testing/bench_support.zig");
+const skim_io = @import("skim_io");
 
 const App = app_mod.App;
 const Navigation = navigation.Navigation;
@@ -59,8 +60,10 @@ const FrameSamples = struct {
     }
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(process_init: std.process.Init) !void {
+    skim_io.init(process_init);
+
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -121,13 +124,12 @@ fn runView(
 ) !void {
     const allocator = app.allocator;
 
-    var out: std.io.Writer.Allocating = .init(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
 
-    var vx = try vaxis.init(allocator, .{});
+    var vx = try vaxis.init(skim_io.get(), allocator, skim_io.environMap(), .{});
     defer vx.screen.deinit(allocator);
     defer vx.screen_last.deinit(allocator);
-    defer vx.unicode.deinit(allocator);
 
     // Pretend we are in the alt screen so vaxis emits the same cursor motion it
     // would in the real TUI rather than the scrollback-relative variant.
@@ -152,7 +154,7 @@ fn runView(
     while (iteration < warmup + iterations) : (iteration += 1) {
         advance(app, motion);
 
-        var timer = try std.time.Timer.start();
+        var timer = try skim_io.Timer.start();
         try frame.render(app, vx.window());
         const build_ns = timer.read();
 

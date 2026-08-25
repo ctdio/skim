@@ -8,6 +8,7 @@ const process = @import("process.zig");
 const protocol = @import("protocol.zig");
 const types = @import("types.zig");
 const codec = @import("codec.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Terminal Registry
@@ -33,7 +34,7 @@ const TerminalEntry = struct {
 
     // Thread management (will be added in Phase 2)
     worker_thread: ?std.Thread = null,
-    output_mutex: std.Thread.Mutex = .{},
+    output_mutex: std.Io.Mutex = .init,
 
     fn deinit(self: *TerminalEntry) void {
         // Join worker thread if still running (will be used in Phase 2)
@@ -42,7 +43,7 @@ const TerminalEntry = struct {
         }
         self.output_buffer.deinit(self.allocator);
         // The browser build never spawns, and wasi has no pid to signal.
-        if (!is_web) _ = self.child.kill() catch {};
+        if (!is_web) self.child.kill(skim_io.get());
     }
 };
 
@@ -78,7 +79,7 @@ pub const AcpManager = struct {
 
     // Pending messages for TUI to consume (protected by messages_mutex for background thread access)
     pending_messages: std.ArrayListUnmanaged(PendingMessage),
-    messages_mutex: std.Thread.Mutex,
+    messages_mutex: std.Io.Mutex,
 
     // Async prompting state
     pending_prompt_id: ?i64,
@@ -279,26 +280,26 @@ pub const AcpManager = struct {
             .agent_name = null,
             .server_name = null,
             .session_id = null,
-            .available_modes = .{},
+            .available_modes = .empty,
             .current_mode_id = null,
-            .available_models = .{},
+            .available_models = .empty,
             .current_model_id = null,
             .on_message = null,
             .on_tool_call = null,
             .callback_ctx = null,
-            .pending_messages = .{},
-            .messages_mutex = .{},
+            .pending_messages = .empty,
+            .messages_mutex = .init,
             .pending_prompt_id = null,
-            .queued_prompts = .{},
+            .queued_prompts = .empty,
             .pending_permission = null,
             .next_request_id = 1000, // Start high to avoid collision with client IDs
             .terminals = .{},
             .next_terminal_id = 1,
             .next_marker_id = 1,
-            .tool_terminal_map = .{},
-            .pending_terminal_waits = .{},
-            .tool_call_id_to_idx = .{},
-            .seen_diff_keys = .{},
+            .tool_terminal_map = .empty,
+            .pending_terminal_waits = .empty,
+            .tool_call_id_to_idx = .empty,
+            .seen_diff_keys = .empty,
         };
     }
 
@@ -376,7 +377,7 @@ pub const AcpManager = struct {
         std.log.info("ACP: Spawning agent '{s}' with --resume {s}", .{ agent_command, session_id });
 
         // Build args with --resume flag
-        var args_list: std.ArrayList([]const u8) = .{};
+        var args_list: std.ArrayList([]const u8) = .empty;
         defer args_list.deinit(self.allocator);
 
         // Add base args
@@ -731,8 +732,8 @@ pub const AcpManager = struct {
     /// Returns slice of pending messages. Call clearMessages() after processing.
     /// Note: session/update notifications are processed by background thread callback.
     pub fn poll(self: *AcpManager) Error![]PendingMessage {
-        self.messages_mutex.lock();
-        defer self.messages_mutex.unlock();
+        self.messages_mutex.lockUncancelable(skim_io.get());
+        defer self.messages_mutex.unlock(skim_io.get());
 
         const acp = self.acp_client orelse return self.pending_messages.items;
 
@@ -839,13 +840,13 @@ pub const AcpManager = struct {
                 };
 
                 // Read file content
-                const file = std.fs.openFileAbsolute(params.path, .{}) catch {
+                const file = std.Io.Dir.openFileAbsolute(skim_io.get(), params.path, .{}) catch {
                     try acp.transport.sendErrorResponse(id, -32001, "File not found");
                     return;
                 };
-                defer file.close();
+                defer file.close(skim_io.get());
 
-                const content = file.readToEndAlloc(self.allocator, 10 * 1024 * 1024) catch {
+                const content = skim_io.readAllAlloc(file, self.allocator, 10 * 1024 * 1024) catch {
                     try acp.transport.sendErrorResponse(id, -32002, "Read error");
                     return;
                 };
@@ -906,7 +907,7 @@ pub const AcpManager = struct {
 
                 // Create parent directories if needed
                 if (std.fs.path.dirname(params.path)) |dir| {
-                    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+                    std.Io.Dir.createDirAbsolute(skim_io.get(), dir, .default_dir) catch |err| switch (err) {
                         error.PathAlreadyExists => {},
                         else => {
                             std.log.err("ACP Manager: failed to create directory: {any}", .{err});
@@ -917,14 +918,14 @@ pub const AcpManager = struct {
                 }
 
                 // Write file content
-                const file = std.fs.createFileAbsolute(params.path, .{ .truncate = true }) catch |err| {
+                const file = std.Io.Dir.createFileAbsolute(skim_io.get(), params.path, .{ .truncate = true }) catch |err| {
                     std.log.err("ACP Manager: failed to create file: {any}", .{err});
                     try acp.transport.sendErrorResponse(id, -32001, "Failed to create file");
                     return;
                 };
-                defer file.close();
+                defer file.close(skim_io.get());
 
-                file.writeAll(params.content) catch |err| {
+                file.writeStreamingAll(skim_io.get(), params.content) catch |err| {
                     std.log.err("ACP Manager: failed to write file: {any}", .{err});
                     try acp.transport.sendErrorResponse(id, -32002, "Write error");
                     return;
@@ -997,9 +998,9 @@ pub const AcpManager = struct {
             }
 
             // Process exited - send response with exit status
-            var response: std.ArrayListUnmanaged(u8) = .{};
-            defer response.deinit(self.allocator);
-            const writer = response.writer(self.allocator);
+            var response: std.Io.Writer.Allocating = .init(self.allocator);
+            defer response.deinit();
+            const writer = &response.writer;
 
             writer.writeAll("{\"exitStatus\":{") catch continue;
             if (entry.exit_code) |code| {
@@ -1011,7 +1012,7 @@ pub const AcpManager = struct {
             }
             writer.writeAll("}}") catch continue;
 
-            acp.transport.sendResponse(pending.request_id, response.items) catch {};
+            acp.transport.sendResponse(pending.request_id, response.written()) catch {};
 
             // Clean up
             self.allocator.free(pending.terminal_id);
@@ -1051,7 +1052,7 @@ pub const AcpManager = struct {
         self.next_marker_id += 1;
 
         // Build the command string
-        var cmd_buf: std.ArrayListUnmanaged(u8) = .{};
+        var cmd_buf: std.ArrayListUnmanaged(u8) = .empty;
         defer cmd_buf.deinit(self.allocator);
 
         // Prepend export statements for env vars passed by agent
@@ -1100,16 +1101,16 @@ pub const AcpManager = struct {
         }
 
         // Use user's shell
-        const user_shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+        const user_shell = skim_io.getEnv("SHELL") orelse "/bin/sh";
 
         // Spawn shell (will read commands from stdin, sources config files)
         const argv = [_][]const u8{user_shell};
-        var child = std.process.Child.init(&argv, self.allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        child.spawn() catch |err| {
+        const child = std.process.spawn(skim_io.get(), .{
+            .argv = &argv,
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        }) catch |err| {
             std.log.err("ACP Manager: failed to spawn shell: {any}", .{err});
             self.allocator.free(terminal_id);
             try acp.transport.sendErrorResponse(id, -32001, "Failed to spawn shell");
@@ -1129,7 +1130,7 @@ pub const AcpManager = struct {
             .allocator = self.allocator,
             .child = child,
             .marker_id = marker_id,
-            .output_buffer = .{},
+            .output_buffer = .empty,
             .output_byte_limit = params.output_byte_limit orelse 1024 * 1024,
             .completed = std.atomic.Value(bool).init(false),
             .exited = std.atomic.Value(bool).init(false),
@@ -1149,10 +1150,10 @@ pub const AcpManager = struct {
         // Write command with marker to stdin (don't close - background thread will close)
         if (entry_ptr.child.stdin) |stdin| {
             std.log.info("ACP Manager: writing command: {s}", .{cmd_buf.items});
-            stdin.writeAll(cmd_buf.items) catch {};
-            stdin.writeAll(marker_str) catch {};
+            stdin.writeStreamingAll(skim_io.get(), cmd_buf.items) catch {};
+            stdin.writeStreamingAll(skim_io.get(), marker_str) catch {};
             // NOTE: stdin is closed by background thread, not here
-            // This avoids race conditions with child.wait() cleanup
+            // This avoids race conditions with child.wait(skim_io.get()) cleanup
         }
 
         // Spawn background worker thread
@@ -1166,15 +1167,15 @@ pub const AcpManager = struct {
         entry_ptr.worker_thread = thread;
 
         // Send response
-        var response: std.ArrayListUnmanaged(u8) = .{};
-        defer response.deinit(self.allocator);
-        const writer = response.writer(self.allocator);
+        var response: std.Io.Writer.Allocating = .init(self.allocator);
+        defer response.deinit();
+        const writer = &response.writer;
         writer.print("{{\"terminalId\":\"{s}\"}}", .{terminal_id}) catch {
             try acp.transport.sendErrorResponse(id, -32603, "Out of memory");
             return;
         };
 
-        try acp.transport.sendResponse(id, response.items);
+        try acp.transport.sendResponse(id, response.written());
     }
 
     /// Handle terminal/output request
@@ -1196,13 +1197,13 @@ pub const AcpManager = struct {
         };
 
         // Lock during read to prevent corruption during background thread drain
-        entry.output_mutex.lock();
-        defer entry.output_mutex.unlock();
+        entry.output_mutex.lockUncancelable(skim_io.get());
+        defer entry.output_mutex.unlock(skim_io.get());
 
         // Build response
-        var response: std.ArrayListUnmanaged(u8) = .{};
-        defer response.deinit(self.allocator);
-        const writer = response.writer(self.allocator);
+        var response: std.Io.Writer.Allocating = .init(self.allocator);
+        defer response.deinit();
+        const writer = &response.writer;
 
         writer.writeAll("{\"output\":\"") catch return;
         // Escape the output for JSON
@@ -1236,7 +1237,7 @@ pub const AcpManager = struct {
         }
         writer.writeAll("}") catch return;
 
-        try acp.transport.sendResponse(id, response.items);
+        try acp.transport.sendResponse(id, response.written());
     }
 
     /// Handle terminal/wait_for_exit request
@@ -1311,7 +1312,7 @@ pub const AcpManager = struct {
 
         // Kill the child process
         // The browser build never spawns, and wasi has no pid to signal.
-        if (!is_web) _ = entry.child.kill() catch {};
+        if (!is_web) entry.child.kill(skim_io.get());
 
         // Join worker thread (exits quickly after kill)
         if (entry.worker_thread) |thread| {
@@ -1354,7 +1355,7 @@ pub const AcpManager = struct {
     // =========================================================================
 
     /// Background worker thread that waits for process and drains output.
-    /// Runs in dedicated thread per terminal - blocks on child.wait() for zero CPU usage.
+    /// Runs in dedicated thread per terminal - blocks on child.wait(skim_io.get()) for zero CPU usage.
     fn terminalWorkerThread(entry: *TerminalEntry) void {
         // 1. Close stdin to signal EOF to shell (use std.c.close to avoid panic on BADF)
         if (entry.child.stdin) |stdin| {
@@ -1363,7 +1364,7 @@ pub const AcpManager = struct {
         }
 
         // 2. Drain stdout/stderr BEFORE waiting (prevents deadlock if buffers fill)
-        entry.output_mutex.lock();
+        entry.output_mutex.lockUncancelable(skim_io.get());
         var buf: [4096]u8 = undefined;
 
         // Track which fds we've closed to avoid double-close
@@ -1374,7 +1375,7 @@ pub const AcpManager = struct {
         if (entry.child.stdout) |stdout| {
             stdout_handle = stdout.handle;
             while (true) {
-                const n = stdout.read(&buf) catch break;
+                const n = skim_io.readFile(stdout, &buf) catch break;
                 if (n == 0) break; // EOF
                 if (entry.output_buffer.items.len < entry.output_byte_limit) {
                     const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
@@ -1389,7 +1390,7 @@ pub const AcpManager = struct {
         if (entry.child.stderr) |stderr| {
             stderr_handle = stderr.handle;
             while (true) {
-                const n = stderr.read(&buf) catch break;
+                const n = skim_io.readFile(stderr, &buf) catch break;
                 if (n == 0) break;
                 if (entry.output_buffer.items.len < entry.output_byte_limit) {
                     const remaining = entry.output_byte_limit - entry.output_buffer.items.len;
@@ -1411,12 +1412,18 @@ pub const AcpManager = struct {
             }
         }
 
-        entry.output_mutex.unlock();
+        entry.output_mutex.unlock(skim_io.get());
 
-        // 3. Now wait for process exit using waitpid directly (child.wait cleanup already done)
-        const wait_result = std.posix.waitpid(entry.child.id, 0);
-        // Parse raw wait status using POSIX macros
-        const raw_status = wait_result.status;
+        // 3. Now wait for process exit. `Child.wait` cleanup already ran above, and
+        // 0.16 dropped `posix.waitpid`, so the reap goes straight to libc.
+        var raw_status: u32 = 0;
+        if (entry.child.id) |child_pid| {
+            var status: c_int = undefined;
+            while (std.c.waitpid(child_pid, &status, 0) == -1) {
+                if (std.posix.errno(@as(isize, -1)) != .INTR) break;
+            }
+            raw_status = @bitCast(status);
+        }
         if (raw_status & 0x7f == 0) {
             // Normal exit: WIFEXITED - exit code in high byte
             entry.exit_code = @truncate((raw_status >> 8) & 0xff);
@@ -1426,9 +1433,9 @@ pub const AcpManager = struct {
         }
 
         // 4. Check for completion marker
-        entry.output_mutex.lock();
+        entry.output_mutex.lockUncancelable(skim_io.get());
         checkForMarkerStatic(entry);
-        entry.output_mutex.unlock();
+        entry.output_mutex.unlock(skim_io.get());
 
         // 5. Signal completion
         entry.completed.store(true, .release);
@@ -1470,8 +1477,8 @@ pub const AcpManager = struct {
 
     /// Clear processed messages
     pub fn clearMessages(self: *AcpManager) void {
-        self.messages_mutex.lock();
-        defer self.messages_mutex.unlock();
+        self.messages_mutex.lockUncancelable(skim_io.get());
+        defer self.messages_mutex.unlock(skim_io.get());
 
         for (self.pending_messages.items) |*msg| {
             msg.deinit(self.allocator);
@@ -1485,8 +1492,8 @@ pub const AcpManager = struct {
     /// Clear only the first `count` messages from the pending queue.
     /// Used for bounded message processing to prevent UI freezes.
     pub fn clearMessagesN(self: *AcpManager, count: usize) void {
-        self.messages_mutex.lock();
-        defer self.messages_mutex.unlock();
+        self.messages_mutex.lockUncancelable(skim_io.get());
+        defer self.messages_mutex.unlock(skim_io.get());
 
         const to_clear = @min(count, self.pending_messages.items.len);
         if (to_clear == 0) return;
@@ -1518,8 +1525,8 @@ pub const AcpManager = struct {
 
     /// Get the count of pending messages without locking (for status checks)
     pub fn pendingMessageCount(self: *AcpManager) usize {
-        self.messages_mutex.lock();
-        defer self.messages_mutex.unlock();
+        self.messages_mutex.lockUncancelable(skim_io.get());
+        defer self.messages_mutex.unlock(skim_io.get());
         return self.pending_messages.items.len;
     }
 
@@ -1939,8 +1946,8 @@ pub const AcpManager = struct {
         const self: *AcpManager = @ptrCast(@alignCast(ctx));
 
         // Lock mutex - this function may be called from background thread
-        self.messages_mutex.lock();
-        defer self.messages_mutex.unlock();
+        self.messages_mutex.lockUncancelable(skim_io.get());
+        defer self.messages_mutex.unlock(skim_io.get());
 
         // Determine message kind based on update type
         const msg_kind: PendingMessage.Kind = switch (update.update_type) {
@@ -2177,8 +2184,8 @@ pub const AcpManager = struct {
                 if (self.tool_terminal_map.get(tcu.tool_call_id)) |terminal_id| {
                     std.log.info("ACP: looking up terminal output for {s}", .{terminal_id});
                     if (self.terminals.getPtr(terminal_id)) |entry| {
-                        entry.output_mutex.lock();
-                        defer entry.output_mutex.unlock();
+                        entry.output_mutex.lockUncancelable(skim_io.get());
+                        defer entry.output_mutex.unlock(skim_io.get());
                         if (entry.output_buffer.items.len > 0) {
                             std.log.info("ACP: found terminal output, len={d}", .{entry.output_buffer.items.len});
                             output_text = self.allocator.dupe(u8, entry.output_buffer.items) catch null;
@@ -2454,8 +2461,8 @@ pub fn loadAgentList(allocator: Allocator, config_agents: ?[]const ConfigAgent) 
 fn expandEnvValue(allocator: Allocator, value: []const u8) ![]const u8 {
     if (std.mem.startsWith(u8, value, "${") and std.mem.endsWith(u8, value, "}")) {
         const var_name = value[2 .. value.len - 1];
-        const expanded = std.process.getEnvVarOwned(allocator, var_name) catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => return try allocator.dupe(u8, ""),
+        const expanded = skim_io.getEnvVarOwned(allocator, var_name) catch |err| switch (err) {
+            error.EnvironmentVariableMissing => return try allocator.dupe(u8, ""),
             else => return err,
         };
         return expanded;

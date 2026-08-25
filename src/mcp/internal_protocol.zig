@@ -134,26 +134,26 @@ pub const ParsedDaemonMessage = union(enum) {
 
 pub fn encodeAdapterHello(allocator: Allocator, adapter_id: []const u8) ![]u8 {
     // Zig 0.15: ArrayList is unmanaged, pass allocator to methods
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"adapter_hello\",\"adapter_id\":{f}}}\n", .{std.json.fmt(adapter_id, .{})});
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 pub fn encodeAdapterGoodbye(allocator: Allocator) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
+    var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     try output.appendSlice(allocator, "{\"event\":\"adapter_goodbye\"}\n");
     return output.toOwnedSlice(allocator);
 }
 
 pub fn encodeMcpRequest(allocator: Allocator, payload: McpRequestPayload) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"mcp_request\",\"request_id\":{f},\"mcp_id\":", .{std.json.fmt(payload.request_id, .{})});
     try payload.mcp_id.format(writer);
     try writer.print(",\"method\":{f}", .{std.json.fmt(payload.method, .{})});
@@ -164,11 +164,11 @@ pub fn encodeMcpRequest(allocator: Allocator, payload: McpRequestPayload) ![]u8 
     }
 
     try writer.writeAll("}\n");
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 pub fn encodeStatusQuery(allocator: Allocator) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
+    var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     try output.appendSlice(allocator, "{\"event\":\"status_query\"}\n");
     return output.toOwnedSlice(allocator);
@@ -179,10 +179,10 @@ pub fn encodeStatusQuery(allocator: Allocator) ![]u8 {
 // =============================================================================
 
 pub fn encodeAdapterWelcome(allocator: Allocator, adapter_id: []const u8, clients: []const ClientSummary) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"adapter_welcome\",\"adapter_id\":{f},\"clients\":[", .{std.json.fmt(adapter_id, .{})});
 
     for (clients, 0..) |client, i| {
@@ -196,14 +196,14 @@ pub fn encodeAdapterWelcome(allocator: Allocator, adapter_id: []const u8, client
     }
 
     try writer.writeAll("]}\n");
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 pub fn encodeMcpResponse(allocator: Allocator, request_id: []const u8, mcp_id: McpId, result: ?[]const u8, err: ?McpErrorPayload) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.print("{{\"event\":\"mcp_response\",\"request_id\":{f},\"mcp_id\":", .{std.json.fmt(request_id, .{})});
     try mcp_id.format(writer);
 
@@ -220,14 +220,14 @@ pub fn encodeMcpResponse(allocator: Allocator, request_id: []const u8, mcp_id: M
     }
 
     try writer.writeAll("}\n");
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 pub fn encodeClientUpdate(allocator: Allocator, action: ClientAction, client: ClientSummary) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     const action_str = switch (action) {
         .connected => "connected",
         .disconnected => "disconnected",
@@ -239,14 +239,14 @@ pub fn encodeClientUpdate(allocator: Allocator, action: ClientAction, client: Cl
         std.json.fmt(client.diff_ref, .{}),
         client.file_count,
     });
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 pub fn encodeStatusResponse(allocator: Allocator, clients: []const ClientSummary, adapter_count: usize) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
     try writer.writeAll("{\"event\":\"status_response\",\"clients\":[");
 
     for (clients, 0..) |client, i| {
@@ -260,7 +260,7 @@ pub fn encodeStatusResponse(allocator: Allocator, clients: []const ClientSummary
     }
 
     try writer.print("],\"adapter_count\":{d}}}\n", .{adapter_count});
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 // =============================================================================
@@ -279,7 +279,7 @@ const RawAdapterMessage = struct {
 
 /// Decode an adapter message
 pub fn decodeAdapterMessage(allocator: Allocator, json_line: []const u8) !ParsedAdapterMessage {
-    const trimmed = std.mem.trimRight(u8, json_line, "\n\r");
+    const trimmed = std.mem.trimEnd(u8, json_line, "\n\r");
 
     const parsed = std.json.parseFromSlice(RawAdapterMessage, allocator, trimmed, .{
         .ignore_unknown_fields = true,
@@ -314,12 +314,12 @@ pub fn decodeAdapterMessage(allocator: Allocator, json_line: []const u8) !Parsed
 
         // Stringify params if present
         const params_str: ?[]const u8 = if (msg.params) |p| blk: {
-            var params_output: std.ArrayList(u8) = .{};
-            errdefer params_output.deinit(allocator);
-            const writer = params_output.writer(allocator);
+            var params_output: std.Io.Writer.Allocating = .init(allocator);
+            errdefer params_output.deinit();
+            const writer = &params_output.writer;
             // Zig 0.15: use json.fmt for stringifying
             writer.print("{f}", .{std.json.fmt(p, .{})}) catch return error.InvalidParams;
-            break :blk params_output.toOwnedSlice(allocator) catch return error.InvalidParams;
+            break :blk params_output.toOwnedSlice() catch return error.InvalidParams;
         } else null;
 
         return .{ .mcp_request = .{
@@ -359,7 +359,7 @@ const ClientSummaryRaw = struct {
 
 /// Decode a daemon message
 pub fn decodeDaemonMessage(allocator: Allocator, json_line: []const u8) !ParsedDaemonMessage {
-    const trimmed = std.mem.trimRight(u8, json_line, "\n\r");
+    const trimmed = std.mem.trimEnd(u8, json_line, "\n\r");
 
     const parsed = std.json.parseFromSlice(RawDaemonMessage, allocator, trimmed, .{
         .ignore_unknown_fields = true,
@@ -405,7 +405,7 @@ pub fn decodeDaemonMessage(allocator: Allocator, json_line: []const u8) !ParsedD
         // Stringify result if present
         const result_str: ?[]const u8 = if (msg.result) |r| blk: {
             // Zig 0.15: use Writer.Allocating for Stringify
-            var alloc_writer: std.io.Writer.Allocating = .init(allocator);
+            var alloc_writer: std.Io.Writer.Allocating = .init(allocator);
             errdefer alloc_writer.deinit();
             var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
             stringify.write(r) catch return error.InvalidResult;

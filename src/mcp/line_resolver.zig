@@ -118,8 +118,8 @@ pub const LineResolver = struct {
         const file_idx = self.findFile(file_path) orelse return null;
         const file = &self.files[file_idx];
 
-        var new_lines: std.ArrayList(u32) = .{};
-        var old_lines: std.ArrayList(u32) = .{};
+        var new_lines: std.ArrayList(u32) = .empty;
+        var old_lines: std.ArrayList(u32) = .empty;
         errdefer new_lines.deinit(allocator);
         errdefer old_lines.deinit(allocator);
 

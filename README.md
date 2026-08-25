@@ -29,7 +29,7 @@ A keyboard-driven TUI for code reviews built in Zig.
 
 #### Prerequisites
 
-- Zig 0.15.1
+- Zig 0.16.0
 - Git
 
 ```bash

@@ -37,7 +37,7 @@ pub fn threadsToSessionInfos(
     allocator: Allocator,
     threads: []const codex_protocol.Thread,
 ) Allocator.Error![]SessionInfo {
-    var result: std.ArrayList(SessionInfo) = .{};
+    var result: std.ArrayList(SessionInfo) = .empty;
     errdefer {
         for (result.items) |*s| s.deinit();
         result.deinit(allocator);
@@ -79,7 +79,7 @@ pub fn listAllSessions(
     cwd: []const u8,
     limit: usize,
 ) SessionDiscoveryError![]SessionInfo {
-    var all_sessions: std.ArrayList(SessionInfo) = .{};
+    var all_sessions: std.ArrayList(SessionInfo) = .empty;
     errdefer {
         for (all_sessions.items) |*s| s.deinit();
         all_sessions.deinit(allocator);

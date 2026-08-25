@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const blame = @import("blame.zig");
 const parser = @import("parser.zig");
 const line_map = @import("../line_map.zig");
+const skim_io = @import("skim_io");
 
 /// A completed async blame fetch handed from a worker thread back to the main
 /// loop. `path` and the ArrayList backing store use c_allocator so they survive
@@ -46,28 +47,26 @@ pub const Blame = struct {
     allocator: Allocator,
     cache: std.StringHashMap(blame.BlameData), // file_path -> blame data
     pending_results: std.ArrayListUnmanaged(PendingBlameResult),
-    pending_mutex: std.Thread.Mutex,
+    pending_mutex: std.Io.Mutex,
     pending_ready: std.atomic.Value(bool),
     requests_in_flight: std.StringHashMapUnmanaged(void),
     /// Blame workers are detached, so `deinit` cannot join them. It waits on
     /// this count instead: a worker dereferences the controller (mutex, pending
     /// results) after it finishes, so tearing the controller down while any are
     /// outstanding is a use-after-free.
-    outstanding: usize,
-    outstanding_mutex: std.Thread.Mutex,
-    outstanding_done: std.Thread.Condition,
+    /// 0.16's `Io.Condition` has no timed wait, so the count doubles as the
+    /// futex word: workers wake `deinit` by publishing a drop to zero.
+    outstanding: std.atomic.Value(u32),
 
     pub fn init(allocator: Allocator) Blame {
         return .{
             .allocator = allocator,
             .cache = std.StringHashMap(blame.BlameData).init(allocator),
-            .pending_results = .{},
-            .pending_mutex = .{},
+            .pending_results = .empty,
+            .pending_mutex = .init,
             .pending_ready = std.atomic.Value(bool).init(false),
-            .requests_in_flight = .{},
-            .outstanding = 0,
-            .outstanding_mutex = .{},
-            .outstanding_done = .{},
+            .requests_in_flight = .empty,
+            .outstanding = .init(0),
         };
     }
 
@@ -110,33 +109,34 @@ pub const Blame = struct {
     }
 
     fn workerStarted(self: *Blame) void {
-        self.outstanding_mutex.lock();
-        defer self.outstanding_mutex.unlock();
-        self.outstanding += 1;
+        _ = self.outstanding.fetchAdd(1, .monotonic);
     }
 
     fn workerFinished(self: *Blame) void {
-        self.outstanding_mutex.lock();
-        defer self.outstanding_mutex.unlock();
-        self.outstanding -= 1;
-        if (self.outstanding == 0) self.outstanding_done.broadcast();
+        if (self.outstanding.fetchSub(1, .release) == 1) {
+            skim_io.get().futexWake(u32, &self.outstanding.raw, std.math.maxInt(u32));
+        }
     }
 
     /// Waits until every detached blame worker has stopped touching `self`.
     /// Returns false if they did not all finish in time — a wedged `git blame`
     /// must not hang quit, so the caller leaks instead of freeing under them.
     fn waitForWorkers(self: *Blame) bool {
+        const io = skim_io.get();
         const deadline_ns: u64 = 2 * std.time.ns_per_s;
-        var timer = std.time.Timer.start() catch null;
+        var timer: ?skim_io.Timer = skim_io.Timer.start() catch null;
 
-        self.outstanding_mutex.lock();
-        defer self.outstanding_mutex.unlock();
-        while (self.outstanding != 0) {
+        while (true) {
+            const remaining = self.outstanding.load(.acquire);
+            if (remaining == 0) return true;
+
             const elapsed = if (timer) |*t| t.read() else deadline_ns;
             if (elapsed >= deadline_ns) return false;
-            self.outstanding_done.timedWait(&self.outstanding_mutex, deadline_ns - elapsed) catch return self.outstanding == 0;
+
+            io.futexWaitTimeout(u32, &self.outstanding.raw, remaining, .{
+                .duration = .{ .raw = .{ .nanoseconds = @intCast(deadline_ns - elapsed) }, .clock = .awake },
+            }) catch return self.outstanding.load(.acquire) == 0;
         }
-        return true;
     }
 };
 
@@ -176,10 +176,10 @@ pub fn requestBlameForViewport(self: *Blame, vp: ViewportParams) void {
 pub fn pollPending(self: *Blame, profile_render: bool) bool {
     if (!self.pending_ready.load(.acquire)) return false;
 
-    self.pending_mutex.lock();
+    self.pending_mutex.lockUncancelable(skim_io.get());
     var results = self.pending_results;
-    self.pending_results = .{};
-    self.pending_mutex.unlock();
+    self.pending_results = .empty;
+    self.pending_mutex.unlock(skim_io.get());
     self.pending_ready.store(false, .release);
 
     defer results.deinit(std.heap.c_allocator);
@@ -258,7 +258,7 @@ fn startAsyncBlameFetch(self: *Blame, file_path: []const u8) !void {
 }
 
 fn blameFetchWorker(ctx: *BlameFetchContext) void {
-    var timer = std.time.Timer.start() catch null;
+    var timer: ?skim_io.Timer = skim_io.Timer.start() catch null;
     const blame_data = blame.getBlame(std.heap.c_allocator, ctx.path, null) catch null;
     const duration_ns: u64 = if (timer) |*t| t.read() else 0;
 
@@ -269,9 +269,9 @@ fn blameFetchWorker(ctx: *BlameFetchContext) void {
     };
 
     const controller = ctx.controller;
-    controller.pending_mutex.lock();
+    controller.pending_mutex.lockUncancelable(skim_io.get());
     controller.pending_results.append(std.heap.c_allocator, result) catch {
-        controller.pending_mutex.unlock();
+        controller.pending_mutex.unlock(skim_io.get());
         if (result.blame_data) |data| {
             var owned_data = data;
             owned_data.deinit();
@@ -282,7 +282,7 @@ fn blameFetchWorker(ctx: *BlameFetchContext) void {
         controller.workerFinished();
         return;
     };
-    controller.pending_mutex.unlock();
+    controller.pending_mutex.unlock(skim_io.get());
     controller.pending_ready.store(true, .release);
 
     std.heap.c_allocator.destroy(ctx);
@@ -290,8 +290,8 @@ fn blameFetchWorker(ctx: *BlameFetchContext) void {
 }
 
 fn drainPending(self: *Blame) void {
-    self.pending_mutex.lock();
-    defer self.pending_mutex.unlock();
+    self.pending_mutex.lockUncancelable(skim_io.get());
+    defer self.pending_mutex.unlock(skim_io.get());
 
     for (self.pending_results.items) |result| {
         if (result.blame_data) |data| {

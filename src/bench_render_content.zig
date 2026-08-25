@@ -14,6 +14,7 @@ const unified = @import("rendering/unified.zig");
 const side_by_side = @import("rendering/side_by_side.zig");
 const search = @import("search.zig");
 const bench = @import("testing/bench_support.zig");
+const skim_io = @import("skim_io");
 
 const App = app_mod.App;
 const UnifiedRenderer = unified.UnifiedRenderer;
@@ -21,8 +22,10 @@ const SideBySideRenderer = side_by_side.SideBySideRenderer;
 
 const BenchView = enum { unified, side_by_side, both };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(process_init: std.process.Init) !void {
+    skim_io.init(process_init);
+
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -105,7 +108,7 @@ fn runBench(app: *App, win: harness.Window, view: BenchView, iterations: usize, 
         app.state.view_mode = if (view == .unified) .unified else .side_by_side;
         app.resetFrameAllocators();
 
-        var timer = try std.time.Timer.start();
+        var timer = try skim_io.Timer.start();
         switch (view) {
             .unified => try UnifiedRenderer.renderContent(app, win),
             .side_by_side => try SideBySideRenderer.renderContent(app, win),

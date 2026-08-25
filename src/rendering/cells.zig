@@ -123,7 +123,6 @@ fn isPrintableAscii(text: []const u8) bool {
 
 const TestScreens = struct {
     allocator: std.mem.Allocator,
-    unicode: vaxis.Unicode,
     reference: vaxis.Screen,
     fast: vaxis.Screen,
 
@@ -131,7 +130,6 @@ const TestScreens = struct {
         const winsize = vaxis.Winsize{ .rows = rows, .cols = cols, .x_pixel = 0, .y_pixel = 0 };
         return .{
             .allocator = allocator,
-            .unicode = try vaxis.Unicode.init(allocator),
             .reference = try vaxis.Screen.init(allocator, winsize),
             .fast = try vaxis.Screen.init(allocator, winsize),
         };
@@ -140,10 +138,9 @@ const TestScreens = struct {
     fn deinit(self: *TestScreens) void {
         self.reference.deinit(self.allocator);
         self.fast.deinit(self.allocator);
-        self.unicode.deinit(self.allocator);
     }
 
-    fn window(self: *TestScreens, screen: *vaxis.Screen) Window {
+    fn windowFor(screen: *vaxis.Screen) Window {
         return .{
             .x_off = 0,
             .y_off = 0,
@@ -152,7 +149,6 @@ const TestScreens = struct {
             .width = screen.width,
             .height = screen.height,
             .screen = screen,
-            .unicode = &self.unicode,
         };
     }
 
@@ -165,8 +161,8 @@ const TestScreens = struct {
         segments: []const Segment,
         opts: PrintOptions,
     ) !void {
-        const expected = self.window(&self.reference).child(child).print(segments, opts);
-        const actual = print(self.window(&self.fast).child(child), segments, opts);
+        const expected = TestScreens.windowFor(&self.reference).child(child).print(segments, opts);
+        const actual = print(TestScreens.windowFor(&self.fast).child(child), segments, opts);
 
         try std.testing.expectEqual(expected.row, actual.row);
         try std.testing.expectEqual(expected.col, actual.col);
@@ -178,8 +174,8 @@ const TestScreens = struct {
     /// Prints `segments` through both `vaxis.Window.print` and `cells.print`,
     /// then asserts the results and every screen cell match.
     fn expectMatches(self: *TestScreens, segments: []const Segment, opts: PrintOptions) !void {
-        const expected = self.window(&self.reference).print(segments, opts);
-        const actual = print(self.window(&self.fast), segments, opts);
+        const expected = TestScreens.windowFor(&self.reference).print(segments, opts);
+        const actual = print(TestScreens.windowFor(&self.fast), segments, opts);
 
         try std.testing.expectEqual(expected.row, actual.row);
         try std.testing.expectEqual(expected.col, actual.col);
@@ -365,11 +361,11 @@ test "fillGlyph: matches vaxis for a run of a box-drawing glyph" {
     var screens = try TestScreens.init(std.testing.allocator, 20, 4);
     defer screens.deinit();
 
-    _ = screens.window(&screens.reference).print(
+    _ = TestScreens.windowFor(&screens.reference).print(
         &.{.{ .text = "╱╱╱╱╱╱", .style = .{ .fg = .{ .index = 4 } } }},
         .{ .row_offset = 2, .col_offset = 3 },
     );
-    fillGlyph(screens.window(&screens.fast), "╱", .{
+    fillGlyph(TestScreens.windowFor(&screens.fast), "╱", .{
         .col = 3,
         .row = 2,
         .count = 6,
@@ -385,11 +381,11 @@ test "fillGlyph: clips a run at the window edge instead of wrapping" {
 
     // fillGlyph never wraps, so the reference prints only the glyphs that fit
     // on the row. Cells past the edge must stay untouched on both screens.
-    _ = screens.window(&screens.reference).print(
+    _ = TestScreens.windowFor(&screens.reference).print(
         &.{.{ .text = "┃┃┃" }},
         .{ .row_offset = 0, .col_offset = 5 },
     );
-    fillGlyph(screens.window(&screens.fast), "┃", .{ .col = 5, .row = 0, .count = 5 });
+    fillGlyph(TestScreens.windowFor(&screens.fast), "┃", .{ .col = 5, .row = 0, .count = 5 });
 
     try screens.expectCellsMatch();
 }
@@ -398,8 +394,8 @@ test "fillGlyph: matches vaxis wrapped flag when the run reaches the right edge"
     var screens = try TestScreens.init(std.testing.allocator, 6, 2);
     defer screens.deinit();
 
-    _ = screens.window(&screens.reference).print(&.{.{ .text = "╱╱╱╱╱╱" }}, .{});
-    fillGlyph(screens.window(&screens.fast), "╱", .{ .col = 0, .row = 0, .count = 6 });
+    _ = TestScreens.windowFor(&screens.reference).print(&.{.{ .text = "╱╱╱╱╱╱" }}, .{});
+    fillGlyph(TestScreens.windowFor(&screens.fast), "╱", .{ .col = 0, .row = 0, .count = 6 });
 
     try screens.expectCellsMatch();
 }
@@ -408,7 +404,7 @@ test "fillGlyph: writes nothing for a row outside the window" {
     var screens = try TestScreens.init(std.testing.allocator, 8, 2);
     defer screens.deinit();
 
-    fillGlyph(screens.window(&screens.fast), "┃", .{ .col = 0, .row = 9, .count = 4 });
+    fillGlyph(TestScreens.windowFor(&screens.fast), "┃", .{ .col = 0, .row = 9, .count = 4 });
 
     try screens.expectCellsMatch();
 }
@@ -417,7 +413,7 @@ test "fillGlyph: writes nothing for a zero count" {
     var screens = try TestScreens.init(std.testing.allocator, 8, 2);
     defer screens.deinit();
 
-    fillGlyph(screens.window(&screens.fast), "┃", .{ .col = 0, .row = 0, .count = 0 });
+    fillGlyph(TestScreens.windowFor(&screens.fast), "┃", .{ .col = 0, .row = 0, .count = 0 });
 
     try screens.expectCellsMatch();
 }

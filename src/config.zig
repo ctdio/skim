@@ -1,4 +1,5 @@
 const std = @import("std");
+const skim_io = @import("skim_io");
 const Allocator = std.mem.Allocator;
 
 // =============================================================================
@@ -86,11 +87,11 @@ pub fn load(allocator: Allocator) !Config {
     const config_path = try getConfigFilePath(allocator);
     defer allocator.free(config_path);
 
-    const file = try std.fs.openFileAbsolute(config_path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.openFileAbsolute(skim_io.get(), config_path, .{});
+    defer file.close(skim_io.get());
 
     var buffer: [16384]u8 = undefined;
-    const bytes_read = try file.readAll(&buffer);
+    const bytes_read = try file.readPositionalAll(skim_io.get(), &buffer, 0);
 
     if (bytes_read == 0) {
         return Config{};
@@ -134,7 +135,7 @@ pub fn parseConfig(allocator: Allocator, json_bytes: []const u8) !Config {
 fn parseAgentServers(allocator: Allocator, servers: std.json.ObjectMap) ![]const AgentServerConfig {
     if (servers.count() == 0) return &.{};
 
-    var agents: std.ArrayListUnmanaged(AgentServerConfig) = .{};
+    var agents: std.ArrayListUnmanaged(AgentServerConfig) = .empty;
     errdefer {
         for (agents.items) |*agent| {
             freeAgentServer(allocator, agent);
@@ -174,7 +175,7 @@ fn parseAgentServer(allocator: Allocator, name: []const u8, obj: std.json.Object
     // Parse args (optional)
     if (obj.get("args")) |args_val| {
         if (args_val == .array) {
-            var args: std.ArrayListUnmanaged([]const u8) = .{};
+            var args: std.ArrayListUnmanaged([]const u8) = .empty;
             errdefer {
                 for (args.items) |arg| allocator.free(arg);
                 args.deinit(allocator);
@@ -191,7 +192,7 @@ fn parseAgentServer(allocator: Allocator, name: []const u8, obj: std.json.Object
     // Parse env (optional) - object of name -> value
     if (obj.get("env")) |env_val| {
         if (env_val == .object) {
-            var env_vars: std.ArrayListUnmanaged(EnvVar) = .{};
+            var env_vars: std.ArrayListUnmanaged(EnvVar) = .empty;
             errdefer {
                 for (env_vars.items) |ev| {
                     allocator.free(ev.name);
@@ -262,7 +263,7 @@ fn parseAgentServer(allocator: Allocator, name: []const u8, obj: std.json.Object
 
 /// Get the path to the config file: ~/.skim/config.json
 pub fn getConfigFilePath(allocator: Allocator) ![]u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try skim_io.getEnvVarOwned(allocator, "HOME");
     defer allocator.free(home);
 
     return std.fmt.allocPrint(allocator, "{s}/.skim/config.json", .{home});
@@ -270,7 +271,7 @@ pub fn getConfigFilePath(allocator: Allocator) ![]u8 {
 
 /// Get the path to the skim directory: ~/.skim
 pub fn getSkimDir(allocator: Allocator) ![]u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try skim_io.getEnvVarOwned(allocator, "HOME");
     defer allocator.free(home);
 
     return std.fmt.allocPrint(allocator, "{s}/.skim", .{home});
@@ -284,8 +285,8 @@ pub fn getSkimDir(allocator: Allocator) ![]u8 {
 pub fn expandEnvValue(allocator: Allocator, value: []const u8) ![]const u8 {
     if (std.mem.startsWith(u8, value, "${") and std.mem.endsWith(u8, value, "}")) {
         const var_name = value[2 .. value.len - 1];
-        const expanded = std.process.getEnvVarOwned(allocator, var_name) catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => return try allocator.dupe(u8, ""),
+        const expanded = skim_io.getEnvVarOwned(allocator, var_name) catch |err| switch (err) {
+            error.EnvironmentVariableMissing => return try allocator.dupe(u8, ""),
             else => return err,
         };
         return expanded;

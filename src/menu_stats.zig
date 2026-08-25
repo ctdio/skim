@@ -31,7 +31,7 @@ pub fn startMenuStatsFetch(app: *App) void {
 /// Worker thread that fetches menu stats in background
 fn menuStatsFetchWorker(app: *App) void {
     // Use a thread-local allocator for git operations
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 

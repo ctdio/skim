@@ -1,5 +1,6 @@
 const std = @import("std");
 const syntax = @import("core.zig");
+const skim_io = @import("skim_io");
 
 // Highlighting job - lightweight request struct
 pub const HighlightJob = struct {
@@ -25,7 +26,7 @@ pub const HighlightWorker = struct {
     thread: std.Thread,
     job_queue: std.ArrayList(HighlightJob),
     result_queue: std.ArrayList(HighlightResult),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     should_stop: bool,
     highlighter: syntax.SyntaxHighlighter,
 
@@ -36,9 +37,9 @@ pub const HighlightWorker = struct {
         worker.* = .{
             .allocator = allocator,
             .thread = undefined, // Will be set below
-            .job_queue = .{},
-            .result_queue = .{},
-            .mutex = std.Thread.Mutex{},
+            .job_queue = .empty,
+            .result_queue = .empty,
+            .mutex = std.Io.Mutex.init,
             .should_stop = false,
             .highlighter = try syntax.SyntaxHighlighter.init(allocator),
         };
@@ -52,9 +53,9 @@ pub const HighlightWorker = struct {
 
     pub fn deinit(self: *HighlightWorker) void {
         // Signal worker to stop
-        self.mutex.lock();
+        self.mutex.lockUncancelable(skim_io.get());
         self.should_stop = true;
-        self.mutex.unlock();
+        self.mutex.unlock(skim_io.get());
 
         // Wait for thread to finish
         self.thread.join();
@@ -79,15 +80,15 @@ pub const HighlightWorker = struct {
 
     // Submit a job (non-blocking, just adds to queue)
     pub fn submitJob(self: *HighlightWorker, job: HighlightJob) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(skim_io.get());
+        defer self.mutex.unlock(skim_io.get());
         try self.job_queue.append(self.allocator, job);
     }
 
     // Check for completed results (non-blocking)
     pub fn pollResults(self: *HighlightWorker, allocator: std.mem.Allocator, out_results: *std.ArrayList(HighlightResult)) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(skim_io.get());
+        defer self.mutex.unlock(skim_io.get());
 
         // Transfer all completed results to caller
         for (self.result_queue.items) |result| {
@@ -100,9 +101,9 @@ pub const HighlightWorker = struct {
     fn workerThreadMain(self: *HighlightWorker) void {
         while (true) {
             // Check if we should stop
-            self.mutex.lock();
+            self.mutex.lockUncancelable(skim_io.get());
             if (self.should_stop) {
-                self.mutex.unlock();
+                self.mutex.unlock(skim_io.get());
                 return;
             }
 
@@ -111,7 +112,7 @@ pub const HighlightWorker = struct {
                 self.job_queue.orderedRemove(0)
             else
                 null;
-            self.mutex.unlock();
+            self.mutex.unlock(skim_io.get());
 
             if (job_opt) |job| {
                 // Process the job (outside the lock for parallel work)
@@ -122,7 +123,7 @@ pub const HighlightWorker = struct {
                 const old_highlights = self.highlighter.highlightFile(job.file_path, job.old_content) catch null;
 
                 // Store result
-                self.mutex.lock();
+                self.mutex.lockUncancelable(skim_io.get());
                 self.result_queue.append(self.allocator, .{
                     .file_idx = job.file_idx,
                     .hunk_idx = job.hunk_idx,
@@ -137,10 +138,10 @@ pub const HighlightWorker = struct {
                         self.highlighter.freeHighlights(owned_old_highlights);
                     }
                 };
-                self.mutex.unlock();
+                self.mutex.unlock(skim_io.get());
             } else {
                 // No jobs available, sleep briefly to avoid busy-wait
-                std.Thread.sleep(1 * std.time.ns_per_ms);
+                skim_io.sleep(1 * std.time.ns_per_ms);
             }
         }
     }
@@ -148,7 +149,7 @@ pub const HighlightWorker = struct {
 
 // Legacy struct for compatibility (deprecated)
 pub const AsyncHighlightJob = struct {
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     allocator: std.mem.Allocator,
     // Input data (set before spawning thread)
     file_path: []u8, // Owned copy
@@ -164,7 +165,7 @@ pub const AsyncHighlightJob = struct {
     pub fn init(allocator: std.mem.Allocator) !*AsyncHighlightJob {
         const job = try allocator.create(AsyncHighlightJob);
         job.* = .{
-            .mutex = std.Thread.Mutex{},
+            .mutex = std.Io.Mutex.init,
             .allocator = allocator,
             .file_path = &[_]u8{},
             .content = &[_]u8{},
@@ -187,15 +188,15 @@ pub const AsyncHighlightJob = struct {
 
     // Check if job is complete (thread-safe)
     pub fn isDone(self: *AsyncHighlightJob) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(skim_io.get());
+        defer self.mutex.unlock(skim_io.get());
         return self.done;
     }
 
     // Get results (thread-safe) - transfers ownership of highlights
     pub fn takeResults(self: *AsyncHighlightJob) ?[]syntax.Highlight {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(skim_io.get());
+        defer self.mutex.unlock(skim_io.get());
         if (!self.done or self.failed) return null;
         const result = self.highlights;
         self.highlights = null; // Transfer ownership
@@ -207,38 +208,38 @@ pub const AsyncHighlightJob = struct {
 pub fn highlightWorker(job: *AsyncHighlightJob) void {
     // Create a new syntax highlighter for this thread (tree-sitter not thread-safe)
     var highlighter = syntax.SyntaxHighlighter.init(job.allocator) catch {
-        job.mutex.lock();
+        job.mutex.lockUncancelable(skim_io.get());
         job.failed = true;
         job.done = true;
-        job.mutex.unlock();
+        job.mutex.unlock(skim_io.get());
         return;
     };
     defer highlighter.deinit();
 
     // Highlight NEW file content (add/context lines)
     const highlights = highlighter.highlightFile(job.file_path, job.content) catch {
-        job.mutex.lock();
+        job.mutex.lockUncancelable(skim_io.get());
         job.failed = true;
         job.done = true;
-        job.mutex.unlock();
+        job.mutex.unlock(skim_io.get());
         return;
     };
 
     // Highlight OLD file content (delete/context lines)
     const old_highlights = highlighter.highlightFile(job.file_path, job.old_content) catch {
-        job.mutex.lock();
+        job.mutex.lockUncancelable(skim_io.get());
         job.failed = true;
         job.done = true;
-        job.mutex.unlock();
+        job.mutex.unlock(skim_io.get());
         return;
     };
 
     // Store results (thread-safe)
-    job.mutex.lock();
+    job.mutex.lockUncancelable(skim_io.get());
     job.highlights = highlights;
     job.old_highlights = old_highlights;
     job.done = true;
-    job.mutex.unlock();
+    job.mutex.unlock(skim_io.get());
 }
 
 fn allocTestHighlights(allocator: std.mem.Allocator, count: usize) ![]syntax.Highlight {
@@ -264,7 +265,7 @@ test "HighlightWorker deinit frees queued old highlights" {
     const worker = try HighlightWorker.init(allocator);
     defer worker.deinit();
 
-    worker.mutex.lock();
+    worker.mutex.lockUncancelable(skim_io.get());
     try worker.result_queue.append(allocator, .{
         .file_idx = 0,
         .hunk_idx = 0,
@@ -272,5 +273,5 @@ test "HighlightWorker deinit frees queued old highlights" {
         .old_highlights = try allocTestHighlights(allocator, 1),
         .failed = false,
     });
-    worker.mutex.unlock();
+    worker.mutex.unlock(skim_io.get());
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 
@@ -62,11 +63,11 @@ pub fn isCurrentEditorTerminal(allocator: Allocator) !bool {
 /// Get the editor command from environment variables
 /// Priority: EDITOR -> VISUAL -> "vi"
 fn getEditorCommand(allocator: Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "EDITOR")) |editor| {
+    if (skim_io.getEnvVarOwned(allocator, "EDITOR")) |editor| {
         return editor;
     } else |_| {}
 
-    if (std.process.getEnvVarOwned(allocator, "VISUAL")) |visual| {
+    if (skim_io.getEnvVarOwned(allocator, "VISUAL")) |visual| {
         return visual;
     } else |_| {}
 
@@ -88,10 +89,10 @@ pub fn openInEditor(
     const is_terminal = isTerminalEditor(editor_cmd);
 
     // Build the command with arguments
-    var args: std.ArrayList([]const u8) = .{};
+    var args: std.ArrayList([]const u8) = .empty;
     defer args.deinit(allocator);
 
-    var allocated_args: std.ArrayList([]u8) = .{};
+    var allocated_args: std.ArrayList([]u8) = .empty;
     defer {
         for (allocated_args.items) |allocated| {
             allocator.free(allocated);
@@ -162,25 +163,18 @@ pub fn openInEditor(
     }
 
     // Spawn the editor process
-    var child = std.process.Child.init(args.items, allocator);
-
-    if (is_terminal) {
-        // Terminal editor: inherit stdin/stdout/stderr for interactive use
-        child.stdin_behavior = .Inherit;
-        child.stdout_behavior = .Inherit;
-        child.stderr_behavior = .Inherit;
-    } else {
-        // GUI editor: detach from terminal
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-    }
-
-    try child.spawn();
+    // Terminal editors inherit stdio for interactive use; GUI editors detach.
+    const stdio: std.process.SpawnOptions.StdIo = if (is_terminal) .inherit else .ignore;
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = args.items,
+        .stdin = stdio,
+        .stdout = stdio,
+        .stderr = stdio,
+    });
 
     // Wait for terminal editors, but don't wait for GUI editors
     if (is_terminal) {
-        _ = try child.wait();
+        _ = try child.wait(skim_io.get());
     }
 }
 

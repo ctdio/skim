@@ -1,9 +1,10 @@
 const std = @import("std");
-const net = std.net;
+const net = @import("../net.zig");
 const posix = std.posix;
 
 const Allocator = std.mem.Allocator;
 const internal_protocol = @import("internal_protocol.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Discovery Types
@@ -95,8 +96,7 @@ pub fn discoverDaemon(allocator: Allocator) DaemonStatus {
 /// Query daemon for connected clients and adapter count
 fn queryDaemonStatus(allocator: Allocator, adapter_port: u16) !struct { clients: []ConnectedClient, adapter_count: usize } {
     // Connect to daemon adapter port
-    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, adapter_port);
-    const stream = try net.tcpConnectToAddress(address);
+    const stream = try net.connectLoopback(adapter_port);
     defer stream.close();
 
     // Send status query
@@ -109,11 +109,11 @@ fn queryDaemonStatus(allocator: Allocator, adapter_port: u16) !struct { clients:
     var total_read: usize = 0;
 
     // Read until we get a newline or timeout
-    const start_time = std.time.milliTimestamp();
+    const start_time = skim_io.milliTimestamp();
     const timeout_ms: i64 = 5000; // 5 second timeout
 
     while (total_read < buffer.len) {
-        if (std.time.milliTimestamp() - start_time > timeout_ms) {
+        if (skim_io.milliTimestamp() - start_time > timeout_ms) {
             return error.Timeout;
         }
 
@@ -159,7 +159,7 @@ fn queryDaemonStatus(allocator: Allocator, adapter_port: u16) !struct { clients:
 
 /// Get the path to the discovery file
 pub fn getDiscoveryFilePath(allocator: Allocator) ![]u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try skim_io.getEnvVarOwned(allocator, "HOME");
     defer allocator.free(home);
 
     return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ home, SKIM_DIR, DISCOVERY_FILENAME });
@@ -167,7 +167,7 @@ pub fn getDiscoveryFilePath(allocator: Allocator) ![]u8 {
 
 /// Get the path to the skim config directory
 pub fn getSkimDir(allocator: Allocator) ![]u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try skim_io.getEnvVarOwned(allocator, "HOME");
     defer allocator.free(home);
 
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, SKIM_DIR });
@@ -175,8 +175,8 @@ pub fn getSkimDir(allocator: Allocator) ![]u8 {
 
 /// Read and parse the discovery file
 pub fn readDiscoveryFile(allocator: Allocator, path: []const u8) !DaemonInfo {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.openFileAbsolute(skim_io.get(), path, .{});
+    defer file.close(skim_io.get());
 
     var buffer: [1024]u8 = undefined;
     const bytes_read = try file.readAll(&buffer);
@@ -199,7 +199,7 @@ pub fn writeDiscoveryFile(allocator: Allocator, info: DaemonInfo) !void {
     const dir_path = try getSkimDir(allocator);
     defer allocator.free(dir_path);
 
-    std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(skim_io.get(), dir_path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -208,12 +208,12 @@ pub fn writeDiscoveryFile(allocator: Allocator, info: DaemonInfo) !void {
     const file_path = try getDiscoveryFilePath(allocator);
     defer allocator.free(file_path);
 
-    const file = try std.fs.createFileAbsolute(file_path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.createFileAbsolute(skim_io.get(), file_path, .{});
+    defer file.close(skim_io.get());
 
     // Zig 0.15: file.writer() requires a buffer
     var write_buffer: [256]u8 = undefined;
-    var file_writer = file.writer(&write_buffer);
+    var file_writer = file.writer(skim_io.get(), &write_buffer);
     defer file_writer.interface.flush() catch {};
     try file_writer.interface.print(
         \\{{"version":1,"tui_port":{d},"adapter_port":{d},"pid":{d}}}
@@ -225,7 +225,7 @@ pub fn deleteDiscoveryFile(allocator: Allocator) void {
     const path = getDiscoveryFilePath(allocator) catch return;
     defer allocator.free(path);
 
-    std.fs.deleteFileAbsolute(path) catch {};
+    std.Io.Dir.deleteFileAbsolute(skim_io.get(), path) catch {};
 }
 
 /// Check if a process is alive
@@ -237,8 +237,7 @@ pub fn isProcessAlive(pid: i32) bool {
 
 /// Try to connect to a port to verify daemon is responsive
 fn canConnectToPort(port: u16) bool {
-    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-    const stream = net.tcpConnectToAddress(address) catch {
+    const stream = net.connectLoopback(port) catch {
         return false;
     };
     stream.close();
@@ -251,7 +250,7 @@ fn canConnectToPort(port: u16) bool {
 
 /// Check if auto-start is enabled via environment variable
 pub fn isAutoStartEnabled() bool {
-    const env_value = std.process.getEnvVarOwned(std.heap.page_allocator, "SKIM_DAEMON_AUTO_START") catch {
+    const env_value = skim_io.getEnvVarOwned(std.heap.page_allocator, "SKIM_DAEMON_AUTO_START") catch {
         return false;
     };
     defer std.heap.page_allocator.free(env_value);
@@ -267,10 +266,10 @@ pub fn isAutoStartEnabled() bool {
 
 /// Format daemon status for display
 pub fn formatStatus(allocator: Allocator, status: DaemonStatus) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
 
     switch (status) {
         .running => |info| {
@@ -339,7 +338,7 @@ pub fn formatStatus(allocator: Allocator, status: DaemonStatus) ![]u8 {
         },
     }
 
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 // =============================================================================

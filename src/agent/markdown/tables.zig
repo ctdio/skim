@@ -12,6 +12,7 @@ const gwidth = @import("width.zig").gwidth;
 const types = @import("types.zig");
 const colors_mod = @import("colors.zig");
 const parser_mod = @import("parser.zig");
+const skim_io = @import("skim_io");
 
 const StyledSpan = types.StyledSpan;
 const NodeType = types.NodeType;
@@ -68,8 +69,8 @@ pub const TableRenderer = struct {
         max_width: usize,
     ) !TableRenderResult {
         var result = TableRenderResult{
-            .spans = .{},
-            .strings = .{},
+            .spans = .empty,
+            .strings = .empty,
             .allocator = self.allocator,
         };
         errdefer result.deinit();
@@ -78,13 +79,13 @@ pub const TableRenderer = struct {
         const safe_max_width = @max(max_width, 20);
 
         // Extract table data
-        var header_cells: std.ArrayList([]const u8) = .{};
+        var header_cells: std.ArrayList([]const u8) = .empty;
         defer header_cells.deinit(self.allocator);
 
-        var alignments: std.ArrayList(Alignment) = .{};
+        var alignments: std.ArrayList(Alignment) = .empty;
         defer alignments.deinit(self.allocator);
 
-        var body_rows: std.ArrayList(std.ArrayList([]const u8)) = .{};
+        var body_rows: std.ArrayList(std.ArrayList([]const u8)) = .empty;
         defer {
             for (body_rows.items) |*row| {
                 row.deinit(self.allocator);
@@ -175,7 +176,7 @@ pub const TableRenderer = struct {
                     found_delimiter = true;
                 } else if (std.mem.indexOf(u8, child_type, "row") != null and found_delimiter) {
                     // Parse body row
-                    var row: std.ArrayList([]const u8) = .{};
+                    var row: std.ArrayList([]const u8) = .empty;
                     try self.parseCells(child, md_parser, &row);
                     try body_rows.append(self.allocator, row);
                 }
@@ -214,7 +215,7 @@ pub const TableRenderer = struct {
                     found_delimiter = true;
                 } else {
                     // Not a delimiter - might be malformed, treat as body
-                    var row: std.ArrayList([]const u8) = .{};
+                    var row: std.ArrayList([]const u8) = .empty;
                     try self.parseCellsFromText(trimmed, &row);
                     if (row.items.len > 0) {
                         try body_rows.append(self.allocator, row);
@@ -222,7 +223,7 @@ pub const TableRenderer = struct {
                 }
             } else {
                 // After delimiter, all | lines are body rows
-                var row: std.ArrayList([]const u8) = .{};
+                var row: std.ArrayList([]const u8) = .empty;
                 try self.parseCellsFromText(trimmed, &row);
                 if (row.items.len > 0) {
                     try body_rows.append(self.allocator, row);
@@ -677,7 +678,7 @@ fn wrapTextAlloc(allocator: std.mem.Allocator, text: []const u8, width: usize) !
         return lines;
     }
 
-    var lines_list: std.ArrayList([]const u8) = .{};
+    var lines_list: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (lines_list.items) |line| {
             allocator.free(line);

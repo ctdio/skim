@@ -13,6 +13,7 @@ const folds = @import("../folds.zig");
 const frame = @import("frame.zig");
 
 const App = @import("../app.zig").App;
+const skim_io = @import("skim_io");
 const Color = rendering_common.Color;
 const Layout = rendering_common.Layout;
 const FrameChars = rendering_common.FrameChars;
@@ -26,7 +27,7 @@ pub const UnifiedRenderer = struct {
         if (app.state.files.len == 0) return;
 
         const profile_frame = app.profile_active_frame;
-        var total_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
+        var total_timer_opt: ?skim_io.Timer = if (profile_frame) skim_io.Timer.start() catch null else null;
         var gutter_ns: u64 = 0;
         var records_scanned: usize = 0;
         var rows_rendered: usize = 0;
@@ -36,7 +37,7 @@ pub const UnifiedRenderer = struct {
         Navigation.clampScrollOffset(app);
 
         // Calculate global gutter width (consistent across all files)
-        var gutter_timer_opt: ?std.time.Timer = if (profile_frame) std.time.Timer.start() catch null else null;
+        var gutter_timer_opt: ?skim_io.Timer = if (profile_frame) skim_io.Timer.start() catch null else null;
         const gutter_width = app.getGlobalGutterWidth(app.state.show_blame);
         if (gutter_timer_opt) |*timer| {
             gutter_ns = timer.read();

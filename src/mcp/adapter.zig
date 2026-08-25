@@ -24,6 +24,7 @@ const Allocator = std.mem.Allocator;
 const framework = @import("framework.zig");
 const session_mgr = @import("session.zig");
 const cli_client = @import("../cli/client.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Write Buffers (Zig 0.15 requires buffers for file.writer())
@@ -72,21 +73,21 @@ pub const McpAdapter = struct {
     /// Main adapter loop - read from stdin, process MCP requests, write to stdout
     pub fn run(self: *McpAdapter) !void {
         // Set stdin to non-blocking
-        try setNonBlocking(std.fs.File.stdin().handle);
-        defer setBlocking(std.fs.File.stdin().handle) catch {};
+        try setNonBlocking(std.Io.File.stdin().handle);
+        defer setBlocking(std.Io.File.stdin().handle) catch {};
 
         self.running = true;
 
         while (self.running) {
             try self.pollStdin();
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            skim_io.sleep(1 * std.time.ns_per_ms);
         }
     }
 
     fn pollStdin(self: *McpAdapter) !void {
-        const stdin = std.fs.File.stdin();
+        const stdin = std.Io.File.stdin();
 
-        const bytes_read = stdin.read(stdin_buffer[self.stdin_len..]) catch |err| switch (err) {
+        const bytes_read = posix.read(stdin.handle, stdin_buffer[self.stdin_len..]) catch |err| switch (err) {
             error.WouldBlock => return,
             else => return err,
         };
@@ -131,7 +132,7 @@ pub const McpAdapter = struct {
     fn handleMcpRequest(self: *McpAdapter, line: []const u8) void {
         std.log.debug("MCP request from agent: {s}", .{line});
 
-        var file_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        var file_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
         defer file_writer.interface.flush() catch {};
         const stdout = &file_writer.interface;
 
@@ -303,8 +304,8 @@ fn handleListSessions(ctx: *framework.Context, args: ?std.json.Value) framework.
     }
 
     // Build text output
-    var output: std.ArrayList(u8) = .{};
-    const writer = output.writer(ctx.allocator);
+    var output: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const writer = &output.writer;
 
     if (sessions.len == 0) {
         writer.writeAll("No skim sessions running.\n") catch {};
@@ -318,7 +319,7 @@ fn handleListSessions(ctx: *framework.Context, args: ?std.json.Value) framework.
         }
     }
 
-    const text = output.toOwnedSlice(ctx.allocator) catch {
+    const text = output.toOwnedSlice() catch {
         return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
     };
 
@@ -348,7 +349,7 @@ fn handleGetContext(ctx: *framework.Context, args: ?std.json.Value) framework.Re
     switch (response) {
         .result => |result| {
             // Serialize result to JSON text
-            var alloc_writer: std.io.Writer.Allocating = .init(ctx.allocator);
+            var alloc_writer: std.Io.Writer.Allocating = .init(ctx.allocator);
             var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
             stringify.write(result) catch {
                 alloc_writer.deinit();
@@ -409,8 +410,8 @@ fn handleGetDiff(ctx: *framework.Context, args: ?std.json.Value) framework.Resul
     // Build params for TUI request
     var req_params_obj: ?std.json.Value = null;
     if (file_filter) |f| {
-        var req_params = std.json.ObjectMap.init(ctx.allocator);
-        req_params.put(ctx.allocator.dupe(u8, "file") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, f) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
+        var req_params: std.json.ObjectMap = .empty;
+        req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "file") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, f) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
         req_params_obj = .{ .object = req_params };
     }
     defer if (req_params_obj) |*p| {
@@ -420,7 +421,7 @@ fn handleGetDiff(ctx: *framework.Context, args: ?std.json.Value) framework.Resul
                 ctx.allocator.free(entry.key_ptr.*);
                 if (entry.value_ptr.* == .string) ctx.allocator.free(entry.value_ptr.string);
             }
-            p.object.deinit();
+            p.object.deinit(ctx.allocator);
         }
     };
 
@@ -497,13 +498,13 @@ fn handleAddComment(ctx: *framework.Context, args: ?std.json.Value) framework.Re
     defer client.deinit();
 
     // Build params for TUI request
-    var req_params = std.json.ObjectMap.init(ctx.allocator);
-    defer req_params.deinit();
+    var req_params: std.json.ObjectMap = .empty;
+    defer req_params.deinit(ctx.allocator);
 
-    req_params.put(ctx.allocator.dupe(u8, "file") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, file.?) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
-    req_params.put(ctx.allocator.dupe(u8, "line") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .integer = @as(i64, @intCast(line.?)) }) catch {};
-    req_params.put(ctx.allocator.dupe(u8, "line_type") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, line_type) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
-    req_params.put(ctx.allocator.dupe(u8, "text") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, text.?) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
+    req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "file") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, file.?) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
+    req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "line") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .integer = @as(i64, @intCast(line.?)) }) catch {};
+    req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "line_type") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, line_type) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
+    req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "text") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, text.?) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
 
     var response = client.request("add_comment", "mcp-add", .{ .object = req_params }) catch {
         return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
@@ -549,7 +550,7 @@ fn handleListComments(ctx: *framework.Context, args: ?std.json.Value) framework.
     switch (response) {
         .result => |result| {
             // Serialize result to JSON text
-            var alloc_writer: std.io.Writer.Allocating = .init(ctx.allocator);
+            var alloc_writer: std.Io.Writer.Allocating = .init(ctx.allocator);
             var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
             stringify.write(result) catch {
                 alloc_writer.deinit();
@@ -615,10 +616,10 @@ fn handleDeleteComment(ctx: *framework.Context, args: ?std.json.Value) framework
     defer client.deinit();
 
     // Build params for TUI request
-    var req_params = std.json.ObjectMap.init(ctx.allocator);
-    defer req_params.deinit();
+    var req_params: std.json.ObjectMap = .empty;
+    defer req_params.deinit(ctx.allocator);
 
-    req_params.put(ctx.allocator.dupe(u8, "index") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .integer = @as(i64, @intCast(index.?)) }) catch {};
+    req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "index") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .integer = @as(i64, @intCast(index.?)) }) catch {};
 
     var response = client.request("delete_comment", "mcp-del", .{ .object = req_params }) catch {
         return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
@@ -662,15 +663,11 @@ fn parseSessionId(args: ?std.json.Value) ?posix.pid_t {
 }
 
 fn setNonBlocking(handle: posix.fd_t) !void {
-    const flags = try posix.fcntl(handle, posix.F.GETFL, @as(usize, 0));
-    const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
-    _ = try posix.fcntl(handle, posix.F.SETFL, flags | O_NONBLOCK);
+    try skim_io.setNonBlocking(handle, true);
 }
 
 fn setBlocking(handle: posix.fd_t) !void {
-    const flags = try posix.fcntl(handle, posix.F.GETFL, @as(usize, 0));
-    const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
-    _ = try posix.fcntl(handle, posix.F.SETFL, flags & ~O_NONBLOCK);
+    try skim_io.setNonBlocking(handle, false);
 }
 
 // =============================================================================
@@ -699,27 +696,27 @@ test "adapter init and deinit" {
 }
 
 test "parseSessionId with string" {
-    var obj = std.json.ObjectMap.init(std.testing.allocator);
-    defer obj.deinit();
-    try obj.put("session_id", .{ .string = "12345" });
+    var obj: std.json.ObjectMap = .empty;
+    defer obj.deinit(std.testing.allocator);
+    try obj.put(std.testing.allocator, "session_id", .{ .string = "12345" });
 
     const pid = parseSessionId(.{ .object = obj });
     try std.testing.expectEqual(@as(?posix.pid_t, 12345), pid);
 }
 
 test "parseSessionId with integer" {
-    var obj = std.json.ObjectMap.init(std.testing.allocator);
-    defer obj.deinit();
-    try obj.put("session_id", .{ .integer = 54321 });
+    var obj: std.json.ObjectMap = .empty;
+    defer obj.deinit(std.testing.allocator);
+    try obj.put(std.testing.allocator, "session_id", .{ .integer = 54321 });
 
     const pid = parseSessionId(.{ .object = obj });
     try std.testing.expectEqual(@as(?posix.pid_t, 54321), pid);
 }
 
 test "parseSessionId with empty string" {
-    var obj = std.json.ObjectMap.init(std.testing.allocator);
-    defer obj.deinit();
-    try obj.put("session_id", .{ .string = "" });
+    var obj: std.json.ObjectMap = .empty;
+    defer obj.deinit(std.testing.allocator);
+    try obj.put(std.testing.allocator, "session_id", .{ .string = "" });
 
     const pid = parseSessionId(.{ .object = obj });
     try std.testing.expectEqual(@as(?posix.pid_t, null), pid);

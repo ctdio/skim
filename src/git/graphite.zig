@@ -1,4 +1,5 @@
 const std = @import("std");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 
@@ -72,15 +73,15 @@ pub const BranchParents = struct {
 /// fall back to forge-native inference.
 pub fn getBranchParents(allocator: Allocator) ?BranchParents {
     const args = &[_][]const u8{ "gt", "state" };
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    child.spawn() catch return null;
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 4 * 1024 * 1024) catch return null;
+    var child = std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch return null;
+    const stdout = skim_io.readAllAlloc(child.stdout.?, allocator, 4 * 1024 * 1024) catch return null;
     defer allocator.free(stdout);
-    const term = child.wait() catch return null;
-    if (term != .Exited or term.Exited != 0) return null;
+    const term = child.wait(skim_io.get()) catch return null;
+    if (term != .exited or term.exited != 0) return null;
 
     return parseBranchParents(allocator, stdout);
 }
@@ -112,17 +113,17 @@ pub fn parseBranchParents(allocator: Allocator, json_str: []const u8) ?BranchPar
 }
 
 /// Check if the graphite CLI (gt) is available in PATH
-pub fn isGraphiteAvailable(allocator: Allocator) bool {
+pub fn isGraphiteAvailable() bool {
     const args = &[_][]const u8{ "which", "gt" };
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    child.spawn() catch return false;
-    const term = child.wait() catch return false;
+    var child = std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return false;
+    const term = child.wait(skim_io.get()) catch return false;
 
     return switch (term) {
-        .Exited => |code| code == 0,
+        .exited => |code| code == 0,
         else => false,
     };
 }
@@ -131,19 +132,19 @@ pub fn isGraphiteAvailable(allocator: Allocator) bool {
 pub fn isGraphiteRepo(allocator: Allocator) bool {
     // Run gt state - if it fails or returns empty, not a graphite repo
     const args = &[_][]const u8{ "gt", "state" };
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch return false;
 
-    child.spawn() catch return false;
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1 * 1024 * 1024) catch return false;
+    const stdout = skim_io.readAllAlloc(child.stdout.?, allocator, 1 * 1024 * 1024) catch return false;
     defer allocator.free(stdout);
 
-    const term = child.wait() catch return false;
+    const term = child.wait(skim_io.get()) catch return false;
 
     return switch (term) {
-        .Exited => |code| code == 0 and stdout.len > 2, // At least "{}"
+        .exited => |code| code == 0 and stdout.len > 2, // At least "{}"
         else => false,
     };
 }
@@ -151,18 +152,18 @@ pub fn isGraphiteRepo(allocator: Allocator) bool {
 /// Get the current git branch name
 pub fn getCurrentBranch(allocator: Allocator) ![]const u8 {
     const args = &[_][]const u8{ "git", "rev-parse", "--abbrev-ref", "HEAD" };
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = try std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
 
-    try child.spawn();
-
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, 1024);
+    const stdout = try skim_io.readAllAlloc(child.stdout.?, allocator, 1024);
     errdefer allocator.free(stdout);
 
-    const term = try child.wait();
+    const term = try child.wait(skim_io.get());
 
-    if (term != .Exited or term.Exited != 0) {
+    if (term != .exited or term.exited != 0) {
         allocator.free(stdout);
         return error.GitCommandFailed;
     }
@@ -183,18 +184,18 @@ pub fn getGraphiteStack(allocator: Allocator) !?GraphiteStack {
 
     // Run gt state
     const args = &[_][]const u8{ "gt", "state" };
-    var child = std.process.Child.init(args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = std.process.spawn(skim_io.get(), .{
+        .argv = args,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch return null;
 
-    child.spawn() catch return null;
-
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 1 * 1024 * 1024) catch return null;
+    const stdout = skim_io.readAllAlloc(child.stdout.?, allocator, 1 * 1024 * 1024) catch return null;
     defer allocator.free(stdout);
 
-    const term = child.wait() catch return null;
+    const term = child.wait(skim_io.get()) catch return null;
 
-    if (term != .Exited or term.Exited != 0) {
+    if (term != .exited or term.exited != 0) {
         return null;
     }
 
@@ -267,7 +268,7 @@ fn buildStackFromJson(allocator: Allocator, json_str: []const u8, current_branch
     }
 
     // Build the stack: walk from current branch up to trunk
-    var stack_list: std.ArrayList(GraphiteBranch) = .{};
+    var stack_list: std.ArrayList(GraphiteBranch) = .empty;
     errdefer {
         for (stack_list.items) |b| {
             allocator.free(b.name);
@@ -277,7 +278,7 @@ fn buildStackFromJson(allocator: Allocator, json_str: []const u8, current_branch
     }
 
     // Walk up to trunk
-    var ancestors: std.ArrayList([]const u8) = .{};
+    var ancestors: std.ArrayList([]const u8) = .empty;
     defer ancestors.deinit(allocator);
 
     var walker: []const u8 = current_branch;
@@ -313,7 +314,7 @@ fn buildStackFromJson(allocator: Allocator, json_str: []const u8, current_branch
 
     // Now walk down from current to find children (branches where parent = current)
     // This is more complex - need to find all descendants
-    var descendants: std.ArrayList([]const u8) = .{};
+    var descendants: std.ArrayList([]const u8) = .empty;
     defer descendants.deinit(allocator);
 
     try findDescendants(allocator, &branch_map, current_branch, &descendants);
@@ -360,7 +361,7 @@ fn firstParentRef(obj: std.json.ObjectMap) ?[]const u8 {
 /// Find all descendants of a branch (children, grandchildren, etc.)
 fn findDescendants(allocator: Allocator, branch_map: *std.StringHashMap(BranchInfo), parent: []const u8, result: *std.ArrayList([]const u8)) !void {
     // Find immediate children
-    var children: std.ArrayList([]const u8) = .{};
+    var children: std.ArrayList([]const u8) = .empty;
     defer children.deinit(allocator);
 
     var it = branch_map.iterator();
@@ -390,8 +391,7 @@ pub fn refreshGraphiteStack(allocator: Allocator, old_stack: ?*GraphiteStack) !?
 }
 
 test "isGraphiteAvailable returns bool" {
-    const allocator = std.testing.allocator;
-    _ = isGraphiteAvailable(allocator);
+    _ = isGraphiteAvailable();
     // Just verify it doesn't crash
 }
 

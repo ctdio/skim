@@ -5,6 +5,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const client = @import("client.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Write Buffers (Zig 0.15 requires buffers for file.writer())
@@ -48,19 +49,19 @@ pub const DeleteArgs = struct {
 pub fn runAdd(allocator: Allocator, args: AddArgs) !void {
     // Validate required args
     const file = args.file orelse {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         stderr_writer.interface.writeAll("Error: --file is required\n") catch {};
         stderr_writer.interface.flush() catch {};
         std.process.exit(1);
     };
     const line = args.line orelse {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         stderr_writer.interface.writeAll("Error: --line is required\n") catch {};
         stderr_writer.interface.flush() catch {};
         std.process.exit(1);
     };
     const text = args.text orelse {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         stderr_writer.interface.writeAll("Error: Comment text is required\n") catch {};
         stderr_writer.interface.flush() catch {};
         std.process.exit(1);
@@ -70,23 +71,23 @@ pub fn runAdd(allocator: Allocator, args: AddArgs) !void {
     defer conn.deinit();
 
     // Build params object
-    var params = std.json.ObjectMap.init(allocator);
-    defer params.deinit();
+    var params: std.json.ObjectMap = .empty;
+    defer params.deinit(allocator);
 
-    try params.put(try allocator.dupe(u8, "file"), .{ .string = try allocator.dupe(u8, file) });
-    try params.put(try allocator.dupe(u8, "line"), .{ .integer = @as(i64, @intCast(line)) });
-    try params.put(try allocator.dupe(u8, "line_type"), .{ .string = try allocator.dupe(u8, args.line_type) });
-    try params.put(try allocator.dupe(u8, "text"), .{ .string = try allocator.dupe(u8, text) });
+    try params.put(allocator, try allocator.dupe(u8, "file"), .{ .string = try allocator.dupe(u8, file) });
+    try params.put(allocator, try allocator.dupe(u8, "line"), .{ .integer = @as(i64, @intCast(line)) });
+    try params.put(allocator, try allocator.dupe(u8, "line_type"), .{ .string = try allocator.dupe(u8, args.line_type) });
+    try params.put(allocator, try allocator.dupe(u8, "text"), .{ .string = try allocator.dupe(u8, text) });
 
     var response = conn.request("add_comment", "add-1", .{ .object = params }) catch |err| {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         stderr_writer.interface.print("Error: Request failed: {}\n", .{err}) catch {};
         stderr_writer.interface.flush() catch {};
         std.process.exit(1);
     };
     defer response.deinit(allocator);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     const stdout = &stdout_writer.interface;
 
@@ -103,7 +104,7 @@ pub fn runAdd(allocator: Allocator, args: AddArgs) !void {
             try stdout.writeAll("Comment add response received.\n");
         },
         .err => |e| {
-            var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+            var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
             stderr_writer.interface.print("Error from server: {s}\n", .{e.message}) catch {};
             stderr_writer.interface.flush() catch {};
             std.process.exit(1);
@@ -116,14 +117,14 @@ pub fn runList(allocator: Allocator, args: ListArgs) !void {
     defer conn.deinit();
 
     var response = conn.request("list_comments", "list-1", null) catch |err| {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         stderr_writer.interface.print("Error: Request failed: {}\n", .{err}) catch {};
         stderr_writer.interface.flush() catch {};
         std.process.exit(1);
     };
     defer response.deinit(allocator);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     const stdout = &stdout_writer.interface;
 
@@ -136,7 +137,7 @@ pub fn runList(allocator: Allocator, args: ListArgs) !void {
             }
         },
         .err => |e| {
-            var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+            var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
             stderr_writer.interface.print("Error from server: {s}\n", .{e.message}) catch {};
             stderr_writer.interface.flush() catch {};
             std.process.exit(1);
@@ -146,7 +147,7 @@ pub fn runList(allocator: Allocator, args: ListArgs) !void {
 
 pub fn runDelete(allocator: Allocator, args: DeleteArgs) !void {
     const index = args.index orelse {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         stderr_writer.interface.writeAll("Error: Comment index is required\n") catch {};
         stderr_writer.interface.flush() catch {};
         std.process.exit(1);
@@ -156,20 +157,20 @@ pub fn runDelete(allocator: Allocator, args: DeleteArgs) !void {
     defer conn.deinit();
 
     // Build params object
-    var params = std.json.ObjectMap.init(allocator);
-    defer params.deinit();
+    var params: std.json.ObjectMap = .empty;
+    defer params.deinit(allocator);
 
-    try params.put(try allocator.dupe(u8, "index"), .{ .integer = @as(i64, @intCast(index)) });
+    try params.put(allocator, try allocator.dupe(u8, "index"), .{ .integer = @as(i64, @intCast(index)) });
 
     var response = conn.request("delete_comment", "del-1", .{ .object = params }) catch |err| {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         stderr_writer.interface.print("Error: Request failed: {}\n", .{err}) catch {};
         stderr_writer.interface.flush() catch {};
         std.process.exit(1);
     };
     defer response.deinit(allocator);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     const stdout = &stdout_writer.interface;
 
@@ -186,7 +187,7 @@ pub fn runDelete(allocator: Allocator, args: DeleteArgs) !void {
             try stdout.writeAll("Comment delete response received.\n");
         },
         .err => |e| {
-            var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+            var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
             stderr_writer.interface.print("Error from server: {s}\n", .{e.message}) catch {};
             stderr_writer.interface.flush() catch {};
             std.process.exit(1);
@@ -200,7 +201,7 @@ pub fn runDelete(allocator: Allocator, args: DeleteArgs) !void {
 
 fn connectOrExit(allocator: Allocator, session_pid: ?std.posix.pid_t) client.Client {
     return client.autoConnect(allocator, session_pid) catch |err| {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         const stderr = &stderr_writer.interface;
         switch (err) {
             error.NoSessionsRunning => stderr.writeAll("Error: No skim sessions running.\n") catch {},
@@ -214,7 +215,7 @@ fn connectOrExit(allocator: Allocator, session_pid: ?std.posix.pid_t) client.Cli
 }
 
 fn outputJson(allocator: Allocator, writer: anytype, result: std.json.Value) !void {
-    var alloc_writer: std.io.Writer.Allocating = .init(allocator);
+    var alloc_writer: std.Io.Writer.Allocating = .init(allocator);
     defer alloc_writer.deinit();
     var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
     stringify.write(result) catch return error.JsonSerializationFailed;

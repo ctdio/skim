@@ -29,7 +29,7 @@ pub fn ensureDetected(self: *GraphiteState, allocator: Allocator) void {
     if (self.detected) return;
 
     self.detected = true;
-    self.available = graphite.isGraphiteAvailable(allocator);
+    self.available = graphite.isGraphiteAvailable();
 
     if (self.available) {
         if (graphite.getGraphiteStack(allocator) catch null) |stack| {

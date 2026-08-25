@@ -202,7 +202,7 @@ pub const LineMap = struct {
         collapsed_folds: ?*const std.AutoHashMap(u64, void), // Optional fold state
         review_threads: ?[]const thread_placement.AnchoredThread, // GitHub review-thread anchors (null → no thread records)
     ) !LineMap {
-        var records: std.ArrayList(LineRecord) = .{};
+        var records: std.ArrayList(LineRecord) = .empty;
         errdefer records.deinit(allocator);
 
         // Pre-allocate file header cache

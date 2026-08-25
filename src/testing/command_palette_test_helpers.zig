@@ -53,9 +53,10 @@ fn fillBackground(win: vaxis.Window) void {
 pub fn renderFilePalette(win: vaxis.Window, config: FilePaletteConfig, frame_alloc: std.mem.Allocator) void {
     fillBackground(win);
 
-    // Row PADDING: Title with stats
-    var title_buf: [256]u8 = undefined;
-    const title = std.fmt.bufPrint(&title_buf, "Go to File ({d} files, +{d}, -{d})", .{
+    // Row PADDING: Title with stats. Allocated from the frame arena, not the
+    // stack: vaxis cells hold a slice to the grapheme bytes rather than copying
+    // them, and the capture happens after this function returns.
+    const title = std.fmt.allocPrint(frame_alloc, "Go to File ({d} files, +{d}, -{d})", .{
         config.total_files,
         config.total_additions,
         config.total_deletions,

@@ -334,7 +334,7 @@ pub fn renderDiffLineWithBlame(
         const num_str = std.fmt.allocPrint(alloc, "{d}", .{n}) catch "";
         const padding_needed = lineno_width -| num_str.len -| 1;
 
-        var gutter_list: std.ArrayList(u8) = .{};
+        var gutter_list: std.ArrayList(u8) = .empty;
         gutter_list.appendNTimes(alloc, ' ', padding_needed) catch {};
         gutter_list.appendSlice(alloc, num_str) catch {};
         gutter_list.append(alloc, sign) catch {};

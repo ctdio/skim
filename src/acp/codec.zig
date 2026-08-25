@@ -210,9 +210,9 @@ pub const Encoder = struct {
 
     /// Encode a request (client -> agent)
     pub fn encodeRequest(self: *Encoder, id: i64, method: []const u8, params_json: ?[]const u8) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         if (params_json) |params| {
             try writer.print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":{f},\"params\":{s}}}", .{
@@ -227,14 +227,14 @@ pub const Encoder = struct {
             });
         }
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode a response (client -> agent, for agent-initiated requests)
     pub fn encodeResponse(self: *Encoder, id: JsonRpcId, result_json: ?[]const u8) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
         try self.writeId(writer, id);
@@ -247,14 +247,14 @@ pub const Encoder = struct {
         }
 
         try writer.writeAll("}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode a notification (client -> agent, no response expected)
     pub fn encodeNotification(self: *Encoder, method: []const u8, params_json: ?[]const u8) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         if (params_json) |params| {
             try writer.print("{{\"jsonrpc\":\"2.0\",\"method\":{f},\"params\":{s}}}", .{
@@ -267,7 +267,7 @@ pub const Encoder = struct {
             });
         }
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode an error response (client -> agent)
@@ -277,9 +277,9 @@ pub const Encoder = struct {
 
     /// Encode an error response (client -> agent)
     pub fn encodeErrorResponse(self: *Encoder, id: JsonRpcId, code: i32, message: []const u8) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
         try self.writeId(writer, id);
@@ -288,14 +288,14 @@ pub const Encoder = struct {
             std.json.fmt(message, .{}),
         });
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode initialize params to JSON
     pub fn encodeInitializeParams(self: *Encoder, params: protocol.InitializeParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"protocolVersion\":{d}", .{params.protocol_version});
 
@@ -313,14 +313,14 @@ pub const Encoder = struct {
         }
         try writer.print(",\"version\":{f}}}}}", .{std.json.fmt(params.client_info.version, .{})});
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode session/new params to JSON
     pub fn encodeSessionNewParams(self: *Encoder, params: protocol.SessionNewParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"cwd\":{f},\"mcpServers\":[", .{std.json.fmt(params.cwd, .{})});
 
@@ -363,14 +363,14 @@ pub const Encoder = struct {
         }
 
         try writer.writeByte('}');
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode session/load params to JSON
     pub fn encodeSessionLoadParams(self: *Encoder, params: protocol.SessionLoadParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"sessionId\":{f},\"cwd\":{f},\"mcpServers\":[", .{
             std.json.fmt(params.session_id, .{}),
@@ -388,14 +388,14 @@ pub const Encoder = struct {
         }
 
         try writer.writeAll("]}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode session/prompt params to JSON
     pub fn encodeSessionPromptParams(self: *Encoder, params: protocol.SessionPromptParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"sessionId\":{f},\"prompt\":[", .{std.json.fmt(params.session_id, .{})});
 
@@ -428,66 +428,66 @@ pub const Encoder = struct {
         }
 
         try writer.writeAll("]}");
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode session/cancel params to JSON
     pub fn encodeSessionCancelParams(self: *Encoder, params: protocol.SessionCancelParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"sessionId\":{f}}}", .{std.json.fmt(params.session_id, .{})});
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode session/set_mode params to JSON
     pub fn encodeSessionSetModeParams(self: *Encoder, params: protocol.SessionSetModeParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"sessionId\":{f},\"modeId\":{f}}}", .{
             std.json.fmt(params.session_id, .{}),
             std.json.fmt(params.mode_id, .{}),
         });
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode session/set_model params to JSON
     pub fn encodeSessionSetModelParams(self: *Encoder, params: protocol.SessionSetModelParams) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"sessionId\":{f},\"modelId\":{f}}}", .{
             std.json.fmt(params.session_id, .{}),
             std.json.fmt(params.model_id, .{}),
         });
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode fs/read_text_file result to JSON
     pub fn encodeReadTextFileResult(self: *Encoder, result: protocol.ReadTextFileResult) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         try writer.print("{{\"content\":{f}}}", .{std.json.fmt(result.content, .{})});
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     /// Encode permission response to JSON per ACP spec:
     /// https://agentclientprotocol.com/protocol/tool-calls#requesting-permission
     /// Result: {"outcome":{"outcome":"selected","optionId":"..."}} or {"outcome":{"outcome":"cancelled"}}
     pub fn encodePermissionResult(self: *Encoder, selected_option: ?[]const u8) ![]u8 {
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
 
         if (selected_option) |option| {
             try writer.print("{{\"outcome\":{{\"outcome\":\"selected\",\"optionId\":{f}}}}}", .{
@@ -497,7 +497,7 @@ pub const Encoder = struct {
             try writer.writeAll("{\"outcome\":{\"outcome\":\"cancelled\"}}");
         }
 
-        return output.toOwnedSlice(self.allocator);
+        return output.toOwnedSlice();
     }
 
     fn writeId(self: *Encoder, writer: anytype, id: JsonRpcId) !void {
@@ -529,7 +529,7 @@ pub const Decoder = struct {
 
     /// Decode a JSON-RPC message line
     pub fn decode(self: *Decoder, line: []const u8) !DecodedMessage {
-        const trimmed = std.mem.trimRight(u8, line, "\n\r");
+        const trimmed = std.mem.trimEnd(u8, line, "\n\r");
 
         // Parse as generic JSON first
         const parsed = std.json.parseFromSlice(RawMessage, self.allocator, trimmed, .{
@@ -595,11 +595,11 @@ pub const Decoder = struct {
     fn stringifyValue(self: *Decoder, value: ?std.json.Value) !?[]u8 {
         if (value == null) return null;
 
-        var output: std.ArrayList(u8) = .{};
-        errdefer output.deinit(self.allocator);
-        const writer = output.writer(self.allocator);
+        var output: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer output.deinit();
+        const writer = &output.writer;
         try writer.print("{f}", .{std.json.fmt(value.?, .{})});
-        const result = try output.toOwnedSlice(self.allocator);
+        const result = try output.toOwnedSlice();
         return result;
     }
 
@@ -683,7 +683,7 @@ pub const Decoder = struct {
         // Parse modes if present
         var modes: ?protocol.SessionModes = null;
         if (r.modes) |raw_modes| {
-            var available_modes: std.ArrayListUnmanaged(protocol.ModeInfo) = .{};
+            var available_modes: std.ArrayListUnmanaged(protocol.ModeInfo) = .empty;
             errdefer {
                 for (available_modes.items) |*m| {
                     self.allocator.free(m.id);
@@ -712,7 +712,7 @@ pub const Decoder = struct {
         // Parse models if present
         var models: ?protocol.SessionModels = null;
         if (r.models) |raw_models| {
-            var available_models: std.ArrayListUnmanaged(protocol.ModelInfo) = .{};
+            var available_models: std.ArrayListUnmanaged(protocol.ModelInfo) = .empty;
             errdefer {
                 for (available_models.items) |*m| {
                     self.allocator.free(m.model_id);
@@ -973,7 +973,7 @@ pub const Decoder = struct {
             "Tool call";
 
         // Parse options
-        var options: std.ArrayList(ParsedPermissionOption) = .{};
+        var options: std.ArrayList(ParsedPermissionOption) = .empty;
         errdefer {
             for (options.items) |*opt| {
                 self.allocator.free(opt.option_id);
@@ -1179,7 +1179,7 @@ pub const Decoder = struct {
                     std.log.info("CODEC: content is {s}", .{@tagName(content_val)});
                     if (content_val == .array) {
                         std.log.info("CODEC: content array has {d} items", .{content_val.array.items.len});
-                        var text_blocks: std.ArrayList(protocol.ContentBlock) = .{};
+                        var text_blocks: std.ArrayList(protocol.ContentBlock) = .empty;
                         defer text_blocks.deinit(self.allocator);
                         errdefer {
                             for (text_blocks.items) |*block| {

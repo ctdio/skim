@@ -1,8 +1,9 @@
 const std = @import("std");
-const net = std.net;
+const net = @import("../net.zig");
 const protocol = @import("protocol.zig");
 const parser = @import("../git/parser.zig");
 const line_resolver = @import("line_resolver.zig");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 
@@ -81,7 +82,7 @@ pub const ClientRegistry = struct {
             };
         }
 
-        const now = std.time.timestamp();
+        const now = skim_io.timestamp();
         client.* = .{
             .id = id,
             .stream = stream,
@@ -123,7 +124,7 @@ pub const ClientRegistry = struct {
     /// List all connected clients
     pub fn list(self: *ClientRegistry, allocator: Allocator) ![]ClientListEntry {
         // Zig 0.15: ArrayList is unmanaged
-        var entries: std.ArrayList(ClientListEntry) = .{};
+        var entries: std.ArrayList(ClientListEntry) = .empty;
         errdefer entries.deinit(allocator);
 
         var it = self.clients.valueIterator();
@@ -163,13 +164,13 @@ pub const ClientRegistry = struct {
     /// Update last_seen timestamp for a client
     pub fn touch(self: *ClientRegistry, id: SessionId) void {
         if (self.clients.get(id)) |client| {
-            client.last_seen = std.time.timestamp();
+            client.last_seen = skim_io.timestamp();
         }
     }
 
     /// Get all client streams for broadcasting
     pub fn getAllStreams(self: *ClientRegistry, allocator: Allocator) ![]net.Stream {
-        var streams: std.ArrayList(net.Stream) = .{};
+        var streams: std.ArrayList(net.Stream) = .empty;
         errdefer streams.deinit(allocator);
 
         var it = self.clients.valueIterator();
@@ -189,7 +190,7 @@ pub const ClientRegistry = struct {
 /// Generate a random UUID v4 string
 pub fn generateSessionId() SessionId {
     var id: SessionId = undefined;
-    var rng = std.Random.DefaultPrng.init(@intCast(std.time.nanoTimestamp()));
+    var rng = std.Random.DefaultPrng.init(@intCast(skim_io.nanoTimestamp()));
     const random = rng.random();
 
     // Generate random bytes

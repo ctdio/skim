@@ -16,6 +16,7 @@ const review_controller = @import("review_controller.zig");
 const review_parse = @import("review_parse.zig");
 const line_writer = @import("line_writer.zig");
 const width_util = @import("../rendering/width.zig");
+const skim_io = @import("skim_io");
 
 const Verdict = review_controller.Verdict;
 const ThreadCounts = review_controller.ThreadCounts;
@@ -279,7 +280,7 @@ fn drawBodyEditor(win: vaxis.Window, view: SubmitView, top: u16, bottom: u16) vo
         }
     }
     var cursor_col: usize = 0;
-    var giter = win.unicode.graphemeIterator(view.body[line_start..cb]);
+    var giter = vaxis.unicode.graphemeIterator(view.body[line_start..cb]);
     while (giter.next()) |g| cursor_col += win.gwidth(g.bytes(view.body[line_start..cb]));
 
     // Scroll so the cursor row stays inside the visible window (anchor to bottom
@@ -679,8 +680,8 @@ test "drawSubmitDialog: positions a beam cursor at the editor cursor in insert m
     });
 
     try testing.expect(ts.screen.cursor_vis);
-    try testing.expectEqual(@as(u16, 5), ts.screen.cursor_row);
-    try testing.expectEqual(@as(u16, 4), ts.screen.cursor_col);
+    try testing.expectEqual(@as(u16, 5), ts.screen.cursor.row);
+    try testing.expectEqual(@as(u16, 4), ts.screen.cursor.col);
     try testing.expectEqual(vaxis.Cell.CursorShape.beam, ts.screen.cursor_shape);
 }
 

@@ -428,7 +428,7 @@ fn freeJsonValue(allocator: Allocator, value: std.json.Value) void {
             var it = object.iterator();
             while (it.next()) |entry| freeJsonValue(allocator, entry.value_ptr.*);
             var owned = object;
-            owned.deinit();
+            owned.deinit(allocator);
         },
         else => {},
     }

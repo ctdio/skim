@@ -1,4 +1,5 @@
 const std = @import("std");
+const skim_io = @import("skim_io");
 
 const Allocator = std.mem.Allocator;
 
@@ -50,9 +51,9 @@ pub const AppliedPatch = struct {
 };
 
 pub fn buildOldNewFromHunks(allocator: Allocator, hunks: []const Hunk) !AppliedPatch {
-    var old_lines: std.ArrayList([]const u8) = .{};
+    var old_lines: std.ArrayList([]const u8) = .empty;
     errdefer old_lines.deinit(allocator);
-    var new_lines: std.ArrayList([]const u8) = .{};
+    var new_lines: std.ArrayList([]const u8) = .empty;
     errdefer new_lines.deinit(allocator);
 
     for (hunks) |hunk| {
@@ -77,7 +78,7 @@ pub fn buildOldNewFromHunks(allocator: Allocator, hunks: []const Hunk) !AppliedP
 }
 
 pub fn parseApplyPatch(allocator: Allocator, patch_text: []const u8) ![]FilePatch {
-    var files: std.ArrayList(FilePatch) = .{};
+    var files: std.ArrayList(FilePatch) = .empty;
     errdefer {
         for (files.items) |*file| file.deinit(allocator);
         files.deinit(allocator);
@@ -86,15 +87,15 @@ pub fn parseApplyPatch(allocator: Allocator, patch_text: []const u8) ![]FilePatc
     var current_kind: ?FilePatch.Kind = null;
     var current_path: ?[]const u8 = null;
     var current_new_path: ?[]const u8 = null;
-    var current_hunks: std.ArrayList(Hunk) = .{};
-    var current_lines: std.ArrayList(PatchLine) = .{};
+    var current_hunks: std.ArrayList(Hunk) = .empty;
+    var current_lines: std.ArrayList(PatchLine) = .empty;
 
     const flush_hunk = struct {
         fn call(alloc: Allocator, hunks: *std.ArrayList(Hunk), lines: *std.ArrayList(PatchLine)) !void {
             if (lines.items.len == 0) return;
             const owned_lines = try lines.toOwnedSlice(alloc);
             try hunks.append(alloc, .{ .lines = owned_lines });
-            lines.* = .{};
+            lines.* = .empty;
         }
     };
 
@@ -120,7 +121,7 @@ pub fn parseApplyPatch(allocator: Allocator, patch_text: []const u8) ![]FilePatc
             kind.* = null;
             path.* = null;
             new_path.* = null;
-            hunks.* = .{};
+            hunks.* = .empty;
         }
     };
 
@@ -210,24 +211,24 @@ pub fn applyFilePatch(allocator: Allocator, cwd: ?[]const u8, patch: FilePatch) 
 }
 
 fn readFileContent(allocator: Allocator, cwd: ?[]const u8, path: []const u8) ![]const u8 {
-    var file: std.fs.File = undefined;
+    var file: std.Io.File = undefined;
 
     if (std.fs.path.isAbsolute(path)) {
-        file = try std.fs.openFileAbsolute(path, .{});
+        file = try std.Io.Dir.openFileAbsolute(skim_io.get(), path, .{});
     } else if (cwd) |base| {
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base, path });
         defer allocator.free(full_path);
-        file = try std.fs.openFileAbsolute(full_path, .{});
+        file = try std.Io.Dir.openFileAbsolute(skim_io.get(), full_path, .{});
     } else {
-        file = try std.fs.cwd().openFile(path, .{});
+        file = try std.Io.Dir.cwd().openFile(skim_io.get(), path, .{});
     }
-    defer file.close();
+    defer file.close(skim_io.get());
 
-    return try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    return try skim_io.readAllAlloc(file, allocator, std.math.maxInt(usize));
 }
 
 fn splitLines(allocator: Allocator, text: []const u8) ![]const []const u8 {
-    var lines: std.ArrayList([]const u8) = .{};
+    var lines: std.ArrayList([]const u8) = .empty;
     errdefer lines.deinit(allocator);
 
     var iter = std.mem.splitScalar(u8, text, '\n');
@@ -240,7 +241,7 @@ fn splitLines(allocator: Allocator, text: []const u8) ![]const []const u8 {
 fn joinLines(allocator: Allocator, lines: []const []const u8) ![]const u8 {
     if (lines.len == 0) return allocator.dupe(u8, "");
 
-    var output: std.ArrayList(u8) = .{};
+    var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
 
     for (lines, 0..) |line, idx| {
@@ -252,7 +253,7 @@ fn joinLines(allocator: Allocator, lines: []const []const u8) ![]const u8 {
 }
 
 fn joinPatchLines(allocator: Allocator, hunks: []const Hunk, include_kind: PatchLineKind) ![]const u8 {
-    var lines: std.ArrayList([]const u8) = .{};
+    var lines: std.ArrayList([]const u8) = .empty;
     errdefer lines.deinit(allocator);
 
     for (hunks) |hunk| {
@@ -272,15 +273,15 @@ fn applyHunks(allocator: Allocator, old_text: []const u8, hunks: []const Hunk) !
     var old_lines = try splitLines(allocator, old_text);
     defer allocator.free(old_lines);
 
-    var output_lines: std.ArrayList([]const u8) = .{};
+    var output_lines: std.ArrayList([]const u8) = .empty;
     errdefer output_lines.deinit(allocator);
 
     var search_start: usize = 0;
 
     for (hunks) |hunk| {
-        var hunk_old: std.ArrayList([]const u8) = .{};
+        var hunk_old: std.ArrayList([]const u8) = .empty;
         defer hunk_old.deinit(allocator);
-        var hunk_new: std.ArrayList([]const u8) = .{};
+        var hunk_new: std.ArrayList([]const u8) = .empty;
         defer hunk_new.deinit(allocator);
 
         for (hunk.lines) |line| {

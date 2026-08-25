@@ -1,6 +1,7 @@
 const std = @import("std");
 const ts = @import("tree-sitter");
 const platform = @import("../platform.zig");
+const skim_io = @import("skim_io");
 
 // Embed highlight query files at compile time
 // Programming languages
@@ -479,7 +480,7 @@ pub const SyntaxHighlighter = struct {
         cursor.exec(cache.query, root);
 
         // Collect all captures into highlights
-        var highlights: std.ArrayList(Highlight) = .{};
+        var highlights: std.ArrayList(Highlight) = .empty;
         errdefer highlights.deinit(self.allocator);
 
         while (cursor.nextMatch()) |match| {
@@ -588,10 +589,14 @@ test "Highlight TypeScript with types" {
 
     try std.testing.expect(highlights.len > 0);
 
-    // Should have keyword "function"
+    // `function` is captured as a keyword. The query files emit the bare
+    // `keyword` capture rather than a `keyword.function` variant, and every
+    // `keyword*` capture collapses to the same colour anyway, so match on the
+    // span's text instead of on which variant produced it.
     var found_function_keyword = false;
     for (highlights) |h| {
-        if (std.mem.eql(u8, h.category, "keyword.function")) {
+        if (!std.mem.startsWith(u8, h.category, "keyword")) continue;
+        if (std.mem.eql(u8, ts_code[h.start_byte..h.end_byte], "function")) {
             found_function_keyword = true;
             break;
         }

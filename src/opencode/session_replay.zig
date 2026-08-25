@@ -1,22 +1,23 @@
 const std = @import("std");
 const OpencodeManager = @import("manager.zig").OpencodeManager;
+const skim_io = @import("skim_io");
 
 pub fn loadReplayLines(allocator: std.mem.Allocator, path: []const u8) ![][]const u8 {
     const file = if (std.fs.path.isAbsolute(path))
-        try std.fs.openFileAbsolute(path, .{})
+        try std.Io.Dir.openFileAbsolute(skim_io.get(), path, .{})
     else
-        try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+        try std.Io.Dir.cwd().openFile(skim_io.get(), path, .{});
+    defer file.close(skim_io.get());
 
-    const content = try file.readToEndAlloc(allocator, 8 * 1024 * 1024);
+    const content = try skim_io.readAllAlloc(file, allocator, 8 * 1024 * 1024);
     defer allocator.free(content);
 
     return loadReplayLinesFromString(allocator, content);
 }
 
 pub fn loadReplayLinesFromString(allocator: std.mem.Allocator, content: []const u8) ![][]const u8 {
-    var lines_out: std.ArrayList([]const u8) = .{};
-    var current: std.ArrayList(u8) = .{};
+    var lines_out: std.ArrayList([]const u8) = .empty;
+    var current: std.ArrayList(u8) = .empty;
     errdefer {
         current.deinit(allocator);
         for (lines_out.items) |line| allocator.free(line);
@@ -31,7 +32,7 @@ pub fn loadReplayLinesFromString(allocator: std.mem.Allocator, content: []const 
         if (isReplayEventStart(trimmed)) {
             if (current.items.len > 0) {
                 try lines_out.append(allocator, try current.toOwnedSlice(allocator));
-                current = .{};
+                current = .empty;
             }
             try current.appendSlice(allocator, trimmed);
             continue;

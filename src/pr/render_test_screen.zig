@@ -10,7 +10,6 @@ const testing = std.testing;
 
 pub const TestScreen = struct {
     screen: vaxis.Screen,
-    unicode: vaxis.Unicode,
 
     pub fn init(cols: u16, rows: u16) !TestScreen {
         var screen = try vaxis.Screen.init(testing.allocator, .{
@@ -20,13 +19,11 @@ pub const TestScreen = struct {
             .y_pixel = 0,
         });
         errdefer screen.deinit(testing.allocator);
-        const unicode = try vaxis.Unicode.init(testing.allocator);
-        return .{ .screen = screen, .unicode = unicode };
+        return .{ .screen = screen };
     }
 
     pub fn deinit(self: *TestScreen) void {
         self.screen.deinit(testing.allocator);
-        self.unicode.deinit(testing.allocator);
     }
 
     pub fn window(self: *TestScreen) vaxis.Window {
@@ -38,7 +35,6 @@ pub const TestScreen = struct {
             .width = self.screen.width,
             .height = self.screen.height,
             .screen = &self.screen,
-            .unicode = &self.unicode,
         };
     }
 };

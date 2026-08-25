@@ -9,15 +9,16 @@
 //!   Error:    {"id": "123", "error": {"code": -1, "message": "..."}}
 
 const std = @import("std");
-const net = std.net;
+const net = @import("../net.zig");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
 const platform = @import("../platform.zig");
+const skim_io = @import("skim_io");
 
-/// `net.Server` embeds a `net.Address`, whose `sockaddr` members do not exist on
-/// wasm. `App` holds a `?TuiServer` by value, so that type is resolved even for
-/// the web build, which never listens. Collapse it to a placeholder there.
+/// `net.Server` wraps a POSIX socket handle, which does not exist on wasm.
+/// `App` holds a `?TuiServer` by value, so that type is resolved even for the
+/// web build, which never listens. Collapse it to a placeholder there.
 const Listener = if (platform.is_web) ?void else ?net.Server;
 
 // =============================================================================
@@ -78,7 +79,7 @@ pub const TuiServer = struct {
             .handler = handler,
             .user_data = user_data,
             .running = false,
-            .clients = .{},
+            .clients = .empty,
         };
     }
 
@@ -92,16 +93,13 @@ pub const TuiServer = struct {
         if (self.running) return;
 
         // Bind to localhost on ephemeral port
-        const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
-        self.listener = try address.listen(.{
-            .reuse_address = true,
-        });
+        self.listener = try net.listenLoopback(0);
 
         // Get the assigned port
-        self.port = self.listener.?.listen_address.getPort();
+        self.port = self.listener.?.port;
 
         // Set non-blocking for the listener
-        try setNonBlocking(self.listener.?.stream.handle);
+        try setNonBlocking(self.listener.?.handle);
 
         self.running = true;
     }
@@ -151,17 +149,17 @@ pub const TuiServer = struct {
 
         // Try to accept (non-blocking)
         while (true) {
-            const conn = self.listener.?.accept() catch |err| {
+            const stream = self.listener.?.accept() catch |err| {
                 if (err == error.WouldBlock) break;
                 return err;
             };
 
             // Set client socket to non-blocking
-            try setNonBlocking(conn.stream.handle);
+            try setNonBlocking(stream.handle);
 
             try self.clients.append(self.allocator, .{
-                .stream = conn.stream,
-                .buffer = .{},
+                .stream = stream,
+                .buffer = .empty,
             });
         }
     }
@@ -312,23 +310,20 @@ const ClientConnection = struct {
 // =============================================================================
 
 fn setNonBlocking(handle: posix.fd_t) !void {
-    const flags = try posix.fcntl(handle, posix.F.GETFL, @as(usize, 0));
-    // Use the platform-specific O_NONBLOCK from std.posix (bitcast to u32 first, then extend)
-    const O_NONBLOCK: usize = @as(u32, @bitCast(posix.O{ .NONBLOCK = true }));
-    _ = try posix.fcntl(handle, posix.F.SETFL, flags | O_NONBLOCK);
+    try skim_io.setNonBlocking(handle, true);
 }
 
 fn serializeResponse(allocator: Allocator, response: Response) ![]u8 {
-    var output: std.ArrayList(u8) = .{};
-    errdefer output.deinit(allocator);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
 
-    const writer = output.writer(allocator);
+    const writer = &output.writer;
 
     switch (response) {
         .result => |result| {
             try writer.writeAll("{\"result\":");
             // Zig 0.15: Use Writer.Allocating with Stringify to serialize json.Value
-            var alloc_writer: std.io.Writer.Allocating = .init(allocator);
+            var alloc_writer: std.Io.Writer.Allocating = .init(allocator);
             defer alloc_writer.deinit();
             var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
             stringify.write(result) catch return error.JsonSerializationFailed;
@@ -343,17 +338,12 @@ fn serializeResponse(allocator: Allocator, response: Response) ![]u8 {
         },
     }
 
-    return output.toOwnedSlice(allocator);
+    return output.toOwnedSlice();
 }
 
 // =============================================================================
 // Response Builder Helpers
 // =============================================================================
-
-/// Create a success response with a JSON object
-pub fn successResponse(allocator: Allocator) !std.json.ObjectMap {
-    return std.json.ObjectMap.init(allocator);
-}
 
 /// Create an error response
 pub fn errorResponse(code: i32, message: []const u8) Response {
@@ -390,8 +380,7 @@ test "server accepts connection" {
     const port = server.getPort();
 
     // Connect as client
-    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-    const stream = try net.tcpConnectToAddress(address);
+    const stream = try net.connectLoopback(port);
     defer stream.close();
 
     // Poll to accept
@@ -410,8 +399,7 @@ test "server handles request" {
     const port = server.getPort();
 
     // Connect as client
-    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-    const stream = try net.tcpConnectToAddress(address);
+    const stream = try net.connectLoopback(port);
     defer stream.close();
 
     // Send request
@@ -438,8 +426,7 @@ test "server handles malformed JSON" {
     const port = server.getPort();
 
     // Connect as client
-    const address = net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-    const stream = try net.tcpConnectToAddress(address);
+    const stream = try net.connectLoopback(port);
     defer stream.close();
 
     // Send malformed JSON

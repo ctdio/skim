@@ -7,6 +7,7 @@
 const std = @import("std");
 const posix = std.posix;
 const builtin = @import("builtin");
+const skim_io = @import("skim_io");
 const Allocator = std.mem.Allocator;
 
 // =============================================================================
@@ -62,7 +63,7 @@ pub const SessionManager = struct {
         errdefer allocator.free(sessions_dir);
 
         // Create sessions directory if it doesn't exist
-        std.fs.makeDirAbsolute(sessions_dir) catch |err| switch (err) {
+        std.Io.Dir.createDirAbsolute(skim_io.get(), sessions_dir, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -87,12 +88,12 @@ pub const SessionManager = struct {
         defer self.allocator.free(temp_path);
 
         // Write to temp file
-        const file = try std.fs.createFileAbsolute(temp_path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.createFileAbsolute(skim_io.get(), temp_path, .{});
+        defer file.close(skim_io.get());
 
         // Zig 0.15: file.writer() requires a buffer
         var write_buffer: [4096]u8 = undefined;
-        var file_writer = file.writer(&write_buffer);
+        var file_writer = file.writer(skim_io.get(), &write_buffer);
         defer file_writer.interface.flush() catch {};
 
         // Manually construct JSON using std.json.fmt for string escaping
@@ -111,7 +112,7 @@ pub const SessionManager = struct {
         try file_writer.interface.print("],\"started_at\":{d}}}", .{info.started_at});
 
         // Atomic rename
-        try std.fs.renameAbsolute(temp_path, file_path);
+        try std.Io.Dir.renameAbsolute(temp_path, file_path, skim_io.get());
     }
 
     /// Remove session file for current process
@@ -119,25 +120,25 @@ pub const SessionManager = struct {
         const file_path = self.getSessionFilePath(self.current_pid) catch return;
         defer self.allocator.free(file_path);
 
-        std.fs.deleteFileAbsolute(file_path) catch {};
+        std.Io.Dir.deleteFileAbsolute(skim_io.get(), file_path) catch {};
     }
 
     /// List all valid sessions (validates PIDs, prunes stale files)
     pub fn listSessions(self: *SessionManager) ![]SessionInfo {
-        var sessions: std.ArrayList(SessionInfo) = .{};
+        var sessions: std.ArrayList(SessionInfo) = .empty;
         errdefer {
             for (sessions.items) |*s| s.deinit(self.allocator);
             sessions.deinit(self.allocator);
         }
 
-        var dir = std.fs.openDirAbsolute(self.sessions_dir, .{ .iterate = true }) catch |err| switch (err) {
+        var dir = std.Io.Dir.openDirAbsolute(skim_io.get(), self.sessions_dir, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return sessions.toOwnedSlice(self.allocator),
             else => return err,
         };
-        defer dir.close();
+        defer dir.close(skim_io.get());
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(skim_io.get())) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
 
@@ -148,7 +149,7 @@ pub const SessionManager = struct {
             // Check if process is alive
             if (!isProcessAlive(pid)) {
                 // Prune stale session file
-                dir.deleteFile(entry.name) catch {};
+                dir.deleteFile(skim_io.get(), entry.name) catch {};
                 continue;
             }
 
@@ -157,7 +158,7 @@ pub const SessionManager = struct {
                 try sessions.append(self.allocator, session);
             } else |_| {
                 // Invalid file, try to prune
-                dir.deleteFile(entry.name) catch {};
+                dir.deleteFile(skim_io.get(), entry.name) catch {};
             }
         }
 
@@ -170,7 +171,7 @@ pub const SessionManager = struct {
             // Prune stale file
             const file_path = try self.getSessionFilePath(pid);
             defer self.allocator.free(file_path);
-            std.fs.deleteFileAbsolute(file_path) catch {};
+            std.Io.Dir.deleteFileAbsolute(skim_io.get(), file_path) catch {};
             return null;
         }
 
@@ -210,11 +211,11 @@ pub const SessionManager = struct {
         const file_path = try self.getSessionFilePath(pid);
         defer self.allocator.free(file_path);
 
-        const file = try std.fs.openFileAbsolute(file_path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.openFileAbsolute(skim_io.get(), file_path, .{});
+        defer file.close(skim_io.get());
 
         var buffer: [8192]u8 = undefined;
-        const bytes_read = try file.readAll(&buffer);
+        const bytes_read = try file.readPositionalAll(skim_io.get(), &buffer, 0);
 
         const parsed = try std.json.parseFromSlice(SessionFileJson, self.allocator, buffer[0..bytes_read], .{
             .ignore_unknown_fields = true,
@@ -252,14 +253,14 @@ pub const SessionManager = struct {
 
 /// Get the path to sessions directory: ~/.skim/sessions/
 pub fn getSessionsDir(allocator: Allocator) ![]u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try skim_io.getEnvVarOwned(allocator, "HOME");
     defer allocator.free(home);
 
     const skim_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, SKIM_DIR });
     defer allocator.free(skim_dir);
 
     // Ensure ~/.skim exists
-    std.fs.makeDirAbsolute(skim_dir) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(skim_io.get(), skim_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -270,7 +271,7 @@ pub fn getSessionsDir(allocator: Allocator) ![]u8 {
 /// Check if a process is alive using kill(pid, 0)
 pub fn isProcessAlive(pid: posix.pid_t) bool {
     // In Zig 0.15, kill returns an error union
-    posix.kill(pid, 0) catch |err| {
+    posix.kill(pid, @enumFromInt(0)) catch |err| {
         // ESRCH means no such process, EPERM means exists but no permission
         return err != error.ProcessNotFound;
     };
@@ -324,11 +325,11 @@ test "session manager init creates directory" {
     defer manager.deinit();
 
     // Verify directory exists
-    var dir = std.fs.openDirAbsolute(manager.sessions_dir, .{}) catch {
+    var dir = std.Io.Dir.openDirAbsolute(skim_io.get(), manager.sessions_dir, .{}) catch {
         try std.testing.expect(false); // Directory should exist
         return;
     };
-    dir.close();
+    dir.close(skim_io.get());
 }
 
 test "write and read session file" {
@@ -378,8 +379,8 @@ test "list sessions filters dead PIDs" {
 
     // Write fake session file
     {
-        const file = try std.fs.createFileAbsolute(fake_path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.createFileAbsolute(skim_io.get(), fake_path, .{});
+        defer file.close(skim_io.get());
         try file.writer().writeAll("{\"pid\":999999998,\"port\":11111,\"cwd\":\"/fake\",\"diff_ref\":\"main\",\"files\":[],\"started_at\":0}");
     }
 

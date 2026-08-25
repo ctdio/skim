@@ -11,6 +11,7 @@ const colors_mod = @import("colors.zig");
 const parser_mod = @import("parser.zig");
 const code_blocks_mod = @import("code_blocks.zig");
 const tables_mod = @import("tables.zig");
+const skim_io = @import("skim_io");
 
 const NodeType = types.NodeType;
 const StyledSpan = types.StyledSpan;
@@ -55,10 +56,10 @@ pub const MarkdownRenderer = struct {
         return .{
             .allocator = allocator,
             .colors = md_colors,
-            .spans = .{},
-            .strings = .{},
-            .style_stack = .{},
-            .list_stack = .{},
+            .spans = .empty,
+            .strings = .empty,
+            .style_stack = .empty,
+            .list_stack = .empty,
             .blockquote_depth = 0,
             .ended_major_block = false,
             .highlight_ctx = highlight_ctx,
@@ -245,7 +246,7 @@ pub const MarkdownRenderer = struct {
         // recognize table content during streaming.
         if (findTableContentStart(content)) |table_start| {
             // Render content before the table normally
-            const before_table = std.mem.trimRight(u8, content[0..table_start], " \t\n\r");
+            const before_table = std.mem.trimEnd(u8, content[0..table_start], " \t\n\r");
             if (before_table.len > 0) {
                 const inline_tree = md_parser.parseInline(before_table);
                 if (inline_tree) |tree| {
@@ -315,7 +316,7 @@ pub const MarkdownRenderer = struct {
         for (content, 0..) |c, i| {
             if (c == '\n' or i == content.len - 1) {
                 const line_end = if (c == '\n') i else i + 1;
-                const line = std.mem.trimLeft(u8, content[line_start..line_end], " \t");
+                const line = std.mem.trimStart(u8, content[line_start..line_end], " \t");
                 const is_pipe_line = line.len > 0 and line[0] == '|';
 
                 if (is_pipe_line and prev_line_was_pipe) {
@@ -1032,14 +1033,14 @@ fn isMarkerNode(node_type_str: []const u8) bool {
 
 /// Check if a line looks like a table row (starts with optional whitespace then |)
 fn looksLikeTableRow(line: []const u8) bool {
-    const trimmed = std.mem.trimLeft(u8, line, " \t");
+    const trimmed = std.mem.trimStart(u8, line, " \t");
     return trimmed.len > 0 and trimmed[0] == '|';
 }
 
 /// Check if a line looks like a table delimiter row (contains |---| pattern)
 fn looksLikeDelimiterRow(line: []const u8) bool {
     // Must contain at least one | followed by dashes
-    const trimmed = std.mem.trimLeft(u8, line, " \t");
+    const trimmed = std.mem.trimStart(u8, line, " \t");
     if (trimmed.len < 3) return false;
     if (trimmed[0] != '|') return false;
 

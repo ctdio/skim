@@ -201,13 +201,13 @@ export fn skimJsonLen() usize {
 /// meaningful while `skimCursorVisible` returns 1.
 export fn skimCursorRow() u16 {
     const session = &(active orelse return 0);
-    return session.ctx.screen.cursor_row;
+    return session.ctx.screen.cursor.row;
 }
 
 /// Column of the text cursor in the last frame, 0-based from the left.
 export fn skimCursorCol() u16 {
     const session = &(active orelse return 0);
-    return session.ctx.screen.cursor_col;
+    return session.ctx.screen.cursor.col;
 }
 
 /// 1 while skim wants a visible text cursor, which is the comment editor. The

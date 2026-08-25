@@ -10,6 +10,17 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "enable_profile", enable_profile);
     const build_options_module = build_options.createModule();
 
+    // `src/io.zig` as a named module: files reach the process-wide `std.Io`
+    // handle as `@import("skim_io")` rather than by relative path, so a test
+    // step rooted at `src/acp/` or `src/testing/` can still import it. One
+    // instance per target -- two modules wrapping the same file in one compile
+    // is an error, and would be two copies of the global besides.
+    const skim_io_module = b.createModule(.{
+        .root_source_file = b.path("src/io.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Get vaxis dependency
     const vaxis_dep = b.dependency("vaxis", .{
         .target = target,
@@ -27,7 +38,7 @@ pub fn build(b: *std.Build) void {
     // Build grammar libraries
     const grammars = buildGrammars(b, target, optimize);
 
-    // Build executable - Zig 0.15: use root_module instead of direct fields
+    // Build executable
     const exe = b.addExecutable(.{
         .name = "skim",
         .root_module = b.createModule(.{
@@ -40,16 +51,17 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("vaxis", vaxis);
     exe.root_module.addImport("tree-sitter", tree_sitter);
     exe.root_module.addImport("build_options", build_options_module);
+    exe.root_module.addImport("skim_io", skim_io_module);
 
     // Note: tree-sitter core library is linked automatically via the module
 
     // Link all grammar libraries
     for (grammars) |grammar| {
-        exe.linkLibrary(grammar);
+        exe.root_module.linkLibrary(grammar);
     }
 
     // Link libc for C library support
-    exe.linkLibC();
+    exe.root_module.link_libc = true;
 
     // Strip for smaller binary in release modes
     if (optimize == .ReleaseFast or optimize == .ReleaseSmall) {
@@ -69,10 +81,11 @@ pub fn build(b: *std.Build) void {
     });
     debug_exe.root_module.addImport("tree-sitter", tree_sitter);
     debug_exe.root_module.addImport("build_options", build_options_module);
+    debug_exe.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        debug_exe.linkLibrary(grammar);
+        debug_exe.root_module.linkLibrary(grammar);
     }
-    debug_exe.linkLibC();
+    debug_exe.root_module.link_libc = true;
     const debug_run = b.addRunArtifact(debug_exe);
     const debug_step = b.step("debug-syntax", "Run syntax debugging");
     debug_step.dependOn(&debug_run.step);
@@ -88,10 +101,11 @@ pub fn build(b: *std.Build) void {
     });
     bench_exe.root_module.addImport("tree-sitter", tree_sitter);
     bench_exe.root_module.addImport("build_options", build_options_module);
+    bench_exe.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        bench_exe.linkLibrary(grammar);
+        bench_exe.root_module.linkLibrary(grammar);
     }
-    bench_exe.linkLibC();
+    bench_exe.root_module.link_libc = true;
     const bench_run = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run startup benchmark");
     bench_step.dependOn(&bench_run.step);
@@ -107,10 +121,11 @@ pub fn build(b: *std.Build) void {
     });
     first_render_exe.root_module.addImport("tree-sitter", tree_sitter);
     first_render_exe.root_module.addImport("build_options", build_options_module);
+    first_render_exe.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        first_render_exe.linkLibrary(grammar);
+        first_render_exe.root_module.linkLibrary(grammar);
     }
-    first_render_exe.linkLibC();
+    first_render_exe.root_module.link_libc = true;
     const first_render_run = b.addRunArtifact(first_render_exe);
     const first_render_step = b.step("bench-render", "Run first render benchmark");
     first_render_step.dependOn(&first_render_run.step);
@@ -127,10 +142,11 @@ pub fn build(b: *std.Build) void {
     render_content_exe.root_module.addImport("vaxis", vaxis);
     render_content_exe.root_module.addImport("tree-sitter", tree_sitter);
     render_content_exe.root_module.addImport("build_options", build_options_module);
+    render_content_exe.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        render_content_exe.linkLibrary(grammar);
+        render_content_exe.root_module.linkLibrary(grammar);
     }
-    render_content_exe.linkLibC();
+    render_content_exe.root_module.link_libc = true;
     const render_content_run = b.addRunArtifact(render_content_exe);
     const render_content_step = b.step("bench-render-content", "Run render content benchmark");
     render_content_step.dependOn(&render_content_run.step);
@@ -147,10 +163,11 @@ pub fn build(b: *std.Build) void {
     scroll_exe.root_module.addImport("vaxis", vaxis);
     scroll_exe.root_module.addImport("tree-sitter", tree_sitter);
     scroll_exe.root_module.addImport("build_options", build_options_module);
+    scroll_exe.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        scroll_exe.linkLibrary(grammar);
+        scroll_exe.root_module.linkLibrary(grammar);
     }
-    scroll_exe.linkLibC();
+    scroll_exe.root_module.link_libc = true;
     b.installArtifact(scroll_exe);
     const scroll_run = b.addRunArtifact(scroll_exe);
     const scroll_step = b.step("bench-scroll", "Run diff scroll session benchmark");
@@ -168,10 +185,11 @@ pub fn build(b: *std.Build) void {
     agent_render_exe.root_module.addImport("vaxis", vaxis);
     agent_render_exe.root_module.addImport("tree-sitter", tree_sitter);
     agent_render_exe.root_module.addImport("build_options", build_options_module);
+    agent_render_exe.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        agent_render_exe.linkLibrary(grammar);
+        agent_render_exe.root_module.linkLibrary(grammar);
     }
-    agent_render_exe.linkLibC();
+    agent_render_exe.root_module.link_libc = true;
     const agent_render_run = b.addRunArtifact(agent_render_exe);
     const agent_render_step = b.step("bench-agent-render", "Run agent render benchmark");
     agent_render_step.dependOn(&agent_render_run.step);
@@ -186,6 +204,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     async_exe.root_module.addImport("build_options", build_options_module);
+    async_exe.root_module.addImport("skim_io", skim_io_module);
     const async_run = b.addRunArtifact(async_exe);
     const async_step = b.step("bench-async", "Run async startup benchmark");
     async_step.dependOn(&async_run.step);
@@ -225,18 +244,25 @@ pub fn build(b: *std.Build) void {
             .optimize = web_optimize,
         }),
     });
+    const web_skim_io_module = b.createModule(.{
+        .root_source_file = b.path("src/io.zig"),
+        .target = web_target,
+        .optimize = web_optimize,
+    });
     web_exe.root_module.addImport("vaxis", web_vaxis);
+    web_exe.root_module.addImport("skim_io", web_skim_io_module);
     web_exe.root_module.addImport("web_core", webCoreModule(b, .{
         .target = web_target,
         .optimize = web_optimize,
         .vaxis = web_vaxis,
         .tree_sitter = web_tree_sitter,
         .build_options = build_options_module,
+        .skim_io = web_skim_io_module,
     }));
     for (buildWebGrammars(b, web_target, web_optimize)) |grammar| {
-        web_exe.linkLibrary(grammar);
+        web_exe.root_module.linkLibrary(grammar);
     }
-    web_exe.linkLibC();
+    web_exe.root_module.link_libc = true;
     web_exe.root_module.strip = true;
     // Name the ABI exports rather than using rdynamic, which would also export
     // every tree-sitter symbol and keep the linker from dropping unused ones.
@@ -283,7 +309,7 @@ pub fn build(b: *std.Build) void {
     const lint_step = b.step("lint", "Run ziglint");
     lint_step.dependOn(&lint_cmd.step);
 
-    // Tests - Zig 0.15: use root_module instead of direct fields
+    // Tests
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -295,10 +321,11 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addImport("vaxis", vaxis);
     unit_tests.root_module.addImport("tree-sitter", tree_sitter);
     unit_tests.root_module.addImport("build_options", build_options_module);
+    unit_tests.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        unit_tests.linkLibrary(grammar);
+        unit_tests.root_module.linkLibrary(grammar);
     }
-    unit_tests.linkLibC();
+    unit_tests.root_module.link_libc = true;
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
@@ -313,6 +340,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     mouse_tests.root_module.addImport("vaxis", vaxis);
+    mouse_tests.root_module.addImport("skim_io", skim_io_module);
     const run_mouse_tests = b.addRunArtifact(mouse_tests);
     test_step.dependOn(&run_mouse_tests.step);
 
@@ -325,6 +353,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     acp_tests.root_module.addImport("build_options", build_options_module);
+    acp_tests.root_module.addImport("skim_io", skim_io_module);
     const run_acp_tests = b.addRunArtifact(acp_tests);
     test_step.dependOn(&run_acp_tests.step);
 
@@ -337,7 +366,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     opencode_tests.root_module.addImport("build_options", build_options_module);
-    opencode_tests.linkLibC();
+    opencode_tests.root_module.addImport("skim_io", skim_io_module);
+    opencode_tests.root_module.link_libc = true;
     const run_opencode_tests = b.addRunArtifact(opencode_tests);
     test_step.dependOn(&run_opencode_tests.step);
 
@@ -350,6 +380,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     codex_tests.root_module.addImport("build_options", build_options_module);
+    codex_tests.root_module.addImport("skim_io", skim_io_module);
     const run_codex_tests = b.addRunArtifact(codex_tests);
     test_step.dependOn(&run_codex_tests.step);
 
@@ -365,7 +396,8 @@ pub fn build(b: *std.Build) void {
     });
     pr_tests.root_module.addImport("vaxis", vaxis);
     pr_tests.root_module.addImport("build_options", build_options_module);
-    pr_tests.linkLibC();
+    pr_tests.root_module.addImport("skim_io", skim_io_module);
+    pr_tests.root_module.link_libc = true;
     const run_pr_tests = b.addRunArtifact(pr_tests);
     test_step.dependOn(&run_pr_tests.step);
 
@@ -381,7 +413,8 @@ pub fn build(b: *std.Build) void {
     });
     pr_controller_tests.root_module.addImport("vaxis", vaxis);
     pr_controller_tests.root_module.addImport("build_options", build_options_module);
-    pr_controller_tests.linkLibC();
+    pr_controller_tests.root_module.addImport("skim_io", skim_io_module);
+    pr_controller_tests.root_module.link_libc = true;
     const run_pr_controller_tests = b.addRunArtifact(pr_controller_tests);
     test_step.dependOn(&run_pr_controller_tests.step);
 
@@ -394,6 +427,7 @@ pub fn build(b: *std.Build) void {
     session_replay_root_module.addImport("vaxis", vaxis);
     session_replay_root_module.addImport("tree-sitter", tree_sitter);
     session_replay_root_module.addImport("build_options", build_options_module);
+    session_replay_root_module.addImport("skim_io", skim_io_module);
     const session_replay_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/testing/session_replay_scenarios.zig"),
@@ -405,10 +439,11 @@ pub fn build(b: *std.Build) void {
     session_replay_tests.root_module.addImport("vaxis", vaxis);
     session_replay_tests.root_module.addImport("tree-sitter", tree_sitter);
     session_replay_tests.root_module.addImport("build_options", build_options_module);
+    session_replay_tests.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        session_replay_tests.linkLibrary(grammar);
+        session_replay_tests.root_module.linkLibrary(grammar);
     }
-    session_replay_tests.linkLibC();
+    session_replay_tests.root_module.link_libc = true;
     const run_session_replay_tests = b.addRunArtifact(session_replay_tests);
     test_step.dependOn(&run_session_replay_tests.step);
 
@@ -422,10 +457,11 @@ pub fn build(b: *std.Build) void {
     diff_core_tests.root_module.addImport("vaxis", vaxis);
     diff_core_tests.root_module.addImport("tree-sitter", tree_sitter);
     diff_core_tests.root_module.addImport("build_options", build_options_module);
+    diff_core_tests.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        diff_core_tests.linkLibrary(grammar);
+        diff_core_tests.root_module.linkLibrary(grammar);
     }
-    diff_core_tests.linkLibC();
+    diff_core_tests.root_module.link_libc = true;
     const run_diff_core_tests = b.addRunArtifact(diff_core_tests);
     test_step.dependOn(&run_diff_core_tests.step);
 
@@ -448,11 +484,12 @@ pub fn build(b: *std.Build) void {
         .vaxis = vaxis,
         .tree_sitter = tree_sitter,
         .build_options = build_options_module,
+        .skim_io = skim_io_module,
     }));
     for (grammars) |grammar| {
-        web_tests.linkLibrary(grammar);
+        web_tests.root_module.linkLibrary(grammar);
     }
-    web_tests.linkLibC();
+    web_tests.root_module.link_libc = true;
     const run_web_tests = b.addRunArtifact(web_tests);
     test_step.dependOn(&run_web_tests.step);
 
@@ -467,7 +504,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     width_tests.root_module.addImport("vaxis", vaxis);
-    width_tests.linkLibC();
+    width_tests.root_module.addImport("skim_io", skim_io_module);
+    width_tests.root_module.link_libc = true;
     const run_width_tests = b.addRunArtifact(width_tests);
     test_step.dependOn(&run_width_tests.step);
 
@@ -482,7 +520,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     scroll_region_tests.root_module.addImport("vaxis", vaxis);
-    scroll_region_tests.linkLibC();
+    scroll_region_tests.root_module.addImport("skim_io", skim_io_module);
+    scroll_region_tests.root_module.link_libc = true;
     const run_scroll_region_tests = b.addRunArtifact(scroll_region_tests);
     test_step.dependOn(&run_scroll_region_tests.step);
 
@@ -498,7 +537,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     cells_tests.root_module.addImport("vaxis", vaxis);
-    cells_tests.linkLibC();
+    cells_tests.root_module.addImport("skim_io", skim_io_module);
+    cells_tests.root_module.link_libc = true;
     const run_cells_tests = b.addRunArtifact(cells_tests);
     test_step.dependOn(&run_cells_tests.step);
 
@@ -512,6 +552,7 @@ pub fn build(b: *std.Build) void {
     review_test_root_module.addImport("vaxis", vaxis);
     review_test_root_module.addImport("tree-sitter", tree_sitter);
     review_test_root_module.addImport("build_options", build_options_module);
+    review_test_root_module.addImport("skim_io", skim_io_module);
     const review_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/testing/review_test_helpers.zig"),
@@ -522,11 +563,12 @@ pub fn build(b: *std.Build) void {
     review_tests.root_module.addImport("vaxis", vaxis);
     review_tests.root_module.addImport("tree-sitter", tree_sitter);
     review_tests.root_module.addImport("build_options", build_options_module);
+    review_tests.root_module.addImport("skim_io", skim_io_module);
     review_tests.root_module.addImport("review_test_root", review_test_root_module);
     for (grammars) |grammar| {
-        review_tests.linkLibrary(grammar);
+        review_tests.root_module.linkLibrary(grammar);
     }
-    review_tests.linkLibC();
+    review_tests.root_module.link_libc = true;
     const run_review_tests = b.addRunArtifact(review_tests);
     test_step.dependOn(&run_review_tests.step);
 
@@ -541,10 +583,11 @@ pub fn build(b: *std.Build) void {
     markdown_tests.root_module.addImport("vaxis", vaxis);
     markdown_tests.root_module.addImport("tree-sitter", tree_sitter);
     markdown_tests.root_module.addImport("build_options", build_options_module);
+    markdown_tests.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        markdown_tests.linkLibrary(grammar);
+        markdown_tests.root_module.linkLibrary(grammar);
     }
-    markdown_tests.linkLibC();
+    markdown_tests.root_module.link_libc = true;
     const run_markdown_tests = b.addRunArtifact(markdown_tests);
     test_step.dependOn(&run_markdown_tests.step);
 
@@ -558,6 +601,7 @@ pub fn build(b: *std.Build) void {
     });
     testing_harness_tests.root_module.addImport("vaxis", vaxis);
     testing_harness_tests.root_module.addImport("build_options", build_options_module);
+    testing_harness_tests.root_module.addImport("skim_io", skim_io_module);
     const run_testing_harness_tests = b.addRunArtifact(testing_harness_tests);
     test_step.dependOn(&run_testing_harness_tests.step);
 
@@ -570,6 +614,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     testing_snapshot_tests.root_module.addImport("build_options", build_options_module);
+    testing_snapshot_tests.root_module.addImport("skim_io", skim_io_module);
     const run_testing_snapshot_tests = b.addRunArtifact(testing_snapshot_tests);
     test_step.dependOn(&run_testing_snapshot_tests.step);
 
@@ -583,6 +628,7 @@ pub fn build(b: *std.Build) void {
     });
     diff_helpers_tests.root_module.addImport("vaxis", vaxis);
     diff_helpers_tests.root_module.addImport("build_options", build_options_module);
+    diff_helpers_tests.root_module.addImport("skim_io", skim_io_module);
     const run_diff_helpers_tests = b.addRunArtifact(diff_helpers_tests);
     test_step.dependOn(&run_diff_helpers_tests.step);
 
@@ -596,6 +642,7 @@ pub fn build(b: *std.Build) void {
     });
     agent_helpers_tests.root_module.addImport("vaxis", vaxis);
     agent_helpers_tests.root_module.addImport("build_options", build_options_module);
+    agent_helpers_tests.root_module.addImport("skim_io", skim_io_module);
     const run_agent_helpers_tests = b.addRunArtifact(agent_helpers_tests);
     test_step.dependOn(&run_agent_helpers_tests.step);
 
@@ -609,6 +656,7 @@ pub fn build(b: *std.Build) void {
     });
     acp_replay_tests.root_module.addImport("vaxis", vaxis);
     acp_replay_tests.root_module.addImport("build_options", build_options_module);
+    acp_replay_tests.root_module.addImport("skim_io", skim_io_module);
     const run_acp_replay_tests = b.addRunArtifact(acp_replay_tests);
     test_step.dependOn(&run_acp_replay_tests.step);
 
@@ -622,6 +670,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vaxis", .module = vaxis },
             .{ .name = "tree-sitter", .module = tree_sitter },
             .{ .name = "build_options", .module = build_options_module },
+            .{ .name = "skim_io", .module = skim_io_module },
         },
     });
 
@@ -642,14 +691,16 @@ pub fn build(b: *std.Build) void {
     question_prompt_root_module.addImport("vaxis", vaxis);
     question_prompt_root_module.addImport("tree-sitter", tree_sitter);
     question_prompt_root_module.addImport("build_options", build_options_module);
+    question_prompt_root_module.addImport("skim_io", skim_io_module);
     snapshot_scenarios_tests.root_module.addImport("vaxis", vaxis);
     snapshot_scenarios_tests.root_module.addImport("tree-sitter", tree_sitter);
     snapshot_scenarios_tests.root_module.addImport("markdown", markdown_module);
     snapshot_scenarios_tests.root_module.addImport("build_options", build_options_module);
+    snapshot_scenarios_tests.root_module.addImport("skim_io", skim_io_module);
     for (grammars) |grammar| {
-        snapshot_scenarios_tests.linkLibrary(grammar);
+        snapshot_scenarios_tests.root_module.linkLibrary(grammar);
     }
-    snapshot_scenarios_tests.linkLibC();
+    snapshot_scenarios_tests.root_module.link_libc = true;
     const run_snapshot_scenarios_tests = b.addRunArtifact(snapshot_scenarios_tests);
     test_step.dependOn(&run_snapshot_scenarios_tests.step);
 
@@ -663,11 +714,12 @@ pub fn build(b: *std.Build) void {
     question_prompt_tests.root_module.addImport("vaxis", vaxis);
     question_prompt_tests.root_module.addImport("tree-sitter", tree_sitter);
     question_prompt_tests.root_module.addImport("build_options", build_options_module);
+    question_prompt_tests.root_module.addImport("skim_io", skim_io_module);
     question_prompt_tests.root_module.addImport("question_prompt_root", question_prompt_root_module);
     for (grammars) |grammar| {
-        question_prompt_tests.linkLibrary(grammar);
+        question_prompt_tests.root_module.linkLibrary(grammar);
     }
-    question_prompt_tests.linkLibC();
+    question_prompt_tests.root_module.link_libc = true;
     const run_question_prompt_tests = b.addRunArtifact(question_prompt_tests);
     test_step.dependOn(&run_question_prompt_tests.step);
 
@@ -678,6 +730,7 @@ pub fn build(b: *std.Build) void {
     approval_root_module.addImport("tree-sitter", tree_sitter);
     approval_root_module.addImport("markdown", markdown_module);
     approval_root_module.addImport("build_options", build_options_module);
+    approval_root_module.addImport("skim_io", skim_io_module);
     const approval_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/testing/approval_scenarios.zig"),
@@ -688,11 +741,12 @@ pub fn build(b: *std.Build) void {
     approval_tests.root_module.addImport("vaxis", vaxis);
     approval_tests.root_module.addImport("tree-sitter", tree_sitter);
     approval_tests.root_module.addImport("build_options", build_options_module);
+    approval_tests.root_module.addImport("skim_io", skim_io_module);
     approval_tests.root_module.addImport("approval_test_root", approval_root_module);
     for (grammars) |grammar| {
-        approval_tests.linkLibrary(grammar);
+        approval_tests.root_module.linkLibrary(grammar);
     }
-    approval_tests.linkLibC();
+    approval_tests.root_module.link_libc = true;
     const run_approval_tests = b.addRunArtifact(approval_tests);
     test_step.dependOn(&run_approval_tests.step);
 }
@@ -771,7 +825,6 @@ fn buildGrammar(
 ) *std.Build.Step.Compile {
     const dep = b.dependency(info.dep_name, .{});
 
-    // Zig 0.15: Use addLibrary with .linkage = .static instead of addStaticLibrary
     const lib = b.addLibrary(.{
         .linkage = .static,
         .name = b.fmt("tree-sitter-{s}", .{info.name}),
@@ -788,7 +841,7 @@ fn buildGrammar(
         "src";
 
     // Add parser.c
-    lib.addCSourceFile(.{
+    lib.root_module.addCSourceFile(.{
         .file = dep.path(b.fmt("{s}/parser.c", .{src_path})),
         .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
     });
@@ -796,13 +849,13 @@ fn buildGrammar(
     // Add scanner if present
     if (info.has_scanner) {
         if (info.scanner_is_cpp) {
-            lib.addCSourceFile(.{
+            lib.root_module.addCSourceFile(.{
                 .file = dep.path(b.fmt("{s}/scanner.cc", .{src_path})),
                 .flags = &.{ "-std=c++14", "-fno-sanitize=undefined" },
             });
-            lib.linkLibCpp();
+            lib.root_module.link_libcpp = true;
         } else {
-            lib.addCSourceFile(.{
+            lib.root_module.addCSourceFile(.{
                 .file = dep.path(b.fmt("{s}/scanner.c", .{src_path})),
                 .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
             });
@@ -810,9 +863,9 @@ fn buildGrammar(
     }
 
     // Add include path for tree_sitter headers
-    lib.addIncludePath(dep.path(src_path));
+    lib.root_module.addIncludePath(dep.path(src_path));
 
-    lib.linkLibC();
+    lib.root_module.link_libc = true;
 
     return lib;
 }
@@ -828,6 +881,7 @@ fn webCoreModule(b: *std.Build, opts: WebCoreOptions) *std.Build.Module {
     module.addImport("vaxis", opts.vaxis);
     module.addImport("tree-sitter", opts.tree_sitter);
     module.addImport("build_options", opts.build_options);
+    module.addImport("skim_io", opts.skim_io);
     return module;
 }
 
@@ -837,4 +891,5 @@ const WebCoreOptions = struct {
     vaxis: *std.Build.Module,
     tree_sitter: *std.Build.Module,
     build_options: *std.Build.Module,
+    skim_io: *std.Build.Module,
 };

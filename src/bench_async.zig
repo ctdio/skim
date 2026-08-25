@@ -1,22 +1,25 @@
 const std = @import("std");
 const git = @import("git/diff.zig");
 const parser = @import("git/parser.zig");
+const skim_io = @import("skim_io");
 const DiffSource = git.DiffSource;
 
-pub fn main() !void {
-    const start_time = std.time.nanoTimestamp();
+pub fn main(process_init: std.process.Init) !void {
+    skim_io.init(process_init);
+
+    const start_time = skim_io.nanoTimestamp();
     std.log.info("=== ASYNC STARTUP BENCHMARK ===", .{});
     std.log.info("Simulating async highlighting behavior", .{});
     std.log.info("", .{});
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     // 1. Git diff
     const diff_text = try git.getDiff(allocator, .{ .working_dir = .{ .staged = false } });
     defer allocator.free(diff_text);
-    const diff_time = std.time.nanoTimestamp();
+    const diff_time = skim_io.nanoTimestamp();
     std.log.info("[{d}ms] Git diff loaded", .{@divTrunc(diff_time - start_time, std.time.ns_per_ms)});
 
     // 2. Parse diff
@@ -27,15 +30,15 @@ pub fn main() !void {
         }
         allocator.free(files);
     }
-    const parse_time = std.time.nanoTimestamp();
+    const parse_time = skim_io.nanoTimestamp();
     std.log.info("[{d}ms] Diff parsed ({d} files)", .{ @divTrunc(parse_time - start_time, std.time.ns_per_ms), files.len });
 
     // 3. Terminal setup (simulated - reduced from 1000ms to 100ms)
-    const terminal_time = std.time.nanoTimestamp();
+    const terminal_time = skim_io.nanoTimestamp();
     std.log.info("[{d}ms] Terminal setup (100ms timeout)", .{@divTrunc(terminal_time - start_time, std.time.ns_per_ms)});
 
     // 4. First render - NO HIGHLIGHTING (async mode)
-    const first_render_time = std.time.nanoTimestamp();
+    const first_render_time = skim_io.nanoTimestamp();
     std.log.info("", .{});
     std.log.info("=== UI VISIBLE TO USER ===", .{});
     std.log.info("[{d}ms] First frame rendered (no syntax colors yet)", .{@divTrunc(first_render_time - start_time, std.time.ns_per_ms)});
@@ -51,7 +54,7 @@ pub fn main() !void {
     // Simulated highlighting time
     std.time.sleep(390 * std.time.ns_per_ms);
 
-    const highlight_complete_time = std.time.nanoTimestamp();
+    const highlight_complete_time = skim_io.nanoTimestamp();
     std.log.info("[{d}ms] Syntax highlighting complete", .{@divTrunc(highlight_complete_time - start_time, std.time.ns_per_ms)});
     std.log.info("(Colors pop in on next render)", .{});
     std.log.info("", .{});

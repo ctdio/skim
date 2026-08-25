@@ -5,6 +5,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const client = @import("client.zig");
+const skim_io = @import("skim_io");
 
 // =============================================================================
 // Write Buffers (Zig 0.15 requires buffers for file.writer())
@@ -28,7 +29,7 @@ pub const Args = struct {
 
 pub fn run(allocator: Allocator, args: Args) !void {
     var conn = client.autoConnect(allocator, args.session_pid) catch |err| {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         const stderr = &stderr_writer.interface;
         switch (err) {
             error.NoSessionsRunning => stderr.writeAll("Error: No skim sessions running.\n") catch {},
@@ -42,14 +43,14 @@ pub fn run(allocator: Allocator, args: Args) !void {
     defer conn.deinit();
 
     var response = conn.request("get_context", "ctx-1", null) catch |err| {
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
         stderr_writer.interface.print("Error: Request failed: {}\n", .{err}) catch {};
         stderr_writer.interface.flush() catch {};
         std.process.exit(1);
     };
     defer response.deinit(allocator);
 
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
     defer stdout_writer.interface.flush() catch {};
     const stdout = &stdout_writer.interface;
 
@@ -62,7 +63,7 @@ pub fn run(allocator: Allocator, args: Args) !void {
             }
         },
         .err => |e| {
-            var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+            var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
             stderr_writer.interface.print("Error from server: {s}\n", .{e.message}) catch {};
             stderr_writer.interface.flush() catch {};
             std.process.exit(1);
@@ -72,7 +73,7 @@ pub fn run(allocator: Allocator, args: Args) !void {
 
 fn outputJson(allocator: Allocator, writer: anytype, result: std.json.Value) !void {
     // Serialize the result JSON to output
-    var alloc_writer: std.io.Writer.Allocating = .init(allocator);
+    var alloc_writer: std.Io.Writer.Allocating = .init(allocator);
     defer alloc_writer.deinit();
     var stringify: std.json.Stringify = .{ .writer = &alloc_writer.writer };
     stringify.write(result) catch return error.JsonSerializationFailed;

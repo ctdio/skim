@@ -19,6 +19,7 @@ pub const SyntaxHighlighter = highlighting.SyntaxHighlighter;
 
 // Markdown rendering for agent messages
 const markdown = @import("markdown/markdown.zig");
+const skim_io = @import("skim_io");
 const MarkdownRenderer = markdown.MarkdownRenderer;
 const StyledSpan = markdown.StyledSpan;
 const NodeType = markdown.NodeType;
@@ -184,10 +185,10 @@ pub const ChatLineMap = struct {
     /// Initialize an empty chat line map
     pub fn init(allocator: Allocator) ChatLineMap {
         var self = ChatLineMap{
-            .records = .{},
-            .strings = .{},
-            .segment_slices = .{},
-            .highlights = .{},
+            .records = .empty,
+            .strings = .empty,
+            .segment_slices = .empty,
+            .highlights = .empty,
             .allocator = allocator,
             .wrap_width = 0,
             .message_count = 0,
@@ -788,7 +789,7 @@ pub const ChatLineMap = struct {
     /// Wrap a command string into multiple lines respecting word boundaries
     /// Returns owned array of line strings (caller must free)
     fn wrapCommandString(allocator: Allocator, cmd: []const u8, max_width: usize, max_lines: usize) ![][]const u8 {
-        var lines: std.ArrayList([]const u8) = .{};
+        var lines: std.ArrayList([]const u8) = .empty;
         errdefer lines.deinit(allocator);
 
         if (cmd.len == 0) {
@@ -1215,7 +1216,7 @@ pub const ChatLineMap = struct {
         const status_icon: []const u8 = switch (msg.tool_status) {
             .pending => "○",
             .running => blk: {
-                const frame = @as(usize, @intCast(@divTrunc(std.time.milliTimestamp(), 100)));
+                const frame = @as(usize, @intCast(@divTrunc(skim_io.milliTimestamp(), 100)));
                 break :blk spinner_chars[frame % spinner_chars.len];
             },
             .completed => "✓",
@@ -1335,7 +1336,7 @@ pub const ChatLineMap = struct {
                     const status_icon: []const u8 = switch (msg.tool_status) {
                         .pending => "○",
                         .running => blk: {
-                            const frame = @as(usize, @intCast(@divTrunc(std.time.milliTimestamp(), 100)));
+                            const frame = @as(usize, @intCast(@divTrunc(skim_io.milliTimestamp(), 100)));
                             break :blk spinner_chars[frame % spinner_chars.len];
                         },
                         .completed => "✓",
@@ -1459,7 +1460,7 @@ pub const ChatLineMap = struct {
 
         // For thinking messages, trim leading newlines to avoid extra spacing
         const content = if (msg.role == .thinking)
-            std.mem.trimLeft(u8, msg.content, "\n")
+            std.mem.trimStart(u8, msg.content, "\n")
         else
             msg.content;
 
@@ -1508,7 +1509,7 @@ pub const ChatLineMap = struct {
         const max_collapsed_lines: usize = 5;
 
         // First, wrap all content to get total line count
-        var all_wrapped_lines: std.ArrayList([]const u8) = .{};
+        var all_wrapped_lines: std.ArrayList([]const u8) = .empty;
         defer all_wrapped_lines.deinit(self.allocator);
 
         var content_iter = std.mem.splitScalar(u8, content, '\n');
@@ -1677,7 +1678,7 @@ pub const ChatLineMap = struct {
 
         // Collect styled segments per line, preserving per-span styling
         var line_idx: usize = 0;
-        var current_line_segments: std.ArrayList(StyledSegment) = .{};
+        var current_line_segments: std.ArrayList(StyledSegment) = .empty;
         defer current_line_segments.deinit(self.allocator);
         var current_indent: usize = base_indent;
         var current_node_type: NodeType = .text;
@@ -1793,7 +1794,7 @@ pub const ChatLineMap = struct {
         }
 
         // Word wrapping needed - split segments across multiple lines
-        var current_line: std.ArrayList(StyledSegment) = .{};
+        var current_line: std.ArrayList(StyledSegment) = .empty;
         defer current_line.deinit(self.allocator);
         var current_width: usize = 0;
 
@@ -1994,10 +1995,10 @@ pub const ChatLineMap = struct {
     /// Returns null if file can't be read or neither text found
     fn findStartingLineInFile(allocator: Allocator, file_path: []const u8, old_text: []const u8, new_text: []const u8) ?usize {
         // Try to read the file
-        const file = std.fs.cwd().openFile(file_path, .{}) catch return null;
-        defer file.close();
+        const file = std.Io.Dir.cwd().openFile(skim_io.get(), file_path, .{}) catch return null;
+        defer file.close(skim_io.get());
 
-        const file_content = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch return null;
+        const file_content = skim_io.readAllAlloc(file, allocator, 10 * 1024 * 1024) catch return null;
         defer allocator.free(file_content);
 
         // Try to find new_text first (file has already been modified)
@@ -2218,7 +2219,7 @@ pub const ChatLineMap = struct {
             },
             .side_by_side => {
                 // For side-by-side, collect the lines to show and pass to existing function
-                var lines_to_show: std.ArrayList(DiffLine) = .{};
+                var lines_to_show: std.ArrayList(DiffLine) = .empty;
                 defer lines_to_show.deinit(self.allocator);
 
                 while (line_idx < total_diff_lines) {
@@ -2410,9 +2411,9 @@ pub const ChatLineMap = struct {
         const left_content_width = remaining / 2;
 
         // Collect left and right lines
-        var left_lines: std.ArrayList(SideLine) = .{};
+        var left_lines: std.ArrayList(SideLine) = .empty;
         defer left_lines.deinit(self.allocator);
-        var right_lines: std.ArrayList(SideLine) = .{};
+        var right_lines: std.ArrayList(SideLine) = .empty;
         defer right_lines.deinit(self.allocator);
 
         for (diff_lines) |diff_line| {
@@ -2581,7 +2582,7 @@ fn formatTokenCount(buf: *[32]u8, count: usize) []const u8 {
 /// Shows "Xs" for < 60s, "Xm Ys" for >= 60s.
 fn formatElapsed(buf: *[32]u8, start_time_ms: i64, end_time_ms: i64) []const u8 {
     if (start_time_ms == 0) return "";
-    const end = if (end_time_ms != 0) end_time_ms else std.time.milliTimestamp();
+    const end = if (end_time_ms != 0) end_time_ms else skim_io.milliTimestamp();
     const elapsed_ms = end - start_time_ms;
     if (elapsed_ms < 0) return "";
     const secs: usize = @intCast(@divTrunc(elapsed_ms, 1000));
@@ -2888,7 +2889,7 @@ test "markdown segment wrapping preserves UTF-8 grapheme boundaries" {
     _ = messages[0].ensureMarkdownParsed();
     try line_map.build(&messages, 6, .unified, null, null);
 
-    var rebuilt: std.ArrayList(u8) = .{};
+    var rebuilt: std.ArrayList(u8) = .empty;
     defer rebuilt.deinit(allocator);
 
     for (line_map.records.items) |record| {

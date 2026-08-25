@@ -17,6 +17,7 @@ const command_palette = @import("../agent/command_palette.zig");
 const opencode = @import("../opencode/opencode.zig");
 const subagent_fetch = @import("../agent/subagent_fetch.zig");
 const model_selection_mode = @import("model_selection_mode.zig");
+const skim_io = @import("skim_io");
 
 /// Handle keyboard input when in agent mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
@@ -1227,7 +1228,7 @@ fn insertFileAsResource(_: *App, agent_state: *agent.AgentState, file_path: []co
     const active = state.FilePickerState.getActiveAtPosition(input_text, cursor_pos) orelse return;
 
     // Build new text: before @ + @file_path + space + after query
-    var new_text: std.ArrayList(u8) = .{};
+    var new_text: std.ArrayList(u8) = .empty;
     defer new_text.deinit(agent_state.allocator);
 
     try new_text.appendSlice(agent_state.allocator, input_text[0..active.start]);
@@ -1272,7 +1273,7 @@ fn getMimeType(path: []const u8) []const u8 {
 
 /// Escape a string for JSON embedding
 fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var result: std.ArrayList(u8) = .{};
+    var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
 
     for (input) |c| {
@@ -1331,14 +1332,14 @@ pub fn handleShellCommand(app: *App, agent_state: *agent.AgentState, command: []
     };
 
     // Spawn the command using sh -c
-    const user_shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+    const user_shell = skim_io.getEnv("SHELL") orelse "/bin/sh";
     var argv_storage: [3][]const u8 = .{ user_shell, "-c", command };
-    running_cmd.child = std.process.Child.init(&argv_storage, app.allocator);
-    running_cmd.child.stdout_behavior = .Pipe;
-    running_cmd.child.stderr_behavior = .Pipe;
-    running_cmd.child.stdin_behavior = .Close;
-
-    running_cmd.child.spawn() catch |err| {
+    running_cmd.child = std.process.spawn(skim_io.get(), .{
+        .argv = &argv_storage,
+        .stdin = .close,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    }) catch |err| {
         std.log.err("Failed to spawn command: {any}", .{err});
         running_cmd.deinit();
         try agent_state.updateToolMessage(tool_id, .failed, null, "Failed to spawn command");
@@ -1368,7 +1369,7 @@ pub fn pollRunningShellCommand(app: *App) bool {
         const poll_result = std.posix.poll(&poll_fds, 0) catch 0;
 
         if (poll_result > 0 and (poll_fds[0].revents & std.posix.POLL.IN) != 0) {
-            const bytes_read = stdout.read(&read_buf) catch 0;
+            const bytes_read = skim_io.readFile(stdout, &read_buf) catch 0;
             if (bytes_read > 0) {
                 cmd.stdout_buf.appendSlice(app.allocator, read_buf[0..bytes_read]) catch {};
                 had_activity = true;
@@ -1384,7 +1385,7 @@ pub fn pollRunningShellCommand(app: *App) bool {
         const poll_result = std.posix.poll(&poll_fds, 0) catch 0;
 
         if (poll_result > 0 and (poll_fds[0].revents & std.posix.POLL.IN) != 0) {
-            const bytes_read = stderr.read(&read_buf) catch 0;
+            const bytes_read = skim_io.readFile(stderr, &read_buf) catch 0;
             if (bytes_read > 0) {
                 cmd.stderr_buf.appendSlice(app.allocator, read_buf[0..bytes_read]) catch {};
                 had_activity = true;
@@ -1400,14 +1401,17 @@ pub fn pollRunningShellCommand(app: *App) bool {
         app.needs_render = true;
     }
 
-    // Check if process has terminated (non-blocking)
-    const wait_result = std.posix.waitpid(cmd.child.id, std.c.W.NOHANG);
-    const exited = wait_result.pid != 0;
+    // Check if process has terminated (non-blocking). 0.16 dropped
+    // `posix.waitpid`, so the poll goes straight to libc.
+    const child_pid = cmd.child.id orelse return false;
+    var raw_status: c_int = undefined;
+    const exited = std.c.waitpid(child_pid, &raw_status, std.c.W.NOHANG) > 0;
     if (exited) {
         // Process has completed - finalize
         // Parse exit status using POSIX macros
-        const exit_success = std.c.W.IFEXITED(wait_result.status) and
-            std.c.W.EXITSTATUS(wait_result.status) == 0;
+        const wait_status: u32 = @bitCast(raw_status);
+        const exit_success = std.c.W.IFEXITED(wait_status) and
+            std.c.W.EXITSTATUS(wait_status) == 0;
         const status: state.Message.ToolStatus = if (exit_success) .completed else .failed;
 
         // Update with final output
@@ -1416,7 +1420,7 @@ pub fn pollRunningShellCommand(app: *App) bool {
         agent_state.updateToolMessage(cmd.tool_id, status, stdout_content, stderr_content) catch {};
 
         // Queue output for next prompt
-        queueCommandOutput(app, agent_state, cmd.command, stdout_content, stderr_content orelse "", wait_result.status) catch |err| {
+        queueCommandOutput(app, agent_state, cmd.command, stdout_content, stderr_content orelse "", wait_status) catch |err| {
             std.log.err("Failed to queue command output: {any}", .{err});
         };
 
@@ -1441,10 +1445,10 @@ fn queueCommandOutput(
     wait_status: u32,
 ) !void {
     // Build the resource content with command, exit code, and output
-    var content_buf: std.ArrayList(u8) = .{};
-    defer content_buf.deinit(app.allocator);
+    var content_buf: std.Io.Writer.Allocating = .init(app.allocator);
+    defer content_buf.deinit();
 
-    const writer = content_buf.writer(app.allocator);
+    const writer = &content_buf.writer;
 
     // Write command header
     try writer.print("$ {s}\n", .{command});
@@ -1470,15 +1474,15 @@ fn queueCommandOutput(
     const exit_code: i32 = if (std.c.W.IFEXITED(wait_status))
         @intCast(std.c.W.EXITSTATUS(wait_status))
     else if (std.c.W.IFSIGNALED(wait_status))
-        -@as(i32, @intCast(std.c.W.TERMSIG(wait_status)))
+        -@as(i32, @intCast(@intFromEnum(std.c.W.TERMSIG(wait_status))))
     else if (std.c.W.IFSTOPPED(wait_status))
-        -@as(i32, @intCast(std.c.W.STOPSIG(wait_status)))
+        -@as(i32, @intCast(@intFromEnum(std.c.W.STOPSIG(wait_status))))
     else
         @intCast(wait_status);
     try writer.print("# exit code: {d}\n", .{exit_code});
 
     // Queue for sending with next prompt
-    try agent_state.queueShellOutput(content_buf.items);
+    try agent_state.queueShellOutput(content_buf.written());
 }
 
 /// Extract arguments from slash command input.
@@ -1519,7 +1523,7 @@ fn extractSlashCommandName(input: []const u8) []const u8 {
 }
 
 fn buildSlashCommandText(allocator: std.mem.Allocator, command_name: []const u8, args: []const u8) ![]u8 {
-    var cmd_text: std.ArrayList(u8) = .{};
+    var cmd_text: std.ArrayList(u8) = .empty;
     defer cmd_text.deinit(allocator);
 
     try cmd_text.append(allocator, '/');
@@ -2268,7 +2272,7 @@ fn cancelCodexApproval(mgr: ManagerHandle) void {
 
 fn submitCodexUserInput(allocator: std.mem.Allocator, mgr: ManagerHandle, ui: anytype) void {
     // Collect selected option labels as answers
-    var answers_list: std.ArrayListUnmanaged([]const u8) = .{};
+    var answers_list: std.ArrayListUnmanaged([]const u8) = .empty;
     defer answers_list.deinit(allocator);
 
     for (ui.questions) |q| {
@@ -2546,7 +2550,7 @@ fn submitPendingQuestion(app: *App, agent_state: *state.AgentState, pending: *st
 /// Build 2D answers array for the OpenCode question reply endpoint.
 /// Returns `[]const []const []const u8` — caller owns all allocations.
 fn buildQuestionAnswers(allocator: std.mem.Allocator, pending: *state.PendingQuestion) ![]const []const []const u8 {
-    var outer: std.ArrayList([]const []const u8) = .{};
+    var outer: std.ArrayList([]const []const u8) = .empty;
     errdefer {
         for (outer.items) |inner| allocator.free(inner);
         outer.deinit(allocator);
@@ -2554,7 +2558,7 @@ fn buildQuestionAnswers(allocator: std.mem.Allocator, pending: *state.PendingQue
 
     for (pending.questions, 0..) |question, qi| {
         const q_state = pending.states[qi];
-        var inner: std.ArrayList([]const u8) = .{};
+        var inner: std.ArrayList([]const u8) = .empty;
         errdefer inner.deinit(allocator);
 
         for (question.options, 0..) |opt, oi| {
@@ -2576,7 +2580,7 @@ fn buildQuestionAnswers(allocator: std.mem.Allocator, pending: *state.PendingQue
 }
 
 fn buildCodexUserInputAnswers(allocator: std.mem.Allocator, pending: *state.PendingQuestion) ![]const []const u8 {
-    var answers: std.ArrayList([]const u8) = .{};
+    var answers: std.ArrayList([]const u8) = .empty;
     errdefer answers.deinit(allocator);
 
     for (pending.questions, 0..) |question, qi| {
@@ -2769,10 +2773,10 @@ pub const ParsedContent = struct {
 /// Returns text blocks and embedded resource blocks.
 /// Caller owns the returned ParsedContent and must call deinit().
 pub fn parsePromptContent(allocator: std.mem.Allocator, input_text: []const u8) !ParsedContent {
-    var blocks: std.ArrayList(protocol.ContentBlock) = .{};
+    var blocks: std.ArrayList(protocol.ContentBlock) = .empty;
     errdefer blocks.deinit(allocator);
 
-    var resources: std.ArrayList(ParsedContent.OwnedResource) = .{};
+    var resources: std.ArrayList(ParsedContent.OwnedResource) = .empty;
     errdefer {
         for (resources.items) |res| {
             allocator.free(res.uri);
@@ -2816,12 +2820,12 @@ pub fn parsePromptContent(allocator: std.mem.Allocator, input_text: []const u8) 
 
                 // Try to read the file
                 if (file_path.len > 0) {
-                    const cwd = std.fs.cwd();
-                    if (cwd.openFile(file_path, .{})) |file| {
-                        defer file.close();
+                    const cwd = std.Io.Dir.cwd();
+                    if (cwd.openFile(skim_io.get(), file_path, .{})) |file| {
+                        defer file.close(skim_io.get());
 
                         // Check file size
-                        const stat = file.stat() catch {
+                        const stat = file.stat(skim_io.get()) catch {
                             i += 1;
                             continue;
                         };
@@ -2831,7 +2835,7 @@ pub fn parsePromptContent(allocator: std.mem.Allocator, input_text: []const u8) 
                         }
 
                         // Read file content
-                        const content = file.readToEndAlloc(allocator, state.MAX_FILE_SIZE) catch {
+                        const content = skim_io.readAllAlloc(file, allocator, state.MAX_FILE_SIZE) catch {
                             i += 1;
                             continue;
                         };
@@ -2845,12 +2849,12 @@ pub fn parsePromptContent(allocator: std.mem.Allocator, input_text: []const u8) 
                         }
 
                         // Build file URI
-                        const abs_path = cwd.realpathAlloc(allocator, file_path) catch {
+                        const abs_path = skim_io.absolutePathAlloc(allocator, file_path) catch {
                             allocator.free(content);
                             i += 1;
                             continue;
                         };
-                        var uri_buf: std.ArrayList(u8) = .{};
+                        var uri_buf: std.ArrayList(u8) = .empty;
                         defer uri_buf.deinit(allocator);
                         try uri_buf.appendSlice(allocator, "file://");
                         try uri_buf.appendSlice(allocator, abs_path);
@@ -3292,7 +3296,7 @@ test "new tab action preserves vim mode when tabs reallocate" {
     const tab = try app.tab_manager.?.createTab("Tab 1");
     tab.agent_state.input.vim.vim_mode = .visual;
 
-    var exact_tabs: std.ArrayList(agent.AgentTab) = .{};
+    var exact_tabs: std.ArrayList(agent.AgentTab) = .empty;
     try exact_tabs.ensureTotalCapacityPrecise(allocator, 1);
     try exact_tabs.append(allocator, app.tab_manager.?.tabs.items[0]);
     app.tab_manager.?.tabs.deinit(allocator);
@@ -3318,7 +3322,7 @@ test "openSplit preserves vim mode when tabs reallocate" {
     const tab = try app.tab_manager.?.createTab("Tab 1");
     tab.agent_state.input.vim.vim_mode = .visual;
 
-    var exact_tabs: std.ArrayList(agent.AgentTab) = .{};
+    var exact_tabs: std.ArrayList(agent.AgentTab) = .empty;
     try exact_tabs.ensureTotalCapacityPrecise(allocator, 1);
     try exact_tabs.append(allocator, app.tab_manager.?.tabs.items[0]);
     app.tab_manager.?.tabs.deinit(allocator);

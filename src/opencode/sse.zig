@@ -57,8 +57,8 @@ pub const SseParser = struct {
     pub fn init(allocator: Allocator) SseParser {
         return .{
             .allocator = allocator,
-            .data_buffer = .{},
-            .line_buffer = .{},
+            .data_buffer = .empty,
+            .line_buffer = .empty,
         };
     }
 
