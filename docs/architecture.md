@@ -24,6 +24,7 @@ Skim is organized into several main layers:
 ┌─────────────────────────────────────────────┐
 │ CLI Layer (main.zig)                        │
 │ - Argument parsing                          │
+│ - std.Io + env capture (skim_io.init)       │
 │ - Initialization                            │
 │ - Subcommand routing (mcp, session)         │
 └─────────────────┬───────────────────────────┘
@@ -46,6 +47,7 @@ Skim is organized into several main layers:
 │ - LineMap (line_map.zig)                    │
 │ - Navigation (navigation.zig)               │
 │ - State Helpers (state.zig)                 │
+│ - I/O Handle (io.zig, module `skim_io`)     │
 │ - Logging (logging.zig)                     │
 └─────┬───────────────────────────┬───────────┘
       │                           │
@@ -72,6 +74,7 @@ Skim is organized into several main layers:
 
 **CLI Layer** (`main.zig`)
 
+- Adopt `std.process.Init` and publish the `std.Io` handle with `skim_io.init`
 - Parse command-line arguments (working dir, staged, ref comparison)
 - Route subcommands (`mcp`, `session`)
 - Initialize terminal and vaxis
@@ -102,6 +105,8 @@ Skim is organized into several main layers:
 - **LineMap** (`line_map.zig`): Pre-computed position registry for all renderable lines
 - **Navigation** (`navigation.zig`): Cursor movement and scrolling logic
 - **State Helpers** (`state.zig`): Async highlighting, diff stats
+- **I/O Handle** (`io.zig`): Process-wide `std.Io` and environment, plus the Zig 0.16 shims (see [The skim_io module](#the-skim_io-module))
+- **Sockets** (`net.zig`): Non-blocking loopback TCP for the MCP server and its clients
 
 **Git Integration** (`git/`)
 
@@ -116,6 +121,34 @@ Skim is organized into several main layers:
 - Syntax highlighting integration
 - Comment display
 - Scroll-region redraw (`scroll_region.zig`)
+
+### The skim_io module
+
+Zig 0.16 moved file, process, timing, and synchronization operations behind an
+`std.Io` value that every call takes as a parameter, and hands that value to
+`main` through `std.process.Init`. Threading it through several hundred
+signatures would have been noise, so `main` stashes it in `src/io.zig` and every
+subsystem reaches it through `skim_io.get()`.
+
+Two rules follow from that:
+
+- **Import it by name — `@import("skim_io")`, never a relative path.** The
+  module is wired into every module in `build.zig`, which is what lets a test
+  step rooted at `src/acp/` or `src/testing/` import it at all. A relative
+  import fails to compile in exactly those steps.
+- **Every executable calls `skim_io.init(process_init)` first.** A `main` that
+  skips it leaves the handle `undefined`, and the first file, timer, or lock
+  operation crashes. That includes the benchmarks in `src/bench_*.zig`.
+
+`io.zig` also carries the shims for the APIs 0.16 removed outright: `Timer`,
+the `sleep`/`timestamp` helpers, `getEnv`, `readFile`/`readAllAlloc`,
+`AppendFile` (0.16 dropped `File.seek`), `absolutePathAlloc` (replaces
+`realpathAlloc`), and `setNonBlocking` (replaces `posix.fcntl`). Extend it
+rather than reimplement a workaround locally.
+
+Sockets are the one part that does not go through `std.Io`. 0.16 treats
+`EAGAIN` on a non-blocking socket as a programmer bug and aborts on it, so the
+MCP server and its clients use `src/net.zig` instead.
 
 ### Scroll-region redraw
 
@@ -162,7 +195,7 @@ src/
 └── queries/           - Tree-sitter query files (.scm)
 ```
 
-Key root-level files: `line_map.zig` (position registry), `navigation.zig` (cursor/scroll), `ui.zig` (UI components), `logging.zig` (file-based logging), `config.zig` (configuration).
+Key root-level files: `line_map.zig` (position registry), `navigation.zig` (cursor/scroll), `ui.zig` (UI components), `io.zig` (the `skim_io` module: `std.Io` handle and Zig 0.16 shims), `net.zig` (non-blocking sockets), `logging.zig` (file-based logging), `config.zig` (configuration).
 
 ### File Size Guidelines
 
