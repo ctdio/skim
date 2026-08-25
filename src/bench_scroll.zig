@@ -63,9 +63,11 @@ const FrameSamples = struct {
 pub fn main(process_init: std.process.Init) !void {
     skim_io.init(process_init);
 
-    var gpa = std.heap.DebugAllocator(.{}).init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // The same allocator the release binary gets. skim links libc, so `main`
+    // runs on `std.heap.c_allocator`. Benching on a `DebugAllocator` instead
+    // charged the frame for safety bookkeeping the user never pays - it read
+    // the status bar at 45us a frame when the real cost is 4us.
+    const allocator = std.heap.c_allocator;
 
     const spec = bench.SyntheticSpec{
         .file_count = bench.envUsize(allocator, "SKIM_BENCH_FILES", 10),
@@ -127,6 +129,9 @@ fn runView(
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
 
+    var scroller: scroll_region.Scroller = .{ .allocator = allocator };
+    defer scroller.deinit();
+
     var vx = try vaxis.init(skim_io.get(), allocator, skim_io.environMap(), .{});
     defer vx.screen.deinit(allocator);
     defer vx.screen_last.deinit(allocator);
@@ -159,7 +164,7 @@ fn runView(
         const build_ns = timer.read();
 
         out.clearRetainingCapacity();
-        _ = try scroll_region.apply(&vx, &out.writer);
+        _ = try scroller.apply(&vx, &out.writer);
         try vx.render(&out.writer);
         try out.writer.flush();
         const total_ns = timer.read();

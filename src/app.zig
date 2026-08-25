@@ -1541,6 +1541,9 @@ pub const App = struct {
         try loop.start();
         defer loop.stop();
 
+        var scroller: scroll_region.Scroller = .{ .allocator = self.allocator };
+        defer scroller.deinit();
+
         try vx.enterAltScreen(writer);
 
         // Kick off the streaming diff load before the capability query so git
@@ -1793,7 +1796,7 @@ pub const App = struct {
                         const render_ns: u64 = if (render_timer_opt) |*timer| timer.read() else 0;
 
                         var vx_timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
-                        const shifted = try scroll_region.apply(vx, tty.writer());
+                        const shifted = try scroller.apply(vx, tty.writer());
                         try vx.render(tty.writer());
                         const vx_ns: u64 = if (vx_timer_opt) |*timer| timer.read() else 0;
 
@@ -1803,14 +1806,14 @@ pub const App = struct {
                         );
                     } else {
                         try frame.render(self, win);
-                        _ = try scroll_region.apply(vx, tty.writer());
+                        _ = try scroller.apply(vx, tty.writer());
                         try vx.render(tty.writer());
                     }
 
                     self.profile_active_frame = false;
                 } else {
                     try frame.render(self, win);
-                    _ = try scroll_region.apply(vx, tty.writer());
+                    _ = try scroller.apply(vx, tty.writer());
                     try vx.render(tty.writer());
                 }
                 // Don't clear needs_render if we're about to suspend for editor
