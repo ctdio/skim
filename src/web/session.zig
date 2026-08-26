@@ -36,6 +36,7 @@ const visual_mode = core.visual_mode;
 const help_mode = core.help_mode;
 const command_palette_mode = core.command_palette_mode;
 const command_palette = core.command_palette;
+const menu_stats = core.menu_stats;
 const CommentController = core.CommentController;
 const CommentEditor = core.CommentEditor;
 const agent = core.agent;
@@ -745,6 +746,10 @@ fn highlightAll(allocator: Allocator, files: []parser.FileDiff, highlighter: *Sy
 /// child processes, none of which exist on wasm. The "session leaves no memory
 /// behind" test guards this list against drift.
 fn freeApp(allocator: Allocator, app: *App) void {
+    // Opening the command palette kicks a background stats fetch that writes
+    // into `app.state`. On wasm there is no thread and this is a no-op, but the
+    // host-target test build really spawns one and has to reap it here.
+    menu_stats.joinPending(app);
     if (app.tab_manager) |*tm| tm.deinit();
     app.state.line_map.deinit();
     app.state.comment_store.deinit();
@@ -759,6 +764,7 @@ fn freeApp(allocator: Allocator, app: *App) void {
     app.syntax_highlighter.deinit();
 
     if (app.state.status_message_owned) |message| allocator.free(message);
+    if (app.state.default_branch_name) |name| allocator.free(name);
     allocator.free(app.frame_text_buffer);
     allocator.free(app.state.git_repo_root);
     allocator.free(app.state.file_diff_stats);

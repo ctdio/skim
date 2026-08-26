@@ -30,6 +30,7 @@ pub const visual_mode = @import("modes/visual_mode.zig");
 pub const help_mode = @import("modes/help_mode.zig");
 pub const command_palette_mode = @import("modes/command_palette_mode.zig");
 pub const command_palette = @import("command_palette.zig");
+pub const menu_stats = @import("menu_stats.zig");
 pub const CommentController = @import("comments/controller.zig").CommentController;
 pub const CommentEditor = @import("comments/editor.zig").CommentEditor;
 

@@ -16,16 +16,29 @@ pub fn startMenuStatsFetch(app: *App) void {
     if (platform.is_web) return;
     if (app.state.menu_stats_cached or app.state.menu_stats_loading) return;
 
+    // A previous fetch has finished by now (`menu_stats_loading` is clear) but
+    // its handle is still open. Reap it before opening another.
+    joinPending(app);
     app.state.menu_stats_loading = true;
 
-    // Spawn detached thread to fetch stats
-    const thread = std.Thread.spawn(.{}, menuStatsFetchWorker, .{app}) catch {
+    app.state.menu_stats_thread = std.Thread.spawn(.{}, menuStatsFetchWorker, .{app}) catch {
         // If thread spawn fails, fall back to sync fetch
         app.state.menu_stats_loading = false;
         fetchMenuStatsSync(app);
         return;
     };
-    thread.detach();
+}
+
+/// Wait for an in-flight fetch to finish.
+///
+/// The worker writes its results straight into `app.state`, so anything that
+/// tears that state down -- App.deinit, or the refresh that invalidates the
+/// cache -- has to wait here first. Without it the worker writes a freshly
+/// duped branch name over state that has already been freed.
+pub fn joinPending(app: *App) void {
+    const thread = app.state.menu_stats_thread orelse return;
+    app.state.menu_stats_thread = null;
+    thread.join();
 }
 
 /// Worker thread that fetches menu stats in background

@@ -6,6 +6,7 @@ const git = @import("git/diff.zig");
 const DiffSource = git.DiffSource;
 const DiffStats = git.DiffStats;
 const platform = @import("platform.zig");
+const menu_stats = @import("menu_stats.zig");
 const state_helpers = @import("state.zig");
 const render_utils = @import("rendering/utils.zig");
 const Color = @import("rendering/common.zig").Color;
@@ -63,6 +64,9 @@ pub const CommandPaletteState = struct {
     filtered_commands: std.ArrayList(usize), // Indices into commands array
     selected_idx: usize, // Index into filtered_commands
     scroll_offset: usize, // For scrolling long lists
+    /// Whether the registry was built with real diff-source stats rather than
+    /// the zeros a cold cache yields.
+    stats_ready: bool = false,
     allocator: Allocator,
 
     const max_visible_items = 10;
@@ -80,12 +84,7 @@ pub const CommandPaletteState = struct {
     }
 
     pub fn deinit(self: *CommandPaletteState) void {
-        // Free owned display names
-        for (self.commands.items) |cmd| {
-            if (cmd.owns_display_name) {
-                self.allocator.free(cmd.display_name);
-            }
-        }
+        self.freeOwnedDisplayNames();
         self.commands.deinit(self.allocator);
         self.filtered_commands.deinit(self.allocator);
     }
@@ -94,35 +93,51 @@ pub const CommandPaletteState = struct {
         self.query_len = 0;
         self.selected_idx = 0;
         self.scroll_offset = 0;
-        // Free owned display names before clearing
+        self.freeOwnedDisplayNames();
+        self.commands.clearRetainingCapacity();
+        self.filtered_commands.clearRetainingCapacity();
+    }
+
+    /// Rebuild once a cold stats fetch lands, so a palette opened before the
+    /// numbers arrived stops showing zeros. Keeps the typed query: the registry
+    /// is rebuilt in the same order, so the filter is simply re-run over it.
+    pub fn refreshStatsIfLanded(self: *CommandPaletteState, app: *App, files: []const parser.FileDiff) !void {
+        if (self.stats_ready or !app.state.menu_stats_cached) return;
+        try self.buildCommandRegistry(app, files);
+        try self.filterCommands();
+    }
+
+    fn freeOwnedDisplayNames(self: *CommandPaletteState) void {
         for (self.commands.items) |cmd| {
             if (cmd.owns_display_name) {
                 self.allocator.free(cmd.display_name);
             }
         }
-        self.commands.clearRetainingCapacity();
-        self.filtered_commands.clearRetainingCapacity();
     }
 
     // Build command registry from current app state (both files and commands)
     pub fn buildCommandRegistry(self: *CommandPaletteState, app: *App, files: []const parser.FileDiff) !void {
+        self.freeOwnedDisplayNames();
         self.commands.clearRetainingCapacity();
 
-        // Stats for the diff-source commands. The browser build has no git to
-        // ask, and drops those commands anyway, so it skips the calls.
+        // Stats for the diff-source commands. Asking git here would spawn four
+        // subprocesses before the palette could draw -- 20ms of nothing after
+        // the keypress. The menu already fetches exactly these off-thread, so
+        // read that cache and open now; `refreshStatsIfLanded` fills the
+        // numbers in when a cold fetch returns. The browser build has no git to
+        // ask and drops the diff-source commands anyway.
         const zero = DiffStats{ .files = 0, .additions = 0, .deletions = 0 };
         var working_stats = zero;
         var staged_stats = zero;
         var main_stats = zero;
+        self.stats_ready = platform.is_web or app.state.menu_stats_cached;
         if (!platform.is_web) {
-            working_stats = git.getDiffStats(self.allocator, DiffSource{ .working_dir = .{ .staged = false } }) catch zero;
-            staged_stats = git.getDiffStats(self.allocator, DiffSource{ .working_dir = .{ .staged = true } }) catch zero;
-
-            // For main branch, try to detect default branch
-            const default_branch = git.detectDefaultBranch(self.allocator) catch null;
-            if (default_branch) |branch| {
-                main_stats = git.getDiffStats(self.allocator, DiffSource{ .single_ref = .{ .ref = branch, .staged = false } }) catch zero;
-                self.allocator.free(branch);
+            if (app.state.menu_stats_cached) {
+                working_stats = app.state.working_stats;
+                staged_stats = app.state.staged_stats;
+                main_stats = app.state.main_stats;
+            } else {
+                menu_stats.startMenuStatsFetch(app);
             }
         }
 

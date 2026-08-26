@@ -6,6 +6,7 @@ const blame_ctrl = @import("git/blame_controller.zig");
 const diff_loader = @import("git/diff_loader.zig");
 const parser = @import("git/parser.zig");
 const file_caches = @import("file_caches.zig");
+const menu_stats = @import("menu_stats.zig");
 const syntax = @import("highlighting/core.zig");
 const comments = @import("comments/store.zig");
 const line_map = @import("line_map.zig");
@@ -260,6 +261,9 @@ pub const App = struct {
         // Cached stats for menu items (fetched async to avoid blocking UI)
         menu_stats_cached: bool, // Whether stats have been fetched
         menu_stats_loading: bool, // Whether async fetch is in progress
+        /// Handle on the in-flight fetch. The worker writes into this struct,
+        /// so teardown joins it rather than letting it outlive the state.
+        menu_stats_thread: ?std.Thread = null,
         working_stats: git.DiffStats,
         staged_stats: git.DiffStats,
         main_stats: git.DiffStats,
@@ -941,6 +945,8 @@ pub const App = struct {
         self.state.collapsed_folds.deinit();
         self.state.branch_stats_cache.deinit();
         self.state.model_select.deinit(self.allocator);
+        // Reap the stats worker before freeing what it writes into.
+        menu_stats.joinPending(self);
         // Clean up cached default branch name
         if (self.state.default_branch_name) |name| {
             self.allocator.free(name);
@@ -1295,6 +1301,7 @@ pub const App = struct {
         Navigation.clampScrollOffset(self);
 
         // Invalidate menu stats cache (will be re-fetched on next render if needed)
+        menu_stats.joinPending(self);
         self.state.menu_stats_cached = false;
         self.state.menu_stats_loading = false;
         if (self.state.default_branch_name) |name| {
@@ -1749,6 +1756,9 @@ pub const App = struct {
             self.pollReviewMutations();
             self.pollReviewThreadMutations();
             self.pollReviewSubmit();
+            if (self.mode == .command_palette) {
+                self.state.command_palette_state.refreshStatsIfLanded(self, self.state.files) catch {};
+            }
 
             // Render if we had events, need to update, or first render
             // A held key repeats faster than the terminal can draw, so frames the
