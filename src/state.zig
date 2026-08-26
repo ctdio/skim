@@ -1,12 +1,11 @@
 const std = @import("std");
 const parser = @import("git/parser.zig");
-const rendering_common = @import("rendering/common.zig");
+const file_caches = @import("file_caches.zig");
 const syntax = @import("highlighting/core.zig");
 const highlighting = @import("highlighting/async.zig");
 
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
-const Layout = rendering_common.Layout;
 
 // Re-export async highlighting types for backward compatibility
 pub const HighlightJob = highlighting.HighlightJob;
@@ -15,10 +14,7 @@ pub const HighlightWorker = highlighting.HighlightWorker;
 pub const AsyncHighlightJob = highlighting.AsyncHighlightJob;
 
 pub const StateHelpers = struct {
-    pub const FileDiffStats = struct {
-        additions: usize,
-        deletions: usize,
-    };
+    pub const FileDiffStats = file_caches.FileDiffStats;
 
     pub const HighlightMode = enum { new, old };
 
@@ -42,26 +38,11 @@ pub const StateHelpers = struct {
         return max;
     }
 
-    // Count the number of digits in a number
-    pub fn countDigits(n: u32) usize {
-        if (n == 0) return 1;
-        var count: usize = 0;
-        var num = n;
-        while (num > 0) {
-            count += 1;
-            num /= 10;
-        }
-        return count;
-    }
+    pub const countDigits = file_caches.countDigits;
 
     // Calculate the gutter width for a file (digits + sign character)
     pub fn getGutterWidth(file: *const parser.FileDiff) usize {
-        const max_lineno = getMaxLineNumber(file);
-        const digits = countDigits(max_lineno);
-        // gutter width = number width + sign width (1 char)
-        const calculated = digits + 1;
-        // Ensure minimum width for consistency
-        return @max(calculated, Layout.min_gutter_width);
+        return file_caches.gutterWidthFor(getMaxLineNumber(file));
     }
 
     // Calculate the gutter width across all files (for consistent width in continuous view)
@@ -81,9 +62,7 @@ pub const StateHelpers = struct {
             const file_max = getMaxLineNumber(file);
             max_lineno = @max(max_lineno, file_max);
         }
-        const digits = countDigits(max_lineno);
-        const calculated = digits + 1;
-        const base_width = @max(calculated, Layout.min_gutter_width);
+        const base_width = file_caches.gutterWidthFor(max_lineno);
 
         if (show_blame) {
             return base_width + BLAME_GUTTER_WIDTH + BLAME_SEPARATOR_WIDTH;

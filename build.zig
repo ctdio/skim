@@ -331,6 +331,27 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // Derived per-file cache tests. file_caches.zig reaches only the parser and
+    // the layout constants, so it roots its own step -- a test block in a file
+    // only reachable transitively from src/main.zig does not get collected.
+    const file_caches_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/file_caches.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    file_caches_tests.root_module.addImport("vaxis", vaxis);
+    file_caches_tests.root_module.addImport("tree-sitter", tree_sitter);
+    file_caches_tests.root_module.addImport("build_options", build_options_module);
+    file_caches_tests.root_module.addImport("skim_io", skim_io_module);
+    for (grammars) |grammar| {
+        file_caches_tests.root_module.linkLibrary(grammar);
+    }
+    file_caches_tests.root_module.link_libc = true;
+    const run_file_caches_tests = b.addRunArtifact(file_caches_tests);
+    test_step.dependOn(&run_file_caches_tests.step);
+
     // Mouse-wheel routing tests
     const mouse_tests = b.addTest(.{
         .root_module = b.createModule(.{

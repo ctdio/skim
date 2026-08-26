@@ -5,6 +5,7 @@ const git = @import("git/diff.zig");
 const blame_ctrl = @import("git/blame_controller.zig");
 const diff_loader = @import("git/diff_loader.zig");
 const parser = @import("git/parser.zig");
+const file_caches = @import("file_caches.zig");
 const syntax = @import("highlighting/core.zig");
 const comments = @import("comments/store.zig");
 const line_map = @import("line_map.zig");
@@ -126,12 +127,6 @@ fn readEnvU32(allocator: Allocator, name: []const u8, default_value: u32) u32 {
     return std.fmt.parseInt(u32, env_value, 10) catch default_value;
 }
 
-const FileCaches = struct {
-    stats: []StateHelpers.FileDiffStats,
-    line_counts: []usize,
-    gutter_width: usize,
-};
-
 const RenderProfileCounters = struct {
     slice_ns: u64 = 0,
     slice_calls: u64 = 0,
@@ -148,54 +143,6 @@ const RenderProfileCounters = struct {
     search_ns: u64 = 0,
     search_calls: u64 = 0,
 };
-
-fn buildFileCaches(allocator: Allocator, files: []const parser.FileDiff) !FileCaches {
-    const stats = try allocator.alloc(StateHelpers.FileDiffStats, files.len);
-    errdefer allocator.free(stats);
-
-    const line_counts = try allocator.alloc(usize, files.len);
-    errdefer allocator.free(line_counts);
-
-    var global_max_lineno: u32 = 0;
-
-    for (files, 0..) |*file, idx| {
-        var additions: usize = 0;
-        var deletions: usize = 0;
-        var line_count: usize = 0;
-        var file_max_lineno: u32 = 0;
-
-        for (file.hunks) |hunk| {
-            line_count += hunk.lines.len;
-            for (hunk.lines) |line| {
-                switch (line.line_type) {
-                    .add => additions += 1,
-                    .delete => deletions += 1,
-                    .context => {},
-                }
-                if (line.old_lineno) |old| {
-                    file_max_lineno = @max(file_max_lineno, old);
-                }
-                if (line.new_lineno) |new| {
-                    file_max_lineno = @max(file_max_lineno, new);
-                }
-            }
-        }
-
-        stats[idx] = .{ .additions = additions, .deletions = deletions };
-        line_counts[idx] = line_count;
-        global_max_lineno = @max(global_max_lineno, file_max_lineno);
-    }
-
-    const digits = StateHelpers.countDigits(global_max_lineno);
-    const calculated = digits + 1;
-    const base_width = @max(calculated, Layout.min_gutter_width);
-
-    return .{
-        .stats = stats,
-        .line_counts = line_counts,
-        .gutter_width = base_width,
-    };
-}
 
 /// Severity of a temporary status-bar message. Errors render red with a ⚠
 /// prefix so a failed thread interaction never reads like a success.
@@ -503,7 +450,7 @@ pub const App = struct {
         var frame_segment_arena = std.heap.ArenaAllocator.init(allocator);
         errdefer frame_segment_arena.deinit();
 
-        const caches = try buildFileCaches(allocator, files);
+        const caches = try file_caches.build(allocator, files);
         errdefer {
             allocator.free(caches.stats);
             allocator.free(caches.line_counts);
@@ -682,7 +629,7 @@ pub const App = struct {
         var frame_segment_arena = std.heap.ArenaAllocator.init(allocator);
         errdefer frame_segment_arena.deinit();
 
-        const caches = try buildFileCaches(allocator, files);
+        const caches = try file_caches.build(allocator, files);
         errdefer {
             allocator.free(caches.stats);
             allocator.free(caches.line_counts);
@@ -829,7 +776,7 @@ pub const App = struct {
         var frame_segment_arena = std.heap.ArenaAllocator.init(allocator);
         errdefer frame_segment_arena.deinit();
 
-        const caches = try buildFileCaches(allocator, files);
+        const caches = try file_caches.build(allocator, files);
         errdefer {
             allocator.free(caches.stats);
             allocator.free(caches.line_counts);
@@ -1281,7 +1228,7 @@ pub const App = struct {
             self.allocator.free(new_files);
         }
 
-        const caches = try buildFileCaches(self.allocator, new_files);
+        const caches = try file_caches.build(self.allocator, new_files);
         errdefer {
             self.allocator.free(caches.stats);
             self.allocator.free(caches.line_counts);
@@ -1438,7 +1385,17 @@ pub const App = struct {
         @memcpy(combined[0..old.len], old);
         @memcpy(combined[old.len..], more);
 
-        const caches = try buildFileCaches(self.allocator, combined);
+        // Measure only the new files. Rebuilding over `combined` per batch
+        // rewalks every line already walked, the same O(batches x total lines)
+        // shape the line map had.
+        const caches = try file_caches.append(self.allocator, .{
+            .caches = .{
+                .stats = self.state.file_diff_stats,
+                .line_counts = self.state.file_line_counts,
+                .gutter_width = self.state.global_gutter_width,
+            },
+            .more = more,
+        });
         errdefer {
             self.allocator.free(caches.stats);
             self.allocator.free(caches.line_counts);
