@@ -21,6 +21,7 @@ const render_utils = @import("rendering/utils.zig");
 const width_util = @import("rendering/width.zig");
 const frame = @import("rendering/frame.zig");
 const scroll_region = @import("rendering/scroll_region.zig");
+const frame_pacer = @import("rendering/frame_pacer.zig");
 const state_helpers = @import("state.zig");
 const ui_components = @import("ui.zig");
 const editor = @import("editor.zig");
@@ -1551,6 +1552,9 @@ pub const App = struct {
         var scroller: scroll_region.Scroller = .{ .allocator = self.allocator };
         defer scroller.deinit();
 
+        var pacer: frame_pacer.FramePacer = .{};
+        var loop_clock = try skim_io.Timer.start();
+
         try vx.enterAltScreen(writer);
 
         // Kick off the streaming diff load before the capability query so git
@@ -1790,8 +1794,17 @@ pub const App = struct {
             self.pollReviewSubmit();
 
             // Render if we had events, need to update, or first render
-            if (had_events or self.needs_render or first_render) {
+            // A held key repeats faster than the terminal can draw, so frames the
+            // pacer turns down are dropped rather than queued: the state they
+            // would have shown rides along on the next frame instead of filling
+            // the tty buffer until the next write blocks.
+            const wants_frame = had_events or self.needs_render or first_render;
+            const draw_frame = wants_frame and pacer.shouldRender(loop_clock.read());
+            if (wants_frame and !draw_frame) self.needs_render = true;
+
+            if (draw_frame) {
                 const win = vx.window();
+                var write_ns: u64 = 0;
 
                 if (profiling_enabled) {
                     const profile_log = std.log.scoped(.profile_loop);
@@ -1806,6 +1819,7 @@ pub const App = struct {
                         const shifted = try scroller.apply(vx, tty.writer());
                         try vx.render(tty.writer());
                         const vx_ns: u64 = if (vx_timer_opt) |*timer| timer.read() else 0;
+                        write_ns = vx_ns;
 
                         profile_log.debug(
                             "frame {d}: render_ns={d} vx_ns={d} scrolled_rows={d} events={} needs_render={} pending_jobs={d}",
@@ -1813,21 +1827,27 @@ pub const App = struct {
                         );
                     } else {
                         try frame.render(self, win);
+                        var write_timer = try skim_io.Timer.start();
                         _ = try scroller.apply(vx, tty.writer());
                         try vx.render(tty.writer());
+                        write_ns = write_timer.read();
                     }
 
                     self.profile_active_frame = false;
                 } else {
                     try frame.render(self, win);
+                    var write_timer = try skim_io.Timer.start();
                     _ = try scroller.apply(vx, tty.writer());
                     try vx.render(tty.writer());
+                    write_ns = write_timer.read();
                 }
                 // Don't clear needs_render if we're about to suspend for editor
                 // This prevents blocking on the next pollEvent()
                 if (!self.should_suspend_for_editor) {
                     self.needs_render = false; // Clear the flag after rendering
                 }
+
+                pacer.recordFrame(loop_clock.read(), write_ns);
             }
 
             if (self.pending_agent_connect_idx != null) {

@@ -525,6 +525,18 @@ pub fn build(b: *std.Build) void {
     const run_scroll_region_tests = b.addRunArtifact(scroll_region_tests);
     test_step.dependOn(&run_scroll_region_tests.step);
 
+    // Frame-pacing tests. frame_pacer.zig depends on nothing but std, so it
+    // roots its own step like width.zig does.
+    const frame_pacer_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rendering/frame_pacer.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_frame_pacer_tests = b.addRunArtifact(frame_pacer_tests);
+    test_step.dependOn(&run_frame_pacer_tests.step);
+
     // Cell-writing fast-path tests. cells.zig is self-contained (std + vaxis
     // only) and its tests assert byte-for-byte equivalence with
     // vaxis.Window.print, so it roots its own step for the same reason
