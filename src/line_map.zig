@@ -159,6 +159,9 @@ const CommentIndex = struct {
 /// Complete map of all lines in the diff
 pub const LineMap = struct {
     records: []LineRecord,
+    /// Records the allocation behind `records` can hold. `appendFiles` grows
+    /// into the spare room, so a streamed diff does not reallocate per batch.
+    records_capacity: usize,
     allocator: Allocator,
     /// Cached file header line numbers for O(1) lookup
     /// Index is file_idx, value is global line number of that file's header
@@ -209,12 +212,139 @@ pub const LineMap = struct {
         const file_header_lines = try allocator.alloc(usize, files.len);
         errdefer allocator.free(file_header_lines);
 
+        var global_line: usize = 0;
+
+        try appendRange(.{
+            .allocator = allocator,
+            .files = files,
+            .first_new = 0,
+            .records = &records,
+            .file_header_lines = file_header_lines,
+            .global_line = &global_line,
+            .comment_store = comment_store,
+            .hunk_view_mode = hunk_view_mode,
+            .apply_filtering = apply_filtering,
+            .collapsed_folds = collapsed_folds,
+            .review_threads = review_threads,
+        });
+
+        return LineMap{
+            .records = records.items,
+            .records_capacity = records.capacity,
+            .allocator = allocator,
+            .file_header_lines = file_header_lines,
+        };
+    }
+
+    /// What `appendFiles` needs to emit records for the files it adds.
+    pub const AppendParams = struct {
+        /// The whole file list, old files first, with the new ones at the end.
+        files: []const parser.FileDiff,
+        comment_store: *comments.CommentStore,
+        hunk_view_mode: HunkViewMode,
+        apply_filtering: bool,
+        collapsed_folds: ?*const std.AutoHashMap(u64, void) = null,
+        review_threads: ?[]const thread_placement.AnchoredThread = null,
+    };
+
+    /// Extend the map with files appended to the end of the diff.
+    ///
+    /// A record's global line number is also its index, so files added at the
+    /// end never move the records already built. The streaming loader delivers
+    /// a diff in batches, and calling `build` for every batch re-emits every
+    /// record already emitted, which costs O(batches x total lines): on a
+    /// 139k-line diff that was 44ms of main-thread work during the load, with
+    /// single batches reaching 6ms.
+    pub fn appendFiles(self: *LineMap, params: AppendParams) !void {
+        const allocator = self.allocator;
+        const first_new = self.file_header_lines.len;
+        if (first_new >= params.files.len) return;
+
+        self.file_header_lines = try allocator.realloc(self.file_header_lines, params.files.len);
+        @memset(self.file_header_lines[first_new..], 0);
+
+        // Adopt the existing buffer so the records already emitted are neither
+        // copied nor reallocated; the list grows into its own spare capacity.
+        var records: std.ArrayList(LineRecord) = .{ .items = self.records, .capacity = self.records_capacity };
+        defer {
+            self.records = records.items;
+            self.records_capacity = records.capacity;
+        }
+
+        var global_line = records.items.len;
+
+        // Whichever file was last until now was denied its trailing spacers,
+        // because `appendRange` skips them for the file it believes is last.
+        if (first_new > 0) {
+            var spacer_num: usize = 0;
+            while (spacer_num < file_spacing) : (spacer_num += 1) {
+                try records.append(allocator, .{
+                    .global_line = global_line,
+                    .file_idx = first_new - 1, // Belongs to file it comes after
+                    .line_type = .{
+                        .spacer = .{
+                            .after_file_idx = first_new - 1,
+                            .spacer_line_num = spacer_num,
+                            .is_header_spacer = false,
+                        },
+                    },
+                });
+                global_line += 1;
+            }
+        }
+
+        try appendRange(.{
+            .allocator = allocator,
+            .files = params.files,
+            .first_new = first_new,
+            .records = &records,
+            .file_header_lines = self.file_header_lines,
+            .global_line = &global_line,
+            .comment_store = params.comment_store,
+            .hunk_view_mode = params.hunk_view_mode,
+            .apply_filtering = params.apply_filtering,
+            .collapsed_folds = params.collapsed_folds,
+            .review_threads = params.review_threads,
+        });
+    }
+
+    /// What `appendRange` emits records into, and from which files.
+    const RangeParams = struct {
+        allocator: Allocator,
+        /// The whole file list. Records are emitted for `files[first_new..]`,
+        /// but the length decides which file is last and so gets no spacers.
+        files: []const parser.FileDiff,
+        first_new: usize,
+        records: *std.ArrayList(LineRecord),
+        file_header_lines: []usize,
+        global_line: *usize,
+        comment_store: *comments.CommentStore,
+        hunk_view_mode: HunkViewMode,
+        apply_filtering: bool,
+        collapsed_folds: ?*const std.AutoHashMap(u64, void),
+        review_threads: ?[]const thread_placement.AnchoredThread,
+    };
+
+    /// Emit the records for `files[first_new..]`, continuing from the caller's
+    /// running global line number.
+    fn appendRange(params: RangeParams) !void {
+        const allocator = params.allocator;
+        const files = params.files;
+        const records = params.records;
+        const file_header_lines = params.file_header_lines;
+        const comment_store = params.comment_store;
+        const hunk_view_mode = params.hunk_view_mode;
+        const apply_filtering = params.apply_filtering;
+        const collapsed_folds = params.collapsed_folds;
+        const review_threads = params.review_threads;
+
         var comment_index = try CommentIndex.build(allocator, comment_store);
         defer comment_index.deinit(allocator);
 
-        var global_line: usize = 0;
+        var global_line = params.global_line.*;
+        defer params.global_line.* = global_line;
 
-        for (files, 0..) |*file, file_idx| {
+        for (files[params.first_new..], params.first_new..) |*file, file_idx| {
             const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
 
             // Check if this file is folded
@@ -404,17 +534,11 @@ pub const LineMap = struct {
                 }
             }
         }
-
-        return LineMap{
-            .records = try records.toOwnedSlice(allocator),
-            .allocator = allocator,
-            .file_header_lines = file_header_lines,
-        };
     }
 
     pub fn deinit(self: *LineMap) void {
         self.allocator.free(self.file_header_lines);
-        self.allocator.free(self.records);
+        self.allocator.free(self.records.ptr[0..self.records_capacity]);
     }
 
     /// Get total number of lines
@@ -977,4 +1101,74 @@ test "comment deletion with multiple comments above" {
     try std.testing.expect(new_parent3_line != null);
     // Parent should be at same position (comments above it are unchanged)
     try std.testing.expectEqual(parent3_line.?, new_parent3_line.?);
+}
+
+const three_file_diff =
+    \\diff --git a/file1.txt b/file1.txt
+    \\--- a/file1.txt
+    \\+++ b/file1.txt
+    \\@@ -1,1 +1,1 @@
+    \\-old line
+    \\+new line
+    \\diff --git a/file2.txt b/file2.txt
+    \\--- a/file2.txt
+    \\+++ b/file2.txt
+    \\@@ -1,1 +1,2 @@
+    \\ context
+    \\+addition
+    \\diff --git a/file3.txt b/file3.txt
+    \\--- a/file3.txt
+    \\+++ b/file3.txt
+    \\@@ -1,2 +1,2 @@
+    \\ keep
+    \\-drop
+    \\+gain
+;
+
+test "appending the rest of a diff matches building it all at once" {
+    const allocator = std.testing.allocator;
+    const files = try parser.parse(allocator, three_file_diff);
+    defer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    var whole = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    defer whole.deinit();
+
+    var grown = try LineMap.build(allocator, files[0..1], &store, .all, true, null, null);
+    defer grown.deinit();
+    try grown.appendFiles(.{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
+
+    try std.testing.expectEqual(whole.getTotalLines(), grown.getTotalLines());
+    try std.testing.expectEqualDeep(whole.records, grown.records);
+    try std.testing.expectEqualSlices(usize, whole.file_header_lines, grown.file_header_lines);
+}
+
+test "appending one file at a time matches building it all at once" {
+    const allocator = std.testing.allocator;
+    const files = try parser.parse(allocator, three_file_diff);
+    defer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+
+    var store = comments.CommentStore.init(allocator);
+    defer store.deinit();
+
+    var whole = try LineMap.build(allocator, files, &store, .all, true, null, null);
+    defer whole.deinit();
+
+    var grown = try LineMap.build(allocator, files[0..1], &store, .all, true, null, null);
+    defer grown.deinit();
+
+    try grown.appendFiles(.{ .files = files[0..2], .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
+    try grown.appendFiles(.{ .files = files, .comment_store = &store, .hunk_view_mode = .all, .apply_filtering = true });
+
+    try std.testing.expectEqual(whole.getTotalLines(), grown.getTotalLines());
+    try std.testing.expectEqualDeep(whole.records, grown.records);
+    try std.testing.expectEqualSlices(usize, whole.file_header_lines, grown.file_header_lines);
 }

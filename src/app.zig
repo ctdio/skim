@@ -1446,19 +1446,26 @@ pub const App = struct {
         // Re-derive review-thread anchors before building the map that emits
         // their records (matches applyRefreshedFiles).
         self.reanchorReview(combined);
-
-        const new_line_map = try line_map.LineMap.build(self.allocator, combined, &self.state.comment_store, hunk_view.convertHunkViewMode(self), hunk_view.shouldApplyHunkFiltering(self), &self.state.collapsed_folds, self.reviewAnchored());
-
+        // Extend the existing map rather than rebuilding it. The loader streams
+        // a diff in batches, and a rebuild per batch re-emits every record
+        // already emitted, which costs O(batches x total lines).
         // Commit: free only the old array (structs moved into `combined`).
         self.allocator.free(old);
         self.freeFileCaches();
-        self.state.line_map.deinit();
 
         self.state.files = combined;
         self.state.file_diff_stats = caches.stats;
         self.state.file_line_counts = caches.line_counts;
         self.state.global_gutter_width = caches.gutter_width;
-        self.state.line_map = new_line_map;
+
+        try self.state.line_map.appendFiles(.{
+            .files = combined,
+            .comment_store = &self.state.comment_store,
+            .hunk_view_mode = hunk_view.convertHunkViewMode(self),
+            .apply_filtering = hunk_view.shouldApplyHunkFiltering(self),
+            .collapsed_folds = &self.state.collapsed_folds,
+            .review_threads = self.reviewAnchored(),
+        });
 
         const total_lines = self.getTotalGlobalLines();
         if (total_lines > 0 and self.state.global_cursor_line >= total_lines) {
