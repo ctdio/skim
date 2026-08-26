@@ -318,9 +318,11 @@ fn rowsMatch(vx: *const vaxis.Vaxis, rows: struct { new_row: u16, last_row: u16 
     const width: usize = vx.screen.width;
     const new_cells = vx.screen.buf[@as(usize, rows.new_row) * width .. (@as(usize, rows.new_row) + 1) * width];
     const last_cells = vx.screen_last.buf[@as(usize, rows.last_row) * width .. (@as(usize, rows.last_row) + 1) * width];
-    for (new_cells, last_cells) |new_cell, last_cell| {
+    // Iterate by pointer: an InternalCell is 104 bytes, and taking it by value
+    // copied one for every column of every row compared.
+    for (new_cells, last_cells) |*new_cell, *last_cell| {
         if (new_cell.image != null) return false;
-        if (!last_cell.eql(new_cell)) return false;
+        if (!last_cell.eql(new_cell.*)) return false;
     }
     return true;
 }
