@@ -630,6 +630,7 @@ For AI agents that support MCP (Model Context Protocol), add skim to your agent'
 
 | Tool               | Description                                        |
 | ------------------ | -------------------------------------------------- |
+| `get_skill`        | Read the guide for driving skim (no session needed) |
 | `list_sessions`    | List all running skim TUI sessions                 |
 | `get_context`      | Get diff metadata (files, stats, mode)             |
 | `get_diff`         | Get diff content with line numbers                 |
@@ -645,6 +646,18 @@ one session running you can omit it. `add_comment` and `reply_to_comment` take a
 The server also returns MCP `instructions` describing the review workflow, so an
 agent that connects gets the "list before you reply, always pass `author`" rules
 without being told.
+
+**Agent guide, served from the binary.** The full reference ships inside skim, so
+an agent can read it without the Claude Code plugin installed — `get_skill` over
+MCP, or `skim skill` in a shell. Both take a topic (`overview`, `mcp`, `cli`,
+`workflow`), and both serve the version that matches the tools the binary
+actually registers.
+
+```bash
+skim skill              # how to review with skim
+skim skill cli          # full CLI reference
+skim skill workflow     # step-by-step review workflow
+```
 
 ### Debug Replay
 

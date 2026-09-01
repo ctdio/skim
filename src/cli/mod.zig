@@ -6,6 +6,7 @@ pub const session = @import("session.zig");
 pub const client = @import("client.zig");
 pub const debug = @import("debug.zig");
 pub const print = @import("print.zig");
+pub const skill = @import("skill.zig");
 
 // Legacy exports (deprecated, use `skim session` instead)
 pub const sessions = @import("sessions.zig");

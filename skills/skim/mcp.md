@@ -7,6 +7,30 @@ exactly one session running you can omit it.
 
 ## Tool Reference
 
+### mcp__skim__get_skill
+
+Return this guide, served from the skim binary. Call it first if you have not
+driven skim before — you get the version that matches the tools the server
+actually registers, which a separately-installed copy of these files cannot
+promise.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `topic` | string | No | `overview` (default), `mcp`, `cli`, or `workflow` |
+
+**Example call:**
+```json
+mcp__skim__get_skill { "topic": "workflow" }
+```
+
+**Returns:** the requested document as markdown. An unknown topic is an error
+listing the valid ones.
+
+Needs no session — you can read this before finding a running TUI.
+
+---
+
 ### mcp__skim__list_sessions
 
 List all running skim TUI sessions.

@@ -52,6 +52,12 @@ pub fn main(process_init: std.process.Init) !void {
         } else if (std.mem.eql(u8, args[1], "comment")) {
             // Legacy: `skim comment` -> `skim session comment`
             return runCommentCommand(allocator, args);
+        } else if (std.mem.eql(u8, args[1], "skill")) {
+            const parsed = cli.skill.parseArgs(args) catch {
+                cli.skill.printUnknownTopic();
+                std.process.exit(1);
+            };
+            return cli.skill.run(parsed);
         } else if (std.mem.eql(u8, args[1], "pr")) {
             logging.init(.tui);
             defer logging.deinit();
@@ -635,6 +641,7 @@ fn printHelp(_: std.mem.Allocator) !void {
         \\    pr                 Browse open pull requests and review them
         \\    agent              Start the AI agent panel directly (ACP mode)
         \\    mcp                Run as MCP adapter (for Claude Desktop, Cursor, etc.)
+        \\    skill              Print the agent guide for driving skim
         \\
         \\OPTIONS:
         \\    --staged, --cached    Review staged changes (or staged vs. ref if ref provided)
@@ -667,6 +674,7 @@ fn printHelp(_: std.mem.Allocator) !void {
         \\AI INTEGRATION:
         \\    skim agent                # Open AI agent panel (full-screen)
         \\    skim mcp                  # Run MCP adapter (for agent configs)
+        \\    skim skill                # Print the agent guide (also served as MCP get_skill)
         \\
     );
 
@@ -695,7 +703,8 @@ fn printVersion() !void {
 /// Check if arg is a skim subcommand (not a git diff flag)
 fn isSkimSubcommand(arg: []const u8) bool {
     const subcommands = [_][]const u8{
-        "session", "debug", "print", "sessions", "context", "comment", "mcp", "diff", "agent", "pr",
+        "session", "debug", "print", "sessions", "context", "comment",
+        "mcp",     "diff",  "agent", "pr",       "skill",
     };
     for (subcommands) |cmd| {
         if (std.mem.eql(u8, arg, cmd)) return true;

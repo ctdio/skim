@@ -30,6 +30,10 @@ answer in the same place.
 2. If yes: use MCP tools (direct, no shell needed)
 3. If no or it fails: use CLI commands via Bash
 
+This guide also ships inside the skim binary, so you can re-read it at any time
+without this file: `mcp__skim__get_skill` over MCP, or `skim skill` in a shell.
+Both take a topic — `overview` (default), `mcp`, `cli`, `workflow`.
+
 ## Quick Reference
 
 ### Step 1: Find Sessions

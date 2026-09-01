@@ -8,6 +8,23 @@ Use these commands via Bash when MCP tools (`mcp__skim__*`) are not available.
 with `--id, -i <PID>`. Comment commands use `--session, -s <PID>` instead,
 because on `comment reply` and `comment delete` `-i` already means `--index`.
 
+## Reading This Guide
+
+```bash
+skim skill [overview|mcp|cli|workflow]
+```
+
+Print this guide from the skim binary — the same documents the MCP `get_skill`
+tool serves. Needs no running session.
+
+**Example:**
+```bash
+$ skim skill cli        # this document
+$ skim skill workflow   # step-by-step review workflow
+```
+
+---
+
 ## Session Commands
 
 ### List Sessions

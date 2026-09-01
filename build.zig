@@ -52,6 +52,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("tree-sitter", tree_sitter);
     exe.root_module.addImport("build_options", build_options_module);
     exe.root_module.addImport("skim_io", skim_io_module);
+    // `skim skill` and the MCP `get_skill` tool serve these from the binary, so
+    // an agent gets the guidance without the Claude Code plugin installed.
+    addSkillDocs(b, exe.root_module);
 
     // Note: tree-sitter core library is linked automatically via the module
 
@@ -348,6 +351,7 @@ pub fn build(b: *std.Build) void {
         unit_tests.root_module.linkLibrary(grammar);
     }
     unit_tests.root_module.link_libc = true;
+    addSkillDocs(b, unit_tests.root_module);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");

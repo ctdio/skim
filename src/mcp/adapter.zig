@@ -25,6 +25,7 @@ const framework = @import("framework.zig");
 const session_mgr = @import("session.zig");
 const cli_client = @import("../cli/client.zig");
 const skim_io = @import("skim_io");
+const skill = @import("../skill.zig");
 
 // =============================================================================
 // Write Buffers (Zig 0.15 requires buffers for file.writer())
@@ -52,6 +53,8 @@ const server_instructions =
     \\message is attributed to them.
     \\
     \\Typical flow:
+    \\  0. `get_skill` if you have not driven skim before — it returns the full
+    \\     guide, including the line-number rules `add_comment` depends on
     \\  1. `list_sessions` to find the session (omit `session_id` if only one runs)
     \\  2. `get_diff` before commenting — never guess line numbers
     \\  3. `add_comment` for something new, using line_type "old" for `-` lines and
@@ -83,6 +86,7 @@ pub const McpAdapter = struct {
         });
 
         // Register tools
+        server.tool("get_skill", "Read the guide for reviewing with skim: the tools, the CLI, the line-number rules, and how comment threads work. Call this first if you have not driven skim before. Optional `topic` selects a section (" ++ skill.topic_names ++ "); the default is the overview.", GetSkillParams, handleGetSkill) catch {};
         server.tool("list_sessions", "List all running skim TUI sessions", null, handleListSessions) catch {};
         server.tool("get_context", "Get diff context and comments from a skim session", GetContextParams, handleGetContext) catch {};
         server.tool("get_diff", "Get the full diff content with line numbers. Use this to see what lines exist before adding comments.", GetDiffParams, handleGetDiff) catch {};
@@ -287,6 +291,10 @@ pub const McpAdapter = struct {
 // Tool Parameter Types
 // =============================================================================
 
+const GetSkillParams = struct {
+    topic: []const u8 = "",
+};
+
 const GetContextParams = struct {
     session_id: []const u8 = "",
 };
@@ -324,6 +332,27 @@ const DeleteCommentParams = struct {
 // =============================================================================
 // Tool Handlers
 // =============================================================================
+
+/// Serve a skill document. Needs no session: an agent should be able to learn
+/// the surface before, or instead of, finding a running TUI.
+fn handleGetSkill(ctx: *framework.Context, args: ?std.json.Value) framework.Result {
+    const requested = blk: {
+        const a = args orelse break :blk "";
+        if (a != .object) break :blk "";
+        const v = a.object.get("topic") orelse break :blk "";
+        break :blk if (v == .string) v.string else "";
+    };
+
+    const topic = skill.Topic.parse(requested) orelse {
+        return framework.Result.textError(
+            ctx.allocator,
+            "Unknown topic. Available topics: " ++ skill.topic_names,
+        ) catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+    };
+
+    return framework.Result.text(ctx.allocator, skill.document(topic)) catch
+        framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+}
 
 fn handleListSessions(ctx: *framework.Context, args: ?std.json.Value) framework.Result {
     _ = args;
