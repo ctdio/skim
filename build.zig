@@ -548,6 +548,26 @@ pub fn build(b: *std.Build) void {
 
     // Frame-pacing tests. frame_pacer.zig depends on nothing but std, so it
     // roots its own step like width.zig does.
+    // Highlight scheduler tests. scheduler.zig is only reachable transitively
+    // from src/main.zig, whose test step does not collect its blocks.
+    const highlight_scheduler_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/highlight_scheduler_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    highlight_scheduler_tests.root_module.addImport("vaxis", vaxis);
+    highlight_scheduler_tests.root_module.addImport("tree-sitter", tree_sitter);
+    highlight_scheduler_tests.root_module.addImport("build_options", build_options_module);
+    highlight_scheduler_tests.root_module.addImport("skim_io", skim_io_module);
+    for (grammars) |grammar| {
+        highlight_scheduler_tests.root_module.linkLibrary(grammar);
+    }
+    highlight_scheduler_tests.root_module.link_libc = true;
+    const run_highlight_scheduler_tests = b.addRunArtifact(highlight_scheduler_tests);
+    test_step.dependOn(&run_highlight_scheduler_tests.step);
+
     const frame_pacer_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/rendering/frame_pacer.zig"),

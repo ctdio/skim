@@ -8,6 +8,7 @@ const parser = @import("git/parser.zig");
 const file_caches = @import("file_caches.zig");
 const menu_stats = @import("menu_stats.zig");
 const syntax = @import("highlighting/core.zig");
+const highlight_scheduler = @import("highlighting/scheduler.zig");
 const comments = @import("comments/store.zig");
 const line_map = @import("line_map.zig");
 const folds = @import("folds.zig");
@@ -88,17 +89,6 @@ const profiling_enabled = build_options.enable_profile;
 const HEADER_BUFFER_WIDTH = 4096;
 const FRAME_TEXT_CAPACITY = 262144; // 256 KiB per frame scratch space
 
-const HunkKey = struct {
-    file_idx: usize,
-    hunk_idx: usize,
-};
-
-const PendingJob = struct {
-    file_path: []const u8, // Owned file path used by worker
-    content: []const u8, // Owned NEW hunk content
-    old_content: []const u8, // Owned OLD hunk content
-};
-
 // Static buffer for vaxis Tty writer (must persist for lifetime of Tty).
 // Sized to hold a whole frame: a full-screen repaint of a wide terminal runs
 // ~30-45KB of escape sequences, and any frame larger than this buffer is split
@@ -166,8 +156,7 @@ pub const App = struct {
     frame_text_used: usize,
     frame_segment_arena: std.heap.ArenaAllocator,
     syntax_highlighter: syntax.SyntaxHighlighter,
-    highlight_worker: ?*state_helpers.HighlightWorker, // Long-lived worker thread with cached parsers
-    pending_highlight_jobs: std.AutoHashMap(HunkKey, PendingJob), // {file_idx, hunk_idx} -> owned content strings
+    highlighter_jobs: highlight_scheduler.HighlightScheduler, // Decides which hunks get parsed, and when
     needs_render: bool, // Flag to force re-render (e.g., after async highlighting)
     needs_async_highlight: bool, // Flag to trigger async highlighting for current file
     tui_server: ?tui_server.TuiServer, // TCP server for CLI/MCP connections
@@ -564,8 +553,7 @@ pub const App = struct {
             .frame_text_used = 0,
             .frame_segment_arena = frame_segment_arena,
             .syntax_highlighter = syntax_highlighter,
-            .highlight_worker = null, // Will be created on first use
-            .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
+            .highlighter_jobs = highlight_scheduler.HighlightScheduler.init(allocator),
             .needs_render = false,
             .needs_async_highlight = true, // Start with highlighting needed for first file
             .tui_server = null,
@@ -740,8 +728,7 @@ pub const App = struct {
             .frame_text_used = 0,
             .frame_segment_arena = frame_segment_arena,
             .syntax_highlighter = syntax_highlighter,
-            .highlight_worker = null,
-            .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
+            .highlighter_jobs = highlight_scheduler.HighlightScheduler.init(allocator),
             .needs_render = false,
             .needs_async_highlight = false, // No async highlighting in headless mode
             .tui_server = null,
@@ -859,8 +846,7 @@ pub const App = struct {
             .frame_text_used = 0,
             .frame_segment_arena = frame_segment_arena,
             .syntax_highlighter = syntax_highlighter,
-            .highlight_worker = null,
-            .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
+            .highlighter_jobs = highlight_scheduler.HighlightScheduler.init(allocator),
             .needs_render = false,
             .needs_async_highlight = false,
             .tui_server = null,
@@ -897,23 +883,11 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        // Clean up highlight worker
-        if (self.highlight_worker) |worker| {
-            worker.deinit();
-        }
+        self.highlighter_jobs.deinit();
 
         // Join any in-flight streaming diff load before freeing state.files so
         // the worker can't append into freed state.
         diff_loader.deinitState(&self.state.diff_load, self.allocator);
-
-        // Free pending job content strings
-        var iter = self.pending_highlight_jobs.iterator();
-        while (iter.next()) |entry| {
-            self.allocator.free(entry.value_ptr.file_path);
-            self.allocator.free(entry.value_ptr.content);
-            self.allocator.free(entry.value_ptr.old_content);
-        }
-        self.pending_highlight_jobs.deinit();
 
         // Free diff_source if needed
         switch (self.state.diff_source) {
@@ -1610,7 +1584,7 @@ pub const App = struct {
             const pr_active = self.state.pr.fetch.ready.load(.acquire) or self.state.pr.fetch_in_flight;
             const review_active = self.state.review.entry.ready.load(.acquire) or self.state.review.entry_in_flight or review_controller.hasPostingWork(&self.state.review);
             const diff_loading = self.state.diff_load.isLoading();
-            const should_poll = !self.needs_render and self.pending_highlight_jobs.count() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active and !review_active and !diff_loading;
+            const should_poll = !self.needs_render and self.highlighter_jobs.pendingCount() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active and !review_active and !diff_loading;
             if (should_poll) {
                 try loop.pollEvent();
             } else {
@@ -1790,7 +1764,7 @@ pub const App = struct {
 
                         profile_log.debug(
                             "frame {d}: render_ns={d} vx_ns={d} scrolled_rows={d} events={} needs_render={} pending_jobs={d}",
-                            .{ self.profile_frame_counter, render_ns, vx_ns, shifted, had_events, self.needs_render, self.pending_highlight_jobs.count() },
+                            .{ self.profile_frame_counter, render_ns, vx_ns, shifted, had_events, self.needs_render, self.highlighter_jobs.pendingCount() },
                         );
                     } else {
                         try frame.render(self, win);
@@ -1829,73 +1803,10 @@ pub const App = struct {
                 first_render = false;
             }
 
-            // Check for completed highlighting results
-            if (self.highlight_worker) |worker| {
-                var results: std.ArrayList(state_helpers.HighlightResult) = .empty;
-                defer results.deinit(self.allocator);
-
-                worker.pollResults(self.allocator, &results) catch {};
-
-                for (results.items) |result| {
-                    const file_idx = result.file_idx;
-                    const hunk_idx = result.hunk_idx;
-
-                    // Remove from pending jobs and free content
-                    const key = HunkKey{ .file_idx = file_idx, .hunk_idx = hunk_idx };
-                    if (self.pending_highlight_jobs.fetchRemove(key)) |entry| {
-                        self.allocator.free(entry.value.file_path);
-                        self.allocator.free(entry.value.content);
-                        self.allocator.free(entry.value.old_content);
-                    }
-
-                    // Apply highlights to hunk
-                    if (file_idx < self.state.files.len) {
-                        const file = &self.state.files[file_idx];
-                        if (hunk_idx < file.hunks.len) {
-                            const hunk = &file.hunks[hunk_idx];
-                            const mutable_hunk = @constCast(hunk);
-
-                            if (result.highlights) |highlights| {
-                                mutable_hunk.highlights = highlights;
-                            }
-                            if (result.old_highlights) |old_highlights| {
-                                mutable_hunk.old_highlights = old_highlights;
-                            }
-
-                            if (result.highlights != null or result.old_highlights != null) {
-                                StateHelpers.rebuildHunkHighlightCaches(self.allocator, mutable_hunk) catch |err| {
-                                    std.log.warn("Failed to rebuild highlight cache: {any}", .{err});
-                                };
-                            }
-
-                            // Only trigger re-render if this is the CURRENT file
-                            if (file_idx == self.state.current_file_idx) {
-                                self.needs_render = true;
-                            }
-                        } else {
-                            // Hunk no longer exists, free highlights
-                            if (self.highlight_worker) |w| {
-                                if (result.highlights) |highlights| {
-                                    w.highlighter.freeHighlights(highlights);
-                                }
-                                if (result.old_highlights) |old_highlights| {
-                                    w.highlighter.freeHighlights(old_highlights);
-                                }
-                            }
-                        }
-                    } else {
-                        // File no longer exists (refresh happened), free highlights
-                        if (self.highlight_worker) |w| {
-                            if (result.highlights) |highlights| {
-                                w.highlighter.freeHighlights(highlights);
-                            }
-                            if (result.old_highlights) |old_highlights| {
-                                w.highlighter.freeHighlights(old_highlights);
-                            }
-                        }
-                    }
-                }
-            }
+            if (self.highlighter_jobs.applyResults(.{
+                .files = self.state.files,
+                .current_file_idx = self.state.current_file_idx,
+            })) self.needs_render = true;
 
             // Poll TUI server for incoming connections and requests
             if (self.tui_server) |*server| {
@@ -1904,104 +1815,15 @@ pub const App = struct {
                 };
             }
 
-            // Submit highlighting jobs for visible hunks (per-hunk highlighting)
-            // Strategy: Highlight hunks in files that are currently visible on screen
-            // This ensures smooth scrolling without waiting for highlights
-            if (self.state.files.len > 0) {
-                // Create worker on first use
-                if (self.highlight_worker == null) {
-                    self.highlight_worker = state_helpers.HighlightWorker.init(self.allocator) catch null;
-                }
-
-                if (self.highlight_worker) |worker| {
-                    // Determine which files are visible in the viewport
-                    const viewport_height = self.state.viewport_height;
-                    const scroll_line = self.state.global_scroll_offset;
-                    const visible_end = scroll_line + viewport_height;
-
-                    // Start from file at scroll position
-                    const start_file_idx = self.state.line_map.getFileIndexForLine(scroll_line) orelse 0;
-
-                    // Submit jobs for visible hunks (current file + up to 3 files ahead)
-                    var hunks_submitted: usize = 0;
-                    const max_hunks_per_frame: usize = 8; // Limit hunks per frame to prevent overwhelming
-
-                    var check_idx = start_file_idx;
-                    file_loop: while (check_idx < self.state.files.len) : (check_idx += 1) {
-                        const file = &self.state.files[check_idx];
-
-                        // Check if this file is visible or close to visible
-                        if (self.state.line_map.getFileHeaderLine(check_idx)) |file_header_line| {
-                            const buffer_lines = viewport_height; // One screen ahead
-                            if (file_header_line > visible_end + buffer_lines) {
-                                break; // File is too far ahead
-                            }
-                        }
-
-                        const file_path = if (file.new_path.len > 0) file.new_path else file.old_path;
-
-                        // Iterate through hunks in this file
-                        for (file.hunks, 0..) |*hunk, hunk_idx| {
-                            if (hunks_submitted >= max_hunks_per_frame) break :file_loop;
-
-                            // Skip if already highlighted or job pending
-                            const key = HunkKey{ .file_idx = check_idx, .hunk_idx = hunk_idx };
-                            if (hunk.highlights != null or self.pending_highlight_jobs.contains(key)) {
-                                continue;
-                            }
-
-                            // Build NEW hunk content (add/context lines)
-                            const content = StateHelpers.buildHunkContent(self.allocator, hunk) catch continue;
-                            errdefer self.allocator.free(content);
-
-                            // Build OLD hunk content (delete/context lines)
-                            const old_content = StateHelpers.buildHunkOldContent(self.allocator, hunk) catch {
-                                self.allocator.free(content);
-                                continue;
-                            };
-                            errdefer self.allocator.free(old_content);
-
-                            const file_path_copy = self.allocator.dupe(u8, file_path) catch {
-                                self.allocator.free(content);
-                                self.allocator.free(old_content);
-                                continue;
-                            };
-                            errdefer self.allocator.free(file_path_copy);
-
-                            self.pending_highlight_jobs.put(key, .{
-                                .file_path = file_path_copy,
-                                .content = content,
-                                .old_content = old_content,
-                            }) catch {
-                                self.allocator.free(file_path_copy);
-                                self.allocator.free(content);
-                                self.allocator.free(old_content);
-                                continue;
-                            };
-
-                            worker.submitJob(.{
-                                .file_path = file_path_copy,
-                                .content = content,
-                                .old_content = old_content,
-                                .file_idx = check_idx,
-                                .hunk_idx = hunk_idx,
-                            }) catch {
-                                if (self.pending_highlight_jobs.fetchRemove(key)) |entry| {
-                                    self.allocator.free(entry.value.file_path);
-                                    self.allocator.free(entry.value.content);
-                                    self.allocator.free(entry.value.old_content);
-                                }
-                                continue;
-                            };
-
-                            hunks_submitted += 1;
-                        }
-                    }
-                }
-
-                // Reset the flag after processing
-                self.needs_async_highlight = false;
-            }
+            _ = self.highlighter_jobs.submitVisible(.{
+                .files = self.state.files,
+                .line_map = &self.state.line_map,
+                .viewport = .{
+                    .scroll_offset = self.state.global_scroll_offset,
+                    .height = self.state.viewport_height,
+                },
+            });
+            self.needs_async_highlight = false;
 
             if (self.state.show_blame) {
                 blame_ctrl.requestBlameForViewport(&self.blame, self.blameViewportParams());
@@ -3558,8 +3380,7 @@ test "queueSelectedAgentConnection switches to agent mode and queues selection" 
         .frame_text_used = 0,
         .frame_segment_arena = std.heap.ArenaAllocator.init(allocator),
         .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
+        .highlighter_jobs = highlight_scheduler.HighlightScheduler.init(allocator),
         .needs_render = false,
         .needs_async_highlight = false,
         .tui_server = null,
@@ -3577,7 +3398,7 @@ test "queueSelectedAgentConnection switches to agent mode and queues selection" 
         .profile_active_frame = false,
         .profile_counters = .{},
     };
-    defer app.pending_highlight_jobs.deinit();
+    defer app.highlighter_jobs.deinit();
     defer app.blame.deinit();
     defer app.frame_segment_arena.deinit();
 
@@ -3612,8 +3433,7 @@ test "isSessionInitializing returns true for queued agent connection" {
         .frame_text_used = 0,
         .frame_segment_arena = std.heap.ArenaAllocator.init(allocator),
         .syntax_highlighter = undefined,
-        .highlight_worker = null,
-        .pending_highlight_jobs = std.AutoHashMap(HunkKey, PendingJob).init(allocator),
+        .highlighter_jobs = highlight_scheduler.HighlightScheduler.init(allocator),
         .needs_render = false,
         .needs_async_highlight = false,
         .tui_server = null,
@@ -3631,7 +3451,7 @@ test "isSessionInitializing returns true for queued agent connection" {
         .profile_active_frame = false,
         .profile_counters = .{},
     };
-    defer app.pending_highlight_jobs.deinit();
+    defer app.highlighter_jobs.deinit();
     defer app.blame.deinit();
     defer app.frame_segment_arena.deinit();
 

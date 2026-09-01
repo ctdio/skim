@@ -758,7 +758,7 @@ fn freeApp(allocator: Allocator, app: *App) void {
     app.state.expanded_comments.deinit();
     app.state.collapsed_folds.deinit();
     app.state.branch_stats_cache.deinit();
-    app.pending_highlight_jobs.deinit();
+    app.highlighter_jobs.deinitWithoutWorker();
     app.frame_segment_arena.deinit();
     app.blame.deinit();
     app.syntax_highlighter.deinit();
