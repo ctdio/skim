@@ -538,9 +538,10 @@ fn outputCommentsHuman(writer: anytype, result: std.json.Value) !void {
     for (comments.array.items, 0..) |comment, idx| {
         if (comment == .object) {
             const c = comment.object;
-            const file_path = if (c.get("file_path")) |f| if (f == .string) f.string else "?" else "?";
+            const file = if (c.get("file")) |f| if (f == .string) f.string else "?" else "?";
+            const line = if (c.get("line")) |l| if (l == .integer) @as(i64, l.integer) else 0 else 0;
             const text = if (c.get("text")) |t| if (t == .string) t.string else "" else "";
-            try writer.print("  [{d}] {s}\n", .{ idx, file_path });
+            try writer.print("  [{d}] {s}:{d}\n", .{ idx, file, line });
             try writer.print("      {s}\n\n", .{text});
         }
     }

@@ -301,6 +301,10 @@ pub fn handleAddComment(app: *App, params: ?std.json.Value) tui_server.Response 
 }
 
 /// Handle list_comments request
+///
+/// Reports each comment in the same `file`/`line`/`line_type` vocabulary
+/// `add_comment` accepts, so a listed comment can be pointed at again without
+/// knowing the store's hunk coordinates.
 pub fn handleListComments(app: *App) tui_server.Response {
     var result: std.json.ObjectMap = .empty;
 
@@ -308,9 +312,13 @@ pub fn handleListComments(app: *App) tui_server.Response {
     for (app.state.comment_store.comments.items, 0..) |comment, idx| {
         var comment_obj: std.json.ObjectMap = .empty;
         comment_obj.put(app.allocator, "index", .{ .integer = @intCast(idx) }) catch continue;
-        comment_obj.put(app.allocator, "file_path", .{ .string = app.allocator.dupe(u8, comment.file_path) catch continue }) catch continue;
-        comment_obj.put(app.allocator, "hunk_idx", .{ .integer = @intCast(comment.hunk_idx) }) catch continue;
-        comment_obj.put(app.allocator, "line_idx", .{ .integer = @intCast(comment.line_idx) }) catch continue;
+        comment_obj.put(app.allocator, "file", .{ .string = app.allocator.dupe(u8, comment.file_path) catch continue }) catch continue;
+        // A deleted line only has an old-file number; everything else is addressed
+        // by its new-file number, which is what `add_comment` resolves first.
+        const lineno: i64 = if (comment.new_lineno) |n| @intCast(n) else if (comment.old_lineno) |o| @intCast(o) else 0;
+        const line_type: []const u8 = if (comment.new_lineno != null) "new" else "old";
+        comment_obj.put(app.allocator, "line", .{ .integer = lineno }) catch continue;
+        comment_obj.put(app.allocator, "line_type", .{ .string = app.allocator.dupe(u8, line_type) catch continue }) catch continue;
         comment_obj.put(app.allocator, "author", .{ .string = app.allocator.dupe(u8, comment.author) catch continue }) catch continue;
         comment_obj.put(app.allocator, "text", .{ .string = app.allocator.dupe(u8, comment.text) catch continue }) catch continue;
 

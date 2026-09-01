@@ -1810,6 +1810,20 @@ test "list_comments reports the comment the visitor typed" {
     try std.testing.expect(std.mem.indexOf(u8, answer, "src/greet.zig") != null);
 }
 
+test "list_comments reports the file and line an agent can comment on again" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"name is never checked"}
+    );
+
+    const answer = try session.listComments();
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"file\":\"src/greet.zig\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"line\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"line_type\":\"new\"") != null);
+}
+
 test "list_comments on a diff with no comments reports an empty list" {
     var session = try openTestSession(std.testing.allocator);
     defer session.deinit();
