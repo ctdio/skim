@@ -13,6 +13,7 @@ const parser = review.parser;
 const line_map = review.line_map;
 const comments = review.comments;
 const thread_block = review.thread_block;
+const comment_block = review.comment_block;
 const thread_hint = review.thread_hint;
 const harness = review.harness;
 const snapshot = review.snapshot;
@@ -635,6 +636,8 @@ test "snapshot: review_thread_reply_input" {
     editor.vim.setText("good catch, fixing now");
     editor.vim.cursor_pos = editor.vim.text_len;
     app.state.active_comment_input = editor;
+    app.mode = .comment;
+    defer app.mode = .normal;
 
     try renderThreadWithInputSnapshot("review_thread_reply_input", &app, .{
         .thread = &thread,
@@ -833,6 +836,346 @@ test "snapshot: review_side_by_side_edit_input" {
 }
 
 // =============================================================================
+// comment blocks: replies, expand/collapse
+// =============================================================================
+
+test "snapshot: comment_no_replies" {
+    var fixture = try CommentFixture.init("why is this not cached?");
+    defer fixture.deinit();
+
+    try renderCommentSnapshot("comment_no_replies", &fixture, .{});
+}
+
+test "snapshot: comment_focused_hints" {
+    var fixture = try CommentFixture.init("why is this not cached?");
+    defer fixture.deinit();
+
+    try renderCommentSnapshot("comment_focused_hints", &fixture, .{ .is_cursor = true });
+}
+
+test "snapshot: comment_replies_collapsed" {
+    var fixture = try CommentFixture.init("why is this not cached?");
+    defer fixture.deinit();
+    try fixture.addReply("claude", "foo() memoizes internally");
+    try fixture.addReply("you", "ok, drop the TODO then");
+
+    try renderCommentSnapshot("comment_replies_collapsed", &fixture, .{});
+}
+
+test "snapshot: comment_replies_expanded" {
+    var fixture = try CommentFixture.init("why is this not cached?");
+    defer fixture.deinit();
+    try fixture.addReply("claude", "foo() memoizes internally");
+    try fixture.addReply("you", "ok, drop the TODO then");
+
+    try renderCommentSnapshot("comment_replies_expanded", &fixture, .{ .expanded = true });
+}
+
+test "snapshot: comment_reply_wraps" {
+    var fixture = try CommentFixture.init("short");
+    defer fixture.deinit();
+    try fixture.addReply("claude", "this reply is long enough that it has to wrap across more than one rendered row inside the block");
+
+    try renderCommentSnapshot("comment_reply_wraps", &fixture, .{ .expanded = true });
+}
+
+test "snapshot: comment_reply_editor_open" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var fixture = try CommentFixture.init("why is this not cached?");
+    defer fixture.deinit();
+    try fixture.addReply("claude", "foo() memoizes internally");
+
+    try renderCommentWithReplyEditorSnapshot("comment_reply_editor_open", &app, &fixture, "because the caller needs it");
+}
+
+test "snapshot: comment_reply_editor_empty" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var fixture = try CommentFixture.init("why is this not cached?");
+    defer fixture.deinit();
+
+    try renderCommentWithReplyEditorSnapshot("comment_reply_editor_empty", &app, &fixture, "");
+}
+
+test "snapshot: comment_replies_collapsed_singular" {
+    var fixture = try CommentFixture.init("why is this not cached?");
+    defer fixture.deinit();
+    try fixture.addReply("claude", "foo() memoizes internally");
+
+    try renderCommentSnapshot("comment_replies_collapsed_singular", &fixture, .{});
+}
+
+test "snapshot: comment_replies_focused_hints" {
+    var fixture = try CommentFixture.init("why is this not cached?");
+    defer fixture.deinit();
+    try fixture.addReply("claude", "foo() memoizes internally");
+
+    try renderCommentSnapshot("comment_replies_focused_hints", &fixture, .{ .expanded = true, .is_cursor = true });
+}
+
+test "snapshot: comment_authored_by_agent" {
+    var fixture = try CommentFixture.init("this allocation is never freed");
+    defer fixture.deinit();
+    fixture.comment.author = "claude";
+
+    try renderCommentSnapshot("comment_authored_by_agent", &fixture, .{});
+}
+
+test "a collapsed comment tells the reader which key opens its replies" {
+    var fixture = try CommentFixture.init("root");
+    defer fixture.deinit();
+    try fixture.addReply("claude", "one");
+
+    const text = try planRowsToText(&fixture, .{});
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "1 reply (press o to expand)") != null);
+}
+
+test "the focused label row advertises the reply key" {
+    var fixture = try CommentFixture.init("root");
+    defer fixture.deinit();
+
+    const text = try planRowsToText(&fixture, .{ .is_cursor = true });
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "r:Reply") != null);
+}
+
+test "an unfocused comment shows no key hints" {
+    var fixture = try CommentFixture.init("root");
+    defer fixture.deinit();
+
+    const text = try planRowsToText(&fixture, .{});
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "r:Reply") == null);
+}
+
+test "a terminal too narrow for the hints drops them rather than clipping them" {
+    var fixture = try CommentFixture.init("root");
+    defer fixture.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const rows = try comment_block.planRows(arena.allocator(), fixture.info(.{ .is_cursor = true }), 24);
+
+    // The label row is spans[1]; a clipped hint would show up as a truncated
+    // "Enter:Edit  r:Rep" tail on it.
+    for (rows) |planned| {
+        for (planned.spans) |span| {
+            try testing.expect(std.mem.indexOf(u8, span.text, "Enter") == null);
+        }
+    }
+}
+
+test "a collapsed comment summarises its replies in a single row" {
+    var fixture = try CommentFixture.init("root");
+    defer fixture.deinit();
+    try fixture.addReply("claude", "one");
+    try fixture.addReply("claude", "two");
+
+    const collapsed = comment_block.commentBlockHeight(testing.allocator, fixture.info(.{}), 60);
+
+    // top spacer + label + one body row + reply summary + bottom spacer
+    try testing.expectEqual(@as(usize, 5), collapsed);
+}
+
+test "expanding a comment adds a row per reply plus its byline and separator" {
+    var fixture = try CommentFixture.init("root");
+    defer fixture.deinit();
+    try fixture.addReply("claude", "one");
+    try fixture.addReply("claude", "two");
+
+    const expanded = comment_block.commentBlockHeight(testing.allocator, fixture.info(.{ .expanded = true }), 60);
+
+    // The collapsed block's 5 rows, minus the 1-row summary, plus 3 rows per
+    // reply (separator + byline + body).
+    try testing.expectEqual(@as(usize, 4 + 3 * 2), expanded);
+}
+
+test "a comment with no replies is the same height expanded or collapsed" {
+    var fixture = try CommentFixture.init("root");
+    defer fixture.deinit();
+
+    const collapsed = comment_block.commentBlockHeight(testing.allocator, fixture.info(.{}), 60);
+    const expanded = comment_block.commentBlockHeight(testing.allocator, fixture.info(.{ .expanded = true }), 60);
+
+    try testing.expectEqual(collapsed, expanded);
+}
+
+test "commentBlockHeight equals the rows renderCommentDisplay actually draws" {
+    const allocator = testing.allocator;
+    var app = try initRenderApp(allocator);
+    defer deinitRenderApp(&app);
+
+    var fixture = try CommentFixture.init("why is this not cached?");
+    defer fixture.deinit();
+    try fixture.addReply("claude", "foo() memoizes internally, so the extra layer would buy nothing here");
+    try fixture.addReply("you", "ok, drop the TODO then");
+
+    app.state.expanded_comments = std.AutoHashMap(u64, void).init(allocator);
+    defer app.state.expanded_comments.deinit();
+    try app.state.expanded_comments.put(fixture.comment.id, {});
+
+    const width = 80;
+    const gutter_width = 4;
+    var ctx = try harness.createTestContext(allocator, width, 40);
+    defer ctx.deinit();
+
+    const content_width = width - (1 + gutter_width + 2);
+    const height = comment_block.commentBlockHeight(allocator, fixture.info(.{ .expanded = true }), content_width);
+    const drawn = try RenderUtils.renderCommentDisplay(&app, ctx.window(), &fixture.comment, 0, gutter_width, false);
+
+    try testing.expectEqual(height, drawn);
+}
+
+/// A comment plus its replies, owned so tests can add replies without hand-rolling
+/// allocation for each one.
+const CommentFixture = struct {
+    comment: comments.Comment,
+
+    fn init(text: []const u8) !CommentFixture {
+        return .{ .comment = .{
+            .id = 1,
+            .file_path = "src/x.zig",
+            .hunk_idx = 0,
+            .line_idx = 0,
+            .author = comments.local_author,
+            .text = text,
+            .replies = .empty,
+            .end_hunk_idx = null,
+            .end_line_idx = null,
+            .line_type = .add,
+            .line_content = "    const x = foo();",
+            .old_lineno = null,
+            .new_lineno = 42,
+        } };
+    }
+
+    fn addReply(self: *CommentFixture, author: []const u8, text: []const u8) !void {
+        try self.comment.replies.append(testing.allocator, .{ .author = author, .text = text });
+    }
+
+    fn info(self: *CommentFixture, opts: struct { expanded: bool = false, is_cursor: bool = false }) comment_block.CommentRenderInfo {
+        return .{ .comment = &self.comment, .expanded = opts.expanded, .is_cursor = opts.is_cursor };
+    }
+
+    fn deinit(self: *CommentFixture) void {
+        self.comment.replies.deinit(testing.allocator);
+    }
+};
+
+/// Draw the comment block and, immediately under it, the open reply editor —
+/// mirroring the production placement in `unified.zig`/`side_by_side.zig`. This
+/// is the moment a user actually sees when they press `r`.
+fn renderCommentWithReplyEditorSnapshot(
+    name: []const u8,
+    app: *App,
+    fixture: *CommentFixture,
+    draft: []const u8,
+) !void {
+    const allocator = testing.allocator;
+
+    app.state.expanded_comments = std.AutoHashMap(u64, void).init(allocator);
+    defer app.state.expanded_comments.deinit();
+    // Replying expands the thread, so the editor is never drawn under a
+    // collapsed block in production.
+    try app.state.expanded_comments.put(fixture.comment.id, {});
+
+    var editor = CommentEditor.State{
+        .target_file_path = "src/x.zig",
+        .target_hunk_idx = 0,
+        .target_line_idx = 0,
+        .target_end_hunk_idx = null,
+        .target_end_line_idx = null,
+        .editing_comment_idx = null,
+        .target = .local,
+        .edit_context = .{ .local_reply = .{ .comment_id = fixture.comment.id } },
+        .vim = CommentEditor.VimEditor.State.initWithMode(.insert),
+    };
+    editor.vim.setText(draft);
+    editor.vim.cursor_pos = editor.vim.text_len;
+    app.state.active_comment_input = editor;
+
+    var ctx = try harness.createTestContext(allocator, 72, 24);
+    defer ctx.deinit();
+
+    const gutter_width = 4;
+    const rows = try RenderUtils.renderCommentDisplay(app, ctx.window(), &fixture.comment, 0, gutter_width, true);
+    _ = try RenderUtils.renderCommentInputBox(app, ctx.window(), rows, gutter_width);
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, name, text);
+}
+
+/// The planned rows joined into text, for assertions that care about wording
+/// rather than pixel placement.
+fn planRowsToText(
+    fixture: *CommentFixture,
+    opts: struct { expanded: bool = false, is_cursor: bool = false },
+) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const rows = try comment_block.planRows(
+        arena.allocator(),
+        fixture.info(.{ .expanded = opts.expanded, .is_cursor = opts.is_cursor }),
+        72,
+    );
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(testing.allocator);
+    for (rows) |planned| {
+        for (planned.spans) |span| try out.appendSlice(testing.allocator, span.text);
+        try out.append(testing.allocator, '\n');
+    }
+    return out.toOwnedSlice(testing.allocator);
+}
+
+/// Draw a comment block through the app-free row planner and snapshot the result.
+/// Styles are irrelevant to the text capture, so the block is drawn plainly.
+fn renderCommentSnapshot(
+    name: []const u8,
+    fixture: *CommentFixture,
+    opts: struct { expanded: bool = false, is_cursor: bool = false },
+) !void {
+    const allocator = testing.allocator;
+    var ctx = try harness.createTestContext(allocator, 64, 20);
+    defer ctx.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const rows = try comment_block.planRows(
+        arena.allocator(),
+        fixture.info(.{ .expanded = opts.expanded, .is_cursor = opts.is_cursor }),
+        64,
+    );
+
+    const win = ctx.window();
+    for (rows, 0..) |planned, row| {
+        var col: u16 = 0;
+        for (planned.spans) |span| {
+            var seg = [_]vaxis.Cell.Segment{.{ .text = span.text, .style = .{} }};
+            _ = win.print(&seg, .{ .row_offset = @intCast(row), .col_offset = col });
+            col += @intCast(review.widthUtil.displayWidth(span.text));
+        }
+    }
+
+    const text = try ctx.captureToText();
+    defer allocator.free(text);
+    try snapshot.expectSnapshot(allocator, name, text);
+}
+
+// =============================================================================
 // side-by-side saved comment: background parity with the unified view
 // =============================================================================
 
@@ -841,17 +1184,20 @@ test "side-by-side comment keeps the comment background when not focused" {
     var app = try initRenderApp(allocator);
     defer deinitRenderApp(&app);
 
-    app.state.expanded_comments = std.AutoHashMap(usize, void).init(allocator);
+    app.state.expanded_comments = std.AutoHashMap(u64, void).init(allocator);
     defer app.state.expanded_comments.deinit();
 
     var ctx = try harness.createTestContext(allocator, 100, 24);
     defer ctx.deinit();
 
     const comment = comments.Comment{
+        .id = 1,
         .file_path = "src/x.zig",
         .hunk_idx = 0,
         .line_idx = 0,
+        .author = comments.local_author,
         .text = "needs a guard",
+        .replies = .empty,
         .end_hunk_idx = null,
         .end_line_idx = null,
         .line_type = .context,
@@ -860,7 +1206,7 @@ test "side-by-side comment keeps the comment background when not focused" {
         .new_lineno = 10,
     };
 
-    const rows = try SideBySideRenderer.renderSideBySideComment(&app, ctx.window(), &comment, 0, 0, 40, 40, 4, .context, false);
+    const rows = try SideBySideRenderer.renderSideBySideComment(&app, ctx.window(), &comment, 0, 40, 40, 4, .context, false);
     try testing.expect(rows > 0);
 
     // Every cell of the box, border through trailing spacer, carries comment_bg.
@@ -879,17 +1225,20 @@ test "side-by-side comment uses the hover background when focused" {
     var app = try initRenderApp(allocator);
     defer deinitRenderApp(&app);
 
-    app.state.expanded_comments = std.AutoHashMap(usize, void).init(allocator);
+    app.state.expanded_comments = std.AutoHashMap(u64, void).init(allocator);
     defer app.state.expanded_comments.deinit();
 
     var ctx = try harness.createTestContext(allocator, 100, 24);
     defer ctx.deinit();
 
     const comment = comments.Comment{
+        .id = 1,
         .file_path = "src/x.zig",
         .hunk_idx = 0,
         .line_idx = 0,
+        .author = comments.local_author,
         .text = "needs a guard",
+        .replies = .empty,
         .end_hunk_idx = null,
         .end_line_idx = null,
         .line_type = .context,
@@ -898,7 +1247,7 @@ test "side-by-side comment uses the hover background when focused" {
         .new_lineno = 10,
     };
 
-    const rows = try SideBySideRenderer.renderSideBySideComment(&app, ctx.window(), &comment, 0, 0, 40, 40, 4, .context, true);
+    const rows = try SideBySideRenderer.renderSideBySideComment(&app, ctx.window(), &comment, 0, 40, 40, 4, .context, true);
     try testing.expect(rows > 0);
 
     const cell = ctx.screen.readCell(9, 0).?;
@@ -919,7 +1268,7 @@ fn initRenderApp(allocator: std.mem.Allocator) !App {
     var syntax_highlighter = try review.SyntaxHighlighter.init(allocator);
     errdefer syntax_highlighter.deinit();
 
-    return .{
+    var app: App = .{
         .allocator = allocator,
         .vx = null,
         .tty = null,
@@ -934,7 +1283,7 @@ fn initRenderApp(allocator: std.mem.Allocator) !App {
         .header_line_buffers = undefined,
         .frame_text_buffer = frame_buffer,
         .frame_text_used = 0,
-        .frame_segment_arena = undefined,
+        .frame_segment_arena = std.heap.ArenaAllocator.init(allocator),
         .syntax_highlighter = syntax_highlighter,
         .highlighter_jobs = undefined,
         .needs_render = false,
@@ -954,11 +1303,17 @@ fn initRenderApp(allocator: std.mem.Allocator) !App {
         .profile_active_frame = false,
         .profile_counters = .{},
     };
+
+    // `state` is otherwise `undefined`; the renderers read this field to decide
+    // whether a reply editor is open, and a garbage tag panics the switch.
+    app.state.active_comment_input = null;
+    return app;
 }
 
 fn deinitRenderApp(app: *App) void {
     if (app.tab_manager) |*tm| tm.deinit();
     app.syntax_highlighter.deinit();
+    app.frame_segment_arena.deinit();
     app.allocator.free(app.frame_text_buffer);
 }
 

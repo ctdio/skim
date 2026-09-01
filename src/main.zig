@@ -406,6 +406,9 @@ fn runCommentCommand(allocator: std.mem.Allocator, args: []const []const u8) !vo
     if (std.mem.eql(u8, args[2], "add")) {
         const parsed = cli.comment.parseAddArgs(args);
         try cli.comment.runAdd(allocator, parsed);
+    } else if (std.mem.eql(u8, args[2], "reply")) {
+        const parsed = cli.comment.parseReplyArgs(args);
+        try cli.comment.runReply(allocator, parsed);
     } else if (std.mem.eql(u8, args[2], "list")) {
         const parsed = cli.comment.parseListArgs(args);
         try cli.comment.runList(allocator, parsed);
@@ -445,6 +448,7 @@ fn printMcpHelp() !void {
         \\    list_sessions        List all running skim TUI sessions
         \\    get_context          Get diff context and comments from a session
         \\    add_comment          Add a comment to a line in the diff
+        \\    reply_to_comment     Reply to an existing comment thread
         \\    list_comments        List all comments in a session
         \\    delete_comment       Delete a comment by index
         \\

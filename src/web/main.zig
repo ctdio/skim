@@ -178,6 +178,14 @@ export fn skimAddComment(ptr: [*]const u8, len: usize) i32 {
     return @intFromEnum(Status.ok);
 }
 
+/// Serve an MCP `reply_comment` request. `ptr[0..len]` is the JSON params object
+/// the tool sends. Read the answer with `skimJsonPtr` and `skimJsonLen`.
+export fn skimReplyComment(ptr: [*]const u8, len: usize) i32 {
+    var session = &(active orelse return @intFromEnum(Status.no_session));
+    _ = session.replyComment(ptr[0..len]) catch return @intFromEnum(Status.request_failed);
+    return @intFromEnum(Status.ok);
+}
+
 /// Serve an MCP `list_comments` request. Read the answer with `skimJsonPtr` and
 /// `skimJsonLen`.
 export fn skimListComments() i32 {

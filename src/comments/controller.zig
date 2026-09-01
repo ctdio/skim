@@ -9,6 +9,7 @@ const std = @import("std");
 
 const App = @import("../app.zig").App;
 const comment_editor = @import("editor.zig");
+const comment_store = @import("store.zig");
 const clipboard = @import("../clipboard.zig");
 const navigation = @import("../navigation.zig");
 const hunk_view = @import("../hunk_view.zig");
@@ -193,6 +194,35 @@ pub const CommentController = struct {
         app.state.visual_anchor = null;
     }
 
+    /// Open the inline editor to reply to the local comment under the cursor.
+    /// No-op when the cursor is not on a comment. The thread is expanded first so
+    /// the reply lands somewhere the reviewer can actually see it.
+    pub fn startLocalReplyInput(app: *App) !void {
+        const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return;
+        const comment_info = switch (record.line_type) {
+            .comment_line => |info| info,
+            else => return,
+        };
+
+        const comment = app.state.comment_store.getComment(comment_info.comment_idx) orelse return;
+
+        app.state.expanded_comments.put(comment.id, {}) catch {};
+
+        app.state.active_comment_input = .{
+            .target_file_path = comment.file_path,
+            .target_hunk_idx = comment_info.parent_hunk_idx,
+            .target_line_idx = comment_info.parent_line_idx,
+            .target_end_hunk_idx = null,
+            .target_end_line_idx = null,
+            .editing_comment_idx = null,
+            .target = .local,
+            .edit_context = .{ .local_reply = .{ .comment_id = comment.id } },
+            .vim = comment_editor.CommentEditor.VimEditor.State.initWithMode(.insert),
+        };
+        app.mode = .comment;
+        Navigation.ensureCommentBoxVisible(app);
+    }
+
     /// Open the inline editor to reply to the review thread at `thread_idx`
     /// (FR-5). Refuses when the thread is still an unposted placeholder or busy.
     /// Pre-fills a previously failed reply/edit body for draft safety (AD-8).
@@ -275,12 +305,11 @@ pub const CommentController = struct {
         // mutation instead of the diff-coordinate comment path (FR-5). The
         // browser build never opens a review session, so the branch is dead
         // there — and it spawns a thread and `gh`, which wasm has neither of.
-        if (!platform.is_web) {
-            switch (input.edit_context) {
-                .none => {},
-                .reply => |r| return saveReply(app, r.thread_id, input),
-                .edit_own => |e| return saveEditOwn(app, e.comment_id, input),
-            }
+        switch (input.edit_context) {
+            .none => {},
+            .local_reply => |lr| return saveLocalReply(app, lr.comment_id, input),
+            .reply => |r| if (!platform.is_web) return saveReply(app, r.thread_id, input),
+            .edit_own => |e| if (!platform.is_web) return saveEditOwn(app, e.comment_id, input),
         }
 
         if (std.mem.trim(u8, input.vim.text_buffer[0..input.vim.text_len], " \t\r\n").len == 0) {
@@ -341,33 +370,31 @@ pub const CommentController = struct {
                     return false;
                 }
                 // Add range comment
-                try app.state.comment_store.addRangeComment(
-                    input.target_file_path,
-                    input.target_hunk_idx,
-                    input.target_line_idx,
-                    end_hunk_idx,
-                    end_line_idx,
-                    comment_text,
-                    line.line_type,
-                    line.content,
-                    line.old_lineno,
-                    line.new_lineno,
-                );
+                saved_comment_idx = try app.state.comment_store.add(.{
+                    .file_path = input.target_file_path,
+                    .hunk_idx = input.target_hunk_idx,
+                    .line_idx = input.target_line_idx,
+                    .end_hunk_idx = end_hunk_idx,
+                    .end_line_idx = end_line_idx,
+                    .text = comment_text,
+                    .line_type = line.line_type,
+                    .line_content = line.content,
+                    .old_lineno = line.old_lineno,
+                    .new_lineno = line.new_lineno,
+                });
             } else {
                 // Add single-line comment
-                try app.state.comment_store.addComment(
-                    input.target_file_path,
-                    input.target_hunk_idx,
-                    input.target_line_idx,
-                    comment_text,
-                    line.line_type,
-                    line.content,
-                    line.old_lineno,
-                    line.new_lineno,
-                );
+                saved_comment_idx = try app.state.comment_store.add(.{
+                    .file_path = input.target_file_path,
+                    .hunk_idx = input.target_hunk_idx,
+                    .line_idx = input.target_line_idx,
+                    .text = comment_text,
+                    .line_type = line.line_type,
+                    .line_content = line.content,
+                    .old_lineno = line.old_lineno,
+                    .new_lineno = line.new_lineno,
+                });
             }
-            // New comment is at the end of the list
-            saved_comment_idx = app.state.comment_store.comments.items.len - 1;
         }
 
         // Rebuild LineMap since comment count changed
@@ -586,17 +613,27 @@ pub const CommentController = struct {
         Navigation.clampScrollOffset(app);
     }
 
-    // Check if a comment is expanded (collapsed by default)
+    // Check if a comment is expanded (collapsed by default). The set is keyed by
+    // stable id, not index, so deleting a comment cannot hand its expansion state
+    // to whichever comment shifts down into its slot.
     pub fn isCommentExpanded(app: *App, comment_idx: usize) bool {
-        return app.state.expanded_comments.contains(comment_idx);
+        const id = app.state.comment_store.idAt(comment_idx) orelse return false;
+        return isCommentExpandedById(app, id);
+    }
+
+    /// Expansion state for a comment already in hand. The renderers use this so
+    /// they never have to walk back through the store for an id they hold.
+    pub fn isCommentExpandedById(app: *App, comment_id: u64) bool {
+        return app.state.expanded_comments.contains(comment_id);
     }
 
     // Toggle comment expanded/collapsed state
     pub fn toggleCommentExpanded(app: *App, comment_idx: usize) void {
-        if (app.state.expanded_comments.contains(comment_idx)) {
-            _ = app.state.expanded_comments.remove(comment_idx);
+        const id = app.state.comment_store.idAt(comment_idx) orelse return;
+        if (app.state.expanded_comments.contains(id)) {
+            _ = app.state.expanded_comments.remove(id);
         } else {
-            app.state.expanded_comments.put(comment_idx, {}) catch {};
+            app.state.expanded_comments.put(id, {}) catch {};
         }
     }
 
@@ -661,6 +698,44 @@ pub const CommentController = struct {
 
         app.rebuildReviewLineMap();
         app.showStatusMessage("posting draft comment…");
+        return true;
+    }
+
+    /// Append the editor's contents to a local comment's thread. An empty body
+    /// closes the editor without posting — same as cancelling. A reply changes the
+    /// block's height but not the LineMap's record count, so no rebuild is needed.
+    fn saveLocalReply(app: *App, comment_id: u64, input: comment_editor.CommentEditor.State) !bool {
+        const body = input.vim.text_buffer[0..input.vim.text_len];
+        if (std.mem.trim(u8, body, " \t\r\n").len == 0) return true;
+
+        // Re-resolve the id now: an agent may have deleted a lower-indexed
+        // comment over MCP while this editor was open, shifting every index above
+        // it. Resolving late is what keeps the reply on the comment the user
+        // actually aimed at — or reports it gone rather than misfiling it.
+        const comment_idx = app.state.comment_store.findById(comment_id) orelse {
+            app.showStatusMessage("comment no longer exists");
+            return true;
+        };
+
+        _ = app.state.comment_store.addReply(comment_idx, comment_store.local_author, body) catch |err| {
+            std.log.err("failed to add reply: {any}", .{err});
+            app.showStatusError("failed to save reply");
+            return false;
+        };
+
+        app.state.expanded_comments.put(comment_id, {}) catch {};
+
+        // Close the editor before scrolling. The caller clears it too, but the
+        // block reserves a different number of rows while a reply editor is open
+        // under it, so scrolling first would aim at a layout that is about to
+        // change.
+        app.state.active_comment_input = null;
+
+        if (app.state.line_map.findLineByCommentIdx(comment_idx)) |comment_line| {
+            app.state.global_cursor_line = comment_line;
+        }
+        Navigation.ensureCommentBoxVisible(app);
+        app.needs_render = true;
         return true;
     }
 

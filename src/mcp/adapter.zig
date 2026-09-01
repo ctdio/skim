@@ -55,6 +55,7 @@ pub const McpAdapter = struct {
         server.tool("get_context", "Get diff context and comments from a skim session", GetContextParams, handleGetContext) catch {};
         server.tool("get_diff", "Get the full diff content with line numbers. Use this to see what lines exist before adding comments.", GetDiffParams, handleGetDiff) catch {};
         server.tool("add_comment", "Add a comment to a line in the diff", AddCommentParams, handleAddComment) catch {};
+        server.tool("reply_to_comment", "Reply to an existing comment thread. Use list_comments to find the comment index, and pass your own name as `author` so the reviewer can tell who answered.", ReplyToCommentParams, handleReplyToComment) catch {};
         server.tool("list_comments", "List all comments in a skim session", ListCommentsParams, handleListComments) catch {};
         server.tool("delete_comment", "Delete a comment by index", DeleteCommentParams, handleDeleteComment) catch {};
 
@@ -269,6 +270,14 @@ const AddCommentParams = struct {
     line: u32,
     line_type: []const u8 = "new",
     text: []const u8,
+    author: []const u8 = "",
+};
+
+const ReplyToCommentParams = struct {
+    session_id: []const u8 = "",
+    index: u32,
+    text: []const u8,
+    author: []const u8 = "",
 };
 
 const ListCommentsParams = struct {
@@ -505,6 +514,7 @@ fn handleAddComment(ctx: *framework.Context, args: ?std.json.Value) framework.Re
     req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "line") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .integer = @as(i64, @intCast(line.?)) }) catch {};
     req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "line_type") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, line_type) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
     req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "text") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, text.?) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
+    putAuthor(ctx, &req_params, obj);
 
     var response = client.request("add_comment", "mcp-add", .{ .object = req_params }) catch {
         return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
@@ -528,6 +538,81 @@ fn handleAddComment(ctx: *framework.Context, args: ?std.json.Value) framework.Re
             };
         },
     }
+}
+
+fn handleReplyToComment(ctx: *framework.Context, args: ?std.json.Value) framework.Result {
+    const params = args orelse {
+        return framework.Result.mcpError(framework.ErrorCode.invalid_params, "Missing parameters");
+    };
+
+    if (params != .object) {
+        return framework.Result.mcpError(framework.ErrorCode.invalid_params, "Invalid parameters");
+    }
+
+    const obj = params.object;
+
+    const index = if (obj.get("index")) |i| if (i == .integer) @as(u32, @intCast(i.integer)) else null else null;
+    const text = if (obj.get("text")) |t| if (t == .string) t.string else null else null;
+
+    if (index == null or text == null) {
+        return framework.Result.mcpError(framework.ErrorCode.invalid_params, "Missing required parameters: index, text");
+    }
+
+    const session_pid = parseSessionId(args);
+
+    var client = cli_client.autoConnect(ctx.allocator, session_pid) catch |err| {
+        return switch (err) {
+            error.NoSessionsRunning => framework.Result.textError(ctx.allocator, "No skim sessions running") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "No sessions"),
+            error.AmbiguousSessions => framework.Result.textError(ctx.allocator, "Multiple sessions found, specify session_id") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Ambiguous"),
+            error.SessionNotFound => framework.Result.textError(ctx.allocator, "Session not found") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Not found"),
+            else => framework.Result.mcpError(framework.ErrorCode.internal_error, "Connection failed"),
+        };
+    };
+    defer client.deinit();
+
+    var req_params: std.json.ObjectMap = .empty;
+    defer req_params.deinit(ctx.allocator);
+
+    req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "index") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .integer = @as(i64, @intCast(index.?)) }) catch {};
+    req_params.put(ctx.allocator, ctx.allocator.dupe(u8, "text") catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed"), .{ .string = ctx.allocator.dupe(u8, text.?) catch return framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed") }) catch {};
+    putAuthor(ctx, &req_params, obj);
+
+    var response = client.request("reply_comment", "mcp-reply", .{ .object = req_params }) catch {
+        return framework.Result.mcpError(framework.ErrorCode.internal_error, "Request failed");
+    };
+
+    switch (response) {
+        .result => {
+            response.deinit(ctx.allocator);
+            return framework.Result.text(ctx.allocator, "Reply added successfully.") catch framework.Result.mcpError(framework.ErrorCode.internal_error, "Alloc failed");
+        },
+        .err => |e| {
+            // Must duplicate message before freeing response, as e.message points into response
+            const message = ctx.allocator.dupe(u8, e.message) catch {
+                response.deinit(ctx.allocator);
+                return framework.Result.mcpError(e.code, e.message);
+            };
+            response.deinit(ctx.allocator);
+            return framework.Result.textError(ctx.allocator, message) catch {
+                ctx.allocator.free(message);
+                return framework.Result.mcpError(framework.ErrorCode.internal_error, "Allocation failed");
+            };
+        },
+    }
+}
+
+/// Forward the caller's `author`, when it supplied a non-empty one. Omitted, the
+/// TUI attributes the message to the local reviewer.
+fn putAuthor(ctx: *framework.Context, req_params: *std.json.ObjectMap, obj: std.json.ObjectMap) void {
+    const val = obj.get("author") orelse return;
+    if (val != .string or val.string.len == 0) return;
+
+    const key = ctx.allocator.dupe(u8, "author") catch return;
+    const author = ctx.allocator.dupe(u8, val.string) catch {
+        ctx.allocator.free(key);
+        return;
+    };
+    req_params.put(ctx.allocator, key, .{ .string = author }) catch {};
 }
 
 fn handleListComments(ctx: *framework.Context, args: ?std.json.Value) framework.Result {

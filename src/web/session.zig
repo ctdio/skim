@@ -256,8 +256,20 @@ pub const Session = struct {
         return encodeResponse(self, mcp_handlers.handleAddComment(&self.app, parsed.value));
     }
 
+    /// Answer an MCP `reply_comment` request against the open diff.
+    ///
+    /// `params_text` is the JSON object the tool sends: `index`, `text`, and an
+    /// optional `author`. Like `addComment` this goes through
+    /// `mcp/handlers.zig`, so a reply the page shows arrived the way an agent's
+    /// reply arrives. The returned JSON is owned by the session.
+    pub fn replyComment(self: *Session, params_text: []const u8) ![]const u8 {
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, params_text, .{});
+        defer parsed.deinit();
+        return encodeResponse(self, mcp_handlers.handleReplyComment(&self.app, parsed.value));
+    }
+
     /// Answer an MCP `list_comments` request. Reports every comment on the open
-    /// diff, whoever wrote it.
+    /// diff, whoever wrote it, along with its replies.
     pub fn listComments(self: *Session) ![]const u8 {
         return encodeResponse(self, mcp_handlers.handleListComments(&self.app));
     }
@@ -696,6 +708,9 @@ fn normalKey(app: *App, key: vaxis.Key) !void {
             app.state.cursor_column = 0;
         },
         vaxis.Key.enter => try CommentController.startCommentInput(app),
+        // The TUI's `r` also refreshes the diff off a comment; the browser has no
+        // git to refresh from, so here it only ever means "reply".
+        'r' => try CommentController.startLocalReplyInput(app),
         'd' => try CommentController.deleteCommentUnderCursor(app),
         'D' => try CommentController.clearAllComments(app),
         'o' => CommentController.toggleCommentUnderCursorExpanded(app),
@@ -1571,6 +1586,216 @@ test "add_comment on a line the diff does not have reports an error" {
     try std.testing.expectEqual(@as(usize, 0), session.app.state.comment_store.comments.items.len);
 }
 
+test "r on a comment opens a reply editor titled Reply" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    try moveToCodeLine(&session);
+    try press(&session, vaxis.Key.enter);
+    try typeText(&session, "why the extra print");
+    try press(&session, vaxis.Key.enter);
+
+    try press(&session, 'r');
+
+    try std.testing.expect(session.app.mode == .comment);
+    try std.testing.expect(session.app.state.active_comment_input.?.edit_context == .local_reply);
+
+    const text = try renderPlain(&session);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Reply") != null);
+}
+
+test "saving the reply editor threads the reply under the comment" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    try moveToCodeLine(&session);
+    try press(&session, vaxis.Key.enter);
+    try typeText(&session, "why the extra print");
+    try press(&session, vaxis.Key.enter);
+
+    try press(&session, 'r');
+    try typeText(&session, "the caller needs it");
+    try press(&session, vaxis.Key.enter);
+
+    try std.testing.expect(session.app.mode == .normal);
+
+    const comment = session.app.state.comment_store.getComment(0).?;
+    try std.testing.expectEqual(@as(usize, 1), comment.replies.items.len);
+    try std.testing.expectEqualStrings("you", comment.replies.items[0].author);
+    try std.testing.expectEqualStrings("the caller needs it", comment.replies.items[0].text);
+}
+
+test "an empty reply editor leaves the comment unreplied" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    try moveToCodeLine(&session);
+    try press(&session, vaxis.Key.enter);
+    try typeText(&session, "why the extra print");
+    try press(&session, vaxis.Key.enter);
+
+    try press(&session, 'r');
+    try press(&session, vaxis.Key.enter);
+
+    try std.testing.expectEqual(@as(usize, 0), session.app.state.comment_store.replyCount(0));
+}
+
+test "r off a comment does not open a reply editor" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    try moveToCodeLine(&session);
+    try press(&session, 'r');
+
+    try std.testing.expect(session.app.mode == .normal);
+    try std.testing.expect(session.app.state.active_comment_input == null);
+}
+
+test "o collapses a replied comment back to a reply count" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    try moveToCodeLine(&session);
+    try press(&session, vaxis.Key.enter);
+    try typeText(&session, "why the extra print");
+    try press(&session, vaxis.Key.enter);
+
+    try press(&session, 'r');
+    try typeText(&session, "the caller needs it");
+    try press(&session, vaxis.Key.enter);
+
+    // Replying expands the thread, so the reply body is on screen.
+    const expanded = try renderPlain(&session);
+    defer std.testing.allocator.free(expanded);
+    try std.testing.expect(std.mem.indexOf(u8, expanded, "the caller needs it") != null);
+
+    try press(&session, 'o');
+
+    const collapsed = try renderPlain(&session);
+    defer std.testing.allocator.free(collapsed);
+    try std.testing.expect(std.mem.indexOf(u8, collapsed, "the caller needs it") == null);
+    try std.testing.expect(std.mem.indexOf(u8, collapsed, "1 reply") != null);
+}
+
+test "deleting a comment removes its replies from the diff" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    try moveToCodeLine(&session);
+    try press(&session, vaxis.Key.enter);
+    try typeText(&session, "why the extra print");
+    try press(&session, vaxis.Key.enter);
+
+    try press(&session, 'r');
+    try typeText(&session, "the caller needs it");
+    try press(&session, vaxis.Key.enter);
+
+    try press(&session, 'd');
+
+    try std.testing.expectEqual(@as(usize, 0), session.app.state.comment_store.comments.items.len);
+
+    const text = try renderPlain(&session);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "the caller needs it") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "why the extra print") == null);
+}
+
+test "reply_comment through the MCP handler threads the reply under the comment" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"name is never checked"}
+    );
+
+    const answer = try session.replyComment(
+        \\{"index":0,"text":"it is checked by the caller","author":"claude"}
+    );
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"success\":true") != null);
+
+    const comment = session.app.state.comment_store.getComment(0).?;
+    try std.testing.expectEqual(@as(usize, 1), comment.replies.items.len);
+    try std.testing.expectEqualStrings("claude", comment.replies.items[0].author);
+    try std.testing.expectEqualStrings("it is checked by the caller", comment.replies.items[0].text);
+}
+
+test "a reply is visible on the diff without the reader expanding anything" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"name is never checked"}
+    );
+    _ = try session.replyComment(
+        \\{"index":0,"text":"it is checked by the caller","author":"claude"}
+    );
+
+    const text = try renderPlain(&session);
+    defer std.testing.allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "name is never checked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "claude") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "it is checked by the caller") != null);
+}
+
+test "reply_comment without an author attributes the reply to the local reviewer" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"name is never checked"}
+    );
+    _ = try session.replyComment(
+        \\{"index":0,"text":"noted"}
+    );
+
+    const comment = session.app.state.comment_store.getComment(0).?;
+    try std.testing.expectEqualStrings("you", comment.replies.items[0].author);
+}
+
+test "reply_comment on a comment index that does not exist reports an error" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    const answer = try session.replyComment(
+        \\{"index":7,"text":"nowhere"}
+    );
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"error\"") != null);
+}
+
+test "reply_comment with an empty body reports an error" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"name is never checked"}
+    );
+
+    const answer = try session.replyComment(
+        \\{"index":0,"text":"   "}
+    );
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"error\"") != null);
+    try std.testing.expectEqual(@as(usize, 0), session.app.state.comment_store.replyCount(0));
+}
+
+test "list_comments carries each comment's author and replies" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"name is never checked"}
+    );
+    _ = try session.replyComment(
+        \\{"index":0,"text":"it is checked by the caller","author":"claude"}
+    );
+
+    const answer = try session.listComments();
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"author\":\"you\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "\"author\":\"claude\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, answer, "it is checked by the caller") != null);
+}
+
 test "list_comments reports the comment the visitor typed" {
     var session = try openTestSession(std.testing.allocator);
     defer session.deinit();
@@ -1597,6 +1822,9 @@ test "a session that served MCP requests leaves no memory behind" {
     var session = try openTestSession(std.testing.allocator);
     _ = try session.addComment(
         \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"hold this"}
+    );
+    _ = try session.replyComment(
+        \\{"index":0,"text":"and this","author":"claude"}
     );
     _ = try session.listComments();
     session.deinit();
@@ -1781,4 +2009,178 @@ test "typing into a panel that is not open reports an error" {
     defer session.deinit();
 
     try std.testing.expectError(error.NoAgentPanel, session.agentInput("hello"));
+}
+
+// =============================================================================
+// Concurrent writers
+//
+// Replies arrive from two directions at once: the reviewer typing in the TUI and
+// any number of agents posting over MCP. `poll()` runs on the event loop thread,
+// so the writes are serialised and cannot race — but they can still clobber each
+// other *logically*, by resolving a stale comment index onto the wrong parent.
+// These cover that.
+// =============================================================================
+
+test "two agents replying to the same comment both land, oldest first" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"name is never checked"}
+    );
+
+    _ = try session.replyComment(
+        \\{"index":0,"text":"the caller checks it","author":"claude"}
+    );
+    _ = try session.replyComment(
+        \\{"index":0,"text":"only on the happy path","author":"codex"}
+    );
+
+    const comment = session.app.state.comment_store.getComment(0).?;
+    try std.testing.expectEqual(@as(usize, 2), comment.replies.items.len);
+    try std.testing.expectEqualStrings("claude", comment.replies.items[0].author);
+    try std.testing.expectEqualStrings("the caller checks it", comment.replies.items[0].text);
+    try std.testing.expectEqualStrings("codex", comment.replies.items[1].author);
+    try std.testing.expectEqualStrings("only on the happy path", comment.replies.items[1].text);
+}
+
+test "replies leave the comment they answer untouched" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"name is never checked"}
+    );
+    _ = try session.replyComment(
+        \\{"index":0,"text":"the caller checks it","author":"claude"}
+    );
+    _ = try session.replyComment(
+        \\{"index":0,"text":"only on the happy path","author":"codex"}
+    );
+
+    const comment = session.app.state.comment_store.getComment(0).?;
+    try std.testing.expectEqualStrings("name is never checked", comment.text);
+    try std.testing.expectEqualStrings("you", comment.author);
+}
+
+test "an agent reply lands while the reviewer is mid-reply on the same comment" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    try moveToCodeLine(&session);
+    try press(&session, vaxis.Key.enter);
+    try typeText(&session, "why the extra print");
+    try press(&session, vaxis.Key.enter);
+
+    try press(&session, 'r');
+    try typeText(&session, "half a thought");
+
+    _ = try session.replyComment(
+        \\{"index":0,"text":"it is a debug leftover","author":"claude"}
+    );
+
+    try press(&session, vaxis.Key.enter);
+
+    // Both writers' replies survive, in the order they were committed: the agent
+    // finished first, so it sits above the reply the reviewer was still typing.
+    const comment = session.app.state.comment_store.getComment(0).?;
+    try std.testing.expectEqual(@as(usize, 2), comment.replies.items.len);
+    try std.testing.expectEqualStrings("claude", comment.replies.items[0].author);
+    try std.testing.expectEqualStrings("you", comment.replies.items[1].author);
+    try std.testing.expectEqualStrings("half a thought", comment.replies.items[1].text);
+}
+
+test "an agent write does not move the cursor out of an open editor" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    try moveToCodeLine(&session);
+    try press(&session, vaxis.Key.enter);
+    try typeText(&session, "why the extra print");
+    try press(&session, vaxis.Key.enter);
+
+    try press(&session, 'r');
+    const cursor_before = session.app.state.global_cursor_line;
+    const scroll_before = session.app.state.global_scroll_offset;
+
+    _ = try session.replyComment(
+        \\{"index":0,"text":"it is a debug leftover","author":"claude"}
+    );
+
+    try std.testing.expectEqual(cursor_before, session.app.state.global_cursor_line);
+    try std.testing.expectEqual(scroll_before, session.app.state.global_scroll_offset);
+}
+
+test "a reply in flight follows its comment when an earlier one is deleted" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"first comment"}
+    );
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":4,"line_type":"new","text":"second comment"}
+    );
+
+    // Open a reply on the second comment, then let an agent delete the first out
+    // from under it — every index above the deletion shifts down by one.
+    try moveToCommentIdx(&session, 1);
+    try press(&session, 'r');
+    try typeText(&session, "answering the second");
+    try deleteCommentAt(&session, 0);
+    try press(&session, vaxis.Key.enter);
+
+    try std.testing.expectEqual(@as(usize, 1), session.app.state.comment_store.comments.items.len);
+    const survivor = session.app.state.comment_store.getComment(0).?;
+    try std.testing.expectEqualStrings("second comment", survivor.text);
+    try std.testing.expectEqual(@as(usize, 1), survivor.replies.items.len);
+    try std.testing.expectEqualStrings("answering the second", survivor.replies.items[0].text);
+}
+
+test "a reply in flight is dropped when its own comment is deleted" {
+    var session = try openTestSession(std.testing.allocator);
+    defer session.deinit();
+
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":3,"line_type":"new","text":"first comment"}
+    );
+    _ = try session.addComment(
+        \\{"file":"src/greet.zig","line":4,"line_type":"new","text":"second comment"}
+    );
+
+    try moveToCommentIdx(&session, 1);
+    try press(&session, 'r');
+    try typeText(&session, "answering the second");
+    try deleteCommentAt(&session, 1);
+    try press(&session, vaxis.Key.enter);
+
+    // The reply is discarded rather than misfiled onto the comment that survived.
+    const survivor = session.app.state.comment_store.getComment(0).?;
+    try std.testing.expectEqualStrings("first comment", survivor.text);
+    try std.testing.expectEqual(@as(usize, 0), survivor.replies.items.len);
+}
+
+/// Park the cursor on the rendered block for `comment_idx`.
+fn moveToCommentIdx(session: *Session, comment_idx: usize) !void {
+    const line = session.app.state.line_map.findLineByCommentIdx(comment_idx) orelse
+        return error.NoCommentLine;
+    session.app.state.global_cursor_line = line;
+}
+
+/// Delete a comment the way an agent does, through the MCP handler, so the
+/// LineMap is rebuilt exactly as it is in production.
+fn deleteCommentAt(session: *Session, comment_idx: usize) !void {
+    const params_text = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"index\":{d}}}",
+        .{comment_idx},
+    );
+    defer std.testing.allocator.free(params_text);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, params_text, .{});
+    defer parsed.deinit();
+
+    const response = mcp_handlers.handleDeleteComment(&session.app, parsed.value);
+    defer freeResponse(session.allocator, response);
+    if (response == .err) return error.DeleteFailed;
 }

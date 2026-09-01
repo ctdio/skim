@@ -79,6 +79,8 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = ":", .desc = "Command palette" },
         .{ .key = "?", .desc = "This help" },
         .{ .key = "Enter", .desc = "Add / edit comment" },
+        .{ .key = "r", .desc = "Reply to comment (on comment)" },
+        .{ .key = "o", .desc = "Expand / collapse comment" },
         .{ .key = "d / D", .desc = "Delete comment / all" },
         .{ .key = "y", .desc = "Yank comment" },
         .{ .key = "Y", .desc = "Yank all comments" },
@@ -88,11 +90,11 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "Ctrl-e", .desc = "Toggle agent panel" },
         .{ .key = "gY", .desc = "Send comments to agent" },
         .{ .key = "Ctrl-w h/l", .desc = "Focus diff / agent" },
-        .{ .key = "r", .desc = "Refresh diff" },
+        .{ .key = "r", .desc = "Refresh diff (off a comment)" },
         .{ .key = "Ctrl-g", .desc = "Open in $EDITOR" },
     };
     for (core_bindings) |b| {
-        if (unavailable(b.key)) continue;
+        if (unavailable(b)) continue;
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
     try content_lines.append(app.allocator, .{ .blank = true });
@@ -131,7 +133,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "v / Esc", .desc = "Exit" },
     };
     for (visual_bindings) |b| {
-        if (unavailable(b.key)) continue;
+        if (unavailable(b)) continue;
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
     try content_lines.append(app.allocator, .{ .blank = true });
@@ -160,7 +162,7 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
             .{ .key = "R", .desc = "Submit review (verdict + body)" },
             .{ .key = "i", .desc = "Toggle PR info panel" },
             .{ .key = "C", .desc = "Comment target: GitHub ⇄ local" },
-            .{ .key = "r", .desc = "Refresh diff + refetch threads" },
+            .{ .key = "r", .desc = "Refresh diff + refetch threads (off a comment)" },
             .{ .key = "Enter", .desc = "Reply to thread (on thread)" },
             .{ .key = "e", .desc = "Edit your comment (on thread)" },
             .{ .key = "x", .desc = "Resolve / unresolve (on thread)" },
@@ -250,13 +252,25 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
 /// True when this build cannot serve the binding. The browser build has no git,
 /// no editor, no agent, and no clipboard, so a key that needs one of those is
 /// left out of the overlay rather than listed and ignored.
-fn unavailable(key: []const u8) bool {
+///
+/// Matching is on key *and* description because `r` is overloaded: it refreshes
+/// the diff (which web cannot do) off a comment, and replies to a comment (which
+/// web can) on one.
+fn unavailable(binding: Binding) bool {
     if (!platform.is_web) return false;
-    const web_cannot = [_][]const u8{
-        "y", "Y", "Ctrl-e", "gY", "Ctrl-w h/l", "r", "Ctrl-g",
+    const web_cannot = [_]Binding{
+        .{ .key = "y", .desc = "Yank comment" },
+        .{ .key = "Y", .desc = "Yank all comments" },
+        .{ .key = "Ctrl-e", .desc = "Toggle agent panel" },
+        .{ .key = "gY", .desc = "Send comments to agent" },
+        .{ .key = "Ctrl-w h/l", .desc = "Focus diff / agent" },
+        .{ .key = "r", .desc = "Refresh diff (off a comment)" },
+        .{ .key = "r", .desc = "Refresh diff + refetch threads (off a comment)" },
+        .{ .key = "Ctrl-g", .desc = "Open in $EDITOR" },
     };
     for (web_cannot) |unsupported| {
-        if (std.mem.eql(u8, unsupported, key)) return true;
+        if (std.mem.eql(u8, unsupported.key, binding.key) and
+            std.mem.eql(u8, unsupported.desc, binding.desc)) return true;
     }
     return false;
 }

@@ -3,12 +3,37 @@ const parser = @import("../git/parser.zig");
 
 const Allocator = std.mem.Allocator;
 
-/// A comment attached to a specific line or range of lines in a diff
+/// Author label for anything the reviewer writes in the TUI or via the CLI.
+/// Agent-authored replies carry the agent's own name instead, which is what
+/// makes a thread read as an exchange rather than a pile of notes.
+pub const local_author = "you";
+
+/// A reply threaded under a comment. Ordered oldest-first.
+pub const Reply = struct {
+    author: []const u8,
+    text: []const u8,
+
+    pub fn deinit(self: *const Reply, allocator: Allocator) void {
+        allocator.free(self.author);
+        allocator.free(self.text);
+    }
+};
+
+/// A comment attached to a specific line or range of lines in a diff, plus any
+/// replies threaded under it. The comment's own text is the root of the thread;
+/// `replies` holds every message posted after it.
 pub const Comment = struct {
+    /// Stable identity, unique for the store's lifetime and never reused. A
+    /// comment's *index* shifts whenever a lower one is deleted, so anything
+    /// that outlives a single call — an open reply editor, the expanded set, an
+    /// agent that read `list_comments` a moment ago — must hold this instead.
+    id: u64,
     file_path: []const u8, // Which file this comment belongs to
     hunk_idx: usize, // Which hunk (0-indexed) - start of range
     line_idx: usize, // Line within hunk (0-indexed, relative to all hunk lines) - start of range
+    author: []const u8, // Who wrote the root comment
     text: []const u8, // The comment text (can be multi-line)
+    replies: std.ArrayList(Reply), // Replies, oldest first
 
     // Range support (null means single-line comment)
     end_hunk_idx: ?usize, // End hunk for range comments
@@ -20,22 +45,45 @@ pub const Comment = struct {
     old_lineno: ?u32,
     new_lineno: ?u32,
 
-    pub fn deinit(self: *const Comment, allocator: Allocator) void {
+    pub fn deinit(self: *Comment, allocator: Allocator) void {
         allocator.free(self.file_path);
+        allocator.free(self.author);
         allocator.free(self.text);
         allocator.free(self.line_content);
+        for (self.replies.items) |*reply| reply.deinit(allocator);
+        self.replies.deinit(allocator);
     }
+};
+
+/// Everything needed to place a comment. `end_hunk_idx`/`end_line_idx` are set
+/// together for a range comment and left null for a single-line one.
+pub const AddParams = struct {
+    file_path: []const u8,
+    hunk_idx: usize,
+    line_idx: usize,
+    text: []const u8,
+    line_type: parser.Line.LineType,
+    line_content: []const u8,
+    old_lineno: ?u32 = null,
+    new_lineno: ?u32 = null,
+    end_hunk_idx: ?usize = null,
+    end_line_idx: ?usize = null,
+    author: []const u8 = local_author,
 };
 
 /// Storage for all comments in the current review session
 pub const CommentStore = struct {
     comments: std.ArrayList(Comment),
     allocator: Allocator,
+    /// Monotonic source of `Comment.id`. Never decremented, so a deleted
+    /// comment's id cannot be handed to a later one.
+    next_id: u64,
 
     pub fn init(allocator: Allocator) CommentStore {
         return .{
             .comments = .empty,
             .allocator = allocator,
+            .next_id = 1,
         };
     }
 
@@ -46,60 +94,40 @@ pub const CommentStore = struct {
         self.comments.deinit(self.allocator);
     }
 
-    /// Add a new comment (single line or range)
-    pub fn addComment(
-        self: *CommentStore,
-        file_path: []const u8,
-        hunk_idx: usize,
-        line_idx: usize,
-        text: []const u8,
-        line_type: parser.Line.LineType,
-        line_content: []const u8,
-        old_lineno: ?u32,
-        new_lineno: ?u32,
-    ) !void {
+    /// Add a comment (single-line or range). Returns its index.
+    pub fn add(self: *CommentStore, params: AddParams) !usize {
         const comment = Comment{
-            .file_path = try self.allocator.dupe(u8, file_path),
-            .hunk_idx = hunk_idx,
-            .line_idx = line_idx,
-            .text = try self.allocator.dupe(u8, text),
-            .end_hunk_idx = null,
-            .end_line_idx = null,
-            .line_type = line_type,
-            .line_content = try self.allocator.dupe(u8, line_content),
-            .old_lineno = old_lineno,
-            .new_lineno = new_lineno,
+            .id = self.next_id,
+            .file_path = try self.allocator.dupe(u8, params.file_path),
+            .hunk_idx = params.hunk_idx,
+            .line_idx = params.line_idx,
+            .author = try self.allocator.dupe(u8, params.author),
+            .text = try self.allocator.dupe(u8, params.text),
+            .replies = .empty,
+            .end_hunk_idx = params.end_hunk_idx,
+            .end_line_idx = params.end_line_idx,
+            .line_type = params.line_type,
+            .line_content = try self.allocator.dupe(u8, params.line_content),
+            .old_lineno = params.old_lineno,
+            .new_lineno = params.new_lineno,
         };
         try self.comments.append(self.allocator, comment);
+        self.next_id += 1;
+        return self.comments.items.len - 1;
     }
 
-    /// Add a new range comment (for visual selections)
-    pub fn addRangeComment(
-        self: *CommentStore,
-        file_path: []const u8,
-        hunk_idx: usize,
-        line_idx: usize,
-        end_hunk_idx: usize,
-        end_line_idx: usize,
-        text: []const u8,
-        line_type: parser.Line.LineType,
-        line_content: []const u8,
-        old_lineno: ?u32,
-        new_lineno: ?u32,
-    ) !void {
-        const comment = Comment{
-            .file_path = try self.allocator.dupe(u8, file_path),
-            .hunk_idx = hunk_idx,
-            .line_idx = line_idx,
-            .text = try self.allocator.dupe(u8, text),
-            .end_hunk_idx = end_hunk_idx,
-            .end_line_idx = end_line_idx,
-            .line_type = line_type,
-            .line_content = try self.allocator.dupe(u8, line_content),
-            .old_lineno = old_lineno,
-            .new_lineno = new_lineno,
-        };
-        try self.comments.append(self.allocator, comment);
+    /// Resolve a stable id to its current index, or null if it was deleted.
+    pub fn findById(self: *const CommentStore, id: u64) ?usize {
+        for (self.comments.items, 0..) |comment, idx| {
+            if (comment.id == id) return idx;
+        }
+        return null;
+    }
+
+    /// The stable id of the comment at `comment_idx`, or null if out of range.
+    pub fn idAt(self: *const CommentStore, comment_idx: usize) ?u64 {
+        if (comment_idx >= self.comments.items.len) return null;
+        return self.comments.items[comment_idx].id;
     }
 
     /// Update an existing comment's text
@@ -107,8 +135,51 @@ pub const CommentStore = struct {
         if (comment_idx >= self.comments.items.len) return error.InvalidCommentIndex;
 
         var comment = &self.comments.items[comment_idx];
+        const text = try self.allocator.dupe(u8, new_text);
         self.allocator.free(comment.text);
-        comment.text = try self.allocator.dupe(u8, new_text);
+        comment.text = text;
+    }
+
+    /// Append a reply to a comment's thread. Returns the reply's index.
+    pub fn addReply(self: *CommentStore, comment_idx: usize, author: []const u8, text: []const u8) !usize {
+        if (comment_idx >= self.comments.items.len) return error.InvalidCommentIndex;
+
+        var comment = &self.comments.items[comment_idx];
+        const reply = Reply{
+            .author = try self.allocator.dupe(u8, author),
+            .text = try self.allocator.dupe(u8, text),
+        };
+        errdefer reply.deinit(self.allocator);
+        try comment.replies.append(self.allocator, reply);
+        return comment.replies.items.len - 1;
+    }
+
+    /// Update an existing reply's text
+    pub fn updateReply(self: *CommentStore, comment_idx: usize, reply_idx: usize, new_text: []const u8) !void {
+        if (comment_idx >= self.comments.items.len) return error.InvalidCommentIndex;
+        var comment = &self.comments.items[comment_idx];
+        if (reply_idx >= comment.replies.items.len) return error.InvalidReplyIndex;
+
+        var reply = &comment.replies.items[reply_idx];
+        const text = try self.allocator.dupe(u8, new_text);
+        self.allocator.free(reply.text);
+        reply.text = text;
+    }
+
+    /// Delete a reply from a comment's thread
+    pub fn deleteReply(self: *CommentStore, comment_idx: usize, reply_idx: usize) !void {
+        if (comment_idx >= self.comments.items.len) return error.InvalidCommentIndex;
+        var comment = &self.comments.items[comment_idx];
+        if (reply_idx >= comment.replies.items.len) return error.InvalidReplyIndex;
+
+        const reply = comment.replies.orderedRemove(reply_idx);
+        reply.deinit(self.allocator);
+    }
+
+    /// Number of replies threaded under a comment
+    pub fn replyCount(self: *const CommentStore, comment_idx: usize) usize {
+        if (comment_idx >= self.comments.items.len) return 0;
+        return self.comments.items[comment_idx].replies.items.len;
     }
 
     /// Delete a comment
@@ -208,9 +279,7 @@ pub const CommentStore = struct {
                 try writer.writeAll("```\n\n");
             }
 
-            // Comment text
-            try writer.writeAll("Comment:\n");
-            try writer.print("{s}\n\n", .{comment.text});
+            try writeThread(writer, comment);
             try writer.writeAll("---\n\n");
         }
 
@@ -262,13 +331,24 @@ pub const CommentStore = struct {
             try writer.writeAll("```\n\n");
         }
 
-        // Comment text
-        try writer.writeAll("Comment:\n");
-        try writer.print("{s}\n\n", .{comment.text});
+        try writeThread(writer, comment);
         try writer.writeAll("---\n");
 
         try writer.writeAll("</code_review>\n");
         return output.toOwnedSlice();
+    }
+
+    /// Write a comment and its replies as a conversation. Replies are labelled
+    /// with their author so an agent reading the export can tell who said what
+    /// and which turn it is answering.
+    fn writeThread(writer: anytype, comment: *const Comment) !void {
+        try writer.print("Comment ({s}):\n", .{comment.author});
+        try writer.print("{s}\n\n", .{comment.text});
+
+        for (comment.replies.items) |reply| {
+            try writer.print("Reply ({s}):\n", .{reply.author});
+            try writer.print("{s}\n\n", .{reply.text});
+        }
     }
 
     fn renderCommentContext(
@@ -397,8 +477,7 @@ pub const CommentStore = struct {
                 comment.line_content,
             });
 
-            try writer.writeAll("Comment:\n");
-            try writer.print("{s}\n\n", .{comment.text});
+            try writeThread(writer, comment);
             try writer.writeAll("---\n\n");
         }
 
@@ -413,34 +492,205 @@ test "comment store basic operations" {
     var store = CommentStore.init(allocator);
     defer store.deinit();
 
-    // Add comment
-    try store.addComment(
-        "test.zig",
-        0,
-        5,
-        "This needs validation",
-        .add,
-        "const x = getValue();",
-        null,
-        42,
-    );
+    const idx = try store.add(.{
+        .file_path = "test.zig",
+        .hunk_idx = 0,
+        .line_idx = 5,
+        .text = "This needs validation",
+        .line_type = .add,
+        .line_content = "const x = getValue();",
+        .new_lineno = 42,
+    });
+    try std.testing.expectEqual(@as(usize, 0), idx);
 
     try std.testing.expectEqual(@as(usize, 1), store.comments.items.len);
     try std.testing.expect(store.hasCommentAt("test.zig", 0, 5));
     try std.testing.expect(!store.hasCommentAt("test.zig", 0, 6));
 
-    // Find comment
-    const idx = store.findCommentAt("test.zig", 0, 5);
-    try std.testing.expect(idx != null);
-    try std.testing.expectEqual(@as(usize, 0), idx.?);
+    const found = store.findCommentAt("test.zig", 0, 5);
+    try std.testing.expect(found != null);
+    try std.testing.expectEqual(@as(usize, 0), found.?);
 
-    // Update comment
     try store.updateComment(0, "Updated comment text");
     const comment = store.getComment(0).?;
     try std.testing.expectEqualStrings("Updated comment text", comment.text);
 
-    // Delete comment
     try store.deleteComment(0);
+    try std.testing.expectEqual(@as(usize, 0), store.comments.items.len);
+}
+
+test "a new comment defaults to the local author and has no replies" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    _ = try store.add(.{
+        .file_path = "test.zig",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "note",
+        .line_type = .add,
+        .line_content = "x",
+    });
+
+    const comment = store.getComment(0).?;
+    try std.testing.expectEqualStrings(local_author, comment.author);
+    try std.testing.expectEqual(@as(usize, 0), store.replyCount(0));
+}
+
+test "replies append to a comment in order and keep their authors" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    _ = try store.add(.{
+        .file_path = "test.zig",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "why is this not cached?",
+        .line_type = .add,
+        .line_content = "const x = foo();",
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), try store.addReply(0, "claude", "foo() memoizes internally"));
+    try std.testing.expectEqual(@as(usize, 1), try store.addReply(0, local_author, "ok, drop the TODO then"));
+
+    const comment = store.getComment(0).?;
+    try std.testing.expectEqual(@as(usize, 2), comment.replies.items.len);
+    try std.testing.expectEqualStrings("claude", comment.replies.items[0].author);
+    try std.testing.expectEqualStrings("foo() memoizes internally", comment.replies.items[0].text);
+    try std.testing.expectEqualStrings(local_author, comment.replies.items[1].author);
+    try std.testing.expectEqualStrings("ok, drop the TODO then", comment.replies.items[1].text);
+}
+
+test "addReply rejects an out-of-range comment index" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    try std.testing.expectError(error.InvalidCommentIndex, store.addReply(0, "claude", "hi"));
+}
+
+test "updateReply replaces only the targeted reply text" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    _ = try store.add(.{
+        .file_path = "test.zig",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "root",
+        .line_type = .add,
+        .line_content = "x",
+    });
+    _ = try store.addReply(0, "claude", "first");
+    _ = try store.addReply(0, local_author, "second");
+
+    try store.updateReply(0, 0, "revised");
+
+    const comment = store.getComment(0).?;
+    try std.testing.expectEqualStrings("revised", comment.replies.items[0].text);
+    try std.testing.expectEqualStrings("second", comment.replies.items[1].text);
+}
+
+test "updateReply rejects an out-of-range reply index" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    _ = try store.add(.{
+        .file_path = "test.zig",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "root",
+        .line_type = .add,
+        .line_content = "x",
+    });
+
+    try std.testing.expectError(error.InvalidReplyIndex, store.updateReply(0, 0, "nope"));
+}
+
+test "deleteReply removes the reply and keeps the rest in order" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    _ = try store.add(.{
+        .file_path = "test.zig",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "root",
+        .line_type = .add,
+        .line_content = "x",
+    });
+    _ = try store.addReply(0, "claude", "first");
+    _ = try store.addReply(0, local_author, "second");
+    _ = try store.addReply(0, "claude", "third");
+
+    try store.deleteReply(0, 1);
+
+    const comment = store.getComment(0).?;
+    try std.testing.expectEqual(@as(usize, 2), comment.replies.items.len);
+    try std.testing.expectEqualStrings("first", comment.replies.items[0].text);
+    try std.testing.expectEqualStrings("third", comment.replies.items[1].text);
+}
+
+test "deleting a comment frees its replies" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    _ = try store.add(.{
+        .file_path = "test.zig",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "root",
+        .line_type = .add,
+        .line_content = "x",
+    });
+    _ = try store.addReply(0, "claude", "a reply that must be freed");
+
+    try store.deleteComment(0);
+    try std.testing.expectEqual(@as(usize, 0), store.comments.items.len);
+}
+
+test "clearAll frees comments that carry replies" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    _ = try store.add(.{
+        .file_path = "file1.zig",
+        .hunk_idx = 0,
+        .line_idx = 5,
+        .text = "Comment 1",
+        .line_type = .add,
+        .line_content = "line 1",
+        .new_lineno = 10,
+    });
+    _ = try store.addReply(0, "claude", "reply 1");
+    _ = try store.add(.{
+        .file_path = "file2.zig",
+        .hunk_idx = 1,
+        .line_idx = 10,
+        .text = "Comment 2",
+        .line_type = .delete,
+        .line_content = "line 2",
+        .old_lineno = 20,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), store.comments.items.len);
+
+    store.clearAll();
     try std.testing.expectEqual(@as(usize, 0), store.comments.items.len);
 }
 
@@ -450,16 +700,15 @@ test "export to markdown" {
     var store = CommentStore.init(allocator);
     defer store.deinit();
 
-    try store.addComment(
-        "src/app.zig",
-        0,
-        10,
-        "This should check for null",
-        .add,
-        "const value = data.getValue();",
-        null,
-        150,
-    );
+    _ = try store.add(.{
+        .file_path = "src/app.zig",
+        .hunk_idx = 0,
+        .line_idx = 10,
+        .text = "This should check for null",
+        .line_type = .add,
+        .line_content = "const value = data.getValue();",
+        .new_lineno = 150,
+    });
 
     const markdown = try store.exportToMarkdown(allocator);
     defer allocator.free(markdown);
@@ -467,51 +716,99 @@ test "export to markdown" {
     try std.testing.expect(std.mem.containsAtLeast(u8, markdown, 1, "<code_review>"));
     try std.testing.expect(std.mem.containsAtLeast(u8, markdown, 1, "src/app.zig"));
     try std.testing.expect(std.mem.containsAtLeast(u8, markdown, 1, "This should check for null"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, markdown, 1, "Comment (you):"));
 }
 
-test "clear all comments" {
+test "export to markdown labels each reply with its author" {
     const allocator = std.testing.allocator;
 
     var store = CommentStore.init(allocator);
     defer store.deinit();
 
-    // Add multiple comments
-    try store.addComment(
-        "file1.zig",
-        0,
-        5,
-        "Comment 1",
-        .add,
-        "line 1",
-        null,
-        10,
-    );
+    _ = try store.add(.{
+        .file_path = "src/app.zig",
+        .hunk_idx = 0,
+        .line_idx = 10,
+        .text = "why is this not cached?",
+        .line_type = .add,
+        .line_content = "const value = data.getValue();",
+        .new_lineno = 150,
+    });
+    _ = try store.addReply(0, "claude", "getValue memoizes internally");
+    _ = try store.addReply(0, local_author, "ok, drop the TODO then");
 
-    try store.addComment(
-        "file2.zig",
-        1,
-        10,
-        "Comment 2",
-        .delete,
-        "line 2",
-        20,
-        null,
-    );
+    const markdown = try store.exportToMarkdown(allocator);
+    defer allocator.free(markdown);
 
-    try store.addComment(
-        "file3.zig",
-        2,
-        15,
-        "Comment 3",
-        .context,
-        "line 3",
-        30,
-        30,
-    );
+    try std.testing.expect(std.mem.containsAtLeast(u8, markdown, 1, "Comment (you):\nwhy is this not cached?"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, markdown, 1, "Reply (claude):\ngetValue memoizes internally"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, markdown, 1, "Reply (you):\nok, drop the TODO then"));
 
-    try std.testing.expectEqual(@as(usize, 3), store.comments.items.len);
+    // Replies follow the root comment, in order.
+    const root_at = std.mem.indexOf(u8, markdown, "why is this not cached?").?;
+    const first_reply_at = std.mem.indexOf(u8, markdown, "getValue memoizes internally").?;
+    const second_reply_at = std.mem.indexOf(u8, markdown, "ok, drop the TODO then").?;
+    try std.testing.expect(root_at < first_reply_at);
+    try std.testing.expect(first_reply_at < second_reply_at);
+}
 
-    // Clear all comments
-    store.clearAll();
-    try std.testing.expectEqual(@as(usize, 0), store.comments.items.len);
+test "a comment's id survives the deletion of a lower-indexed comment" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    _ = try store.add(.{
+        .file_path = "a.zig",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "first",
+        .line_type = .add,
+        .line_content = "x",
+    });
+    _ = try store.add(.{
+        .file_path = "a.zig",
+        .hunk_idx = 0,
+        .line_idx = 1,
+        .text = "second",
+        .line_type = .add,
+        .line_content = "y",
+    });
+
+    const second_id = store.idAt(1).?;
+    try store.deleteComment(0);
+
+    // The index moved; the id did not.
+    try std.testing.expectEqual(@as(?usize, 0), store.findById(second_id));
+    try std.testing.expectEqualStrings("second", store.getComment(0).?.text);
+}
+
+test "a deleted comment's id is not handed to a later comment" {
+    const allocator = std.testing.allocator;
+
+    var store = CommentStore.init(allocator);
+    defer store.deinit();
+
+    _ = try store.add(.{
+        .file_path = "a.zig",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "first",
+        .line_type = .add,
+        .line_content = "x",
+    });
+    const first_id = store.idAt(0).?;
+    try store.deleteComment(0);
+
+    _ = try store.add(.{
+        .file_path = "a.zig",
+        .hunk_idx = 0,
+        .line_idx = 1,
+        .text = "second",
+        .line_type = .add,
+        .line_content = "y",
+    });
+
+    try std.testing.expect(store.idAt(0).? != first_id);
+    try std.testing.expectEqual(@as(?usize, null), store.findById(first_id));
 }

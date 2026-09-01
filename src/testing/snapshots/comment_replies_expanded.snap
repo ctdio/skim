@@ -1,0 +1,10 @@
+┃
+┃ Comment · you
+┃ > why is this not cached?
+┃
+┃   ↳ claude
+┃     foo() memoizes internally
+┃
+┃   ↳ you
+┃     ok, drop the TODO then
+┃

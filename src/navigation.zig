@@ -4,6 +4,10 @@ const rendering = @import("rendering/common.zig");
 const state_helpers = @import("state.zig");
 const CommentController = @import("comments/controller.zig").CommentController;
 const RenderUtils = @import("rendering/utils.zig").RenderUtils;
+const SideBySideRenderer = @import("rendering/side_by_side.zig").SideBySideRenderer;
+const comments = @import("comments/store.zig");
+const line_map = @import("line_map.zig");
+const parser = @import("git/parser.zig");
 const skim_io = @import("skim_io");
 const Layout = rendering.Layout;
 const StateHelpers = state_helpers.StateHelpers;
@@ -272,8 +276,7 @@ pub const Navigation = struct {
         switch (record.line_type) {
             .comment_line => |comment_info| {
                 const comment = app.state.comment_store.getComment(comment_info.comment_idx) orelse return 1;
-                const is_expanded = CommentController.isCommentExpanded(app, comment_info.comment_idx);
-                return calculateSavedCommentHeight(comment.text, is_expanded);
+                return savedCommentHeight(app, comment, record);
             },
             .review_thread => |thread_info| {
                 const width = if (app.state.viewport_width > 0) app.state.viewport_width else 80;
@@ -283,41 +286,77 @@ pub const Navigation = struct {
         }
     }
 
-    /// Calculate rendered height of a saved comment based on its text
-    fn calculateSavedCommentHeight(text: []const u8, is_expanded: bool) usize {
-        const max_lines = Layout.max_comment_lines;
-        const estimated_text_width: usize = 80; // Conservative estimate for wrapping
+    /// Rows the comment block above an open reply editor occupies, or 0 when the
+    /// editor is not a reply to a local comment.
+    fn replyBlockHeight(app: *App) usize {
+        const input = app.state.active_comment_input orelse return 0;
+        const comment_id = switch (input.edit_context) {
+            .local_reply => |lr| lr.comment_id,
+            else => return 0,
+        };
+        const comment_idx = app.state.comment_store.findById(comment_id) orelse return 0;
 
-        // Count total text lines (with wrapping estimation)
-        var total_text_lines: usize = 0;
-        var line_iter = std.mem.splitScalar(u8, text, '\n');
-        while (line_iter.next()) |line| {
-            // Each text line takes at least 1 row
-            if (line.len <= estimated_text_width or line.len == 0) {
-                total_text_lines += 1;
-            } else {
-                // Account for wrapping
-                total_text_lines += (line.len + estimated_text_width - 1) / estimated_text_width;
-            }
+        const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return 0;
+        if (record.line_type != .comment_line) return 0;
+
+        const comment = app.state.comment_store.getComment(comment_idx) orelse return 0;
+        return savedCommentHeight(app, comment, record);
+    }
+
+    /// Rendered height of a saved comment block, asked of the same row planner
+    /// the renderers use so scrolling reserves exactly what gets painted. The
+    /// block's width depends on the view: full content width in unified, and the
+    /// anchor line's pane in side-by-side.
+    fn savedCommentHeight(
+        app: *App,
+        comment: *const comments.Comment,
+        record: *const line_map.LineRecord,
+    ) usize {
+        const viewport_width = if (app.state.viewport_width > 0) app.state.viewport_width else 80;
+
+        switch (app.state.view_mode) {
+            .unified => {
+                const gutter_width = app.getGlobalGutterWidth(app.state.show_blame);
+                const content_start = 1 + gutter_width + Layout.gutter_spacing;
+                return RenderUtils.commentDisplayHeight(app, comment, viewport_width -| content_start);
+            },
+            .side_by_side => {
+                const gutter_width = app.getGlobalGutterWidth(false);
+                const total_borders_and_gutters = Layout.sidebar_width + (2 * gutter_width) + (2 * Layout.gutter_spacing) + 1;
+                if (viewport_width <= total_borders_and_gutters) return 1;
+
+                const available_width = viewport_width - total_borders_and_gutters;
+                const left_content_width = available_width / 2;
+
+                const line_type = anchorLineType(app, record, comment) orelse .context;
+                return SideBySideRenderer.sideBySideCommentHeight(app, comment, .{
+                    .line_type = line_type,
+                    .left_width = left_content_width,
+                    .right_width = available_width - left_content_width,
+                    .gutter_width = gutter_width,
+                });
+            },
         }
+    }
 
-        // Height components:
-        // - 1 line for top spacer
-        // - 1 line for label
-        // - N text lines (capped at max_lines if collapsed)
-        // - 1 line for truncation indicator (if truncated)
-        // - 1 line for bottom spacer
-        var height: usize = 3; // top spacer + label + bottom spacer
+    /// The diff line a comment hangs off, which decides its pane in side-by-side.
+    /// Falls back to the line type captured on the comment when the parent line is
+    /// no longer reachable (a refreshed diff can drop it).
+    fn anchorLineType(
+        app: *App,
+        record: *const line_map.LineRecord,
+        comment: *const comments.Comment,
+    ) ?parser.Line.LineType {
+        const info = record.line_type.comment_line;
+        if (record.file_idx >= app.state.files.len) return comment.line_type;
 
-        if (is_expanded or total_text_lines <= max_lines) {
-            height += total_text_lines;
-        } else {
-            // Collapsed and truncated
-            height += max_lines;
-            height += 1; // truncation indicator line
-        }
+        const file = &app.state.files[record.file_idx];
+        if (info.parent_hunk_idx >= file.hunks.len) return comment.line_type;
 
-        return height;
+        const hunk = &file.hunks[info.parent_hunk_idx];
+        if (info.parent_line_idx >= hunk.lines.len) return comment.line_type;
+
+        return hunk.lines[info.parent_line_idx].line_type;
     }
 
     /// Calculate actual comment box height based on text content
@@ -370,8 +409,10 @@ pub const Navigation = struct {
         const scroll_offset = app.state.global_scroll_offset;
         const window_height = app.state.viewport_height;
 
-        // Calculate actual comment box height based on current text
-        const comment_box_height = calculateCommentBoxHeight(app);
+        // A reply editor is drawn *below* the block it answers, so the block's
+        // rows have to be reserved too or the box lands off the bottom of a long
+        // thread.
+        const comment_box_height = calculateCommentBoxHeight(app) + replyBlockHeight(app);
         const top_padding: usize = 2; // Room at top
 
         // Check if cursor is too high

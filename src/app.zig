@@ -233,7 +233,7 @@ pub const App = struct {
         session_list: []sessions.SessionInfo, // Discovered sessions
         session_selection: usize, // Selected session index
 
-        expanded_comments: std.AutoHashMap(usize, void), // Set of expanded comment indices
+        expanded_comments: std.AutoHashMap(u64, void), // Stable comment ids that are expanded
         collapsed_folds: std.AutoHashMap(u64, void), // Set of collapsed file/hunk folds (keyed by FoldKey)
 
         pending_ctrl_w: bool, // Waiting for second key in Ctrl+w chord
@@ -522,7 +522,7 @@ pub const App = struct {
                 .help_scroll_offset = 0,
                 .session_list = &[_]sessions.SessionInfo{},
                 .session_selection = 0,
-                .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
+                .expanded_comments = std.AutoHashMap(u64, void).init(allocator),
                 .collapsed_folds = std.AutoHashMap(u64, void).init(allocator),
                 .pending_ctrl_w = false,
                 .status_message = null,
@@ -697,7 +697,7 @@ pub const App = struct {
                 .help_scroll_offset = 0,
                 .session_list = &[_]sessions.SessionInfo{},
                 .session_selection = 0,
-                .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
+                .expanded_comments = std.AutoHashMap(u64, void).init(allocator),
                 .collapsed_folds = std.AutoHashMap(u64, void).init(allocator),
                 .pending_ctrl_w = false,
                 .status_message = null,
@@ -815,7 +815,7 @@ pub const App = struct {
                 .help_scroll_offset = 0,
                 .session_list = &[_]sessions.SessionInfo{},
                 .session_selection = 0,
-                .expanded_comments = std.AutoHashMap(usize, void).init(allocator),
+                .expanded_comments = std.AutoHashMap(u64, void).init(allocator),
                 .collapsed_folds = std.AutoHashMap(u64, void).init(allocator),
                 .pending_ctrl_w = false,
                 .status_message = null,
@@ -3286,6 +3286,14 @@ pub const App = struct {
                         try buffer.appendSlice(self.allocator, "Comment: ");
                         try buffer.appendSlice(self.allocator, comment.text);
                         try buffer.append(self.allocator, '\n');
+
+                        for (comment.replies.items) |reply| {
+                            try buffer.appendSlice(self.allocator, "  Reply (");
+                            try buffer.appendSlice(self.allocator, reply.author);
+                            try buffer.appendSlice(self.allocator, "): ");
+                            try buffer.appendSlice(self.allocator, reply.text);
+                            try buffer.append(self.allocator, '\n');
+                        }
                     }
                 },
                 .review_thread => {

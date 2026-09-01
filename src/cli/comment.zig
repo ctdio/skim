@@ -20,6 +20,7 @@ var stderr_buffer: [4096]u8 = undefined;
 
 pub const Subcommand = enum {
     add,
+    reply,
     list,
     delete,
 };
@@ -30,6 +31,14 @@ pub const AddArgs = struct {
     line: ?u32 = null,
     line_type: []const u8 = "new",
     text: ?[]const u8 = null,
+    author: ?[]const u8 = null,
+};
+
+pub const ReplyArgs = struct {
+    session_pid: ?std.posix.pid_t = null,
+    index: ?u32 = null,
+    text: ?[]const u8 = null,
+    author: ?[]const u8 = null,
 };
 
 pub const ListArgs = struct {
@@ -78,6 +87,9 @@ pub fn runAdd(allocator: Allocator, args: AddArgs) !void {
     try params.put(allocator, try allocator.dupe(u8, "line"), .{ .integer = @as(i64, @intCast(line)) });
     try params.put(allocator, try allocator.dupe(u8, "line_type"), .{ .string = try allocator.dupe(u8, args.line_type) });
     try params.put(allocator, try allocator.dupe(u8, "text"), .{ .string = try allocator.dupe(u8, text) });
+    if (args.author) |author| {
+        try params.put(allocator, try allocator.dupe(u8, "author"), .{ .string = try allocator.dupe(u8, author) });
+    }
 
     var response = conn.request("add_comment", "add-1", .{ .object = params }) catch |err| {
         var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
@@ -102,6 +114,65 @@ pub fn runAdd(allocator: Allocator, args: AddArgs) !void {
                 }
             }
             try stdout.writeAll("Comment add response received.\n");
+        },
+        .err => |e| {
+            var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
+            stderr_writer.interface.print("Error from server: {s}\n", .{e.message}) catch {};
+            stderr_writer.interface.flush() catch {};
+            std.process.exit(1);
+        },
+    }
+}
+
+pub fn runReply(allocator: Allocator, args: ReplyArgs) !void {
+    const index = args.index orelse {
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
+        stderr_writer.interface.writeAll("Error: --index is required\n") catch {};
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    const text = args.text orelse {
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
+        stderr_writer.interface.writeAll("Error: Reply text is required\n") catch {};
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+
+    var conn = connectOrExit(allocator, args.session_pid);
+    defer conn.deinit();
+
+    var params: std.json.ObjectMap = .empty;
+    defer params.deinit(allocator);
+
+    try params.put(allocator, try allocator.dupe(u8, "index"), .{ .integer = @as(i64, @intCast(index)) });
+    try params.put(allocator, try allocator.dupe(u8, "text"), .{ .string = try allocator.dupe(u8, text) });
+    if (args.author) |author| {
+        try params.put(allocator, try allocator.dupe(u8, "author"), .{ .string = try allocator.dupe(u8, author) });
+    }
+
+    var response = conn.request("reply_comment", "reply-1", .{ .object = params }) catch |err| {
+        var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
+        stderr_writer.interface.print("Error: Request failed: {}\n", .{err}) catch {};
+        stderr_writer.interface.flush() catch {};
+        std.process.exit(1);
+    };
+    defer response.deinit(allocator);
+
+    var stdout_writer = std.Io.File.stdout().writer(skim_io.get(), &stdout_buffer);
+    defer stdout_writer.interface.flush() catch {};
+    const stdout = &stdout_writer.interface;
+
+    switch (response) {
+        .result => |result| {
+            if (result == .object) {
+                if (result.object.get("success")) |success| {
+                    if (success == .bool and success.bool) {
+                        try stdout.writeAll("Reply added successfully.\n");
+                        return;
+                    }
+                }
+            }
+            try stdout.writeAll("Reply response received.\n");
         },
         .err => |e| {
             var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
@@ -254,8 +325,23 @@ fn outputCommentsHuman(writer: anytype, result: std.json.Value) !void {
             const line_type = if (c.get("line_type")) |lt| if (lt == .string) lt.string else "?" else "?";
             const text = if (c.get("text")) |t| if (t == .string) t.string else "" else "";
 
+            const author = if (c.get("author")) |a| if (a == .string) a.string else "?" else "?";
+
             try writer.print("  [{d}] {s}:{d} ({s})\n", .{ i, file, line, line_type });
-            try writer.print("      {s}\n\n", .{text});
+            try writer.print("      {s}: {s}\n", .{ author, text });
+
+            if (c.get("replies")) |replies| {
+                if (replies == .array) {
+                    for (replies.array.items) |reply| {
+                        if (reply != .object) continue;
+                        const r = reply.object;
+                        const r_author = if (r.get("author")) |a| if (a == .string) a.string else "?" else "?";
+                        const r_text = if (r.get("text")) |t| if (t == .string) t.string else "" else "";
+                        try writer.print("        \u{21B3} {s}: {s}\n", .{ r_author, r_text });
+                    }
+                }
+            }
+            try writer.writeAll("\n");
         }
     }
 }
@@ -285,6 +371,11 @@ pub fn parseAddArgs(args: []const []const u8) AddArgs {
                 i += 1;
                 result.line_type = args[i];
             }
+        } else if (std.mem.eql(u8, args[i], "--author") or std.mem.eql(u8, args[i], "-a")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                result.author = args[i];
+            }
         } else if (std.mem.eql(u8, args[i], "--session") or std.mem.eql(u8, args[i], "-s")) {
             if (i + 1 < args.len) {
                 i += 1;
@@ -292,6 +383,36 @@ pub fn parseAddArgs(args: []const []const u8) AddArgs {
             }
         } else if (!std.mem.startsWith(u8, args[i], "-")) {
             // Positional argument = comment text
+            result.text = args[i];
+        }
+    }
+
+    return result;
+}
+
+pub fn parseReplyArgs(args: []const []const u8) ReplyArgs {
+    var result = ReplyArgs{};
+
+    // Skip "skim comment reply"
+    var i: usize = 3;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--index") or std.mem.eql(u8, args[i], "-i")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                result.index = std.fmt.parseInt(u32, args[i], 10) catch null;
+            }
+        } else if (std.mem.eql(u8, args[i], "--author") or std.mem.eql(u8, args[i], "-a")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                result.author = args[i];
+            }
+        } else if (std.mem.eql(u8, args[i], "--session") or std.mem.eql(u8, args[i], "-s")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                result.session_pid = std.fmt.parseInt(std.posix.pid_t, args[i], 10) catch null;
+            }
+        } else if (!std.mem.startsWith(u8, args[i], "-")) {
+            // Positional argument = reply text
             result.text = args[i];
         }
     }
@@ -351,7 +472,8 @@ pub fn printHelp(writer: anytype) !void {
         \\
         \\SUBCOMMANDS:
         \\    add       Add a comment to a file
-        \\    list      List all comments
+        \\    reply     Reply to an existing comment
+        \\    list      List all comments and their replies
         \\    delete    Delete a comment by index
         \\
         \\OPTIONS:
@@ -361,13 +483,20 @@ pub fn printHelp(writer: anytype) !void {
         \\    --file, -f <PATH>      File path (required)
         \\    --line, -l <N>         Line number (required)
         \\    --line-type, -t <TYPE> Line type: new or old (default: new)
+        \\    --author, -a <NAME>    Author label (default: you)
         \\    TEXT                   Comment text (positional, required)
+        \\
+        \\REPLY OPTIONS:
+        \\    --index, -i <N>        Index of the comment to reply to (required)
+        \\    --author, -a <NAME>    Author label (default: you)
+        \\    TEXT                   Reply text (positional, required)
         \\
         \\LIST OPTIONS:
         \\    --json                 Output in JSON format
         \\
         \\EXAMPLES:
         \\    skim comment add -f src/app.zig -l 42 "Check for null"
+        \\    skim comment reply -i 0 -a claude "getValue memoizes internally"
         \\    skim comment list
         \\    skim comment list --json
         \\    skim comment delete 0

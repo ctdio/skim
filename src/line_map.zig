@@ -729,16 +729,15 @@ test "line map with comments" {
     defer store.deinit();
 
     // Add a comment on line 0 of hunk 0
-    try store.addComment(
-        "test.txt",
-        0, // hunk_idx
-        0, // line_idx
-        "test comment",
-        .delete,
-        "old",
-        1,
-        null,
-    );
+    _ = try store.add(.{
+        .file_path = "test.txt",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "test comment",
+        .line_type = .delete,
+        .line_content = "old",
+        .old_lineno = 1,
+    });
 
     var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
     defer line_map.deinit();
@@ -780,9 +779,27 @@ test "a range comment starting on a line suppresses a later single comment there
     defer store.deinit();
 
     // Range comment spanning both lines, added first.
-    try store.addRangeComment("test.txt", 0, 0, 0, 1, "range", .delete, "old", 1, null);
+    _ = try store.add(.{
+        .file_path = "test.txt",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .end_hunk_idx = 0,
+        .end_line_idx = 1,
+        .text = "range",
+        .line_type = .delete,
+        .line_content = "old",
+        .old_lineno = 1,
+    });
     // Single comment on the same start line, added second.
-    try store.addComment("test.txt", 0, 0, "single", .delete, "old", 1, null);
+    _ = try store.add(.{
+        .file_path = "test.txt",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "single",
+        .line_type = .delete,
+        .line_content = "old",
+        .old_lineno = 1,
+    });
 
     var map = try LineMap.build(allocator, files, &store, .all, true, null, null);
     defer map.deinit();
@@ -828,7 +845,15 @@ test "comments attach to the file whose path matches" {
 
     var store = comments.CommentStore.init(allocator);
     defer store.deinit();
-    try store.addComment("two.txt", 0, 0, "on two", .delete, "c", 1, null);
+    _ = try store.add(.{
+        .file_path = "two.txt",
+        .hunk_idx = 0,
+        .line_idx = 0,
+        .text = "on two",
+        .line_type = .delete,
+        .line_content = "c",
+        .old_lineno = 1,
+    });
 
     var map = try LineMap.build(allocator, files, &store, .all, true, null, null);
     defer map.deinit();
@@ -874,16 +899,16 @@ test "comment deletion scroll anchoring" {
     defer store.deinit();
 
     // Add a comment on line 2 (the "-old1" line, which is line_idx 1 in the hunk)
-    try store.addComment(
-        "test.txt",
-        0, // hunk_idx
-        1, // line_idx (0=context1, 1=old1, 2=new1, 3=context2, ...)
-        "test comment",
-        .delete,
-        "old1",
-        1,
-        null,
-    );
+    // line_idx 1 is the "-old1" line (0=context1, 1=old1, 2=new1, 3=context2, ...)
+    _ = try store.add(.{
+        .file_path = "test.txt",
+        .hunk_idx = 0,
+        .line_idx = 1,
+        .text = "test comment",
+        .line_type = .delete,
+        .line_content = "old1",
+        .old_lineno = 1,
+    });
 
     // Build LineMap with comment
     var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);
@@ -1014,11 +1039,35 @@ test "comment deletion with multiple comments above" {
 
     // Add comments on multiple lines
     // Comment 1: on old1 (line_idx 1)
-    try store.addComment("test.txt", 0, 1, "comment 1", .delete, "old1", 1, null);
+    _ = try store.add(.{
+        .file_path = "test.txt",
+        .hunk_idx = 0,
+        .line_idx = 1,
+        .text = "comment 1",
+        .line_type = .delete,
+        .line_content = "old1",
+        .old_lineno = 1,
+    });
     // Comment 2: on old2 (line_idx 4)
-    try store.addComment("test.txt", 0, 4, "comment 2", .delete, "old2", 4, null);
+    _ = try store.add(.{
+        .file_path = "test.txt",
+        .hunk_idx = 0,
+        .line_idx = 4,
+        .text = "comment 2",
+        .line_type = .delete,
+        .line_content = "old2",
+        .old_lineno = 4,
+    });
     // Comment 3: on old3 (line_idx 7) - this is the one we'll delete
-    try store.addComment("test.txt", 0, 7, "comment 3", .delete, "old3", 7, null);
+    _ = try store.add(.{
+        .file_path = "test.txt",
+        .hunk_idx = 0,
+        .line_idx = 7,
+        .text = "comment 3",
+        .line_type = .delete,
+        .line_content = "old3",
+        .old_lineno = 7,
+    });
 
     // Build LineMap with comments
     var line_map = try LineMap.build(allocator, files, &store, .all, true, null, null);

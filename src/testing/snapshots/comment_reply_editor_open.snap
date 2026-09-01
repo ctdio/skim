@@ -1,0 +1,10 @@
+       ┃
+       ┃ Comment · you         Enter:Edit  r:Reply  d:Delete  o:Collapse
+       ┃ > why is this not cached?
+       ┃
+       ┃   ↳ claude
+       ┃     foo() memoizes internally
+       ┃
+       ┃ Reply                    Enter:Save  Ctrl+J:Newline  ESC:Cancel
+       ┃ > because the caller needs it
+       ┃

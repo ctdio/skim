@@ -154,7 +154,7 @@ pub const UnifiedRenderer = struct {
                         const comment_rows = if (is_editing_this_comment)
                             try RenderUtils.renderCommentInputBox(app, win, row, gutter_width)
                         else
-                            try RenderUtils.renderCommentDisplay(app, win, comment, comment_info.comment_idx, row, gutter_width, is_cursor);
+                            try RenderUtils.renderCommentDisplay(app, win, comment, row, gutter_width, is_cursor);
 
                         // Render sidebar for all comment rows
                         var comment_row_idx: usize = 1; // First sidebar already rendered above
@@ -166,6 +166,22 @@ pub const UnifiedRenderer = struct {
                             _ = cells.print(win, &comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0) });
                         }
                         row += comment_rows;
+
+                        // A reply editor renders under the comment block it is
+                        // answering, so the thread reads top-to-bottom.
+                        if (RenderUtils.repliesToComment(app, comment.id) and row < win.height) {
+                            const input_start_row = row;
+                            const input_rows = try RenderUtils.renderCommentInputBox(app, win, row, gutter_width);
+                            var input_row_idx: usize = 0;
+                            while (input_row_idx < input_rows and input_start_row + input_row_idx < win.height) : (input_row_idx += 1) {
+                                var comment_sidebar = [_]vaxis.Cell.Segment{.{
+                                    .text = "┃",
+                                    .style = sidebar_style,
+                                }};
+                                _ = cells.print(win, &comment_sidebar, .{ .row_offset = @intCast(input_start_row + input_row_idx), .col_offset = @intCast(0) });
+                            }
+                            row += input_rows;
+                        }
                     }
                 },
                 .review_thread => |thread_info| {
@@ -186,7 +202,7 @@ pub const UnifiedRenderer = struct {
                             const targets_this_thread = switch (input.edit_context) {
                                 .reply => |r| std.mem.eql(u8, r.thread_id, cur_id),
                                 .edit_own => |e| std.mem.eql(u8, e.thread_id, cur_id),
-                                .none => false,
+                                .local_reply, .none => false,
                             };
                             if (targets_this_thread and row < win.height) {
                                 const comment_start_row = row;

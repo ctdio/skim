@@ -23,6 +23,13 @@ pub const CommentEditor = struct {
     /// comment mode and cannot be removed by a mutation on another thread).
     pub const EditContext = union(enum) {
         none,
+        /// A reply to a local skim comment, keyed by the comment's stable id for
+        /// the same reason the GitHub variants below key by node id: an agent can
+        /// delete a lower-indexed comment over MCP while this editor is open, and
+        /// a positional index would then silently retarget the reply at whichever
+        /// comment shifted into that slot. Unlike the GitHub variants this needs
+        /// no network round trip, so it works in every build including wasm.
+        local_reply: struct { comment_id: u64 },
         reply: struct { thread_id: []const u8 },
         edit_own: struct { thread_id: []const u8, comment_id: []const u8 },
     };

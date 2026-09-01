@@ -12,6 +12,7 @@ const session_mgr = @import("session.zig");
 const line_map = @import("../line_map.zig");
 const hunk_view = @import("../hunk_view.zig");
 const parser = @import("../git/parser.zig");
+const comments = @import("../comments/store.zig");
 const skim_io = @import("skim_io");
 
 /// Start TUI server and write session file
@@ -48,6 +49,8 @@ pub fn handleTuiServerRequest(request: tui_server.Request, user_data: ?*anyopaqu
         return handleListComments(app);
     } else if (std.mem.eql(u8, request.method, "delete_comment")) {
         return handleDeleteComment(app, request.params);
+    } else if (std.mem.eql(u8, request.method, "reply_comment")) {
+        return handleReplyComment(app, request.params);
     }
 
     return tui_server.errorResponse(tui_server.ErrorCode.METHOD_NOT_FOUND, "Unknown method");
@@ -217,6 +220,10 @@ pub fn handleAddComment(app: *App, params: ?std.json.Value) tui_server.Response 
     const text_val = obj.get("text") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'text'");
     const text = if (text_val == .string) text_val.string else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'text' must be string");
 
+    // Optional: agents identify themselves so the thread reads as an exchange.
+    const author = parseAuthor(obj) catch
+        return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'author' must be string");
+
     // Find the file in the diff
     const file_diff = blk: {
         for (app.state.files) |*f| {
@@ -244,16 +251,17 @@ pub fn handleAddComment(app: *App, params: ?std.json.Value) tui_server.Response 
     };
 
     // Add the comment
-    app.state.comment_store.addComment(
-        file,
-        line_info.hunk_idx,
-        line_info.line_idx,
-        text,
-        line_info.line.line_type,
-        line_info.line.content,
-        line_info.line.old_lineno,
-        line_info.line.new_lineno,
-    ) catch {
+    const added_idx = app.state.comment_store.add(.{
+        .file_path = file,
+        .hunk_idx = line_info.hunk_idx,
+        .line_idx = line_info.line_idx,
+        .author = author,
+        .text = text,
+        .line_type = line_info.line.line_type,
+        .line_content = line_info.line.content,
+        .old_lineno = line_info.line.old_lineno,
+        .new_lineno = line_info.line.new_lineno,
+    }) catch {
         return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to add comment");
     };
 
@@ -273,8 +281,8 @@ pub fn handleAddComment(app: *App, params: ?std.json.Value) tui_server.Response 
     app.needs_render = true;
 
     // Auto-scroll to show the new comment (for external callers like CLI/MCP)
-    const comment_idx = app.state.comment_store.comments.items.len - 1;
-    if (app.state.line_map.findLineByCommentIdx(comment_idx)) |comment_line| {
+    const comment_idx = added_idx;
+    if (!userIsTyping(app)) if (app.state.line_map.findLineByCommentIdx(comment_idx)) |comment_line| {
         // Center the comment in the viewport
         const half_viewport = app.state.viewport_height / 2;
         if (comment_line >= half_viewport) {
@@ -284,7 +292,7 @@ pub fn handleAddComment(app: *App, params: ?std.json.Value) tui_server.Response 
         }
         // Also move cursor to the comment line
         app.state.global_cursor_line = comment_line;
-    }
+    };
 
     var result: std.json.ObjectMap = .empty;
     result.put(app.allocator, "success", .{ .bool = true }) catch {};
@@ -303,11 +311,71 @@ pub fn handleListComments(app: *App) tui_server.Response {
         comment_obj.put(app.allocator, "file_path", .{ .string = app.allocator.dupe(u8, comment.file_path) catch continue }) catch continue;
         comment_obj.put(app.allocator, "hunk_idx", .{ .integer = @intCast(comment.hunk_idx) }) catch continue;
         comment_obj.put(app.allocator, "line_idx", .{ .integer = @intCast(comment.line_idx) }) catch continue;
+        comment_obj.put(app.allocator, "author", .{ .string = app.allocator.dupe(u8, comment.author) catch continue }) catch continue;
         comment_obj.put(app.allocator, "text", .{ .string = app.allocator.dupe(u8, comment.text) catch continue }) catch continue;
+
+        var replies_arr = std.json.Array.init(app.allocator);
+        for (comment.replies.items, 0..) |reply, reply_idx| {
+            var reply_obj: std.json.ObjectMap = .empty;
+            reply_obj.put(app.allocator, "index", .{ .integer = @intCast(reply_idx) }) catch continue;
+            reply_obj.put(app.allocator, "author", .{ .string = app.allocator.dupe(u8, reply.author) catch continue }) catch continue;
+            reply_obj.put(app.allocator, "text", .{ .string = app.allocator.dupe(u8, reply.text) catch continue }) catch continue;
+            replies_arr.append(.{ .object = reply_obj }) catch {};
+        }
+        comment_obj.put(app.allocator, "replies", .{ .array = replies_arr }) catch continue;
+
         comments_arr.append(.{ .object = comment_obj }) catch {};
     }
 
     result.put(app.allocator, "comments", .{ .array = comments_arr }) catch {};
+    return .{ .result = .{ .object = result } };
+}
+
+/// Handle reply_comment request - appends a reply to an existing comment thread
+/// Params: { index: number, text: string, author?: string }
+pub fn handleReplyComment(app: *App, params: ?std.json.Value) tui_server.Response {
+    const p = params orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing params");
+    if (p != .object) return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "params must be object");
+
+    const obj = p.object;
+
+    const index_val = obj.get("index") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'index'");
+    const index: usize = switch (index_val) {
+        .integer => |i| if (i >= 0) @intCast(i) else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'index' must be non-negative"),
+        else => return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'index' must be integer"),
+    };
+
+    const text_val = obj.get("text") orelse return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Missing 'text'");
+    const text = if (text_val == .string) text_val.string else return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'text' must be string");
+    if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
+        return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'text' must not be empty");
+    }
+
+    const author = parseAuthor(obj) catch
+        return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'author' must be string");
+
+    const reply_idx = app.state.comment_store.addReply(index, author, text) catch |err| switch (err) {
+        error.InvalidCommentIndex => return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Invalid comment index"),
+        else => return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to add reply"),
+    };
+
+    // A reply grows the comment block but does not change the LineMap's record
+    // count, so the map stays valid — only the rendered height changes. Expand
+    // the thread so the new reply is actually visible.
+    if (app.state.comment_store.idAt(index)) |id| {
+        app.state.expanded_comments.put(id, {}) catch {};
+    }
+    app.needs_render = true;
+
+    if (!userIsTyping(app)) if (app.state.line_map.findLineByCommentIdx(index)) |comment_line| {
+        app.state.global_cursor_line = comment_line;
+        const half_viewport = app.state.viewport_height / 2;
+        app.state.global_scroll_offset = if (comment_line >= half_viewport) comment_line - half_viewport else 0;
+    };
+
+    var result: std.json.ObjectMap = .empty;
+    result.put(app.allocator, "success", .{ .bool = true }) catch {};
+    result.put(app.allocator, "reply_index", .{ .integer = @intCast(reply_idx) }) catch {};
     return .{ .result = .{ .object = result } };
 }
 
@@ -350,6 +418,24 @@ pub fn handleDeleteComment(app: *App, params: ?std.json.Value) tui_server.Respon
 }
 
 // ===== Helper functions =====
+
+/// True while the user is typing in the comment editor. An agent request that
+/// moved the cursor or scroll then would yank the viewport out from under a
+/// half-written comment — and because the editor is drawn relative to the
+/// cursor's record, it would also tear the box away from the block it belongs
+/// to. Agent writes still land; only the camera move is suppressed.
+fn userIsTyping(app: *App) bool {
+    return app.mode == .comment and app.state.active_comment_input != null;
+}
+
+/// The `author` param, or the local reviewer's label when the caller omits it.
+/// Empty strings fall back too — an unlabelled reply is worse than a wrong one.
+fn parseAuthor(obj: std.json.ObjectMap) ![]const u8 {
+    const val = obj.get("author") orelse return comments.local_author;
+    if (val != .string) return error.InvalidAuthor;
+    if (val.string.len == 0) return comments.local_author;
+    return val.string;
+}
 
 fn writeSessionMetadata(app: *App) !void {
     const sm = &(app.session_manager orelse return);

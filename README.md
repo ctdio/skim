@@ -16,7 +16,7 @@ A keyboard-driven TUI for code reviews built in Zig.
 - Character find commands (`f`/`t`/`F`/`T` like vim)
 - Live refresh (press 'r')
 - Full git diff compatibility (working dir, staged, branch comparisons)
-- Comment system with export to clipboard ('y' for current, 'Y' for all)
+- Comment system with threaded replies and export to clipboard ('y' for current, 'Y' for all)
 - Editor integration (Ctrl-g opens file at line in $EDITOR)
 - Git blame display toggle
 - File staging from within the TUI
@@ -192,15 +192,21 @@ Navigate files and position cursor with vim-style movements:
 
 #### Comments
 
-| Key     | Action                                   |
-| ------- | ---------------------------------------- |
-| `Enter` | Add/edit comment on cursor line          |
-| `d`     | Delete comment under cursor              |
-| `D`     | Clear all comments                       |
-| `o`     | Toggle comment expand/collapse           |
-| `y`     | Yank (copy) current comment to clipboard |
-| `Y`     | Yank (copy) all comments to clipboard    |
-| `gY`    | Yank all comments to agent input         |
+| Key                | Action                                            |
+| ------------------ | ------------------------------------------------- |
+| `Enter`            | Add/edit comment on cursor line                   |
+| `r` _(on comment)_ | Reply to the comment under the cursor             |
+| `d`                | Delete comment under cursor (with its replies)    |
+| `D`                | Clear all comments                                |
+| `o`                | Toggle comment expand/collapse (incl. its replies) |
+| `y`                | Yank (copy) current comment to clipboard          |
+| `Y`                | Yank (copy) all comments to clipboard             |
+| `gY`               | Yank all comments to agent input                  |
+
+A comment with replies renders as a thread. Collapsed, it shows a `▸ N replies`
+summary; `o` expands it to show every reply with its author, each marked `↳`.
+Replies from an agent carry the agent's name, so a comment reads as a
+conversation rather than a pile of notes.
 
 #### PR Review
 
@@ -577,7 +583,11 @@ skim session diff --file src/app.zig
 skim session comment add --file src/app.zig --line 42 "Check for null"
 skim session comment add -f main.zig -l 10 --type old "Remove this"
 
-# List comments
+# Reply to a comment (index comes from `comment list`)
+skim session comment reply --index 0 "Good catch, fixing now"
+skim session comment reply -i 0 -a claude "getValue memoizes internally"
+
+# List comments and their replies
 skim session comment list
 skim session comment list --json
 
@@ -590,6 +600,7 @@ skim session comment delete 0
 - `--id <PID>` - Target a specific session when multiple are running
 - `--json` - Output in JSON format (for programmatic parsing)
 - `--type <old|new>` - For comments: `new` for added lines, `old` for deleted lines
+- `--author <NAME>` - Attribution for a comment or reply (defaults to `you`)
 
 **Diff output format:**
 
@@ -623,6 +634,7 @@ For AI agents that support MCP (Model Context Protocol), add skim to your agent'
 | `get_diff_context` | Get diff metadata (files, stats, mode)    |
 | `get_file_diff`    | Get full diff content for a specific file |
 | `add_comment`      | Add a review comment to a specific line   |
+| `reply_to_comment` | Reply to an existing comment thread       |
 | `get_comments`     | Get all comments from a skim instance     |
 
 ### Debug Replay

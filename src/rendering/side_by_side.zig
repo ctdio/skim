@@ -4,6 +4,7 @@ const cells = @import("cells.zig");
 const parser = @import("../git/parser.zig");
 const syntax = @import("../highlighting/core.zig");
 const comments = @import("../comments/store.zig");
+const comment_block = @import("comment_block.zig");
 const rendering_common = @import("common.zig");
 const render_utils = @import("utils.zig");
 const width_util = @import("width.zig");
@@ -177,7 +178,7 @@ pub const SideBySideRenderer = struct {
                         const comment_rows = if (is_editing_this_comment)
                             try renderSideBySideCommentInput(app, win, row, left_content_width, right_content_width, gutter_width, line.line_type)
                         else
-                            try renderSideBySideComment(app, win, comment, comment_info.comment_idx, row, left_content_width, right_content_width, gutter_width, line.line_type, is_cursor);
+                            try renderSideBySideComment(app, win, comment, row, left_content_width, right_content_width, gutter_width, line.line_type, is_cursor);
 
                         // Render sidebar for all comment rows (no middle divider - spans full width)
                         var comment_row_idx: usize = 1; // First sidebar already rendered above
@@ -189,6 +190,22 @@ pub const SideBySideRenderer = struct {
                             _ = cells.print(win, &comment_sidebar, .{ .row_offset = @intCast(comment_start_row + comment_row_idx), .col_offset = @intCast(0) });
                         }
                         row += comment_rows;
+
+                        // A reply editor renders under the comment block it is
+                        // answering, so the thread reads top-to-bottom.
+                        if (RenderUtils.repliesToComment(app, comment.id) and row < win.height) {
+                            const input_start_row = row;
+                            const input_rows = try RenderUtils.renderCommentInputBox(app, win, row, gutter_width);
+                            var input_row_idx: usize = 0;
+                            while (input_row_idx < input_rows and input_start_row + input_row_idx < win.height) : (input_row_idx += 1) {
+                                var comment_sidebar = [_]vaxis.Cell.Segment{.{
+                                    .text = "┃",
+                                    .style = sidebar_style,
+                                }};
+                                _ = cells.print(win, &comment_sidebar, .{ .row_offset = @intCast(input_start_row + input_row_idx), .col_offset = @intCast(0) });
+                            }
+                            row += input_rows;
+                        }
                     }
                 },
                 .review_thread => |thread_info| {
@@ -210,7 +227,7 @@ pub const SideBySideRenderer = struct {
                             const targets_this_thread = switch (input.edit_context) {
                                 .reply => |r| std.mem.eql(u8, r.thread_id, cur_id),
                                 .edit_own => |e| std.mem.eql(u8, e.thread_id, cur_id),
-                                .none => false,
+                                .local_reply, .none => false,
                             };
                             if (targets_this_thread and row < win.height) {
                                 const comment_start_row = row;
@@ -811,7 +828,7 @@ pub const SideBySideRenderer = struct {
         // Line 1: ┃ <label>                              Enter:Save  Ctrl+J:Newline  ESC:Cancel
         const hints = "Enter:Save  Ctrl+J:Newline  ESC:Cancel";
         const label = switch (input.edit_context) {
-            .reply => try RenderUtils.copyFrameText(app, " Reply"),
+            .local_reply, .reply => try RenderUtils.copyFrameText(app, " Reply"),
             .edit_own => try RenderUtils.copyFrameText(app, " Edit"),
             .none => try RenderUtils.copyFrameText(app, " Comment"),
         };
@@ -960,7 +977,6 @@ pub const SideBySideRenderer = struct {
         app: *App,
         win: vaxis.Window,
         comment: *const comments.Comment,
-        comment_idx: usize,
         row: usize,
         left_width: usize,
         right_width: usize,
@@ -968,210 +984,72 @@ pub const SideBySideRenderer = struct {
         line_type: parser.Line.LineType,
         is_cursor: bool,
     ) !usize {
-        // Determine positioning based on line type
-        const PaneLayout = struct {
-            start_col: usize,
-            width: usize,
-        };
-
-        const layout: PaneLayout = switch (line_type) {
-            .delete => .{
-                // Left pane only
-                .start_col = 1 + gutter_width + Layout.gutter_spacing,
-                .width = left_width,
-            },
-            .add => .{
-                // Right pane only
-                .start_col = 1 + gutter_width + Layout.gutter_spacing + left_width + 1 + gutter_width + Layout.gutter_spacing,
-                .width = right_width,
-            },
-            .context => .{
-                // Across both panes
-                .start_col = 1 + gutter_width + Layout.gutter_spacing,
-                .width = left_width + 1 + gutter_width + Layout.gutter_spacing + right_width,
-            },
-        };
-
+        const layout = commentPaneLayout(.{
+            .line_type = line_type,
+            .left_width = left_width,
+            .right_width = right_width,
+            .gutter_width = gutter_width,
+        });
         if (layout.width < 20) return 0;
 
-        const is_expanded = CommentController.isCommentExpanded(app, comment_idx);
-        const max_lines = Layout.max_comment_lines;
-
-        // Use cyan for regular comments, yellow when focused
-        const border_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
-        else
-            .{ .fg = Color.cyan, .bg = Color.comment_bg, .bold = true };
-
-        const text_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.white, .bg = Color.comment_hover_bg }
-        else
-            .{ .fg = Color.white, .bg = Color.comment_bg };
-
-        const label_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .bold = true }
-        else
-            .{ .fg = Color.cyan, .bg = Color.comment_bg, .bold = true };
-
-        const hints_style: vaxis.Style = if (is_cursor)
-            .{ .fg = Color.yellow, .bg = Color.comment_hover_bg, .dim = true }
-        else
-            .{ .fg = Color.cyan, .bg = Color.comment_bg, .dim = true };
-
-        const bg_style: vaxis.Style = if (is_cursor)
-            .{ .bg = Color.comment_hover_bg }
-        else
-            .{ .bg = Color.comment_bg };
+        const info = RenderUtils.commentRenderInfo(app, comment, is_cursor);
+        const rows = comment_block.planRows(app.frameSegmentAllocator(), info, layout.width) catch return 0;
+        const styles = RenderUtils.commentBlockStyles(is_cursor);
 
         var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
         defer segments.deinit(app.allocator);
 
-        var current_row = row;
+        var drawn: usize = 0;
+        for (rows) |planned| {
+            const row_offset = row + drawn;
+            if (row_offset >= win.height) break;
 
-        // Line 1: ┃ Comment                              Enter:Edit  d:Delete  o:Expand
-        if (is_cursor) {
-            const expand_hint = if (is_expanded) "o:Collapse" else "o:Expand";
-            var hints_buf: [64]u8 = undefined;
-            const hints = std.fmt.bufPrint(&hints_buf, "Enter:Edit  d:Delete  {s}", .{expand_hint}) catch "Enter:Edit  d:Delete";
-            const border_and_label = "┃ Comment";
-            const spacing = "  ";
-            const total_fixed = border_and_label.len + spacing.len + hints.len;
-            const available_for_spacer = layout.width -| total_fixed;
-
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
-
-            // Spacer between label and hints
-            if (available_for_spacer > 0) {
-                const spacer = try RenderUtils.frameTextSlice(app, available_for_spacer);
-                @memset(spacer, ' ');
-                try segments.append(app.allocator, .{ .text = spacer, .style = bg_style });
+            segments.clearRetainingCapacity();
+            for (planned.spans) |span| {
+                try segments.append(app.allocator, .{ .text = span.text, .style = styles.forRole(span.role) });
             }
-
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, spacing), .style = bg_style });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, hints), .style = hints_style });
-        } else {
-            // Just label when not focused
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
-            try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " Comment"), .style = label_style });
-            const label_spacer = try RenderUtils.frameTextSlice(app, layout.width - 9); // -9 for "┃ Comment"
-            @memset(label_spacer, ' ');
-            try segments.append(app.allocator, .{ .text = label_spacer, .style = bg_style });
+            _ = cells.print(win, segments.items, .{
+                .row_offset = @intCast(row_offset),
+                .col_offset = @intCast(layout.start_col),
+            });
+            drawn += 1;
         }
 
-        _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col) });
-        current_row += 1;
+        return drawn;
+    }
 
-        // Render comment text lines with word wrapping
-        const text_area_width = layout.width - 4; // -4 for "┃ > " or "┃   "
-        var line_iter = std.mem.splitScalar(u8, comment.text, '\n');
-        var is_first_line = true;
-        var text_lines_rendered: usize = 0;
-        var total_text_lines: usize = 0;
-        var truncated = false;
+    /// Height of the comment block at `comment_idx` in side-by-side, where the
+    /// block's width depends on which pane its anchor line belongs to.
+    pub fn sideBySideCommentHeight(
+        app: *App,
+        comment: *const comments.Comment,
+        params: CommentPaneParams,
+    ) usize {
+        const layout = commentPaneLayout(params);
+        if (layout.width < 20) return 0;
 
-        // First pass: count total lines if we need to truncate
-        if (!is_expanded) {
-            var count_iter = std.mem.splitScalar(u8, comment.text, '\n');
-            while (count_iter.next()) |text_line| {
-                var wrapped = try RenderUtils.wrapText(app.allocator, text_line, text_area_width);
-                defer wrapped.deinit(app.allocator);
-                total_text_lines += wrapped.items.len;
-            }
-        }
+        const info = RenderUtils.commentRenderInfo(app, comment, false);
+        return comment_block.commentBlockHeight(app.allocator, info, layout.width);
+    }
 
-        while (line_iter.next()) |text_line| {
-            if (current_row >= win.height) break;
+    pub const CommentPaneParams = struct {
+        line_type: parser.Line.LineType,
+        left_width: usize,
+        right_width: usize,
+        gutter_width: usize,
+    };
 
-            // Wrap this line if it's too long
-            var wrapped_lines = try RenderUtils.wrapText(app.allocator, text_line, text_area_width);
-            defer wrapped_lines.deinit(app.allocator);
+    /// Where a comment block sits: a deletion comments the left pane, an addition
+    /// the right, and a context line spans both.
+    fn commentPaneLayout(params: CommentPaneParams) struct { start_col: usize, width: usize } {
+        const left_start = 1 + params.gutter_width + Layout.gutter_spacing;
+        const right_start = left_start + params.left_width + 1 + params.gutter_width + Layout.gutter_spacing;
 
-            // Render each wrapped segment
-            for (wrapped_lines.items) |wrapped_segment| {
-                if (current_row >= win.height) break;
-
-                // Check if we should truncate (only when collapsed)
-                if (!is_expanded and text_lines_rendered >= max_lines) {
-                    truncated = true;
-                    break;
-                }
-
-                segments.clearRetainingCapacity();
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
-                if (is_first_line) {
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " > "), .style = text_style });
-                } else {
-                    try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "   "), .style = text_style });
-                }
-
-                const display_text = blk: {
-                    var buf = try RenderUtils.frameTextSlice(app, text_area_width);
-                    const copy_len = @min(wrapped_segment.len, text_area_width);
-                    if (copy_len > 0) {
-                        @memcpy(buf[0..copy_len], wrapped_segment[0..copy_len]);
-                    }
-                    if (copy_len < buf.len) {
-                        @memset(buf[copy_len..], ' ');
-                    }
-                    break :blk buf;
-                };
-
-                try segments.append(app.allocator, .{ .text = display_text, .style = text_style });
-                _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col) });
-                current_row += 1;
-                text_lines_rendered += 1;
-                is_first_line = false;
-            }
-
-            if (truncated) break;
-        }
-
-        // Show truncation indicator if collapsed and has more lines
-        if (truncated and total_text_lines > max_lines) {
-            if (current_row < win.height) {
-                segments.clearRetainingCapacity();
-                try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
-
-                const remaining = total_text_lines - max_lines;
-                var more_buf: [64]u8 = undefined;
-                const more_text = std.fmt.bufPrint(&more_buf, "   ... {d} more line{s} (press o to expand)", .{
-                    remaining,
-                    if (remaining == 1) "" else "s",
-                }) catch "   ... (press o to expand)";
-
-                const display_text = blk: {
-                    var buf = try RenderUtils.frameTextSlice(app, text_area_width);
-                    const copy_len = @min(more_text.len, text_area_width);
-                    if (copy_len > 0) {
-                        @memcpy(buf[0..copy_len], more_text[0..copy_len]);
-                    }
-                    if (copy_len < buf.len) {
-                        @memset(buf[copy_len..], ' ');
-                    }
-                    break :blk buf;
-                };
-
-                try segments.append(app.allocator, .{ .text = display_text, .style = hints_style });
-                _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col) });
-                current_row += 1;
-            }
-        }
-
-        if (current_row >= win.height) {
-            return current_row - row;
-        }
-
-        // Line N: ┃ (bottom spacer)
-        segments.clearRetainingCapacity();
-        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, "┃"), .style = border_style });
-        const bottom_spacer = try RenderUtils.frameTextSlice(app, layout.width - 1);
-        @memset(bottom_spacer, ' ');
-        try segments.append(app.allocator, .{ .text = bottom_spacer, .style = bg_style });
-        _ = cells.print(win, segments.items, .{ .row_offset = @intCast(current_row), .col_offset = @intCast(layout.start_col) });
-        current_row += 1;
-
-        return current_row - row;
+        return switch (params.line_type) {
+            .delete => .{ .start_col = left_start, .width = params.left_width },
+            .add => .{ .start_col = right_start, .width = params.right_width },
+            .context => .{ .start_col = left_start, .width = right_start - left_start + params.right_width },
+        };
     }
 
     /// Render diagonal fill pattern using Unicode box drawing diagonal character

@@ -385,8 +385,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
             }
         },
         'r' => {
-            try app.refresh();
-            app.startReviewRefetch();
+            // On a local comment, `r` opens a reply; everywhere else it refreshes
+            // the diff (matching how `d`/`x`/`o` specialise over the cursor).
+            if (commentUnderCursor(app) != null) {
+                try CommentController.startLocalReplyInput(app);
+            } else {
+                try app.refresh();
+                app.startReviewRefetch();
+            }
         },
         'y' => try CommentController.yankCurrentCommentToClipboard(app),
         'Y' => try CommentController.yankAllCommentsToClipboard(app),
@@ -522,6 +528,16 @@ fn toggleExpandUnderCursor(app: *App) !void {
         },
         else => CommentController.toggleCommentUnderCursorExpanded(app),
     }
+}
+
+/// The local comment index under the cursor, or null when the cursor is not on a
+/// comment record.
+fn commentUnderCursor(app: *App) ?usize {
+    const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return null;
+    return switch (record.line_type) {
+        .comment_line => |info| info.comment_idx,
+        else => null,
+    };
 }
 
 /// The review-thread index under the cursor, or null when the cursor is not on a
