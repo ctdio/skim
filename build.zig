@@ -173,6 +173,28 @@ pub fn build(b: *std.Build) void {
     const scroll_step = b.step("bench-scroll", "Run diff scroll session benchmark");
     scroll_step.dependOn(&scroll_run.step);
 
+    // Highlight paging benchmark executable
+    const highlight_scroll_exe = b.addExecutable(.{
+        .name = "bench_highlight_scroll",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_highlight_scroll.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    highlight_scroll_exe.root_module.addImport("vaxis", vaxis);
+    highlight_scroll_exe.root_module.addImport("tree-sitter", tree_sitter);
+    highlight_scroll_exe.root_module.addImport("build_options", build_options_module);
+    highlight_scroll_exe.root_module.addImport("skim_io", skim_io_module);
+    for (grammars) |grammar| {
+        highlight_scroll_exe.root_module.linkLibrary(grammar);
+    }
+    highlight_scroll_exe.root_module.link_libc = true;
+    b.installArtifact(highlight_scroll_exe);
+    const highlight_scroll_run = b.addRunArtifact(highlight_scroll_exe);
+    const highlight_scroll_step = b.step("bench-highlight-scroll", "Run highlight paging benchmark");
+    highlight_scroll_step.dependOn(&highlight_scroll_run.step);
+
     // Agent render benchmark executable
     const agent_render_exe = b.addExecutable(.{
         .name = "bench_agent_render",

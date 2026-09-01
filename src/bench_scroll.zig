@@ -37,6 +37,15 @@ const Motion = enum {
 
 const View = enum { unified, side_by_side, both };
 
+/// A run of keystrokes that coalesced into one frame. The loop drains every
+/// queued event before it renders, so a terminal that falls behind turns N
+/// keypresses into a single jump N times as large. `rows` of 0 leaves the
+/// `Motion` in charge.
+const Burst = struct {
+    rows: usize,
+    up: bool,
+};
+
 const FrameSamples = struct {
     build_ns: []u64,
     flush_ns: []u64,
@@ -81,6 +90,10 @@ pub fn main(process_init: std.process.Init) !void {
     const motion = bench.envEnum(Motion, allocator, "SKIM_BENCH_MOTION", .line);
     const view = bench.envEnum(View, allocator, "SKIM_BENCH_VIEW", .unified);
     const highlight = bench.envBool(allocator, "SKIM_BENCH_HIGHLIGHT", true);
+    const burst: Burst = .{
+        .rows = bench.envUsize(allocator, "SKIM_BENCH_SHIFT", 0),
+        .up = bench.envBool(allocator, "SKIM_BENCH_UP", false),
+    };
 
     std.log.info("=== SCROLL BENCH ===", .{});
     std.log.info(
@@ -106,11 +119,11 @@ pub fn main(process_init: std.process.Init) !void {
     std.log.info("line map: records={d}", .{app.state.line_map.records.len});
 
     switch (view) {
-        .unified => try runView(&app, .unified, motion, width, height, iterations, warmup),
-        .side_by_side => try runView(&app, .side_by_side, motion, width, height, iterations, warmup),
+        .unified => try runView(&app, .unified, motion, width, height, iterations, warmup, burst),
+        .side_by_side => try runView(&app, .side_by_side, motion, width, height, iterations, warmup, burst),
         .both => {
-            try runView(&app, .unified, motion, width, height, iterations, warmup);
-            try runView(&app, .side_by_side, motion, width, height, iterations, warmup);
+            try runView(&app, .unified, motion, width, height, iterations, warmup, burst);
+            try runView(&app, .side_by_side, motion, width, height, iterations, warmup, burst);
         },
     }
 }
@@ -123,6 +136,7 @@ fn runView(
     height: u16,
     iterations: usize,
     warmup: usize,
+    burst: Burst,
 ) !void {
     const allocator = app.allocator;
 
@@ -157,7 +171,7 @@ fn runView(
     var sample_idx: usize = 0;
     var iteration: usize = 0;
     while (iteration < warmup + iterations) : (iteration += 1) {
-        advance(app, motion);
+        advance(app, motion, burst);
 
         var timer = try skim_io.Timer.start();
         try frame.render(app, vx.window());
@@ -181,11 +195,23 @@ fn runView(
     report(@tagName(view), samples);
 }
 
-/// Applies one navigation step, wrapping back to the top when the motion runs
-/// off the end so a long run keeps exercising fresh content.
-fn advance(app: *App, motion: Motion) void {
+/// Applies one navigation step, wrapping back to the far end when the motion
+/// runs off the map so a long run keeps exercising fresh content.
+fn advance(app: *App, motion: Motion, burst: Burst) void {
     const before_scroll = app.state.global_scroll_offset;
     const before_cursor = app.state.global_cursor_line;
+
+    if (burst.rows > 0) {
+        app.state.count_prefix = burst.rows;
+        if (burst.up) Navigation.scrollUp(app) else Navigation.scrollDown(app);
+        if (app.state.global_scroll_offset == before_scroll) {
+            const wrap_to = if (burst.up) app.getTotalGlobalLines() -| 1 else 0;
+            app.state.global_scroll_offset = wrap_to;
+            app.state.global_cursor_line = wrap_to;
+        }
+        return;
+    }
+
     switch (motion) {
         .line => Navigation.moveCursorDown(app),
         .half_page => Navigation.pageDown(app),

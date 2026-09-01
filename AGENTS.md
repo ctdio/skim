@@ -58,6 +58,10 @@ zig build bench-scroll -Doptimize=ReleaseFast
 
 # Isolated content-renderer cost at a fixed scroll offset
 zig build bench-render-content -Doptimize=ReleaseFast
+
+# Whole paging session: live highlight worker, real frame pacer, optional
+# rate-limited terminal. Use this for anything about scrolling *smoothness*.
+zig build bench-highlight-scroll -Doptimize=ReleaseFast
 ```
 
 `bench_scroll` is also installed to `./zig-out/bin/bench_scroll` so knobs can be
@@ -72,7 +76,21 @@ synchronous highlighting, stats) lives in `src/testing/bench_support.zig`.
 | `SKIM_BENCH_VIEW` | `unified` | `unified`, `side_by_side`, or `both` |
 | `SKIM_BENCH_MOTION` | `line` | `line` (`j`), `half_page`, `page`, `file` — scroll only |
 | `SKIM_BENCH_HIGHLIGHT` | `1` | Pre-highlight every hunk (steady state) — scroll only |
+| `SKIM_BENCH_SHIFT` | `0` | Rows per step, overriding `_MOTION`: models coalesced keystrokes — scroll only |
+| `SKIM_BENCH_UP` | `0` | Scroll toward the top of the diff instead of the bottom |
 | `SKIM_BENCH_ITERS` / `_WARMUP` | 200 / 20 | Sample counts |
+| `SKIM_BENCH_PAGES` / `_PAGE_MS` | 120 / 40 | Keystroke count and repeat interval — highlight-scroll only |
+| `SKIM_BENCH_SBS` | `0` | Side-by-side view — highlight-scroll only |
+| `SKIM_BENCH_DRAIN_KBPS` | `0` | Terminal consumption rate; `0` writes to memory — highlight-scroll only |
+
+`bench_highlight_scroll` exists because the other two cannot see smoothness:
+they render against a writer that never blocks, with highlighting either fully
+warm or fully absent. This one pages on a wall clock with the worker thread
+racing alongside, and `SKIM_BENCH_DRAIN_KBPS` writes frames into a pipe drained
+at a fixed rate, so a write blocks the way it does against a slow terminal or an
+ssh link — which is what puts `FramePacer` under load. It reports pop-in (share
+of visible rows still unstyled when a frame is drawn), the spread of frame gaps,
+and keystroke-to-frame lag. **A p99 frame gap far above p50 is the stutter.**
 
 **`bytes/frame` is the number to watch.** It is what the terminal emulator has
 to parse, and on a slow terminal or over SSH it dominates everything measured
