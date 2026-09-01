@@ -628,14 +628,23 @@ For AI agents that support MCP (Model Context Protocol), add skim to your agent'
 
 **Available MCP Tools:**
 
-| Tool               | Description                               |
-| ------------------ | ----------------------------------------- |
-| `list_clients`     | List all connected skim TUI instances     |
-| `get_diff_context` | Get diff metadata (files, stats, mode)    |
-| `get_file_diff`    | Get full diff content for a specific file |
-| `add_comment`      | Add a review comment to a specific line   |
-| `reply_to_comment` | Reply to an existing comment thread       |
-| `get_comments`     | Get all comments from a skim instance     |
+| Tool               | Description                                        |
+| ------------------ | -------------------------------------------------- |
+| `list_sessions`    | List all running skim TUI sessions                 |
+| `get_context`      | Get diff metadata (files, stats, mode)             |
+| `get_diff`         | Get diff content with line numbers                 |
+| `add_comment`      | Add a review comment to a specific line            |
+| `reply_to_comment` | Append a reply to an existing comment's thread     |
+| `list_comments`    | List every comment with its author and its replies |
+| `delete_comment`   | Delete a comment and its whole thread              |
+
+Every tool takes an optional `session_id` (the PID from `list_sessions`); with
+one session running you can omit it. `add_comment` and `reply_to_comment` take an
+`author` — pass your agent's name so the reviewer can tell who wrote what.
+
+The server also returns MCP `instructions` describing the review workflow, so an
+agent that connects gets the "list before you reply, always pass `author`" rules
+without being told.
 
 ### Debug Replay
 

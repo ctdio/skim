@@ -33,6 +33,37 @@ const skim_io = @import("skim_io");
 var stdout_buffer: [4096]u8 = undefined;
 var stdin_buffer: [65536]u8 = undefined;
 
+/// Returned from `initialize` and surfaced by every MCP client. Tool
+/// descriptions can only speak for one call; this is where the ordering between
+/// them lives — get the diff before commenting, list before replying — along
+/// with the one thing a model reliably gets wrong: omitting `author`, which
+/// silently files its reply under the reviewer's name.
+const server_instructions =
+    \\skim is a terminal code-review UI the user is looking at right now. Comments
+    \\you add and replies you post appear in their session immediately.
+    \\
+    \\A comment is a conversation, not a drop box. Every comment has an `author`
+    \\and a thread of `replies`. When the reviewer asks something on a line, answer
+    \\with `reply_to_comment` on that comment rather than opening a new one, so the
+    \\question and the answer stay on the line they are about.
+    \\
+    \\Always pass `author` with your own name on `add_comment` and
+    \\`reply_to_comment`. It is the label the reviewer sees; omit it and your
+    \\message is attributed to them.
+    \\
+    \\Typical flow:
+    \\  1. `list_sessions` to find the session (omit `session_id` if only one runs)
+    \\  2. `get_diff` before commenting — never guess line numbers
+    \\  3. `add_comment` for something new, using line_type "old" for `-` lines and
+    \\     "new" for `+` and context lines
+    \\  4. `list_comments` to read the threads, then `reply_to_comment` to answer
+    \\     anything the reviewer addressed to you
+    \\
+    \\`index` on `reply_to_comment` and `delete_comment` is positional, and deleting
+    \\a comment shifts every index above it down by one. Call `list_comments`
+    \\immediately before using an index rather than reusing an older one.
+;
+
 // =============================================================================
 // MCP Adapter
 // =============================================================================
@@ -48,16 +79,17 @@ pub const McpAdapter = struct {
         var server = framework.Server.init(allocator, .{
             .name = "skim",
             .version = "1.0.0",
+            .instructions = server_instructions,
         });
 
         // Register tools
         server.tool("list_sessions", "List all running skim TUI sessions", null, handleListSessions) catch {};
         server.tool("get_context", "Get diff context and comments from a skim session", GetContextParams, handleGetContext) catch {};
         server.tool("get_diff", "Get the full diff content with line numbers. Use this to see what lines exist before adding comments.", GetDiffParams, handleGetDiff) catch {};
-        server.tool("add_comment", "Add a comment to a line in the diff", AddCommentParams, handleAddComment) catch {};
-        server.tool("reply_to_comment", "Reply to an existing comment thread. Use list_comments to find the comment index, and pass your own name as `author` so the reviewer can tell who answered.", ReplyToCommentParams, handleReplyToComment) catch {};
-        server.tool("list_comments", "List all comments in a skim session", ListCommentsParams, handleListComments) catch {};
-        server.tool("delete_comment", "Delete a comment by index", DeleteCommentParams, handleDeleteComment) catch {};
+        server.tool("add_comment", "Add a comment to a line in the diff. Call get_diff first for real line numbers, and pass your own name as `author`. To answer an existing comment use reply_to_comment instead of opening a new one.", AddCommentParams, handleAddComment) catch {};
+        server.tool("reply_to_comment", "Append a reply to an existing comment's thread — the way to answer something the reviewer asked on a line. Run list_comments immediately before this for a fresh `index`, and pass your own name as `author` or the reply is attributed to the reviewer.", ReplyToCommentParams, handleReplyToComment) catch {};
+        server.tool("list_comments", "List every comment with its `author` and its `replies` thread. Read it before replying: it gives the index reply_to_comment needs, and `author` tells your own messages from the reviewer's.", ListCommentsParams, handleListComments) catch {};
+        server.tool("delete_comment", "Delete a comment and its whole reply thread by index. Every higher index shifts down by one, so re-run list_comments before using another.", DeleteCommentParams, handleDeleteComment) catch {};
 
         return .{
             .allocator = allocator,

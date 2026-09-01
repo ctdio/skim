@@ -374,6 +374,29 @@ pub fn build(b: *std.Build) void {
     const run_file_caches_tests = b.addRunArtifact(file_caches_tests);
     test_step.dependOn(&run_file_caches_tests.step);
 
+    // MCP surface tests. Rooted at src/ (via mcp_test_root) because Zig only
+    // runs `test` blocks from a compilation's root file, and the skill-document
+    // drift guard needs `mcp/adapter.zig`'s registration list.
+    const mcp_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mcp_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    mcp_tests.root_module.addImport("vaxis", vaxis);
+    mcp_tests.root_module.addImport("tree-sitter", tree_sitter);
+    mcp_tests.root_module.addImport("build_options", build_options_module);
+    mcp_tests.root_module.addImport("skim_io", skim_io_module);
+    for (grammars) |grammar| {
+        mcp_tests.root_module.linkLibrary(grammar);
+    }
+    mcp_tests.root_module.link_libc = true;
+    addSkillDocs(b, mcp_tests.root_module);
+
+    const run_mcp_tests = b.addRunArtifact(mcp_tests);
+    test_step.dependOn(&run_mcp_tests.step);
+
     // Mouse-wheel routing tests
     const mouse_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -968,3 +991,17 @@ const WebCoreOptions = struct {
     build_options: *std.Build.Module,
     skim_io: *std.Build.Module,
 };
+
+/// Expose `skills/skim/*.md` to `@embedFile` so a test can compare what the
+/// docs tell agents to call against what the MCP server actually registers.
+fn addSkillDocs(b: *std.Build, module: *std.Build.Module) void {
+    const docs = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "skill_skill_md", .path = "skills/skim/SKILL.md" },
+        .{ .name = "skill_mcp_md", .path = "skills/skim/mcp.md" },
+        .{ .name = "skill_cli_md", .path = "skills/skim/cli.md" },
+        .{ .name = "skill_workflow_md", .path = "skills/skim/workflow.md" },
+    };
+    for (docs) |doc| {
+        module.addAnonymousImport(doc.name, .{ .root_source_file = b.path(doc.path) });
+    }
+}

@@ -9,6 +9,11 @@ const Allocator = std.mem.Allocator;
 pub const ServerConfig = struct {
     name: []const u8,
     version: []const u8,
+    /// Server-level guidance returned from `initialize`. Every MCP client
+    /// surfaces this to its model, so it is where a workflow that spans several
+    /// tools belongs — a per-tool description cannot say "list before you reply".
+    /// Empty omits the field.
+    instructions: []const u8 = "",
 };
 
 /// Tool result content types
@@ -244,7 +249,14 @@ pub const Server = struct {
         try output.appendSlice(allocator, self.config.name);
         try output.appendSlice(allocator, "\",\"version\":\"");
         try output.appendSlice(allocator, self.config.version);
-        try output.appendSlice(allocator, "\"}}");
+        try output.appendSlice(allocator, "\"}");
+
+        if (self.config.instructions.len > 0) {
+            try output.appendSlice(allocator, ",\"instructions\":");
+            try output.print(allocator, "{f}", .{std.json.fmt(self.config.instructions, .{})});
+        }
+
+        try output.append(allocator, '}');
 
         return output.toOwnedSlice(allocator);
     }

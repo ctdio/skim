@@ -2,6 +2,12 @@
 
 Use these commands via Bash when MCP tools (`mcp__skim__*`) are not available.
 
+`skim session <cmd>` and the shorter `skim <cmd>` are the same command.
+
+**Flag warning:** session commands (`list`, `context`, `diff`) select a session
+with `--id, -i <PID>`. Comment commands use `--session, -s <PID>` instead,
+because on `comment reply` and `comment delete` `-i` already means `--index`.
+
 ## Session Commands
 
 ### List Sessions
@@ -88,9 +94,9 @@ $ skim session diff --file src/app.zig
 **Reading the output:**
 | Column | Meaning |
 |--------|---------|
-| `+` | Added line (use `--type new`) |
-| `-` | Deleted line (use `--type old`) |
-| ` ` | Context line (use `--type new`) |
+| `+` | Added line (use `--line-type new`) |
+| `-` | Deleted line (use `--line-type old`) |
+| ` ` | Context line (use `--line-type new`) |
 | First number | OLD line number (blank for added) |
 | Second number | NEW line number (blank for deleted) |
 
@@ -101,16 +107,18 @@ $ skim session diff --file src/app.zig
 ### Add Comment
 
 ```bash
-skim session comment add -f <file> -l <line> [-t new|old] "comment text"
+skim session comment add -f <file> -l <line> [-t new|old] [-a <name>] "comment text"
 ```
 
-Add a comment to a specific line.
+Add a comment to a specific line. Use this to raise something new; to answer an
+existing comment use `comment reply`.
 
 **Options:**
 - `-f, --file <path>` - File path as shown in diff **(required)**
 - `-l, --line <num>` - Line number from diff output **(required)**
-- `-t, --type <new|old>` - Line type (default: `new`)
-- `--id, -i <PID>` - Target specific session
+- `-t, --line-type <new|old>` - Line type (default: `new`)
+- `-a, --author <name>` - Author label (default: `you`)
+- `-s, --session <PID>` - Target specific session
 
 **Examples:**
 
@@ -119,7 +127,8 @@ Comment on an added line:
 skim session comment add \
   --file src/app.zig \
   --line 42 \
-  --type new \
+  --line-type new \
+  --author claude \
   "Consider adding error handling here"
 ```
 
@@ -128,27 +137,58 @@ Comment on a deleted line:
 skim session comment add \
   --file src/app.zig \
   --line 41 \
-  --type old \
+  --line-type old \
+  --author claude \
   "Good removal - this was a security risk"
 ```
 
 Short form:
 ```bash
-skim session comment add -f src/app.zig -l 42 "Check for null"
+skim session comment add -f src/app.zig -l 42 -a claude "Check for null"
 ```
+
+---
+
+### Reply to a Comment
+
+```bash
+skim session comment reply -i <index> [-a <name>] "reply text"
+```
+
+Append a reply to an existing comment's thread. This is how you answer a question
+the reviewer left for you — it keeps the answer attached to the line it is about
+instead of starting a disconnected comment.
+
+**Options:**
+- `-i, --index <num>` - Comment index from `comment list` **(required)**
+- `-a, --author <name>` - Author label (default: `you`)
+- `-s, --session <PID>` - Target specific session
+
+**Example:**
+```bash
+$ skim session comment reply -i 0 -a claude "It is memoized inside foo()."
+Reply added.
+```
+
+**Always pass `--author`.** It is the label shown next to your reply in the TUI;
+omitting it attributes your reply to the reviewer.
+
+**`--index` is positional.** Deleting a comment shifts every index above it down
+by one. Run `comment list` immediately before replying rather than reusing an
+index from earlier.
 
 ---
 
 ### List Comments
 
 ```bash
-skim session comment list [--id <PID>] [--json]
+skim session comment list [--session <PID>] [--json]
 ```
 
-List all comments in a session.
+List all comments and their reply threads.
 
 **Options:**
-- `--id, -i <PID>` - Target specific session
+- `-s, --session <PID>` - Target specific session
 - `--json` - JSON output
 
 **Example:**
@@ -157,24 +197,30 @@ $ skim session comment list
 Comments (2):
 
   [0] src/app.zig
-      Consider adding error handling here
+      you: why is this not cached?
+        ↳ claude: foo() memoizes internally
 
   [1] src/main.zig
-      Potential null pointer dereference
+      claude: Potential null pointer dereference
 ```
+
+JSON output carries `author` on each comment and a `replies` array whose entries
+each have `index`, `author`, and `text`. Read `author` to tell your own messages
+from the reviewer's — a thread whose last message is the reviewer's and reads as
+a question is one to answer.
 
 ---
 
 ### Delete Comment
 
 ```bash
-skim session comment delete <index> [--id <PID>]
+skim session comment delete <index> [--session <PID>]
 ```
 
-Delete a comment by its index (from `comment list`).
+Delete a comment and its whole thread, by index (from `comment list`).
 
 **Options:**
-- `--id, -i <PID>` - Target specific session
+- `-s, --session <PID>` - Target specific session
 
 **Example:**
 ```bash
@@ -182,18 +228,16 @@ $ skim session comment delete 0
 Comment deleted.
 ```
 
+Deleting shifts every higher index down by one. Re-list before using another
+index.
+
 ---
-
-## Global Options
-
-All session commands support:
-- `--id, -i <PID>` - Target specific session (auto-selects if only one)
-- `-h, --help` - Help for any command
 
 ## Session Selection
 
 - **One session:** Selected automatically
-- **Multiple sessions:** Must specify `--id <PID>`
+- **Multiple sessions:** Specify `--id <PID>` (session commands) or
+  `--session <PID>` (comment commands)
 - **No sessions:** Error message with instructions to start skim
 
 ---
@@ -236,15 +280,19 @@ $ skim session comment add \
     -f src/main.zig \
     -l 55 \
     -t new \
+    -a claude \
     "Good null check, but consider logging the error too"
 Comment added.
 
-# 4. Verify the comment
+# 4. Read the thread and answer anything addressed to you
 $ skim session comment list
 Comments (1):
 
   [0] src/main.zig
-      Good null check, but consider logging the error too
+      you: why is this not cached?
+
+$ skim session comment reply -i 0 -a claude "foo() memoizes internally."
+Reply added.
 ```
 
 ## Error Messages
@@ -252,7 +300,9 @@ Comments (1):
 | Error | Meaning | Solution |
 |-------|---------|----------|
 | `No skim sessions running` | No TUI running | Start skim first |
-| `Multiple sessions found` | Ambiguous target | Use `--id <PID>` |
+| `Multiple sessions found` | Ambiguous target | Use `--id`/`--session <PID>` |
 | `Session not found` | Invalid PID | Run `skim session list` |
 | `--file is required` | Missing file arg | Add `-f <path>` |
 | `--line is required` | Missing line arg | Add `-l <num>` |
+| `--index is required` | Missing index on reply | Add `-i <num>` |
+| `Invalid comment index` | Comment deleted or index stale | Run `comment list` again |

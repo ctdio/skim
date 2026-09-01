@@ -569,17 +569,21 @@ fn printHelp() void {
         \\    list                     List running sessions
         \\    context                  Get session context (files, diff ref, etc.)
         \\    diff                     Get diff content with line numbers
-        \\    comment                  Manage comments (add/list/delete)
+        \\    comment                  Manage comments (add/reply/list/delete)
         \\
         \\OPTIONS:
         \\    --id, -i <PID>           Target specific session by PID
         \\    -h, --help               Print help
+        \\
+        \\    Comment subcommands take --session, -s <PID> instead: on
+        \\    `comment reply` and `comment delete`, -i already means --index.
         \\
         \\EXAMPLES:
         \\    skim session list
         \\    skim session context
         \\    skim session diff --file src/app.zig
         \\    skim session comment add -f src/app.zig -l 42 "Check for null"
+        \\    skim session comment reply -i 0 -a claude "it is memoized"
         \\    skim session comment list
         \\    skim session comment delete 0
         \\
@@ -635,8 +639,8 @@ fn printDiffHelp() void {
         \\
         \\OUTPUT FORMAT:
         \\    Each line shows: MARKER OLD_LINE NEW_LINE | CONTENT
-        \\    + = added line (use --type new for comments)
-        \\    - = deleted line (use --type old for comments)
+        \\    + = added line (use --line-type new for comments)
+        \\    - = deleted line (use --line-type old for comments)
         \\    (space) = context line
         \\
     ) catch {};

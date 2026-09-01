@@ -381,7 +381,7 @@ test "list sessions filters dead PIDs" {
     {
         const file = try std.Io.Dir.createFileAbsolute(skim_io.get(), fake_path, .{});
         defer file.close(skim_io.get());
-        try file.writer().writeAll("{\"pid\":999999998,\"port\":11111,\"cwd\":\"/fake\",\"diff_ref\":\"main\",\"files\":[],\"started_at\":0}");
+        try file.writeStreamingAll(skim_io.get(), "{\"pid\":999999998,\"port\":11111,\"cwd\":\"/fake\",\"diff_ref\":\"main\",\"files\":[],\"started_at\":0}");
     }
 
     // List sessions - should prune the fake one
@@ -400,7 +400,7 @@ test "list sessions filters dead PIDs" {
     }
 
     // Fake file should be deleted
-    std.fs.accessAbsolute(fake_path, .{}) catch |err| {
+    std.Io.Dir.accessAbsolute(skim_io.get(), fake_path, .{}) catch |err| {
         try std.testing.expect(err == error.FileNotFound);
         return;
     };

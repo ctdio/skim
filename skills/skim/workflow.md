@@ -6,7 +6,7 @@ Step-by-step guide for reviewing code changes with skim.
 
 **MCP:**
 ```json
-mcp__skim__list_clients {}
+mcp__skim__list_sessions {}
 ```
 
 **CLI:**
@@ -16,15 +16,15 @@ skim session list
 
 **Handle results:**
 - **No sessions** → Tell user: "Start skim first with `skim`, `skim --staged`, or `skim main..feature`"
-- **One session** → Use its PID as `client_id`
+- **One session** → Use its PID as `session_id`
 - **Multiple sessions** → Ask user which one (show CWD and diff_ref)
 
 ## Step 2: Get the Diff
 
 **MCP:**
 ```json
-mcp__skim__get_file_diff {
-  "client_id": "12345",
+mcp__skim__get_diff {
+  "session_id": "12345",
   "file": "src/app.zig"
 }
 ```
@@ -75,11 +75,12 @@ For each issue, add a comment:
 **MCP:**
 ```json
 mcp__skim__add_comment {
-  "client_id": "12345",
+  "session_id": "12345",
   "file": "src/app.zig",
   "line": 42,
   "line_type": "new",
-  "text": "This could return null - add error handling"
+  "text": "This could return null - add error handling",
+  "author": "claude"
 }
 ```
 
@@ -89,10 +90,41 @@ skim session comment add \
   -f src/app.zig \
   -l 42 \
   -t new \
+  -a claude \
   "This could return null - add error handling"
 ```
 
-## Step 4: Summarize
+## Step 4: Answer the Reviewer
+
+A comment is a conversation, not a drop box. Each comment carries an `author` and
+a thread of `replies`. When the reviewer asks something on a line, reply on that
+comment rather than opening a new one — that keeps the question and the answer in
+the same place.
+
+**MCP:**
+```json
+mcp__skim__list_comments { "session_id": "12345" }
+mcp__skim__reply_to_comment {
+  "session_id": "12345",
+  "index": 0,
+  "text": "foo() memoizes internally, so the second call is free.",
+  "author": "claude"
+}
+```
+
+**CLI:**
+```bash
+skim session comment list
+skim session comment reply -i 0 -a claude "foo() memoizes internally."
+```
+
+**Always pass the author.** It is the label shown next to your reply in the TUI;
+omitting it attributes your reply to the reviewer.
+
+**The index is positional.** Deleting a comment shifts every index above it down
+by one, so list immediately before replying rather than reusing an older index.
+
+## Step 5: Summarize
 
 After adding comments, summarize your findings:
 
@@ -130,11 +162,12 @@ Good: "This can return null when user not found. Add:
 **MCP:**
 ```json
 mcp__skim__add_comment {
-  "client_id": "12345",
+  "session_id": "12345",
   "file": "src/db.zig",
   "line": 78,
   "line_type": "new",
-  "text": "Race condition: Two requests could read the same counter value.\n\nConsider using atomic operations or a transaction:\n```zig\nconst count = @atomicRmw(u32, &counter, .Add, 1, .SeqCst);\n```"
+  "text": "Race condition: Two requests could read the same counter value.\n\nConsider using atomic operations or a transaction:\n```zig\nconst count = @atomicRmw(u32, &counter, .Add, 1, .seq_cst);\n```",
+  "author": "claude"
 }
 ```
 
@@ -148,8 +181,8 @@ After adding comments, optionally verify they were added:
 
 **MCP:**
 ```json
-mcp__skim__get_comments {
-  "client_id": "12345"
+mcp__skim__list_comments {
+  "session_id": "12345"
 }
 ```
 
@@ -163,12 +196,12 @@ skim session comment list
 ```
 Agent: First, let me find your skim session.
 
-[calls mcp__skim__list_clients {}]
+[calls mcp__skim__list_sessions {}]
 → "12345 (working in /home/user/project)"
 
 Agent: Found session 12345. Let me get the diff.
 
-[calls mcp__skim__get_file_diff { "client_id": "12345", "file": "src/auth.zig" }]
+[calls mcp__skim__get_diff { "session_id": "12345", "file": "src/auth.zig" }]
 → Shows diff with line numbers
 
 Agent: I see several changes. Let me review them...
@@ -176,14 +209,29 @@ Agent: I see several changes. Let me review them...
 [Reviews diff, identifies issue on line 156]
 
 [calls mcp__skim__add_comment {
-  "client_id": "12345",
+  "session_id": "12345",
   "file": "src/auth.zig",
   "line": 156,
   "line_type": "new",
-  "text": "user could be null here if lookup fails. Add null check before accessing user.id"
+  "text": "user could be null here if lookup fails. Add null check before accessing user.id",
+  "author": "claude"
 }]
-→ "Comment request sent"
+→ {"success": true, "comment_index": 0}
 
 Agent: I've added a comment about the null check issue.
 The comment should now be visible in your skim TUI.
+
+[Reviewer types a reply in the TUI: "can lookup actually fail here?"]
+
+[calls mcp__skim__list_comments { "session_id": "12345" }]
+→ comment 0, author "you", replies: [{ "author": "you",
+   "text": "can lookup actually fail here?" }]
+
+[calls mcp__skim__reply_to_comment {
+  "session_id": "12345",
+  "index": 0,
+  "text": "Yes - findUser returns null on a cache miss, which happens on the first request after a deploy.",
+  "author": "claude"
+}]
+→ {"success": true, "reply_index": 1}
 ```
