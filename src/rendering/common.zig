@@ -23,7 +23,7 @@ pub const Color = struct {
     pub const dim: vaxis.Cell.Color = .{ .rgb = [3]u8{ 100, 100, 100 } }; // Medium gray #646464
 
     // Diff background colors - slightly darkened for subtle depth
-    pub const diff_add_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 37, 53, 37 } }; // Darker green #253525
+    pub const diff_add_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 33, 58, 43 } }; // Cool green #213A2B (matches codex diff view)
     pub const diff_delete_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 54, 32, 32 } }; // Darker red #362020
 
     // Diff foreground colors for +/- signs and header stats

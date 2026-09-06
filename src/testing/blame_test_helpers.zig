@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 const Color = struct {
     const white: vaxis.Cell.Color = .{ .index = 7 };
     const dim: vaxis.Cell.Color = .{ .rgb = [3]u8{ 100, 100, 100 } };
-    const diff_add_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 37, 53, 37 } };
+    const diff_add_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 33, 58, 43 } };
     const diff_delete_bg: vaxis.Cell.Color = .{ .rgb = [3]u8{ 54, 32, 32 } };
     const diff_sign_add: vaxis.Cell.Color = .{ .rgb = [3]u8{ 63, 185, 80 } };
     const diff_sign_delete: vaxis.Cell.Color = .{ .rgb = [3]u8{ 247, 81, 73 } };
