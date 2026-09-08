@@ -17,6 +17,7 @@ const session_mgr = @import("mcp/session.zig");
 const mcp_handlers = @import("mcp/handlers.zig");
 const navigation = @import("navigation.zig");
 const mouse = @import("mouse.zig");
+const keys = @import("keys.zig");
 const search = @import("search.zig");
 const clipboard = @import("clipboard.zig");
 const rendering_common = @import("rendering/common.zig");
@@ -1932,7 +1933,12 @@ pub const App = struct {
         }
     }
 
-    fn handleKey(self: *App, key: vaxis.Key) !void {
+    fn handleKey(self: *App, raw_key: vaxis.Key) !void {
+        // Fold the kitty keyboard protocol's key events back into plain
+        // characters before dispatch, and drop the bare modifier presses that
+        // protocol reports as keys of their own. See src/keys.zig.
+        const key = keys.normalize(raw_key) orelse return;
+
         // Handle Ctrl-C in modal overlays
         if (key.mods.ctrl and key.codepoint == 'c') {
             // In modal overlay modes, single Ctrl-C closes the modal

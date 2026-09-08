@@ -414,6 +414,20 @@ pub fn build(b: *std.Build) void {
     const run_mouse_tests = b.addRunArtifact(mouse_tests);
     test_step.dependOn(&run_mouse_tests.step);
 
+    // Key-normalization tests. Rooted at the file itself: keys.zig is only
+    // reachable from main.zig through app.zig, so its test blocks need a direct
+    // root to be collected.
+    const keys_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/keys.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    keys_tests.root_module.addImport("vaxis", vaxis);
+    const run_keys_tests = b.addRunArtifact(keys_tests);
+    test_step.dependOn(&run_keys_tests.step);
+
     // ACP module tests
     const acp_tests = b.addTest(.{
         .root_module = b.createModule(.{
