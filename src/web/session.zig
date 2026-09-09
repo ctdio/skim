@@ -29,6 +29,7 @@ const UI = core.UI;
 const UnifiedRenderer = core.UnifiedRenderer;
 const hunk_view = core.hunk_view;
 const mouse = core.mouse;
+const keys = core.keys;
 const parser = core.parser;
 const help = core.help;
 const search_mode = core.search_mode;
@@ -132,7 +133,8 @@ pub const Session = struct {
     /// Route one key to the mode that owns it. Only the modes a browser can
     /// serve are wired: normal, search, visual, comment, help, and the
     /// command palette.
-    pub fn handleKey(self: *Session, raw: vaxis.Key) !void {
+    pub fn handleKey(self: *Session, event: vaxis.Key) !void {
+        const raw = keys.normalize(event) orelse return;
         const closing = isCloseChord(raw);
         const key: vaxis.Key = if (closing) .{ .codepoint = vaxis.Key.escape } else raw;
         switch (self.app.mode) {

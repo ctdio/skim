@@ -22,6 +22,7 @@ pub const Navigation = @import("navigation.zig").Navigation;
 pub const folds = @import("folds.zig");
 pub const hunk_view = @import("hunk_view.zig");
 pub const mouse = @import("mouse.zig");
+pub const keys = @import("keys.zig");
 pub const Layout = @import("rendering/common.zig").Layout;
 pub const UI = @import("ui.zig").UI;
 pub const help = @import("help.zig");
