@@ -82,6 +82,14 @@
             .url = "git+https://github.com/tree-sitter/tree-sitter-bash#a06c2e4415e9bc0346c6b86d401879ffb44058f7",
             .hash = "N-V-__8AANjenwCy_cXlIbU8nqBzGxMlEHVokLZJYrmIXtoz",
         },
+
+        // SQLite amalgamation for the PR store (src/pr/db/). Zig strips the
+        // archive's single top-level directory, so sqlite3.c / sqlite3.h sit at
+        // the package root.
+        .sqlite = .{
+            .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
+            .hash = "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
+        },
     },
 
     .paths = .{

@@ -38,6 +38,10 @@ pub fn build(b: *std.Build) void {
     // Build grammar libraries
     const grammars = buildGrammars(b, target, optimize);
 
+    // SQLite for the PR store. Native target only: the wasm artifact never
+    // links it (see src/pr/db/).
+    const sqlite = buildSqlite(b, target, optimize);
+
     // Build executable
     const exe = b.addExecutable(.{
         .name = "skim",
@@ -438,6 +442,8 @@ pub fn build(b: *std.Build) void {
     });
     acp_tests.root_module.addImport("build_options", build_options_module);
     acp_tests.root_module.addImport("skim_io", skim_io_module);
+    // process.zig's tests reach skim_io.setNonBlocking, which calls libc fcntl.
+    acp_tests.root_module.link_libc = true;
     const run_acp_tests = b.addRunArtifact(acp_tests);
     test_step.dependOn(&run_acp_tests.step);
 
@@ -501,6 +507,20 @@ pub fn build(b: *std.Build) void {
     pr_controller_tests.root_module.link_libc = true;
     const run_pr_controller_tests = b.addRunArtifact(pr_controller_tests);
     test_step.dependOn(&run_pr_controller_tests.step);
+
+    // PR store tests (src/pr/db/). Separate root because this is the only step
+    // that links SQLite; app.zig does not import the store yet.
+    const pr_db_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pr_db_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    pr_db_tests.root_module.addImport("skim_io", skim_io_module);
+    linkSqlite(pr_db_tests.root_module, sqlite);
+    const run_pr_db_tests = b.addRunArtifact(pr_db_tests);
+    test_step.dependOn(&run_pr_db_tests.step);
 
     // Core diff-path tests: parser, line_map, comment store, streaming loader.
     // Same reason as width_tests below — these are only reachable from main.zig
@@ -867,6 +887,22 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_approval_tests.step);
 }
 
+// SQLite compile options. THREADSAFE=2: connections are never shared
+// across threads, so SQLite skips its per-connection mutexes.
+const sqlite_flags = [_][]const u8{
+    "-DSQLITE_THREADSAFE=2",
+    "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+    "-DSQLITE_OMIT_LOAD_EXTENSION",
+    "-DSQLITE_OMIT_DEPRECATED",
+    "-DSQLITE_OMIT_SHARED_CACHE",
+    "-DSQLITE_DQS=0",
+    "-DSQLITE_DEFAULT_MEMSTATUS=0",
+    "-DSQLITE_LIKE_DOESNT_MATCH_BLOBS",
+    "-DSQLITE_MAX_EXPR_DEPTH=0",
+    "-DSQLITE_USE_ALLOCA",
+    "-fno-sanitize=undefined",
+};
+
 // Grammar metadata for building
 const GrammarInfo = struct {
     name: []const u8,
@@ -984,6 +1020,51 @@ fn buildGrammar(
     lib.root_module.link_libc = true;
 
     return lib;
+}
+
+const SqliteArtifacts = struct {
+    lib: *std.Build.Step.Compile,
+    /// translate-c of sqlite3.h, imported by src/pr/db/sqlite.zig as "sqlite_c".
+    c_module: *std.Build.Module,
+};
+
+fn buildSqlite(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) SqliteArtifacts {
+    const dep = b.dependency("sqlite", .{});
+
+    const lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "sqlite3",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lib.root_module.addCSourceFile(.{ .file = dep.path("sqlite3.c"), .flags = &sqlite_flags });
+    lib.root_module.addIncludePath(dep.path(""));
+    lib.root_module.link_libc = true;
+
+    const header = b.addTranslateC(.{
+        .root_source_file = dep.path("sqlite3.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    // Keep the translated declarations in step with what the library exports.
+    header.defineCMacro("SQLITE_OMIT_DEPRECATED", "1");
+    header.defineCMacro("SQLITE_OMIT_LOAD_EXTENSION", "1");
+
+    return .{ .lib = lib, .c_module = header.createModule() };
+}
+
+/// Make `src/pr/db/*` compile and link in `module`.
+fn linkSqlite(module: *std.Build.Module, sqlite: SqliteArtifacts) void {
+    module.addImport("sqlite_c", sqlite.c_module);
+    module.linkLibrary(sqlite.lib);
+    module.link_libc = true;
 }
 
 /// Build the `web_core` named module: the src/-rooted re-export root that
