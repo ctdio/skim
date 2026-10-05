@@ -536,6 +536,23 @@ pub fn build(b: *std.Build) void {
     const run_pr_filter_tests = b.addRunArtifact(pr_filter_tests);
     test_step.dependOn(&run_pr_filter_tests.step);
 
+    // Offline prefetch harness executable, driven by
+    // scripts/test-infra/pr-sidebar/prefetch/run-harness.sh. Installed only by
+    // its own step; not part of `test` or the default install.
+    const harness_prefetch = b.addExecutable(.{
+        .name = "harness_prefetch",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/harness_prefetch.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    harness_prefetch.root_module.addImport("skim_io", skim_io_module);
+    linkSqlite(harness_prefetch.root_module, sqlite);
+    const install_harness_prefetch = b.addInstallArtifact(harness_prefetch, .{});
+    const harness_prefetch_step = b.step("harness-prefetch", "Build the offline prefetch harness (zig-out/bin/harness_prefetch)");
+    harness_prefetch_step.dependOn(&install_harness_prefetch.step);
+
     // config.zig's tests were not in any test binary before this step.
     const config_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -639,6 +656,28 @@ pub fn build(b: *std.Build) void {
     diff_core_tests.root_module.link_libc = true;
     const run_diff_core_tests = b.addRunArtifact(diff_core_tests);
     test_step.dependOn(&run_diff_core_tests.step);
+
+    // Prefetch worker + its pure planners (src/pr/prefetch/). Needs tree-sitter
+    // (parsed_lru -> git/parser.zig) and SQLite (prefetch -> pr/db/store.zig).
+    // The integration tests spawn real `git` in temp dirs.
+    const pr_prefetch_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pr_prefetch_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    pr_prefetch_tests.root_module.addImport("vaxis", vaxis);
+    pr_prefetch_tests.root_module.addImport("tree-sitter", tree_sitter);
+    pr_prefetch_tests.root_module.addImport("build_options", build_options_module);
+    pr_prefetch_tests.root_module.addImport("skim_io", skim_io_module);
+    for (grammars) |grammar| {
+        pr_prefetch_tests.root_module.linkLibrary(grammar);
+    }
+    pr_prefetch_tests.root_module.link_libc = true;
+    linkSqlite(pr_prefetch_tests.root_module, sqlite);
+    const run_pr_prefetch_tests = b.addRunArtifact(pr_prefetch_tests);
+    test_step.dependOn(&run_pr_prefetch_tests.step);
 
     // Web (wasm) session tests. Rooted at src/web/session.zig so its own tests are
     // collected, reaching production code through the src/-rooted `web_core` NAMED

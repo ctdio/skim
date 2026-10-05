@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Offline stand-in for `gh api graphql -f query=... -F number=N`: logs one line
+# per call (the query text is elided so each call is exactly one line) and
+# serves $FAKE_GH_FIXTURES/review-N.json. A missing fixture fails like gh does
+# for an unknown PR.
+log="${FAKE_GH_LOG:?FAKE_GH_LOG not set}"
+fixtures="${FAKE_GH_FIXTURES:?FAKE_GH_FIXTURES not set}"
+
+num=""
+logged=()
+for arg in "$@"; do
+  case "$arg" in
+    query=*) logged+=("query=<elided>") ;;
+    number=*) num="${arg#number=}"; logged+=("$arg") ;;
+    *) logged+=("$arg") ;;
+  esac
+done
+printf '%s\n' "${logged[*]}" >>"$log"
+
+fixture="$fixtures/review-$num.json"
+if [ -n "$num" ] && [ -f "$fixture" ]; then
+  cat "$fixture"
+  exit 0
+fi
+echo "GraphQL: Could not resolve to a PullRequest with the number of $num. (repository.pullRequest)" >&2
+exit 1

@@ -40,6 +40,12 @@ pub fn migrate(db: *sqlite.Db) MigrateError!void {
 }
 
 /// Migration 1: the whole initial schema.
+///
+/// Blob columns (`diff_cache.bytes`, `thread_cache.json`) come last in their
+/// rows. SQLite stores a large value on overflow pages, and reading any
+/// column after it walks that page chain: with `bytes` before `size`,
+/// `SUM(size)` over a 300 MB diff_cache took 79 ms against 0.08 ms with
+/// `bytes` last, and eviction sums the cache after every diff it writes.
 const migration_1 =
     \\CREATE TABLE repo (
     \\  id               INTEGER PRIMARY KEY,
@@ -98,9 +104,9 @@ const migration_1 =
     \\  repo_id        INTEGER NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
     \\  merge_base_oid TEXT NOT NULL,
     \\  head_oid       TEXT NOT NULL,
-    \\  bytes          BLOB NOT NULL,               -- raw `git diff --no-color --no-ext-diff -U10` output
     \\  size           INTEGER NOT NULL,
     \\  last_used_at   INTEGER NOT NULL,
+    \\  bytes          BLOB NOT NULL,               -- raw `git diff --no-color --no-ext-diff -U10` output (last column: see above)
     \\  PRIMARY KEY (repo_id, merge_base_oid, head_oid)
     \\);
     \\CREATE INDEX diff_cache_lru ON diff_cache(repo_id, last_used_at);
@@ -120,8 +126,8 @@ const migration_1 =
     \\  repo_id        INTEGER NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
     \\  number         INTEGER NOT NULL,
     \\  pr_updated_at  TEXT NOT NULL,               -- pr.updated_at when fetched; mismatch => stale
-    \\  json           BLOB NOT NULL,               -- raw `review_query` response bytes
     \\  fetched_at     INTEGER NOT NULL,
+    \\  json           BLOB NOT NULL,               -- raw `review_query` response bytes (last column: see above)
     \\  PRIMARY KEY (repo_id, number)
     \\);
     \\
@@ -209,6 +215,20 @@ test "idempotent reopen" {
     try testing.expectEqualStrings("k", try stmt.columnText(0));
 }
 
+test "diff_cache and thread_cache keep their blob column last" {
+    var db = try sqlite.Db.open(":memory:", .{});
+    defer db.close();
+    try migrate(&db);
+
+    const diff_last = try lastColumn(&db, "PRAGMA table_info(diff_cache)");
+    defer testing.allocator.free(diff_last);
+    const thread_last = try lastColumn(&db, "PRAGMA table_info(thread_cache)");
+    defer testing.allocator.free(thread_last);
+
+    try testing.expectEqualStrings("bytes", diff_last);
+    try testing.expectEqualStrings("json", thread_last);
+}
+
 test "migrate refuses a newer schema" {
     var db = try sqlite.Db.open(":memory:", .{});
     defer db.close();
@@ -259,4 +279,18 @@ fn tmpDbPath(tmp: *testing.TmpDir) ![:0]u8 {
     const absolute = try skim_io.absolutePathAlloc(testing.allocator, relative);
     defer testing.allocator.free(absolute);
     return testing.allocator.dupeZ(u8, absolute);
+}
+
+/// Name of the last column a `PRAGMA table_info` lists; testing.allocator-owned.
+fn lastColumn(db: *sqlite.Db, pragma: []const u8) ![]u8 {
+    var stmt = try db.prepare(pragma);
+    defer stmt.finalize();
+    var name: []u8 = &.{};
+    errdefer testing.allocator.free(name);
+    while (try stmt.step()) {
+        testing.allocator.free(name);
+        name = &.{};
+        name = try testing.allocator.dupe(u8, try stmt.columnText(1));
+    }
+    return name;
 }

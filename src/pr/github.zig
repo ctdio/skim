@@ -31,18 +31,18 @@ pub fn listPullRequestsRaw(allocator: std.mem.Allocator) !GhFetch {
 
 /// Fetch a PR's head into a stable local ref (`refs/skim/pr-<number>`) without
 /// touching the working tree, and fetch its base branch so `base...head` can be
-/// diffed. Uses `pull/<number>/head`, which GitHub exposes on `origin` even for
-/// fork PRs — so no extra remotes or worktrees are needed. Returns the local
+/// diffed. Uses `refs/pull/<number>/head`, which GitHub exposes on `origin` even
+/// for fork PRs — so no extra remotes or worktrees are needed. Returns the local
 /// head ref name; caller owns it.
 pub fn fetchRef(allocator: std.mem.Allocator, params: struct {
     number: u32,
     base_ref: []const u8,
     git_bin: []const u8 = "git",
 }) ![]u8 {
-    const head_ref = try std.fmt.allocPrint(allocator, "refs/skim/pr-{d}", .{params.number});
+    const head_ref = try localPullRef(allocator, params.number);
     errdefer allocator.free(head_ref);
 
-    const refspec = try std.fmt.allocPrint(allocator, "+pull/{d}/head:{s}", .{ params.number, head_ref });
+    const refspec = try buildPullRefspec(allocator, params.number);
     defer allocator.free(refspec);
 
     try runGit(allocator, &.{ params.git_bin, "fetch", "--quiet", "origin", refspec });
@@ -50,12 +50,61 @@ pub fn fetchRef(allocator: std.mem.Allocator, params: struct {
     if (params.base_ref.len > 0) {
         // Land the base in its remote-tracking ref so `origin/<base>...head`
         // resolves. Best-effort: a missing base only weakens the merge-base.
-        const base_spec = try std.fmt.allocPrint(allocator, "+{s}:refs/remotes/origin/{s}", .{ params.base_ref, params.base_ref });
-        defer allocator.free(base_spec);
-        runGit(allocator, &.{ params.git_bin, "fetch", "--quiet", "origin", base_spec }) catch {};
+        if (buildBaseRefspec(allocator, params.base_ref)) |base_spec| {
+            defer allocator.free(base_spec);
+            runGit(allocator, &.{ params.git_bin, "fetch", "--quiet", "origin", base_spec }) catch {};
+        } else |err| {
+            std.log.warn("skipping base fetch, rejected ref name: {any}", .{err});
+        }
     }
 
     return head_ref;
+}
+
+pub const RefNameError = error{InvalidRefName};
+
+/// `refs/skim/pr-<number>`: where a PR head lands locally. Caller owns.
+pub fn localPullRef(allocator: std.mem.Allocator, number: u32) ![]u8 {
+    return std.fmt.allocPrint(allocator, "refs/skim/pr-{d}", .{number});
+}
+
+/// `+refs/pull/<n>/head:refs/skim/pr-<n>`. Integer-only, so it needs no
+/// validation. Caller owns.
+pub fn buildPullRefspec(allocator: std.mem.Allocator, number: u32) ![]u8 {
+    return std.fmt.allocPrint(allocator, "+refs/pull/{d}/head:refs/skim/pr-{d}", .{ number, number });
+}
+
+/// `+refs/heads/<base>:refs/remotes/origin/<base>` for a GitHub-supplied branch
+/// name, after `validateRefName`. The qualified source keeps git from
+/// resolving a same-named tag. Caller owns.
+pub fn buildBaseRefspec(allocator: std.mem.Allocator, base_ref: []const u8) ![]u8 {
+    try validateRefName(base_ref);
+    return std.fmt.allocPrint(allocator, "+refs/heads/{s}:refs/remotes/origin/{s}", .{ base_ref, base_ref });
+}
+
+/// Pure port of `git check-ref-format --branch <name>` (git 2.43), minus its
+/// `@{-N}`/`@` expansion: `@` is rejected outright. Names come from GitHub and
+/// end up in refspec argv, so this is the injection boundary (NFR-2).
+pub fn validateRefName(name: []const u8) RefNameError!void {
+    if (name.len == 0 or name.len > 255) return error.InvalidRefName;
+    if (name[0] == '-' or name[0] == '/') return error.InvalidRefName;
+    if (name[name.len - 1] == '/' or name[name.len - 1] == '.') return error.InvalidRefName;
+    if (std.mem.eql(u8, name, "@") or std.mem.eql(u8, name, "HEAD")) return error.InvalidRefName;
+    if (std.mem.indexOf(u8, name, "..") != null) return error.InvalidRefName;
+    if (std.mem.indexOf(u8, name, "@{") != null) return error.InvalidRefName;
+    if (std.mem.indexOf(u8, name, "//") != null) return error.InvalidRefName;
+    for (name) |c| {
+        if (c < 0x20 or c == 0x7f) return error.InvalidRefName;
+        switch (c) {
+            ' ', '~', '^', ':', '?', '*', '[', '\\' => return error.InvalidRefName,
+            else => {},
+        }
+    }
+    var components = std.mem.splitScalar(u8, name, '/');
+    while (components.next()) |component| {
+        if (component.len == 0 or component[0] == '.') return error.InvalidRefName;
+        if (std.mem.endsWith(u8, component, ".lock")) return error.InvalidRefName;
+    }
 }
 
 // =============================================================================
@@ -279,15 +328,24 @@ fn parsePrUrl(arg: []const u8) !PrRequest {
 
 /// Fetch the full review payload for a PR via the GraphQL query above.
 pub fn fetchReviewData(allocator: std.mem.Allocator, params: ReviewDataParams) !GhFetch {
+    const argv = try reviewDataArgv(allocator, params);
+    defer freeArgv(allocator, argv);
+    return runGhCapture(allocator, argv, "gh api graphql");
+}
+
+/// The `fetchReviewData` command line, argv[0] = `params.gh_bin`, for callers
+/// that run gh themselves (the prefetch worker, which needs a deadline and a
+/// killable process group). Pure; the caller owns the slice and every string.
+pub fn reviewDataArgv(allocator: std.mem.Allocator, params: ReviewDataParams) ![][]const u8 {
     const argv = try buildGraphqlArgv(allocator, review_query, &.{
         .{ .key = "owner", .value = params.owner_repo.owner },
         .{ .key = "name", .value = params.owner_repo.repo },
     }, &.{
         .{ .key = "number", .value = @intCast(params.number) },
     });
-    defer freeArgv(allocator, argv);
+    errdefer freeArgv(allocator, argv);
     try replaceBin(allocator, argv, params.gh_bin);
-    return runGhCapture(allocator, argv, "gh api graphql");
+    return argv;
 }
 
 /// Fetch a single PR's metadata (`gh pr view <n> --json ...`). Used to resolve
@@ -1126,6 +1184,18 @@ test "buildGraphqlArgv: mirrors gh api graphql -f/-F shape" {
     try testing.expectEqualStrings("number=42", argv[10]);
 }
 
+test "reviewDataArgv: gh_bin as argv[0], review query, owner/name/number vars" {
+    const argv = try reviewDataArgv(testing.allocator, .{ .owner_repo = .{ .owner = "ctdio", .repo = "skim" }, .number = 42, .gh_bin = "/tmp/fake/gh" });
+    defer freeArgv(testing.allocator, argv);
+    try testing.expectEqualStrings("/tmp/fake/gh", argv[0]);
+    try testing.expectEqualStrings("api", argv[1]);
+    try testing.expectEqualStrings("graphql", argv[2]);
+    try testing.expect(std.mem.indexOf(u8, argv[4], "reviewThreads") != null);
+    try testing.expect(argvContains(argv, "owner=ctdio"));
+    try testing.expect(argvContains(argv, "name=skim"));
+    try testing.expect(argvContains(argv, "number=42"));
+}
+
 test "replaceBin: points argv[0] at the override and keeps the rest" {
     const argv = try buildReplyArgs(testing.allocator, "PRRT_1", "hi");
     defer freeArgv(testing.allocator, argv);
@@ -1133,4 +1203,49 @@ test "replaceBin: points argv[0] at the override and keeps the rest" {
     try testing.expectEqualStrings("/tmp/fake/gh", argv[0]);
     try testing.expectEqualStrings("api", argv[1]);
     try testing.expect(argvContains(argv, "tid=PRRT_1"));
+}
+
+test "validateRefName accepts names git check-ref-format --branch accepts" {
+    const ok = [_][]const u8{ "main", "feature/x", "release-1.0", "a@b", "x.lock.y", "a/b/c", "caf\xc3\xa9" };
+    for (ok) |name| try validateRefName(name);
+}
+
+test "validateRefName rejects names git check-ref-format --branch rejects" {
+    const bad = [_][]const u8{
+        "",     "-x",   "a..b",    "a:b",    "a b",    "a\tb",       "a~1", "a^", "a?",   "a*",
+        "a[b",  "a\\b", ".hidden", "x/.y",   "a.lock", "x/a.lock/y", "a/",  "/a", "a//b", "a.",
+        "a@{b", "HEAD", "@",       "a\x7fb",
+    };
+    for (bad) |name| try testing.expectError(error.InvalidRefName, validateRefName(name));
+}
+
+test "validateRefName rejects names longer than 255 bytes" {
+    try validateRefName("a" ** 255);
+    try testing.expectError(error.InvalidRefName, validateRefName("a" ** 256));
+}
+
+test "localPullRef is refs/skim/pr-N" {
+    const ref = try localPullRef(testing.allocator, 7);
+    defer testing.allocator.free(ref);
+    try testing.expectEqualStrings("refs/skim/pr-7", ref);
+}
+
+test "buildPullRefspec maps refs/pull/N/head onto refs/skim/pr-N" {
+    const spec = try buildPullRefspec(testing.allocator, 42);
+    defer testing.allocator.free(spec);
+    try testing.expectEqualStrings("+refs/pull/42/head:refs/skim/pr-42", spec);
+}
+
+test "buildBaseRefspec qualifies the source as refs/heads" {
+    const spec = try buildBaseRefspec(testing.allocator, "release/1.0");
+    defer testing.allocator.free(spec);
+    try testing.expectEqualStrings("+refs/heads/release/1.0:refs/remotes/origin/release/1.0", spec);
+}
+
+test "buildBaseRefspec refuses an option-looking base name" {
+    try testing.expectError(error.InvalidRefName, buildBaseRefspec(testing.allocator, "--upload-pack=x"));
+}
+
+test "buildBaseRefspec refuses a name that would smuggle a second refspec side" {
+    try testing.expectError(error.InvalidRefName, buildBaseRefspec(testing.allocator, "main:refs/heads/evil"));
 }

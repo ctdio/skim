@@ -74,6 +74,15 @@ pub const DiffLookup = struct {
     now: i64,
 };
 
+pub const EvictParams = struct {
+    repo_id: i64,
+    budget_bytes: u64,
+    ranked: []const DiffKey = &.{},
+    /// Ranked entries before this index are never deleted, even when the
+    /// budget cannot be met without them.
+    keep_nearest: usize = 0,
+};
+
 pub const PutDiffParams = struct {
     repo_id: i64,
     key: DiffKey,
@@ -99,6 +108,18 @@ pub const UpdateNoteParams = struct {
     id: i64,
     text: []const u8,
     replies: []const u8,
+};
+
+/// An eviction candidate: `rank` is its index in `EvictParams.ranked`
+/// (meaningless for unranked rows).
+const SizedKey = struct {
+    key: DiffKey,
+    size: u64,
+    rank: usize,
+
+    fn fartherFirst(_: void, a: SizedKey, b: SizedKey) bool {
+        return a.rank > b.rank;
+    }
 };
 
 /// One per thread (THREADSAFE=2): the UI thread, the sync worker and the
@@ -495,7 +516,7 @@ pub const Store = struct {
     }
 
     /// Insert or replace the diff for `params.key`. Eviction is a separate
-    /// call (`evictDiffs`); the caller decides when.
+    /// call (`evictDiffsRanked`); the caller decides when.
     pub fn putDiff(self: *Store, params: PutDiffParams) !void {
         try self.run(
             \\INSERT INTO diff_cache(repo_id, merge_base_oid, head_oid, bytes, size, last_used_at)
@@ -512,22 +533,36 @@ pub const Store = struct {
         });
     }
 
-    /// Delete least-recently-used unpinned rows until SUM(size) <= budget.
-    /// Pinned = referenced by a pr_seen row; those are never deleted, even
-    /// when the budget cannot be met. Returns rows deleted.
-    pub fn evictDiffs(self: *Store, repo_id: i64, budget_bytes: u64) !usize {
-        if (try self.diffCacheSize(repo_id) <= budget_bytes) return 0;
+    /// Delete unpinned rows until SUM(size) <= budget, in two passes: rows
+    /// absent from `params.ranked` go first, least recently used first; then
+    /// ranked rows from the end of the list (a key listed twice counts at its
+    /// first, nearest position), stopping short of the first
+    /// `params.keep_nearest` entries. Pinned = referenced by a pr_seen row;
+    /// those are never deleted, even when the budget cannot be met. Returns
+    /// the deleted keys in deletion order (allocator-owned, empty when under
+    /// budget).
+    pub fn evictDiffsRanked(self: *Store, allocator: std.mem.Allocator, params: EvictParams) ![]DiffKey {
+        if (try self.diffCacheSize(params.repo_id) <= params.budget_bytes) return allocator.alloc(DiffKey, 0);
+
+        var rank_of: std.AutoHashMapUnmanaged(DiffKey, usize) = .empty;
+        defer rank_of.deinit(self.allocator);
+        for (params.ranked, 0..) |key, rank| {
+            const slot = try rank_of.getOrPut(self.allocator, key);
+            if (!slot.found_existing) slot.value_ptr.* = rank;
+        }
 
         try self.db.begin(.immediate);
         errdefer self.db.rollback();
 
         // Re-read under the write lock: another connection may have changed
         // the cache since the unlocked check.
-        var total = try self.diffCacheSize(repo_id);
+        var total = try self.diffCacheSize(params.repo_id);
 
-        var victims: std.ArrayList(DiffKey) = .empty;
-        defer victims.deinit(self.allocator);
-        if (total > budget_bytes) {
+        var unranked: std.ArrayList(SizedKey) = .empty;
+        defer unranked.deinit(self.allocator);
+        var ranked: std.ArrayList(SizedKey) = .empty;
+        defer ranked.deinit(self.allocator);
+        {
             var candidates = try self.db.prepare(
                 \\SELECT merge_base_oid, head_oid, size FROM diff_cache d
                 \\WHERE repo_id = ? AND NOT EXISTS (
@@ -536,25 +571,46 @@ pub const Store = struct {
                 \\ORDER BY last_used_at ASC
             );
             defer candidates.finalize();
-            try candidates.bind(1, repo_id);
-            while (total > budget_bytes and try candidates.step()) {
-                try victims.append(self.allocator, .{
+            try candidates.bind(1, params.repo_id);
+            while (try candidates.step()) {
+                const key: DiffKey = .{
                     .merge_base_oid = try storedOid(try candidates.columnText(0)),
                     .head_oid = try storedOid(try candidates.columnText(1)),
-                });
-                total -|= std.math.cast(u64, candidates.columnInt(2)) orelse return error.SqliteError;
+                };
+                const size = std.math.cast(u64, candidates.columnInt(2)) orelse return error.SqliteError;
+                const rank = rank_of.get(key);
+                if (rank) |r| if (r < params.keep_nearest) continue;
+                const list = if (rank == null) &unranked else &ranked;
+                try list.append(self.allocator, .{ .key = key, .size = size, .rank = rank orelse 0 });
             }
         }
+        std.mem.sortUnstable(SizedKey, ranked.items, {}, SizedKey.fartherFirst);
 
         var delete = try self.db.prepare("DELETE FROM diff_cache WHERE repo_id = ? AND merge_base_oid = ? AND head_oid = ?");
         defer delete.finalize();
-        for (victims.items) |key| {
-            try delete.bindAll(.{ repo_id, &key.merge_base_oid, &key.head_oid });
-            _ = try delete.step();
-            delete.reset();
+        var deleted: std.ArrayList(DiffKey) = .empty;
+        errdefer deleted.deinit(allocator);
+        for ([_][]const SizedKey{ unranked.items, ranked.items }) |victims| {
+            for (victims) |victim| {
+                if (total <= params.budget_bytes) break;
+                try deleted.ensureUnusedCapacity(allocator, 1);
+                try delete.bindAll(.{ params.repo_id, &victim.key.merge_base_oid, &victim.key.head_oid });
+                _ = try delete.step();
+                delete.reset();
+                total -|= victim.size;
+                deleted.appendAssumeCapacity(victim.key);
+            }
         }
         try self.db.commit();
-        return victims.items.len;
+        return deleted.toOwnedSlice(allocator);
+    }
+
+    /// `evictDiffsRanked` with nothing ranked: plain LRU over unpinned rows.
+    /// Returns rows deleted.
+    pub fn evictDiffs(self: *Store, repo_id: i64, budget_bytes: u64) !usize {
+        const deleted = try self.evictDiffsRanked(self.allocator, .{ .repo_id = repo_id, .budget_bytes = budget_bytes });
+        defer self.allocator.free(deleted);
+        return deleted.len;
     }
 
     /// Existence check that does NOT bump last_used_at (prefetch skip checks
@@ -689,7 +745,7 @@ pub const Store = struct {
         _ = try stmt.step();
     }
 
-    fn diffCacheSize(self: *Store, repo_id: i64) !u64 {
+    pub fn diffCacheSize(self: *Store, repo_id: i64) !u64 {
         var sum = try self.db.prepare("SELECT COALESCE(SUM(size), 0) FROM diff_cache WHERE repo_id = ?");
         defer sum.finalize();
         try sum.bind(1, repo_id);
@@ -1914,6 +1970,140 @@ test "hasDiff does not bump last_used_at" {
     try testing.expect(try store.hasDiff(repo_id, diffKey(oid_a, oid_b)));
     try testing.expectEqual(@as(i64, 100), try queryInt(&store, "SELECT last_used_at FROM diff_cache"));
     try testing.expect(!try store.hasDiff(repo_id, diffKey(oid_c, oid_d)));
+}
+
+test "evictDiffsRanked deletes rows outside the ranking before ranked ones" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    const hundred = "x" ** 100;
+    const k1 = diffKey(oid_a, oid_b);
+    const k2 = diffKey(oid_a, oid_c);
+    const k3 = diffKey(oid_a, oid_d);
+    try store.putDiff(.{ .repo_id = repo_id, .key = k1, .bytes = hundred, .now = 1 });
+    try store.putDiff(.{ .repo_id = repo_id, .key = k2, .bytes = hundred, .now = 2 });
+    try store.putDiff(.{ .repo_id = repo_id, .key = k3, .bytes = hundred, .now = 3 });
+
+    const deleted = try store.evictDiffsRanked(testing.allocator, .{ .repo_id = repo_id, .budget_bytes = 200, .ranked = &.{ k1, k3 } });
+    defer testing.allocator.free(deleted);
+
+    try testing.expectEqualSlices(DiffKey, &.{k2}, deleted);
+    try testing.expect(try store.hasDiff(repo_id, k1));
+    try testing.expect(!try store.hasDiff(repo_id, k2));
+    try testing.expect(try store.hasDiff(repo_id, k3));
+}
+
+test "evictDiffsRanked deletes ranked rows farthest first, whatever their age" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    const hundred = "x" ** 100;
+    const k1 = diffKey(oid_a, oid_b);
+    const k2 = diffKey(oid_a, oid_c);
+    const k3 = diffKey(oid_a, oid_d);
+    try store.putDiff(.{ .repo_id = repo_id, .key = k1, .bytes = hundred, .now = 1 });
+    try store.putDiff(.{ .repo_id = repo_id, .key = k2, .bytes = hundred, .now = 9 });
+    try store.putDiff(.{ .repo_id = repo_id, .key = k3, .bytes = hundred, .now = 5 });
+
+    const deleted = try store.evictDiffsRanked(testing.allocator, .{ .repo_id = repo_id, .budget_bytes = 100, .ranked = &.{ k1, k3, k2 } });
+    defer testing.allocator.free(deleted);
+
+    try testing.expectEqualSlices(DiffKey, &.{ k2, k3 }, deleted);
+    try testing.expect(try store.hasDiff(repo_id, k1));
+    try testing.expect(!try store.hasDiff(repo_id, k2));
+    try testing.expect(!try store.hasDiff(repo_id, k3));
+}
+
+test "evictDiffsRanked never deletes a pinned row, even one ranked last" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    const hundred = "x" ** 100;
+    const k1 = diffKey(oid_a, oid_b);
+    const k2 = diffKey(oid_a, oid_c);
+    try store.putDiff(.{ .repo_id = repo_id, .key = k1, .bytes = hundred, .now = 1 });
+    try store.putDiff(.{ .repo_id = repo_id, .key = k2, .bytes = hundred, .now = 2 });
+    try store.setSeen(.{ .repo_id = repo_id, .number = 2, .head_oid = oid_c, .merge_base_oid = oid_a, .now = 1 });
+
+    const deleted = try store.evictDiffsRanked(testing.allocator, .{ .repo_id = repo_id, .budget_bytes = 100, .ranked = &.{ k1, k2 } });
+    defer testing.allocator.free(deleted);
+
+    try testing.expectEqualSlices(DiffKey, &.{k1}, deleted);
+    try testing.expect(!try store.hasDiff(repo_id, k1));
+    try testing.expect(try store.hasDiff(repo_id, k2));
+}
+
+test "evictDiffsRanked counts a key ranked twice at its nearest position" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    const hundred = "x" ** 100;
+    const k1 = diffKey(oid_a, oid_b);
+    const k2 = diffKey(oid_a, oid_c);
+    try store.putDiff(.{ .repo_id = repo_id, .key = k1, .bytes = hundred, .now = 1 });
+    try store.putDiff(.{ .repo_id = repo_id, .key = k2, .bytes = hundred, .now = 2 });
+
+    const deleted = try store.evictDiffsRanked(testing.allocator, .{ .repo_id = repo_id, .budget_bytes = 100, .ranked = &.{ k1, k2, k1 } });
+    defer testing.allocator.free(deleted);
+
+    try testing.expectEqualSlices(DiffKey, &.{k2}, deleted);
+    try testing.expect(try store.hasDiff(repo_id, k1));
+    try testing.expect(!try store.hasDiff(repo_id, k2));
+}
+
+test "evictDiffsRanked keeps the keep_nearest ranked rows when pinned bytes alone exceed the budget" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    const hundred = "x" ** 100;
+    const pinned = diffKey(oid_a, oid_b);
+    const near = diffKey(oid_a, oid_c);
+    const next = diffKey(oid_b, oid_c);
+    const far = diffKey(oid_a, oid_d);
+    try store.putDiff(.{ .repo_id = repo_id, .key = pinned, .bytes = hundred, .now = 1 });
+    try store.putDiff(.{ .repo_id = repo_id, .key = near, .bytes = hundred, .now = 2 });
+    try store.putDiff(.{ .repo_id = repo_id, .key = next, .bytes = hundred, .now = 3 });
+    try store.putDiff(.{ .repo_id = repo_id, .key = far, .bytes = hundred, .now = 4 });
+    try store.setSeen(.{ .repo_id = repo_id, .number = 1, .head_oid = oid_b, .merge_base_oid = oid_a, .now = 1 });
+
+    const deleted = try store.evictDiffsRanked(testing.allocator, .{
+        .repo_id = repo_id,
+        .budget_bytes = 50,
+        .ranked = &.{ near, next, far },
+        .keep_nearest = 2,
+    });
+    defer testing.allocator.free(deleted);
+
+    try testing.expectEqualSlices(DiffKey, &.{far}, deleted);
+    try testing.expect(try store.hasDiff(repo_id, pinned));
+    try testing.expect(try store.hasDiff(repo_id, near));
+    try testing.expect(try store.hasDiff(repo_id, next));
+}
+
+test "evictDiffsRanked under budget deletes nothing and reports nothing" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    const k1 = diffKey(oid_a, oid_b);
+    try store.putDiff(.{ .repo_id = repo_id, .key = k1, .bytes = "x" ** 100, .now = 1 });
+
+    const deleted = try store.evictDiffsRanked(testing.allocator, .{ .repo_id = repo_id, .budget_bytes = 100, .ranked = &.{k1} });
+    defer testing.allocator.free(deleted);
+
+    try testing.expectEqual(@as(usize, 0), deleted.len);
+    try testing.expect(try store.hasDiff(repo_id, k1));
 }
 
 // --- merge-base cache ------------------------------------------------------
