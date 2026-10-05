@@ -127,7 +127,7 @@ const usage =
     \\  run          --db D --repo-id R --repo-root P --owner O --name N --targets T.tsv
     \\               [--focus N] [--then-focus N]... [--budget BYTES] [--timeout-ms 30000]
     \\               [--gh-bin PATH] [--git-bin PATH] [--git-timeout-ms MS] [--keep-nearest N]
-    \\               [--no-threads] [--wipe-diffs]
+    \\               [--no-threads] [--wipe-diffs] [--stop-after-ms MS]
     \\  dump-diffs   --db D --repo-id R
     \\  dump-diff    --db D --repo-id R --merge-base M --head H
     \\  dump-key     --db D --repo-id R --base-tip B --head H
@@ -302,6 +302,9 @@ fn cmdRun(ctx: *Ctx) !u8 {
     // Focus first so the worker's first look at the new targets already orders by it.
     worker.setFocus(focus);
     const version = try worker.setTargets(targets);
+    if (ctx.flags.get("--stop-after-ms") != null) {
+        return stopMidRun(ctx, worker, try ctx.flags.int(u64, "--stop-after-ms"));
+    }
 
     var status = (try waitForSettled(worker, .{ .version = version, .timeout_ms = timeout_ms })) orelse {
         worker.stop();
@@ -335,6 +338,18 @@ fn cmdRun(ctx: *Ctx) !u8 {
         std.debug.print("harness_prefetch run: worker leaked memory\n", .{});
         return 1;
     }
+    return 0;
+}
+
+/// `--stop-after-ms`: let the worker run that long (into a git or gh child
+/// that hangs), then stop it and print `stopped <ms stop took>`. A stop that
+/// gives up on the thread leaves it freeing itself through the allocator, so
+/// there is no leak check here.
+fn stopMidRun(ctx: *Ctx, worker: *prefetch.PrefetchWorker, stop_after_ms: u64) !u8 {
+    skim_io.sleep(stop_after_ms * std.time.ns_per_ms);
+    var timer = try skim_io.Timer.start();
+    worker.stop();
+    try ctx.out.print("stopped\t{d}\n", .{timer.read() / std.time.ns_per_ms});
     return 0;
 }
 

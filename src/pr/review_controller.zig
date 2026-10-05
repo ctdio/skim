@@ -1,10 +1,10 @@
 //! Controller for a native GitHub PR review session. Owns `ReviewSession`
 //! state and all logic over it as free functions (App Struct Boundaries
-//! pattern; template: `pr/controller.zig`). App keeps only thin forwarders.
+//! pattern). App keeps only thin forwarders.
 //!
 //! Layering (AD-1): this is the controller layer. IO lives in `github.zig`,
-//! parsing in `review_parse.zig`. The async idiom (AD-3) mirrors
-//! `pr/controller.zig`: a detached worker allocates with `c_allocator` so
+//! parsing in `review_parse.zig`. The async idiom (AD-3): a detached worker
+//! allocates with `c_allocator` so
 //! results survive the thread boundary; the main loop polls an atomic `ready`
 //! flag and consumes under a mutex. `applyFetchedData` is THE ownership
 //! boundary (AD-4): every string the session keeps is deep-copied into a
@@ -277,7 +277,7 @@ pub const PendingEntry = struct {
     fetched_base_ref: ?[]u8 = null, // base branch name used for the diff
     gh_ok: bool = false, // review payload fetched successfully
     raw_json: ?[]u8 = null, // gh review payload (when gh_ok)
-    gh_kind: github.GhErrorKind = .other, // classified failure (when !gh_ok)
+    gh_kind: ?github.GhErrorKind = null, // classified gh failure; null = gh reported none
     generation: u64 = 0, // session generation this entry/refetch was spawned under
 };
 
@@ -292,8 +292,15 @@ pub const EntryOutcome = union(enum) {
         gh_error: ?github.GhErrorKind, // set when the diff entered but review data failed
     },
     refreshed: ?github.GhErrorKind, // review data re-applied; gh_error if the refetch failed
-    fetch_failed, // git ref fetch failed — cannot enter the diff at all
+    fetch_failed: FetchFailure, // git ref fetch failed — cannot enter the diff at all
     start_failed, // the entry parked behind a superseded one could not be started
+};
+
+/// Why an entry could not fetch the PR's refs. `gh_error` is gh's verdict on
+/// the PR when gh ran first (number-only entry), else null.
+pub const FetchFailure = struct {
+    number: u32,
+    gh_error: ?github.GhErrorKind,
 };
 
 pub const ReviewSession = struct {
@@ -513,7 +520,7 @@ pub fn pollPending(self: *ReviewSession, allocator: Allocator) EntryOutcome {
         return .none;
     }
 
-    var gh_error: ?github.GhErrorKind = if (gh_ok) null else gh_kind;
+    var gh_error: ?github.GhErrorKind = if (gh_ok) null else gh_kind orelse .other;
     if (gh_ok) {
         if (raw_json) |raw| {
             if (review_parse.parsePrDetails(allocator, raw)) |parsed| {
@@ -539,19 +546,19 @@ pub fn pollPending(self: *ReviewSession, allocator: Allocator) EntryOutcome {
     if (!git_ok) {
         if (head_ref) |h| ca.free(h);
         if (base_ref) |b| ca.free(b);
-        return .fetch_failed;
+        return .{ .fetch_failed = .{ .number = entered_number, .gh_error = gh_kind } };
     }
 
     const app_head = allocator.dupe(u8, head_ref orelse "") catch {
         if (head_ref) |h| ca.free(h);
         if (base_ref) |b| ca.free(b);
-        return .fetch_failed;
+        return .{ .fetch_failed = .{ .number = entered_number, .gh_error = null } };
     };
     const app_base = allocator.dupe(u8, base_ref orelse "") catch {
         allocator.free(app_head);
         if (head_ref) |h| ca.free(h);
         if (base_ref) |b| ca.free(b);
-        return .fetch_failed;
+        return .{ .fetch_failed = .{ .number = entered_number, .gh_error = null } };
     };
     if (head_ref) |h| ca.free(h);
     if (base_ref) |b| ca.free(b);
@@ -565,6 +572,19 @@ pub fn pollPending(self: *ReviewSession, allocator: Allocator) EntryOutcome {
     }
     self.data_unavailable = gh_error != null;
     return .{ .entered = .{ .head_ref = app_head, .base_ref = app_base, .gh_error = gh_error } };
+}
+
+/// Sidebar text for an entry whose ref fetch failed. A PR gh could not
+/// resolve is named, gh setup problems use their classified text, and
+/// anything else keeps the generic hint. `buf` holds the formatted text.
+pub fn fetchFailedMessage(buf: []u8, failure: FetchFailure) []const u8 {
+    const generic = "fetch failed — is gh/git authenticated?";
+    const kind = failure.gh_error orelse return generic;
+    return switch (kind) {
+        .not_found => std.fmt.bufPrint(buf, "PR #{d} not found on GitHub", .{failure.number}) catch github.kindMessage(kind),
+        .not_installed, .not_authenticated, .rate_limited, .network => github.kindMessage(kind),
+        .other => generic,
+    };
 }
 
 /// Deep-copy parsed review data into a fresh session-owned arena, replacing any
@@ -1440,13 +1460,14 @@ fn entryWorker(self: *ReviewSession) void {
     var git_ok = kind == .refetch; // refetch never touches git
     var head_ref: ?[]u8 = null;
     var base_ref_out: ?[]u8 = null;
+    var gh_kind: ?github.GhErrorKind = null;
 
     if (kind == .enter) {
         var base_ref: []const u8 = self.entering_base_ref;
-        var resolved: ?[]u8 = null;
+        var resolved: ResolvedBase = .{};
         if (base_ref.len == 0) {
             resolved = resolveBaseRef(ca, .{ .number = number, .gh_bin = self.gh_bin });
-            if (resolved) |r| base_ref = r;
+            if (resolved.name) |r| base_ref = r;
         }
         if (github.fetchRef(ca, .{ .number = number, .base_ref = base_ref, .git_bin = self.git_bin })) |hr| {
             git_ok = true;
@@ -1454,13 +1475,14 @@ fn entryWorker(self: *ReviewSession) void {
             base_ref_out = ca.dupe(u8, base_ref) catch null;
         } else |_| {
             git_ok = false;
+            // gh's verdict on the PR explains the failed fetch better than git's.
+            gh_kind = resolved.gh_error;
         }
-        if (resolved) |r| ca.free(r);
+        if (resolved.name) |r| ca.free(r);
     }
 
     var gh_ok = false;
     var raw_json: ?[]u8 = null;
-    var gh_kind: github.GhErrorKind = .other;
     if (git_ok) {
         if (github.getOriginOwnerRepo(ca, self.git_bin)) |owner_repo| {
             defer ca.free(owner_repo.owner);
@@ -1492,19 +1514,26 @@ fn entryWorker(self: *ReviewSession) void {
     self.entry.ready.store(true, .release);
 }
 
+/// `resolveBaseRef`'s answer: the base branch (caller frees), or gh's
+/// classified failure when it ran and failed.
+const ResolvedBase = struct {
+    name: ?[]u8 = null,
+    gh_error: ?github.GhErrorKind = null,
+};
+
 /// Resolve a PR's base branch name via `gh pr view` (number-only entry). Best
-/// effort — returns null on any failure; the caller then diffs against HEAD.
-fn resolveBaseRef(ca: Allocator, params: github.PrByNumberParams) ?[]u8 {
-    const fetch = github.fetchPrByNumber(ca, params) catch return null;
+/// effort — a null `name` makes the caller diff against HEAD.
+fn resolveBaseRef(ca: Allocator, params: github.PrByNumberParams) ResolvedBase {
+    const fetch = github.fetchPrByNumber(ca, params) catch return .{};
     switch (fetch) {
         .ok => |raw| {
             defer ca.free(raw);
-            var meta = review_parse.parsePrView(ca, raw) catch return null;
+            var meta = review_parse.parsePrView(ca, raw) catch return .{};
             defer meta.deinit();
-            if (meta.base_ref.len == 0) return null;
-            return ca.dupe(u8, meta.base_ref) catch null;
+            if (meta.base_ref.len == 0) return .{};
+            return .{ .name = ca.dupe(u8, meta.base_ref) catch null };
         },
-        .failed => return null,
+        .failed => |kind| return .{ .gh_error = kind },
     }
 }
 
@@ -3648,6 +3677,57 @@ test "review_controller: stale-generation entry result discarded" {
     try testing.expectEqual(@as(usize, 0), session.threads.items.len);
     try testing.expect(!session.entry_in_flight);
     try testing.expect(session.entry.raw_json == null);
+}
+
+test "pollPending: a number-only entry for a PR gh cannot resolve fails as not_found" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    session.entry_in_flight = true;
+    session.pending_kind = .enter;
+    session.entering_number = 999;
+    session.entry.git_ok = false;
+    session.entry.gh_kind = .not_found;
+    session.entry.ready.store(true, .release);
+
+    const outcome = pollPending(&session, a);
+
+    try testing.expect(outcome == .fetch_failed);
+    try testing.expectEqual(@as(u32, 999), outcome.fetch_failed.number);
+    try testing.expectEqual(@as(?github.GhErrorKind, .not_found), outcome.fetch_failed.gh_error);
+}
+
+test "pollPending: a git fetch failure with no gh verdict carries no gh error" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    session.entry_in_flight = true;
+    session.pending_kind = .enter;
+    session.entering_number = 12;
+    session.entering_base_ref = try a.dupe(u8, "main");
+    session.entry.git_ok = false;
+    session.entry.ready.store(true, .release);
+
+    const outcome = pollPending(&session, a);
+
+    try testing.expect(outcome == .fetch_failed);
+    try testing.expectEqual(@as(u32, 12), outcome.fetch_failed.number);
+    try testing.expectEqual(@as(?github.GhErrorKind, null), outcome.fetch_failed.gh_error);
+}
+
+test "fetchFailedMessage: names a PR GitHub does not have" {
+    var buf: [96]u8 = undefined;
+    try testing.expectEqualStrings("PR #999 not found on GitHub", fetchFailedMessage(&buf, .{ .number = 999, .gh_error = .not_found }));
+}
+
+test "fetchFailedMessage: gh setup problems use the classified text" {
+    var buf: [96]u8 = undefined;
+    try testing.expectEqualStrings(github.kindMessage(.not_authenticated), fetchFailedMessage(&buf, .{ .number = 1, .gh_error = .not_authenticated }));
+}
+
+test "fetchFailedMessage: an unexplained git failure keeps the generic hint" {
+    var buf: [96]u8 = undefined;
+    try testing.expectEqualStrings("fetch failed — is gh/git authenticated?", fetchFailedMessage(&buf, .{ .number = 1, .gh_error = null }));
 }
 
 test "startEnterPr: a third request replaces a parked one without leaking" {

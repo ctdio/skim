@@ -307,6 +307,21 @@ pub fn visibleStacks(allocator: std.mem.Allocator, params: struct {
     return .{ .views = try views.toOwnedSlice(allocator), .member_storage = member_storage };
 }
 
+pub fn isRequestedMe(r: *const PrRecord, ctx: EvalContext) bool {
+    return listContainsIgnoreCase(r.requested_users, ctx.viewer_login);
+}
+
+pub fn isRequestedTeam(r: *const PrRecord, ctx: EvalContext) bool {
+    return anyListIntersects(r.requested_teams, ctx.viewer_teams);
+}
+
+/// Approved by the viewer at the PR's current head.
+pub fn isMineApproved(r: *const PrRecord) bool {
+    return std.mem.eql(u8, r.my_review_state, "APPROVED") and
+        r.my_review_oid.len > 0 and
+        std.mem.eql(u8, r.my_review_oid, r.head_oid);
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -588,21 +603,6 @@ fn termMatches(params: struct {
         },
         .text => |needle| recordHasText(r, needle),
     };
-}
-
-fn isRequestedMe(r: *const PrRecord, ctx: EvalContext) bool {
-    return listContainsIgnoreCase(r.requested_users, ctx.viewer_login);
-}
-
-fn isRequestedTeam(r: *const PrRecord, ctx: EvalContext) bool {
-    return anyListIntersects(r.requested_teams, ctx.viewer_teams);
-}
-
-/// Approved by the viewer at the PR's current head.
-fn isMineApproved(r: *const PrRecord) bool {
-    return std.mem.eql(u8, r.my_review_state, "APPROVED") and
-        r.my_review_oid.len > 0 and
-        std.mem.eql(u8, r.my_review_oid, r.head_oid);
 }
 
 fn anyMemberHasText(records: []const PrRecord, members: []const usize, needle: []const u8) bool {

@@ -7,6 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const skim_io = @import("skim_io");
 const github = @import("../github.zig");
+const child_group = @import("../child_group.zig");
 const review_parse = @import("../review_parse.zig");
 const store_mod = @import("../db/store.zig");
 const plan = @import("plan.zig");
@@ -38,9 +39,6 @@ pub const default_child_timeout_ns: u64 = 120 * std.time.ns_per_s;
 /// No passphrase or host-key prompt underneath the TUI, and a host that does
 /// not answer fails in 15s instead of the system's TCP timeout.
 const default_ssh_command = "ssh -o BatchMode=yes -o ConnectTimeout=15";
-/// How long a child's process group gets to exit on SIGTERM before SIGKILL.
-const term_grace_ns = 300 * std.time.ns_per_ms;
-const term_poll_ns = 10 * std.time.ns_per_ms;
 /// Scratch kept between jobs; anything above it (a large diff) is released.
 const scratch_retain_bytes = 1024 * 1024;
 /// Diff views per target; `slotOf` ranks each target's views together.
@@ -115,10 +113,9 @@ pub const PrefetchWorker = struct {
     focus_number: std.atomic.Value(u32) = .init(0),
     gen: std.atomic.Value(u64) = .init(0),
 
-    /// Guards `child_pid`: the git child the thread is reading from (0 = none),
-    /// so `stop` can kill its process group.
-    child_mutex: std.Io.Mutex = .init,
-    child_pid: std.posix.pid_t = 0,
+    /// The git/gh child the thread is reading from, so `stop` can kill its
+    /// process group.
+    child: child_group.ChildSlot = .{},
 
     /// Guards `targets_arena`, `targets` and `targets_version`.
     targets_mutex: std.Io.Mutex = .init,
@@ -176,7 +173,7 @@ pub const PrefetchWorker = struct {
     pub fn stop(self: *PrefetchWorker) void {
         self.stop_requested.store(true, .release);
         wake(self);
-        killChildGroup(self);
+        self.child.cancel();
         const thread = self.thread.?;
         if (!waitForExit(self) and self.life.cmpxchgStrong(.running, .orphaned, .acq_rel, .acquire) == null) {
             std.log.warn("prefetch: worker still busy 2s after its child was killed; detaching it", .{});
@@ -997,10 +994,10 @@ fn runGit(ctx: Ctx, params: struct {
 }
 
 /// Private child runner: cwd = repo root, the worker's child env, argv[0]
-/// swapped for `params.bin`, `params.stdin` written up front. The child leads
-/// its own process group so a timeout or `stop` can kill everything it
+/// swapped for `params.bin`, `params.stdin` written up front, run through
+/// `child_group.run` on the worker's slot so `stop` can kill everything it
 /// started (ssh, remote helpers, gh's own children). Output is scratch-owned.
-/// Errors: `Stopped` (stop was requested; nothing is spawned),
+/// Errors: `Stopped` (stop was requested, before or during the run),
 /// `ExecutableMissing`, `StdoutTooLong` (over `params.stdout_limit`),
 /// `StderrTooLong`, `Timeout` (over `config.child_timeout_ns`). Never logs at
 /// .err and never prints to stderr (that would corrupt the TUI).
@@ -1011,57 +1008,28 @@ fn runChild(ctx: Ctx, params: struct {
     stdout_limit: usize = max_git_output_bytes,
 }) !ChildResult {
     if (ctx.worker.stop_requested.load(.acquire)) return error.Stopped;
-    const io = skim_io.get();
     const argv = try ctx.scratch().dupe([]const u8, params.argv);
     argv[0] = params.bin;
-    var child = std.process.spawn(io, .{
+    const output = child_group.run(.{
+        .allocator = ctx.scratch(),
         .argv = argv,
-        .cwd = .{ .path = ctx.config().repo_root },
+        .cwd = ctx.config().repo_root,
         .environ_map = ctx.env,
-        .stdin = if (params.stdin != null) .pipe else .ignore,
-        .stdout = .pipe,
-        .stderr = .pipe,
-        .pgid = 0,
+        .stdin = params.stdin,
+        .stdout_limit = params.stdout_limit,
+        .stderr_limit = max_git_output_bytes,
+        .timeout = .{ .total_ns = ctx.config().child_timeout_ns },
+        .slot = &ctx.worker.child,
     }) catch |err| switch (err) {
         error.FileNotFound => return error.ExecutableMissing,
-        else => return err,
-    };
-    defer child.kill(io);
-    holdChild(ctx.worker, child.id.?);
-    var exited = false;
-    defer if (!exited) releaseChild(ctx.worker, .{ .kill_group = true });
-
-    if (params.stdin) |bytes| {
-        const stdin = child.stdin.?;
-        stdin.writeStreamingAll(io, bytes) catch |err| std.log.warn("prefetch: child stdin failed: {any}", .{err});
-        stdin.close(io);
-        child.stdin = null;
-    }
-
-    var buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
-    var reader: std.Io.File.MultiReader = undefined;
-    reader.init(ctx.scratch(), io, buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
-    defer reader.deinit();
-    const deadline: std.Io.Timeout = .{ .deadline = .fromNow(io, .{
-        .raw = .{ .nanoseconds = @intCast(ctx.config().child_timeout_ns) },
-        .clock = .awake,
-    }) };
-    while (reader.fill(64, deadline)) |_| {
-        if (reader.reader(0).buffered().len > params.stdout_limit) return error.StdoutTooLong;
-        if (reader.reader(1).buffered().len > max_git_output_bytes) return error.StderrTooLong;
-    } else |err| switch (err) {
-        error.EndOfStream => {},
+        error.Canceled => return error.Stopped,
         else => |e| return e,
-    }
-    try reader.checkAnyError();
-
-    exited = true;
-    releaseChild(ctx.worker, .{ .kill_group = false });
-    const exit_code: u32 = switch (try child.wait(io)) {
+    };
+    const exit_code: u32 = switch (output.term) {
         .exited => |code| code,
         else => 1,
     };
-    return .{ .ok = exit_code == 0, .exit_code = exit_code, .stdout = try reader.toOwnedSlice(0), .stderr = try reader.toOwnedSlice(1) };
+    return .{ .ok = exit_code == 0, .exit_code = exit_code, .stdout = output.stdout, .stderr = output.stderr };
 }
 
 /// Copy the shared target list into the round when its version changed, and
@@ -1171,71 +1139,6 @@ fn waitForExit(self: *PrefetchWorker) bool {
         if (deadline.compare(.lte, .now(io, .awake))) return false;
         io.futexWaitTimeout(Life, &self.life.raw, .running, .{ .deadline = deadline }) catch {};
     }
-    return true;
-}
-
-/// Record the child `runChild` is reading from so `stop` can kill it. A child
-/// spawned after stop was requested is killed at once: nothing will use its
-/// output, and `stop` may already have looked for a child to kill.
-fn holdChild(self: *PrefetchWorker, pid: std.posix.pid_t) void {
-    self.child_mutex.lockUncancelable(skim_io.get());
-    defer self.child_mutex.unlock(skim_io.get());
-    self.child_pid = pid;
-    if (self.stop_requested.load(.acquire)) killGroup(pid);
-}
-
-/// Called before the child is reaped, so its pid (and process group id)
-/// cannot have been reused by the time `kill_group` signals it.
-fn releaseChild(self: *PrefetchWorker, params: struct { kill_group: bool }) void {
-    self.child_mutex.lockUncancelable(skim_io.get());
-    defer self.child_mutex.unlock(skim_io.get());
-    if (params.kill_group and self.child_pid != 0) killGroup(self.child_pid);
-    self.child_pid = 0;
-}
-
-fn killChildGroup(self: *PrefetchWorker) void {
-    self.child_mutex.lockUncancelable(skim_io.get());
-    defer self.child_mutex.unlock(skim_io.get());
-    if (self.child_pid != 0) killGroup(self.child_pid);
-}
-
-/// SIGTERM the child's process group so git can remove its lock files, then
-/// SIGKILL whatever is left once the leader has exited or `term_grace_ns`
-/// has passed, whichever comes first. Callers hold `child_mutex`, so the
-/// leader stays unreaped (and its pid cannot be reused as a group id) until
-/// this returns.
-fn killGroup(pid: std.posix.pid_t) void {
-    if (!signalGroup(pid, std.posix.SIG.TERM)) return;
-    var waited_ns: u64 = 0;
-    while (waited_ns < term_grace_ns) : (waited_ns += term_poll_ns) {
-        skim_io.sleep(term_poll_ns);
-        if (!signalGroup(pid, @enumFromInt(0))) return;
-        if (leaderExited(pid)) break;
-    }
-    _ = signalGroup(pid, std.posix.SIG.KILL);
-}
-
-/// The unreaped leader's zombie keeps its group visible to `signalGroup`,
-/// so its exit is read with `waitid(WNOWAIT)`, which leaves it for
-/// `runChild` to reap. Linux only; elsewhere the full grace period runs.
-fn leaderExited(pid: std.posix.pid_t) bool {
-    if (builtin.os.tag != .linux) return false;
-    const linux = std.os.linux;
-    var info = std.mem.zeroes(linux.siginfo_t);
-    const rc = linux.waitid(.PID, pid, &info, linux.W.EXITED | linux.W.NOHANG | linux.W.NOWAIT, null);
-    if (linux.errno(rc) != .SUCCESS) return false;
-    return info.fields.common.first.piduid.pid == pid;
-}
-
-/// False once the group is gone.
-fn signalGroup(pid: std.posix.pid_t, sig: std.posix.SIG) bool {
-    std.posix.kill(-pid, sig) catch |err| switch (err) {
-        error.ProcessNotFound => return false,
-        else => {
-            std.log.warn("prefetch: signalling child process group {d} failed: {any}", .{ pid, err });
-            return false;
-        },
-    };
     return true;
 }
 

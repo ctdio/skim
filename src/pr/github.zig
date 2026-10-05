@@ -6,11 +6,14 @@ const std = @import("std");
 const review_parse = @import("review_parse.zig");
 const filter = @import("filter.zig");
 const git = @import("git.zig");
+const child_group = @import("child_group.zig");
 const skim_io = @import("skim_io");
 
 pub const Error = error{ GhCommandFailed, GhNotFound };
 
 const default_limit = 50;
+/// stdout/stderr cap for one `gh` call.
+const max_gh_output_bytes = 16 * 1024 * 1024;
 
 const json_fields = "number,title,author,headRefName,baseRefName,isDraft,updatedAt,url,statusCheckRollup";
 
@@ -823,6 +826,8 @@ pub const GraphqlRequest = struct {
     allow_error_body: bool = false,
     label: []const u8 = "gh api graphql",
     idle_timeout_ms: u32 = 30_000,
+    /// Forwarded to `runGhArgv`: lets another thread kill the call.
+    child_slot: ?*child_group.ChildSlot = null,
 };
 
 /// `gh api graphql` with a configurable binary and an idle timeout. Strings go
@@ -838,6 +843,7 @@ pub fn runGraphql(allocator: std.mem.Allocator, request: GraphqlRequest) !GhFetc
         .label = request.label,
         .allow_error_body = request.allow_error_body,
         .idle_timeout_ms = request.idle_timeout_ms,
+        .child_slot = request.child_slot,
     });
 }
 
@@ -848,24 +854,28 @@ pub const RunGhArgvParams = struct {
     /// GraphQL `data` member (a partial result next to `errors`).
     allow_error_body: bool = false,
     /// Longest wait for the next byte of output, not a wall-clock limit. On
-    /// expiry the child is killed and the call fails as `.network`.
+    /// expiry the child's process group is killed and the call fails as
+    /// `.network`.
     idle_timeout_ms: u32 = 30_000,
+    /// The child is held here while it runs, so `ChildSlot.cancel` on another
+    /// thread kills it and this call returns `error.Canceled`.
+    child_slot: ?*child_group.ChildSlot = null,
 };
 
 /// Run an arbitrary `gh` argv and classify its failure. Failures are logged at
 /// `.warn`: a failed `gh` call is a recoverable, per-item failure for the
-/// background workers that use this.
+/// background workers that use this. `gh` leads its own process group so a
+/// timeout or a cancel kills everything it started.
 pub fn runGhArgv(allocator: std.mem.Allocator, params: RunGhArgvParams) !GhFetch {
-    const result = std.process.run(allocator, skim_io.get(), .{
+    const output = child_group.run(.{
+        .allocator = allocator,
         .argv = params.argv,
-        .stdout_limit = .limited(16 * 1024 * 1024),
-        .stderr_limit = .limited(16 * 1024 * 1024),
-        .timeout = .{ .duration = .{
-            .raw = .fromMilliseconds(params.idle_timeout_ms),
-            .clock = .awake,
-        } },
+        .stdout_limit = max_gh_output_bytes,
+        .stderr_limit = max_gh_output_bytes,
+        .timeout = .{ .idle_ns = @as(u64, params.idle_timeout_ms) * std.time.ns_per_ms },
+        .slot = params.child_slot,
     }) catch |err| switch (err) {
-        error.OutOfMemory, error.Canceled => return err,
+        error.OutOfMemory, error.Canceled => |e| return e,
         error.FileNotFound => {
             std.log.warn("{s}: {s} not found", .{ params.label, params.argv[0] });
             return .{ .failed = .not_installed };
@@ -874,27 +884,31 @@ pub fn runGhArgv(allocator: std.mem.Allocator, params: RunGhArgvParams) !GhFetch
             std.log.warn("{s} timed out after {d}ms without output", .{ params.label, params.idle_timeout_ms });
             return .{ .failed = .network };
         },
+        error.StdoutTooLong, error.StderrTooLong => {
+            std.log.warn("{s} could not run: output over {d} bytes", .{ params.label, max_gh_output_bytes });
+            return .{ .failed = .other };
+        },
         else => {
             std.log.warn("{s} could not run: {}", .{ params.label, err });
             return .{ .failed = .other };
         },
     };
-    errdefer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+    defer allocator.free(output.stderr);
+    const stdout = output.stdout;
 
-    const code: u32 = switch (result.term) {
+    const code: u32 = switch (output.term) {
         .exited => |c| c,
         else => 1,
     };
     if (code != 0) {
-        std.log.warn("{s} failed ({d}): {s}", .{ params.label, code, result.stderr });
-        if (params.allow_error_body and std.mem.indexOf(u8, result.stdout, "\"data\"") != null) {
-            return .{ .ok = result.stdout };
+        std.log.warn("{s} failed ({d}): {s}", .{ params.label, code, output.stderr });
+        if (params.allow_error_body and std.mem.indexOf(u8, stdout, "\"data\"") != null) {
+            return .{ .ok = stdout };
         }
-        allocator.free(result.stdout);
-        return .{ .failed = classifyGhFailure(code, result.stderr) };
+        allocator.free(stdout);
+        return .{ .failed = classifyGhFailure(code, output.stderr) };
     }
-    return .{ .ok = result.stdout };
+    return .{ .ok = stdout };
 }
 
 // =============================================================================

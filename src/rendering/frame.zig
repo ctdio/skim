@@ -12,6 +12,10 @@ const ui_components = @import("../ui.zig");
 const agent = @import("../agent/agent.zig");
 const command_palette = @import("../command_palette.zig");
 const help = @import("../help.zig");
+const sidebar_controller = @import("../pr/sidebar/controller.zig");
+const sidebar_layout = @import("../pr/sidebar/layout.zig");
+const sidebar_render = @import("../pr/sidebar/render.zig");
+const scroll_region = @import("scroll_region.zig");
 
 const App = @import("../app.zig").App;
 const skim_io = @import("skim_io");
@@ -44,32 +48,65 @@ pub fn render(app: *App, win: vaxis.Window) !void {
         return;
     }
 
+    // PR sidebar (AD-8) takes the left columns; everything but the status bar
+    // and the mode overlays draws into `main_win` beside it.
+    const surface_split = surfaceSplit(app, win.width);
+    if (surface_split.sidebar_cols > 0) {
+        const sidebar_win = win.child(.{
+            .x_off = 0,
+            .y_off = 0,
+            .width = surface_split.sidebar_cols,
+            .height = win.height -| Layout.status_height,
+        });
+        const list_rows = sidebar_render.listRows(sidebar_win.height, app.state.sidebar.parse_error != null);
+        sidebar_controller.clampScroll(&app.state.sidebar, list_rows);
+        sidebar_render.draw(sidebar_win, sidebar_controller.view(&app.state.sidebar, .{
+            .focused = app.mode == .pr_review,
+            .now_secs = skim_io.timestamp(),
+            .frame_allocator = app.frameSegmentAllocator(),
+            .visible_rows = list_rows,
+        }));
+    }
+    const main_win = win.child(.{
+        .x_off = surface_split.main_x,
+        .y_off = 0,
+        .width = surface_split.main_cols,
+        .height = win.height,
+    });
+
     // Content height without dividers (continuous mode)
-    const content_height = win.height -| Layout.header_height -| Layout.status_height;
+    const content_height = main_win.height -| Layout.header_height -| Layout.status_height;
 
     // Check if agent panel should be shown (visible and not full-screen)
     // Don't show when in agent_selection mode (selecting which agent to connect to)
     const show_agent_panel = app.isAgentPanelVisible() and !app.isAgentFullScreen() and app.mode != .agent_selection;
 
     // Render header and content (or empty/branch menu if no files)
-    if (app.state.files.len == 0) {
+    if (surface_split.main_cols == 0) {
+        // Narrow terminal with the PR sidebar focused: it takes every column.
+    } else if (app.state.files.len == 0 and app.state.diff_load.isLoading()) {
         // Initial diff still streaming and nothing on screen yet: show a loading
         // indicator instead of the "no changes" menu until the first file lands.
-        if (app.state.diff_load.isLoading()) {
-            loading.renderLoadingScreen(win);
-            return;
-        }
-
+        // Beside the PR sidebar the status bar still draws below it.
+        loading.renderLoadingScreen(main_win);
+        if (!app.state.sidebar.open) return;
+    } else if (app.state.files.len == 0 and app.state.sidebar.open) {
+        // The working-tree "no changes" menu makes no sense beside a PR list.
+        sidebar_render.drawDiffPlaceholder(main_win, .{
+            .message = app.state.sidebar.messageText(),
+            .selected_number = app.state.sidebar.selected_number,
+        });
+    } else if (app.state.files.len == 0) {
         // No files - show empty state or branch selection menu
         // If agent panel is visible, render it as sidebar with empty menu in main area
         if (show_agent_panel) {
             const panel_side = app.getAgentPanelSide();
-            const panel_width = win.width * 3 / 10; // 30% for agent panel
-            const diff_width = win.width - panel_width;
+            const panel_width = main_win.width * 3 / 10; // 30% for agent panel
+            const diff_width = main_win.width - panel_width;
 
             if (panel_side == .left) {
                 // Agent panel on left
-                const agent_win = win.child(.{
+                const agent_win = main_win.child(.{
                     .x_off = 0,
                     .y_off = Layout.header_height,
                     .width = @intCast(panel_width),
@@ -84,11 +121,11 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 }
 
                 // Empty menu on right
-                const content_win = win.child(.{
+                const content_win = main_win.child(.{
                     .x_off = @intCast(panel_width),
                     .y_off = 0,
                     .width = @intCast(diff_width),
-                    .height = @intCast(win.height),
+                    .height = @intCast(main_win.height),
                 });
                 if (app.mode == .branch_selection) {
                     if (profile_frame) {
@@ -129,11 +166,11 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 }
             } else {
                 // Empty menu on left
-                const content_win = win.child(.{
+                const content_win = main_win.child(.{
                     .x_off = 0,
                     .y_off = 0,
                     .width = @intCast(diff_width),
-                    .height = @intCast(win.height),
+                    .height = @intCast(main_win.height),
                 });
                 if (app.mode == .branch_selection) {
                     if (profile_frame) {
@@ -174,7 +211,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 }
 
                 // Agent panel on right
-                const agent_win = win.child(.{
+                const agent_win = main_win.child(.{
                     .x_off = @intCast(diff_width),
                     .y_off = Layout.header_height,
                     .width = @intCast(panel_width),
@@ -193,38 +230,38 @@ pub fn render(app: *App, win: vaxis.Window) !void {
             if (app.mode == .branch_selection) {
                 if (profile_frame) {
                     var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
-                    try UI.renderBranchSelectionMenu(app, win);
+                    try UI.renderBranchSelectionMenu(app, main_win);
                     if (timer_opt) |*timer| overlay_ns += timer.read();
                 } else {
-                    try UI.renderBranchSelectionMenu(app, win);
+                    try UI.renderBranchSelectionMenu(app, main_win);
                 }
             } else if (app.mode == .commit_selection) {
                 if (profile_frame) {
                     var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
-                    try UI.renderCommitSelectionMenu(app, win);
+                    try UI.renderCommitSelectionMenu(app, main_win);
                     if (timer_opt) |*timer| overlay_ns += timer.read();
                 } else {
-                    try UI.renderCommitSelectionMenu(app, win);
+                    try UI.renderCommitSelectionMenu(app, main_win);
                 }
             } else if (app.mode == .commit_diff_mode) {
                 if (profile_frame) {
                     var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
-                    try UI.renderCommitSelectionMenu(app, win);
+                    try UI.renderCommitSelectionMenu(app, main_win);
                     if (timer_opt) |*timer| overlay_ns += timer.read();
                     timer_opt = skim_io.Timer.start() catch null;
-                    try UI.renderCommitDiffModeMenu(app, win);
+                    try UI.renderCommitDiffModeMenu(app, main_win);
                     if (timer_opt) |*timer| overlay_ns += timer.read();
                 } else {
-                    try UI.renderCommitSelectionMenu(app, win);
-                    try UI.renderCommitDiffModeMenu(app, win);
+                    try UI.renderCommitSelectionMenu(app, main_win);
+                    try UI.renderCommitDiffModeMenu(app, main_win);
                 }
             } else {
                 if (profile_frame) {
                     var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
-                    try UI.renderEmptyMenu(app, win);
+                    try UI.renderEmptyMenu(app, main_win);
                     if (timer_opt) |*timer| overlay_ns += timer.read();
                 } else {
-                    try UI.renderEmptyMenu(app, win);
+                    try UI.renderEmptyMenu(app, main_win);
                 }
             }
         }
@@ -233,12 +270,12 @@ pub fn render(app: *App, win: vaxis.Window) !void {
         // Split content area based on panels
         if (show_agent_panel) {
             const panel_side = app.getAgentPanelSide();
-            const panel_width = win.width * 3 / 10; // 30% for agent panel
-            const diff_width = win.width - panel_width;
+            const panel_width = main_win.width * 3 / 10; // 30% for agent panel
+            const diff_width = main_win.width - panel_width;
 
             if (panel_side == .left) {
                 // Agent panel on left (starts at y=0, full height including header area)
-                const agent_win = win.child(.{
+                const agent_win = main_win.child(.{
                     .x_off = 0,
                     .y_off = 0,
                     .width = @intCast(panel_width),
@@ -253,7 +290,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 }
 
                 // Header above diff content (on right side)
-                const header_win = win.child(.{
+                const header_win = main_win.child(.{
                     .x_off = @intCast(panel_width),
                     .y_off = 0,
                     .width = @intCast(diff_width),
@@ -268,7 +305,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 }
 
                 // Diff content on right (below header)
-                const content_win = win.child(.{
+                const content_win = main_win.child(.{
                     .x_off = @intCast(panel_width),
                     .y_off = Layout.header_height,
                     .width = @intCast(diff_width),
@@ -284,7 +321,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
             } else {
                 // Agent panel on right (default)
                 // Header above diff content (on left side)
-                const header_win = win.child(.{
+                const header_win = main_win.child(.{
                     .x_off = 0,
                     .y_off = 0,
                     .width = @intCast(diff_width),
@@ -299,7 +336,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 }
 
                 // Diff content on left (below header)
-                const content_win = win.child(.{
+                const content_win = main_win.child(.{
                     .x_off = 0,
                     .y_off = Layout.header_height,
                     .width = @intCast(diff_width),
@@ -314,7 +351,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 }
 
                 // Agent panel on right (starts at y=0, full height including header area)
-                const agent_win = win.child(.{
+                const agent_win = main_win.child(.{
                     .x_off = @intCast(diff_width),
                     .y_off = 0,
                     .width = @intCast(panel_width),
@@ -330,10 +367,10 @@ pub fn render(app: *App, win: vaxis.Window) !void {
             }
         } else {
             // Full width - header spans full width
-            const header_win = win.child(.{
+            const header_win = main_win.child(.{
                 .x_off = 0,
                 .y_off = 0,
-                .width = @intCast(win.width),
+                .width = @intCast(main_win.width),
                 .height = @intCast(Layout.header_height),
             });
             if (profile_frame) {
@@ -344,10 +381,10 @@ pub fn render(app: *App, win: vaxis.Window) !void {
                 try UI.renderHeader(app, header_win);
             }
             // Full width content
-            const content_win = win.child(.{
+            const content_win = main_win.child(.{
                 .x_off = 0,
                 .y_off = Layout.header_height,
-                .width = @intCast(win.width),
+                .width = @intCast(main_win.width),
                 .height = @intCast(content_height),
             });
             if (profile_frame) {
@@ -406,18 +443,6 @@ pub fn render(app: *App, win: vaxis.Window) !void {
             if (timer_opt) |*timer| overlay_ns += timer.read();
         } else {
             try UI.renderGraphiteStackDialog(app, win);
-        }
-    }
-
-    // Render the PR picker full-screen if in pr_review mode (it clears the
-    // window, so it overlays whatever diff was underneath).
-    if (app.mode == .pr_review) {
-        if (profile_frame) {
-            var timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
-            try UI.renderPrReviewDialog(app, win);
-            if (timer_opt) |*timer| overlay_ns += timer.read();
-        } else {
-            try UI.renderPrReviewDialog(app, win);
         }
     }
 
@@ -557,6 +582,24 @@ pub fn render(app: *App, win: vaxis.Window) !void {
             },
         );
     }
+}
+
+/// The columns the diff scrolls in, for `scroll_region.Scroller.apply`: the
+/// main pane beside the PR sidebar, or null for whole rows when no sidebar is
+/// drawn. The sidebar does not scroll with the diff, so comparing it would
+/// hide every scroll.
+pub fn scrollColumns(app: *const App, width: u16) ?scroll_region.Columns {
+    const surface_split = surfaceSplit(app, width);
+    if (surface_split.sidebar_cols == 0) return null;
+    return .{ .x = surface_split.main_x, .width = surface_split.main_cols };
+}
+
+fn surfaceSplit(app: *const App, width: u16) sidebar_layout.Split {
+    return sidebar_layout.split(.{
+        .width = width,
+        .visible = app.state.sidebar.open and app.state.sidebar.visible,
+        .sidebar_focused = app.mode == .pr_review,
+    });
 }
 
 fn renderContent(app: *App, win: vaxis.Window) !void {
@@ -1200,4 +1243,26 @@ test "search highlighting - across syntax segments" {
     try std.testing.expectEqualStrings("function", result[0].text);
     try std.testing.expect(result[0].style.bold);
     // Search highlight should override syntax highlighting
+}
+
+test "scrollColumns: whole rows when no sidebar is drawn" {
+    var app = searchTestApp(std.testing.allocator);
+    app.state.sidebar = .{};
+
+    try std.testing.expectEqual(@as(?scroll_region.Columns, null), scrollColumns(&app, 160));
+}
+
+test "scrollColumns: the main pane beside a visible sidebar" {
+    var app = searchTestApp(std.testing.allocator);
+    app.state.sidebar = .{ .open = true, .visible = true };
+
+    try std.testing.expectEqual(@as(?scroll_region.Columns, .{ .x = 44, .width = 116 }), scrollColumns(&app, 160));
+}
+
+test "scrollColumns: no columns to scroll when a narrow focused sidebar takes the width" {
+    var app = searchTestApp(std.testing.allocator);
+    app.state.sidebar = .{ .open = true, .visible = true };
+    app.mode = .pr_review;
+
+    try std.testing.expectEqual(@as(?scroll_region.Columns, .{ .x = 60, .width = 0 }), scrollColumns(&app, 60));
 }

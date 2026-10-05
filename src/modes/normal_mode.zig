@@ -8,9 +8,12 @@ const folds = @import("../folds.zig");
 const hunk_view = @import("../hunk_view.zig");
 const CommentController = @import("../comments/controller.zig").CommentController;
 const review_controller = @import("../pr/review_controller.zig");
+const pr_review_mode = @import("pr_review_mode.zig");
 
 /// Handle keyboard input when in normal mode
 pub fn handleKey(app: *App, key: vaxis.Key) !void {
+    if (try pr_review_mode.handleDiffFocusKey(app, key)) return;
+
     // Special handling when there are no files (empty menu)
     if (app.state.files.len == 0) {
         try handleEmptyMenu(app, key);
@@ -221,12 +224,14 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                 }
             },
             'h' => {
-                // Focus left - check if agent panel is on the left
+                // Focus left: a left-side agent panel, else the PR sidebar
                 if (agent_panel_visible and agent_on_left) {
                     app.mode = .agent;
                     app.needs_render = true;
+                } else if (pr_review_mode.sidebarFocusable(app)) {
+                    app.mode = .pr_review;
+                    app.needs_render = true;
                 }
-                // Otherwise no-op (diff is already focused)
             },
             'w' => {
                 // Cycle focus - switch to agent panel if visible
@@ -652,6 +657,9 @@ fn handleEmptyMenu(app: *App, key: vaxis.Key) !void {
             'h' => {
                 if (agent_panel_visible and agent_on_left) {
                     app.mode = .agent;
+                    app.needs_render = true;
+                } else if (pr_review_mode.sidebarFocusable(app)) {
+                    app.mode = .pr_review;
                     app.needs_render = true;
                 }
             },

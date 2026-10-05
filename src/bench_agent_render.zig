@@ -282,19 +282,19 @@ fn addUserTurn(agent_state: *agent.AgentState, turn_idx: usize) !void {
 }
 
 fn addAgentTurn(agent_state: *agent.AgentState, turn_idx: usize, streaming_tail: bool) !void {
-    var content: std.ArrayList(u8) = .empty;
-    defer content.deinit(agent_state.allocator);
+    var content: std.Io.Writer.Allocating = .init(agent_state.allocator);
+    defer content.deinit();
 
-    try content.writer(agent_state.allocator).print(
+    try content.writer.print(
         "### Turn {d}\n\nThe rendering path is sensitive to repeated work. This message mixes paragraphs, inline code like `ensureLineMap()` and `renderAgentPanel()`, plus a table.\n\n| Phase | Goal |\n| --- | --- |\n| Cold | Build markdown and line map |\n| Steady | Paint cached rows |\n| Stream | Update the last message |\n\n```zig\nfn benchRender(frame: usize) void {{\n    if (frame % 2 == 0) std.log.debug(\"frame={{d}}\", .{{frame}});\n}}\n```\n\n1. Keep message formatting stable.\n2. Avoid parsing unchanged content.\n3. Measure the steady-state frame budget.\n",
         .{turn_idx},
     );
 
     if (!streaming_tail) {
-        try content.appendSlice(agent_state.allocator, "\nFinal note: the UI should stay responsive while long messages stream in.");
+        try content.writer.writeAll("\nFinal note: the UI should stay responsive while long messages stream in.");
     }
 
-    const owned = try content.toOwnedSlice(agent_state.allocator);
+    const owned = try content.toOwnedSlice();
     defer agent_state.allocator.free(owned);
     try agent_state.addMessage(.agent, owned);
 }

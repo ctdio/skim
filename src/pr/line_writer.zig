@@ -37,9 +37,12 @@ pub const LineWriter = struct {
     }
 
     pub fn text(self: *LineWriter, value: []const u8) void {
-        var iter = vaxis.unicode.graphemeIterator(value);
+        const ascii = asciiRun(value);
+        for (0..ascii) |index| self.cell(value[index..][0..1], 1);
+        const rest = value[ascii..];
+        var iter = vaxis.unicode.graphemeIterator(rest);
         while (iter.next()) |item| {
-            const bytes = item.bytes(value);
+            const bytes = item.bytes(rest);
             if (std.mem.eql(u8, bytes, "\n")) return;
             self.grapheme(bytes);
         }
@@ -70,7 +73,10 @@ pub const LineWriter = struct {
     }
 
     fn grapheme(self: *LineWriter, value: []const u8) void {
-        const width = self.win.gwidth(value);
+        self.cell(value, self.win.gwidth(value));
+    }
+
+    fn cell(self: *LineWriter, value: []const u8, width: u16) void {
         if (width == 0) return;
         if (width > self.win.width - self.col) {
             self.col = self.win.width;
@@ -85,3 +91,101 @@ pub const LineWriter = struct {
         self.col += width;
     }
 };
+
+/// Cells `value` takes in `win`. Printable ASCII is one cell per byte, which
+/// skips grapheme segmentation for the common case.
+pub fn displayWidth(win: vaxis.Window, value: []const u8) u16 {
+    if (asciiRun(value) == value.len) return @intCast(@min(value.len, std.math.maxInt(u16)));
+    return win.gwidth(value);
+}
+
+/// Length of the leading run of bytes that are each a one-cell grapheme:
+/// printable ASCII, minus the last byte when something else follows, since a
+/// combining mark after it would join its grapheme.
+fn asciiRun(value: []const u8) usize {
+    var end: usize = 0;
+    while (end < value.len and value[end] >= 0x20 and value[end] < 0x7f) end += 1;
+    return if (end == value.len) end else end -| 1;
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+const TestScreen = @import("render_test_screen.zig").TestScreen;
+
+fn cellAt(ts: *TestScreen, col: u16) vaxis.Cell {
+    return ts.screen.readCell(col, 0).?;
+}
+
+test "text writes printable ASCII one cell per byte in the writer's style" {
+    var ts = try TestScreen.init(10, 1);
+    defer ts.deinit();
+    var writer = LineWriter.init(.{ .win = ts.window(), .row = 0, .col = 1, .style = .{ .bold = true } });
+
+    writer.text("ab c");
+
+    try testing.expectEqual(@as(u16, 5), writer.col);
+    try testing.expectEqualStrings("a", cellAt(&ts, 1).char.grapheme);
+    try testing.expectEqualStrings(" ", cellAt(&ts, 3).char.grapheme);
+    try testing.expectEqualStrings("c", cellAt(&ts, 4).char.grapheme);
+    try testing.expect(cellAt(&ts, 4).style.bold);
+}
+
+test "text keeps an ASCII letter and its combining mark in one cell" {
+    var ts = try TestScreen.init(10, 1);
+    defer ts.deinit();
+    var writer = LineWriter.init(.{ .win = ts.window(), .row = 0 });
+
+    writer.text("ae\u{301}x");
+
+    try testing.expectEqual(@as(u16, 3), writer.col);
+    try testing.expectEqualStrings("e\u{301}", cellAt(&ts, 1).char.grapheme);
+    try testing.expectEqualStrings("x", cellAt(&ts, 2).char.grapheme);
+}
+
+test "text gives a wide grapheme two cells after ASCII" {
+    var ts = try TestScreen.init(10, 1);
+    defer ts.deinit();
+    var writer = LineWriter.init(.{ .win = ts.window(), .row = 0 });
+
+    writer.text("a漢b");
+
+    try testing.expectEqual(@as(u16, 4), writer.col);
+    try testing.expectEqualStrings("漢", cellAt(&ts, 1).char.grapheme);
+    try testing.expectEqualStrings("b", cellAt(&ts, 3).char.grapheme);
+}
+
+test "text stops at a newline" {
+    var ts = try TestScreen.init(10, 1);
+    defer ts.deinit();
+    var writer = LineWriter.init(.{ .win = ts.window(), .row = 0 });
+
+    writer.text("ab\ncd");
+
+    try testing.expectEqual(@as(u16, 2), writer.col);
+    try testing.expectEqualStrings(" ", cellAt(&ts, 2).char.grapheme);
+}
+
+test "text clips ASCII at the window's right edge" {
+    var ts = try TestScreen.init(3, 1);
+    defer ts.deinit();
+    var writer = LineWriter.init(.{ .win = ts.window(), .row = 0, .col = 1 });
+
+    writer.text("abcdef");
+
+    try testing.expectEqual(@as(u16, 3), writer.col);
+    try testing.expectEqualStrings("b", cellAt(&ts, 2).char.grapheme);
+}
+
+test "text forces bg onto ASCII cells" {
+    var ts = try TestScreen.init(4, 1);
+    defer ts.deinit();
+    const bg: Color = .{ .index = 4 };
+    var writer = LineWriter.init(.{ .win = ts.window(), .row = 0, .bg = bg });
+
+    writer.text("ab");
+
+    try testing.expect(Color.eql(cellAt(&ts, 1).style.bg, bg));
+}

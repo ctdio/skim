@@ -7,6 +7,10 @@
 const std = @import("std");
 
 pub const pr = @import("pr/pr.zig");
+// The SQLite-free sidebar files carry inline render/layout tests.
+pub const sidebar_layout = @import("pr/sidebar/layout.zig");
+pub const sidebar_render = @import("pr/sidebar/render.zig");
+pub const line_writer = @import("pr/line_writer.zig");
 
 test {
     std.testing.refAllDecls(@This());

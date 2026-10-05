@@ -5,6 +5,8 @@ const parser = @import("../git/parser.zig");
 const state_helpers = @import("../state.zig");
 const syntax = @import("../highlighting/core.zig");
 const skim_io = @import("skim_io");
+const pr_types = @import("../pr/db/types.zig");
+const sidebar_controller = @import("../pr/sidebar/controller.zig");
 
 const App = app_mod.App;
 const StateHelpers = state_helpers.StateHelpers;
@@ -146,6 +148,52 @@ pub fn addHunkHighlights(allocator: std.mem.Allocator, app: *App) !void {
             StateHelpers.rebuildHunkHighlightCaches(allocator, hunk) catch {};
         }
     }
+}
+
+/// Opens the PR sidebar beside the diff with `pr_count` standalone PRs, so a
+/// scroll bench pays for the columns the sidebar keeps still.
+pub fn openSidebar(allocator: std.mem.Allocator, app: *App, pr_count: usize) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+    const items = try a.alloc(pr_types.PrRecord, pr_count);
+    for (items, 0..) |*item, i| {
+        item.* = .{
+            .number = @intCast(1000 + i),
+            .node_id = "",
+            .state = .open,
+            .title = try std.fmt.allocPrint(a, "Refactor the scroll region for pull request {d}", .{i}),
+            .author = "bench",
+            .url = "",
+            .is_draft = false,
+            .head_ref = try std.fmt.allocPrint(a, "feature/bench-{d}", .{i}),
+            .base_ref = "main",
+            .head_oid = "",
+            .base_oid = "",
+            .updated_at = "2026-01-01T00:00:00Z",
+            .hydrated_at_update = "2026-01-01T00:00:00Z",
+            .additions = 12,
+            .deletions = 3,
+            .changed_files = 2,
+            .review_decision = "",
+            .ci = .success,
+            .labels = "",
+            .requested_users = "",
+            .requested_teams = "",
+            .my_review_state = "",
+            .my_review_oid = "",
+            .seen_head_oid = null,
+            .seen_merge_base_oid = null,
+        };
+    }
+    try sidebar_controller.applySnapshot(&app.state.sidebar, allocator, .{
+        .records = .{ .arena = arena, .items = items },
+        .viewer_login = "bench",
+        .viewer_teams = "",
+        .sync = .{ .last_ok_at = skim_io.timestamp() },
+    });
+    app.state.sidebar.open = true;
+    app.state.sidebar.visible = true;
 }
 
 /// Logs a one-line summary of the parsed diff shape.

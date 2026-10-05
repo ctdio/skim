@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Phase 5 prefetch harness: builds the offline world (setup-origin.sh), then
-# drives zig-out/bin/harness_prefetch through scenarios H1-H14 and asserts on
+# drives zig-out/bin/harness_prefetch through scenarios H1-H15 and asserts on
 # DB rows, GIT_TRACE output and the fake gh call log. Prints one PASS/FAIL line
 # per assertion; exits non-zero on any failure.
 #
@@ -51,6 +51,7 @@ main() {
   scenario_H12
   scenario_H13
   scenario_H14
+  scenario_H15
   finish
 }
 
@@ -481,6 +482,46 @@ scenario_H14() {
   stop_point H14
 }
 
+# stop() while a git or gh child is in flight: the run returns long before the
+# 300s hang and leaves no grandchild behind. stop() only SIGTERMs the group;
+# for a child that ignores SIGTERM the worker escalates to SIGKILL, so stop
+# itself still returns at once.
+scenario_H15() {
+  begin H15
+  local DB="$WORK/prs-stop-git.db" CLONE="$WORK/clone-stop" REPO_ID
+  local git_pid_file="$WORK/stop-git.pid" gh_pid_file="$WORK/stop-gh.pid" deaf_pid_file="$WORK/stop-gh-deaf.pid"
+  write_hang_script "$WORK/bin/stop-git" "$git_pid_file" fetch
+  write_hang_script "$WORK/bin/stop-gh" "$gh_pid_file" ""
+  write_hang_script "$WORK/bin/stop-gh-deaf" "$deaf_pid_file" "" ignore-term
+  pgit clone -q --no-local --single-branch --branch main "$WORK/origin.git" "$CLONE" 2>/dev/null || abort "clone for H15 failed"
+  seed_db
+
+  stop_prefetch H15-git 1500 --focus 1 --no-threads --git-bin "$WORK/bin/stop-git"
+  expect_true "stop mid-fetch: the hung git was in flight" "[ -s '$git_pid_file' ]"
+  expect_true "stop mid-fetch: stop returned in ${STOP_MS}ms" "[ -n '$STOP_MS' ] && [ '$STOP_MS' -lt 1000 ]"
+  expect_true "stop mid-fetch: run finished well before the 300s hang (${ELAPSED_S}s)" "[ $ELAPSED_S -lt 20 ]"
+  expect_true "stop mid-fetch: its background grandchild was killed" "pid_gone '$git_pid_file'"
+
+  # The main clone has every commit, so only the thread jobs reach a child.
+  CLONE="$WORK/clone"
+  DB="$WORK/prs-stop-gh.db"
+  seed_db
+  stop_prefetch H15-gh 1500 --focus 1 --gh-bin "$WORK/bin/stop-gh"
+  expect_true "stop mid-gh: the hung gh was in flight" "[ -s '$gh_pid_file' ]"
+  expect_true "stop mid-gh: stop returned in ${STOP_MS}ms" "[ -n '$STOP_MS' ] && [ '$STOP_MS' -lt 1000 ]"
+  expect_true "stop mid-gh: run finished well before the 300s hang (${ELAPSED_S}s)" "[ $ELAPSED_S -lt 20 ]"
+  expect_true "stop mid-gh: its background grandchild was killed" "pid_gone '$gh_pid_file'"
+
+  DB="$WORK/prs-stop-gh-deaf.db"
+  seed_db
+  stop_prefetch H15-gh-deaf 1500 --focus 1 --gh-bin "$WORK/bin/stop-gh-deaf"
+  expect_true "stop mid-gh, TERM-deaf: the hung gh was in flight" "[ -s '$deaf_pid_file' ]"
+  expect_true "stop mid-gh, TERM-deaf: stop returned in ${STOP_MS}ms" "[ -n '$STOP_MS' ] && [ '$STOP_MS' -lt 1000 ]"
+  expect_true "stop mid-gh, TERM-deaf: run finished well before the 300s hang (${ELAPSED_S}s)" "[ $ELAPSED_S -lt 20 ]"
+  expect_true "stop mid-gh, TERM-deaf: its background grandchild was killed" "pid_gone '$deaf_pid_file'"
+  stop_point H15
+}
+
 # =============================================================================
 # Harness driving
 # =============================================================================
@@ -514,6 +555,22 @@ run_prefetch() {
   # Only with --then-focus: the settle before the focus move.
   IFS=$'\t' read -r _ INITIAL_PHASE INITIAL_READY INITIAL_FAILURES INITIAL_LAST_ERROR < <(grep '^initial' "$WORK/run-$label.out")
   GENERATION="$(awk -F'\t' '$1 == "generation" { print $2 }' "$WORK/run-$label.out")"
+}
+
+# stop_prefetch <label> <stop-after-ms> [flags...]: one worker run that is
+# stopped <stop-after-ms> after it starts. Sets STOP_MS (how long stop took)
+# and ELAPSED_S (the whole run).
+stop_prefetch() {
+  local label="$1" after="$2" code started
+  shift 2
+  started=$SECONDS
+  harness run --db "$DB" --repo-id "$REPO_ID" --repo-root "$CLONE" \
+    --owner "$REPO_OWNER" --name "$REPO_NAME" --targets "$(targets_tsv)" --gh-bin "$WORK/bin/gh" \
+    --stop-after-ms "$after" "$@" >"$WORK/run-$label.out" 2>"$WORK/harness-$label.err"
+  code=$?
+  ELAPSED_S=$((SECONDS - started))
+  [ "$code" != 0 ] && fail "run $label exited $code (see $WORK/harness-$label.err)"
+  STOP_MS="$(awk -F'\t' '$1 == "stopped" { print $2 }' "$WORK/run-$label.out")"
 }
 
 dump_diffs() {

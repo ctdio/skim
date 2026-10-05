@@ -17,6 +17,7 @@ const command_palette = @import("../agent/command_palette.zig");
 const opencode = @import("../opencode/opencode.zig");
 const subagent_fetch = @import("../agent/subagent_fetch.zig");
 const model_selection_mode = @import("model_selection_mode.zig");
+const pr_review_mode = @import("pr_review_mode.zig");
 const skim_io = @import("skim_io");
 
 /// Handle keyboard input when in agent mode
@@ -734,6 +735,9 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
                     }
                     if (!agent_on_left) {
                         app.mode = .normal;
+                        app.needs_render = true;
+                    } else if (pr_review_mode.sidebarFocusable(app)) {
+                        app.mode = .pr_review;
                         app.needs_render = true;
                     }
                     return;

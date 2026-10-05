@@ -76,6 +76,7 @@ synchronous highlighting, stats) lives in `src/testing/bench_support.zig`.
 | `SKIM_BENCH_VIEW` | `unified` | `unified`, `side_by_side`, or `both` |
 | `SKIM_BENCH_MOTION` | `line` | `line` (`j`), `half_page`, `page`, `file` — scroll only |
 | `SKIM_BENCH_HIGHLIGHT` | `1` | Pre-highlight every hunk (steady state) — scroll only |
+| `SKIM_BENCH_SIDEBAR` | `0` | Open the PR sidebar (80 PRs) beside the diff — scroll only |
 | `SKIM_BENCH_SHIFT` | `0` | Rows per step, overriding `_MOTION`: models coalesced keystrokes — scroll only |
 | `SKIM_BENCH_UP` | `0` | Scroll toward the top of the diff instead of the bottom |
 | `SKIM_BENCH_ITERS` / `_WARMUP` | 200 / 20 | Sample counts |
@@ -353,17 +354,17 @@ shared `State`. Feature _logic_ lives in feature modules, not as `App` methods.
 _dispatch_ (`modes/<mode>.zig` calling `handleKey(app, key)`) governs feature
 _logic_ too:
 
-- Feature state = a top-level `pub` struct (e.g. `PrReviewState`), stored as one
-  field on `State` (e.g. `state.pr`) — **not** a scatter of loose `State` fields.
+- Feature state = a top-level `pub` struct (e.g. `SidebarState`), stored as one
+  field on `State` (e.g. `state.sidebar`) — **not** a scatter of loose `State` fields.
 - Feature logic = free functions in the feature module taking `*ThatState` plus the
   narrow deps it needs (`allocator`, a status-message callback), **not** `*App`.
   If a function only reaches through `self` to touch `self.state.<feature>`, it does
   not belong on `App`.
 - `modes/<mode>.zig` and the command palette call the controller directly
-  (`pr_controller.move(&app.state.pr, 1)`), not a forwarding `App` method.
+  (`sidebar_controller.move(&app.state.sidebar, 1)`), not a forwarding `App` method.
 
 This keeps `app.zig` readable top-to-bottom and lets features be unit-tested without
-constructing an `App`. Reference layout: `src/pr/` (state + `controller.zig` +
+constructing an `App`. Reference layout: `src/pr/sidebar/` (`state.zig` + `controller.zig` +
 `render.zig`) is the template. If a change would push `app.zig` meaningfully larger,
 that is the signal to extract a controller, not to add another method.
 

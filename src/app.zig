@@ -26,6 +26,7 @@ const width_util = @import("rendering/width.zig");
 const frame = @import("rendering/frame.zig");
 const scroll_region = @import("rendering/scroll_region.zig");
 const frame_pacer = @import("rendering/frame_pacer.zig");
+const input_wait = @import("input_wait.zig");
 const state_helpers = @import("state.zig");
 const ui_components = @import("ui.zig");
 const editor = @import("editor.zig");
@@ -65,7 +66,10 @@ const connect = @import("acp/connect.zig");
 const opencode = @import("opencode/opencode.zig");
 const codex_mod = @import("codex/codex.zig");
 const pr = @import("pr/pr.zig");
-const pr_controller = @import("pr/controller.zig");
+const pr_surface = if (platform.is_web) @import("pr/surface_stub.zig") else @import("pr/surface.zig");
+const sidebar_state = @import("pr/sidebar/state.zig");
+const sidebar_controller = @import("pr/sidebar/controller.zig");
+const pr_types = @import("pr/db/types.zig");
 const review_controller = @import("pr/review_controller.zig");
 const thread_anchor = @import("pr/thread_anchor.zig");
 const thread_placement = @import("pr/thread_placement.zig");
@@ -320,11 +324,13 @@ pub const App = struct {
         // Tab waiting for agent selection (after :new_tab)
         pending_tab_for_selection: ?u32,
 
-        // PR review picker state (defaulted, so it stays out of the init literal)
-        pr: pr_controller.PrReviewState = .{},
-
         // Native GitHub PR review session (async entry + review data). Defaulted.
         review: review_controller.ReviewSession = .{},
+
+        // PR sidebar (AD-8): the stack-grouped PR list beside the diff, and
+        // the native surface that owns its Store connection + SyncWorker.
+        sidebar: sidebar_state.SidebarState = .{},
+        pr_surface: pr_surface.Surface = .{},
 
         // Streaming diff-load sub-state. Defaulted idle; armed by init/refresh
         // and driven by the event loop so large diffs render as they arrive.
@@ -334,9 +340,6 @@ pub const App = struct {
         // dialog is open. Defaulted null (stays out of the init literal); the
         // editor buffer is large so it is only allocated on demand.
         review_submit_editor: ?comment_editor.CommentEditor.VimEditor.State = null,
-
-        // Boot straight into this PR number when set (`skim pr <n|url>`).
-        pr_boot_number: ?u32 = null,
 
         const ViewMode = enum {
             unified,
@@ -619,8 +622,8 @@ pub const App = struct {
             .profile_counters = .{},
         };
 
-        app.state.pr.pr_only = is_pr_only;
-        app.state.pr_boot_number = if (@hasField(@TypeOf(config), "pr_request")) config.pr_request else null;
+        app.state.sidebar.pr_only = is_pr_only;
+        app.state.sidebar.boot_number = if (@hasField(@TypeOf(config), "pr_request")) config.pr_request else null;
 
         // Arm the streaming diff loader; run() starts it once the App has a
         // stable address (init returns App by value).
@@ -976,9 +979,10 @@ pub const App = struct {
         }
         // Clean up graphite stack
         self.state.graphite.deinit(self.allocator);
-        // Clean up PR review state (joins any in-flight loader first so its
-        // worker can't write into freed state).
-        pr_controller.deinitState(&self.state.pr, self.allocator);
+        // Stop the PR sync worker and close its Store before freeing the
+        // sidebar records it fed.
+        pr_surface.close(&self.state.pr_surface);
+        sidebar_controller.deinitState(&self.state.sidebar, self.allocator);
         // Clean up native GitHub review session (joins its in-flight worker too).
         review_controller.deinitState(&self.state.review, self.allocator);
         // Clean up TUI server and session
@@ -1609,25 +1613,9 @@ pub const App = struct {
             };
         }
 
-        // If launched as `skim pr`, open straight into the PR picker and kick off
-        // the background load so the first frame shows the cached/loading list.
-        // `skim pr <n|url>` instead enters that PR directly, off-thread.
-        if (self.state.pr.pr_only) {
-            self.mode = .pr_review;
-            if (self.state.pr_boot_number) |number| {
-                var msg_buf: [64]u8 = undefined;
-                const loading = std.fmt.bufPrint(&msg_buf, "Loading PR #{d}…", .{number}) catch "Loading PR…";
-                pr_controller.setMessage(&self.state.pr, loading);
-                review_controller.startEnterPr(&self.state.review, self.allocator, .{ .number = number }) catch |err| {
-                    std.log.err("Failed to start PR entry: {any}", .{err});
-                    pr_controller.setMessage(&self.state.pr, "failed to start PR entry");
-                };
-            } else {
-                pr_controller.startListLoad(&self.state.pr, self.allocator) catch |err| {
-                    std.log.err("Failed to start PR load: {any}", .{err});
-                };
-            }
-        }
+        // `skim pr [n|url]`: open the PR sidebar so the first frame paints the
+        // cached list from the DB; `openPrSurface` enters the boot PR off-thread.
+        if (self.state.sidebar.pr_only) self.openPrSurface(.{});
 
         var first_render = true;
         var last_shimmer_render: i64 = 0;
@@ -1648,10 +1636,12 @@ pub const App = struct {
             // Check if a connection thread is running (need to poll for completion)
             const connecting = self.pending_connection != null;
             const blame_active = self.blame.isActive();
-            const pr_active = self.state.pr.fetch.ready.load(.acquire) or self.state.pr.fetch_in_flight;
+            // The surface's workers bump generations nothing wakes pollEvent
+            // for, so keep the loop ticking while it is open.
+            const surface_tick = pr_surface.wantsTick(&self.state.pr_surface);
             const review_active = self.state.review.entry.ready.load(.acquire) or self.state.review.entry_in_flight or review_controller.hasPostingWork(&self.state.review);
             const diff_loading = self.state.diff_load.isLoading();
-            const should_poll = !self.needs_render and self.highlighter_jobs.pendingCount() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !pr_active and !review_active and !diff_loading;
+            const should_poll = !self.needs_render and self.highlighter_jobs.pendingCount() == 0 and !server_active and !stats_loading and !manager_active and !replay_playing and !shell_cmd_running and !connecting and !blame_active and !surface_tick and !review_active and !diff_loading;
             if (should_poll) {
                 try loop.pollEvent();
             } else {
@@ -1662,7 +1652,7 @@ pub const App = struct {
                 const is_high_activity = manager_active or replay_playing or shell_cmd_running;
                 const is_medium_activity = connecting or server_active;
                 const sleep_ms: u64 = if (is_high_activity) 5 else if (is_medium_activity) 8 else 16;
-                sleepUntilInput(&loop.queue, sleep_ms);
+                input_wait.waitForInput(&loop.queue, sleep_ms * std.time.ns_per_ms);
             }
             // When not blocking (acp_active, mcp_active, etc.), events are still
             // captured by the vaxis reader thread and available via tryEvent()
@@ -1790,13 +1780,7 @@ pub const App = struct {
 
             // Poll subagent fetch result (worker thread -> main thread)
             subagent_fetch.pollSubagentFetch(self);
-            self.pollDiffLoad();
-            if (blame_ctrl.pollPending(&self.blame, self.profile_render)) self.needs_render = true;
-            if (pr_controller.pollPendingFetch(&self.state.pr, self.allocator)) self.needs_render = true;
-            self.pollReviewEntry();
-            self.pollReviewMutations();
-            self.pollReviewThreadMutations();
-            self.pollReviewSubmit();
+            self.pollBackgroundWork();
             if (self.mode == .command_palette) {
                 self.state.command_palette_state.refreshStatsIfLanded(self, self.state.files) catch {};
             }
@@ -1824,7 +1808,7 @@ pub const App = struct {
                         const render_ns: u64 = if (render_timer_opt) |*timer| timer.read() else 0;
 
                         var vx_timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
-                        const shifted = try scroller.apply(vx, tty.writer());
+                        const shifted = try scroller.apply(.{ .vx = vx, .writer = tty.writer(), .columns = frame.scrollColumns(self, win.width) });
                         try vx.render(tty.writer());
                         const vx_ns: u64 = if (vx_timer_opt) |*timer| timer.read() else 0;
                         write_ns = vx_ns;
@@ -1836,7 +1820,7 @@ pub const App = struct {
                     } else {
                         try frame.render(self, win);
                         var write_timer = try skim_io.Timer.start();
-                        _ = try scroller.apply(vx, tty.writer());
+                        _ = try scroller.apply(.{ .vx = vx, .writer = tty.writer(), .columns = frame.scrollColumns(self, win.width) });
                         try vx.render(tty.writer());
                         write_ns = write_timer.read();
                     }
@@ -1845,7 +1829,7 @@ pub const App = struct {
                 } else {
                     try frame.render(self, win);
                     var write_timer = try skim_io.Timer.start();
-                    _ = try scroller.apply(vx, tty.writer());
+                    _ = try scroller.apply(.{ .vx = vx, .writer = tty.writer(), .columns = frame.scrollColumns(self, win.width) });
                     try vx.render(tty.writer());
                     write_ns = write_timer.read();
                 }
@@ -1999,7 +1983,7 @@ pub const App = struct {
         }
     }
 
-    fn handleKey(self: *App, raw_key: vaxis.Key) !void {
+    pub fn handleKey(self: *App, raw_key: vaxis.Key) !void {
         // Fold the kitty keyboard protocol's key events back into plain
         // characters before dispatch, and drop the bare modifier presses that
         // protocol reports as keys of their own. See src/keys.zig.
@@ -2087,16 +2071,7 @@ pub const App = struct {
                     return;
                 },
                 .pr_review => {
-                    // Ctrl+C is a back button, peeling one layer at a time:
-                    // author overlay -> list, then list -> the diff being
-                    // reviewed (or quit if `skim pr` has nothing behind it).
-                    if (self.state.pr.picking_author) {
-                        pr_controller.closeAuthorPicker(&self.state.pr, self.allocator);
-                    } else if (self.state.pr.pr_only) {
-                        self.should_quit = true;
-                    } else {
-                        self.mode = .normal;
-                    }
+                    try self.prSidebarBack();
                     self.needs_render = true;
                     return;
                 },
@@ -2553,8 +2528,7 @@ pub const App = struct {
                 try self.startCommitSelection();
             },
             .enter_pr_review => {
-                try pr_controller.startListLoad(&self.state.pr, self.allocator);
-                self.mode = .pr_review;
+                self.openPrSurface(.{});
             },
             else => {},
         }
@@ -2634,7 +2608,7 @@ pub const App = struct {
         // Go back to normal mode and refresh
         self.state.pager_mode = false;
         self.mode = .normal;
-        self.leavePrSurface();
+        self.closePrSurface();
         try self.refresh();
     }
 
@@ -2668,37 +2642,68 @@ pub const App = struct {
     // PR Review (native `skim pr` / `:pr`)
     // =========================================================================
 
+    /// Test seam only: the offline harness points sync at a fake `gh`.
+    /// Production callers pass `.{}`.
+    pub const PrSurfaceOptions = struct { gh_bin: []const u8 = "gh" };
+
+    /// Open the PR sidebar surface (`skim pr`, `:pr`) and focus it. Already
+    /// open: only refocuses. `skim pr <n>` enters its boot PR once.
+    pub fn openPrSurface(self: *App, options: PrSurfaceOptions) void {
+        const sb = &self.state.sidebar;
+        sb.open = true;
+        sb.visible = true;
+        self.mode = .pr_review;
+        self.needs_render = true;
+        pr_surface.open(&self.state.pr_surface, .{ .allocator = self.allocator, .sidebar = sb, .gh_bin = options.gh_bin });
+        const number = sb.boot_number orelse return;
+        sb.boot_number = null;
+        const listed = sidebar_controller.selectNumber(sb, self.allocator, number) catch false;
+        const params = if (listed) enterParamsFor(sidebar_controller.selectedPr(sb).?) else review_controller.EnterParams{ .number = number };
+        self.selectPullRequest(params) catch |err| {
+            std.log.err("Failed to start PR entry: {any}", .{err});
+        };
+    }
+
+    /// Close the PR sidebar surface: stop the sync worker, close its Store,
+    /// hide the sidebar, then end the review session (`leavePrSurface`).
+    ///
+    /// Precondition (`leavePrSurface`'s): the caller already set a non-PR
+    /// `state.diff_source` and calls `refresh()` right after. A close that picks
+    /// no diff of its own goes through `switchDiffMode(.working)`.
+    pub fn closePrSurface(self: *App) void {
+        pr_surface.close(&self.state.pr_surface);
+        self.state.sidebar.open = false;
+        self.state.sidebar.visible = false;
+        if (self.mode == .pr_review) self.mode = .normal;
+        self.leavePrSurface();
+    }
+
     /// Review the highlighted PR natively: fetch its head + base into local refs
     /// (no worktree) and swap the diff to `origin/<base>...refs/skim/pr-<n>`.
     pub fn reviewSelectedPr(self: *App) !void {
-        const pull = pr_controller.selected(&self.state.pr) orelse return;
-        try self.selectPullRequest(pull);
+        const record = sidebar_controller.selectedPr(&self.state.sidebar) orelse return;
+        try self.selectPullRequest(enterParamsFor(record));
     }
 
-    /// Begin reviewing a PR selected from the picker. Kicks off the async entry
+    /// Begin reviewing a PR selected in the sidebar. Kicks off the async entry
     /// worker (git fetch + gh review fetch) off-thread and returns immediately —
     /// the main loop's `pollReviewEntry` swaps the diff once the fetch lands, so
-    /// the picker never freezes. Stays in `.pr_review` mode (with a "Loading…"
-    /// message) until entry completes.
-    pub fn selectPullRequest(self: *App, pull: pr.PullRequest) !void {
-        // An editor left open behind the picker (Ctrl-E from the editor keeps
+    /// the sidebar never freezes. The sidebar shows "Loading…" until then.
+    pub fn selectPullRequest(self: *App, params: review_controller.EnterParams) !void {
+        const sb = &self.state.sidebar;
+        // An editor left open behind the sidebar (Ctrl-E from the editor keeps
         // it) would otherwise be settled against the next PR's entry.
         if (self.state.active_comment_input != null) {
-            pr_controller.setMessage(&self.state.pr, "finish or cancel the open comment first");
+            sidebar_controller.setMessage(sb, "finish or cancel the open comment first");
             self.needs_render = true;
             return;
         }
         var msg_buf: [64]u8 = undefined;
-        const loading = std.fmt.bufPrint(&msg_buf, "Loading PR #{d}…", .{pull.number}) catch "Loading PR…";
-        pr_controller.setMessage(&self.state.pr, loading);
+        const loading = std.fmt.bufPrint(&msg_buf, "Loading PR #{d}…", .{params.number}) catch "Loading PR…";
+        sidebar_controller.setMessage(sb, loading);
 
-        review_controller.startEnterPr(&self.state.review, self.allocator, .{
-            .number = pull.number,
-            .base_ref = pull.base_ref,
-            .title = pull.title,
-            .url = pull.url,
-        }) catch {
-            pr_controller.setMessage(&self.state.pr, "failed to start PR entry");
+        review_controller.startEnterPr(&self.state.review, self.allocator, params) catch {
+            sidebar_controller.setMessage(sb, "failed to start PR entry");
         };
         self.resetPerPrViewState();
         self.needs_render = true;
@@ -2728,7 +2733,7 @@ pub const App = struct {
     /// `switchDiffMode(.working)`.
     pub fn leavePrSurface(self: *App) void {
         if (review_controller.leaveSurface(&self.state.review, self.allocator)) {
-            pr_controller.setMessage(&self.state.pr, "");
+            sidebar_controller.setMessage(&self.state.sidebar, "");
         }
         if (self.state.pr_surface_parking.comments == null) return;
         self.state.pr_surface_parking.change = .leave_pr;
@@ -2762,6 +2767,19 @@ pub const App = struct {
         self.state.global_scroll_offset = 0;
     }
 
+    /// Drain the diff, blame, PR surface and review workers into App state.
+    /// Called once per main-loop iteration; the offline PR surface harness
+    /// calls it in a loop in place of `run()`.
+    pub fn pollBackgroundWork(self: *App) void {
+        self.pollDiffLoad();
+        if (blame_ctrl.pollPending(&self.blame, self.profile_render)) self.needs_render = true;
+        if (pr_surface.poll(&self.state.pr_surface, .{ .allocator = self.allocator, .sidebar = &self.state.sidebar })) self.needs_render = true;
+        self.pollReviewEntry();
+        self.pollReviewMutations();
+        self.pollReviewThreadMutations();
+        self.pollReviewSubmit();
+    }
+
     /// Consume a completed PR entry/refetch from the review worker. On entry,
     /// swaps the diff source to `origin/<base>...refs/skim/pr-<n>`; on graceful
     /// degradation (git ok, gh failed) still enters and surfaces the reason.
@@ -2773,7 +2791,7 @@ pub const App = struct {
                 defer self.allocator.free(info.base_ref);
                 self.enterReviewDiff(.{ .head_ref = info.head_ref, .base_ref = info.base_ref, .gh_error = info.gh_error }) catch |err| {
                     std.log.err("Failed to enter PR diff: {any}", .{err});
-                    pr_controller.setMessage(&self.state.pr, "failed to open PR diff");
+                    sidebar_controller.setMessage(&self.state.sidebar, "failed to open PR diff");
                     self.needs_render = true;
                     return;
                 };
@@ -2790,8 +2808,9 @@ pub const App = struct {
                 self.rebuildReviewLineMap();
                 self.needs_render = true;
             },
-            .fetch_failed => {
-                pr_controller.setMessage(&self.state.pr, "fetch failed — is gh/git authenticated?");
+            .fetch_failed => |failure| {
+                var buf: [96]u8 = undefined;
+                sidebar_controller.setMessage(&self.state.sidebar, review_controller.fetchFailedMessage(&buf, failure));
                 // The switch already reset the session, so the previous PR's
                 // diff stays up with no threads.
                 if (self.state.pr_surface_parking.comments != null) {
@@ -2800,7 +2819,7 @@ pub const App = struct {
                 self.needs_render = true;
             },
             .start_failed => {
-                pr_controller.setMessage(&self.state.pr, "failed to start PR entry");
+                sidebar_controller.setMessage(&self.state.sidebar, "failed to start PR entry");
                 self.showStatusError("failed to start PR entry");
                 self.needs_render = true;
             },
@@ -3013,7 +3032,7 @@ pub const App = struct {
         self.state.pr_surface_parking.change = .enter_pr;
         self.resetDiffViewState();
 
-        pr_controller.setMessage(&self.state.pr, "");
+        sidebar_controller.setMessage(&self.state.sidebar, "");
         self.state.pager_mode = false;
         self.mode = .normal;
         try self.refresh();
@@ -3138,22 +3157,28 @@ pub const App = struct {
         if (will_start) self.showStatusMessage("refreshing review…");
     }
 
-    /// Esc peels back one layer at a time: query, then the pinned author, then
-    /// leave — so a stray Esc never drops you out with filters still applied.
-    /// Owns App mode/quit state, so it stays a thin cross-cutting forwarder.
-    pub fn prClearOrLeave(self: *App) void {
-        const p = &self.state.pr;
-        if (p.query_len > 0) {
-            p.query_len = 0;
-            pr_controller.rebuildFilter(p, self.allocator);
-        } else if (p.author_len > 0) {
-            p.author_len = 0;
-            pr_controller.rebuildFilter(p, self.allocator);
-        } else if (p.pr_only) {
-            self.should_quit = true;
-        } else {
-            self.mode = .normal;
+    /// Esc/Ctrl-C in the sidebar peel one layer at a time: the filter prompt,
+    /// then a custom query back to its preset, then leave — quit for `skim pr`,
+    /// else the working-tree diff (which closes the surface). Owns App
+    /// mode/quit state; the peeling itself is the controller's.
+    pub fn prSidebarBack(self: *App) !void {
+        const sb = &self.state.sidebar;
+        if (sb.prompt != null) {
+            _ = try sidebar_controller.promptKey(sb, self.allocator, .escape);
+            return;
         }
+        if (try sidebar_controller.restorePreset(sb, self.allocator)) {
+            pr_surface.pushVisible(&self.state.pr_surface, .{ .allocator = self.allocator, .sidebar = sb });
+            return;
+        }
+        if (sb.pr_only) {
+            self.should_quit = true;
+            return;
+        }
+        try self.switchDiffMode(.working);
+        // Outside a git repository the swap is refused and the surface stays
+        // open; hand focus to the diff so Esc never traps the user.
+        if (sb.open) self.mode = .normal;
     }
 
     pub fn selectGraphiteStackBranch(self: *App, idx: usize) !void {
@@ -3193,7 +3218,7 @@ pub const App = struct {
         // Go back to normal mode and refresh
         self.state.pager_mode = false;
         self.mode = .normal;
-        self.leavePrSurface();
+        self.closePrSurface();
         try self.refresh();
     }
 
@@ -3261,7 +3286,7 @@ pub const App = struct {
 
         // Refresh to load new diff
         self.state.pager_mode = false;
-        self.leavePrSurface();
+        self.closePrSurface();
         try self.refresh();
     }
 
@@ -3741,32 +3766,10 @@ fn initPagerModeAppFromWorkingDiff(allocator: Allocator) !App {
     return App.initForRenderBench(allocator, files);
 }
 
-/// Waits up to `max_ms` for the tty reader thread to queue an event, returning
-/// as soon as one lands.
-///
-/// The loop only reaches here when something needs polling on a timer, which in
-/// practice is always: `should_poll` requires `!server_active`, and the TUI
-/// server starts unconditionally. Sleeping the interval out unconditionally
-/// would add its full duration to the latency of every keystroke. Zig 0.16
-/// dropped `Condition.timedWait`, so instead of blocking on the queue's own
-/// condition variable this naps in short slices; the slice length, not the
-/// budget, bounds the added latency.
-fn sleepUntilInput(queue: anytype, max_ms: u64) void {
-    const budget_ns = max_ms * std.time.ns_per_ms;
-    const slice_ns = @min(budget_ns, std.time.ns_per_ms);
-    var waited_ns: u64 = 0;
-    while (waited_ns < budget_ns) : (waited_ns += slice_ns) {
-        if (!queueIsEmpty(queue)) return;
-        skim_io.sleep(slice_ns);
-    }
-}
-
-/// Mirrors `Queue.isEmptyLH`, which is private. Peeking (rather than popping)
-/// leaves the event for the caller's `tryEvent` drain.
-fn queueIsEmpty(queue: anytype) bool {
-    queue.mutex.lockUncancelable(skim_io.get());
-    defer queue.mutex.unlock(skim_io.get());
-    return queue.write_index == queue.read_index;
+/// Entry parameters for a sidebar record. The strings borrow from the
+/// record; `startEnterPr` copies them.
+fn enterParamsFor(record: *const pr_types.PrRecord) review_controller.EnterParams {
+    return .{ .number = record.number, .base_ref = record.base_ref, .title = record.title, .url = record.url };
 }
 
 fn diffContainsLine(files: []const parser.FileDiff, expected: []const u8) bool {

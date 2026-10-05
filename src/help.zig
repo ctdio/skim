@@ -93,8 +93,9 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         .{ .key = "r", .desc = "Refresh diff (off a comment)" },
         .{ .key = "Ctrl-g", .desc = "Open in $EDITOR" },
     };
-    for (core_bindings) |b| {
-        if (unavailable(b)) continue;
+    for (core_bindings) |binding| {
+        if (unavailable(binding)) continue;
+        const b = if (app.state.sidebar.open) sidebarOverride(binding) else binding;
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
     try content_lines.append(app.allocator, .{ .blank = true });
@@ -154,6 +155,32 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
     }
     try content_lines.append(app.allocator, .{ .blank = true });
+
+    // PR SIDEBAR (only while the PR surface is open)
+    if (app.state.sidebar.open) {
+        try content_lines.append(app.allocator, .{ .section = "PR SIDEBAR" });
+        const sidebar_bindings = [_]Binding{
+            .{ .key = "Tab / ^w h", .desc = "Focus the sidebar (from the diff)" },
+            .{ .key = "l / Tab", .desc = "Focus the diff (from the sidebar)" },
+            .{ .key = "^b", .desc = "Hide / show the sidebar" },
+            .{ .key = "j / k", .desc = "Move between rows" },
+            .{ .key = "J / K", .desc = "Next / previous PR in the stack" },
+            .{ .key = "^n / ^p", .desc = "Next / previous stack" },
+            .{ .key = "gg / G", .desc = "Top / bottom" },
+            .{ .key = "Space / za", .desc = "Expand / collapse a stack" },
+            .{ .key = "h", .desc = "Collapse the stack" },
+            .{ .key = "Enter", .desc = "Open the selected PR" },
+            .{ .key = "f", .desc = "Filter (author:@me -is:draft ...)" },
+            .{ .key = "F", .desc = "Next filter preset" },
+            .{ .key = "R", .desc = "Sync now" },
+            .{ .key = "o", .desc = "Open the PR in the browser" },
+            .{ .key = "Esc", .desc = "Back: prompt, preset, then close" },
+        };
+        for (sidebar_bindings) |b| {
+            try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });
+        }
+        try content_lines.append(app.allocator, .{ .blank = true });
+    }
 
     // PR REVIEW (only while a review session is active)
     if (review_controller.isActive(&app.state.review)) {
@@ -273,6 +300,15 @@ fn unavailable(binding: Binding) bool {
             std.mem.eql(u8, unsupported.desc, binding.desc)) return true;
     }
     return false;
+}
+
+/// Tab and Ctrl-b move focus to and toggle the PR sidebar while it is open,
+/// so the diff's hunk filter and page up are listed under the keys that still
+/// reach them.
+fn sidebarOverride(binding: Binding) Binding {
+    if (std.mem.eql(u8, binding.key, "Tab")) return .{ .key = "Shift-Tab", .desc = "Cycle hunk filter (backward)" };
+    if (std.mem.eql(u8, binding.key, "b / Ctrl-b")) return .{ .key = "b / PageUp", .desc = binding.desc };
+    return binding;
 }
 
 fn drawBoxBorder(win: vaxis.Window, width: usize, height: usize, style: vaxis.Style) void {

@@ -75,14 +75,14 @@ main() {
 # Scenarios
 # =============================================================================
 
-# Risk 1: Enter A, Ctrl-j, Enter B while A's gh is still sleeping -> B wins.
+# Risk 1: Enter A, j, Enter B while A's gh is still sleeping -> B wins.
 scenario_latest_wins() {
   fake_gh_set FAKE_GH_DELAY_1 4
   skim_start pr
   wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
   send Enter
   wait_for_log '^review.*number=1' 1 5 || { REASON="no gh review call for PR 1"; return 1; }
-  send C-j
+  send j
   sleep 0.2
   send Enter
   wait_for_pane "b_only.txt" 10 || { REASON="B's diff (b_only.txt) never appeared"; return 1; }
@@ -103,14 +103,17 @@ scenario_gh_fail_on_switch() {
   send Enter
   wait_for_pane "ALPHA-THREAD-MARKER" 10 || { REASON="A's thread never rendered"; return 1; }
   open_picker || { REASON="could not reopen the PR picker via the palette"; return 1; }
-  send C-j
+  send j
   sleep 0.2
   send Enter
   wait_for_pane "b_only.txt" 10 || { REASON="B's diff (b_only.txt) never appeared"; return 1; }
   wait_for_log '^review.*number=2' 1 5 || { REASON="no gh review call for PR 2"; return 1; }
   sleep 1
-  pane_has "ALPHA-THREAD-MARKER" && { REASON="A's thread is shown on B"; return 1; }
-  pane_has "Alpha change" && { REASON="A's title is shown on B"; return 1; }
+  # The PR sidebar lists A's title by design and stays open; check only the
+  # diff columns to its right.
+  pane_has "Alpha change" || { REASON="the PR sidebar is no longer showing the list"; return 1; }
+  diff_pane_has "ALPHA-THREAD-MARKER" && { REASON="A's thread is shown on B"; return 1; }
+  diff_pane_has "Alpha change" && { REASON="A's title is shown on B"; return 1; }
   status_line | grep -q "PR #1" && { REASON="status line still names PR #1: $(status_line)"; return 1; }
   return 0
 }
@@ -170,7 +173,7 @@ scenario_rapid_switch_stress() {
     in_picker || open_picker || { REASON="iteration $i: could not reopen the picker"; return 1; }
     send Enter
     sleep 0.1
-    if ((i % 2 == 0)); then send C-j; else send C-k; fi
+    if ((i % 2 == 0)); then send j; else send k; fi
     sleep 0.05
     send Enter
     if ((i % 3 == 0)) && wait_for_pane "refs/skim/pr-" 4; then
@@ -188,7 +191,7 @@ scenario_rapid_switch_stress() {
   for ((attempt = 0; attempt < 5; attempt++)); do
     dismiss_editor
     in_picker || open_picker || continue
-    send C-j
+    send j
     sleep 0.15
     target="$(picker_selected_number)"
     send Enter
@@ -225,7 +228,7 @@ scenario_view_state_reset() {
   send z C
   wait_for_pane "▶ a_only.txt" 3 || { REASON="zC did not fold a_only.txt (fold key path changed?)"; return 1; }
   open_picker || { REASON="could not reopen the PR picker via the palette"; return 1; }
-  send C-j
+  send j
   sleep 0.2
   send Enter
   wait_for_pane "b_only.txt" 10 || { REASON="B's diff never appeared"; return 1; }
@@ -328,7 +331,7 @@ scenario_leave_during_entry() {
   wait_for_pane "a_only.txt" 10 || { REASON="PR 1 diff never appeared"; return 1; }
   fake_gh_set FAKE_GH_DELAY_2 4
   open_picker || { REASON="could not reopen the PR picker via the palette"; return 1; }
-  send C-j
+  send j
   sleep 0.2
   send Enter
   wait_for_log '^review.*number=2' 1 5 || { REASON="no gh review call for PR 2"; return 1; }
@@ -476,8 +479,26 @@ status_line() {
   pane | grep -E -- '^-- [A-Z ]+ --' | tail -1
 }
 
+# Columns the PR sidebar takes, divider included, in the default 200-column
+# pane: clamp(200 * 28 / 100, 32, 56) (src/pr/sidebar/layout.zig).
+SIDEBAR_COLS=56
+
+# The pane with the sidebar's columns cut off. Bash slices by character only
+# under a UTF-8 locale, and the sidebar draws multi-byte glyphs.
+diff_pane() {
+  local LC_ALL=C.UTF-8 line
+  while IFS= read -r line; do
+    printf '%s\n' "${line:SIDEBAR_COLS}"
+  done < <(pane)
+}
+
+diff_pane_has() {
+  diff_pane | grep -qE -- "$1"
+}
+
+# The PR sidebar has focus (`pr_review` mode).
 in_picker() {
-  pane | head -1 | grep -q "skim pr"
+  status_line | grep -q -- "-- PRS --"
 }
 
 open_picker() {
@@ -533,7 +554,7 @@ add_wt_note() {
 # guard makes a too-slow switch a loud harness failure, not a false PASS.
 switch_to_pr2() {
   open_picker || { REASON="could not reopen the PR picker via the palette"; return 1; }
-  send C-j
+  send j
   sleep 0.2
   send Enter
   if (($(log_count '^thread') > 0)); then

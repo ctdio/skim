@@ -281,22 +281,33 @@ fn printPrHelp() !void {
         \\USAGE:
         \\    skim pr [<number|url>]
         \\
-        \\With no argument, lists open PRs (via the GitHub CLI, `gh`) in an
-        \\interactive picker. Selecting one fetches its head and opens skim on the
-        \\PR's diff. Given a PR number or a github.com PR URL, opens straight into
-        \\that PR's diff. A URL must point at the origin remote's repository.
+        \\Opens a sidebar of the repository's open PRs, grouped into stacks, beside
+        \\the diff. The list is read from a local cache (~/.skim/prs.db) and kept
+        \\in sync with GitHub in the background via the GitHub CLI (`gh`).
+        \\Opening a PR fetches its head and shows the PR's diff. Given a PR number
+        \\or a github.com PR URL, selects and opens that PR straight away. A URL
+        \\must point at the origin remote's repository.
         \\
-        \\KEYS:
-        \\    (type)               filter by author, title, or branch
-        \\    ctrl-n / ctrl-j      move down
-        \\    ctrl-p / ctrl-k      move up
+        \\SIDEBAR KEYS:
+        \\    j / k                move down / up
+        \\    J / K                next / previous PR in the stack
+        \\    ctrl-n / ctrl-p      next / previous stack
         \\    ctrl-d / ctrl-u      half-page down / up
-        \\    ctrl-a               filter by author
-        \\    ctrl-r               refresh the PR list
-        \\    ctrl-o               open the selected PR in the browser
-        \\    enter                review the selected PR
-        \\    esc                  back: clear search, then author filter, then exit
-        \\    ctrl-c               back: author overlay -> list, then exit
+        \\    gg / G               top / bottom
+        \\    space / za           expand or collapse a stack
+        \\    h                    collapse the stack
+        \\    enter                open the selected PR
+        \\    l / tab              focus the diff
+        \\    f                    filter (e.g. author:@me -is:draft)
+        \\    F                    next filter preset
+        \\    R                    sync now
+        \\    o                    open the selected PR in the browser
+        \\    ctrl-b               hide / show the sidebar
+        \\    esc / ctrl-c         back: prompt, then preset, then exit
+        \\
+        \\DIFF KEYS (while the sidebar is open):
+        \\    tab / ctrl-w h       focus the sidebar
+        \\    ctrl-b               hide / show the sidebar
         \\
         \\Requires the GitHub CLI (`gh`) on PATH, authenticated for the repo.
         \\

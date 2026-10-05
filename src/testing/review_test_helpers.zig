@@ -1131,7 +1131,7 @@ test "selectPullRequest: refused while a comment editor is still open" {
 
     try testing.expect(!app.state.review.entry_in_flight);
     try testing.expect(app.state.active_comment_input != null);
-    try testing.expectEqualStrings(open_editor_message, app.state.pr.message_buf[0..app.state.pr.message_len]);
+    try testing.expectEqualStrings(open_editor_message, app.state.sidebar.messageText());
 }
 
 test "saveCurrentComment: refused while the non-PR diff has not installed yet, editor stays open" {
@@ -2106,21 +2106,11 @@ fn workingCommentParams() comments.AddParams {
     };
 }
 
-/// Select another PR from the picker, as Enter in `.pr_review` mode does.
+/// Select another PR from the sidebar, as Enter in `.pr_review` mode does.
 fn selectNextPr(app: *App) !void {
     app.state.review.gh_bin = missing_bin;
     app.state.review.git_bin = missing_bin;
-    try app.selectPullRequest(.{
-        .number = 7,
-        .title = "Next",
-        .author = "octocat",
-        .head_ref = "next",
-        .base_ref = "main",
-        .is_draft = false,
-        .updated_at = "",
-        .url = "",
-        .ci = .none,
-    });
+    try app.selectPullRequest(.{ .number = 7, .base_ref = "main", .title = "Next", .url = "" });
 }
 
 fn waitEntryReady(app: *App) !void {

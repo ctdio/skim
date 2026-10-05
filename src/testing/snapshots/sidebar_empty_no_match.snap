@@ -1,0 +1,10 @@
+ custom · 0/31                    ⟳ 2m ago │
+ label:nope                                │
+───────────────────────────────────────────│
+                                           │
+                                           │
+         No PRs match `label:nope`         │
+         F: next preset · f: edit          │
+                                           │
+                                           │
+ f:filter F:preset R:sync ^b:hide          │

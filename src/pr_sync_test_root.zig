@@ -8,6 +8,7 @@ pub const queries = @import("pr/sync/queries.zig");
 pub const sync_parse = @import("pr/sync/sync_parse.zig");
 pub const planner = @import("pr/sync/planner.zig");
 pub const sync = @import("pr/sync/sync.zig");
+pub const child_group = @import("pr/child_group.zig");
 pub const sync_test = @import("pr/sync/sync_test.zig");
 pub const fixtures = @import("pr/sync/fixtures.zig");
 pub const test_support = @import("pr/sync/test_support.zig");

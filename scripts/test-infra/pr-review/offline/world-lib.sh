@@ -13,7 +13,9 @@
 #                  redirected to origin.git with url.<path>.insteadOf
 #   bin/gh         fake gh (offline/fake-gh), first on PATH
 #   bin/gt         stub Graphite CLI that always fails (keeps a real gt out)
-#   fixtures/      pr-list.json, review-1.json, review-2.json
+#   fixtures/      pr-list.json, review-1.json, review-2.json, and the PR
+#                  sidebar's background sync answers: sync-index.json,
+#                  sync-node-PR_A.json, sync-node-PR_B.json
 #   fake-gh.conf   knobs read by the fake gh on every call
 #   gh.log         one line per gh call: <kind>\x1f<argv...>
 #   stderr.log     skim's stderr
@@ -83,6 +85,7 @@ world_setup() {
   world_git -C "$seed" push -q origin "feat-a:refs/pull/1/head" "feat-b:refs/pull/2/head" || return 1
   SHA_A="$(world_git -C "$seed" rev-parse feat-a)"
   SHA_B="$(world_git -C "$seed" rev-parse feat-b)"
+  SHA_MAIN="$(world_git -C "$seed" rev-parse main)"
 
   world_git clone -q -b main "$WORK/origin.git" "$WORK/clone" 2>/dev/null || return 1
   world_git -C "$WORK/clone" remote set-url origin "$FAKE_REMOTE_URL"
@@ -109,6 +112,7 @@ world_git() {
 }
 
 write_fixtures() {
+  write_sync_fixtures
   cat >"$WORK/fixtures/pr-list.json" <<EOF
 [
 {"number":1,"title":"Alpha change","author":{"login":"alice"},"headRefName":"feat-a","baseRefName":"main","isDraft":false,"updatedAt":"2026-01-02T00:00:00Z","url":"https://github.com/fake/repo/pull/1","statusCheckRollup":[]},
@@ -274,4 +278,22 @@ palette_run() {
   type_text "$1"
   sleep 0.3
   send Enter
+}
+
+# The PR sidebar lists PRs from ~/.skim/prs.db, which its sync worker fills
+# through `gh api graphql` (SkimSyncIndex, then SkimSyncHydrate per node id).
+write_sync_fixtures() {
+  cat >"$WORK/fixtures/sync-index.json" <<EOF
+{"data":{"viewer":{"login":"fake-viewer"},"repository":{"pullRequests":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+{"id":"PR_A","number":1,"title":"Alpha change","isDraft":false,"updatedAt":"2026-01-02T00:00:00Z","url":"https://github.com/fake/repo/pull/1","headRefName":"feat-a","baseRefName":"main","headRefOid":"$SHA_A","baseRefOid":"$SHA_MAIN","author":{"login":"alice"},"labels":{"nodes":[]}},
+{"id":"PR_B","number":2,"title":"Bravo change","isDraft":false,"updatedAt":"2026-01-01T00:00:00Z","url":"https://github.com/fake/repo/pull/2","headRefName":"feat-b","baseRefName":"main","headRefOid":"$SHA_B","baseRefOid":"$SHA_MAIN","author":{"login":"bob"},"labels":{"nodes":[]}}
+]}}}}
+EOF
+  local id number updated
+  for id in PR_A PR_B; do
+    if [ "$id" = PR_A ]; then number=1 updated="2026-01-02T00:00:00Z"; else number=2 updated="2026-01-01T00:00:00Z"; fi
+    cat >"$WORK/fixtures/sync-node-$id.json" <<EOF
+{"number":$number,"updatedAt":"$updated","additions":1,"deletions":1,"changedFiles":2,"reviewDecision":"REVIEW_REQUIRED","reviewRequests":{"nodes":[]},"latestOpinionatedReviews":{"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}}
+EOF
+  done
 }

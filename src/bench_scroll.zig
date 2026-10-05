@@ -90,6 +90,7 @@ pub fn main(process_init: std.process.Init) !void {
     const motion = bench.envEnum(Motion, allocator, "SKIM_BENCH_MOTION", .line);
     const view = bench.envEnum(View, allocator, "SKIM_BENCH_VIEW", .unified);
     const highlight = bench.envBool(allocator, "SKIM_BENCH_HIGHLIGHT", true);
+    const sidebar = bench.envBool(allocator, "SKIM_BENCH_SIDEBAR", false);
     const burst: Burst = .{
         .rows = bench.envUsize(allocator, "SKIM_BENCH_SHIFT", 0),
         .up = bench.envBool(allocator, "SKIM_BENCH_UP", false),
@@ -97,8 +98,8 @@ pub fn main(process_init: std.process.Init) !void {
 
     std.log.info("=== SCROLL BENCH ===", .{});
     std.log.info(
-        "motion={s} view={s} size={d}x{d} highlight={} warmup={d} iterations={d}",
-        .{ @tagName(motion), @tagName(view), width, height, highlight, warmup, iterations },
+        "motion={s} view={s} size={d}x{d} highlight={} sidebar={} warmup={d} iterations={d}",
+        .{ @tagName(motion), @tagName(view), width, height, highlight, sidebar, warmup, iterations },
     );
 
     const diff_text = try bench.loadDiffText(allocator, spec);
@@ -115,6 +116,7 @@ pub fn main(process_init: std.process.Init) !void {
     defer app.deinit();
 
     if (highlight) try bench.addHunkHighlights(allocator, &app);
+    if (sidebar) try bench.openSidebar(allocator, &app, 80);
 
     std.log.info("line map: records={d}", .{app.state.line_map.records.len});
 
@@ -178,7 +180,7 @@ fn runView(
         const build_ns = timer.read();
 
         out.clearRetainingCapacity();
-        _ = try scroller.apply(&vx, &out.writer);
+        _ = try scroller.apply(.{ .vx = &vx, .writer = &out.writer, .columns = frame.scrollColumns(app, width) });
         try vx.render(&out.writer);
         try out.writer.flush();
         const total_ns = timer.read();

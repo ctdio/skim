@@ -34,6 +34,7 @@ pub fn wheelKeyForMode(mode: Mode, down: bool) ?u21 {
         .graphite_stack,
         .agent_selection,
         .agent,
+        // PR sidebar focus: arrows move its cursor.
         .pr_review,
         => if (down) vaxis.Key.down else vaxis.Key.up,
 

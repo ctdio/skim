@@ -267,10 +267,10 @@ pub const CommandPaletteState = struct {
                 .deletions = 0,
             },
             .{
-                .name = "Review Pull Request...",
-                .display_name = "Review Pull Request...",
+                .name = "Pull Requests",
+                .display_name = "Pull Requests",
                 .aliases = &[_][]const u8{ ":pr", ":prs" },
-                .description = "Browse and review open pull requests",
+                .description = "Open the pull request sidebar",
                 .action = .enter_pr_review,
                 .category = .diff,
                 .owns_display_name = false,

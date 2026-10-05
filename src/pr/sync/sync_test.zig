@@ -8,6 +8,7 @@ const std = @import("std");
 const skim_io = @import("skim_io");
 const github = @import("../github.zig");
 const types = @import("../db/types.zig");
+const store_mod = @import("../db/store.zig");
 const sync = @import("sync.zig");
 const planner = @import("planner.zig");
 const fixtures = @import("fixtures.zig");
@@ -948,6 +949,29 @@ test "stop returns within one gh call" {
     var calls = try scenario.readCalls(testing.allocator, root.path);
     defer calls.deinit();
     try testing.expect(calls.items.len <= 2);
+}
+
+test "stop kills an in-flight gh instead of waiting for it, and records no sync error" {
+    var root = try test_support.TmpRoot.init();
+    defer root.deinit();
+    const gh = try serveQuietRepo(.{ .root = &root, .sleep_ms = 8000 });
+    defer testing.allocator.free(gh);
+    const db_path = try test_support.tmpDbPath(testing.allocator, &root);
+    defer testing.allocator.free(db_path);
+
+    const worker = try sync.SyncWorker.start(workerOptions(db_path, gh));
+    try waitForCalls(.{ .root = root.path, .at_least = 1 });
+
+    var timer = try skim_io.Timer.start();
+    worker.stop();
+    try testing.expect(timer.read() < 500 * std.time.ns_per_ms);
+
+    var db = try store_mod.Store.open(testing.allocator, db_path);
+    defer db.close();
+    const repo_id = try db.ensureRepo(.{ .key = repo_key, .owner = owner, .name = repo_name });
+    var repo = (try db.getRepo(testing.allocator, repo_id)).?;
+    defer repo.deinit();
+    try testing.expectEqual(null, repo.row.last_sync_error);
 }
 
 test "status reports last_error after a failing run and clears it after a good one" {

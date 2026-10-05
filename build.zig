@@ -66,6 +66,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         exe.root_module.linkLibrary(grammar);
     }
+    linkSqlite(exe.root_module, sqlite);
 
     // Link libc for C library support
     exe.root_module.link_libc = true;
@@ -92,6 +93,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         debug_exe.root_module.linkLibrary(grammar);
     }
+    linkSqlite(debug_exe.root_module, sqlite);
     debug_exe.root_module.link_libc = true;
     const debug_run = b.addRunArtifact(debug_exe);
     const debug_step = b.step("debug-syntax", "Run syntax debugging");
@@ -112,6 +114,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         bench_exe.root_module.linkLibrary(grammar);
     }
+    linkSqlite(bench_exe.root_module, sqlite);
     bench_exe.root_module.link_libc = true;
     const bench_run = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run startup benchmark");
@@ -132,6 +135,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         first_render_exe.root_module.linkLibrary(grammar);
     }
+    linkSqlite(first_render_exe.root_module, sqlite);
     first_render_exe.root_module.link_libc = true;
     const first_render_run = b.addRunArtifact(first_render_exe);
     const first_render_step = b.step("bench-render", "Run first render benchmark");
@@ -153,6 +157,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         render_content_exe.root_module.linkLibrary(grammar);
     }
+    linkSqlite(render_content_exe.root_module, sqlite);
     render_content_exe.root_module.link_libc = true;
     const render_content_run = b.addRunArtifact(render_content_exe);
     const render_content_step = b.step("bench-render-content", "Run render content benchmark");
@@ -174,6 +179,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         scroll_exe.root_module.linkLibrary(grammar);
     }
+    linkSqlite(scroll_exe.root_module, sqlite);
     scroll_exe.root_module.link_libc = true;
     b.installArtifact(scroll_exe);
     const scroll_run = b.addRunArtifact(scroll_exe);
@@ -196,6 +202,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         highlight_scroll_exe.root_module.linkLibrary(grammar);
     }
+    linkSqlite(highlight_scroll_exe.root_module, sqlite);
     highlight_scroll_exe.root_module.link_libc = true;
     b.installArtifact(highlight_scroll_exe);
     const highlight_scroll_run = b.addRunArtifact(highlight_scroll_exe);
@@ -218,6 +225,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         agent_render_exe.root_module.linkLibrary(grammar);
     }
+    linkSqlite(agent_render_exe.root_module, sqlite);
     agent_render_exe.root_module.link_libc = true;
     const agent_render_run = b.addRunArtifact(agent_render_exe);
     const agent_render_step = b.step("bench-agent-render", "Run agent render benchmark");
@@ -287,6 +295,7 @@ pub fn build(b: *std.Build) void {
         .tree_sitter = web_tree_sitter,
         .build_options = build_options_module,
         .skim_io = web_skim_io_module,
+        .sqlite = null,
     }));
     for (buildWebGrammars(b, web_target, web_optimize)) |grammar| {
         web_exe.root_module.linkLibrary(grammar);
@@ -354,6 +363,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         unit_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(unit_tests.root_module, sqlite);
     unit_tests.root_module.link_libc = true;
     addSkillDocs(b, unit_tests.root_module);
 
@@ -378,6 +388,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         file_caches_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(file_caches_tests.root_module, sqlite);
     file_caches_tests.root_module.link_libc = true;
     const run_file_caches_tests = b.addRunArtifact(file_caches_tests);
     test_step.dependOn(&run_file_caches_tests.step);
@@ -399,6 +410,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         mcp_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(mcp_tests.root_module, sqlite);
     mcp_tests.root_module.link_libc = true;
     addSkillDocs(b, mcp_tests.root_module);
 
@@ -491,25 +503,8 @@ pub fn build(b: *std.Build) void {
     const run_pr_tests = b.addRunArtifact(pr_tests);
     test_step.dependOn(&run_pr_tests.step);
 
-    // PR picker controller tests. The controller imports `../git/graphite.zig`,
-    // which is outside the `src/pr/`-rooted pr_tests module, so it gets its own
-    // src/-rooted aggregator step.
-    const pr_controller_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/pr_controller_test_root.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    pr_controller_tests.root_module.addImport("vaxis", vaxis);
-    pr_controller_tests.root_module.addImport("build_options", build_options_module);
-    pr_controller_tests.root_module.addImport("skim_io", skim_io_module);
-    pr_controller_tests.root_module.link_libc = true;
-    const run_pr_controller_tests = b.addRunArtifact(pr_controller_tests);
-    test_step.dependOn(&run_pr_controller_tests.step);
-
-    // PR store tests (src/pr/db/). Separate root because this is the only step
-    // that links SQLite; app.zig does not import the store yet.
+    // PR store tests (src/pr/db/). Separate root so the store is tested
+    // without compiling App.
     const pr_db_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/pr_db_test_root.zig"),
@@ -616,6 +611,7 @@ pub fn build(b: *std.Build) void {
     const session_replay_root_module = b.createModule(.{
         .root_source_file = b.path("src/session_replay_test_root.zig"),
     });
+    linkSqlite(session_replay_root_module, sqlite);
     session_replay_root_module.addImport("vaxis", vaxis);
     session_replay_root_module.addImport("tree-sitter", tree_sitter);
     session_replay_root_module.addImport("build_options", build_options_module);
@@ -635,6 +631,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         session_replay_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(session_replay_tests.root_module, sqlite);
     session_replay_tests.root_module.link_libc = true;
     const run_session_replay_tests = b.addRunArtifact(session_replay_tests);
     test_step.dependOn(&run_session_replay_tests.step);
@@ -653,6 +650,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         diff_core_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(diff_core_tests.root_module, sqlite);
     diff_core_tests.root_module.link_libc = true;
     const run_diff_core_tests = b.addRunArtifact(diff_core_tests);
     test_step.dependOn(&run_diff_core_tests.step);
@@ -699,10 +697,12 @@ pub fn build(b: *std.Build) void {
         .tree_sitter = tree_sitter,
         .build_options = build_options_module,
         .skim_io = skim_io_module,
+        .sqlite = sqlite,
     }));
     for (grammars) |grammar| {
         web_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(web_tests.root_module, sqlite);
     web_tests.root_module.link_libc = true;
     const run_web_tests = b.addRunArtifact(web_tests);
     test_step.dependOn(&run_web_tests.step);
@@ -757,6 +757,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         highlight_scheduler_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(highlight_scheduler_tests.root_module, sqlite);
     highlight_scheduler_tests.root_module.link_libc = true;
     const run_highlight_scheduler_tests = b.addRunArtifact(highlight_scheduler_tests);
     test_step.dependOn(&run_highlight_scheduler_tests.step);
@@ -770,6 +771,20 @@ pub fn build(b: *std.Build) void {
     });
     const run_frame_pacer_tests = b.addRunArtifact(frame_pacer_tests);
     test_step.dependOn(&run_frame_pacer_tests.step);
+
+    // The event loop's timed queue wait. Roots its own step because a test
+    // block reachable only through src/main.zig is not collected.
+    const input_wait_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/input_wait.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    input_wait_tests.root_module.addImport("vaxis", vaxis);
+    input_wait_tests.root_module.addImport("skim_io", skim_io_module);
+    const run_input_wait_tests = b.addRunArtifact(input_wait_tests);
+    test_step.dependOn(&run_input_wait_tests.step);
 
     // Cell-writing fast-path tests. cells.zig is self-contained (std + vaxis
     // only) and its tests assert byte-for-byte equivalence with
@@ -795,6 +810,7 @@ pub fn build(b: *std.Build) void {
     const review_test_root_module = b.createModule(.{
         .root_source_file = b.path("src/review_test_root.zig"),
     });
+    linkSqlite(review_test_root_module, sqlite);
     review_test_root_module.addImport("vaxis", vaxis);
     review_test_root_module.addImport("tree-sitter", tree_sitter);
     review_test_root_module.addImport("build_options", build_options_module);
@@ -814,9 +830,41 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         review_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(review_tests.root_module, sqlite);
     review_tests.root_module.link_libc = true;
     const run_review_tests = b.addRunArtifact(review_tests);
     test_step.dependOn(&run_review_tests.step);
+
+    // PR sidebar tests (Phase 6a): controller + snapshot tests in
+    // src/testing/, reaching pr/sidebar, rendering/ and app.zig through the
+    // src/-rooted pr_sidebar_test_root NAMED module (same pattern as
+    // review_tests). sqlite is linked because app.zig reaches pr/surface.zig.
+    const pr_sidebar_test_root_module = b.createModule(.{
+        .root_source_file = b.path("src/pr_sidebar_test_root.zig"),
+    });
+    pr_sidebar_test_root_module.addImport("vaxis", vaxis);
+    pr_sidebar_test_root_module.addImport("tree-sitter", tree_sitter);
+    pr_sidebar_test_root_module.addImport("build_options", build_options_module);
+    pr_sidebar_test_root_module.addImport("skim_io", skim_io_module);
+    linkSqlite(pr_sidebar_test_root_module, sqlite);
+    const sidebar_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/sidebar_test_helpers.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    sidebar_tests.root_module.addImport("vaxis", vaxis);
+    sidebar_tests.root_module.addImport("tree-sitter", tree_sitter);
+    sidebar_tests.root_module.addImport("build_options", build_options_module);
+    sidebar_tests.root_module.addImport("skim_io", skim_io_module);
+    sidebar_tests.root_module.addImport("pr_sidebar_test_root", pr_sidebar_test_root_module);
+    for (grammars) |grammar| {
+        sidebar_tests.root_module.linkLibrary(grammar);
+    }
+    linkSqlite(sidebar_tests.root_module, sqlite);
+    const run_sidebar_tests = b.addRunArtifact(sidebar_tests);
+    test_step.dependOn(&run_sidebar_tests.step);
 
     // Markdown module tests
     const markdown_tests = b.addTest(.{
@@ -833,6 +881,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         markdown_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(markdown_tests.root_module, sqlite);
     markdown_tests.root_module.link_libc = true;
     const run_markdown_tests = b.addRunArtifact(markdown_tests);
     test_step.dependOn(&run_markdown_tests.step);
@@ -934,6 +983,7 @@ pub fn build(b: *std.Build) void {
     const question_prompt_root_module = b.createModule(.{
         .root_source_file = b.path("src/question_prompt_test_root.zig"),
     });
+    linkSqlite(question_prompt_root_module, sqlite);
     question_prompt_root_module.addImport("vaxis", vaxis);
     question_prompt_root_module.addImport("tree-sitter", tree_sitter);
     question_prompt_root_module.addImport("build_options", build_options_module);
@@ -946,6 +996,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         snapshot_scenarios_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(snapshot_scenarios_tests.root_module, sqlite);
     snapshot_scenarios_tests.root_module.link_libc = true;
     const run_snapshot_scenarios_tests = b.addRunArtifact(snapshot_scenarios_tests);
     test_step.dependOn(&run_snapshot_scenarios_tests.step);
@@ -965,6 +1016,7 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         question_prompt_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(question_prompt_tests.root_module, sqlite);
     question_prompt_tests.root_module.link_libc = true;
     const run_question_prompt_tests = b.addRunArtifact(question_prompt_tests);
     test_step.dependOn(&run_question_prompt_tests.step);
@@ -972,6 +1024,7 @@ pub fn build(b: *std.Build) void {
     const approval_root_module = b.createModule(.{
         .root_source_file = b.path("src/approval_test_root.zig"),
     });
+    linkSqlite(approval_root_module, sqlite);
     approval_root_module.addImport("vaxis", vaxis);
     approval_root_module.addImport("tree-sitter", tree_sitter);
     approval_root_module.addImport("markdown", markdown_module);
@@ -992,9 +1045,43 @@ pub fn build(b: *std.Build) void {
     for (grammars) |grammar| {
         approval_tests.root_module.linkLibrary(grammar);
     }
+    linkSqlite(approval_tests.root_module, sqlite);
     approval_tests.root_module.link_libc = true;
     const run_approval_tests = b.addRunArtifact(approval_tests);
     test_step.dependOn(&run_approval_tests.step);
+
+    // Offline PR surface harness (Phase 6a). Not part of `test`: it needs the
+    // git world, fake gh and temp HOME that
+    // scripts/test-infra/pr-sidebar/surface-harness.sh builds, and that script
+    // runs the installed binary. The src/-rooted named module lets the harness
+    // in src/testing/ reach App and pr/.
+    const pr_surface_harness_root_module = b.createModule(.{
+        .root_source_file = b.path("src/pr_surface_harness_root.zig"),
+    });
+    pr_surface_harness_root_module.addImport("vaxis", vaxis);
+    pr_surface_harness_root_module.addImport("tree-sitter", tree_sitter);
+    pr_surface_harness_root_module.addImport("markdown", markdown_module);
+    pr_surface_harness_root_module.addImport("build_options", build_options_module);
+    pr_surface_harness_root_module.addImport("skim_io", skim_io_module);
+    linkSqlite(pr_surface_harness_root_module, sqlite);
+    const pr_surface_harness = b.addExecutable(.{
+        .name = "pr_surface_harness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/pr_surface_harness.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    pr_surface_harness.root_module.addImport("vaxis", vaxis);
+    pr_surface_harness.root_module.addImport("skim_io", skim_io_module);
+    pr_surface_harness.root_module.addImport("pr_surface_harness_root", pr_surface_harness_root_module);
+    for (grammars) |grammar| {
+        pr_surface_harness.root_module.linkLibrary(grammar);
+    }
+    linkSqlite(pr_surface_harness.root_module, sqlite);
+    const install_pr_surface_harness = b.addInstallArtifact(pr_surface_harness, .{});
+    const pr_surface_harness_step = b.step("pr-surface-harness", "Build the offline PR surface harness (run it via scripts/test-infra/pr-sidebar/surface-harness.sh)");
+    pr_surface_harness_step.dependOn(&install_pr_surface_harness.step);
 }
 
 // SQLite compile options. THREADSAFE=2: connections are never shared
@@ -1189,6 +1276,7 @@ fn webCoreModule(b: *std.Build, opts: WebCoreOptions) *std.Build.Module {
     module.addImport("tree-sitter", opts.tree_sitter);
     module.addImport("build_options", opts.build_options);
     module.addImport("skim_io", opts.skim_io);
+    if (opts.sqlite) |artifacts| linkSqlite(module, artifacts);
     return module;
 }
 
@@ -1199,6 +1287,9 @@ const WebCoreOptions = struct {
     tree_sitter: *std.Build.Module,
     build_options: *std.Build.Module,
     skim_io: *std.Build.Module,
+    /// Host builds only: app.zig reaches pr/surface.zig, which needs SQLite.
+    /// The wasm web_exe passes null and compiles surface_stub.zig instead.
+    sqlite: ?SqliteArtifacts,
 };
 
 /// Expose `skills/skim/*.md` to `@embedFile` so a test can compare what the

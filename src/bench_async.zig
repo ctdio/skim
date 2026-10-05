@@ -52,7 +52,7 @@ pub fn main(process_init: std.process.Init) !void {
     std.log.info("(User can interact with UI while this happens)", .{});
 
     // Simulated highlighting time
-    std.time.sleep(390 * std.time.ns_per_ms);
+    skim_io.sleep(390 * std.time.ns_per_ms);
 
     const highlight_complete_time = skim_io.nanoTimestamp();
     std.log.info("[{d}ms] Syntax highlighting complete", .{@divTrunc(highlight_complete_time - start_time, std.time.ns_per_ms)});

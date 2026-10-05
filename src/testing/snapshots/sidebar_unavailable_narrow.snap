@@ -1,0 +1,10 @@
+ custom · 0/0                  │
+ no filter                     │
+───────────────────────────────│
+                               │
+                               │
+  gh not authenticated — run   │
+        `gh auth login`        │
+                               │
+                               │
+ f:filter F:preset R:sync      │

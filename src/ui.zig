@@ -10,7 +10,6 @@ const platform = @import("platform.zig");
 const App = @import("app.zig").App;
 const graphite = @import("git/graphite.zig");
 const pr = @import("pr/pr.zig");
-const pr_controller = @import("pr/controller.zig");
 const menu_stats = @import("menu_stats.zig");
 const Color = rendering_common.Color;
 const Layout = rendering_common.Layout;
@@ -729,15 +728,6 @@ pub const UI = struct {
             .style = .{ .fg = Color.dim, .bg = Color.dialog_bg },
         }};
         _ = popup_win.print(&instr_seg, .{ .row_offset = @intCast(popup_height - 2), .col_offset = @intCast(1) });
-    }
-
-    /// Full-screen PR picker. Reuses the pure PR renderer, which clears the
-    /// window first, so it overlays whatever diff sat underneath.
-    pub fn renderPrReviewDialog(app: *App, win: vaxis.Window) !void {
-        // Chrome is 4 rows: header, search, rule, and the hint footer.
-        const rows: usize = if (win.height > 4) win.height - 4 else 0;
-        pr_controller.clampScroll(&app.state.pr, rows);
-        pr.render.draw(win, pr_controller.view(&app.state.pr));
     }
 
     /// Centered submit-review dialog overlay (FR-6). Builds a bordered popup over
@@ -1607,7 +1597,7 @@ pub const UI = struct {
             .permission_selection => "-- PERMISSION MODE --",
             .agent_selection => "-- AGENT SELECTION --",
             .session_picker => "-- RESUME SESSION --",
-            .pr_review => "-- PR REVIEW --",
+            .pr_review => "-- PRS --",
             .review_submit => "-- SUBMIT REVIEW --",
             .pr_info => "-- PR INFO --",
             .agent => blk: {
@@ -1628,7 +1618,7 @@ pub const UI = struct {
     fn keybindingsStr(app: *App) []const u8 {
         // Context-aware keybindings based on cursor position and mode
         return switch (app.mode) {
-            .normal => "j/k:Move  |  ? for help",
+            .normal => if (app.state.sidebar.open and app.state.sidebar.visible) "j/k:Move  |  Tab:PRs  |  ? for help" else "j/k:Move  |  ? for help",
             .comment => blk: {
                 if (app.state.active_comment_input) |input| {
                     break :blk switch (input.vim.vim_mode) {
@@ -1657,7 +1647,7 @@ pub const UI = struct {
             .permission_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .agent_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .session_picker => "j/k:Move  |  Enter:Load  |  ESC:Cancel",
-            .pr_review => "^n/^p:Move  |  Enter:Review  |  ^a:Author  |  ^r:Refresh  |  ESC:Back",
+            .pr_review => "j/k:Move  |  J/K:In stack  |  space:Expand  |  Enter:Open  |  f:Filter  |  F:Preset  |  R:Sync  |  ^b:Hide",
             .review_submit => "Tab:Verdict  |  ^S/Enter:Submit  |  ^D:Discard  |  ESC:Cancel",
             .pr_info => "j/k:Scroll  |  ^d/^u:Page  |  i/ESC/q:Close",
             .agent => blk: {

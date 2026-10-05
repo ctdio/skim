@@ -16,6 +16,7 @@ const types = @import("../db/types.zig");
 const queries = @import("queries.zig");
 const sync_parse = @import("sync_parse.zig");
 const planner = @import("planner.zig");
+const child_group = @import("../child_group.zig");
 
 pub const Options = struct {
     repo_key: []const u8,
@@ -53,8 +54,10 @@ pub const RunParams = struct {
     /// Unix seconds; recorded as `last_sync_at` and used for the teams TTL.
     now: i64,
     /// Checked before every `gh` call; once set, `runOnce` returns
-    /// `error.Canceled` so `SyncWorker.stop` waits for at most one call.
+    /// `error.Canceled`.
     cancel: ?*const std.atomic.Value(bool) = null,
+    /// Holds the in-flight `gh` so `SyncWorker.stop` can kill it.
+    child_slot: ?*child_group.ChildSlot = null,
 };
 
 pub const RunOutcome = union(enum) {
@@ -174,6 +177,9 @@ pub const SyncWorker = struct {
     sync_requested: std.atomic.Value(bool) = .init(true),
     stop_requested: std.atomic.Value(bool) = .init(false),
 
+    /// The in-flight `gh` call, killed by `stop`.
+    child: child_group.ChildSlot = .{},
+
     /// Guards `status_value` and `priority`.
     mutex: std.Io.Mutex = .init,
     status_value: SyncStatus = .{ .running = false, .last_ok_at = null, .last_error = null },
@@ -233,11 +239,12 @@ pub const SyncWorker = struct {
         };
     }
 
-    /// Stop the thread (waiting out at most one in-flight `gh` call), close
-    /// the database and free the worker.
+    /// Stop the thread, killing any in-flight `gh` call rather than waiting
+    /// it out, close the database and free the worker.
     pub fn stop(self: *SyncWorker) void {
         self.stop_requested.store(true, .release);
         self.wake();
+        self.child.cancel();
         self.thread.join();
         self.store.close();
         freeOptions(self.allocator, self.options);
@@ -300,6 +307,7 @@ pub const SyncWorker = struct {
             .on_commit_ctx = self,
             .now = skim_io.timestamp(),
             .cancel = &self.stop_requested,
+            .child_slot = &self.child,
         }) catch |err| {
             if (err == error.Canceled) {
                 self.finishCanceled();
@@ -462,6 +470,7 @@ fn runTeamsPass(params: RunParams, repo: types.RepoRow, viewer_login: []const u8
         .string_vars = &vars,
         .gh_bin = params.gh_bin,
         .label = "gh api graphql (SkimSyncTeams)",
+        .child_slot = params.child_slot,
     })) {
         .ok => |bytes| bytes,
         // runGhArgv already logged the failure.
@@ -496,6 +505,7 @@ fn runHydratePass(params: RunParams, viewer_login: []const u8) !PassResult(usize
             .gh_bin = params.gh_bin,
             .allow_error_body = true,
             .label = "gh api graphql (SkimSyncHydrate)",
+            .child_slot = params.child_slot,
         })) {
             .ok => |bytes| bytes,
             .failed => |kind| return .{ .failed = kind },
@@ -538,6 +548,7 @@ fn fetchPage(params: RunParams, request: PageRequest) !github.GhFetch {
         .string_vars = vars[0..len],
         .gh_bin = params.gh_bin,
         .label = request.label,
+        .child_slot = params.child_slot,
     });
 }
 

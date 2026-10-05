@@ -5,7 +5,8 @@
 # Layout it expects (relative to its own location, so skim's environment does
 # not matter):
 #   <work>/bin/gh            this script
-#   <work>/fixtures/         pr-list.json, review-<N>.json
+#   <work>/fixtures/         pr-list.json, review-<N>.json, sync-index.json,
+#                            sync-node-<id>.json
 #   <work>/fake-gh.conf      optional; sourced on EVERY call, so a scenario can
 #                            change behaviour while skim is running
 #   <work>/gh.log            one line per call: <kind>\x1f<arg>\x1f<arg>...
@@ -20,6 +21,10 @@
 #   FAKE_GH_DELAY_THREAD     seconds to sleep before answering addPullRequestReviewThread
 #   FAKE_GH_FAIL_THREAD=1    addPullRequestReviewThread fails with a .network error
 #   FAKE_GH_DELAY_LIST       seconds to sleep before answering `pr list`
+#
+# The PR sidebar's sync queries (`query Skim<Op>`) are logged as `sync` and
+# answered from the sync fixtures: one index page, hydrate nodes by id, and
+# empty closed/reconcile/teams results.
 #
 # Unknown call shapes are logged as `unknown` and exit 1.
 
@@ -43,6 +48,8 @@ LOG="$WORK/gh.log"
 [ -f "$WORK/fake-gh.conf" ] && . "$WORK/fake-gh.conf"
 
 kind="unknown"
+sync_op=""
+sync_ids=()
 number=""
 pr_id=""
 rid=""
@@ -64,6 +71,10 @@ for arg in "$@"; do
     side=*) side="${arg#side=}" ;;
     body=*) body="${arg#body=}" ;;
     event=*) event="${arg#event=}" ;;
+    'ids[]='*) sync_ids+=("${arg#ids[]=}") ;;
+    query=*)
+      [[ "$arg" =~ query\ (SkimSync[A-Za-z]+) ]] && sync_op="${BASH_REMATCH[1]}"
+      ;;
   esac
 done
 
@@ -72,7 +83,9 @@ if [ "${1:-}" = "pr" ] && [ "${2:-}" = "list" ]; then
 elif [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
   kind="view"
 elif [ "${1:-}" = "api" ] && [ "${2:-}" = "graphql" ]; then
-  if [ -n "$pr_id" ]; then
+  if [ -n "$sync_op" ]; then
+    kind="sync"
+  elif [ -n "$pr_id" ]; then
     kind="create"
   elif [ -n "$rid" ] && [ -n "$path" ]; then
     kind="thread"
@@ -139,6 +152,31 @@ case "$kind" in
     echo "$seq" >"$seq_file"
     printf '{"data":{"addPullRequestReviewThread":{"thread":{"id":"PRRT_NEW_%d","isResolved":false,"isOutdated":false,"line":%d,"startLine":null,"originalLine":%d,"diffSide":"%s","startDiffSide":null,"path":"%s","subjectType":"LINE","comments":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PRRC_NEW_%d","databaseId":%d,"author":{"login":"fake-viewer"},"body":"%s","createdAt":"2026-01-01T00:00:00Z","diffHunk":"@@ -0,0 +1 @@","pullRequestReview":{"id":"%s","state":"PENDING"},"replyTo":null}]}}}}}\n' \
       "$seq" "$line" "$line" "$side" "$(json_escape "$path")" "$seq" "$((9000 + seq))" "$(json_escape "$body")" "$(json_escape "$rid")"
+    ;;
+  sync)
+    case "$sync_op" in
+      SkimSyncIndex) cat "$FIXTURES/sync-index.json" ;;
+      SkimSyncHydrate)
+        nodes=""
+        for id in "${sync_ids[@]}"; do
+          node="null"
+          [ -f "$FIXTURES/sync-node-$id.json" ] && node="$(cat "$FIXTURES/sync-node-$id.json")"
+          nodes+="${nodes:+,}$node"
+        done
+        printf '{"data":{"nodes":[%s]}}\n' "$nodes"
+        ;;
+      SkimSyncReconcile)
+        printf '{"data":{"repository":{"pullRequests":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"number":1},{"number":2}]}}}}\n'
+        ;;
+      SkimSyncClosed)
+        printf '{"data":{"repository":{"pullRequests":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}\n'
+        ;;
+      SkimSyncTeams) printf '{"data":{"viewer":{"organization":null}}}\n' ;;
+      *)
+        echo "unknown fake gh sync operation: $sync_op" >&2
+        exit 1
+        ;;
+    esac
     ;;
   *)
     echo "unknown fake gh call: $*" >&2
