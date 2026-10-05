@@ -40,9 +40,49 @@ pub const AgentServerConfig = struct {
     web_search: bool = false, // Codex CLI: enable native web search tool
 };
 
+/// A named PR sidebar filter query. The query is not validated here: the
+/// sidebar parses it when the preset is applied and shows any error inline.
+pub const PrFilterPreset = struct {
+    name: []const u8,
+    query: []const u8,
+};
+
+pub const PrFilters = struct {
+    /// Preset name to apply on open; null = first preset.
+    default: ?[]const u8 = null,
+    /// In file order (std.json.ObjectMap preserves insertion order).
+    presets: []const PrFilterPreset = &.{},
+
+    pub fn deinit(self: *const PrFilters, allocator: Allocator) void {
+        if (self.default) |name| allocator.free(name);
+        for (self.presets) |preset| {
+            allocator.free(preset.name);
+            allocator.free(preset.query);
+        }
+        allocator.free(self.presets);
+    }
+
+    /// `presets`, or the built-in `[{ all, "" }]` when none are configured.
+    /// Never empty.
+    pub fn effectivePresets(self: *const PrFilters) []const PrFilterPreset {
+        if (self.presets.len == 0) return &builtin_presets;
+        return self.presets;
+    }
+
+    /// Index into `effectivePresets()` of `default`; 0 when unset or unknown.
+    pub fn defaultIndex(self: *const PrFilters) usize {
+        const name = self.default orelse return 0;
+        for (self.effectivePresets(), 0..) |preset, i| {
+            if (std.mem.eql(u8, preset.name, name)) return i;
+        }
+        return 0;
+    }
+};
+
 pub const Config = struct {
     agent_panel_side: AgentPanelSide = .left,
     agent_servers: ?[]const AgentServerConfig = null,
+    pr_filters: PrFilters = .{},
 
     pub const AgentPanelSide = enum {
         left,
@@ -52,31 +92,16 @@ pub const Config = struct {
     /// Free everything `parseConfig` allocated. A default `Config{}` owns
     /// nothing, so this is safe on the value `load` returns after an error.
     pub fn deinit(self: *const Config, allocator: Allocator) void {
-        const servers = self.agent_servers orelse return;
-        for (servers) |server| {
-            allocator.free(server.name);
-            allocator.free(server.command);
-            if (server.args) |args| {
-                for (args) |arg| allocator.free(arg);
-                allocator.free(args);
-            }
-            if (server.env) |env| {
-                for (env) |entry| {
-                    allocator.free(entry.name);
-                    allocator.free(entry.value);
-                }
-                allocator.free(env);
-            }
-            if (server.skim) |ext| {
-                if (ext.mode) |mode| allocator.free(mode);
-                if (ext.model) |model| allocator.free(model);
-            }
-            if (server.approval_policy) |policy| allocator.free(policy);
-            if (server.sandbox_mode) |mode| allocator.free(mode);
-        }
-        allocator.free(servers);
+        if (self.agent_servers) |servers| freeAgentServers(allocator, servers);
+        self.pr_filters.deinit(allocator);
     }
 };
+
+const builtin_presets = [_]PrFilterPreset{.{ .name = "all", .query = "" }};
+
+/// Upper bound on `~/.skim/config.json`. Generous: it only guards against
+/// reading something that is not a config file at all.
+const max_config_bytes = 4 * 1024 * 1024;
 
 // =============================================================================
 // Config Loading
@@ -86,18 +111,23 @@ pub const Config = struct {
 pub fn load(allocator: Allocator) !Config {
     const config_path = try getConfigFilePath(allocator);
     defer allocator.free(config_path);
+    return loadFromPath(allocator, config_path);
+}
 
-    const file = try std.Io.Dir.openFileAbsolute(skim_io.get(), config_path, .{});
+/// Load config from an absolute path. Fails with `error.StreamTooLong` past
+/// `max_config_bytes`.
+pub fn loadFromPath(allocator: Allocator, path: []const u8) !Config {
+    const file = try std.Io.Dir.openFileAbsolute(skim_io.get(), path, .{});
     defer file.close(skim_io.get());
 
-    var buffer: [16384]u8 = undefined;
-    const bytes_read = try file.readPositionalAll(skim_io.get(), &buffer, 0);
+    const bytes = try skim_io.readAllAlloc(file, allocator, max_config_bytes);
+    defer allocator.free(bytes);
 
-    if (bytes_read == 0) {
+    if (bytes.len == 0) {
         return Config{};
     }
 
-    return parseConfig(allocator, buffer[0..bytes_read]);
+    return parseConfig(allocator, bytes);
 }
 
 /// Parse config from JSON string
@@ -111,6 +141,7 @@ pub fn parseConfig(allocator: Allocator, json_bytes: []const u8) !Config {
     }
 
     var config = Config{};
+    errdefer config.deinit(allocator);
 
     // Parse agent_panel_side
     if (root.object.get("agent_panel_side")) |side_val| {
@@ -126,6 +157,10 @@ pub fn parseConfig(allocator: Allocator, json_bytes: []const u8) !Config {
         if (servers_val == .object) {
             config.agent_servers = try parseAgentServers(allocator, servers_val.object);
         }
+    }
+
+    if (root.object.get("pr_filters")) |filters_val| {
+        config.pr_filters = try parsePrFilters(allocator, filters_val);
     }
 
     return config;
@@ -151,6 +186,7 @@ fn parseAgentServers(allocator: Allocator, servers: std.json.ObjectMap) ![]const
         if (value != .object) continue;
 
         const agent = try parseAgentServer(allocator, name, value.object);
+        errdefer freeAgentServer(allocator, &agent);
         try agents.append(allocator, agent);
     }
 
@@ -261,6 +297,47 @@ fn parseAgentServer(allocator: Allocator, name: []const u8, obj: std.json.Object
     return agent;
 }
 
+/// Parse `pr_filters`. Anything that is not the documented shape is ignored
+/// rather than rejected, leaving the defaults.
+fn parsePrFilters(allocator: Allocator, value: std.json.Value) !PrFilters {
+    if (value != .object) return .{};
+
+    var filters = PrFilters{};
+    errdefer filters.deinit(allocator);
+
+    if (value.object.get("default")) |default_val| {
+        if (default_val == .string) filters.default = try allocator.dupe(u8, default_val.string);
+    }
+    if (value.object.get("presets")) |presets_val| {
+        if (presets_val == .object) filters.presets = try parsePrFilterPresets(allocator, presets_val.object);
+    }
+    return filters;
+}
+
+/// String entries in file order; non-string entries are skipped.
+fn parsePrFilterPresets(allocator: Allocator, presets: std.json.ObjectMap) ![]const PrFilterPreset {
+    var list: std.ArrayListUnmanaged(PrFilterPreset) = .empty;
+    errdefer {
+        for (list.items) |preset| {
+            allocator.free(preset.name);
+            allocator.free(preset.query);
+        }
+        list.deinit(allocator);
+    }
+
+    var iter = presets.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.* != .string) continue;
+        const name = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer allocator.free(name);
+        const query = try allocator.dupe(u8, entry.value_ptr.string);
+        errdefer allocator.free(query);
+        try list.append(allocator, .{ .name = name, .query = query });
+    }
+
+    return try list.toOwnedSlice(allocator);
+}
+
 /// Get the path to the config file: ~/.skim/config.json
 pub fn getConfigFilePath(allocator: Allocator) ![]u8 {
     const home = try skim_io.getEnvVarOwned(allocator, "HOME");
@@ -321,7 +398,8 @@ pub fn expandAgentEnv(allocator: Allocator, agent: AgentServerConfig) ![]const E
 /// Caller must free returned agents using freeAgentServers().
 pub fn getConfiguredAgents(allocator: Allocator) !?[]const AgentServerConfig {
     const config = load(allocator) catch return null;
-    // Note: caller takes ownership of agent_servers, we don't free the full config
+    // The caller takes ownership of agent_servers; everything else is freed here.
+    config.pr_filters.deinit(allocator);
     return config.agent_servers;
 }
 
@@ -378,9 +456,7 @@ pub fn freeExpandedEnv(allocator: Allocator, env: []const EnvVar) void {
 
 /// Free config and all owned memory
 pub fn freeConfig(allocator: Allocator, config: Config) void {
-    if (config.agent_servers) |agents| {
-        freeAgentServers(allocator, agents);
-    }
+    config.deinit(allocator);
 }
 
 // Legacy alias for compatibility during transition
@@ -552,4 +628,250 @@ test "parse protocol field from agent config" {
     // Claude Code agent should default to acp protocol
     const claude_agent = agents[claude_idx.?];
     try std.testing.expectEqual(Protocol.acp, claude_agent.protocol);
+}
+
+test "parse pr_filters default and presets in file order" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{
+        \\  "pr_filters": {
+        \\    "default": "ready",
+        \\    "presets": {
+        \\      "ready": "-is:draft review:requested ci:!failure",
+        \\      "mine": "author:@me",
+        \\      "all": ""
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const config = try parseConfig(allocator, json);
+    defer config.deinit(allocator);
+
+    const presets = config.pr_filters.effectivePresets();
+    try std.testing.expectEqual(@as(usize, 3), presets.len);
+    try std.testing.expectEqualStrings("ready", presets[0].name);
+    try std.testing.expectEqualStrings("-is:draft review:requested ci:!failure", presets[0].query);
+    try std.testing.expectEqualStrings("mine", presets[1].name);
+    try std.testing.expectEqualStrings("author:@me", presets[1].query);
+    try std.testing.expectEqualStrings("all", presets[2].name);
+    try std.testing.expectEqualStrings("", presets[2].query);
+    try std.testing.expectEqualStrings("ready", config.pr_filters.default.?);
+    try std.testing.expectEqual(@as(usize, 0), config.pr_filters.defaultIndex());
+}
+
+test "pr_filters default picks the named preset's index" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{"pr_filters": {"default": "mine", "presets": {"ready": "is:ready", "mine": "author:@me"}}}
+    ;
+
+    const config = try parseConfig(allocator, json);
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), config.pr_filters.defaultIndex());
+}
+
+test "missing pr_filters yields built-in all preset as default" {
+    const allocator = std.testing.allocator;
+
+    const config = try parseConfig(allocator, "{}");
+    defer config.deinit(allocator);
+
+    const presets = config.pr_filters.effectivePresets();
+    try std.testing.expectEqual(@as(usize, 1), presets.len);
+    try std.testing.expectEqualStrings("all", presets[0].name);
+    try std.testing.expectEqualStrings("", presets[0].query);
+    try std.testing.expectEqual(@as(usize, 0), config.pr_filters.defaultIndex());
+}
+
+test "default Config has the built-in all preset" {
+    const config = Config{};
+    try std.testing.expectEqualStrings("all", config.pr_filters.effectivePresets()[0].name);
+}
+
+test "empty presets object behaves like missing" {
+    const allocator = std.testing.allocator;
+
+    const config = try parseConfig(allocator, "{\"pr_filters\": {\"default\": \"all\", \"presets\": {}}}");
+    defer config.deinit(allocator);
+
+    const presets = config.pr_filters.effectivePresets();
+    try std.testing.expectEqual(@as(usize, 1), presets.len);
+    try std.testing.expectEqualStrings("all", presets[0].name);
+    try std.testing.expectEqual(@as(usize, 0), config.pr_filters.defaultIndex());
+}
+
+test "non-string preset values are skipped" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{"pr_filters": {"presets": {"n": 5, "ok": "is:draft", "o": {}, "arr": ["x"], "nil": null, "ok2": "is:ready"}}}
+    ;
+
+    const config = try parseConfig(allocator, json);
+    defer config.deinit(allocator);
+
+    const presets = config.pr_filters.effectivePresets();
+    try std.testing.expectEqual(@as(usize, 2), presets.len);
+    try std.testing.expectEqualStrings("ok", presets[0].name);
+    try std.testing.expectEqualStrings("ok2", presets[1].name);
+}
+
+test "only non-string preset values behaves like missing" {
+    const allocator = std.testing.allocator;
+
+    const config = try parseConfig(allocator, "{\"pr_filters\": {\"presets\": {\"n\": 5}}}");
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqualStrings("all", config.pr_filters.effectivePresets()[0].name);
+}
+
+test "non-object pr_filters is ignored" {
+    const allocator = std.testing.allocator;
+
+    for ([_][]const u8{
+        "{\"pr_filters\": \"ready\"}",
+        "{\"pr_filters\": [1, 2]}",
+        "{\"pr_filters\": null}",
+        "{\"pr_filters\": {\"default\": 3, \"presets\": [\"x\"]}}",
+    }) |json| {
+        const config = try parseConfig(allocator, json);
+        defer config.deinit(allocator);
+        try std.testing.expectEqual(@as(?[]const u8, null), config.pr_filters.default);
+        try std.testing.expectEqual(@as(usize, 1), config.pr_filters.effectivePresets().len);
+    }
+}
+
+test "unknown default name falls back to index 0" {
+    const allocator = std.testing.allocator;
+
+    const config = try parseConfig(allocator, "{\"pr_filters\": {\"default\": \"nope\", \"presets\": {\"a\": \"x\", \"b\": \"y\"}}}");
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), config.pr_filters.defaultIndex());
+}
+
+test "Config.deinit frees pr_filters when agent_servers is null" {
+    const allocator = std.testing.allocator;
+
+    const config = try parseConfig(allocator, "{\"pr_filters\": {\"default\": \"a\", \"presets\": {\"a\": \"is:draft\"}}}");
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?[]const AgentServerConfig, null), config.agent_servers);
+    try std.testing.expectEqual(@as(usize, 1), config.pr_filters.presets.len);
+}
+
+test "Config.deinit frees both agent_servers and pr_filters" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{"agent_servers": {"A": {"command": "a", "args": ["x"]}}, "pr_filters": {"presets": {"a": "is:draft"}}}
+    ;
+
+    const config = try parseConfig(allocator, json);
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), config.agent_servers.?.len);
+    try std.testing.expectEqual(@as(usize, 1), config.pr_filters.presets.len);
+}
+
+test "freeConfig frees pr_filters" {
+    const allocator = std.testing.allocator;
+
+    const config = try parseConfig(allocator, "{\"pr_filters\": {\"default\": \"a\", \"presets\": {\"a\": \"is:draft\"}}}");
+    defer freeConfig(allocator, config);
+
+    try std.testing.expectEqual(@as(usize, 1), config.pr_filters.presets.len);
+}
+
+test "parseConfig leaks nothing when allocation fails partway" {
+    const json =
+        \\{"agent_servers": {"A": {"command": "a"}}, "pr_filters": {"default": "a", "presets": {"a": "is:draft", "b": "is:ready"}}}
+    ;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, parseAndDeinit, .{json});
+}
+
+fn parseAndDeinit(allocator: Allocator, json: []const u8) !void {
+    const config = try parseConfig(allocator, json);
+    config.deinit(allocator);
+}
+
+test "loadFromPath reads a config larger than 16 KiB" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmpFilePath(&tmp, "config.json");
+    defer allocator.free(path);
+
+    const big_query = try allocator.alloc(u8, 20 * 1024);
+    defer allocator.free(big_query);
+    @memset(big_query, 'x');
+    const json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"agent_servers\":{{\"A\":{{\"command\":\"a\"}}}},\"pr_filters\":{{\"presets\":{{\"big\":\"{s}\"}}}}}}",
+        .{big_query},
+    );
+    defer allocator.free(json);
+    try writeTestFile(path, json);
+
+    const config = try loadFromPath(allocator, path);
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), config.agent_servers.?.len);
+    try std.testing.expectEqual(big_query.len, config.pr_filters.presets[0].query.len);
+}
+
+test "loadFromPath on an empty file returns default Config" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmpFilePath(&tmp, "config.json");
+    defer allocator.free(path);
+    try writeTestFile(path, "");
+
+    const config = try loadFromPath(allocator, path);
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?[]const AgentServerConfig, null), config.agent_servers);
+    try std.testing.expectEqual(@as(usize, 0), config.pr_filters.presets.len);
+}
+
+test "loadFromPath rejects a file over max_config_bytes" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmpFilePath(&tmp, "config.json");
+    defer allocator.free(path);
+
+    const bytes = try allocator.alloc(u8, max_config_bytes + 1);
+    defer allocator.free(bytes);
+    @memset(bytes, ' ');
+    try writeTestFile(path, bytes);
+
+    try std.testing.expectError(error.StreamTooLong, loadFromPath(allocator, path));
+}
+
+test "loadFromPath on a missing file returns FileNotFound" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmpFilePath(&tmp, "absent.json");
+    defer allocator.free(path);
+
+    try std.testing.expectError(error.FileNotFound, loadFromPath(allocator, path));
+}
+
+fn tmpFilePath(tmp: *std.testing.TmpDir, name: []const u8) ![]u8 {
+    const relative = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
+    defer std.testing.allocator.free(relative);
+    return skim_io.absolutePathAlloc(std.testing.allocator, relative);
+}
+
+fn writeTestFile(path: []const u8, bytes: []const u8) !void {
+    const file = try std.Io.Dir.createFileAbsolute(skim_io.get(), path, .{ .truncate = true });
+    defer file.close(skim_io.get());
+    try file.writeStreamingAll(skim_io.get(), bytes);
 }

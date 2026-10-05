@@ -522,6 +522,33 @@ pub fn build(b: *std.Build) void {
     const run_pr_db_tests = b.addRunArtifact(pr_db_tests);
     test_step.dependOn(&run_pr_db_tests.step);
 
+    // Sidebar filter language tests. No linkSqlite on purpose: filter_query
+    // reaches PrRecord through db/types.zig, which must stay SQLite-free (the
+    // wasm build compiles it). A link error here means that import chain
+    // started pulling in sqlite.zig.
+    const pr_filter_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pr_filter_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_pr_filter_tests = b.addRunArtifact(pr_filter_tests);
+    test_step.dependOn(&run_pr_filter_tests.step);
+
+    // config.zig's tests were not in any test binary before this step.
+    const config_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/config.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    config_tests.root_module.addImport("skim_io", skim_io_module);
+    config_tests.root_module.link_libc = true;
+    const run_config_tests = b.addRunArtifact(config_tests);
+    test_step.dependOn(&run_config_tests.step);
+
     // Core diff-path tests: parser, line_map, comment store, streaming loader.
     // Same reason as width_tests below — these are only reachable from main.zig
     // through app.zig, so their test blocks need a direct root to be collected.
