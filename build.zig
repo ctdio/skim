@@ -549,6 +549,50 @@ pub fn build(b: *std.Build) void {
     const run_config_tests = b.addRunArtifact(config_tests);
     test_step.dependOn(&run_config_tests.step);
 
+    // PR sync engine tests (src/pr/sync/). Rooted at src/ so sync files reach
+    // ../db/ and ../github.zig. Links SQLite for sync.zig, and gets the fake
+    // `gh` path from its own options module rather than the shared
+    // build_options the main exe also imports.
+    const pr_sync_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pr_sync_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    pr_sync_tests.root_module.addImport("vaxis", vaxis);
+    pr_sync_tests.root_module.addImport("build_options", build_options_module);
+    pr_sync_tests.root_module.addImport("skim_io", skim_io_module);
+    linkSqlite(pr_sync_tests.root_module, sqlite);
+    const pr_sync_options = b.addOptions();
+    pr_sync_options.addOption([]const u8, "fake_gh_path", b.pathFromRoot("scripts/test-infra/pr-sidebar/sync/fake-gh"));
+    pr_sync_tests.root_module.addImport("pr_sync_options", pr_sync_options.createModule());
+    addSyncFixtures(b, pr_sync_tests.root_module);
+    const run_pr_sync_tests = b.addRunArtifact(pr_sync_tests);
+    test_step.dependOn(&run_pr_sync_tests.step);
+
+    // Offline PR sync harness: drives runOnce/SyncWorker against the fake
+    // `gh` and a temp DB. Reads captured/ at runtime, so it needs no
+    // embedded fixtures. Not part of `test` or `web`.
+    const harness_pr_sync = b.addExecutable(.{
+        .name = "harness_pr_sync",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/harness_pr_sync.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    harness_pr_sync.root_module.addImport("vaxis", vaxis);
+    harness_pr_sync.root_module.addImport("build_options", build_options_module);
+    harness_pr_sync.root_module.addImport("skim_io", skim_io_module);
+    linkSqlite(harness_pr_sync.root_module, sqlite);
+    const run_harness_pr_sync = b.addRunArtifact(harness_pr_sync);
+    run_harness_pr_sync.addArg(b.pathFromRoot("scripts/test-infra/pr-sidebar/sync/fake-gh"));
+    run_harness_pr_sync.addArg(b.pathFromRoot("scripts/test-infra/pr-sidebar/sync/captured"));
+    run_harness_pr_sync.has_side_effects = true;
+    const harness_pr_sync_step = b.step("harness-pr-sync", "Run the offline PR sync harness");
+    harness_pr_sync_step.dependOn(&run_harness_pr_sync.step);
+
     // Core diff-path tests: parser, line_map, comment store, streaming loader.
     // Same reason as width_tests below — these are only reachable from main.zig
     // through app.zig, so their test blocks need a direct root to be collected.
@@ -1129,5 +1173,30 @@ fn addSkillDocs(b: *std.Build, module: *std.Build.Module) void {
     };
     for (docs) |doc| {
         module.addAnonymousImport(doc.name, .{ .root_source_file = b.path(doc.path) });
+    }
+}
+
+/// Expose the sync GraphQL drift copies and the recorded sync responses under
+/// scripts/test-infra/pr-sidebar/sync/ to `@embedFile`.
+fn addSyncFixtures(b: *std.Build, module: *std.Build.Module) void {
+    const files = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "sync_graphql_index", .path = "scripts/test-infra/pr-sidebar/sync/index.graphql" },
+        .{ .name = "sync_graphql_closed", .path = "scripts/test-infra/pr-sidebar/sync/closed.graphql" },
+        .{ .name = "sync_graphql_reconcile", .path = "scripts/test-infra/pr-sidebar/sync/reconcile.graphql" },
+        .{ .name = "sync_graphql_hydrate", .path = "scripts/test-infra/pr-sidebar/sync/hydrate.graphql" },
+        .{ .name = "sync_graphql_teams", .path = "scripts/test-infra/pr-sidebar/sync/teams.graphql" },
+        .{ .name = "sync_fixture_index_page1", .path = "scripts/test-infra/pr-sidebar/sync/captured/index-page1.json" },
+        .{ .name = "sync_fixture_empty_index", .path = "scripts/test-infra/pr-sidebar/sync/captured/empty-index.json" },
+        .{ .name = "sync_fixture_closed_page1", .path = "scripts/test-infra/pr-sidebar/sync/captured/closed-page1.json" },
+        .{ .name = "sync_fixture_reconcile_page1", .path = "scripts/test-infra/pr-sidebar/sync/captured/reconcile-page1.json" },
+        .{ .name = "sync_fixture_hydrate_batch", .path = "scripts/test-infra/pr-sidebar/sync/captured/hydrate-batch.json" },
+        .{ .name = "sync_fixture_hydrate_partial_error", .path = "scripts/test-infra/pr-sidebar/sync/captured/hydrate-partial-error.json" },
+        .{ .name = "sync_fixture_not_found_repo", .path = "scripts/test-infra/pr-sidebar/sync/captured/not-found-repo.json" },
+        .{ .name = "sync_fixture_teams_null_org", .path = "scripts/test-infra/pr-sidebar/sync/captured/teams-null-org.json" },
+        .{ .name = "sync_fixture_auth_failure_stderr", .path = "scripts/test-infra/pr-sidebar/sync/captured/auth-failure.stderr" },
+        .{ .name = "sync_fixture_network_failure_stderr", .path = "scripts/test-infra/pr-sidebar/sync/captured/network-failure.stderr" },
+    };
+    for (files) |file| {
+        module.addAnonymousImport(file.name, .{ .root_source_file = b.path(file.path) });
     }
 }

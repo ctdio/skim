@@ -1,0 +1,1 @@
+{"data":{"viewer":{"login":"ctdio"},"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],"locations":[{"line":5,"column":3}],"message":"Could not resolve to a Repository with the name 'vercel/no-such-repo-skim-capture'."}]}

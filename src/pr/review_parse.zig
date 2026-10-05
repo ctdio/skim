@@ -398,7 +398,7 @@ fn parseRollup(pull_request: std.json.ObjectMap) RollupState {
     return rollupFromState(state);
 }
 
-fn rollupFromState(state: []const u8) RollupState {
+pub fn rollupFromState(state: []const u8) RollupState {
     if (std.mem.eql(u8, state, "SUCCESS")) return .success;
     if (std.mem.eql(u8, state, "FAILURE")) return .failure;
     if (std.mem.eql(u8, state, "ERROR")) return .err;
@@ -505,7 +505,7 @@ fn parseThreadNode(a: std.mem.Allocator, obj: std.json.ObjectMap, viewer_login: 
 /// error's message. GitHub returns HTTP 200 with `{"errors":[...], "data":…}`
 /// for write failures like a duplicate pending review, so callers must check
 /// this even when `data` is present.
-fn graphqlErrorMessage(root: std.json.Value) ?[]const u8 {
+pub fn graphqlErrorMessage(root: std.json.Value) ?[]const u8 {
     if (root != .object) return null;
     const errors = root.object.get("errors") orelse return null;
     if (errors != .array or errors.array.items.len == 0) return null;

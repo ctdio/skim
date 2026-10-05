@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="${FAKE_GH_ROOT:?FAKE_GH_ROOT not set}"
+step="$(cat "$root/step" 2>/dev/null || echo 1)"
+dir="$root/step-$step"
+
+query=""; cursor=""; ids=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -f|-F)
+      shift
+      case "$1" in
+        query=*) query="${1#query=}" ;;
+        cursor=*) cursor="${1#cursor=}" ;;
+        'ids[]='*) ids+=("${1#ids[]=}") ;;
+      esac ;;
+  esac
+  shift
+done
+
+op="$(printf '%s' "$query" | grep -o 'query Skim[A-Za-z]*' | head -n1 | sed 's/^query //' || true)"
+[ -n "$op" ] || { echo "fake-gh: no SkimSync operation in query" >&2; exit 98; }
+key="first"; [ -n "$cursor" ] && key="$(printf '%s' "$cursor" | tr '/=+' '_.-')"
+echo "$step $op $key ${ids[*]:-}" >> "$root/calls.log"
+
+[ -n "${SLEEP_MS:-}" ] && sleep "$(awk "BEGIN{print ${SLEEP_MS}/1000}")"
+
+# fail-<Op>-<key> fails one page; fail-<Op> fails every call of that op.
+for fail in "$dir/fail-$op-$key" "$dir/fail-$op"; do
+  if [ -f "$fail" ]; then
+    [ -f "$fail.stdout" ] && cat "$fail.stdout"
+    cat "$fail" >&2
+    exit "$(cat "$fail.code" 2>/dev/null || echo 1)"
+  fi
+done
+
+# Hydrate: one slot per requested id, in request order. A missing node file
+# becomes null plus a NOT_FOUND error, and a `forbidden/<id>` file null plus a
+# FORBIDDEN error; either exits 1, the shape of the captured
+# hydrate-partial-error.json. jq builds the envelope so it is always valid JSON.
+if [ "$op" = "SkimSyncHydrate" ]; then
+  nodes='[]'; errs='[]'; first_error=""
+  for i in "${!ids[@]}"; do
+    f="$dir/nodes/${ids[$i]}.json"
+    if [ -f "$f" ]; then
+      nodes="$(jq -c --argjson acc "$nodes" '$acc + [.]' "$f")"
+      continue
+    fi
+    nodes="$(jq -cn --argjson acc "$nodes" '$acc + [null]')"
+    if [ -f "$dir/forbidden/${ids[$i]}" ]; then
+      type="FORBIDDEN"; msg="Resource not accessible by integration"
+    else
+      type="NOT_FOUND"; msg="Could not resolve to a node with the global id of '${ids[$i]}'"
+    fi
+    errs="$(jq -cn --argjson acc "$errs" --argjson i "$i" --arg type "$type" --arg msg "$msg" \
+      '$acc + [{type: $type, path: ["nodes", $i], message: $msg}]')"
+    [ -n "$first_error" ] || first_error="$msg"
+  done
+  if [ -n "$first_error" ]; then
+    jq -cn --argjson nodes "$nodes" --argjson errs "$errs" '{data: {nodes: $nodes}, errors: $errs}'
+    echo "gh: $first_error" >&2
+    exit 1
+  fi
+  jq -cn --argjson nodes "$nodes" '{data: {nodes: $nodes}}'
+  exit 0
+fi
+
+f="$dir/$op-$key.json"
+[ -f "$f" ] || { echo "fake-gh: no fixture $f" >&2; exit 97; }
+cat "$f"

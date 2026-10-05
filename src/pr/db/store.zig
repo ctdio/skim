@@ -144,6 +144,12 @@ pub const Store = struct {
         self.* = undefined;
     }
 
+    /// Rows written on this connection so far. Compare two readings to tell
+    /// whether the writes between them changed anything.
+    pub fn totalChanges(self: *Store) u64 {
+        return self.db.totalChanges();
+    }
+
     // --- repo -----------------------------------------------------------
 
     /// Id of the repo row for `params.key`, inserting it on first use. A known
@@ -225,7 +231,8 @@ pub const Store = struct {
 
     /// Upsert tier-1 index rows as OPEN. Hydrate columns are never written
     /// here, so they survive; a changed `updated_at` makes the row stale for
-    /// `needsHydrate` while the old hydrate values keep rendering.
+    /// `needsHydrate` while the old hydrate values keep rendering. A row
+    /// identical to the stored one is not rewritten.
     pub fn upsertIndex(self: *Store, repo_id: i64, rows: []const IndexRow) !void {
         if (rows.len == 0) return;
         try self.db.begin(.immediate);
@@ -240,6 +247,11 @@ pub const Store = struct {
             \\  head_ref = excluded.head_ref, base_ref = excluded.base_ref,
             \\  head_oid = excluded.head_oid, base_oid = excluded.base_oid,
             \\  updated_at = excluded.updated_at, labels = excluded.labels
+            \\WHERE (pr.node_id, pr.state, pr.title, pr.author, pr.url, pr.is_draft, pr.head_ref,
+            \\       pr.base_ref, pr.head_oid, pr.base_oid, pr.updated_at, pr.labels)
+            \\  IS NOT (excluded.node_id, 'OPEN', excluded.title, excluded.author, excluded.url,
+            \\          excluded.is_draft, excluded.head_ref, excluded.base_ref, excluded.head_oid,
+            \\          excluded.base_oid, excluded.updated_at, excluded.labels)
         );
         defer stmt.finalize();
         for (rows) |row| {
@@ -278,13 +290,37 @@ pub const Store = struct {
         try self.db.commit();
     }
 
+    /// Stamp `hydrated_at_update` with each ref's `updated_at`, leaving the
+    /// tier-2 fields as they are, so `needsHydrate` skips a PR GitHub would
+    /// not resolve until its `updated_at` moves. A row whose `updated_at` no
+    /// longer matches the ref, or that is not stored, is left alone.
+    pub fn markHydrateUnresolved(self: *Store, repo_id: i64, refs: []const NodeRef) !void {
+        if (refs.len == 0) return;
+        try self.db.begin(.immediate);
+        errdefer self.db.rollback();
+        var stmt = try self.db.prepare(
+            \\UPDATE pr SET hydrated_at_update = ?1
+            \\WHERE repo_id = ?2 AND number = ?3 AND updated_at = ?1
+        );
+        defer stmt.finalize();
+        for (refs) |ref| {
+            try stmt.bindAll(.{ ref.updated_at, repo_id, ref.number });
+            _ = try stmt.step();
+            stmt.reset();
+        }
+        try self.db.commit();
+    }
+
     /// Record closed/merged PRs. PRs never stored are ignored (older closed PRs
-    /// are never inserted).
+    /// are never inserted), and a row already in that state is not rewritten.
     pub fn markClosed(self: *Store, repo_id: i64, rows: []const ClosedRow) !void {
         if (rows.len == 0) return;
         try self.db.begin(.immediate);
         errdefer self.db.rollback();
-        var stmt = try self.db.prepare("UPDATE pr SET state = ?, updated_at = ? WHERE repo_id = ? AND number = ?");
+        var stmt = try self.db.prepare(
+            \\UPDATE pr SET state = ?1, updated_at = ?2
+            \\WHERE repo_id = ?3 AND number = ?4 AND (state, updated_at) IS NOT (?1, ?2)
+        );
         defer stmt.finalize();
         for (rows) |row| {
             try stmt.bindAll(.{ stateText(row.state), row.updated_at, repo_id, row.number });
@@ -1348,6 +1384,66 @@ test "applyHydrate ignores unknown numbers" {
     try testing.expectEqual(@as(i64, 0), try queryInt(&store, "SELECT count(*) FROM pr"));
 }
 
+test "markHydrateUnresolved keeps a row out of needsHydrate until its updated_at changes" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    const t1 = "2026-01-01T00:00:00Z";
+    const t2 = "2026-01-02T00:00:00Z";
+    const t3 = "2026-01-03T00:00:00Z";
+    try store.upsertIndex(repo_id, &.{ indexRow(1, t1), indexRow(2, t1) });
+    var hydrate = hydrateRow(1, t1);
+    hydrate.additions = 10;
+    try store.applyHydrate(repo_id, &.{hydrate});
+    try store.upsertIndex(repo_id, &.{indexRow(1, t2)});
+
+    try store.markHydrateUnresolved(repo_id, &.{
+        .{ .number = 1, .node_id = "PR_node1", .updated_at = t2 },
+        .{ .number = 99, .node_id = "PR_node99", .updated_at = t2 },
+    });
+    {
+        var refs = try store.needsHydrate(testing.allocator, repo_id);
+        defer refs.deinit();
+        try testing.expectEqual(@as(usize, 1), refs.items.len);
+        try testing.expectEqual(@as(u32, 2), refs.items[0].number);
+        var list = try store.listOpen(testing.allocator, repo_id);
+        defer list.deinit();
+        const got = list.items[0];
+        try testing.expectEqual(@as(u32, 1), got.number);
+        try testing.expectEqual(@as(u32, 10), got.additions);
+        try testing.expectEqualStrings(t2, got.hydrated_at_update.?);
+    }
+
+    try store.upsertIndex(repo_id, &.{indexRow(1, t3)});
+    var refs = try store.needsHydrate(testing.allocator, repo_id);
+    defer refs.deinit();
+    try testing.expectEqual(@as(usize, 2), refs.items.len);
+    try testing.expectEqual(@as(u32, 1), refs.items[0].number);
+    try testing.expectEqualStrings(t3, refs.items[0].updated_at);
+}
+
+test "markHydrateUnresolved leaves a row whose updated_at moved after the ref was read" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    try store.upsertIndex(repo_id, &.{indexRow(1, "2026-01-01T00:00:00Z")});
+    var stale = try store.needsHydrate(testing.allocator, repo_id);
+    defer stale.deinit();
+    try store.upsertIndex(repo_id, &.{indexRow(1, "2026-01-02T00:00:00Z")});
+
+    try store.markHydrateUnresolved(repo_id, stale.items);
+
+    var refs = try store.needsHydrate(testing.allocator, repo_id);
+    defer refs.deinit();
+    try testing.expectEqual(@as(usize, 1), refs.items.len);
+    try testing.expectEqualStrings("2026-01-02T00:00:00Z", refs.items[0].updated_at);
+    try testing.expectEqual(@as(i64, 1), try queryInt(&store, "SELECT count(*) FROM pr WHERE hydrated_at_update IS NULL"));
+}
+
 test "markClosed hides a row from listOpen and ignores unknown numbers" {
     var t = try TestDb.init();
     defer t.deinit();
@@ -1367,6 +1463,71 @@ test "markClosed hides a row from listOpen and ignores unknown numbers" {
     try testing.expectEqual(@as(u32, 1), list.items[0].number);
     try testing.expectEqual(@as(i64, 2), try queryInt(&store, "SELECT count(*) FROM pr"));
     try testing.expectEqual(@as(i64, 1), try queryInt(&store, "SELECT count(*) FROM pr WHERE number=2 AND state='MERGED' AND updated_at='2026-01-05T00:00:00Z'"));
+}
+
+test "upsertIndex of an unchanged row writes nothing" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    try store.upsertIndex(repo_id, &.{indexRow(1, "2026-01-01T00:00:00Z")});
+
+    const before = store.totalChanges();
+    try store.upsertIndex(repo_id, &.{indexRow(1, "2026-01-01T00:00:00Z")});
+    try testing.expectEqual(before, store.totalChanges());
+}
+
+test "upsertIndex of a changed row is counted as a write" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    try store.upsertIndex(repo_id, &.{indexRow(1, "2026-01-01T00:00:00Z")});
+
+    const before = store.totalChanges();
+    var renamed = indexRow(1, "2026-01-01T00:00:00Z");
+    renamed.title = "renamed";
+    try store.upsertIndex(repo_id, &.{renamed});
+    try testing.expectEqual(before + 1, store.totalChanges());
+    try testing.expectEqual(@as(i64, 1), try queryInt(&store, "SELECT count(*) FROM pr WHERE title='renamed'"));
+}
+
+test "upsertIndex of an otherwise unchanged row reopens it after reconcile closed it" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    const row = indexRow(1, "2026-01-01T00:00:00Z");
+    try store.upsertIndex(repo_id, &.{row});
+    try store.reconcileOpen(repo_id, &.{});
+
+    const before = store.totalChanges();
+    try store.upsertIndex(repo_id, &.{row});
+
+    try testing.expectEqual(before + 1, store.totalChanges());
+    var list = try store.listOpen(testing.allocator, repo_id);
+    defer list.deinit();
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    try testing.expectEqual(@as(u32, 1), list.items[0].number);
+    try testing.expectEqual(PrState.open, list.items[0].state);
+}
+
+test "markClosed of a row already in that state writes nothing" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+    const repo_id = try testRepo(&store);
+    try store.upsertIndex(repo_id, &.{indexRow(1, "2026-01-01T00:00:00Z")});
+    const merged: ClosedRow = .{ .number = 1, .state = .merged, .updated_at = "2026-01-05T00:00:00Z" };
+    try store.markClosed(repo_id, &.{merged});
+
+    const before = store.totalChanges();
+    try store.markClosed(repo_id, &.{ merged, .{ .number = 99, .state = .closed, .updated_at = "2026-01-05T00:00:00Z" } });
+    try testing.expectEqual(before, store.totalChanges());
 }
 
 test "reconcileOpen closes stored OPEN rows missing from the set" {

@@ -92,6 +92,12 @@ pub const Db = struct {
         return @intCast(c.sqlite3_changes64(self.handle));
     }
 
+    /// Rows modified by every INSERT/UPDATE/DELETE since the connection
+    /// opened. A statement whose WHERE matched nothing adds 0.
+    pub fn totalChanges(self: *Db) u64 {
+        return @intCast(c.sqlite3_total_changes64(self.handle));
+    }
+
     pub fn lastInsertRowId(self: *Db) i64 {
         return c.sqlite3_last_insert_rowid(self.handle);
     }

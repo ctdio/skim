@@ -752,6 +752,93 @@ fn runGit(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
 }
 
+pub const GraphqlRequest = struct {
+    query: []const u8,
+    string_vars: []const KV = &.{},
+    int_vars: []const KVInt = &.{},
+    /// argv[0]. `std.process.run` resolves argv[0] against the *parent's* PATH
+    /// even when `environ_map` is set, so tests and the harness point this at
+    /// the fake `gh` instead of editing PATH.
+    gh_bin: []const u8 = "gh",
+    /// Hydrate returns exit 1 with a usable `data` body when one id no longer
+    /// resolves; keep that body instead of classifying it as a failure.
+    allow_error_body: bool = false,
+    label: []const u8 = "gh api graphql",
+    idle_timeout_ms: u32 = 30_000,
+};
+
+/// `gh api graphql` with a configurable binary and an idle timeout. Strings go
+/// through `-f` (so a repeated `ids[]` key builds a list), integers through `-F`.
+pub fn runGraphql(allocator: std.mem.Allocator, request: GraphqlRequest) !GhFetch {
+    const argv = try buildGraphqlArgv(allocator, request.query, request.string_vars, request.int_vars);
+    defer freeArgv(allocator, argv);
+    const gh_bin = try allocator.dupe(u8, request.gh_bin);
+    allocator.free(argv[0]);
+    argv[0] = gh_bin;
+    return runGhArgv(allocator, .{
+        .argv = argv,
+        .label = request.label,
+        .allow_error_body = request.allow_error_body,
+        .idle_timeout_ms = request.idle_timeout_ms,
+    });
+}
+
+pub const RunGhArgvParams = struct {
+    argv: []const []const u8,
+    label: []const u8,
+    /// On a nonzero exit, return stdout as `.ok` when it still carries a
+    /// GraphQL `data` member (a partial result next to `errors`).
+    allow_error_body: bool = false,
+    /// Longest wait for the next byte of output, not a wall-clock limit. On
+    /// expiry the child is killed and the call fails as `.network`.
+    idle_timeout_ms: u32 = 30_000,
+};
+
+/// Run an arbitrary `gh` argv and classify its failure. Failures are logged at
+/// `.warn`: a failed `gh` call is a recoverable, per-item failure for the
+/// background workers that use this.
+pub fn runGhArgv(allocator: std.mem.Allocator, params: RunGhArgvParams) !GhFetch {
+    const result = std.process.run(allocator, skim_io.get(), .{
+        .argv = params.argv,
+        .stdout_limit = .limited(16 * 1024 * 1024),
+        .stderr_limit = .limited(16 * 1024 * 1024),
+        .timeout = .{ .duration = .{
+            .raw = .fromMilliseconds(params.idle_timeout_ms),
+            .clock = .awake,
+        } },
+    }) catch |err| switch (err) {
+        error.OutOfMemory, error.Canceled => return err,
+        error.FileNotFound => {
+            std.log.warn("{s}: {s} not found", .{ params.label, params.argv[0] });
+            return .{ .failed = .not_installed };
+        },
+        error.Timeout => {
+            std.log.warn("{s} timed out after {d}ms without output", .{ params.label, params.idle_timeout_ms });
+            return .{ .failed = .network };
+        },
+        else => {
+            std.log.warn("{s} could not run: {}", .{ params.label, err });
+            return .{ .failed = .other };
+        },
+    };
+    errdefer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    const code: u32 = switch (result.term) {
+        .exited => |c| c,
+        else => 1,
+    };
+    if (code != 0) {
+        std.log.warn("{s} failed ({d}): {s}", .{ params.label, code, result.stderr });
+        if (params.allow_error_body and std.mem.indexOf(u8, result.stdout, "\"data\"") != null) {
+            return .{ .ok = result.stdout };
+        }
+        allocator.free(result.stdout);
+        return .{ .failed = classifyGhFailure(code, result.stderr) };
+    }
+    return .{ .ok = result.stdout };
+}
+
 // =============================================================================
 // Tests
 // =============================================================================

@@ -1,0 +1,15 @@
+query SkimSyncClosed($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: [CLOSED, MERGED], first: 50, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        number
+        state
+        updatedAt
+      }
+    }
+  }
+}

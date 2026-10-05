@@ -1,0 +1,48 @@
+query SkimSyncHydrate($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on PullRequest {
+      number
+      updatedAt
+      additions
+      deletions
+      changedFiles
+      reviewDecision
+      reviewRequests(first: 20) {
+        nodes {
+          requestedReviewer {
+            __typename
+            ... on User {
+              login
+            }
+            ... on Team {
+              slug
+              organization {
+                login
+              }
+            }
+          }
+        }
+      }
+      latestOpinionatedReviews(first: 50) {
+        nodes {
+          author {
+            login
+          }
+          state
+          commit {
+            oid
+          }
+        }
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+            }
+          }
+        }
+      }
+    }
+  }
+}
