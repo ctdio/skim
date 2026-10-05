@@ -8,6 +8,7 @@
 
 pub const thread_anchor = @import("pr/thread_anchor.zig");
 pub const review_parse = @import("pr/review_parse.zig");
+pub const review_controller = @import("pr/review_controller.zig");
 pub const parser = @import("git/parser.zig");
 pub const line_map = @import("line_map.zig");
 pub const comments = @import("comments/store.zig");
@@ -27,6 +28,8 @@ pub const SideBySideRenderer = @import("rendering/side_by_side.zig").SideBySideR
 pub const CommentEditor = @import("comments/editor.zig").CommentEditor;
 pub const SyntaxHighlighter = @import("highlighting/core.zig").SyntaxHighlighter;
 pub const TabManager = @import("agent/tab_manager.zig").TabManager;
+pub const CommentController = @import("comments/controller.zig").CommentController;
+pub const mcp_handlers = @import("mcp/handlers.zig");
 
 pub const AnchoredThread = thread_anchor.AnchoredThread;
 pub const Placement = thread_anchor.Placement;

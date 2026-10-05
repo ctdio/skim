@@ -310,7 +310,7 @@ fn resolvePrRequest(allocator: std.mem.Allocator, request: github.PrRequest) u32
     switch (request) {
         .number => |n| return n,
         .url => |u| {
-            const origin = github.getOriginOwnerRepo(allocator) catch {
+            const origin = github.getOriginOwnerRepo(allocator, "git") catch {
                 std.debug.print("skim pr: could not resolve the origin remote to validate the PR URL\n", .{});
                 std.process.exit(1);
             };

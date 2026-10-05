@@ -9,6 +9,7 @@ pub const HighlightJob = struct {
     old_content: []const u8, // Borrowed reference (old file content: delete/context lines)
     file_idx: usize,
     hunk_idx: usize, // Index of the hunk within the file
+    generation: u64 = 0, // Scheduler generation the job was submitted under
 };
 
 // Completed highlighting result
@@ -18,6 +19,7 @@ pub const HighlightResult = struct {
     highlights: ?[]syntax.Highlight, // Highlights for new file (add/context lines)
     old_highlights: ?[]syntax.Highlight, // Highlights for old file (delete/context lines)
     failed: bool,
+    generation: u64 = 0, // Copied from the job
 };
 
 // Long-lived worker thread that maintains cached parsers
@@ -97,6 +99,30 @@ pub const HighlightWorker = struct {
         self.result_queue.clearRetainingCapacity();
     }
 
+    /// Remove queued (not yet started) jobs submitted before `generation` and
+    /// append them to `out`, so the scheduler can free their bytes now instead of
+    /// waiting for a result. A job the worker has already dequeued is unaffected;
+    /// its result arrives stale and the scheduler frees it then. `out` grows with
+    /// the worker's allocator.
+    pub fn takeQueuedBefore(self: *HighlightWorker, generation: u64, out: *std.ArrayList(HighlightJob)) !void {
+        self.mutex.lockUncancelable(skim_io.get());
+        defer self.mutex.unlock(skim_io.get());
+
+        // A job that cannot be handed over stays queued, so the queue never
+        // loses a job whose bytes the scheduler still has to free.
+        var append_failed = false;
+        var kept: usize = 0;
+        for (self.job_queue.items) |job| {
+            if (job.generation < generation and !append_failed) {
+                if (out.append(self.allocator, job)) continue else |_| append_failed = true;
+            }
+            self.job_queue.items[kept] = job;
+            kept += 1;
+        }
+        self.job_queue.shrinkRetainingCapacity(kept);
+        if (append_failed) return error.OutOfMemory;
+    }
+
     // Worker thread main loop
     fn workerThreadMain(self: *HighlightWorker) void {
         while (true) {
@@ -130,6 +156,7 @@ pub const HighlightWorker = struct {
                     .highlights = highlights,
                     .old_highlights = old_highlights,
                     .failed = highlights == null and old_highlights == null,
+                    .generation = job.generation,
                 }) catch {
                     if (highlights) |owned_highlights| {
                         self.highlighter.freeHighlights(owned_highlights);
@@ -274,4 +301,42 @@ test "HighlightWorker deinit frees queued old highlights" {
         .failed = false,
     });
     worker.mutex.unlock(skim_io.get());
+}
+
+test "HighlightWorker.takeQueuedBefore returns only older-generation queued jobs" {
+    const allocator = std.testing.allocator;
+
+    // No thread is started: takeQueuedBefore only touches mutex + job_queue.
+    var worker = HighlightWorker{
+        .allocator = allocator,
+        .thread = undefined,
+        .job_queue = .empty,
+        .result_queue = .empty,
+        .mutex = std.Io.Mutex.init,
+        .should_stop = false,
+        .highlighter = undefined,
+    };
+    defer worker.job_queue.deinit(allocator);
+
+    const generations = [_]u64{ 0, 0, 1 };
+    for (generations, 0..) |generation, idx| {
+        try worker.submitJob(.{
+            .file_path = "a.zig",
+            .content = "",
+            .old_content = "",
+            .file_idx = 0,
+            .hunk_idx = idx,
+            .generation = generation,
+        });
+    }
+
+    var taken: std.ArrayList(HighlightJob) = .empty;
+    defer taken.deinit(allocator);
+    try worker.takeQueuedBefore(1, &taken);
+
+    try std.testing.expectEqual(@as(usize, 2), taken.items.len);
+    try std.testing.expectEqual(@as(usize, 0), taken.items[0].hunk_idx);
+    try std.testing.expectEqual(@as(usize, 1), taken.items[1].hunk_idx);
+    try std.testing.expectEqual(@as(usize, 1), worker.job_queue.items.len);
+    try std.testing.expectEqual(@as(u64, 1), worker.job_queue.items[0].generation);
 }

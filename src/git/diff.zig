@@ -19,6 +19,21 @@ pub const DiffSource = union(enum) {
     stdin: void, // Diff content comes from stdin (pager mode)
 };
 
+/// Free the ref strings `source` owns. When replacing the App's current
+/// source, defer this on the old one until `refresh()` has returned: an
+/// in-flight diff loader borrows those strings and is only joined inside
+/// `refresh()`.
+pub fn freeDiffSource(allocator: Allocator, source: DiffSource) void {
+    switch (source) {
+        .working_dir, .stdin => {},
+        .single_ref => |sr| allocator.free(sr.ref),
+        .two_refs => |tr| {
+            allocator.free(tr.ref1);
+            allocator.free(tr.ref2);
+        },
+    }
+}
+
 /// Build common git diff arguments for a given source
 /// Returns the args list and an optional allocated range string that the caller must free
 fn buildDiffArgs(allocator: Allocator, source: DiffSource, extra_flags: []const []const u8) !struct { args: std.ArrayList([]const u8), range_owned: ?[]const u8 } {
@@ -101,13 +116,13 @@ pub fn streamDiff(
 
     const stdout = child.stdout.?;
     var read_buf: [64 * 1024]u8 = undefined;
-    var canceled = false;
 
     while (true) {
         if (shouldCancel(ctx)) {
-            canceled = true;
+            // kill() reaps the child and closes its pipes: there is nothing
+            // left to drain or wait on.
             child.kill(skim_io.get());
-            break;
+            return error.Canceled;
         }
         const n = skim_io.readFile(stdout, &read_buf) catch break;
         if (n == 0) break; // EOF
@@ -120,8 +135,6 @@ pub fn streamDiff(
     defer if (stderr) |s| allocator.free(s);
 
     const term = child.wait(skim_io.get()) catch return error.GitCommandFailed;
-
-    if (canceled) return error.Canceled;
 
     switch (term) {
         .exited => |code| {
@@ -624,6 +637,28 @@ test "streamDiff reads the same bytes as getDiff" {
 
     try streamDiff(allocator, .{ .working_dir = .{ .staged = false } }, &ctx, Ctx.onChunk, Ctx.noCancel);
     try std.testing.expectEqualStrings(buffered, ctx.buf.items);
+}
+
+test "streamDiff returns Canceled when canceled before the first read" {
+    const allocator = std.testing.allocator;
+
+    const Ctx = struct {
+        chunks: usize = 0,
+
+        fn onChunk(self: *@This(), _: []const u8) void {
+            self.chunks += 1;
+        }
+        fn cancelNow(_: *@This()) bool {
+            return true;
+        }
+    };
+
+    var ctx = Ctx{};
+    try std.testing.expectError(
+        error.Canceled,
+        streamDiff(allocator, .{ .working_dir = .{ .staged = false } }, &ctx, Ctx.onChunk, Ctx.cancelNow),
+    );
+    try std.testing.expectEqual(@as(usize, 0), ctx.chunks);
 }
 
 test "DiffSource.stdin variant exists" {

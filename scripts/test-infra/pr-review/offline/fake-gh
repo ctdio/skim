@@ -1,0 +1,148 @@
+#!/bin/bash
+# Fake `gh` for the offline PR-review harnesses. Installed as <work>/bin/gh by
+# world-lib.sh; never talks to the network.
+#
+# Layout it expects (relative to its own location, so skim's environment does
+# not matter):
+#   <work>/bin/gh            this script
+#   <work>/fixtures/         pr-list.json, review-<N>.json
+#   <work>/fake-gh.conf      optional; sourced on EVERY call, so a scenario can
+#                            change behaviour while skim is running
+#   <work>/gh.log            one line per call: <kind>\x1f<arg>\x1f<arg>...
+#                            (query= keeps only its first line; other
+#                            newlines are folded to spaces)
+#
+# Knobs (env or fake-gh.conf):
+#   FAKE_GH_DELAY_<N>        seconds to sleep before answering the review query for PR N
+#   FAKE_GH_FAIL_<N>=1       review query for PR N fails with a .network error
+#   FAKE_GH_DELAY_CREATE     seconds to sleep before answering addPullRequestReview
+#   FAKE_GH_FAIL_CREATE=1    addPullRequestReview fails with a .network error
+#   FAKE_GH_DELAY_THREAD     seconds to sleep before answering addPullRequestReviewThread
+#   FAKE_GH_FAIL_THREAD=1    addPullRequestReviewThread fails with a .network error
+#   FAKE_GH_DELAY_LIST       seconds to sleep before answering `pr list`
+#
+# Unknown call shapes are logged as `unknown` and exit 1.
+
+set -u
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+WORK="$(dirname "$BIN_DIR")"
+FIXTURES="$WORK/fixtures"
+LOG="$WORK/gh.log"
+
+# shellcheck disable=SC1091
+[ -f "$WORK/fake-gh.conf" ] && . "$WORK/fake-gh.conf"
+
+kind="unknown"
+number=""
+pr_id=""
+rid=""
+tid=""
+path=""
+line=""
+side="RIGHT"
+body=""
+event=""
+
+for arg in "$@"; do
+  case "$arg" in
+    number=*) number="${arg#number=}" ;;
+    prId=*) pr_id="${arg#prId=}" ;;
+    rid=*) rid="${arg#rid=}" ;;
+    tid=*) tid="${arg#tid=}" ;;
+    path=*) path="${arg#path=}" ;;
+    line=*) line="${arg#line=}" ;;
+    side=*) side="${arg#side=}" ;;
+    body=*) body="${arg#body=}" ;;
+    event=*) event="${arg#event=}" ;;
+  esac
+done
+
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "list" ]; then
+  kind="list"
+elif [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
+  kind="view"
+elif [ "${1:-}" = "api" ] && [ "${2:-}" = "graphql" ]; then
+  if [ -n "$pr_id" ]; then
+    kind="create"
+  elif [ -n "$rid" ] && [ -n "$path" ]; then
+    kind="thread"
+  elif [ -n "$rid" ] && [ -n "$event" ]; then
+    kind="submit"
+  elif [ -n "$tid" ]; then
+    kind="reply"
+  elif [ -n "$number" ]; then
+    kind="review"
+  fi
+fi
+
+{
+  printf '%s' "$kind"
+  for arg in "$@"; do
+    case "$arg" in
+      query=*) arg="${arg%%$'\n'*}" ;;
+    esac
+    printf '\x1f%s' "${arg//$'\n'/ }"
+  done
+  printf '\n'
+} >>"$LOG"
+
+case "$kind" in
+  list)
+    sleep "${FAKE_GH_DELAY_LIST:-0}"
+    cat "$FIXTURES/pr-list.json"
+    ;;
+  view)
+    n="${3:-}"
+    jq -c --argjson n "$n" '.[] | select(.number == $n)' "$FIXTURES/pr-list.json" 2>/dev/null ||
+      { echo "unknown fake gh call: pr view $n" >&2; exit 1; }
+    ;;
+  review)
+    delay_var="FAKE_GH_DELAY_$number"
+    fail_var="FAKE_GH_FAIL_$number"
+    sleep "${!delay_var:-0}"
+    if [ "${!fail_var:-0}" = "1" ]; then
+      echo "error connecting to api.github.com" >&2
+      exit 1
+    fi
+    if [ ! -f "$FIXTURES/review-$number.json" ]; then
+      echo "Could not resolve to a PullRequest with the number of $number." >&2
+      exit 1
+    fi
+    cat "$FIXTURES/review-$number.json"
+    ;;
+  create)
+    sleep "${FAKE_GH_DELAY_CREATE:-0}"
+    if [ "${FAKE_GH_FAIL_CREATE:-0}" = "1" ]; then
+      echo "error connecting to api.github.com" >&2
+      exit 1
+    fi
+    printf '{"data":{"addPullRequestReview":{"pullRequestReview":{"id":"PRR_FOR_%s","state":"PENDING"}}}}\n' "$pr_id"
+    ;;
+  thread)
+    sleep "${FAKE_GH_DELAY_THREAD:-0}"
+    if [ "${FAKE_GH_FAIL_THREAD:-0}" = "1" ]; then
+      echo "error connecting to api.github.com" >&2
+      exit 1
+    fi
+    seq_file="$WORK/fake-gh.seq"
+    seq=$(($(cat "$seq_file" 2>/dev/null || echo 0) + 1))
+    echo "$seq" >"$seq_file"
+    printf '{"data":{"addPullRequestReviewThread":{"thread":{"id":"PRRT_NEW_%d","isResolved":false,"isOutdated":false,"line":%d,"startLine":null,"originalLine":%d,"diffSide":"%s","startDiffSide":null,"path":"%s","subjectType":"LINE","comments":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PRRC_NEW_%d","databaseId":%d,"author":{"login":"fake-viewer"},"body":"%s","createdAt":"2026-01-01T00:00:00Z","diffHunk":"@@ -0,0 +1 @@","pullRequestReview":{"id":"%s","state":"PENDING"},"replyTo":null}]}}}}}\n' \
+      "$seq" "$line" "$line" "$side" "$(json_escape "$path")" "$seq" "$((9000 + seq))" "$(json_escape "$body")" "$(json_escape "$rid")"
+    ;;
+  *)
+    echo "unknown fake gh call: $*" >&2
+    exit 1
+    ;;
+esac
+

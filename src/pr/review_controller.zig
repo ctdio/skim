@@ -74,6 +74,9 @@ pub const MutationOutcome = union(enum) {
     none,
     posted, // a thread posted; caller re-anchors + rebuilds the LineMap
     failed: github.GhErrorKind, // post failed; the body is stashed for retry
+    // A post bound to a PR the user has since left failed. The body is NOT
+    // stashed (it would pre-fill an editor on the wrong PR); the App reports it.
+    stale_failed: github.GhErrorKind,
 };
 
 /// Thread-safe handoff of a single in-flight post mutation to the main loop.
@@ -102,6 +105,8 @@ pub const PendingMutation = struct {
     out_thread_raw: ?[]u8 = null, // addPullRequestReviewThread response JSON
     failed: bool = false,
     fail_kind: github.GhErrorKind = .other,
+
+    generation: u64 = 0, // session generation this post was spawned under
 };
 
 const QueuedPost = struct {
@@ -112,6 +117,23 @@ const QueuedPost = struct {
     start_side: review_parse.Side,
     body: []u8,
     local_seq: u64,
+    // Bound at enqueue time so a drain after a PR switch still targets the PR
+    // the user commented on. All session-allocator-owned.
+    pr_node_id: []u8,
+    head_oid: []u8,
+    review_id: ?[]u8, // null → worker creates a pending review (or one is filled in, see pollMutations)
+    generation: u64,
+};
+
+/// Everything `spawnPost` needs. The PR ids are explicit (not read off the
+/// session) so a queued post drains against the PR it was written on.
+const PostSpawn = struct {
+    post: PostParams,
+    seq: u64,
+    pr_node_id: []const u8,
+    head_oid: []const u8,
+    review_id: ?[]const u8,
+    generation: u64,
 };
 
 /// The conversation operations on an existing review thread (FR-5). `resolve`
@@ -146,6 +168,8 @@ pub const ThreadMutation = struct {
     out_raw: ?[]u8 = null, // mutation response JSON
     failed: bool = false,
     fail_kind: github.GhErrorKind = .other,
+
+    generation: u64 = 0, // session generation this mutation was spawned under
 };
 
 const QueuedThreadMutation = struct {
@@ -153,6 +177,15 @@ const QueuedThreadMutation = struct {
     thread_id: []u8,
     comment_id: []u8,
     body: []u8,
+    generation: u64,
+};
+
+const ThreadMutationSpawn = struct {
+    kind: ThreadMutationKind,
+    thread_id: []const u8,
+    comment_id: []const u8,
+    body: []const u8,
+    generation: u64,
 };
 
 /// Two-step delete confirmation (AD-8 draft safety for destructive ops). Armed
@@ -211,6 +244,8 @@ pub const PendingSubmit = struct {
     out_error_msg: ?[]u8 = null, // 200-with-errors message (self-approval etc.)
     failed: bool = false,
     fail_kind: github.GhErrorKind = .other,
+
+    generation: u64 = 0, // session generation this submit/discard was spawned under
 };
 
 /// Client-side disposition of a submit/discard request (before any worker spawn).
@@ -243,6 +278,7 @@ pub const PendingEntry = struct {
     gh_ok: bool = false, // review payload fetched successfully
     raw_json: ?[]u8 = null, // gh review payload (when gh_ok)
     gh_kind: github.GhErrorKind = .other, // classified failure (when !gh_ok)
+    generation: u64 = 0, // session generation this entry/refetch was spawned under
 };
 
 /// Outcome of consuming a pending entry/refetch. `entered.head_ref`/`base_ref`
@@ -257,6 +293,7 @@ pub const EntryOutcome = union(enum) {
     },
     refreshed: ?github.GhErrorKind, // review data re-applied; gh_error if the refetch failed
     fetch_failed, // git ref fetch failed — cannot enter the diff at all
+    start_failed, // the entry parked behind a superseded one could not be started
 };
 
 pub const ReviewSession = struct {
@@ -348,19 +385,79 @@ pub const ReviewSession = struct {
     // "data unavailable" note so a fetch failure never reads as a genuinely empty
     // PR. Cleared on a successful refetch.
     data_unavailable: bool = false,
+
+    // Bumped by every `resetForSwitch`. Every lane stamps it at spawn/enqueue
+    // and its poll discards results whose stamp differs (AD-7).
+    generation: u64 = 0,
+    // Latest-wins slot: an entry requested while another is in flight. Strings
+    // are allocator-owned; started by `pollPending` once the in-flight worker
+    // is joined. Replaced (old strings freed) by each newer request.
+    next_entry: ?EnterParams = null,
+    // Executables the workers spawn. Production never changes them; tests point
+    // them at fake scripts so the REAL workers run against a canned GitHub.
+    // `std.process.run` resolves argv[0] against the PATH captured at process
+    // start, so these are the only way to reach a fake from inside a test.
+    // Borrowed; must outlive the session (string literals in practice). Written
+    // only before the first spawn, so the workers' unsynchronised reads are safe.
+    gh_bin: []const u8 = "gh",
+    git_bin: []const u8 = "git",
 };
 
-/// Begin an async PR entry: git ref fetch + review-data fetch off-thread. No-op
-/// (returns) if a fetch is already in flight — same guard as `startListLoad`.
+/// Drop everything that belongs to the current PR and bump `generation`, so
+/// every result still in flight for it is discarded when it lands (AD-7).
+/// In-flight workers are NOT joined here (that would block the UI on network
+/// IO); their polls join and free them later. Queued posts / thread mutations
+/// are kept — they carry their own PR ids and still run against the PR they
+/// were written on.
+pub fn resetForSwitch(self: *ReviewSession, allocator: Allocator) void {
+    self.generation += 1;
+
+    for (self.threads.items) |st| {
+        if (st.owned) freeOwnedThread(allocator, st);
+    }
+    clearData(self, allocator);
+    freeAnchored(self, allocator);
+    self.expanded_threads.clearRetainingCapacity();
+    disarmDeleteConfirm(self, allocator);
+
+    if (self.draft_failed_text) |t| allocator.free(t);
+    self.draft_failed_text = null;
+
+    clearSubmitError(self, allocator);
+    if (self.submit.body_stash) |s| allocator.free(s);
+    self.submit.body_stash = null;
+    self.submit.verdict = .comment;
+    self.submit.confirm_discard = false;
+    self.submit.submitting = false;
+
+    self.comment_target = .github;
+    self.info_scroll = 0;
+    self.data_unavailable = false;
+    self.number = 0;
+}
+
+/// Begin an async PR entry: git ref fetch + review-data fetch off-thread. Resets
+/// the session for the switch first. Latest wins: while another entry is in
+/// flight the request is parked and started once that worker is joined.
 pub fn startEnterPr(self: *ReviewSession, allocator: Allocator, params: EnterParams) !void {
-    if (self.entry_in_flight) return;
-    self.pending_kind = .enter;
-    self.entering_number = params.number;
-    self.entering_base_ref = if (params.base_ref.len > 0)
-        try allocator.dupe(u8, params.base_ref)
-    else
-        "";
-    try spawnWorker(self, allocator);
+    resetForSwitch(self, allocator);
+    if (self.entry_in_flight) {
+        // entryWorker reads entering_* off the session while it runs, so the
+        // request is parked in its own slot until pollPending joins the worker.
+        try setNextEntry(self, allocator, params);
+        return;
+    }
+    try beginEntry(self, allocator, params);
+}
+
+/// Leave the PR surface for a non-PR diff. Everything `resetForSwitch` drops,
+/// plus the parked entry, so an entry/refetch still in flight is discarded when
+/// it lands and nothing starts after it. Returns whether an entry was pending.
+pub fn leaveSurface(self: *ReviewSession, allocator: Allocator) bool {
+    const had_entry = self.entry_in_flight or self.next_entry != null;
+    clearNextEntry(self, allocator);
+    resetForSwitch(self, allocator);
+    return had_entry;
 }
 
 /// Re-fetch the review data only (no git fetch). Bound to `r` when a session is
@@ -370,6 +467,7 @@ pub fn startRefetch(self: *ReviewSession, allocator: Allocator) !void {
     self.pending_kind = .refetch;
     self.entering_number = self.number;
     self.entering_base_ref = "";
+    self.entry.generation = self.generation;
     try spawnWorker(self, allocator);
 }
 
@@ -398,12 +496,22 @@ pub fn pollPending(self: *ReviewSession, allocator: Allocator) EntryOutcome {
     self.entry_in_flight = false;
     const kind = self.pending_kind;
     self.pending_kind = .none;
+    const entered_number = self.entering_number;
     if (self.entering_base_ref.len > 0) {
         allocator.free(self.entering_base_ref);
         self.entering_base_ref = "";
     }
 
     const ca = std.heap.c_allocator;
+
+    if (self.entry.generation != self.generation) {
+        // Superseded by a switch: drop everything the worker produced.
+        if (raw_json) |raw| ca.free(raw);
+        if (head_ref) |h| ca.free(h);
+        if (base_ref) |b| ca.free(b);
+        startNextEntry(self, allocator) catch return .start_failed;
+        return .none;
+    }
 
     var gh_error: ?github.GhErrorKind = if (gh_ok) null else gh_kind;
     if (gh_ok) {
@@ -448,6 +556,13 @@ pub fn pollPending(self: *ReviewSession, allocator: Allocator) EntryOutcome {
     if (head_ref) |h| ca.free(h);
     if (base_ref) |b| ca.free(b);
 
+    if (gh_error != null) {
+        for (self.threads.items) |st| {
+            if (st.owned) freeOwnedThread(allocator, st);
+        }
+        clearData(self, allocator);
+        self.number = entered_number;
+    }
     self.data_unavailable = gh_error != null;
     return .{ .entered = .{ .head_ref = app_head, .base_ref = app_base, .gh_error = gh_error } };
 }
@@ -563,10 +678,21 @@ pub fn applyFetchedData(self: *ReviewSession, allocator: Allocator, data: *revie
 
     self.data_arena = arena;
     self.active = true;
+    // A refetch can learn the pending review a queued post was enqueued without.
+    if (self.pending_review_id) |rid| fillQueuedReviewIds(self, allocator, .{
+        .pr_node_id = self.pr_node_id,
+        .review_id = rid,
+    });
 }
 
 pub fn isActive(self: *const ReviewSession) bool {
     return self.active;
+}
+
+/// Whether a PR entry is running or parked behind one. A refetch does not
+/// count: it keeps the PR on screen.
+pub fn entryPending(self: *const ReviewSession) bool {
+    return (self.entry_in_flight and self.pending_kind == .enter) or self.next_entry != null;
 }
 
 /// Replace the derived anchor slice (transfers ownership of `anchored`). The
@@ -647,7 +773,14 @@ pub fn startPostThread(self: *ReviewSession, allocator: Allocator, params: PostP
         try enqueuePost(self, allocator, params, seq);
         return;
     }
-    try spawnPost(self, params, seq);
+    try spawnPost(self, .{
+        .post = params,
+        .seq = seq,
+        .pr_node_id = self.pr_node_id,
+        .head_oid = self.head_ref_oid,
+        .review_id = currentReviewId(self),
+        .generation = self.generation,
+    });
 }
 
 /// Consume a completed post mutation, if ready. On success: cache the pending
@@ -678,20 +811,28 @@ pub fn pollMutations(self: *ReviewSession, allocator: Allocator) MutationOutcome
     const ca = std.heap.c_allocator;
     var outcome: MutationOutcome = undefined;
 
-    // Cache the review id whenever the worker resolved/created one — even on a
-    // partial failure (review created, thread post failed). Otherwise the next
-    // queued post would create a SECOND pending review and hit GitHub's "one
-    // pending review per pull request" error.
-    if (out_review_id) |rid| setReviewId(self, allocator, rid);
+    if (self.mutation.generation != self.generation) {
+        // The PR this post belonged to was left: its placeholder is already
+        // gone. The pending review it created still exists on GitHub, though.
+        if (out_review_id) |rid| adoptStaleReviewId(self, allocator, rid);
+        outcome = if (failed) .{ .stale_failed = fail_kind } else .none;
+    } else {
+        // Cache the review id whenever the worker resolved/created one — even
+        // on a partial failure (review created, thread post failed) — and hand
+        // it to queued posts. Otherwise the next post would create a SECOND
+        // pending review and hit GitHub's "one pending review per pull
+        // request" error.
+        if (out_review_id) |rid| setReviewId(self, allocator, rid);
 
-    if (failed) {
-        failPost(self, allocator, seq);
-        outcome = .{ .failed = fail_kind };
-    } else if (applyPostedThread(self, allocator, out_thread_raw, seq)) {
-        outcome = .posted;
-    } else |_| {
-        failPost(self, allocator, seq);
-        outcome = .{ .failed = .other };
+        if (failed) {
+            failPost(self, allocator, seq);
+            outcome = .{ .failed = fail_kind };
+        } else if (applyPostedThread(self, allocator, out_thread_raw, seq)) {
+            outcome = .posted;
+        } else |_| {
+            failPost(self, allocator, seq);
+            outcome = .{ .failed = .other };
+        }
     }
 
     // Free the worker's c_allocator buffers now that they're consumed.
@@ -842,6 +983,15 @@ pub fn pollThreadMutations(self: *ReviewSession, allocator: Allocator) ThreadMut
     self.thread_mut_active = false;
 
     const ca = std.heap.c_allocator;
+    if (self.thread_mutation.generation != self.generation) {
+        // The mutation already ran against the PR it was written on (node ids
+        // are global); that PR's threads are gone, so nothing is applied here.
+        if (out_raw) |raw| ca.free(raw);
+        freeThreadMutationBuffers(self);
+        drainThreadQueue(self, allocator);
+        return .none;
+    }
+
     const kind = self.thread_mutation.kind;
     const thread_id = self.thread_mutation.in_thread_id;
     const comment_id = self.thread_mutation.in_comment_id;
@@ -1097,9 +1247,18 @@ pub fn pollSubmit(self: *ReviewSession, allocator: Allocator) SubmitOutcome {
         self.submit_thread = null;
     }
     self.submit_in_flight = false;
-    self.submit.submitting = false;
 
     const ca = std.heap.c_allocator;
+    if (self.submit_mutation.generation != self.generation) {
+        // Submitted/discarded on a PR the user has since left; the dialog and
+        // review id now belong to the current PR.
+        if (out_review_id) |r| ca.free(r);
+        if (out_error_msg) |r| ca.free(r);
+        freeSubmitBuffers(self);
+        return .none;
+    }
+    self.submit.submitting = false;
+
     // Cache a created review id even on a partial failure (review created, submit
     // rejected) so a retry / discard reuses it instead of double-creating.
     if (out_review_id) |rid| setReviewId(self, allocator, rid);
@@ -1190,6 +1349,7 @@ pub fn deinitState(self: *ReviewSession, allocator: Allocator) void {
     self.entry.fetched_base_ref = null;
     if (self.entering_base_ref.len > 0) allocator.free(self.entering_base_ref);
     self.entering_base_ref = "";
+    clearNextEntry(self, allocator);
 
     freeMutationBuffers(self);
     clearQueuedPosts(self, allocator);
@@ -1225,6 +1385,39 @@ pub fn deinitState(self: *ReviewSession, allocator: Allocator) void {
 // Helpers
 // =============================================================================
 
+fn beginEntry(self: *ReviewSession, allocator: Allocator, params: EnterParams) !void {
+    self.pending_kind = .enter;
+    self.entering_number = params.number;
+    self.entering_base_ref = if (params.base_ref.len > 0) try allocator.dupe(u8, params.base_ref) else "";
+    self.entry.generation = self.generation;
+    try spawnWorker(self, allocator);
+}
+
+/// Park only what `beginEntry` reads: the number and the base ref.
+fn setNextEntry(self: *ReviewSession, allocator: Allocator, params: EnterParams) !void {
+    const base_ref = try allocator.dupe(u8, params.base_ref);
+    clearNextEntry(self, allocator);
+    self.next_entry = .{ .number = params.number, .base_ref = base_ref };
+}
+
+fn clearNextEntry(self: *ReviewSession, allocator: Allocator) void {
+    const next = self.next_entry orelse return;
+    allocator.free(next.base_ref);
+    self.next_entry = null;
+}
+
+/// Start the entry parked by `startEnterPr` while another was in flight. The
+/// generation was already bumped by that `startEnterPr`.
+fn startNextEntry(self: *ReviewSession, allocator: Allocator) !void {
+    const next = self.next_entry orelse return;
+    self.next_entry = null;
+    defer allocator.free(next.base_ref);
+    beginEntry(self, allocator, next) catch |err| {
+        std.log.debug("failed to start parked PR #{d} entry: {}", .{ next.number, err });
+        return err;
+    };
+}
+
 fn spawnWorker(self: *ReviewSession, allocator: Allocator) !void {
     self.entry.ready.store(false, .release);
     self.entry_in_flight = true;
@@ -1252,10 +1445,10 @@ fn entryWorker(self: *ReviewSession) void {
         var base_ref: []const u8 = self.entering_base_ref;
         var resolved: ?[]u8 = null;
         if (base_ref.len == 0) {
-            resolved = resolveBaseRef(ca, number);
+            resolved = resolveBaseRef(ca, .{ .number = number, .gh_bin = self.gh_bin });
             if (resolved) |r| base_ref = r;
         }
-        if (github.fetchRef(ca, .{ .number = number, .base_ref = base_ref })) |hr| {
+        if (github.fetchRef(ca, .{ .number = number, .base_ref = base_ref, .git_bin = self.git_bin })) |hr| {
             git_ok = true;
             head_ref = hr;
             base_ref_out = ca.dupe(u8, base_ref) catch null;
@@ -1269,10 +1462,10 @@ fn entryWorker(self: *ReviewSession) void {
     var raw_json: ?[]u8 = null;
     var gh_kind: github.GhErrorKind = .other;
     if (git_ok) {
-        if (github.getOriginOwnerRepo(ca)) |owner_repo| {
+        if (github.getOriginOwnerRepo(ca, self.git_bin)) |owner_repo| {
             defer ca.free(owner_repo.owner);
             defer ca.free(owner_repo.repo);
-            if (github.fetchReviewData(ca, owner_repo, number)) |fetch| {
+            if (github.fetchReviewData(ca, .{ .owner_repo = owner_repo, .number = number, .gh_bin = self.gh_bin })) |fetch| {
                 switch (fetch) {
                     .ok => |raw| {
                         gh_ok = true;
@@ -1301,8 +1494,8 @@ fn entryWorker(self: *ReviewSession) void {
 
 /// Resolve a PR's base branch name via `gh pr view` (number-only entry). Best
 /// effort — returns null on any failure; the caller then diffs against HEAD.
-fn resolveBaseRef(ca: Allocator, number: u32) ?[]u8 {
-    const fetch = github.fetchPrByNumber(ca, number) catch return null;
+fn resolveBaseRef(ca: Allocator, params: github.PrByNumberParams) ?[]u8 {
+    const fetch = github.fetchPrByNumber(ca, params) catch return null;
     switch (fetch) {
         .ok => |raw| {
             defer ca.free(raw);
@@ -1434,10 +1627,12 @@ fn applyPostedThread(self: *ReviewSession, allocator: Allocator, raw: ?[]const u
     try replacePlaceholderWithThread(self, allocator, seq, created.thread);
 }
 
-/// Cache the pending-review id used/created by a successful post.
+/// Cache the pending-review id used/created by a successful post or submit,
+/// and hand it to the current PR's queued posts that were enqueued without one.
 fn setReviewId(self: *ReviewSession, allocator: Allocator, id: []const u8) void {
     if (self.posted_review_id) |r| allocator.free(r);
     self.posted_review_id = allocator.dupe(u8, id) catch null;
+    fillQueuedReviewIds(self, allocator, .{ .pr_node_id = self.pr_node_id, .review_id = id });
 }
 
 /// The pending-review id to reuse for the next post: the one cached this session,
@@ -1449,19 +1644,19 @@ fn currentReviewId(self: *const ReviewSession) ?[]const u8 {
 
 /// Copy the post params into `c_allocator` buffers and spawn the post worker.
 /// Buffers live on `self.mutation` (freed by `pollMutations` / `deinitState`).
-fn spawnPost(self: *ReviewSession, params: PostParams, seq: u64) !void {
+fn spawnPost(self: *ReviewSession, params: PostSpawn) !void {
     const ca = std.heap.c_allocator;
 
-    const pr_node_id = try ca.dupe(u8, self.pr_node_id);
+    const pr_node_id = try ca.dupe(u8, params.pr_node_id);
     errdefer ca.free(pr_node_id);
-    const head_oid = try ca.dupe(u8, self.head_ref_oid);
+    const head_oid = try ca.dupe(u8, params.head_oid);
     errdefer ca.free(head_oid);
-    const path = try ca.dupe(u8, params.path);
+    const path = try ca.dupe(u8, params.post.path);
     errdefer ca.free(path);
-    const body = try ca.dupe(u8, params.body);
+    const body = try ca.dupe(u8, params.post.body);
     errdefer ca.free(body);
     var review_id_buf: ?[]u8 = null;
-    if (currentReviewId(self)) |rid| review_id_buf = try ca.dupe(u8, rid);
+    if (params.review_id) |rid| review_id_buf = try ca.dupe(u8, rid);
     errdefer if (review_id_buf) |r| ca.free(r);
 
     self.mutation.in_pr_node_id = pr_node_id;
@@ -1469,11 +1664,12 @@ fn spawnPost(self: *ReviewSession, params: PostParams, seq: u64) !void {
     self.mutation.in_path = path;
     self.mutation.in_body = body;
     self.mutation.in_review_id = review_id_buf;
-    self.mutation.in_line = params.line;
-    self.mutation.in_side = params.side;
-    self.mutation.in_start_line = params.start_line;
-    self.mutation.in_start_side = params.start_side;
-    self.mutation.local_seq = seq;
+    self.mutation.in_line = params.post.line;
+    self.mutation.in_side = params.post.side;
+    self.mutation.in_start_line = params.post.start_line;
+    self.mutation.in_start_side = params.post.start_side;
+    self.mutation.local_seq = params.seq;
+    self.mutation.generation = params.generation;
     self.mutation.failed = false;
     self.mutation.out_review_id = null;
     self.mutation.out_thread_raw = null;
@@ -1503,15 +1699,24 @@ const ResolvedReviewId = struct {
 
 /// Reuse the passed pending-review id or create one via GitHub. Shared by the
 /// post and submit workers so the create/parse/ownership dance stays in lockstep.
-fn resolveReviewId(in_review_id: ?[]const u8, pr_node_id: []const u8, head_oid: []const u8) ResolvedReviewId {
+fn resolveReviewId(params: struct {
+    in_review_id: ?[]const u8,
+    pr_node_id: []const u8,
+    head_oid: []const u8,
+    gh_bin: []const u8,
+}) ResolvedReviewId {
     const ca = std.heap.c_allocator;
     var result: ResolvedReviewId = .{ .review_id = null, .out_review_id = null, .failed = false, .fail_kind = .other };
-    if (in_review_id) |rid| {
+    if (params.in_review_id) |rid| {
         result.review_id = ca.dupe(u8, rid) catch blk: {
             result.failed = true;
             break :blk null;
         };
-    } else if (github.createPendingReview(ca, pr_node_id, head_oid)) |fetch| {
+    } else if (github.createPendingReview(ca, .{
+        .pr_node_id = params.pr_node_id,
+        .commit_oid = params.head_oid,
+        .gh_bin = params.gh_bin,
+    })) |fetch| {
         switch (fetch) {
             .ok => |raw| {
                 defer ca.free(raw);
@@ -1540,7 +1745,12 @@ fn postThreadWorker(self: *ReviewSession) void {
     const ca = std.heap.c_allocator;
     var out_thread_raw: ?[]u8 = null;
 
-    const resolved = resolveReviewId(self.mutation.in_review_id, self.mutation.in_pr_node_id, self.mutation.in_head_oid);
+    const resolved = resolveReviewId(.{
+        .in_review_id = self.mutation.in_review_id,
+        .pr_node_id = self.mutation.in_pr_node_id,
+        .head_oid = self.mutation.in_head_oid,
+        .gh_bin = self.gh_bin,
+    });
     const review_id = resolved.review_id; // ca-owned working copy
     defer if (review_id) |r| ca.free(r);
     const out_review_id = resolved.out_review_id;
@@ -1556,6 +1766,7 @@ fn postThreadWorker(self: *ReviewSession) void {
             .start_line = self.mutation.in_start_line,
             .start_side = self.mutation.in_start_side,
             .body = self.mutation.in_body,
+            .gh_bin = self.gh_bin,
         })) |fetch| {
             switch (fetch) {
                 .ok => |raw| out_thread_raw = raw,
@@ -1585,6 +1796,12 @@ fn enqueuePost(self: *ReviewSession, allocator: Allocator, params: PostParams, s
     errdefer allocator.free(path);
     const body = try allocator.dupe(u8, params.body);
     errdefer allocator.free(body);
+    const pr_node_id = try allocator.dupe(u8, self.pr_node_id);
+    errdefer allocator.free(pr_node_id);
+    const head_oid = try allocator.dupe(u8, self.head_ref_oid);
+    errdefer allocator.free(head_oid);
+    const review_id: ?[]u8 = if (currentReviewId(self)) |rid| try allocator.dupe(u8, rid) else null;
+    errdefer if (review_id) |r| allocator.free(r);
     try self.queued_posts.append(allocator, .{
         .path = path,
         .line = params.line,
@@ -1593,6 +1810,10 @@ fn enqueuePost(self: *ReviewSession, allocator: Allocator, params: PostParams, s
         .start_side = params.start_side,
         .body = body,
         .local_seq = seq,
+        .pr_node_id = pr_node_id,
+        .head_oid = head_oid,
+        .review_id = review_id,
+        .generation = self.generation,
     });
 }
 
@@ -1603,18 +1824,22 @@ fn drainQueue(self: *ReviewSession, allocator: Allocator) void {
     if (self.posting_worker_active or self.mutation.ready.load(.acquire)) return;
 
     const q = self.queued_posts.orderedRemove(0);
-    defer {
-        if (q.path.len > 0) allocator.free(q.path);
-        if (q.body.len > 0) allocator.free(q.body);
-    }
+    defer freeQueuedPost(allocator, q);
     spawnPost(self, .{
-        .path = q.path,
-        .line = q.line,
-        .side = q.side,
-        .start_line = q.start_line,
-        .start_side = q.start_side,
-        .body = q.body,
-    }, q.local_seq) catch {
+        .post = .{
+            .path = q.path,
+            .line = q.line,
+            .side = q.side,
+            .start_line = q.start_line,
+            .start_side = q.start_side,
+            .body = q.body,
+        },
+        .seq = q.local_seq,
+        .pr_node_id = q.pr_node_id,
+        .head_oid = q.head_oid,
+        .review_id = q.review_id,
+        .generation = q.generation,
+    }) catch {
         removePlaceholder(self, allocator, q.local_seq);
     };
 }
@@ -1642,11 +1867,43 @@ fn freeMutationBuffers(self: *ReviewSession) void {
 /// Free every queued post's session-owned buffers (placeholders are freed
 /// separately by the caller's owned-thread sweep).
 fn clearQueuedPosts(self: *ReviewSession, allocator: Allocator) void {
-    for (self.queued_posts.items) |q| {
-        if (q.path.len > 0) allocator.free(q.path);
-        if (q.body.len > 0) allocator.free(q.body);
-    }
+    for (self.queued_posts.items) |q| freeQueuedPost(allocator, q);
     self.queued_posts.clearRetainingCapacity();
+}
+
+fn freeQueuedPost(allocator: Allocator, q: QueuedPost) void {
+    if (q.path.len > 0) allocator.free(q.path);
+    if (q.body.len > 0) allocator.free(q.body);
+    if (q.pr_node_id.len > 0) allocator.free(q.pr_node_id);
+    if (q.head_oid.len > 0) allocator.free(q.head_oid);
+    if (q.review_id) |r| allocator.free(r);
+}
+
+/// A pending review created by a post whose PR was left since. GitHub allows one
+/// pending review per PR per user, so the id belongs to every later post on
+/// that PR: queued ones, and the current session's when the user came back to
+/// the same PR (A→B→A) — otherwise its next post would create a second one.
+fn adoptStaleReviewId(self: *ReviewSession, allocator: Allocator, review_id: []const u8) void {
+    const pr_node_id = self.mutation.in_pr_node_id;
+    if (self.active and std.mem.eql(u8, pr_node_id, self.pr_node_id)) {
+        setReviewId(self, allocator, review_id);
+        return;
+    }
+    fillQueuedReviewIds(self, allocator, .{ .pr_node_id = pr_node_id, .review_id = review_id });
+}
+
+/// Hand a pending-review id to the queued posts written on the same PR (keyed
+/// by PR node id, not generation: leaving and re-entering a PR starts a new
+/// generation on the same review) that had none yet.
+fn fillQueuedReviewIds(
+    self: *ReviewSession,
+    allocator: Allocator,
+    params: struct { pr_node_id: []const u8, review_id: []const u8 },
+) void {
+    for (self.queued_posts.items) |*q| {
+        if (q.review_id != null or !std.mem.eql(u8, q.pr_node_id, params.pr_node_id)) continue;
+        q.review_id = allocator.dupe(u8, params.review_id) catch null;
+    }
 }
 
 /// Deep-copy a `ReviewThread` into session-allocator-owned strings (for
@@ -1743,24 +2000,32 @@ fn beginThreadMutation(
     allocator: Allocator,
     params: struct { kind: ThreadMutationKind, thread_id: []const u8, comment_id: []const u8, body: []const u8 },
 ) !void {
+    const spawn: ThreadMutationSpawn = .{
+        .kind = params.kind,
+        .thread_id = params.thread_id,
+        .comment_id = params.comment_id,
+        .body = params.body,
+        .generation = self.generation,
+    };
     if (self.thread_mut_active or self.thread_mutation.ready.load(.acquire)) {
-        try enqueueThreadMutation(self, allocator, params.kind, params.thread_id, params.comment_id, params.body);
+        try enqueueThreadMutation(self, allocator, spawn);
         return;
     }
-    try spawnThreadMutation(self, params.kind, params.thread_id, params.comment_id, params.body);
+    try spawnThreadMutation(self, spawn);
 }
 
 /// Copy the mutation inputs into `c_allocator` buffers and spawn the worker.
-fn spawnThreadMutation(self: *ReviewSession, kind: ThreadMutationKind, thread_id: []const u8, comment_id: []const u8, body: []const u8) !void {
+fn spawnThreadMutation(self: *ReviewSession, params: ThreadMutationSpawn) !void {
     const ca = std.heap.c_allocator;
-    const tid = try ca.dupe(u8, thread_id);
+    const tid = try ca.dupe(u8, params.thread_id);
     errdefer ca.free(tid);
-    const cid = try ca.dupe(u8, comment_id);
+    const cid = try ca.dupe(u8, params.comment_id);
     errdefer ca.free(cid);
-    const b = try ca.dupe(u8, body);
+    const b = try ca.dupe(u8, params.body);
     errdefer ca.free(b);
 
-    self.thread_mutation.kind = kind;
+    self.thread_mutation.kind = params.kind;
+    self.thread_mutation.generation = params.generation;
     self.thread_mutation.in_thread_id = tid;
     self.thread_mutation.in_comment_id = cid;
     self.thread_mutation.in_body = b;
@@ -1789,11 +2054,11 @@ fn threadMutationWorker(self: *ReviewSession) void {
 
     const m = &self.thread_mutation;
     const result = switch (m.kind) {
-        .reply => github.replyToThread(ca, m.in_thread_id, m.in_body),
-        .resolve => github.resolveThread(ca, m.in_thread_id),
-        .unresolve => github.unresolveThread(ca, m.in_thread_id),
-        .edit => github.updateReviewComment(ca, m.in_comment_id, m.in_body),
-        .delete => github.deleteReviewComment(ca, m.in_comment_id),
+        .reply => github.replyToThread(ca, .{ .thread_id = m.in_thread_id, .body = m.in_body, .gh_bin = self.gh_bin }),
+        .resolve => github.resolveThread(ca, .{ .thread_id = m.in_thread_id, .gh_bin = self.gh_bin }),
+        .unresolve => github.unresolveThread(ca, .{ .thread_id = m.in_thread_id, .gh_bin = self.gh_bin }),
+        .edit => github.updateReviewComment(ca, .{ .comment_id = m.in_comment_id, .body = m.in_body, .gh_bin = self.gh_bin }),
+        .delete => github.deleteReviewComment(ca, .{ .comment_id = m.in_comment_id, .gh_bin = self.gh_bin }),
     };
     if (result) |fetch| {
         switch (fetch) {
@@ -1817,14 +2082,20 @@ fn threadMutationWorker(self: *ReviewSession) void {
 
 /// Queue a thread mutation behind the in-flight worker (copying its inputs onto
 /// the session allocator).
-fn enqueueThreadMutation(self: *ReviewSession, allocator: Allocator, kind: ThreadMutationKind, thread_id: []const u8, comment_id: []const u8, body: []const u8) !void {
-    const tid = try allocator.dupe(u8, thread_id);
+fn enqueueThreadMutation(self: *ReviewSession, allocator: Allocator, params: ThreadMutationSpawn) !void {
+    const tid = try allocator.dupe(u8, params.thread_id);
     errdefer allocator.free(tid);
-    const cid = try allocator.dupe(u8, comment_id);
+    const cid = try allocator.dupe(u8, params.comment_id);
     errdefer allocator.free(cid);
-    const b = try allocator.dupe(u8, body);
+    const b = try allocator.dupe(u8, params.body);
     errdefer allocator.free(b);
-    try self.queued_thread_mutations.append(allocator, .{ .kind = kind, .thread_id = tid, .comment_id = cid, .body = b });
+    try self.queued_thread_mutations.append(allocator, .{
+        .kind = params.kind,
+        .thread_id = tid,
+        .comment_id = cid,
+        .body = b,
+        .generation = params.generation,
+    });
 }
 
 /// Dispatch the next queued thread mutation if the worker is idle. If the spawn
@@ -1839,7 +2110,14 @@ fn drainThreadQueue(self: *ReviewSession, allocator: Allocator) void {
         allocator.free(q.comment_id);
         allocator.free(q.body);
     }
-    spawnThreadMutation(self, q.kind, q.thread_id, q.comment_id, q.body) catch {
+    spawnThreadMutation(self, .{
+        .kind = q.kind,
+        .thread_id = q.thread_id,
+        .comment_id = q.comment_id,
+        .body = q.body,
+        .generation = q.generation,
+    }) catch {
+        if (q.generation != self.generation) return;
         if (threadIdxById(self, q.thread_id)) |i| self.threads.items[i].busy = false;
     };
 }
@@ -2032,6 +2310,7 @@ fn spawnSubmit(self: *ReviewSession, kind: SubmitKind, body: []const u8) !void {
     self.submit_mutation.in_body = body_buf;
     self.submit_mutation.in_review_id = review_id_buf;
     self.submit_mutation.verdict = self.submit.verdict;
+    self.submit_mutation.generation = self.generation;
     self.submit_mutation.out_review_id = null;
     self.submit_mutation.out_error_msg = null;
     self.submit_mutation.failed = false;
@@ -2065,7 +2344,7 @@ fn submitWorker(self: *ReviewSession) void {
 
     if (m.kind == .discard) {
         if (m.in_review_id) |rid| {
-            if (github.deletePendingReview(ca, rid)) |fetch| {
+            if (github.deletePendingReview(ca, .{ .review_id = rid, .gh_bin = self.gh_bin })) |fetch| {
                 switch (fetch) {
                     .ok => |raw| {
                         defer ca.free(raw);
@@ -2097,7 +2376,12 @@ fn submitWorker(self: *ReviewSession) void {
     }
 
     // Submit path: resolve a review id first, then submit it.
-    const resolved = resolveReviewId(m.in_review_id, m.in_pr_node_id, m.in_head_oid);
+    const resolved = resolveReviewId(.{
+        .in_review_id = m.in_review_id,
+        .pr_node_id = m.in_pr_node_id,
+        .head_oid = m.in_head_oid,
+        .gh_bin = self.gh_bin,
+    });
     const review_id = resolved.review_id; // ca-owned working copy
     defer if (review_id) |r| ca.free(r);
     out_review_id = resolved.out_review_id;
@@ -2105,7 +2389,12 @@ fn submitWorker(self: *ReviewSession) void {
     fail_kind = resolved.fail_kind;
 
     if (!failed) {
-        if (github.submitReview(ca, review_id.?, m.in_event, m.in_body)) |fetch| {
+        if (github.submitReview(ca, .{
+            .review_id = review_id.?,
+            .event = m.in_event,
+            .body = m.in_body,
+            .gh_bin = self.gh_bin,
+        })) |fetch| {
             switch (fetch) {
                 .ok => |raw| {
                     defer ca.free(raw);
@@ -2236,6 +2525,18 @@ const canned_payload =
     \\{"id":"PRRC_1","databaseId":99,"author":{"login":"mlugg"},"body":"nit","createdAt":"2025-01-01T00:00:00Z","diffHunk":"@@ -1 +1 @@","pullRequestReview":{"id":"PRR_1","state":"COMMENTED"},"replyTo":null}
     \\]}}
     \\]}
+    \\}}}}
+;
+
+const pending_review_payload =
+    \\{"data":{"viewer":{"login":"ctdio"},"repository":{"pullRequest":{
+    \\"id":"PR_1","number":42,"title":"Widget","body":"desc","author":{"login":"octocat"},
+    \\"isDraft":false,"baseRefName":"main","headRefName":"feat","headRefOid":"abc123","reviewDecision":"",
+    \\"statusCheckRollup":{"state":"SUCCESS"},"commits":{"nodes":[]},
+    \\"reviews":{"pageInfo":{"hasNextPage":false},"nodes":[
+    \\{"id":"PRR_mine","state":"PENDING","author":{"login":"ctdio"},"body":"","submittedAt":null}
+    \\]},
+    \\"reviewThreads":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]}
     \\}}}}
 ;
 
@@ -2385,19 +2686,6 @@ test "startRefetch: no-op when session is inactive" {
     defer deinitState(&session, testing.allocator);
     try startRefetch(&session, testing.allocator);
     try testing.expect(!session.entry_in_flight);
-}
-
-test "startEnterPr: no-op while a fetch is already in flight" {
-    var session = ReviewSession{};
-    defer deinitState(&session, testing.allocator);
-    // Simulate an in-flight fetch without spawning a real IO worker.
-    session.entry_in_flight = true;
-    try startEnterPr(&session, testing.allocator, .{ .number = 5, .base_ref = "main" });
-    try testing.expect(session.entry_thread == null);
-    try testing.expectEqual(@as(u32, 0), session.entering_number);
-    try testing.expectEqualStrings("", session.entering_base_ref);
-    // Reset so deinitState doesn't wait on a nonexistent worker.
-    session.entry_in_flight = false;
 }
 
 test "applyFetchedData: thread with zero comments copies cleanly" {
@@ -3201,6 +3489,693 @@ test "discard confirm: arm then disarm toggles the flag" {
     try testing.expect(discardArmed(&session));
     disarmDiscardConfirm(&session);
     try testing.expect(!discardArmed(&session));
+}
+
+// --- Review-session isolation (PR switch) ------------------------------------
+
+const create_review_fixture =
+    \\{"data":{"addPullRequestReview":{"pullRequestReview":{"id":"PRR_FAKE","state":"PENDING"}}}}
+;
+const created_thread_fixture =
+    \\{"data":{"addPullRequestReviewThread":{"thread":{"id":"PRRT_new","isResolved":false,"isOutdated":false,"line":10,"startLine":null,"originalLine":10,"diffSide":"RIGHT","startDiffSide":null,"path":"src/x.zig","subjectType":"LINE","comments":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PRRC_new","databaseId":5,"author":{"login":"ctdio"},"body":"on A","createdAt":"2026-07-04T23:02:51Z","diffHunk":"@@ -1 +1 @@","pullRequestReview":{"id":"PRR_FAKE","state":"PENDING"},"replyTo":null}]}}}}}
+;
+
+// The fakes dispatch on the `-f`/`-F` variable names github.zig sends. Any
+// call that is not expected exits 1, which logs at .err and fails the test.
+const fake_gh_script =
+    \\#!/bin/sh
+    \\d=$(dirname "$0")
+    \\echo "$*" >> "$d/gh.log"
+    \\case "$*" in
+    \\  *number=42*) cat "$d/review-42.json" ;;
+    \\  *number=7*)  cat "$d/review-7.json" ;;
+    \\  *prId=*)     cat "$d/create-review.json" ;;
+    \\  *rid=*)      cat "$d/add-thread.json" ;;
+    \\  *tid=*)      cat "$d/reply.json" ;;
+    \\  *) echo "unknown fake gh call" >&2; exit 1 ;;
+    \\esac
+    \\
+;
+const fake_git_script =
+    \\#!/bin/sh
+    \\case "$1" in
+    \\  fetch) exit 0 ;;
+    \\  config) echo https://github.com/fake/repo.git ;;
+    \\  *) exit 1 ;;
+    \\esac
+    \\
+;
+
+test "resetForSwitch: clears per-PR state and bumps generation" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    stashFailedDraft(&session, a, "failed draft");
+    stashSubmitBody(&session, a, "half a review");
+    setSubmitError(&session, a, "boom");
+    session.submit.verdict = .approve;
+    session.submit.confirm_discard = true;
+    session.comment_target = .local;
+    armDeleteConfirm(&session, a, "PRRT_1");
+    try toggleThreadExpanded(&session, a, 0);
+    const anchored = try a.alloc(AnchoredThread, 1);
+    anchored[0] = .{ .thread_idx = 0, .placement = .unplaced };
+    setAnchored(&session, a, anchored, 1);
+    session.info_scroll = 5;
+    session.data_unavailable = true;
+    setReviewId(&session, a, "PRR_A");
+    _ = try appendPlaceholder(&session, a, samplePost("posting on A"));
+
+    resetForSwitch(&session, a);
+
+    try testing.expectEqual(@as(u64, 1), session.generation);
+    try testing.expect(!isActive(&session));
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+    try testing.expectEqual(@as(usize, 0), session.anchored.len);
+    try testing.expectEqual(@as(usize, 0), session.unplaced_count);
+    try testing.expectEqual(@as(usize, 0), session.expanded_threads.count());
+    try testing.expect(deleteConfirmArmed(&session) == null);
+    try testing.expect(peekFailedDraft(&session) == null);
+    try testing.expect(submitBodyStash(&session) == null);
+    try testing.expect(submitError(&session) == null);
+    try testing.expectEqual(Verdict.comment, session.submit.verdict);
+    try testing.expect(!session.submit.confirm_discard);
+    try testing.expectEqual(CommentTarget.github, session.comment_target);
+    try testing.expectEqual(@as(usize, 0), session.info_scroll);
+    try testing.expect(!session.data_unavailable);
+    try testing.expect(currentReviewId(&session) == null);
+    try testing.expectEqualStrings("", session.pr_node_id);
+    try testing.expectEqualStrings("", session.title);
+    try testing.expectEqual(@as(u32, 0), session.number);
+}
+
+test "resetForSwitch: keeps queued posts and thread mutations" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+    session.posting_worker_active = true;
+    session.thread_mut_active = true;
+    try startPostThread(&session, a, samplePost("queued on A"));
+    try testing.expect(try startReply(&session, a, 0, "queued reply on A"));
+
+    resetForSwitch(&session, a);
+
+    try testing.expectEqual(@as(usize, 1), session.queued_posts.items.len);
+    try testing.expectEqual(@as(usize, 1), session.queued_thread_mutations.items.len);
+    session.posting_worker_active = false;
+    session.thread_mut_active = false;
+}
+
+test "review_controller: startEnterPr while in flight enters latest" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{
+        .{ .name = "review-42.json", .bytes = canned_payload },
+        .{ .name = "review-7.json", .bytes = second_payload },
+    });
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+
+    try startEnterPr(&session, a, .{ .number = 42, .base_ref = "main" });
+    try startEnterPr(&session, a, .{ .number = 7, .base_ref = "develop" });
+    try testing.expectEqual(@as(u32, 7), session.next_entry.?.number);
+
+    try waitReady(&session.entry.ready);
+    try testing.expect(pollPending(&session, a) == .none);
+    try testing.expect(session.entry_in_flight);
+    try testing.expect(session.next_entry == null);
+
+    try waitReady(&session.entry.ready);
+    const outcome = pollPending(&session, a);
+    try testing.expect(outcome == .entered);
+    defer a.free(outcome.entered.head_ref);
+    defer a.free(outcome.entered.base_ref);
+    try testing.expectEqualStrings("refs/skim/pr-7", outcome.entered.head_ref);
+    try testing.expectEqualStrings("develop", outcome.entered.base_ref);
+    try testing.expect(outcome.entered.gh_error == null);
+    try testing.expectEqual(@as(u32, 7), session.number);
+    try testing.expectEqualStrings("Second", session.title);
+
+    const log = try fakes.ghLog();
+    defer a.free(log);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, log, "number=42"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, log, "number=7"));
+}
+
+test "review_controller: stale-generation entry result discarded" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+
+    session.entry_in_flight = true;
+    session.pending_kind = .enter;
+    session.entry.generation = 0;
+    resetForSwitch(&session, a);
+
+    session.entry.git_ok = true;
+    session.entry.fetched_head_ref = try ca.dupe(u8, "refs/skim/pr-42");
+    session.entry.fetched_base_ref = try ca.dupe(u8, "main");
+    session.entry.gh_ok = true;
+    session.entry.raw_json = try ca.dupe(u8, canned_payload);
+    session.entry.ready.store(true, .release);
+
+    try testing.expect(pollPending(&session, a) == .none);
+    try testing.expect(!isActive(&session));
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+    try testing.expect(!session.entry_in_flight);
+    try testing.expect(session.entry.raw_json == null);
+}
+
+test "startEnterPr: a third request replaces a parked one without leaking" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    session.entry_in_flight = true;
+
+    try startEnterPr(&session, a, .{ .number = 7, .base_ref = "develop", .title = "Seven", .url = "u7" });
+    try startEnterPr(&session, a, .{ .number = 9, .base_ref = "main", .title = "Nine", .url = "u9" });
+
+    try testing.expectEqual(@as(u32, 9), session.next_entry.?.number);
+    try testing.expectEqualStrings("main", session.next_entry.?.base_ref);
+    try testing.expectEqual(@as(u64, 2), session.generation);
+    session.entry_in_flight = false;
+}
+
+test "startEnterPr: a parked entry keeps only what beginEntry reads" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    session.entry_in_flight = true;
+
+    try startEnterPr(&session, a, .{ .number = 7, .base_ref = "develop", .title = "Seven", .url = "u7" });
+
+    try testing.expectEqualStrings("", session.next_entry.?.title);
+    try testing.expectEqualStrings("", session.next_entry.?.url);
+    session.entry_in_flight = false;
+}
+
+test "pollPending: a parked entry that cannot start reports start_failed" {
+    const ca = std.heap.c_allocator;
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{ .fail_index = 1 });
+    const a = failing.allocator();
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+
+    session.entry_in_flight = true;
+    session.pending_kind = .enter;
+    session.entry.generation = 0;
+    try startEnterPr(&session, a, .{ .number = 7, .base_ref = "develop" });
+
+    session.entry.git_ok = true;
+    session.entry.fetched_head_ref = try ca.dupe(u8, "refs/skim/pr-42");
+    session.entry.ready.store(true, .release);
+
+    try testing.expect(pollPending(&session, a) == .start_failed);
+    try testing.expect(!session.entry_in_flight);
+    try testing.expect(session.next_entry == null);
+}
+
+test "leaveSurface: an in-flight entry is discarded and the parked one never starts" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.entry_in_flight = true;
+    session.pending_kind = .enter;
+    session.entry.generation = session.generation;
+    try startEnterPr(&session, a, .{ .number = 7, .base_ref = "develop" });
+
+    try testing.expect(leaveSurface(&session, a));
+
+    try testing.expect(session.next_entry == null);
+    session.entry.git_ok = true;
+    session.entry.fetched_head_ref = try ca.dupe(u8, "refs/skim/pr-42");
+    session.entry.fetched_base_ref = try ca.dupe(u8, "main");
+    session.entry.ready.store(true, .release);
+    try testing.expect(pollPending(&session, a) == .none);
+    try testing.expect(!session.entry_in_flight);
+    try testing.expect(!isActive(&session));
+}
+
+test "leaveSurface: drops the active session's review data" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    try testing.expect(!leaveSurface(&session, a));
+
+    try testing.expect(!isActive(&session));
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+    try testing.expectEqual(@as(u64, 1), session.generation);
+}
+
+test "setReviewId: hands the id to the current PR's queued posts that have none" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+    session.posting_worker_active = true;
+    try startPostThread(&session, a, samplePost("queued on the current PR"));
+    try testing.expect(session.queued_posts.items[0].review_id == null);
+
+    setReviewId(&session, a, "PRR_learned");
+
+    try testing.expectEqualStrings("PRR_learned", session.queued_posts.items[0].review_id.?);
+    session.posting_worker_active = false;
+}
+
+test "setReviewId: leaves a previous PR's queued posts alone" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+    session.posting_worker_active = true;
+    try startPostThread(&session, a, samplePost("queued on A"));
+    resetForSwitch(&session, a);
+    try applyPayload(&session, second_payload);
+
+    setReviewId(&session, a, "PRR_B");
+
+    try testing.expect(session.queued_posts.items[0].review_id == null);
+    session.posting_worker_active = false;
+}
+
+test "applyFetchedData: a refetched pending review id reaches queued posts" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+    session.posting_worker_active = true;
+    try startPostThread(&session, a, samplePost("queued before the refetch"));
+
+    try applyPayload(&session, pending_review_payload);
+
+    try testing.expectEqualStrings("PRR_mine", session.queued_posts.items[0].review_id.?);
+    session.posting_worker_active = false;
+}
+
+test "review_controller: gh failure on switch clears previous threads" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    resetForSwitch(&session, a);
+    session.pending_kind = .enter;
+    session.entering_number = 7;
+    session.entry_in_flight = true;
+    session.entry.generation = session.generation;
+    session.entry.git_ok = true;
+    session.entry.fetched_head_ref = try ca.dupe(u8, "refs/skim/pr-7");
+    session.entry.fetched_base_ref = try ca.dupe(u8, "develop");
+    session.entry.gh_ok = false;
+    session.entry.gh_kind = .network;
+    session.entry.ready.store(true, .release);
+
+    const outcome = pollPending(&session, a);
+    try testing.expect(outcome == .entered);
+    defer a.free(outcome.entered.head_ref);
+    defer a.free(outcome.entered.base_ref);
+    try testing.expectEqual(github.GhErrorKind.network, outcome.entered.gh_error.?);
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+    try testing.expectEqualStrings("", session.title);
+    try testing.expectEqualStrings("", session.pr_node_id);
+    try testing.expectEqual(@as(u32, 7), session.number);
+    try testing.expect(session.data_unavailable);
+}
+
+test "startRefetch: a refetch superseded by a switch is discarded" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{.{ .name = "review-7.json", .bytes = second_payload }});
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    // A refetch of #42 in flight (no worker spawned), stamped before the switch.
+    session.entry_in_flight = true;
+    session.pending_kind = .refetch;
+    session.entering_number = 42;
+    session.entry.generation = session.generation;
+    try startEnterPr(&session, a, .{ .number = 7, .base_ref = "develop" });
+
+    session.entry.gh_ok = true;
+    session.entry.raw_json = try ca.dupe(u8, canned_payload);
+    session.entry.ready.store(true, .release);
+
+    try testing.expect(pollPending(&session, a) == .none);
+    try testing.expect(!isActive(&session));
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+
+    // The parked #7 entry started once the refetch was joined.
+    try waitReady(&session.entry.ready);
+    const outcome = pollPending(&session, a);
+    try testing.expect(outcome == .entered);
+    defer a.free(outcome.entered.head_ref);
+    defer a.free(outcome.entered.base_ref);
+    try testing.expectEqual(@as(u32, 7), session.number);
+}
+
+test "review_controller: queued post binds pr_node_id at enqueue" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{
+        .{ .name = "create-review.json", .bytes = create_review_fixture },
+        .{ .name = "add-thread.json", .bytes = created_thread_fixture },
+    });
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.posting_worker_active = true;
+    try startPostThread(&session, a, samplePost("on A"));
+    try testing.expect(session.queued_posts.items[0].review_id == null);
+
+    resetForSwitch(&session, a);
+    try applyPayload(&session, second_payload);
+
+    session.mutation.generation = 0;
+    session.mutation.failed = false;
+    session.mutation.ready.store(true, .release);
+    try testing.expect(pollMutations(&session, a) == .none);
+    try testing.expectEqual(@as(usize, 0), session.queued_posts.items.len);
+
+    try waitReady(&session.mutation.ready);
+    try testing.expect(pollMutations(&session, a) == .none);
+
+    const log = try fakes.ghLog();
+    defer a.free(log);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, log, "prId=PR_1"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, log, "oid=abc123"));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, log, "PR_2"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, log, "rid=PRR_FAKE"));
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+    try testing.expect(session.posted_review_id == null);
+    try testing.expect(peekFailedDraft(&session) == null);
+}
+
+test "pollMutations: a stale created review id fills A's queued posts, never B" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{
+        .{ .name = "create-review.json", .bytes = create_review_fixture },
+        .{ .name = "add-thread.json", .bytes = created_thread_fixture },
+    });
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.posting_worker_active = true;
+    try startPostThread(&session, a, samplePost("second on A"));
+
+    resetForSwitch(&session, a);
+    try applyPayload(&session, second_payload);
+
+    // A's first post created PRR_A, and its result lands after the switch.
+    session.mutation.generation = 0;
+    session.mutation.failed = false;
+    session.mutation.in_pr_node_id = try ca.dupe(u8, "PR_1");
+    session.mutation.out_review_id = try ca.dupe(u8, "PRR_A");
+    session.mutation.ready.store(true, .release);
+    try testing.expect(pollMutations(&session, a) == .none);
+    try testing.expect(session.posted_review_id == null);
+
+    try waitReady(&session.mutation.ready);
+    try testing.expect(pollMutations(&session, a) == .none);
+
+    const log = try fakes.ghLog();
+    defer a.free(log);
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, log, "prId="));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, log, "rid=PRR_A"));
+    try testing.expect(session.posted_review_id == null);
+    try testing.expect(currentReviewId(&session) == null);
+}
+
+test "pollMutations: A→B→A — a stale create on A fills the second visit's queued post" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{
+        .{ .name = "create-review.json", .bytes = create_review_fixture },
+        .{ .name = "add-thread.json", .bytes = created_thread_fixture },
+    });
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    // A's first post is creating the pending review while the user goes to B
+    // and back to A, then comments again.
+    session.posting_worker_active = true;
+    resetForSwitch(&session, a);
+    try applyPayload(&session, second_payload);
+    resetForSwitch(&session, a);
+    try applyPayload(&session, canned_payload);
+    try startPostThread(&session, a, samplePost("second visit on A"));
+    try testing.expect(session.queued_posts.items[0].review_id == null);
+
+    session.mutation.generation = 0;
+    session.mutation.failed = false;
+    session.mutation.in_pr_node_id = try ca.dupe(u8, "PR_1");
+    session.mutation.out_review_id = try ca.dupe(u8, "PRR_A");
+    session.mutation.ready.store(true, .release);
+    try testing.expect(pollMutations(&session, a) == .none);
+
+    try waitReady(&session.mutation.ready);
+    try testing.expect(pollMutations(&session, a) == .posted);
+
+    const log = try fakes.ghLog();
+    defer a.free(log);
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, log, "prId="));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, log, "rid=PRR_A"));
+}
+
+test "pollMutations: A→B→A — a stale create on A becomes the second visit's review id" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.posting_worker_active = true;
+    resetForSwitch(&session, a);
+    try applyPayload(&session, second_payload);
+    resetForSwitch(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.mutation.generation = 0;
+    session.mutation.failed = false;
+    session.mutation.in_pr_node_id = try ca.dupe(u8, "PR_1");
+    session.mutation.out_review_id = try ca.dupe(u8, "PRR_A");
+    session.mutation.ready.store(true, .release);
+    try testing.expect(pollMutations(&session, a) == .none);
+
+    try testing.expectEqualStrings("PRR_A", currentReviewId(&session).?);
+    // The stale post's thread is not grafted onto the new visit; a refetch brings it.
+    try testing.expectEqual(@as(usize, 1), session.threads.items.len);
+}
+
+test "pollMutations: a stale failed post reports stale_failed without stashing" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.mutation.generation = 0;
+    session.mutation.failed = true;
+    session.mutation.fail_kind = .network;
+    session.mutation.in_body = try ca.dupe(u8, "on A");
+    session.posting_worker_active = true;
+    resetForSwitch(&session, a);
+    try applyPayload(&session, second_payload);
+
+    session.mutation.ready.store(true, .release);
+    const outcome = pollMutations(&session, a);
+    try testing.expect(outcome == .stale_failed);
+    try testing.expectEqual(github.GhErrorKind.network, outcome.stale_failed);
+    try testing.expect(peekFailedDraft(&session) == null);
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+    try testing.expect(!session.posting_worker_active);
+}
+
+test "pollThreadMutations: stale reply is neither applied nor stashed" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.thread_mutation.kind = .reply;
+    session.thread_mutation.in_thread_id = try ca.dupe(u8, "PRRT_1");
+    session.thread_mutation.in_body = try ca.dupe(u8, "hi");
+    session.thread_mutation.failed = true;
+    session.thread_mutation.fail_kind = .network;
+    session.thread_mutation.generation = 0;
+    session.thread_mut_active = true;
+    resetForSwitch(&session, a);
+    // The next PR also has a PRRT_1: the node id is not what guards the apply.
+    try applyPayload(&session, canned_payload);
+
+    session.thread_mutation.ready.store(true, .release);
+    try testing.expect(pollThreadMutations(&session, a) == .none);
+    try testing.expect(peekFailedDraft(&session) == null);
+    try testing.expectEqual(@as(usize, 1), session.threads.items[0].data.comments.len);
+    try testing.expect(!session.thread_mut_active);
+}
+
+test "pollThreadMutations: a stale successful reply is not applied to the next PR" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.thread_mutation.kind = .reply;
+    session.thread_mutation.in_thread_id = try ca.dupe(u8, "PRRT_1");
+    session.thread_mutation.in_body = try ca.dupe(u8, "my reply");
+    session.thread_mutation.out_raw = try ca.dupe(u8, reply_fixture);
+    session.thread_mutation.generation = 0;
+    session.thread_mut_active = true;
+    resetForSwitch(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.thread_mutation.ready.store(true, .release);
+    try testing.expect(pollThreadMutations(&session, a) == .none);
+    try testing.expectEqual(@as(usize, 1), session.threads.items[0].data.comments.len);
+}
+
+test "drainThreadQueue: a queued mutation keeps its own generation" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{.{ .name = "reply.json", .bytes = reply_fixture }});
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.thread_mut_active = true;
+    try testing.expect(try startReply(&session, a, 0, "queued"));
+
+    session.thread_mutation.kind = .resolve;
+    session.thread_mutation.in_thread_id = try ca.dupe(u8, "PRRT_1");
+    session.thread_mutation.generation = 0;
+    session.thread_mutation.out_raw = try ca.dupe(u8, resolve_fixture);
+    resetForSwitch(&session, a);
+    try applyPayload(&session, second_payload);
+
+    session.thread_mutation.ready.store(true, .release);
+    try testing.expect(pollThreadMutations(&session, a) == .none);
+    try testing.expectEqual(@as(u64, 0), session.thread_mutation.generation);
+    try testing.expect(session.thread_mut_active);
+
+    try waitReady(&session.thread_mutation.ready);
+    try testing.expect(pollThreadMutations(&session, a) == .none);
+
+    const log = try fakes.ghLog();
+    defer a.free(log);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, log, "tid=PRRT_1"));
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+    try testing.expect(peekFailedDraft(&session) == null);
+}
+
+test "pollSubmit: stale submit result does not touch the new PR" {
+    const ca = std.heap.c_allocator;
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+
+    session.submit_mutation.kind = .submit;
+    session.submit_mutation.out_review_id = try ca.dupe(u8, "PRR_A");
+    session.submit_mutation.out_error_msg = try ca.dupe(u8, "boom");
+    session.submit_mutation.in_body = try ca.dupe(u8, "review body");
+    session.submit_mutation.failed = true;
+    session.submit_mutation.generation = 0;
+    session.submit_in_flight = true;
+    resetForSwitch(&session, a);
+    try applyPayload(&session, second_payload);
+    session.submit.submitting = true;
+
+    session.submit_mutation.ready.store(true, .release);
+    try testing.expect(pollSubmit(&session, a) == .none);
+    try testing.expect(session.posted_review_id == null);
+    try testing.expect(submitError(&session) == null);
+    try testing.expect(session.submit.submitting);
+    try testing.expect(!session.submit_in_flight);
+}
+
+/// Fake `gh` and `git` executables in a temp dir for one test. The REAL
+/// workers spawn them through ReviewSession.gh_bin / git_bin.
+const FakeBins = struct {
+    tmp: testing.TmpDir,
+    dir: []u8,
+    gh: []u8,
+    git: []u8,
+
+    /// Writes the `gh`/`git` scripts (executable) plus each fixture file.
+    fn init(files: []const FakeFile) !FakeBins {
+        const a = testing.allocator;
+        const io = skim_io.get();
+        var tmp = testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.writeFile(io, .{ .sub_path = "gh", .data = fake_gh_script, .flags = .{ .permissions = .executable_file } });
+        try tmp.dir.writeFile(io, .{ .sub_path = "git", .data = fake_git_script, .flags = .{ .permissions = .executable_file } });
+        for (files) |file| try tmp.dir.writeFile(io, .{ .sub_path = file.name, .data = file.bytes });
+
+        const relative = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        defer a.free(relative);
+        const dir = try skim_io.absolutePathAlloc(a, relative);
+        errdefer a.free(dir);
+        const gh = try std.fmt.allocPrint(a, "{s}/gh", .{dir});
+        errdefer a.free(gh);
+        const git = try std.fmt.allocPrint(a, "{s}/git", .{dir});
+        return .{ .tmp = tmp, .dir = dir, .gh = gh, .git = git };
+    }
+
+    fn deinit(self: *FakeBins) void {
+        testing.allocator.free(self.git);
+        testing.allocator.free(self.gh);
+        testing.allocator.free(self.dir);
+        self.tmp.cleanup();
+    }
+
+    /// Every argv the fake gh received. Entries span several lines (the query
+    /// argument has newlines), so count markers, not lines. Caller frees.
+    fn ghLog(self: *FakeBins) ![]u8 {
+        return self.tmp.dir.readFileAlloc(skim_io.get(), "gh.log", testing.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => testing.allocator.dupe(u8, ""),
+            else => err,
+        };
+    }
+};
+
+const FakeFile = struct { name: []const u8, bytes: []const u8 };
+
+/// Spin until `ready` is set, bounded at 5s so a test never hangs (a subprocess
+/// spawn under a loaded test run can take a while).
+fn waitReady(ready: *std.atomic.Value(bool)) !void {
+    var waited_ms: usize = 0;
+    while (!ready.load(.acquire)) : (waited_ms += 1) {
+        if (waited_ms >= 5000) return error.Timeout;
+        skim_io.sleep(std.time.ns_per_ms);
+    }
+}
+
+/// Apply `payload` through the real parse + applyFetchedData path.
+fn applyPayload(session: *ReviewSession, payload: []const u8) !void {
+    var data = try review_parse.parsePrDetails(testing.allocator, payload);
+    defer data.deinit();
+    try applyFetchedData(session, testing.allocator, &data);
 }
 
 fn samplePost(body: []const u8) PostParams {

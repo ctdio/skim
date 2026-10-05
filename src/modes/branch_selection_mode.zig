@@ -103,34 +103,25 @@ pub fn handleKey(app: *App, key: vaxis.Key) !void {
 
             const filtered_idx = app.state.branch_select.filtered.items[app.state.branch_select.selection];
             const selected_branch = app.state.branch_select.list[filtered_idx];
-            const branch_copy = try app.allocator.dupe(u8, selected_branch);
-            errdefer app.allocator.free(branch_copy);
+            const new_source = blk: {
+                const branch_copy = try app.allocator.dupe(u8, selected_branch);
+                errdefer app.allocator.free(branch_copy);
+                const head = try app.allocator.dupe(u8, "HEAD");
+                break :blk DiffSource{ .two_refs = .{
+                    .ref1 = branch_copy,
+                    .ref2 = head,
+                    .use_merge_base = true,
+                } };
+            };
 
-            const head = try app.allocator.dupe(u8, "HEAD");
-            errdefer app.allocator.free(head);
-
-            // Free old diff_source if needed
-            switch (app.state.diff_source) {
-                .working_dir, .stdin => {},
-                .single_ref => |sr| {
-                    app.allocator.free(sr.ref);
-                },
-                .two_refs => |tr| {
-                    app.allocator.free(tr.ref1);
-                    app.allocator.free(tr.ref2);
-                },
-            }
-
-            // Set up new diff source
-            app.state.diff_source = DiffSource{ .two_refs = .{
-                .ref1 = branch_copy,
-                .ref2 = head,
-                .use_merge_base = true,
-            } };
+            const old_source = app.state.diff_source;
+            defer git.freeDiffSource(app.allocator, old_source);
+            app.state.diff_source = new_source;
 
             // Go back to normal mode and refresh
             app.state.pager_mode = false;
             app.mode = .normal;
+            app.leavePrSurface();
             try app.refresh();
         },
         else => {

@@ -22,6 +22,7 @@ const async_highlight = @import("async.zig");
 const LineMap = line_map_mod.LineMap;
 const StateHelpers = state_helpers.StateHelpers;
 const HighlightWorker = async_highlight.HighlightWorker;
+const HighlightJob = async_highlight.HighlightJob;
 const HighlightResult = async_highlight.HighlightResult;
 
 pub const HunkKey = struct {
@@ -54,6 +55,14 @@ pub const ApplyParams = struct {
     current_file_idx: usize,
 };
 
+/// A job abandoned by `resetForNewDiff` whose bytes the worker may still be
+/// reading. Freed when its (stale) result lands or `takeQueuedBefore` returns it.
+const RetiredJob = struct {
+    generation: u64,
+    key: HunkKey,
+    job: PendingJob,
+};
+
 /// Hunks handed to the worker in one pass. Enough to cover a screen without
 /// burying it under a backlog the next keystroke invalidates.
 const max_hunks_per_pass: usize = 8;
@@ -62,6 +71,10 @@ pub const HighlightScheduler = struct {
     allocator: std.mem.Allocator,
     worker: ?*HighlightWorker = null,
     pending: std.AutoHashMap(HunkKey, PendingJob),
+    // Bumped by `resetForNewDiff`; stamped on every submitted job so a result
+    // for a previous diff is recognised and never applied.
+    generation: u64 = 0,
+    retired: std.ArrayList(RetiredJob) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) HighlightScheduler {
         return .{
@@ -86,6 +99,43 @@ pub const HighlightScheduler = struct {
         var iter = self.pending.iterator();
         while (iter.next()) |entry| self.freeJob(entry.value_ptr.*);
         self.pending.deinit();
+        for (self.retired.items) |retired| self.freeJob(retired.job);
+        self.retired.deinit(self.allocator);
+    }
+
+    /// Abandon every in-flight job: the next diff's hunks share `HunkKey`s with
+    /// the old diff's, so a late result must never be applied (or allowed to
+    /// free the new diff's pending job). Call before replacing `files`.
+    pub fn resetForNewDiff(self: *HighlightScheduler) void {
+        const worker = self.worker orelse {
+            var iter = self.pending.iterator();
+            while (iter.next()) |entry| self.freeJob(entry.value_ptr.*);
+            self.pending.clearRetainingCapacity();
+            self.generation += 1;
+            return;
+        };
+
+        var iter = self.pending.iterator();
+        while (iter.next()) |entry| {
+            // On OOM the job is leaked: the worker may still be reading it.
+            self.retired.append(self.allocator, .{
+                .generation = self.generation,
+                .key = entry.key_ptr.*,
+                .job = entry.value_ptr.*,
+            }) catch {};
+        }
+        self.pending.clearRetainingCapacity();
+        self.generation += 1;
+
+        var dropped: std.ArrayList(HighlightJob) = .empty;
+        defer dropped.deinit(worker.allocator);
+        worker.takeQueuedBefore(self.generation, &dropped) catch {};
+        for (dropped.items) |job| {
+            self.releaseRetired(.{
+                .generation = job.generation,
+                .key = .{ .file_idx = job.file_idx, .hunk_idx = job.hunk_idx },
+            });
+        }
     }
 
     pub fn pendingCount(self: *const HighlightScheduler) usize {
@@ -105,6 +155,11 @@ pub const HighlightScheduler = struct {
         var needs_render = false;
         for (results.items) |result| {
             const key = HunkKey{ .file_idx = result.file_idx, .hunk_idx = result.hunk_idx };
+            if (result.generation != self.generation) {
+                self.releaseRetired(.{ .generation = result.generation, .key = key });
+                freeResult(worker, result);
+                continue;
+            }
             if (self.pending.fetchRemove(key)) |entry| self.freeJob(entry.value);
 
             const hunk = hunkAt(params.files, key) orelse {
@@ -196,6 +251,7 @@ pub const HighlightScheduler = struct {
             .old_content = old_content,
             .file_idx = params.key.file_idx,
             .hunk_idx = params.key.hunk_idx,
+            .generation = self.generation,
         }) catch {
             if (self.pending.fetchRemove(params.key)) |entry| self.freeJob(entry.value);
             return false;
@@ -208,6 +264,16 @@ pub const HighlightScheduler = struct {
         self.allocator.free(job.file_path);
         self.allocator.free(job.content);
         self.allocator.free(job.old_content);
+    }
+
+    fn releaseRetired(self: *HighlightScheduler, params: struct { generation: u64, key: HunkKey }) void {
+        for (self.retired.items, 0..) |retired, idx| {
+            if (retired.generation != params.generation) continue;
+            if (retired.key.file_idx != params.key.file_idx or retired.key.hunk_idx != params.key.hunk_idx) continue;
+            self.freeJob(retired.job);
+            _ = self.retired.swapRemove(idx);
+            return;
+        }
     }
 };
 
@@ -225,6 +291,7 @@ fn freeResult(worker: *HighlightWorker, result: HighlightResult) void {
 
 const testing = std.testing;
 const comments = @import("../comments/store.zig");
+const skim_io = @import("skim_io");
 
 /// Parses `diff_text` into the pieces `submitVisible` needs. Caller deinits both.
 fn testDiff(allocator: std.mem.Allocator, diff_text: []const u8) !struct {
@@ -298,4 +365,217 @@ test "submitVisible does not queue a hunk twice while its job is in flight" {
 
     _ = scheduler.submitVisible(params);
     try testing.expectEqual(@as(usize, 0), scheduler.submitVisible(params));
+}
+
+test "scheduler: resetForNewDiff drops pending and stale results" {
+    const allocator = testing.allocator;
+    var fixture = try testDiff(allocator, two_hunk_diff);
+    defer {
+        for (fixture.files) |*file| file.deinit(allocator);
+        allocator.free(fixture.files);
+        fixture.store.deinit();
+        allocator.destroy(fixture.store);
+        fixture.map.deinit();
+    }
+
+    var scheduler = HighlightScheduler.init(allocator);
+    defer scheduler.deinit();
+
+    _ = scheduler.submitVisible(.{
+        .files = fixture.files,
+        .line_map = &fixture.map,
+        .viewport = .{ .scroll_offset = 0, .height = 40 },
+    });
+    try testing.expectEqual(@as(usize, 2), scheduler.pendingCount());
+
+    scheduler.resetForNewDiff();
+
+    try testing.expectEqual(@as(usize, 0), scheduler.pendingCount());
+    try testing.expectEqual(@as(u64, 1), scheduler.generation);
+}
+
+test "scheduler: a stale result never frees the new diff's pending job" {
+    const allocator = testing.allocator;
+    var fixture = try testDiff(allocator, two_hunk_diff);
+    defer {
+        for (fixture.files) |*file| file.deinit(allocator);
+        allocator.free(fixture.files);
+        fixture.store.deinit();
+        allocator.destroy(fixture.store);
+        fixture.map.deinit();
+    }
+
+    var scheduler = HighlightScheduler.init(allocator);
+    defer scheduler.deinit();
+    scheduler.worker = try HighlightWorker.init(allocator);
+
+    scheduler.resetForNewDiff();
+
+    // The new diff's job for {0,0}, put straight into `pending` so the worker
+    // never sees it and cannot race the assertions below.
+    const key = HunkKey{ .file_idx = 0, .hunk_idx = 0 };
+    try scheduler.pending.put(key, try testJob(allocator));
+
+    const worker = scheduler.worker.?;
+    worker.mutex.lockUncancelable(skim_io.get());
+    try worker.result_queue.append(allocator, .{
+        .file_idx = 0,
+        .hunk_idx = 0,
+        .highlights = null,
+        .old_highlights = null,
+        .failed = true,
+        .generation = 0,
+    });
+    worker.mutex.unlock(skim_io.get());
+
+    _ = scheduler.applyResults(.{ .files = fixture.files, .current_file_idx = 0 });
+
+    try testing.expect(scheduler.pending.contains(key));
+    try testing.expect(fixture.files[0].hunks[0].highlights == null);
+}
+
+test "scheduler: resetForNewDiff without a worker frees pending directly" {
+    const allocator = testing.allocator;
+    var scheduler = HighlightScheduler.init(allocator);
+    defer scheduler.deinit();
+
+    try scheduler.pending.put(.{ .file_idx = 0, .hunk_idx = 0 }, try testJob(allocator));
+    scheduler.resetForNewDiff();
+
+    try testing.expectEqual(@as(usize, 0), scheduler.pendingCount());
+    try testing.expectEqual(@as(usize, 0), scheduler.retired.items.len);
+}
+
+test "scheduler: a stale result frees the retired job it belonged to" {
+    const allocator = testing.allocator;
+    var fixture = try testDiff(allocator, two_hunk_diff);
+    defer {
+        for (fixture.files) |*file| file.deinit(allocator);
+        allocator.free(fixture.files);
+        fixture.store.deinit();
+        allocator.destroy(fixture.store);
+        fixture.map.deinit();
+    }
+
+    var worker = idleWorker(allocator);
+    defer worker.job_queue.deinit(allocator);
+    defer worker.result_queue.deinit(allocator);
+
+    var scheduler = HighlightScheduler.init(allocator);
+    defer scheduler.deinitWithoutWorker();
+    scheduler.worker = &worker;
+
+    // Already dequeued by the worker (not in job_queue), so resetForNewDiff
+    // must keep its bytes alive until the result lands.
+    const key = HunkKey{ .file_idx = 0, .hunk_idx = 0 };
+    try scheduler.pending.put(key, try testJob(allocator));
+    scheduler.resetForNewDiff();
+    try testing.expectEqual(@as(usize, 1), scheduler.retired.items.len);
+
+    try worker.result_queue.append(allocator, .{
+        .file_idx = 0,
+        .hunk_idx = 0,
+        .highlights = null,
+        .old_highlights = null,
+        .failed = true,
+        .generation = 0,
+    });
+    _ = scheduler.applyResults(.{ .files = fixture.files, .current_file_idx = 0 });
+
+    try testing.expectEqual(@as(usize, 0), scheduler.retired.items.len);
+}
+
+test "scheduler: resetForNewDiff frees jobs the worker has not started" {
+    const allocator = testing.allocator;
+    var fixture = try testDiff(allocator, two_hunk_diff);
+    defer {
+        for (fixture.files) |*file| file.deinit(allocator);
+        allocator.free(fixture.files);
+        fixture.store.deinit();
+        allocator.destroy(fixture.store);
+        fixture.map.deinit();
+    }
+
+    var worker = idleWorker(allocator);
+    defer worker.job_queue.deinit(allocator);
+    defer worker.result_queue.deinit(allocator);
+
+    var scheduler = HighlightScheduler.init(allocator);
+    defer scheduler.deinitWithoutWorker();
+    scheduler.worker = &worker;
+
+    _ = scheduler.submitVisible(.{
+        .files = fixture.files,
+        .line_map = &fixture.map,
+        .viewport = .{ .scroll_offset = 0, .height = 40 },
+    });
+    try testing.expectEqual(@as(usize, 2), worker.job_queue.items.len);
+
+    scheduler.resetForNewDiff();
+
+    try testing.expectEqual(@as(usize, 0), worker.job_queue.items.len);
+    try testing.expectEqual(@as(usize, 0), scheduler.retired.items.len);
+}
+
+test "scheduler: a result submitted after resetForNewDiff still applies" {
+    const allocator = testing.allocator;
+    var fixture = try testDiff(allocator, two_hunk_diff);
+    defer {
+        for (fixture.files) |*file| file.deinit(allocator);
+        allocator.free(fixture.files);
+        fixture.store.deinit();
+        allocator.destroy(fixture.store);
+        fixture.map.deinit();
+    }
+
+    var worker = idleWorker(allocator);
+    defer worker.job_queue.deinit(allocator);
+    defer worker.result_queue.deinit(allocator);
+
+    var scheduler = HighlightScheduler.init(allocator);
+    defer scheduler.deinitWithoutWorker();
+    scheduler.worker = &worker;
+
+    scheduler.resetForNewDiff();
+    _ = scheduler.submitVisible(.{
+        .files = fixture.files,
+        .line_map = &fixture.map,
+        .viewport = .{ .scroll_offset = 0, .height = 40 },
+    });
+    try testing.expectEqual(@as(u64, 1), worker.job_queue.items[0].generation);
+
+    const job = worker.job_queue.orderedRemove(0);
+    try worker.result_queue.append(allocator, .{
+        .file_idx = job.file_idx,
+        .hunk_idx = job.hunk_idx,
+        .highlights = null,
+        .old_highlights = null,
+        .failed = true,
+        .generation = job.generation,
+    });
+    _ = scheduler.applyResults(.{ .files = fixture.files, .current_file_idx = 0 });
+
+    try testing.expectEqual(@as(usize, 1), scheduler.pendingCount());
+}
+
+/// A worker whose thread is never started: only `mutex` and the two queues are
+/// touched, so tests can drive results by hand. Callers deinit both queues.
+fn idleWorker(allocator: std.mem.Allocator) HighlightWorker {
+    return .{
+        .allocator = allocator,
+        .thread = undefined,
+        .job_queue = .empty,
+        .result_queue = .empty,
+        .mutex = std.Io.Mutex.init,
+        .should_stop = false,
+        .highlighter = undefined,
+    };
+}
+
+fn testJob(allocator: std.mem.Allocator) !PendingJob {
+    const file_path = try allocator.dupe(u8, "a.zig");
+    errdefer allocator.free(file_path);
+    const content = try allocator.dupe(u8, "const a = 1;\n");
+    errdefer allocator.free(content);
+    return .{ .file_path = file_path, .content = content, .old_content = try allocator.dupe(u8, "") };
 }

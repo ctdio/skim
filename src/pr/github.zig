@@ -37,6 +37,7 @@ pub fn listPullRequestsRaw(allocator: std.mem.Allocator) !GhFetch {
 pub fn fetchRef(allocator: std.mem.Allocator, params: struct {
     number: u32,
     base_ref: []const u8,
+    git_bin: []const u8 = "git",
 }) ![]u8 {
     const head_ref = try std.fmt.allocPrint(allocator, "refs/skim/pr-{d}", .{params.number});
     errdefer allocator.free(head_ref);
@@ -44,14 +45,14 @@ pub fn fetchRef(allocator: std.mem.Allocator, params: struct {
     const refspec = try std.fmt.allocPrint(allocator, "+pull/{d}/head:{s}", .{ params.number, head_ref });
     defer allocator.free(refspec);
 
-    try runGit(allocator, &.{ "git", "fetch", "--quiet", "origin", refspec });
+    try runGit(allocator, &.{ params.git_bin, "fetch", "--quiet", "origin", refspec });
 
     if (params.base_ref.len > 0) {
         // Land the base in its remote-tracking ref so `origin/<base>...head`
         // resolves. Best-effort: a missing base only weakens the merge-base.
         const base_spec = try std.fmt.allocPrint(allocator, "+{s}:refs/remotes/origin/{s}", .{ params.base_ref, params.base_ref });
         defer allocator.free(base_spec);
-        runGit(allocator, &.{ "git", "fetch", "--quiet", "origin", base_spec }) catch {};
+        runGit(allocator, &.{ params.git_bin, "fetch", "--quiet", "origin", base_spec }) catch {};
     }
 
     return head_ref;
@@ -62,6 +63,19 @@ pub fn fetchRef(allocator: std.mem.Allocator, params: struct {
 // =============================================================================
 
 pub const OwnerRepo = struct { owner: []const u8, repo: []const u8 };
+
+/// Every `gh`-backed function below takes its executable as `gh_bin`. Production
+/// leaves the default; tests point it at a fake script, because `std.process.run`
+/// resolves argv[0] against the PATH captured at process start.
+pub const ReviewDataParams = struct { owner_repo: OwnerRepo, number: u32, gh_bin: []const u8 = "gh" };
+pub const PrByNumberParams = struct { number: u32, gh_bin: []const u8 = "gh" };
+pub const CreateReviewParams = struct { pr_node_id: []const u8, commit_oid: []const u8, gh_bin: []const u8 = "gh" };
+pub const ReviewIdParams = struct { review_id: []const u8, gh_bin: []const u8 = "gh" };
+pub const SubmitReviewParams = struct { review_id: []const u8, event: []const u8, body: []const u8, gh_bin: []const u8 = "gh" };
+pub const ReplyParams = struct { thread_id: []const u8, body: []const u8, gh_bin: []const u8 = "gh" };
+pub const ThreadIdParams = struct { thread_id: []const u8, gh_bin: []const u8 = "gh" };
+pub const CommentEditParams = struct { comment_id: []const u8, body: []const u8, gh_bin: []const u8 = "gh" };
+pub const CommentIdParams = struct { comment_id: []const u8, gh_bin: []const u8 = "gh" };
 
 /// A parsed `skim pr <arg>` / `skim debug pr-view <arg>` positional: a bare PR
 /// number or a github.com PR URL. `url` fields alias the input slice.
@@ -197,8 +211,8 @@ pub const review_query =
 ;
 
 /// Resolve the current repo's `owner/repo` from the origin remote URL.
-pub fn getOriginOwnerRepo(allocator: std.mem.Allocator) !OwnerRepo {
-    const url = git.line(allocator, &.{ "git", "config", "--get", "remote.origin.url" }) orelse return error.NoOriginRemote;
+pub fn getOriginOwnerRepo(allocator: std.mem.Allocator, git_bin: []const u8) !OwnerRepo {
+    const url = git.line(allocator, &.{ git_bin, "config", "--get", "remote.origin.url" }) orelse return error.NoOriginRemote;
     defer allocator.free(url);
     return parseOwnerRepo(allocator, url);
 }
@@ -264,23 +278,24 @@ fn parsePrUrl(arg: []const u8) !PrRequest {
 }
 
 /// Fetch the full review payload for a PR via the GraphQL query above.
-pub fn fetchReviewData(allocator: std.mem.Allocator, owner_repo: OwnerRepo, number: u32) !GhFetch {
+pub fn fetchReviewData(allocator: std.mem.Allocator, params: ReviewDataParams) !GhFetch {
     const argv = try buildGraphqlArgv(allocator, review_query, &.{
-        .{ .key = "owner", .value = owner_repo.owner },
-        .{ .key = "name", .value = owner_repo.repo },
+        .{ .key = "owner", .value = params.owner_repo.owner },
+        .{ .key = "name", .value = params.owner_repo.repo },
     }, &.{
-        .{ .key = "number", .value = @intCast(number) },
+        .{ .key = "number", .value = @intCast(params.number) },
     });
     defer freeArgv(allocator, argv);
+    try replaceBin(allocator, argv, params.gh_bin);
     return runGhCapture(allocator, argv, "gh api graphql");
 }
 
 /// Fetch a single PR's metadata (`gh pr view <n> --json ...`). Used to resolve
 /// `baseRefName` for number-only entry (`skim pr <n>`) before the ref fetch.
-pub fn fetchPrByNumber(allocator: std.mem.Allocator, number: u32) !GhFetch {
+pub fn fetchPrByNumber(allocator: std.mem.Allocator, params: PrByNumberParams) !GhFetch {
     var buf: [16]u8 = undefined;
-    const num = std.fmt.bufPrint(&buf, "{d}", .{number}) catch unreachable;
-    const argv = [_][]const u8{ "gh", "pr", "view", num, "--json", json_fields };
+    const num = std.fmt.bufPrint(&buf, "{d}", .{params.number}) catch unreachable;
+    const argv = [_][]const u8{ params.gh_bin, "pr", "view", num, "--json", json_fields };
     return runGhCapture(allocator, &argv, "gh pr view");
 }
 
@@ -423,13 +438,15 @@ pub const AddThreadParams = struct {
     start_line: ?u32 = null,
     start_side: review_parse.Side = .right,
     body: []const u8,
+    gh_bin: []const u8 = "gh",
 };
 
 /// Create a PENDING review (event omitted → PENDING per GitHub). Returns the raw
 /// mutation JSON (parse the id with `review_parse.parseCreatedReviewId`).
-pub fn createPendingReview(allocator: std.mem.Allocator, pr_node_id: []const u8, commit_oid: []const u8) !GhFetch {
-    const argv = try buildCreateReviewArgs(allocator, pr_node_id, commit_oid);
+pub fn createPendingReview(allocator: std.mem.Allocator, params: CreateReviewParams) !GhFetch {
+    const argv = try buildCreateReviewArgs(allocator, params.pr_node_id, params.commit_oid);
     defer freeArgv(allocator, argv);
+    try replaceBin(allocator, argv, params.gh_bin);
     return runGhCapture(allocator, argv, "gh api graphql (addPullRequestReview)");
 }
 
@@ -440,6 +457,7 @@ pub fn createPendingReview(allocator: std.mem.Allocator, pr_node_id: []const u8,
 pub fn addReviewThread(allocator: std.mem.Allocator, params: AddThreadParams) !GhFetch {
     const argv = try buildAddThreadArgs(allocator, params);
     defer freeArgv(allocator, argv);
+    try replaceBin(allocator, argv, params.gh_bin);
     return runGhCapture(allocator, argv, "gh api graphql (addPullRequestReviewThread)");
 }
 
@@ -449,9 +467,10 @@ pub fn addReviewThread(allocator: std.mem.Allocator, params: AddThreadParams) !G
 /// deleted on the web mid-flight), so preserving that body lets the caller surface
 /// the specific message via `review_parse.firstErrorMessage` instead of a generic
 /// classified error. Used by `skim debug pr-discard` and the TUI discard flow.
-pub fn deletePendingReview(allocator: std.mem.Allocator, review_id: []const u8) !GhFetch {
-    const argv = try buildDeleteReviewArgs(allocator, review_id);
+pub fn deletePendingReview(allocator: std.mem.Allocator, params: ReviewIdParams) !GhFetch {
+    const argv = try buildDeleteReviewArgs(allocator, params.review_id);
     defer freeArgv(allocator, argv);
+    try replaceBin(allocator, argv, params.gh_bin);
     return runGhCaptureAllowErrorBody(allocator, argv, "gh api graphql (deletePullRequestReview)");
 }
 
@@ -463,9 +482,10 @@ pub fn deletePendingReview(allocator: std.mem.Allocator, review_id: []const u8) 
 /// (e.g. approving your own PR), so parse with `review_parse.parseSubmitReview`,
 /// which surfaces that envelope's message. The body is a `-f body=<text>` argv
 /// element — shell-safe by construction.
-pub fn submitReview(allocator: std.mem.Allocator, review_id: []const u8, event: []const u8, body: []const u8) !GhFetch {
-    const argv = try buildSubmitReviewArgs(allocator, review_id, event, body);
+pub fn submitReview(allocator: std.mem.Allocator, params: SubmitReviewParams) !GhFetch {
+    const argv = try buildSubmitReviewArgs(allocator, params.review_id, params.event, params.body);
     defer freeArgv(allocator, argv);
+    try replaceBin(allocator, argv, params.gh_bin);
     return runGhCaptureAllowErrorBody(allocator, argv, "gh api graphql (submitPullRequestReview)");
 }
 
@@ -473,38 +493,43 @@ pub fn submitReview(allocator: std.mem.Allocator, review_id: []const u8, event: 
 /// `review_parse.parseCreatedComment`). GitHub attaches the reply to the viewer's
 /// pending review if one exists (comment returns `state: PENDING`). The body is a
 /// `-f body=<text>` argv element — shell-safe by construction.
-pub fn replyToThread(allocator: std.mem.Allocator, thread_id: []const u8, body: []const u8) !GhFetch {
-    const argv = try buildReplyArgs(allocator, thread_id, body);
+pub fn replyToThread(allocator: std.mem.Allocator, params: ReplyParams) !GhFetch {
+    const argv = try buildReplyArgs(allocator, params.thread_id, params.body);
     defer freeArgv(allocator, argv);
+    try replaceBin(allocator, argv, params.gh_bin);
     return runGhCapture(allocator, argv, "gh api graphql (addPullRequestReviewThreadReply)");
 }
 
 /// Mark a review thread resolved. Idempotent server-side (resolving an already
 /// resolved thread returns `isResolved: true`). Parse with `parseResolveResult`.
-pub fn resolveThread(allocator: std.mem.Allocator, thread_id: []const u8) !GhFetch {
-    const argv = try buildResolveArgs(allocator, resolve_thread_mutation, thread_id);
+pub fn resolveThread(allocator: std.mem.Allocator, params: ThreadIdParams) !GhFetch {
+    const argv = try buildResolveArgs(allocator, resolve_thread_mutation, params.thread_id);
     defer freeArgv(allocator, argv);
+    try replaceBin(allocator, argv, params.gh_bin);
     return runGhCapture(allocator, argv, "gh api graphql (resolveReviewThread)");
 }
 
 /// Mark a review thread unresolved. Parse with `parseResolveResult`.
-pub fn unresolveThread(allocator: std.mem.Allocator, thread_id: []const u8) !GhFetch {
-    const argv = try buildResolveArgs(allocator, unresolve_thread_mutation, thread_id);
+pub fn unresolveThread(allocator: std.mem.Allocator, params: ThreadIdParams) !GhFetch {
+    const argv = try buildResolveArgs(allocator, unresolve_thread_mutation, params.thread_id);
     defer freeArgv(allocator, argv);
+    try replaceBin(allocator, argv, params.gh_bin);
     return runGhCapture(allocator, argv, "gh api graphql (unresolveReviewThread)");
 }
 
 /// Edit a review comment's body. Parse with `review_parse.parseUpdatedComment`.
-pub fn updateReviewComment(allocator: std.mem.Allocator, comment_node_id: []const u8, body: []const u8) !GhFetch {
-    const argv = try buildUpdateCommentArgs(allocator, comment_node_id, body);
+pub fn updateReviewComment(allocator: std.mem.Allocator, params: CommentEditParams) !GhFetch {
+    const argv = try buildUpdateCommentArgs(allocator, params.comment_id, params.body);
     defer freeArgv(allocator, argv);
+    try replaceBin(allocator, argv, params.gh_bin);
     return runGhCapture(allocator, argv, "gh api graphql (updatePullRequestReviewComment)");
 }
 
 /// Delete a review comment. Parse/confirm with `review_parse.parseDeletedComment`.
-pub fn deleteReviewComment(allocator: std.mem.Allocator, comment_node_id: []const u8) !GhFetch {
-    const argv = try buildDeleteCommentArgs(allocator, comment_node_id);
+pub fn deleteReviewComment(allocator: std.mem.Allocator, params: CommentIdParams) !GhFetch {
+    const argv = try buildDeleteCommentArgs(allocator, params.comment_id);
     defer freeArgv(allocator, argv);
+    try replaceBin(allocator, argv, params.gh_bin);
     return runGhCapture(allocator, argv, "gh api graphql (deletePullRequestReviewComment)");
 }
 
@@ -696,6 +721,14 @@ fn buildGraphqlArgv(allocator: std.mem.Allocator, query: []const u8, string_vars
 fn freeArgv(allocator: std.mem.Allocator, argv: [][]const u8) void {
     for (argv) |arg| allocator.free(arg);
     allocator.free(argv);
+}
+
+/// Point a built argv at `bin` (tests pass a fake gh/git). Dupes before
+/// freeing, so an OOM leaves `argv` intact for the caller's freeArgv.
+fn replaceBin(allocator: std.mem.Allocator, argv: [][]const u8, bin: []const u8) !void {
+    const owned = try allocator.dupe(u8, bin);
+    allocator.free(argv[0]);
+    argv[0] = owned;
 }
 
 fn runGit(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -1004,4 +1037,13 @@ test "buildGraphqlArgv: mirrors gh api graphql -f/-F shape" {
     try testing.expectEqualStrings("name=skim", argv[8]);
     try testing.expectEqualStrings("-F", argv[9]);
     try testing.expectEqualStrings("number=42", argv[10]);
+}
+
+test "replaceBin: points argv[0] at the override and keeps the rest" {
+    const argv = try buildReplyArgs(testing.allocator, "PRRT_1", "hi");
+    defer freeArgv(testing.allocator, argv);
+    try replaceBin(testing.allocator, argv, "/tmp/fake/gh");
+    try testing.expectEqualStrings("/tmp/fake/gh", argv[0]);
+    try testing.expectEqualStrings("api", argv[1]);
+    try testing.expect(argvContains(argv, "tid=PRRT_1"));
 }

@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const App = @import("../app.zig").App;
+const LocalWriteBlock = @import("../app.zig").LocalWriteBlock;
 const tui_server = @import("tui_server.zig");
 const session_mgr = @import("session.zig");
 const line_map = @import("../line_map.zig");
@@ -224,6 +225,8 @@ pub fn handleAddComment(app: *App, params: ?std.json.Value) tui_server.Response 
     const author = parseAuthor(obj) catch
         return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'author' must be string");
 
+    if (app.localWritesBlocked()) |block| return writesBlockedResponse(block);
+
     // Find the file in the diff
     const file_diff = blk: {
         for (app.state.files) |*f| {
@@ -362,6 +365,8 @@ pub fn handleReplyComment(app: *App, params: ?std.json.Value) tui_server.Respons
     const author = parseAuthor(obj) catch
         return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "'author' must be string");
 
+    if (app.localWritesBlocked()) |block| return writesBlockedResponse(block);
+
     const reply_idx = app.state.comment_store.addReply(index, author, text) catch |err| switch (err) {
         error.InvalidCommentIndex => return tui_server.errorResponse(tui_server.ErrorCode.INVALID_PARAMS, "Invalid comment index"),
         else => return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, "Failed to add reply"),
@@ -434,6 +439,15 @@ pub fn handleDeleteComment(app: *App, params: ?std.json.Value) tui_server.Respon
 /// to. Agent writes still land; only the camera move is suppressed.
 fn userIsTyping(app: *App) bool {
     return app.mode == .comment and app.state.active_comment_input != null;
+}
+
+/// A PR surface change is installing its diff: the store on hand belongs to the
+/// outgoing diff, so a write now would be misplaced or discarded with it.
+fn writesBlockedResponse(block: LocalWriteBlock) tui_server.Response {
+    return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, switch (block) {
+        .diff_loading => "Diff is loading; retry once it is on screen",
+        .pr_loading => "PR is loading; retry once it is on screen",
+    });
 }
 
 /// The `author` param, or the local reviewer's label when the caller omits it.

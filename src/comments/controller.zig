@@ -22,6 +22,7 @@ const Navigation = navigation.Navigation;
 
 pub const CommentController = struct {
     pub fn startCommentInput(app: *App) !void {
+        if (refuseWhileDiffSwapping(app)) return;
         // Get line record from LineMap
         const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return;
 
@@ -122,6 +123,7 @@ pub const CommentController = struct {
     }
 
     pub fn startCommentInputForVisualSelection(app: *App) !void {
+        if (refuseWhileDiffSwapping(app)) return;
         // Get visual selection range
         const selection = app.getVisualSelection() orelse return;
         const start_line = selection.start;
@@ -198,6 +200,7 @@ pub const CommentController = struct {
     /// No-op when the cursor is not on a comment. The thread is expanded first so
     /// the reply lands somewhere the reviewer can actually see it.
     pub fn startLocalReplyInput(app: *App) !void {
+        if (refuseWhileDiffSwapping(app)) return;
         const record = app.state.line_map.getLineRecord(app.state.global_cursor_line) orelse return;
         const comment_info = switch (record.line_type) {
             .comment_line => |info| info,
@@ -298,6 +301,7 @@ pub const CommentController = struct {
 
     pub fn saveCurrentComment(app: *App) !bool {
         if (app.state.active_comment_input == null) return false;
+        if (refuseWhileDiffSwapping(app)) return false;
 
         const input = app.state.active_comment_input.?;
 
@@ -801,6 +805,19 @@ pub const CommentController = struct {
 
         app.rebuildReviewLineMap();
         app.showStatusMessage("saving edit…");
+        return true;
+    }
+
+    /// The diff on screen is not the one `comment_store` belongs to until a PR
+    /// surface change installs its diff, or until the next PR's entry lands; a
+    /// comment written now would anchor to the wrong diff or be discarded with
+    /// the store.
+    fn refuseWhileDiffSwapping(app: *App) bool {
+        const block = app.localWritesBlocked() orelse return false;
+        app.showStatusMessage(switch (block) {
+            .diff_loading => "diff loading…",
+            .pr_loading => "PR loading…",
+        });
         return true;
     }
 

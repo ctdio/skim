@@ -6,9 +6,11 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const review = @import("review_test_root");
+const skim_io = @import("skim_io");
 
 const thread_anchor = review.thread_anchor;
 const review_parse = review.review_parse;
+const review_controller = review.review_controller;
 const parser = review.parser;
 const line_map = review.line_map;
 const comments = review.comments;
@@ -22,6 +24,8 @@ const App = review.App;
 const RenderUtils = review.RenderUtils;
 const SideBySideRenderer = review.SideBySideRenderer;
 const CommentEditor = review.CommentEditor;
+const CommentController = review.CommentController;
+const mcp_handlers = review.mcp_handlers;
 
 const anchorThreads = review.anchorThreads;
 const countUnplaced = review.countUnplaced;
@@ -607,6 +611,563 @@ test "hintText: unresolved thread advertises resolve for a full hint" {
 
 test "hintText: resolved thread advertises unresolve for a reply-only hint" {
     try testing.expect(std.mem.indexOf(u8, thread_hint.hintText(.reply_only, true), "x:unresolve") != null);
+}
+
+// =============================================================================
+// PR surface transitions: what the LineMap shows before the next diff installs
+// =============================================================================
+
+test "enterReviewDiff: the entered PR's threads stay off the previous diff until its own installs" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try applySurfacePayload(&app);
+
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    try testing.expectEqual(@as(usize, 0), countRows(&app.state.line_map, .review_thread));
+}
+
+test "enterReviewDiff: a rebuild before the PR diff installs still keeps threads off" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try applySurfacePayload(&app);
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    // A refetch or post landing in the window rebuilds the LineMap too.
+    app.rebuildReviewLineMap();
+
+    try testing.expectEqual(@as(usize, 0), countRows(&app.state.line_map, .review_thread));
+}
+
+test "enterReviewDiff: threads anchor once the PR diff installs" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try applySurfacePayload(&app);
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+
+    try testing.expectEqual(@as(usize, 1), countRows(&app.state.line_map, .review_thread));
+}
+
+test "enterReviewDiff: parks the non-PR diff's comments and drops their rows" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    _ = try app.state.comment_store.add(workingCommentParams());
+    app.rebuildReviewLineMap();
+    try testing.expectEqual(@as(usize, 1), countRows(&app.state.line_map, .comment_line));
+
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    try testing.expectEqual(@as(usize, 0), countRows(&app.state.line_map, .comment_line));
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items.len);
+    const parked = app.state.pr_surface_parking.comments.?;
+    try testing.expectEqual(@as(usize, 1), parked.comments.items.len);
+    try testing.expectEqualStrings("WT-NOTE", parked.comments.items[0].text);
+}
+
+test "enterReviewDiff: a second PR entry keeps the first parked store and restores it once" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    _ = try app.state.comment_store.add(workingCommentParams());
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+
+    app.resetPerPrViewState();
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+    try app.switchDiffMode(.working);
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+
+    try testing.expectEqual(@as(usize, 1), app.state.comment_store.comments.items.len);
+    try testing.expectEqualStrings("WT-NOTE", app.state.comment_store.comments.items[0].text);
+    try testing.expectEqual(@as(usize, 1), countRows(&app.state.line_map, .comment_line));
+}
+
+test "leavePrSurface: restored comments stay off the PR diff until the non-PR diff installs" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+
+    try app.switchDiffMode(.working);
+
+    try testing.expectEqual(@as(usize, 0), countRows(&app.state.line_map, .comment_line));
+}
+
+test "leavePrSurface: the non-PR diff installs with its restored comments" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+    try app.switchDiffMode(.working);
+
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+
+    try testing.expectEqual(@as(usize, 1), countRows(&app.state.line_map, .comment_line));
+    try testing.expectEqualStrings("WT-NOTE", app.state.comment_store.comments.items[0].text);
+    try testing.expect(app.state.pr_surface_parking.comments == null);
+    try testing.expect(!app.state.pr_surface_parking.pending());
+}
+
+test "leavePrSurface: drops the left session's thread rows right away" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+    try applySurfacePayload(&app);
+    app.rebuildReviewLineMap();
+    try testing.expectEqual(@as(usize, 1), countRows(&app.state.line_map, .review_thread));
+
+    try app.switchDiffMode(.working);
+
+    try testing.expectEqual(@as(usize, 0), countRows(&app.state.line_map, .review_thread));
+}
+
+test "leavePrSurface: entering another PR before the non-PR diff installs keeps comments parked" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+
+    try app.switchDiffMode(.working);
+    app.resetPerPrViewState();
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+
+    try testing.expectEqual(@as(usize, 0), countRows(&app.state.line_map, .comment_line));
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items.len);
+
+    try app.switchDiffMode(.working);
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+
+    try testing.expectEqual(@as(usize, 1), countRows(&app.state.line_map, .comment_line));
+    try testing.expectEqualStrings("WT-NOTE", app.state.comment_store.comments.items[0].text);
+}
+
+test "leavePrSurface: off the PR surface it leaves the diff's comments in place" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    _ = try app.state.comment_store.add(workingCommentParams());
+    app.rebuildReviewLineMap();
+
+    app.leavePrSurface();
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+
+    try testing.expectEqual(@as(usize, 1), countRows(&app.state.line_map, .comment_line));
+    try testing.expect(app.state.pr_surface_parking.comments == null);
+}
+
+test "switchDiffMode(.working): closing the PR surface swaps to the working-tree diff source" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+
+    try app.switchDiffMode(.working);
+
+    try testing.expect(app.state.diff_source == .working_dir);
+    try testing.expect(!app.state.diff_source.working_dir.staged);
+    try testing.expect(app.state.pr_surface_parking.pending());
+}
+
+test "startCommentInput: refused while the PR diff has not installed yet" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+    app.state.global_cursor_line = firstRow(&app.state.line_map, .code_line);
+
+    try CommentController.startCommentInput(&app);
+
+    try testing.expect(app.state.active_comment_input == null);
+    try testing.expect(app.mode != .comment);
+    try testing.expectEqualStrings(diff_loading_message, app.state.status_message.?);
+}
+
+test "startCommentInput: refused while the non-PR diff has not installed yet" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+    try app.switchDiffMode(.working);
+    app.state.global_cursor_line = firstRow(&app.state.line_map, .code_line);
+
+    try CommentController.startCommentInput(&app);
+
+    try testing.expect(app.state.active_comment_input == null);
+    try testing.expect(app.mode != .comment);
+}
+
+test "startCommentInput: opens once the PR diff has installed" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+    app.state.global_cursor_line = firstRow(&app.state.line_map, .code_line);
+
+    try CommentController.startCommentInput(&app);
+
+    try testing.expect(app.state.active_comment_input != null);
+    try testing.expect(app.mode == .comment);
+}
+
+test "startLocalReplyInput: refused while the non-PR diff has not installed yet" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+    _ = try app.state.comment_store.add(workingCommentParams());
+    app.rebuildReviewLineMap();
+    try app.switchDiffMode(.working);
+    app.state.global_cursor_line = firstRow(&app.state.line_map, .comment_line);
+
+    try CommentController.startLocalReplyInput(&app);
+
+    try testing.expect(app.state.active_comment_input == null);
+}
+
+test "add_comment over MCP: refused while the PR diff has not installed yet" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    var params = try std.json.parseFromSlice(std.json.Value, allocator, mcp_comment_params, .{});
+    defer params.deinit();
+    const response = mcp_handlers.handleAddComment(&app, params.value);
+
+    try testing.expect(response == .err);
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items.len);
+}
+
+test "add_comment over MCP: refused while the non-PR diff has not installed yet" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+    try app.switchDiffMode(.working);
+
+    var params = try std.json.parseFromSlice(std.json.Value, allocator, mcp_comment_params, .{});
+    defer params.deinit();
+    const response = mcp_handlers.handleAddComment(&app, params.value);
+    try testing.expect(response == .err);
+
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+    try testing.expectEqual(@as(usize, 1), app.state.comment_store.comments.items.len);
+    try testing.expectEqualStrings("WT-NOTE", app.state.comment_store.comments.items[0].text);
+}
+
+test "add_comment over MCP: lands once the PR diff has installed" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+
+    var params = try std.json.parseFromSlice(std.json.Value, allocator, mcp_comment_params, .{});
+    defer params.deinit();
+    var response = mcp_handlers.handleAddComment(&app, params.value);
+    defer if (response == .result) response.result.object.deinit(allocator);
+
+    try testing.expect(response == .result);
+    try testing.expectEqualStrings("AGENT-NOTE", app.state.comment_store.comments.items[0].text);
+}
+
+test "reply_to_comment over MCP: refused while the non-PR diff has not installed yet" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+    _ = try app.state.comment_store.add(workingCommentParams());
+    try app.switchDiffMode(.working);
+
+    var params = try std.json.parseFromSlice(std.json.Value, allocator, "{\"index\":0,\"text\":\"AGENT-REPLY\"}", .{});
+    defer params.deinit();
+    const response = mcp_handlers.handleReplyComment(&app, params.value);
+
+    try testing.expect(response == .err);
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items[0].replies.items.len);
+}
+
+test "enterReviewDiff: a new local comment open in the editor is saved into the parked store" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try openEditorAt(&app, .code_line, "TYPED-NOTE");
+
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    const parked = app.state.pr_surface_parking.comments.?;
+    try testing.expectEqual(@as(usize, 1), parked.comments.items.len);
+    try testing.expectEqualStrings("TYPED-NOTE", parked.comments.items[0].text);
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items.len);
+    try testing.expect(app.state.active_comment_input == null);
+    try testing.expect(app.mode == .normal);
+}
+
+test "enterReviewDiff: an edit open in the editor lands on the comment in the parked store" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    _ = try app.state.comment_store.add(workingCommentParams());
+    app.rebuildReviewLineMap();
+    try openEditorAt(&app, .comment_line, "WT-NOTE-EDITED");
+
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    const parked = app.state.pr_surface_parking.comments.?;
+    try testing.expectEqual(@as(usize, 1), parked.comments.items.len);
+    try testing.expectEqualStrings("WT-NOTE-EDITED", parked.comments.items[0].text);
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items.len);
+}
+
+test "enterReviewDiff: a local reply open in the editor lands on the parked comment" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    _ = try app.state.comment_store.add(workingCommentParams());
+    app.rebuildReviewLineMap();
+    app.state.global_cursor_line = firstRow(&app.state.line_map, .comment_line);
+    try CommentController.startLocalReplyInput(&app);
+    app.state.active_comment_input.?.vim.setText("WT-REPLY");
+
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    const parked = app.state.pr_surface_parking.comments.?;
+    try testing.expectEqual(@as(usize, 1), parked.comments.items[0].replies.items.len);
+    try testing.expectEqualStrings("WT-REPLY", parked.comments.items[0].replies.items[0].text);
+    try testing.expect(app.state.active_comment_input == null);
+}
+
+test "enterReviewDiff: a GitHub draft open on the previous diff is discarded, not posted" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try applySurfacePayload(&app);
+    app.rebuildReviewLineMap();
+    try openEditorAt(&app, .code_line, "DRAFT");
+    try testing.expect(app.state.active_comment_input.?.target == .github);
+
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    try testing.expect(app.state.active_comment_input == null);
+    try testing.expectEqual(@as(usize, 1), app.state.review.threads.items.len);
+    try testing.expect(!app.state.review.threads.items[0].posting);
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items.len);
+    try expectStatusError(&app, discarded_message);
+}
+
+test "enterReviewDiff: a thread reply open on the previous PR is discarded, not sent" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try applySurfacePayload(&app);
+    try CommentController.startReplyInput(&app, 0);
+    app.state.active_comment_input.?.vim.setText("THREAD-REPLY");
+
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    try testing.expect(app.state.active_comment_input == null);
+    try testing.expect(!review_controller.isThreadBusy(&app.state.review, 0));
+    try expectStatusError(&app, discarded_message);
+}
+
+test "enterReviewDiff: a local comment that cannot be saved is reported as discarded" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try openEditorAt(&app, .code_line, "ORPHANED");
+    app.state.active_comment_input.?.target_file_path = "src/gone.zig";
+
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+
+    try testing.expect(app.state.active_comment_input == null);
+    try testing.expectEqual(@as(usize, 0), app.state.pr_surface_parking.comments.?.comments.items.len);
+    try expectStatusError(&app, discarded_message);
+}
+
+test "startCommentInput: refused on the PR surface while the next PR's entry is pending" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+    try selectNextPr(&app);
+    app.state.global_cursor_line = firstRow(&app.state.line_map, .code_line);
+
+    try CommentController.startCommentInput(&app);
+
+    try testing.expect(app.state.active_comment_input == null);
+    try testing.expect(app.mode != .comment);
+    try testing.expectEqualStrings(pr_loading_message, app.state.status_message.?);
+}
+
+test "add_comment over MCP: refused on the PR surface while the next PR's entry is pending" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+    try selectNextPr(&app);
+
+    var params = try std.json.parseFromSlice(std.json.Value, allocator, mcp_comment_params, .{});
+    defer params.deinit();
+    const response = mcp_handlers.handleAddComment(&app, params.value);
+
+    try testing.expect(response == .err);
+    try testing.expectEqualStrings(mcp_pr_loading_error, response.err.message);
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items.len);
+}
+
+test "pollReviewEntry: local writes reopen once the next PR's entry fails" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+    try selectNextPr(&app);
+    try waitEntryReady(&app);
+    app.pollReviewEntry();
+    app.state.global_cursor_line = firstRow(&app.state.line_map, .code_line);
+
+    try CommentController.startCommentInput(&app);
+
+    try testing.expect(app.state.active_comment_input != null);
+    try testing.expect(app.mode == .comment);
+}
+
+test "pollReviewEntry: a failed PR→PR entry says the previous PR's diff has no review data" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+    try selectNextPr(&app);
+    try waitEntryReady(&app);
+
+    app.pollReviewEntry();
+
+    try expectStatusError(&app, stale_pr_diff_message);
+}
+
+test "pollReviewEntry: a failed first entry leaves the non-PR diff's status line alone" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try selectNextPr(&app);
+    try waitEntryReady(&app);
+
+    app.pollReviewEntry();
+
+    try testing.expect(app.state.status_message == null);
+}
+
+test "enterReviewDiff: an entry that runs out of memory leaves the open editor alone" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try openEditorAt(&app, .code_line, "KEEP-ME");
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    app.allocator = failing.allocator();
+    defer app.allocator = allocator;
+
+    try testing.expectError(error.OutOfMemory, app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" }));
+
+    try testing.expect(app.state.active_comment_input != null);
+    try testing.expect(app.state.pr_surface_parking.comments == null);
+}
+
+test "enterReviewDiff: a gh error is shown as an error" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "", .gh_error = .network });
+
+    try expectStatusError(&app, "network error reaching GitHub");
+}
+
+test "enterReviewDiff: a discarded editor and a gh error share the status line" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try applySurfacePayload(&app);
+    app.rebuildReviewLineMap();
+    try openEditorAt(&app, .code_line, "DRAFT");
+
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "", .gh_error = .not_installed });
+
+    try testing.expect(app.state.active_comment_input == null);
+    try expectStatusError(&app, "unsent comment discarded; gh not found — review features unavailable");
+}
+
+test "startCommentInput: a first PR entry from a non-PR diff leaves that diff writable" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try selectNextPr(&app);
+    app.state.global_cursor_line = firstRow(&app.state.line_map, .code_line);
+
+    try CommentController.startCommentInput(&app);
+
+    try testing.expect(app.state.active_comment_input != null);
+}
+
+test "selectPullRequest: refused while a comment editor is still open" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try openEditorAt(&app, .code_line, "UNSAVED");
+    // Ctrl-E from the editor opens the agent panel and leaves the editor set.
+    app.mode = .agent;
+
+    try selectNextPr(&app);
+
+    try testing.expect(!app.state.review.entry_in_flight);
+    try testing.expect(app.state.active_comment_input != null);
+    try testing.expectEqualStrings(open_editor_message, app.state.pr.message_buf[0..app.state.pr.message_len]);
+}
+
+test "saveCurrentComment: refused while the non-PR diff has not installed yet, editor stays open" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try enterPrWithWorkingComment(&app);
+    try openEditorAt(&app, .code_line, "PR-NOTE");
+    try app.switchDiffMode(.working);
+
+    const saved = try CommentController.saveCurrentComment(&app);
+
+    try testing.expect(!saved);
+    try testing.expectEqualStrings("PR-NOTE", app.state.active_comment_input.?.vim.text_buffer[0..app.state.active_comment_input.?.vim.text_len]);
+    try testing.expectEqualStrings(diff_loading_message, app.state.status_message.?);
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items.len);
+}
+
+test "saveCurrentComment: a local reply is refused while the non-PR diff has not installed yet" {
+    const allocator = testing.allocator;
+    var app = try initDiffApp(allocator);
+    defer app.deinit();
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(allocator, surface_diff));
+    _ = try app.state.comment_store.add(workingCommentParams());
+    app.rebuildReviewLineMap();
+    app.state.global_cursor_line = firstRow(&app.state.line_map, .comment_line);
+    try CommentController.startLocalReplyInput(&app);
+    app.state.active_comment_input.?.vim.setText("PR-REPLY");
+    try app.switchDiffMode(.working);
+
+    const saved = try CommentController.saveCurrentComment(&app);
+
+    try testing.expect(!saved);
+    try testing.expect(app.state.active_comment_input != null);
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items[0].replies.items.len);
 }
 
 // =============================================================================
@@ -1454,4 +2015,149 @@ fn singleFile() [1]parser.FileDiff {
         var hunks = [_]parser.Hunk{makeHunk(.{ .old_start = 10, .old_count = 3, .new_start = 10, .new_count = 4, .context = "" }, &lines)};
     };
     return .{.{ .old_path = "src/x.zig", .new_path = "src/x.zig", .hunks = &S.hunks, .is_untracked = false }};
+}
+
+const surface_diff =
+    \\diff --git a/src/x.zig b/src/x.zig
+    \\index 1111111..2222222 100644
+    \\--- a/src/x.zig
+    \\+++ b/src/x.zig
+    \\@@ -8,3 +8,4 @@
+    \\ line8
+    \\ line9
+    \\+line10
+    \\ line11
+    \\
+;
+
+/// One unresolved thread on `src/x.zig` new line 10 — the added line of
+/// `surface_diff`.
+const surface_payload =
+    \\{"data":{"viewer":{"login":"ctdio"},"repository":{"pullRequest":{
+    \\"id":"PR_1","number":42,"title":"Widget","body":"","author":{"login":"octocat"},
+    \\"isDraft":false,"baseRefName":"main","headRefName":"feat","headRefOid":"abc123","reviewDecision":"",
+    \\"statusCheckRollup":null,"commits":{"nodes":[]},
+    \\"reviews":{"pageInfo":{"hasNextPage":false},"nodes":[]},
+    \\"reviewThreads":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[
+    \\{"id":"PRRT_1","isResolved":false,"isOutdated":false,"line":10,"startLine":null,"originalLine":10,"diffSide":"RIGHT","startDiffSide":null,"path":"src/x.zig","subjectType":"LINE",
+    \\"comments":{"pageInfo":{"hasNextPage":false},"nodes":[
+    \\{"id":"PRRC_1","databaseId":99,"author":{"login":"mlugg"},"body":"nit","createdAt":"2025-01-01T00:00:00Z","diffHunk":"@@ -8 +8 @@","pullRequestReview":{"id":"PRR_1","state":"COMMENTED"},"replyTo":null}
+    \\]}}
+    \\]}
+    \\}}}}
+;
+
+const diff_loading_message = "diff loading…";
+const pr_loading_message = "PR loading…";
+const mcp_pr_loading_error = "PR is loading; retry once it is on screen";
+const discarded_message = "unsent comment on the previous diff discarded";
+const open_editor_message = "finish or cancel the open comment first";
+const stale_pr_diff_message = "PR fetch failed — showing the previous PR's diff without review data";
+
+/// Neither binary exists, so the entry worker fails fast without logging and
+/// without touching the network; until `pollPending` consumes it, the entry
+/// stays pending.
+const missing_bin = "/nonexistent/skim-test-bin";
+
+/// Stands in for a fetched `refs/skim/pr-<n>`. It must resolve: the real diff
+/// worker `enterReviewDiff` starts logs an error for an unknown ref, which fails
+/// the test whenever a later swap joins it first.
+const pr_head_ref = "HEAD";
+
+const mcp_comment_params =
+    \\{"file":"src/x.zig","line":10,"line_type":"new","text":"AGENT-NOTE"}
+;
+
+/// A headless App showing `surface_diff`. `enterReviewDiff` starts a real diff
+/// load; `App.deinit` cancels and joins it, and no test polls it.
+fn initDiffApp(allocator: std.mem.Allocator) !App {
+    const files = try parser.parse(allocator, surface_diff);
+    errdefer {
+        for (files) |*file| file.deinit(allocator);
+        allocator.free(files);
+    }
+    return App.initForRenderBench(allocator, files);
+}
+
+fn applySurfacePayload(app: *App) !void {
+    var data = try review_parse.parsePrDetails(app.allocator, surface_payload);
+    defer data.deinit();
+    try review_controller.applyFetchedData(&app.state.review, app.allocator, &data);
+}
+
+/// Real PR entry from a diff carrying a working-tree comment: `enterReviewDiff`
+/// parks the comment and the PR diff installs, leaving the app on the PR surface.
+fn enterPrWithWorkingComment(app: *App) !void {
+    _ = try app.state.comment_store.add(workingCommentParams());
+    app.rebuildReviewLineMap();
+    try app.enterReviewDiff(.{ .head_ref = pr_head_ref, .base_ref = "" });
+    try app.applyRefreshedFiles(try parser.parse(app.allocator, surface_diff));
+}
+
+fn workingCommentParams() comments.AddParams {
+    return .{
+        .file_path = "src/x.zig",
+        .hunk_idx = 0,
+        .line_idx = 2,
+        .text = "WT-NOTE",
+        .line_type = .add,
+        .line_content = "line10",
+        .new_lineno = 10,
+    };
+}
+
+/// Select another PR from the picker, as Enter in `.pr_review` mode does.
+fn selectNextPr(app: *App) !void {
+    app.state.review.gh_bin = missing_bin;
+    app.state.review.git_bin = missing_bin;
+    try app.selectPullRequest(.{
+        .number = 7,
+        .title = "Next",
+        .author = "octocat",
+        .head_ref = "next",
+        .base_ref = "main",
+        .is_draft = false,
+        .updated_at = "",
+        .url = "",
+        .ci = .none,
+    });
+}
+
+fn waitEntryReady(app: *App) !void {
+    var waited_ms: usize = 0;
+    while (!app.state.review.entry.ready.load(.acquire)) : (waited_ms += 1) {
+        if (waited_ms >= 5000) return error.Timeout;
+        skim_io.sleep(std.time.ns_per_ms);
+    }
+}
+
+fn expectStatusError(app: *const App, expected: []const u8) !void {
+    const message = app.state.status_message orelse return error.TestExpectedStatusMessage;
+    try testing.expectEqualStrings(expected, message);
+    try testing.expect(app.state.status_message_severity == .err);
+}
+
+/// Open the comment editor on the first `tag` row and type `text` into it, as a
+/// reviewer would before pressing save.
+fn openEditorAt(app: *App, tag: std.meta.Tag(line_map.LineType), text: []const u8) !void {
+    app.state.global_cursor_line = firstRow(&app.state.line_map, tag);
+    try CommentController.startCommentInput(app);
+    const input = &app.state.active_comment_input.?;
+    input.vim.setText(text);
+    input.vim.cursor_pos = input.vim.text_len;
+}
+
+fn firstRow(map: *const line_map.LineMap, tag: std.meta.Tag(line_map.LineType)) usize {
+    for (map.records, 0..) |record, idx| {
+        if (record.line_type == tag) return idx;
+    }
+    unreachable;
+}
+
+fn countRows(map: *const line_map.LineMap, tag: std.meta.Tag(line_map.LineType)) usize {
+    var count: usize = 0;
+    for (map.records) |record| {
+        if (record.line_type == tag) count += 1;
+    }
+    return count;
 }

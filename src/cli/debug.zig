@@ -307,7 +307,7 @@ fn runPrDiscard(allocator: Allocator, args: []const []const u8) !void {
         return;
     };
 
-    const fetch = github.deletePendingReview(allocator, review_id) catch {
+    const fetch = github.deletePendingReview(allocator, .{ .review_id = review_id }) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (deletePullRequestReview).\n");
         flushAndExit(&stderr_writer);
     };
@@ -365,7 +365,7 @@ fn runPrSubmit(allocator: Allocator, args: []const []const u8) !void {
         try createReviewOrExit(allocator, details.pr_node_id, details.head_ref_oid);
     defer allocator.free(review_id);
 
-    const fetch = github.submitReview(allocator, review_id, event, body) catch {
+    const fetch = github.submitReview(allocator, .{ .review_id = review_id, .event = event, .body = body }) catch {
         // A review we created solely to submit must not be left dangling.
         if (created_here) discardCreatedReview(allocator, review_id);
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (submitPullRequestReview).\n");
@@ -410,7 +410,7 @@ fn runPrReply(allocator: Allocator, args: []const []const u8) !void {
     const thread_id = flagValueOrExit(args, "--thread", "pr-reply", "Usage: skim debug pr-reply <number|url> --thread PRRT_… --body TEXT");
     const body = flagValueOrExit(args, "--body", "pr-reply", "Usage: skim debug pr-reply <number|url> --thread PRRT_… --body TEXT");
 
-    const fetch = github.replyToThread(allocator, thread_id, body) catch {
+    const fetch = github.replyToThread(allocator, .{ .thread_id = thread_id, .body = body }) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (addPullRequestReviewThreadReply).\n");
         flushAndExit(&stderr_writer);
     };
@@ -443,9 +443,9 @@ fn runPrResolve(allocator: Allocator, args: []const []const u8, resolve: bool) !
     const thread_id = flagValueOrExit(args, "--thread", cmd, usage);
 
     const fetch = (if (resolve)
-        github.resolveThread(allocator, thread_id)
+        github.resolveThread(allocator, .{ .thread_id = thread_id })
     else
-        github.unresolveThread(allocator, thread_id)) catch {
+        github.unresolveThread(allocator, .{ .thread_id = thread_id })) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (resolve/unresolveReviewThread).\n");
         flushAndExit(&stderr_writer);
     };
@@ -471,7 +471,7 @@ fn runPrEdit(allocator: Allocator, args: []const []const u8) !void {
     const comment_id = flagValueOrExit(args, "--comment", "pr-edit", "Usage: skim debug pr-edit <number|url> --comment PRRC_… --body TEXT");
     const body = flagValueOrExit(args, "--body", "pr-edit", "Usage: skim debug pr-edit <number|url> --comment PRRC_… --body TEXT");
 
-    const fetch = github.updateReviewComment(allocator, comment_id, body) catch {
+    const fetch = github.updateReviewComment(allocator, .{ .comment_id = comment_id, .body = body }) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (updatePullRequestReviewComment).\n");
         flushAndExit(&stderr_writer);
     };
@@ -497,7 +497,7 @@ fn runPrDelete(allocator: Allocator, args: []const []const u8) !void {
     var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
     const comment_id = flagValueOrExit(args, "--comment", "pr-delete", "Usage: skim debug pr-delete <number|url> --comment PRRC_…");
 
-    const fetch = github.deleteReviewComment(allocator, comment_id) catch {
+    const fetch = github.deleteReviewComment(allocator, .{ .comment_id = comment_id }) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (deletePullRequestReviewComment).\n");
         flushAndExit(&stderr_writer);
     };
@@ -595,7 +595,7 @@ fn ghOkOrExit(fetch: github.GhFetch) []u8 {
 /// Create a pending review and return its id, or exit non-zero with a diagnostic.
 fn createReviewOrExit(allocator: Allocator, pr_node_id: []const u8, commit_oid: []const u8) ![]u8 {
     var stderr_writer = std.Io.File.stderr().writer(skim_io.get(), &stderr_buffer);
-    const fetch = github.createPendingReview(allocator, pr_node_id, commit_oid) catch {
+    const fetch = github.createPendingReview(allocator, .{ .pr_node_id = pr_node_id, .commit_oid = commit_oid }) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql (addPullRequestReview).\n");
         flushAndExit(&stderr_writer);
     };
@@ -617,7 +617,7 @@ fn createReviewOrExit(allocator: Allocator, pr_node_id: []const u8, commit_oid: 
 /// submit (so a rejected self-approve leaves no dangling review). Failures are
 /// swallowed — the caller is already exiting with the submit error.
 fn discardCreatedReview(allocator: Allocator, review_id: []const u8) void {
-    const fetch = github.deletePendingReview(allocator, review_id) catch return;
+    const fetch = github.deletePendingReview(allocator, .{ .review_id = review_id }) catch return;
     switch (fetch) {
         .ok => |bytes| allocator.free(bytes),
         .failed => {},
@@ -725,7 +725,7 @@ fn fetchReviewJson(allocator: Allocator, args: []const []const u8, comptime cmd:
         flushAndExit(&stderr_writer);
     };
 
-    const origin = github.getOriginOwnerRepo(allocator) catch {
+    const origin = github.getOriginOwnerRepo(allocator, "git") catch {
         try stderr_writer.interface.writeAll("Could not resolve the origin remote (run inside a GitHub repo clone).\n");
         flushAndExit(&stderr_writer);
     };
@@ -746,7 +746,7 @@ fn fetchReviewJson(allocator: Allocator, args: []const []const u8, comptime cmd:
         },
     };
 
-    const fetch = github.fetchReviewData(allocator, origin, number) catch {
+    const fetch = github.fetchReviewData(allocator, .{ .owner_repo = origin, .number = number }) catch {
         try stderr_writer.interface.writeAll("Failed to run gh api graphql.\n");
         flushAndExit(&stderr_writer);
     };

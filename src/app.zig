@@ -30,6 +30,7 @@ const state_helpers = @import("state.zig");
 const ui_components = @import("ui.zig");
 const editor = @import("editor.zig");
 const comment_editor = @import("comments/editor.zig");
+const CommentController = @import("comments/controller.zig").CommentController;
 const command_palette = @import("command_palette.zig");
 const help = @import("help.zig");
 const codex_manager = @import("codex/manager.zig");
@@ -79,6 +80,8 @@ const AsyncHighlightJob = state_helpers.AsyncHighlightJob;
 const DividerPosition = ui_components.DividerPosition;
 
 const Allocator = std.mem.Allocator;
+
+const discarded_comment_message = "unsent comment on the previous diff discarded";
 const Vaxis = vaxis.Vaxis;
 const Event = vaxis.Event;
 
@@ -140,6 +143,25 @@ const RenderProfileCounters = struct {
 /// prefix so a failed thread interaction never reads like a success.
 pub const StatusSeverity = enum { info, err };
 
+/// A landed PR entry for `App.enterReviewDiff`. `head_ref` is the local ref
+/// from `git fetch` (e.g. `refs/skim/pr-42`); `base_ref` is the base branch
+/// name (empty → diff against HEAD); `gh_error` is set when git succeeded but
+/// the review data fetch failed.
+pub const ReviewDiffEntry = struct {
+    head_ref: []const u8,
+    base_ref: []const u8,
+    gh_error: ?pr.github.GhErrorKind = null,
+};
+
+/// Why local comment writes are refused right now (`App.localWritesBlocked`).
+pub const LocalWriteBlock = enum {
+    /// A PR surface change is waiting for its diff to install.
+    diff_loading,
+    /// Another PR was selected from the PR surface and its entry has not
+    /// landed; `comment_store` is about to become that PR's.
+    pr_loading,
+};
+
 pub const App = struct {
     allocator: Allocator,
     vx: ?Vaxis, // null in headless mode (print command)
@@ -191,6 +213,29 @@ pub const App = struct {
         char: u8,
     };
 
+    /// The non-PR diff's local comments while the PR surface is up, and the
+    /// surface change in flight. Comments are parked when a PR diff source is
+    /// selected (`enterReviewDiff`) and restored when the next non-PR diff is
+    /// installed after `leavePrSurface` (`applyRefreshedFiles`), so `comments`
+    /// is non-null from PR entry until a non-PR diff is on screen again.
+    const PrSurfaceParking = struct {
+        comments: ?comments.CommentStore = null,
+        change: SurfaceChange = .none,
+
+        /// A diff-source change between the PR surface and a non-PR diff that
+        /// `applyRefreshedFiles` completes once the new diff is installed, so
+        /// the outgoing diff never shows the incoming surface's comments or
+        /// threads.
+        const SurfaceChange = enum { none, enter_pr, leave_pr };
+
+        /// True while the diff on screen is not the one `comment_store` belongs
+        /// to. Local comment writes are refused then: they would land in the
+        /// wrong store, and on a leave be discarded with it.
+        pub fn pending(self: *const PrSurfaceParking) bool {
+            return self.change != .none;
+        }
+    };
+
     const State = struct {
         diff_source: DiffSource,
         pager_mode: bool, // True when the current diff comes from stdin and cannot be refreshed from git
@@ -210,6 +255,7 @@ pub const App = struct {
         viewport_width: usize,
         count_prefix: ?usize, // For vim-style count prefixes (e.g., 5j)
         comment_store: comments.CommentStore,
+        pr_surface_parking: PrSurfaceParking = .{},
         active_comment_input: ?comment_editor.CommentEditor.State,
         search_state: SearchState,
         command_palette_state: command_palette.CommandPaletteState,
@@ -912,6 +958,8 @@ pub const App = struct {
         self.frame_segment_arena.deinit();
         self.state.line_map.deinit();
         self.state.comment_store.deinit();
+        if (self.state.pr_surface_parking.comments) |*parked| parked.deinit();
+        if (self.state.status_message_owned) |owned| self.allocator.free(owned);
         self.state.search_state.deinit();
         self.state.command_palette_state.deinit();
         self.state.branch_select.deinit(self.allocator);
@@ -1196,12 +1244,17 @@ pub const App = struct {
         if (self.state.pager_mode) return;
 
         diff_loader.start(&self.state.diff_load, self.allocator, self.state.diff_source, .replace);
+        // A worker that never spawned never installs a diff, so a pending PR
+        // surface change would wait forever; `r` retries the load.
+        if (!self.state.diff_load.isLoading()) {
+            self.showStatusError("failed to start diff load (r to retry)");
+        }
     }
 
     /// Swap in a freshly loaded diff, preserving the focused file and cursor.
     /// Takes ownership of `new_files` (frees it on error). Runs on the main
     /// thread from pollDiffLoad once a `.replace` load completes.
-    fn applyRefreshedFiles(self: *App, new_files: []parser.FileDiff) !void {
+    pub fn applyRefreshedFiles(self: *App, new_files: []parser.FileDiff) !void {
         errdefer {
             for (new_files) |*file| {
                 file.deinit(self.allocator);
@@ -1238,6 +1291,10 @@ pub const App = struct {
             }
         }
 
+        // Queued and in-flight highlight jobs are keyed by the old files' hunk
+        // indices and borrow their source bytes.
+        self.highlighter_jobs.resetForNewDiff();
+
         // Free old files and line map
         for (self.state.files) |*file| {
             file.deinit(self.allocator);
@@ -1245,6 +1302,9 @@ pub const App = struct {
         self.allocator.free(self.state.files);
         self.state.line_map.deinit();
         self.freeFileCaches();
+
+        if (self.state.pr_surface_parking.change == .leave_pr) self.restoreNonPrComments();
+        self.state.pr_surface_parking.change = .none;
 
         // Re-derive review-thread anchors against the freshly parsed diff (AD-4)
         // before building the map that will emit their records.
@@ -1311,7 +1371,13 @@ pub const App = struct {
         if (dl.isDone()) {
             if (dl.mode == .replace) {
                 self.applyReplaceLoad() catch {
-                    self.showStatusMessage("Failed to refresh diff");
+                    // A pending PR surface change completes only when a diff
+                    // installs; `r` retries the load.
+                    if (self.state.pr_surface_parking.pending()) {
+                        self.showStatusError("Failed to refresh diff (r to retry)");
+                    } else {
+                        self.showStatusMessage("Failed to refresh diff");
+                    }
                 };
             } else {
                 // Pick up any files that landed alongside the done signal.
@@ -2526,31 +2592,19 @@ pub const App = struct {
     pub fn applyCommitDiff(self: *App) !void {
         const commit = self.state.commit_select.selected_for_diff orelse return;
 
-        // Free old diff_source if needed
-        switch (self.state.diff_source) {
-            .working_dir, .stdin => {},
-            .single_ref => |sr| {
-                self.allocator.free(sr.ref);
-            },
-            .two_refs => |tr| {
-                self.allocator.free(tr.ref1);
-                self.allocator.free(tr.ref2);
-            },
-        }
-
-        if (self.state.commit_select.diff_mode_selection == 0) {
+        const new_source: DiffSource = if (self.state.commit_select.diff_mode_selection == 0) blk: {
             // Option 0: HEAD vs selected commit (changes from commit to HEAD)
             const commit_ref = try self.allocator.dupe(u8, commit.hash);
             errdefer self.allocator.free(commit_ref);
 
             const head_ref = try self.allocator.dupe(u8, "HEAD");
 
-            self.state.diff_source = .{ .two_refs = .{
+            break :blk .{ .two_refs = .{
                 .ref1 = commit_ref,
                 .ref2 = head_ref,
                 .use_merge_base = false,
             } };
-        } else {
+        } else blk: {
             // Option 1: commit vs its parent (commit's own changes)
             var parent_buf: [64]u8 = undefined;
             const parent_ref = try std.fmt.bufPrint(&parent_buf, "{s}^", .{commit.hash});
@@ -2560,12 +2614,16 @@ pub const App = struct {
 
             const parent_copy = try self.allocator.dupe(u8, parent_ref);
 
-            self.state.diff_source = .{ .two_refs = .{
+            break :blk .{ .two_refs = .{
                 .ref1 = parent_copy,
                 .ref2 = commit_ref,
                 .use_merge_base = false,
             } };
-        }
+        };
+
+        const old_source = self.state.diff_source;
+        defer git.freeDiffSource(self.allocator, old_source);
+        self.state.diff_source = new_source;
 
         // Free the selected commit
         if (self.state.commit_select.selected_for_diff) |*c| {
@@ -2576,6 +2634,7 @@ pub const App = struct {
         // Go back to normal mode and refresh
         self.state.pager_mode = false;
         self.mode = .normal;
+        self.leavePrSurface();
         try self.refresh();
     }
 
@@ -2622,6 +2681,13 @@ pub const App = struct {
     /// the picker never freezes. Stays in `.pr_review` mode (with a "Loading…"
     /// message) until entry completes.
     pub fn selectPullRequest(self: *App, pull: pr.PullRequest) !void {
+        // An editor left open behind the picker (Ctrl-E from the editor keeps
+        // it) would otherwise be settled against the next PR's entry.
+        if (self.state.active_comment_input != null) {
+            pr_controller.setMessage(&self.state.pr, "finish or cancel the open comment first");
+            self.needs_render = true;
+            return;
+        }
         var msg_buf: [64]u8 = undefined;
         const loading = std.fmt.bufPrint(&msg_buf, "Loading PR #{d}…", .{pull.number}) catch "Loading PR…";
         pr_controller.setMessage(&self.state.pr, loading);
@@ -2634,27 +2700,83 @@ pub const App = struct {
         }) catch {
             pr_controller.setMessage(&self.state.pr, "failed to start PR entry");
         };
+        self.resetPerPrViewState();
         self.needs_render = true;
+    }
+
+    /// On a PR→PR switch, drop the previous PR's local comments and view state
+    /// as soon as the next PR is selected. Off the PR surface this is a no-op:
+    /// the non-PR diff stays on screen with its comments until the PR diff is
+    /// installed (`enterReviewDiff` parks them), so a failed entry loses nothing.
+    pub fn resetPerPrViewState(self: *App) void {
+        if (self.state.pr_surface_parking.comments == null) return;
+        self.state.comment_store.clearAll();
+        self.resetDiffViewState();
+    }
+
+    /// Leave the PR surface for the non-PR diff source the caller just set.
+    /// Always ends the review session first, so an entry or refetch still in
+    /// flight is discarded instead of pulling the user back onto the PR surface
+    /// they just left; its thread rows go now. The parked non-PR comments come
+    /// back only when the non-PR diff is installed (`applyRefreshedFiles`), so
+    /// they never show on the PR diff that stays on screen until then.
+    ///
+    /// Precondition: `state.diff_source` is already a non-PR source and the
+    /// caller calls `refresh()` right after. There is no in-place close: a PR
+    /// diff left on screen would get the restored comments when it reinstalls.
+    /// A close that picks no diff of its own goes through
+    /// `switchDiffMode(.working)`.
+    pub fn leavePrSurface(self: *App) void {
+        if (review_controller.leaveSurface(&self.state.review, self.allocator)) {
+            pr_controller.setMessage(&self.state.pr, "");
+        }
+        if (self.state.pr_surface_parking.comments == null) return;
+        self.state.pr_surface_parking.change = .leave_pr;
+        self.rebuildReviewLineMap();
+    }
+
+    /// Clear view state tied to the diff on screen, then rebuild the LineMap:
+    /// its comment rows index `comment_store` (deleteCommentUnderCursor acts on
+    /// that index) and its thread rows index `review.threads`, and the callers
+    /// have just replaced one or both.
+    fn resetDiffViewState(self: *App) void {
+        self.clearDiffViewState();
+        self.rebuildReviewLineMap();
+    }
+
+    /// Swap the parked non-PR comments back in as the non-PR diff is installed.
+    /// The caller rebuilds the LineMap.
+    fn restoreNonPrComments(self: *App) void {
+        const parked = self.state.pr_surface_parking.comments orelse return;
+        self.state.comment_store.deinit();
+        self.state.comment_store = parked;
+        self.state.pr_surface_parking.comments = null;
+        self.clearDiffViewState();
+    }
+
+    fn clearDiffViewState(self: *App) void {
+        self.state.collapsed_folds.clearRetainingCapacity();
+        self.state.expanded_comments.clearRetainingCapacity();
+        self.state.search_state.reset();
+        self.state.global_cursor_line = 0;
+        self.state.global_scroll_offset = 0;
     }
 
     /// Consume a completed PR entry/refetch from the review worker. On entry,
     /// swaps the diff source to `origin/<base>...refs/skim/pr-<n>`; on graceful
     /// degradation (git ok, gh failed) still enters and surfaces the reason.
-    fn pollReviewEntry(self: *App) void {
+    pub fn pollReviewEntry(self: *App) void {
         switch (review_controller.pollPending(&self.state.review, self.allocator)) {
             .none => {},
             .entered => |info| {
                 defer self.allocator.free(info.head_ref);
                 defer self.allocator.free(info.base_ref);
-                self.enterReviewDiff(info.head_ref, info.base_ref) catch |err| {
+                self.enterReviewDiff(.{ .head_ref = info.head_ref, .base_ref = info.base_ref, .gh_error = info.gh_error }) catch |err| {
                     std.log.err("Failed to enter PR diff: {any}", .{err});
                     pr_controller.setMessage(&self.state.pr, "failed to open PR diff");
                     self.needs_render = true;
                     return;
                 };
-                if (info.gh_error) |kind| {
-                    self.showStatusError(pr.github.kindMessage(kind));
-                }
                 self.needs_render = true;
             },
             .refreshed => |gh_error| {
@@ -2670,6 +2792,16 @@ pub const App = struct {
             },
             .fetch_failed => {
                 pr_controller.setMessage(&self.state.pr, "fetch failed — is gh/git authenticated?");
+                // The switch already reset the session, so the previous PR's
+                // diff stays up with no threads.
+                if (self.state.pr_surface_parking.comments != null) {
+                    self.showStatusError("PR fetch failed — showing the previous PR's diff without review data");
+                }
+                self.needs_render = true;
+            },
+            .start_failed => {
+                pr_controller.setMessage(&self.state.pr, "failed to start PR entry");
+                self.showStatusError("failed to start PR entry");
                 self.needs_render = true;
             },
         }
@@ -2689,6 +2821,12 @@ pub const App = struct {
             .failed => |kind| {
                 self.rebuildReviewLineMap();
                 self.showStatusError(pr.github.kindMessage(kind));
+                self.needs_render = true;
+            },
+            .stale_failed => |kind| {
+                var msg_buf: [128]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msg_buf, "draft on previous PR failed: {s}", .{pr.github.kindMessage(kind)}) catch "draft on previous PR failed";
+                self.showStatusError(msg);
                 self.needs_render = true;
             },
         }
@@ -2841,37 +2979,94 @@ pub const App = struct {
         self.needs_render = true;
     }
 
-    /// Swap the diff to the fetched PR refs and refresh. `head_ref` is the local
-    /// ref from `git fetch` (e.g. `refs/skim/pr-42`); `base_ref` is the base
-    /// branch name (empty → diff against HEAD).
-    fn enterReviewDiff(self: *App, head_ref: []const u8, base_ref: []const u8) !void {
-        const ref2 = try self.allocator.dupe(u8, head_ref);
+    /// Swap the diff to the fetched PR refs and refresh. Entering the PR surface
+    /// from a non-PR diff parks that diff's local comments until a non-PR diff is
+    /// installed after `leavePrSurface`.
+    pub fn enterReviewDiff(self: *App, entry: ReviewDiffEntry) !void {
+        const ref2 = try self.allocator.dupe(u8, entry.head_ref);
         errdefer self.allocator.free(ref2);
-        const ref1 = if (base_ref.len > 0)
-            try std.fmt.allocPrint(self.allocator, "origin/{s}", .{base_ref})
+        const ref1 = if (entry.base_ref.len > 0)
+            try std.fmt.allocPrint(self.allocator, "origin/{s}", .{entry.base_ref})
         else
             try self.allocator.dupe(u8, "HEAD");
         errdefer self.allocator.free(ref1);
 
-        switch (self.state.diff_source) {
-            .working_dir, .stdin => {},
-            .single_ref => |sr| self.allocator.free(sr.ref),
-            .two_refs => |tr| {
-                self.allocator.free(tr.ref1);
-                self.allocator.free(tr.ref2);
-            },
-        }
-
+        const old_source = self.state.diff_source;
+        defer git.freeDiffSource(self.allocator, old_source);
         self.state.diff_source = DiffSource{ .two_refs = .{
             .ref1 = ref1,
             .ref2 = ref2,
             .use_merge_base = true,
         } };
+        // After the fallible allocations: a failed entry leaves the editor open.
+        const discarded = self.settleCommentEditorForEntry();
+        if (self.state.pr_surface_parking.comments == null) {
+            self.state.pr_surface_parking.comments = self.state.comment_store;
+            self.state.comment_store = comments.CommentStore.init(self.allocator);
+        } else {
+            // PR→PR: writes are refused while the entry is pending
+            // (`localWritesBlocked`), so this only guards against a gap there.
+            self.state.comment_store.clearAll();
+        }
+        // The previous diff stays on screen until the PR diff installs; the
+        // session's threads anchor against that diff, not this one.
+        self.state.pr_surface_parking.change = .enter_pr;
+        self.resetDiffViewState();
 
         pr_controller.setMessage(&self.state.pr, "");
         self.state.pager_mode = false;
         self.mode = .normal;
         try self.refresh();
+        if (entry.gh_error) |kind| self.showEntryGhError(kind, discarded);
+    }
+
+    /// A gh error from the entry, sharing the status line with the discard
+    /// notice when an open editor was dropped so neither hides the other.
+    fn showEntryGhError(self: *App, kind: pr.github.GhErrorKind, discarded: bool) void {
+        if (!discarded) {
+            self.showStatusError(pr.github.kindMessage(kind));
+            return;
+        }
+        var msg_buf: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "unsent comment discarded; {s}", .{pr.github.kindMessage(kind)}) catch discarded_comment_message;
+        self.showStatusError(msg);
+    }
+
+    /// Local comment writes (editor open/save, local reply, MCP add/reply) are
+    /// refused while the diff on screen is not the one `comment_store` will
+    /// belong to. Null when writes are allowed.
+    pub fn localWritesBlocked(self: *const App) ?LocalWriteBlock {
+        if (self.state.pr_surface_parking.pending()) return .diff_loading;
+        // A first entry from a non-PR diff stays writable: `enterReviewDiff`
+        // parks whatever is written meanwhile with that diff.
+        if (self.state.pr_surface_parking.comments != null and review_controller.entryPending(&self.state.review)) return .pr_loading;
+        return null;
+    }
+
+    /// Close a comment editor left open on the outgoing diff as a PR diff is
+    /// entered; returns whether its text was discarded. A local comment or
+    /// reply on a non-PR diff is saved into the outgoing store while
+    /// `state.files` is still the diff its anchors index. Everything else is
+    /// dropped: a GitHub draft or thread reply/edit belongs to the previous
+    /// PR's session and, saved later, would post to the entered PR; a local
+    /// comment on a PR diff (PR→PR) goes with that PR's store; and anything
+    /// open while an earlier surface change is pending has no store of its own.
+    fn settleCommentEditorForEntry(self: *App) bool {
+        const input = self.state.active_comment_input orelse return false;
+        const parking = &self.state.pr_surface_parking;
+        const saves_locally = parking.comments == null and !parking.pending() and switch (input.edit_context) {
+            .none => input.target == .local,
+            .local_reply => true,
+            .reply, .edit_own => false,
+        };
+        const saved = saves_locally and (CommentController.saveCurrentComment(self) catch |err| blk: {
+            std.log.warn("Failed to save the open comment before entering the PR diff: {any}", .{err});
+            break :blk false;
+        });
+        self.state.active_comment_input = null;
+        if (saved) return false;
+        self.showStatusError(discarded_comment_message);
+        return true;
     }
 
     /// Anchored review threads for the active session, or null when no session
@@ -2883,10 +3078,11 @@ pub const App = struct {
     }
 
     /// Re-derive review-thread anchors against `files` (AD-4: anchors are never
-    /// persisted — every diff refresh recomputes them). No-op-safe when no
-    /// session is active. Must run before any `LineMap.build` on a new diff.
+    /// persisted — every diff refresh recomputes them). Drops them instead when
+    /// no session is active or the session's PR diff is not installed yet.
+    /// Must run before any `LineMap.build` on a new diff.
     fn reanchorReview(self: *App, files: []const parser.FileDiff) void {
-        if (!review_controller.isActive(&self.state.review)) {
+        if (!review_controller.isActive(&self.state.review) or self.state.pr_surface_parking.change == .enter_pr) {
             review_controller.freeAnchored(&self.state.review, self.allocator);
             return;
         }
@@ -2966,27 +3162,16 @@ pub const App = struct {
 
         const selected = &stack.branches[idx];
 
-        // Free old diff_source
-        switch (self.state.diff_source) {
-            .working_dir, .stdin => {},
-            .single_ref => |sr| self.allocator.free(sr.ref),
-            .two_refs => |tr| {
-                self.allocator.free(tr.ref1);
-                self.allocator.free(tr.ref2);
-            },
-        }
-
         // For trunk, diff against HEAD (working changes)
         // For other branches, diff against parent
-        if (selected.is_trunk) {
-            self.state.diff_source = DiffSource{ .working_dir = .{ .staged = false } };
-        } else if (selected.parent_ref) |parent| {
+        const new_source: DiffSource = if (selected.is_trunk)
+            DiffSource{ .working_dir = .{ .staged = false } }
+        else if (selected.parent_ref) |parent| blk: {
             const parent_copy = try self.allocator.dupe(u8, parent);
             errdefer self.allocator.free(parent_copy);
             const branch_copy = try self.allocator.dupe(u8, selected.name);
-            errdefer self.allocator.free(branch_copy);
 
-            self.state.diff_source = DiffSource{ .two_refs = .{
+            break :blk DiffSource{ .two_refs = .{
                 .ref1 = parent_copy,
                 .ref2 = branch_copy,
                 .use_merge_base = true,
@@ -2996,7 +3181,11 @@ pub const App = struct {
             self.state.status_message = "No parent branch found";
             self.state.status_message_time = skim_io.milliTimestamp();
             return;
-        }
+        };
+
+        const old_source = self.state.diff_source;
+        defer git.freeDiffSource(self.allocator, old_source);
+        self.state.diff_source = new_source;
 
         // Update current_idx in stack to reflect selection
         self.state.graphite.stack.?.current_idx = idx;
@@ -3004,6 +3193,7 @@ pub const App = struct {
         // Go back to normal mode and refresh
         self.state.pager_mode = false;
         self.mode = .normal;
+        self.leavePrSurface();
         try self.refresh();
     }
 
@@ -3064,24 +3254,14 @@ pub const App = struct {
             },
         };
 
-        // An in-flight loader borrows the old source's ref strings (it does not
-        // copy them), and it is only joined inside refresh(). Freeing them here
-        // would pull them out from under the worker mid-stream, so hold them
-        // until refresh() has returned.
         const old_source = self.state.diff_source;
-        defer switch (old_source) {
-            .working_dir, .stdin => {},
-            .single_ref => |sr| self.allocator.free(sr.ref),
-            .two_refs => |tr| {
-                self.allocator.free(tr.ref1);
-                self.allocator.free(tr.ref2);
-            },
-        };
+        defer git.freeDiffSource(self.allocator, old_source);
 
         self.state.diff_source = new_source;
 
         // Refresh to load new diff
         self.state.pager_mode = false;
+        self.leavePrSurface();
         try self.refresh();
     }
 
