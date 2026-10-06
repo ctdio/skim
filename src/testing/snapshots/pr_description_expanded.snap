@@ -1,8 +1,18 @@
-┌ #42 Add retry to the sync worker · alice  (o to collapse)
-│ ## Why
-│ Sync gave up on the first network error, so a flaky
-│ connection left the sidebar stale until restart.
-│
-│ ## What
-│ - retry with backoff
-└─
+┃ ▾ #42 Add retry to the sync worker  alice
+┃
+┃ Why
+┃ Sync gave up on the first network error, so a flaky
+┃ connection left the sidebar stale until restart.
+┃
+┃ What
+┃ • retry fetchPage with backoff
+┃   ◦ capped at 30s
+┃ ☑ unit tests
+┃ ☐ metrics
+┃
+┃ ▎ Follow-up: surface retries in the status bar
+┃
+┃   const delay = base * attempt;
+┃ ─────────────────────────────────────────────────────────
+┃ 1. merge after #41
+┃

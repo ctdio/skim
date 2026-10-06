@@ -397,54 +397,86 @@ test "threadDisplayHeight equals the rows renderThreadDisplay actually draws" {
 
 test "snapshot: pr_description_expanded" {
     try renderDescriptionSnapshot("pr_description_expanded", .{
-        .number = 42,
-        .title = "Add retry to the sync worker",
-        .author = "alice",
-        .body = "## Why\r\nSync gave up on the first network error, so a flaky connection left the sidebar stale until restart.\r\n\r\n## What\r\n- retry with backoff\r\n",
-        .placeholder = "No description.",
-        .collapsed = false,
+        .body = "<!-- Thanks for contributing! -->\r\n## Why\r\nSync gave up on the **first** network error, so a flaky connection left the sidebar stale until restart.\r\n\r\n## What\r\n- retry `fetchPage` with backoff\r\n  - capped at [30s](https://example.com)\r\n- [x] unit tests\r\n- [ ] metrics\r\n\r\n> Follow-up: surface retries in the status bar\r\n\r\n```zig\r\nconst delay = base * attempt;\r\n```\r\n---\r\n1. merge after #41\r\n",
+        .view = .{
+            .number = 42,
+            .title = "Add retry to the sync worker",
+            .author = "alice",
+            .head_ref = "feat/retry",
+            .base_ref = "main",
+            .lines = &.{},
+            .placeholder = "No description.",
+            .collapsed = false,
+        },
     });
 }
 
 test "snapshot: pr_description_collapsed" {
     try renderDescriptionSnapshot("pr_description_collapsed", .{
-        .number = 42,
-        .title = "Add retry to the sync worker",
-        .author = "alice",
         .body = "## Why\nlong text",
-        .placeholder = "No description.",
-        .collapsed = true,
+        .view = .{
+            .number = 42,
+            .title = "Add retry to the sync worker",
+            .author = "alice",
+            .lines = &.{},
+            .placeholder = "No description.",
+            .collapsed = true,
+        },
     });
 }
 
 test "snapshot: pr_description_loading" {
     try renderDescriptionSnapshot("pr_description_loading", .{
-        .number = 7,
-        .title = "Bump deps",
-        .author = "bob",
         .body = "",
-        .placeholder = "Loading description…",
-        .collapsed = false,
+        .view = .{
+            .number = 7,
+            .title = "Bump deps",
+            .author = "bob",
+            .head_ref = "chore/deps",
+            .base_ref = "main",
+            .is_draft = true,
+            .lines = &.{},
+            .placeholder = "Loading description…",
+            .collapsed = false,
+        },
+    });
+}
+
+test "snapshot: pr_description_long_title_narrow" {
+    try renderDescriptionSnapshot("pr_description_long_title_narrow", .{
+        .body = "A short body.",
+        .width = 40,
+        .view = .{
+            .number = 1234,
+            .title = "Refactor the entire highlighting pipeline to stream results",
+            .author = "carol",
+            .head_ref = "refactor/highlight-stream",
+            .base_ref = "main",
+            .lines = &.{},
+            .placeholder = "No description.",
+            .collapsed = false,
+        },
     });
 }
 
 test "description rowHeight equals the rows drawRow draws for a wrapped line" {
+    const lines = [_]review.description.Line{.{ .kind = .bullet, .text = "a long **description** line that wraps across several rows of a narrow window" }};
     const view: description_block.DescriptionView = .{
         .number = 1,
         .title = "t",
         .author = "a",
-        .body = "a long description line that wraps across several rows of a narrow window",
+        .lines = &lines,
         .placeholder = "",
         .collapsed = false,
     };
     const row: description_block.Row = .{ .kind = .body_line, .line_idx = 0 };
-    const width: u16 = 24;
+    const width: u16 = 28;
 
     var ctx = try harness.createTestContext(testing.allocator, width, 20);
     defer ctx.deinit();
     const drawn = description_block.drawRow(ctx.window(), .{ .view = view, .row = row, .start_row = 0, .is_cursor = false, .frame_allocator = ctx.frameAllocator() });
 
-    try testing.expectEqual(description_block.rowHeight(view, row, width), drawn);
+    try testing.expectEqual(description_block.rowHeight(.{ .view = view, .row = row, .width = width, .allocator = testing.allocator }), drawn);
     try testing.expect(drawn > 1);
 }
 
@@ -2004,10 +2036,19 @@ fn renderHintSnapshot(name: []const u8, hint: thread_hint.ThreadHint, thread_res
     try snapshot.expectSnapshot(allocator, name, text);
 }
 
-/// Draw every description record a LineMap emits for `view` above a one-file
-/// diff, the way the diff renderers walk them, and compare against `name`.
-fn renderDescriptionSnapshot(name: []const u8, view: description_block.DescriptionView) !void {
+/// Lay out `body`, then draw every description record a LineMap emits for it
+/// above a one-file diff, the way the diff renderers walk them.
+fn renderDescriptionSnapshot(name: []const u8, params: struct {
+    body: []const u8,
+    view: description_block.DescriptionView,
+    width: u16 = 60,
+}) !void {
     const allocator = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var view = params.view;
+    view.lines = try review.description.layout(arena.allocator(), params.body);
+
     var files = singleFile();
     var store = comments.CommentStore.init(allocator);
     defer store.deinit();
@@ -2016,11 +2057,11 @@ fn renderDescriptionSnapshot(name: []const u8, view: description_block.Descripti
         .comment_store = &store,
         .hunk_view_mode = .all,
         .apply_filtering = true,
-        .pr_description = .{ .line_count = description_block.lineCount(view.body), .collapsed = view.collapsed },
+        .pr_description = .{ .line_count = description_block.lineCount(view.lines), .collapsed = view.collapsed },
     });
     defer map.deinit();
 
-    var ctx = try harness.createTestContext(allocator, 60, 16);
+    var ctx = try harness.createTestContext(allocator, params.width, 30);
     defer ctx.deinit();
 
     var row: usize = 0;

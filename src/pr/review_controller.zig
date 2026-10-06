@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 
 const github = @import("github.zig");
 const review_parse = @import("review_parse.zig");
+const description = @import("description.zig");
 const thread_placement = @import("thread_placement.zig");
 const width = @import("../rendering/width.zig");
 const skim_io = @import("skim_io");
@@ -335,6 +336,9 @@ pub const ReviewSession = struct {
     head_ref: []const u8 = "",
     title: []const u8 = "",
     body: []const u8 = "",
+    // `body` laid out for the description block above the diff; strings
+    // borrow from `body` / `data_arena`.
+    description_lines: []const description.Line = &.{},
     author: []const u8 = "",
     viewer_login: []const u8 = "",
     review_decision: []const u8 = "",
@@ -753,6 +757,7 @@ pub fn applyFetchedData(self: *ReviewSession, allocator: Allocator, data: *revie
     self.head_ref = try a.dupe(u8, d.head_ref);
     self.title = try a.dupe(u8, d.title);
     self.body = try a.dupe(u8, d.body);
+    self.description_lines = try description.layout(a, self.body);
     self.author = try a.dupe(u8, d.author);
     self.viewer_login = try a.dupe(u8, d.viewer_login);
     self.review_decision = try a.dupe(u8, d.review_decision);
@@ -1726,6 +1731,7 @@ fn clearData(self: *ReviewSession, allocator: Allocator) void {
     self.head_ref = "";
     self.title = "";
     self.body = "";
+    self.description_lines = &.{};
     self.author = "";
     self.viewer_login = "";
     self.review_decision = "";

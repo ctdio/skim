@@ -7,6 +7,7 @@
 //!   - `filter`  : case-insensitive substring match (pure)
 //!   - `stack`   : forge-native stacked-PR detection from base->head edges (pure)
 //!   - `review_*`, `thread_hint` : the review session and its threads
+//!   - `description` : PR body markdown -> display lines (pure)
 //!
 //! The PR list is the sidebar beside the diff: sync -> DB -> sidebar, and
 //! prefetch -> diff cache -> flip, all driven by `surface.zig` (see
@@ -24,6 +25,7 @@ pub const review_render = @import("review_render.zig");
 pub const review_parse = @import("review_parse.zig");
 pub const review_controller = @import("review_controller.zig");
 pub const thread_hint = @import("thread_hint.zig");
+pub const description = @import("description.zig");
 
 pub const CiStatus = parse.CiStatus;
 

@@ -1093,7 +1093,7 @@ pub const RenderUtils = struct {
 
     /// Rendered height of a PR description record — mirrors `renderPrDescription`.
     pub fn prDescriptionHeight(app: *App, row: description_block.Row, width: usize) usize {
-        return description_block.rowHeight(prDescriptionView(app), row, width);
+        return description_block.rowHeight(.{ .view = prDescriptionView(app), .row = row, .width = width, .allocator = app.allocator });
     }
 
     /// Rendered height of a review-thread block — mirrors `renderReviewThread`'s
@@ -1488,7 +1488,10 @@ pub const RenderUtils = struct {
             .number = review.number,
             .title = review.title,
             .author = review.author,
-            .body = review.body,
+            .head_ref = review.head_ref,
+            .base_ref = review.base_ref,
+            .is_draft = review.is_draft,
+            .lines = review.description_lines,
             .placeholder = review_controller.descriptionPlaceholder(review),
             .collapsed = review.description_collapsed,
         };

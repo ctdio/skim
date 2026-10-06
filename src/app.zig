@@ -3085,7 +3085,7 @@ pub const App = struct {
     pub fn reviewDescription(self: *App) ?line_map.DescriptionLayout {
         if (!review_controller.isActive(&self.state.review) or self.state.pr_surface_parking.change == .enter_pr) return null;
         return .{
-            .line_count = description_block.lineCount(self.state.review.body),
+            .line_count = description_block.lineCount(self.state.review.description_lines),
             .collapsed = self.state.review.description_collapsed,
         };
     }
