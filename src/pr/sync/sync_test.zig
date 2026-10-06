@@ -909,6 +909,47 @@ test "start runs an initial sync and bumps generation" {
     try testing.expectEqual(null, worker.status().last_error);
 }
 
+test "start opens the database on the worker thread, reporting a failure and retrying it on the next wake" {
+    var root = try test_support.TmpRoot.init();
+    defer root.deinit();
+    const gh = try serveQuietRepo(.{ .root = &root });
+    defer testing.allocator.free(gh);
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/not-yet", .{root.path});
+    defer testing.allocator.free(db_dir);
+    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/prs.db", .{db_dir});
+    defer testing.allocator.free(db_path);
+
+    const worker = try sync.SyncWorker.start(workerOptions(db_path, gh));
+    defer worker.stop();
+
+    try waitFor(worker, lastErrorSet);
+    try testing.expectEqual(github.GhErrorKind.other, worker.status().last_error.?);
+    try testing.expectEqual(0, worker.generation());
+
+    try std.Io.Dir.cwd().createDirPath(skim_io.get(), db_dir);
+    worker.requestSync();
+    try waitFor(worker, lastOkSet);
+    try testing.expectEqual(null, worker.status().last_error);
+}
+
+test "start seeds status from the caller's initial status until the worker reads the database" {
+    var root = try test_support.TmpRoot.init();
+    defer root.deinit();
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/never", .{root.path});
+    defer testing.allocator.free(db_dir);
+    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/prs.db", .{db_dir});
+    defer testing.allocator.free(db_path);
+
+    var options = workerOptions(db_path, "/nonexistent/gh");
+    options.initial_status = .{ .running = false, .last_ok_at = 1234, .last_error = .network };
+    const worker = try sync.SyncWorker.start(options);
+    const seeded = worker.status();
+    worker.stop();
+
+    try testing.expectEqual(1234, seeded.last_ok_at.?);
+    try testing.expectEqual(github.GhErrorKind.network, seeded.last_error.?);
+}
+
 test "requestSync during a run coalesces into one follow-up run" {
     var root = try test_support.TmpRoot.init();
     defer root.deinit();
@@ -999,7 +1040,7 @@ test "status reports last_error after a failing run and clears it after a good o
     try testing.expectEqual(null, worker.status().last_error);
 }
 
-test "start seeds status from the last stored sync result" {
+test "the worker seeds status from the last stored sync result" {
     var tw = try test_support.TestWorld.init();
     defer tw.deinit();
     const world = &tw.world;
@@ -1014,13 +1055,13 @@ test "start seeds status from the last stored sync result" {
         .gh_bin = "/nonexistent/gh",
         .interval_ms = 60_000,
     });
-    const seeded = worker.status();
-    worker.stop();
+    defer worker.stop();
+    try waitFor(worker, lastOkSet);
 
-    try testing.expectEqual(scenario.World.seed_now, seeded.last_ok_at.?);
+    try testing.expectEqual(scenario.World.seed_now, worker.status().last_ok_at.?);
 }
 
-test "start keeps the last success time when the latest run failed" {
+test "the worker keeps the last success time when the latest run failed" {
     var tw = try test_support.TestWorld.init();
     defer tw.deinit();
     const world = &tw.world;
@@ -1035,11 +1076,11 @@ test "start keeps the last success time when the latest run failed" {
         .db_path = db_path,
         .gh_bin = "/nonexistent/gh",
     });
-    const seeded = worker.status();
-    worker.stop();
+    defer worker.stop();
+    try waitFor(worker, lastOkSet);
 
-    try testing.expectEqual(scenario.World.seed_now, seeded.last_ok_at.?);
-    try testing.expectEqual(github.GhErrorKind.not_installed, seeded.last_error.?);
+    try testing.expectEqual(scenario.World.seed_now, worker.status().last_ok_at.?);
+    try testing.expectEqual(github.GhErrorKind.not_installed, worker.status().last_error.?);
 }
 
 test "the worker stops rerunning at once when a rerun makes no hydrate progress" {
@@ -1136,15 +1177,6 @@ test "a first sync with one inaccessible PR reruns at once for the hydrate work 
     try testing.expectEqual(6, calls.count("SkimSyncIndex"));
     try testing.expectEqual(10, calls.count("SkimSyncHydrate"));
     try testing.expectEqual(null, worker.status().last_error);
-}
-
-test "start with an unopenable db path returns an error and spawns no thread" {
-    try testing.expect(std.meta.isError(sync.SyncWorker.start(.{
-        .repo_key = repo_key,
-        .owner = owner,
-        .name = repo_name,
-        .db_path = "/nonexistent-dir/skim/prs.db",
-    })));
 }
 
 // =============================================================================

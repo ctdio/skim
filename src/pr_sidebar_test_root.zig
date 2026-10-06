@@ -1,4 +1,4 @@
-//! Named-module re-export root for the PR sidebar tests (Phase 6a). Rooted at
+//! Named-module re-export root for the PR sidebar and flip tests. Rooted at
 //! `src/` so the helpers in `testing/sidebar_test_helpers.zig` can reach
 //! `pr/`, `rendering/` and `app.zig` across directory boundaries. Imported by
 //! name ("pr_sidebar_test_root"), so the re-exported files' own `test {}`
@@ -31,6 +31,7 @@ pub const ParsedLru = @import("pr/prefetch/parsed_lru.zig").ParsedLru;
 pub const line_map = @import("line_map.zig");
 pub const pr_review_mode = @import("modes/pr_review_mode.zig");
 pub const flip_controller = @import("pr/flip_controller.zig");
+pub const surface_controller = @import("pr/surface_controller.zig");
 pub const review_controller = @import("pr/review_controller.zig");
 pub const ui = @import("ui.zig");
 pub const comment_controller = @import("comments/controller.zig");

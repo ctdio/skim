@@ -84,7 +84,7 @@ pub fn handleKey(app: *App, key: Key) !void {
             pr_surface.pushVisible(&app.state.pr_surface, .{ .allocator = app.allocator, .sidebar = sb });
         },
         'R' => pr_surface.requestSync(&app.state.pr_surface),
-        'o' => pr_surface.openInBrowser(sb),
+        'o' => pr_surface.openInBrowser(&app.state.pr_surface, sb),
         Key.escape => try app.prSidebarBack(),
         else => {},
     }

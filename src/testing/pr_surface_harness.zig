@@ -1,8 +1,8 @@
-//! Offline harness for the PR sidebar surface (Phases 6a and 6b). Drives the
-//! real `App` (no tty: `initForRenderBench`), the real `SyncWorker` against
-//! Phase 3's fake `gh`, the real `PrefetchWorker` and review entry worker
-//! against Phase 5's review fake and a local bare origin. Scenario ids match
-//! the 6a and 6b verification-harness.md.
+//! Offline harness for the PR sidebar surface and its flip. Drives the real
+//! `App` (no tty: `initForRenderBench`), the real `SyncWorker` against the
+//! sync fake `gh`, the real `PrefetchWorker` and review entry worker against
+//! the review fake `gh` and a local bare origin. S* scenarios cover the
+//! sidebar and sync; H*, M2 and R1 cover the flip.
 //!
 //! Run through scripts/test-infra/pr-sidebar/surface-harness.sh, which builds
 //! the git world, the fake `gh` launchers and a temp HOME, exports the
@@ -13,12 +13,12 @@
 //!
 //! Every scenario runs under its own `DebugAllocator`; a leak is a FAIL.
 //!
-//! 6b (H*, M2, R1) counts subprocesses with two logs: `GIT_TRACE` (git appends
-//! a line per invocation anywhere in the process tree) and the review fake's
-//! `FAKE_GH_LOG`. "No spawn" = both byte-identical across the step, always
+//! The flip scenarios (H*, M2, R1) count subprocesses with two logs:
+//! `GIT_TRACE` (git appends a line per invocation anywhere in the process
+//! tree) and the review fake's `FAKE_GH_LOG`. "No spawn" = both byte-identical across the step, always
 //! with the workers stopped. Each no-spawn window also touches
 //! `$WORK/exec-marks/<id>-<n>-begin|end` (an `access` call), so the script's
-//! optional strace audit can fail any execve inside the window. 6b scenarios
+//! optional strace audit can fail any execve inside the window. Flip scenarios
 //! run only after H0 proved the review fake intercepts gh.
 
 const std = @import("std");
@@ -35,6 +35,7 @@ const review_controller = root.review_controller;
 const SidebarState = root.sidebar_state.SidebarState;
 const SidebarView = root.sidebar_render.View;
 const flip = root.flip;
+const surface_controller = root.surface_controller;
 const pr_surface = root.surface;
 const DiffKey = types.DiffKey;
 const FileDiff = root.parser.FileDiff;
@@ -53,14 +54,14 @@ const Env = struct {
     repo_local: []const u8,
     /// `git config --get remote.origin.url` in `repo`: the surface's repo key.
     repo_key: []const u8,
-    /// Phase 5 review fake (`ReviewSession.gh_bin`).
+    /// Review fake `gh` (`ReviewSession.gh_bin`).
     review_gh: []const u8,
-    /// `<dir>/<kind>/gh` launchers for Phase 3's sync fake; `<dir>/<kind>/root/calls.log`.
+    /// `<dir>/<kind>/gh` launchers for the sync fake; `<dir>/<kind>/root/calls.log`.
     sync_dir: []const u8,
     gh_log: []const u8,
     /// File count of PR 9's diff, computed by the script from the origin.
     pr9_files: usize,
-    /// `GIT_TRACE`: one block per git invocation in the process tree (6b).
+    /// `GIT_TRACE`: one block per git invocation in the process tree (flip scenarios).
     git_trace: []const u8,
     /// `FAKE_GH_FIXTURES`: review-N.json and the optional sleep-N files (H6).
     fixtures: []const u8,
@@ -151,7 +152,7 @@ const Harness = struct {
     sync_launcher: []u8,
     booted_at: i64,
     params: BootParams,
-    /// Virtual clock for `tickPrSurface` (ms). Starts at the real clock and
+    /// Virtual clock for `surface_controller.tick` (ms). Starts at the real clock and
     /// only moves forward; see `flipTo` for why it tracks real time.
     now_ms: i64,
     /// False after `deinit`, so a failed `restart` is not torn down twice.
@@ -283,7 +284,7 @@ const Harness = struct {
         if (selectedNumber(self.sidebar()) != number) return self.ctx.fail("j never reached #{d}", .{number});
     }
 
-    // --- 6b -------------------------------------------------------------
+    // --- Flip -----------------------------------------------------------
 
     /// `boot`, then stop both workers before they cache anything and empty
     /// diff_cache (pinned seen rows stay): every flip is a miss.
@@ -338,7 +339,7 @@ const Harness = struct {
     /// preview, then one `pollBackgroundWork`. A hit is installed on return; a
     /// miss is in flight (`settle` to land it).
     ///
-    /// The fire is split from the arm because `tickPrSurface` consumes the
+    /// The fire is split from the arm because `surface_controller.tick` consumes the
     /// cursor change and runs `flip.tick` in one call, and the debounce is
     /// measured from the arm. After the fire, wait until the real clock
     /// reaches the virtual one: `installPrDiff` stamps the preview with the
@@ -363,7 +364,7 @@ const Harness = struct {
     }
 
     fn tick(self: *Harness) void {
-        self.app.tickPrSurface(self.now_ms);
+        surface_controller.tick(self.app.surfaceCtx(), self.now_ms);
     }
 
     fn advance(self: *Harness, ms: i64) void {
@@ -445,7 +446,7 @@ const settle_deadline_ns = 15 * std.time.ns_per_s;
 /// S14: closing must not wait out the 8s gh call. Esc also reloads the
 /// working-tree diff, so the budget covers a small git diff too.
 const close_budget_ms = 1000;
-/// 6b: the PrefetchWorker caches all 14 origin14 PRs (diffs, merge bases,
+/// Flip: the PrefetchWorker caches all 14 origin14 PRs (diffs, merge bases,
 /// threads for the nearest 10) well inside this.
 const warm_deadline_ns = 30 * std.time.ns_per_s;
 /// H6: the review fake holds its PR 9 answer this long (fixtures/sleep-9).
@@ -472,7 +473,7 @@ const ready_rows = [_]u32{ 710, 712, 813 };
 /// `visibleNumbers` for `ready`, sorted: collapsed stack members count.
 const ready_visible = [_]u32{ 710, 712, 812, 813, 814 };
 
-/// Runs first for any 6b target (see `main`).
+/// Runs first for any flip target (see `main`).
 const h0_scenario: Scenario = .{ .id = "H0", .what = "GIT_TRACE and the review fake's log see the miss path's subprocesses", .run = h0LogsSeeSubprocesses };
 
 const scenarios = [_]Scenario{
@@ -488,7 +489,7 @@ const scenarios = [_]Scenario{
     .{ .id = "S10", .what = "`skim pr <n>` boot selects and enters; unknown number degrades", .run = s10BootNumber },
     .{ .id = "S13", .what = "switching to the working tree closes the surface and restores comments", .run = s13LeaveForWorkingTree },
     .{ .id = "S14", .what = "Esc close and quit during an in-flight sync kill gh instead of waiting", .run = s14CloseDuringSync },
-    // 6b. The world mutators (H3, H4a, H4b, H5) run last: they rewrite PRs 5,
+    // Flip. The world mutators (H3, H4a, H4b, H5) run last: they rewrite PRs 5,
     // 9 and 14 in the shared origin.
     h0_scenario,
     .{ .id = "H1", .what = "a cache hit spawns no git or gh; `r` re-diffs the refs", .run = h1HitSpawnsNothing, .requires_gh_intercept = true },
@@ -944,7 +945,7 @@ fn s14CloseDuringSync(ctx: *Ctx) !void {
     }
 }
 
-// --- 6b ------------------------------------------------------------------
+// --- Flip ----------------------------------------------------------------
 
 fn h0LogsSeeSubprocesses(ctx: *Ctx) !void {
     try seed(ctx, .{ .fixture = .origin14 });
@@ -1586,7 +1587,7 @@ fn stacked31Specs(arena: Allocator) ![]PrSpec {
     return specs.items;
 }
 
-/// Rows from Phase 5's targets.tsv (`number head_ref base_ref head_oid
+/// Rows from the review fixture targets.tsv (`number head_ref base_ref head_oid
 /// base_oid updated_at parent_number`): real refs and oids in the origin, so
 /// Enter can fetch and diff them.
 fn origin14Specs(arena: Allocator, env: Env) ![]PrSpec {
@@ -1775,7 +1776,7 @@ fn expectCursor(ctx: *Ctx, h: *Harness, params: struct { step: []const u8, numbe
     if (sb.rows.items.len != params.rows) return ctx.fail("{s}: {d} rows, expected {d}", .{ params.step, sb.rows.items.len, params.rows });
 }
 
-// --- 6b helpers -----------------------------------------------------------
+// --- Flip helpers ---------------------------------------------------------
 
 /// Snapshot both subprocess logs and open an exec-audit window.
 fn spawnMark(ctx: *Ctx) !SpawnMark {

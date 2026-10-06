@@ -19,10 +19,10 @@ pub const DiffSource = union(enum) {
     stdin: void, // Diff content comes from stdin (pager mode)
 };
 
-/// Free the ref strings `source` owns. When replacing the App's current
-/// source, defer this on the old one until `refresh()` has returned: an
-/// in-flight diff loader borrows those strings and is only joined inside
-/// `refresh()`.
+/// Free the ref strings `source` owns. An in-flight diff load borrows the
+/// App's current source, so before freeing a replaced one either join the
+/// load (`diff_loader.cancel`) or defer the free until `refresh()`, which
+/// joins it, has returned.
 pub fn freeDiffSource(allocator: Allocator, source: DiffSource) void {
     switch (source) {
         .working_dir, .stdin => {},

@@ -131,7 +131,8 @@ pub fn requestSync(surface: *Surface) void {
     _ = surface;
 }
 
-pub fn openInBrowser(sidebar: *const SidebarState) void {
+pub fn openInBrowser(surface: *const Surface, sidebar: *const SidebarState) void {
+    _ = surface;
     _ = sidebar;
 }
 

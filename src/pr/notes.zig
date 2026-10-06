@@ -95,6 +95,10 @@ pub const SavePlan = struct {
 
 const ReplyJson = struct { author: []const u8, text: []const u8 };
 
+const Side = enum { old, new };
+
+const Position = struct { hunk_idx: usize, line_idx: usize };
+
 /// Map each persisted note back into `files` and add it to the CommentStore;
 /// the ones that anchor nowhere become orphans.
 pub fn restore(params: RestoreParams) !void {
@@ -108,24 +112,6 @@ pub fn restore(params: RestoreParams) !void {
             try appendOrphan(.{ .allocator = params.allocator, .orphans = params.orphans, .note = note });
         }
     }
-}
-
-/// Where a note lands in `files`. Anchor order: the same lineno on the same
-/// side with the same content; else the first line in the same file whose
-/// content equals `line_content`; else null (orphan). A lineno whose content
-/// changed is not trusted: the note would sit on an unrelated line. A range
-/// end that no longer exists degrades the note to a single line.
-fn anchorFor(files: []const parser.FileDiff, note: NoteAnchorInput) ?Anchor {
-    const file_idx = fileIndex(files, note.file_path) orelse return null;
-    const file = &files[file_idx];
-    const start = findByLineno(file, .{ .side = sideOf(note.line_type), .lineno = linenoOn(note, sideOf(note.line_type)), .content = note.line_content }) orelse
-        findByContent(file, note.line_content) orelse return null;
-    var anchor: Anchor = .{ .file_idx = file_idx, .hunk_idx = start.hunk_idx, .line_idx = start.line_idx };
-    if (rangeEnd(.{ .file = file, .note = note, .start = start })) |end| {
-        anchor.end_hunk_idx = end.hunk_idx;
-        anchor.end_line_idx = end.line_idx;
-    }
-    return anchor;
 }
 
 /// Reconcile the PR's notes with the CommentStore: insert new comments, update
@@ -193,9 +179,23 @@ pub fn writeOrphanSection(writer: *std.Io.Writer, orphans: []const OrphanNote) !
     }
 }
 
-const Side = enum { old, new };
-
-const Position = struct { hunk_idx: usize, line_idx: usize };
+/// Where a note lands in `files`. Anchor order: the same lineno on the same
+/// side with the same content; else the first line in the same file whose
+/// content equals `line_content`; else null (orphan). A lineno whose content
+/// changed is not trusted: the note would sit on an unrelated line. A range
+/// end that no longer exists degrades the note to a single line.
+fn anchorFor(files: []const parser.FileDiff, note: NoteAnchorInput) ?Anchor {
+    const file_idx = fileIndex(files, note.file_path) orelse return null;
+    const file = &files[file_idx];
+    const start = findByLineno(file, .{ .side = sideOf(note.line_type), .lineno = linenoOn(note, sideOf(note.line_type)), .content = note.line_content }) orelse
+        findByContent(file, note.line_content) orelse return null;
+    var anchor: Anchor = .{ .file_idx = file_idx, .hunk_idx = start.hunk_idx, .line_idx = start.line_idx };
+    if (rangeEnd(.{ .file = file, .note = note, .start = start })) |end| {
+        anchor.end_hunk_idx = end.hunk_idx;
+        anchor.end_line_idx = end.line_idx;
+    }
+    return anchor;
+}
 
 fn sideOf(line_type: parser.Line.LineType) Side {
     return if (line_type == .delete) .old else .new;

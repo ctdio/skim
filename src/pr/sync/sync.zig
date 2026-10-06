@@ -26,6 +26,9 @@ pub const Options = struct {
     db_path: []const u8,
     gh_bin: []const u8 = "gh",
     interval_ms: u32 = 60_000,
+    /// What `status()` reports until the worker thread has read the stored
+    /// sync result; the UI passes what its own connection last showed.
+    initial_status: SyncStatus = .{ .running = false, .last_ok_at = null, .last_error = null },
 };
 
 pub const SyncStatus = struct {
@@ -164,10 +167,11 @@ pub const SyncWorker = struct {
     allocator: std.mem.Allocator,
     /// Strings duped in `start`, owned.
     options: Options,
-    /// This thread's own connection. Opened on the caller's thread, used only
-    /// by the worker thread after `start` returns.
-    store: store_mod.Store,
-    repo_id: i64,
+    /// The worker thread's own connection: opened, used and closed on that
+    /// thread only. Null until it opens.
+    store: ?store_mod.Store = null,
+    /// Set with `store`.
+    repo_id: i64 = 0,
     thread: std.Thread,
 
     generation_value: std.atomic.Value(u64) = .init(0),
@@ -185,8 +189,10 @@ pub const SyncWorker = struct {
     status_value: SyncStatus = .{ .running = false, .last_ok_at = null, .last_error = null },
     priority: std.ArrayList(u32) = .empty,
 
-    /// Open the database, register the repo and start the thread. A database
-    /// that cannot be opened fails here, before any thread exists.
+    /// Start the thread. It opens the database, registers the repo and reads
+    /// the stored sync result itself, so the caller's thread never waits on
+    /// SQLite; a database that cannot be opened is reported through
+    /// `status()` (`last_error = .other`) and retried on every wake.
     pub fn start(options: Options) !*SyncWorker {
         const allocator = std.heap.c_allocator;
         const self = try allocator.create(SyncWorker);
@@ -194,18 +200,12 @@ pub const SyncWorker = struct {
 
         const owned_options = try dupeOptions(allocator, options);
         errdefer freeOptions(allocator, owned_options);
-        var store = try store_mod.Store.open(allocator, owned_options.db_path);
-        errdefer store.close();
-        const repo_id = try store.ensureRepo(.{ .key = owned_options.repo_key, .owner = owned_options.owner, .name = owned_options.name });
-        const initial_status = try initialStatus(&store, repo_id);
 
         self.* = .{
             .allocator = allocator,
             .options = owned_options,
-            .store = store,
-            .repo_id = repo_id,
             .thread = undefined,
-            .status_value = initial_status,
+            .status_value = options.initial_status,
         };
         self.thread = try std.Thread.spawn(.{}, workerMain, .{self});
         return self;
@@ -246,7 +246,6 @@ pub const SyncWorker = struct {
         self.wake();
         self.child.cancel();
         self.thread.join();
-        self.store.close();
         freeOptions(self.allocator, self.options);
         self.priority.deinit(self.allocator);
         self.allocator.destroy(self);
@@ -259,6 +258,8 @@ pub const SyncWorker = struct {
 
     fn workerMain(self: *SyncWorker) void {
         const interval_ns = @as(u64, self.options.interval_ms) * std.time.ns_per_ms;
+        if (!self.openStore(interval_ns)) return;
+        defer self.store.?.close();
         var since_run = RunClock.start();
         var sync_index: u64 = 0;
         // `hydrate_remaining` of the last run when it was an immediate rerun.
@@ -278,6 +279,38 @@ pub const SyncWorker = struct {
         }
     }
 
+    /// Open this thread's connection, retrying on every wake (`requestSync`,
+    /// the interval) while it fails. False when `stop` came first.
+    fn openStore(self: *SyncWorker, interval_ns: u64) bool {
+        while (!self.stop_requested.load(.acquire)) {
+            const seq = self.wake_seq.load(.acquire);
+            if (self.tryOpenStore()) {
+                return true;
+            } else |err| {
+                std.log.warn("pr sync: cannot open {s}: {any}", .{ self.options.db_path, err });
+                self.mutex.lockUncancelable(skim_io.get());
+                self.status_value.last_error = .other;
+                self.mutex.unlock(skim_io.get());
+            }
+            self.waitForWake(seq, interval_ns);
+        }
+        return false;
+    }
+
+    /// Open the database, register the repo and seed `status` from the
+    /// stored sync result.
+    fn tryOpenStore(self: *SyncWorker) !void {
+        var store = try store_mod.Store.open(self.allocator, self.options.db_path);
+        errdefer store.close();
+        const repo_id = try store.ensureRepo(.{ .key = self.options.repo_key, .owner = self.options.owner, .name = self.options.name });
+        const stored_status = try initialStatus(&store, repo_id);
+        self.store = store;
+        self.repo_id = repo_id;
+        self.mutex.lockUncancelable(skim_io.get());
+        defer self.mutex.unlock(skim_io.get());
+        self.status_value = stored_status;
+    }
+
     /// Sleep until `wake_seq` moves past `seq` or `timeout_ns` passes. A
     /// spurious or canceled wait just returns; the caller re-checks state.
     fn waitForWake(self: *SyncWorker, seq: u32, timeout_ns: u64) void {
@@ -295,7 +328,7 @@ pub const SyncWorker = struct {
         const priority = self.beginRun(arena.allocator());
 
         const outcome = runOnce(.{
-            .store = &self.store,
+            .store = &self.store.?,
             .repo_id = self.repo_id,
             .owner = self.options.owner,
             .name = self.options.name,

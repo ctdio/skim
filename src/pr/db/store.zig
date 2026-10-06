@@ -152,14 +152,6 @@ pub const Store = struct {
         return .{ .allocator = allocator, .db = db };
     }
 
-    /// `open` on `defaultPath()`, creating ~/.skim if needed.
-    pub fn openDefault(allocator: std.mem.Allocator) !Store {
-        const path = try defaultPath(allocator);
-        defer allocator.free(path);
-        try std.Io.Dir.cwd().createDirPath(skim_io.get(), std.fs.path.dirname(path).?);
-        return open(allocator, path);
-    }
-
     pub fn close(self: *Store) void {
         self.db.close();
         if (self.quarantined_path) |path| self.allocator.free(path);

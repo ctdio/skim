@@ -934,7 +934,7 @@ gh (GraphQL) ──► SyncWorker ──► prs.db (repo, pr, pr_seen) ──►
                                                                        ▲
 sidebar cursor ─► priority targets ─► PrefetchWorker ─► git fetch refs/skim/pr-N ─► merge_base_cache + diff_cache + thread_cache
                                                                        │
-                                     flip: planFlip ─► ParsedLru hit | parse diff_cache bytes ─► App.installPrDiff
+                                     flip: planFlip ─► ParsedLru hit | parse diff_cache bytes ─► surface_controller.installPrDiff
 ```
 
 - **Sync** (`pr/sync/`): `planner.zig` makes every decision as pure functions
@@ -950,10 +950,10 @@ sidebar cursor ─► priority targets ─► PrefetchWorker ─► git fetch re
   targets; the worker fetches their heads in batches, writes `git diff` bytes
   into `diff_cache`, refreshes review threads for the nearest PRs and evicts by
   cursor distance to stay under budget.
-- **Flip** (`pr/flip.zig`, `pr/flip_controller.zig`, `App.previewPr`): cursor
+- **Flip** (`pr/flip.zig`, `pr/flip_controller.zig`, `pr/surface_controller.zig`): cursor
   moves are debounced into previews. `pr_surface.planFlip` resolves a hit from
   `ParsedLru` (the last 8 parsed sets) or by parsing cached bytes;
-  `App.installPrDiff` swaps the files in, enters the review session from the
+  `surface_controller.installPrDiff` swaps the files in, enters the review session from the
   cached threads and restores local notes. An outgoing set that came from the
   cache is parked in the LRU. A miss streams the diff with git as before; the prefetch worker fills
   the cache for the next visit.
@@ -972,7 +972,7 @@ key.
 `prs.db` is opened once per thread: the UI (`pr/surface.zig`), the sync worker
 and the prefetch worker each own a `Store` connection, with SQLite in WAL mode
 so readers never block the writers. Workers never touch UI state. Each worker
-bumps an atomic generation counter after it commits; `App.tickPrSurface` polls
+bumps an atomic generation counter after it commits; `surface_controller.tick` polls
 `surface.poll`, which reloads the sidebar snapshot only when a generation
 moved. Git and gh children run in their own process group
 (`pr/child_group.zig`) so shutdown can cancel them without waiting.
@@ -1080,8 +1080,8 @@ NFR-1 budgets (p95):
 | Measurement     | What is timed                                                  | Budget  |
 | --------------- | -------------------------------------------------------------- | ------- |
 | `cold paint`    | `pr_surface.openAt` (store open + reload + filter) + first paint | < 50 ms |
-| `flip (db hit)` | `planFlip` parsing cached bytes + `App.installPrDiff` + paint  | < 30 ms |
-| `flip (lru hit)`| `planFlip` from `ParsedLru` + `App.installPrDiff` + paint      | < 5 ms  |
+| `flip (db hit)` | `planFlip` parsing cached bytes + `installPrDiff` + paint      | < 30 ms |
+| `flip (lru hit)`| `planFlip` from `ParsedLru` + `installPrDiff` + paint          | < 5 ms  |
 | `reload+filter` | `pr_surface.reload` + applying the "ready" query               | < 2 ms  |
 | `sidebar draw`  | `sidebar/render.draw` for one cursor move                      | < 1 ms  |
 

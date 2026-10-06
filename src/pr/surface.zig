@@ -51,6 +51,8 @@ pub const Surface = struct {
     targets: std.ArrayList(priority.Target) = .empty,
     /// The allocator `targets` grows with; set by its first rebuild.
     targets_allocator: ?Allocator = null,
+    /// `OpenParams.gh_bin`, borrowed while open; `openInBrowser` runs it.
+    gh_bin: []const u8 = "gh",
 };
 
 pub const OpenParams = struct {
@@ -214,6 +216,7 @@ pub fn open(surface: *Surface, params: OpenParams) void {
     const allocator = params.allocator;
     const sidebar = params.sidebar;
     sidebar.unavailable = .none;
+    surface.gh_bin = params.gh_bin;
 
     const url = git.repoKey(allocator) orelse {
         sidebar.unavailable = .not_github;
@@ -304,7 +307,7 @@ pub fn openAt(surface: *Surface, params: OpenAtParams) void {
     }
     reload(surface, .{ .allocator = allocator, .sidebar = sidebar }) catch |err| {
         std.log.warn("pr surface: initial reload failed: {}", .{err});
-        sidebar.unavailable = .db_error;
+        failDb(sidebar);
     };
 }
 
@@ -317,6 +320,13 @@ pub fn startSync(surface: *Surface, params: StartSyncParams) void {
         .name = params.name,
         .db_path = params.db_path,
         .gh_bin = params.gh_bin,
+        // What the paint read from the UI connection, until the worker has
+        // read it from its own.
+        .initial_status = .{
+            .running = false,
+            .last_ok_at = params.sidebar.sync.last_ok_at,
+            .last_error = if (params.sidebar.sync.last_error) |kind| ghKind(kind) else null,
+        },
     }) catch |err| {
         std.log.warn("pr surface: sync worker failed to start: {}", .{err});
         params.sidebar.sync.last_error = .other;
@@ -332,7 +342,10 @@ pub fn startSync(surface: *Surface, params: StartSyncParams) void {
 /// every flip a miss.
 pub fn startPrefetch(surface: *Surface, params: StartPrefetchParams) void {
     if (surface.prefetch == null and surface.store != null) {
-        if (prefetch.start(params.allocator, .{
+        // A worker `stop` had to detach frees itself whenever it exits, so
+        // it must not allocate from the App's allocator, which may be
+        // deinitialised by then.
+        if (prefetch.start(std.heap.c_allocator, .{
             .repo_root = params.repo_root,
             .db_path = params.db_path,
             .repo_id = surface.repo_id,
@@ -581,6 +594,59 @@ pub fn shareOwnerRepo(surface: *Surface, params: struct { allocator: Allocator, 
     };
 }
 
+/// The main loop keeps ticking while the surface is open so a sync landing
+/// in the background is drawn without waiting for input.
+pub fn wantsTick(surface: *const Surface) bool {
+    return surface.store != null or surface.sync != null;
+}
+
+pub fn requestSync(surface: *Surface) void {
+    const worker = surface.sync orelse return;
+    worker.requestSync();
+}
+
+/// `gh pr view <n> --web` for the selected PR, with the `gh` the surface was
+/// opened with. Blocks until `gh` exits.
+pub fn openInBrowser(surface: *const Surface, sidebar: *const SidebarState) void {
+    const record = sidebar_controller.selectedPr(sidebar) orelse return;
+    var buf: [16]u8 = undefined;
+    const num = std.fmt.bufPrint(&buf, "{d}", .{record.number}) catch return;
+    var child = std.process.spawn(skim_io.get(), .{
+        .argv = &.{ surface.gh_bin, "pr", "view", num, "--web" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| {
+        std.log.warn("pr surface: opening #{d} in the browser failed: {any}", .{ record.number, err });
+        return;
+    };
+    const term = child.wait(skim_io.get()) catch |err| {
+        std.log.warn("pr surface: waiting on gh for #{d} failed: {any}", .{ record.number, err });
+        return;
+    };
+    if (term != .exited or term.exited != 0) std.log.warn("pr surface: gh pr view #{d} --web ended with {any}", .{ record.number, term });
+}
+
+/// Stop both workers and close the store.
+pub fn close(surface: *Surface) void {
+    stopWorkers(surface);
+    if (surface.targets_allocator) |allocator| surface.targets.deinit(allocator);
+    if (surface.store) |*db| db.close();
+    surface.* = .{};
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+comptime {
+    // syncSnapshot maps GhErrorKind onto SyncErrorKind by tag name.
+    const gh = @typeInfo(github.GhErrorKind).@"enum".fields;
+    const kinds = @typeInfo(types.SyncErrorKind).@"enum".fields;
+    std.debug.assert(gh.len == kinds.len);
+    for (gh, kinds) |a, b| std.debug.assert(std.mem.eql(u8, a.name, b.name));
+}
+
 fn pollSync(surface: *Surface, params: ReloadParams) bool {
     const worker = surface.sync orelse return false;
     const sidebar = params.sidebar;
@@ -611,51 +677,6 @@ fn pollSync(surface: *Surface, params: ReloadParams) bool {
         changed = true;
     }
     return changed;
-}
-
-/// The main loop keeps ticking while the surface is open so a sync landing
-/// in the background is drawn without waiting for input.
-pub fn wantsTick(surface: *const Surface) bool {
-    return surface.store != null or surface.sync != null;
-}
-
-pub fn requestSync(surface: *Surface) void {
-    const worker = surface.sync orelse return;
-    worker.requestSync();
-}
-
-/// `gh pr view <n> --web` for the selected PR. Blocks until `gh` exits.
-pub fn openInBrowser(sidebar: *const SidebarState) void {
-    const record = sidebar_controller.selectedPr(sidebar) orelse return;
-    var buf: [16]u8 = undefined;
-    const num = std.fmt.bufPrint(&buf, "{d}", .{record.number}) catch return;
-    var child = std.process.spawn(skim_io.get(), .{
-        .argv = &.{ "gh", "pr", "view", num, "--web" },
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch return;
-    _ = child.wait(skim_io.get()) catch {};
-}
-
-/// Stop both workers and close the store.
-pub fn close(surface: *Surface) void {
-    stopWorkers(surface);
-    if (surface.targets_allocator) |allocator| surface.targets.deinit(allocator);
-    if (surface.store) |*db| db.close();
-    surface.* = .{};
-}
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-comptime {
-    // syncSnapshot maps GhErrorKind onto SyncErrorKind by tag name.
-    const gh = @typeInfo(github.GhErrorKind).@"enum".fields;
-    const kinds = @typeInfo(types.SyncErrorKind).@"enum".fields;
-    std.debug.assert(gh.len == kinds.len);
-    for (gh, kinds) |a, b| std.debug.assert(std.mem.eql(u8, a.name, b.name));
 }
 
 fn pollPrefetch(surface: *Surface, params: ReloadParams) bool {
@@ -795,7 +816,8 @@ fn failDb(sidebar: *SidebarState) void {
 /// Configured presets, or the built-in `all` when config cannot be read.
 fn loadPresets(allocator: Allocator, sidebar: *SidebarState) void {
     var cfg = config.load(allocator) catch |err| {
-        std.log.warn("pr surface: config load failed, using the built-in preset: {}", .{err});
+        // No config file is the default setup, not a failure.
+        if (err != error.FileNotFound) std.log.warn("pr surface: config load failed, using the built-in preset: {}", .{err});
         installPresets(allocator, sidebar, &config.PrFilters{});
         return;
     };

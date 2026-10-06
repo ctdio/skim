@@ -1,7 +1,6 @@
 //! Named-module re-export root for the offline PR surface harness
-//! (`src/testing/pr_surface_harness.zig`, Phase 6a; 6b added `flip` through
-//! `comment_controller`). Rooted at `src/` so the harness, which
-//! lives in `src/testing/`, can reach `app.zig` and `pr/` across directory
+//! (`src/testing/pr_surface_harness.zig`). Rooted at `src/` so the harness,
+//! which lives in `src/testing/`, can reach `app.zig` and `pr/` across directory
 //! boundaries. Imported by name ("pr_surface_harness_root"), mirroring
 //! `review_test_root.zig`.
 
@@ -20,6 +19,7 @@ pub const review_controller = @import("pr/review_controller.zig");
 pub const comments = @import("comments/store.zig");
 pub const github = @import("pr/github.zig");
 pub const flip = @import("pr/flip.zig");
+pub const surface_controller = @import("pr/surface_controller.zig");
 pub const notes = @import("pr/notes.zig");
 pub const prefetch = @import("pr/prefetch/prefetch.zig");
 pub const priority = @import("pr/prefetch/priority.zig");

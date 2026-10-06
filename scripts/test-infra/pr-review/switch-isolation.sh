@@ -80,7 +80,7 @@ main() {
 scenario_latest_wins() {
   fake_gh_set FAKE_GH_DELAY_1 4
   skim_start pr
-  wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="sidebar never showed PRs"; return 1; }
   # Both heads are local, so prefetch caches both diffs: wait for the ◆ glyphs
   # so A's entry is deterministically a hit whose thread fetch is the slow part.
   wait_for_pane "#1 Alpha change.*◆" 10 || { REASON="prefetch never cached PR 1"; return 1; }
@@ -111,7 +111,7 @@ scenario_latest_wins_miss() {
   block_prefetch_fetches
   fake_gh_set FAKE_GH_DELAY_1 6
   skim_start pr
-  wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="sidebar never showed PRs"; return 1; }
   # A miss entry fetches A's threads before its diff streams in, so the list
   # keeps focus while it is in flight. The two number=1 calls are the boot
   # row's entry and the prefetch worker's thread fetch; the worker fetches
@@ -121,13 +121,13 @@ scenario_latest_wins_miss() {
   assert_prefetch_blocked || return 1
   send Enter
   sleep 0.2
-  in_picker || { REASON="Enter on PR 1 left the list before its entry landed: $(status_line)"; return 1; }
+  in_sidebar || { REASON="Enter on PR 1 left the list before its entry landed: $(status_line)"; return 1; }
   send j
   sleep 0.2
   send Enter
   sleep 1
   (($(log_count '^review.*number=2') == 0)) || { REASON="PR 2's entry ran while PR 1's was in flight (not parked)"; return 1; }
-  in_picker || { REASON="the list lost focus while B's entry was parked: $(status_line)"; return 1; }
+  in_sidebar || { REASON="the list lost focus while B's entry was parked: $(status_line)"; return 1; }
   wait_for_log '^review.*number=2' 2 15 || { REASON="PR 2's parked entry never ran"; return 1; }
   wait_for_pane "b_only.txt" 10 || { REASON="B's diff (b_only.txt) never appeared"; return 1; }
   sleep 1
@@ -142,10 +142,10 @@ scenario_latest_wins_miss() {
 scenario_gh_fail_on_switch() {
   fake_gh_set FAKE_GH_FAIL_2 1
   skim_start pr
-  wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="sidebar never showed PRs"; return 1; }
   send Enter
   wait_for_pane "ALPHA-THREAD-MARKER" 10 || { REASON="A's thread never rendered"; return 1; }
-  open_picker || { REASON="could not reopen the PR picker via the palette"; return 1; }
+  open_sidebar || { REASON="could not reopen the PR sidebar via the palette"; return 1; }
   send j
   sleep 0.2
   send Enter
@@ -165,7 +165,7 @@ scenario_gh_fail_on_switch() {
 scenario_queued_post_binding() {
   fake_gh_set FAKE_GH_DELAY_CREATE 6
   skim_start pr
-  wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="sidebar never showed PRs"; return 1; }
   send Enter
   wait_for_pane "ALPHA-ANCHOR-010" 10 || { REASON="A's diff never rendered"; return 1; }
   comment_on "ALPHA-ANCHOR-010" "QUEUED-FIRST" || { REASON="could not post the first comment"; return 1; }
@@ -185,7 +185,7 @@ scenario_queued_post_after_failed_create() {
   fake_gh_set FAKE_GH_DELAY_CREATE 6
   fake_gh_set FAKE_GH_FAIL_CREATE 1
   skim_start pr
-  wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="sidebar never showed PRs"; return 1; }
   send Enter
   wait_for_pane "ALPHA-ANCHOR-010" 10 || { REASON="A's diff never rendered"; return 1; }
   comment_on "ALPHA-ANCHOR-010" "QUEUED-FIRST" || { REASON="could not post the first comment"; return 1; }
@@ -207,13 +207,13 @@ scenario_rapid_switch_stress() {
   fake_gh_set FAKE_GH_DELAY_1 1
   fake_gh_set FAKE_GH_DELAY_2 1
   skim_start pr
-  wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="sidebar never showed PRs"; return 1; }
   local i
   for ((i = 0; i < 10; i++)); do
     # A late entry can flip the UI to the diff at any moment, so a key meant
-    # for the picker may land in normal mode and open the comment editor.
+    # for the sidebar may land in normal mode and open the comment editor.
     dismiss_editor
-    in_picker || open_picker || { REASON="iteration $i: could not reopen the picker"; return 1; }
+    in_sidebar || open_sidebar || { REASON="iteration $i: could not reopen the sidebar"; return 1; }
     send Enter
     sleep 0.1
     if ((i % 2 == 0)); then send j; else send k; fi
@@ -233,16 +233,16 @@ scenario_rapid_switch_stress() {
   local target="" attempt
   for ((attempt = 0; attempt < 5; attempt++)); do
     dismiss_editor
-    in_picker || open_picker || continue
+    in_sidebar || open_sidebar || continue
     send j
     sleep 0.15
-    target="$(picker_selected_number)"
+    target="$(sidebar_selected_number)"
     send Enter
     sleep 0.3
     pane_has "$EDITOR_RE" || break
     target=""
   done
-  [ -n "$target" ] || { REASON="could not issue the final picker Enter"; return 1; }
+  [ -n "$target" ] || { REASON="could not issue the final sidebar Enter"; return 1; }
 
   local mine theirs
   if [ "$target" = "1" ]; then mine=a_only.txt theirs=b_only.txt; else mine=b_only.txt theirs=a_only.txt; fi
@@ -264,7 +264,7 @@ scenario_rapid_switch_stress() {
 # Risk 5: folds and search on A do not follow the switch.
 scenario_view_state_reset() {
   skim_start pr
-  wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="sidebar never showed PRs"; return 1; }
   send Enter
   wait_for_pane "ALPHA-ANCHOR-010" 10 || { REASON="A's diff never rendered"; return 1; }
   search_for "ALPHA-ANCHOR"
@@ -272,7 +272,7 @@ scenario_view_state_reset() {
   # zC: fold the file under the cursor (a_only.txt, file 0).
   send z C
   wait_for_pane "▶ a_only.txt" 3 || { REASON="zC did not fold a_only.txt (fold key path changed?)"; return 1; }
-  open_picker || { REASON="could not reopen the PR picker via the palette"; return 1; }
+  open_sidebar || { REASON="could not reopen the PR sidebar via the palette"; return 1; }
   send j
   sleep 0.2
   send Enter
@@ -290,7 +290,7 @@ scenario_stale_post_failure() {
   fake_gh_set FAKE_GH_DELAY_CREATE 6
   fake_gh_set FAKE_GH_FAIL_THREAD 1
   skim_start pr
-  wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="sidebar never showed PRs"; return 1; }
   send Enter
   wait_for_pane "ALPHA-ANCHOR-010" 10 || { REASON="A's diff never rendered"; return 1; }
   comment_on "ALPHA-ANCHOR-010" "QUEUED-FIRST" || { REASON="could not post the first comment"; return 1; }
@@ -331,7 +331,7 @@ scenario_non_pr_comments_restored() {
   wait_for_pane_gone "$EDITOR_RE" 3 || { REASON="comment editor did not close"; return 1; }
   wait_for_pane "WT-NOTE" 3 || { REASON="local comment WT-NOTE not rendered after save"; return 1; }
   palette_run "pr"
-  wait_for_pane "Alpha change" 10 || { REASON="PR picker did not open from the palette"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="PR sidebar did not open from the palette"; return 1; }
   send Enter
   wait_for_pane "a_only.txt" 10 || { REASON="PR 1 diff never appeared"; return 1; }
   sleep 1
@@ -360,9 +360,9 @@ scenario_failed_entry_keeps_comments() {
   skim_start
   add_wt_note || return 1
   palette_run "pr"
-  wait_for_pane "Alpha change" 10 || { REASON="PR picker did not open from the palette"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="PR sidebar did not open from the palette"; return 1; }
   send Enter
-  wait_for_pane "fetch failed" 15 || { REASON="picker never reported the failed fetch"; return 1; }
+  wait_for_pane "fetch failed" 15 || { REASON="sidebar never reported the failed fetch"; return 1; }
   send Escape
   wait_for_pane "\\[Working\\]" 5 || { REASON="Esc did not return to the working-tree diff: $(status_line)"; return 1; }
   pane_has "WT-NOTE" || { REASON="WT-NOTE vanished after a failed PR entry"; return 1; }
@@ -376,18 +376,18 @@ scenario_leave_during_entry() {
   skim_start
   add_wt_note || return 1
   palette_run "pr"
-  wait_for_pane "Alpha change" 10 || { REASON="PR picker did not open from the palette"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="PR sidebar did not open from the palette"; return 1; }
   send Enter
   wait_for_pane "a_only.txt" 10 || { REASON="PR 1 diff never appeared"; return 1; }
   fake_gh_set FAKE_GH_DELAY_2 4
-  open_picker || { REASON="could not reopen the PR picker via the palette"; return 1; }
+  open_sidebar || { REASON="could not reopen the PR sidebar via the palette"; return 1; }
   send j
   sleep 0.2
   send Enter
   wait_for_log '^review.*number=2' 1 5 || { REASON="no gh review call for PR 2"; return 1; }
   send Escape
   sleep 0.3
-  in_picker && { REASON="Esc did not close the picker"; return 1; }
+  in_sidebar && { REASON="Esc did not close the sidebar"; return 1; }
   palette_run "diff:working"
   wait_for_pane "\\[Working\\]" 10 || { REASON="did not return to the working-tree diff"; return 1; }
   # PR 2's fake gh sleeps 4s; wait past it so a late entry would have landed.
@@ -403,7 +403,7 @@ scenario_leave_during_entry() {
 scenario_post_on_both() {
   fake_gh_set FAKE_GH_DELAY_CREATE 6
   skim_start pr
-  wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="sidebar never showed PRs"; return 1; }
   send Enter
   wait_for_pane "ALPHA-ANCHOR-010" 10 || { REASON="A's diff never rendered"; return 1; }
   comment_on "ALPHA-ANCHOR-010" "A-BODY" || { REASON="could not post on A"; return 1; }
@@ -434,7 +434,7 @@ scenario_leave_while_post_drains() {
   skim_start
   add_wt_note || return 1
   palette_run "pr"
-  wait_for_pane "Alpha change" 10 || { REASON="PR picker did not open from the palette"; return 1; }
+  wait_for_pane "Alpha change" 10 || { REASON="PR sidebar did not open from the palette"; return 1; }
   send Enter
   wait_for_pane "a_only.txt" 10 || { REASON="PR 1 diff never appeared"; return 1; }
   sleep 1
@@ -547,7 +547,7 @@ diff_pane_has() {
 }
 
 # The PR sidebar has focus (`pr_review` mode).
-in_picker() {
+in_sidebar() {
   status_line | grep -q -- "-- PRS --"
 }
 
@@ -593,7 +593,7 @@ assert_prefetch_blocked() {
   return 0
 }
 
-open_picker() {
+open_sidebar() {
   palette_run "pr"
   wait_for_pane "Bravo change" 5 && wait_for_pane "-- PRS --" 3
 }
@@ -605,8 +605,8 @@ dismiss_editor() {
   fi
 }
 
-# Number of the highlighted picker row (marked with ▌).
-picker_selected_number() {
+# Number of the highlighted sidebar row (marked with ▌).
+sidebar_selected_number() {
   pane | grep '▌' | grep -oE '#[0-9]+' | head -1 | tr -d '#'
 }
 
@@ -645,7 +645,7 @@ add_wt_note() {
 # Switch to PR 2 while A's slow pending-review create is still running. The
 # guard makes a too-slow switch a loud harness failure, not a false PASS.
 switch_to_pr2() {
-  open_picker || { REASON="could not reopen the PR picker via the palette"; return 1; }
+  open_sidebar || { REASON="could not reopen the PR sidebar via the palette"; return 1; }
   send j
   sleep 0.2
   send Enter

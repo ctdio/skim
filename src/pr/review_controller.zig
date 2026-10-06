@@ -1562,7 +1562,7 @@ fn startNextEntry(self: *ReviewSession, allocator: Allocator) !void {
     self.next_entry = null;
     defer allocator.free(next.base_ref);
     beginEntry(self, allocator, next) catch |err| {
-        std.log.debug("failed to start parked PR #{d} entry: {}", .{ next.number, err });
+        std.log.warn("failed to start parked PR #{d} entry: {any}", .{ next.number, err });
         return err;
     };
 }
@@ -1571,7 +1571,8 @@ fn spawnWorker(self: *ReviewSession, allocator: Allocator) !void {
     self.entry.ready.store(false, .release);
     self.entry_in_flight = true;
     const owner_repo = workerOwnerRepo(self);
-    self.entry_thread = std.Thread.spawn(.{}, entryWorker, .{ self, owner_repo }) catch {
+    self.entry_thread = std.Thread.spawn(.{}, entryWorker, .{ self, owner_repo }) catch |err| {
+        std.log.warn("failed to spawn the PR entry worker: {any}", .{err});
         if (owner_repo) |known| freeWorkerOwnerRepo(known);
         self.entry_in_flight = false;
         self.pending_kind = .none;
@@ -1607,7 +1608,8 @@ fn entryWorker(self: *ReviewSession, known: ?github.OwnerRepo) void {
             git_ok = true;
             head_ref = pinFetchedHead(.{ .ref = hr, .git_bin = self.git_bin });
             base_ref_out = ca.dupe(u8, base_ref) catch null;
-        } else |_| {
+        } else |err| {
+            std.log.warn("pr entry: fetching #{d} failed: {any}", .{ number, err });
             git_ok = false;
             // gh's verdict on the PR explains the failed fetch better than git's.
             gh_kind = resolved.gh_error;
@@ -1629,10 +1631,12 @@ fn entryWorker(self: *ReviewSession, known: ?github.OwnerRepo) void {
                     },
                     .failed => |k| gh_kind = k,
                 }
-            } else |_| {
+            } else |err| {
+                std.log.warn("pr entry: review data for #{d} failed: {any}", .{ number, err });
                 gh_kind = .other;
             }
-        } else |_| {
+        } else |err| {
+            std.log.warn("pr entry: resolving the origin owner/repo failed: {any}", .{err});
             gh_kind = .other;
         }
     }

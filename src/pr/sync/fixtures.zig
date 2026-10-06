@@ -3,6 +3,8 @@
 //! tests and the sync harness. Pure: JSON bytes out, no file IO.
 
 const std = @import("std");
+const sync_parse = @import("sync_parse.zig");
+const types = @import("../db/types.zig");
 
 pub const SynthPr = struct {
     number: u32,
@@ -242,8 +244,6 @@ fn oidFor(a: std.mem.Allocator, number: u32, fill: u8) ![]u8 {
 // =============================================================================
 
 const testing = std.testing;
-const sync_parse = @import("sync_parse.zig");
-const types = @import("../db/types.zig");
 
 test "ts formats the offset from 2026-01-01" {
     const zero = try ts(testing.allocator, 0);

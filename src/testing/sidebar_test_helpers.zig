@@ -1,9 +1,9 @@
-//! Tests for the PR sidebar (Phase 6a): controller logic on in-memory
+//! Tests for the PR sidebar and its flip wiring: controller logic on in-memory
 //! snapshots, and sidebar snapshots. Reaches production code through the
 //! `pr_sidebar_test_root` named module (see `src/pr_sidebar_test_root.zig`), so
-//! only this file's `test {}` blocks run in the `sidebar_tests` binary. No
-//! DB: every fixture is a `types.RecordList` built the way `store.listOpen`
-//! hands one over.
+//! only this file's `test {}` blocks run in the `sidebar_tests` binary. The
+//! sidebar tests need no DB: every fixture is a `types.RecordList` built the
+//! way `store.listOpen` hands one over. The flip tests use a temp-file DB.
 
 const std = @import("std");
 const skim_io = @import("skim_io");
@@ -1473,7 +1473,7 @@ test "Esc close: switches to the working-tree diff, closes the store, and restor
         .line_content = "line10",
         .new_lineno = 10,
     });
-    try app.enterReviewDiff(.{ .head_ref = "HEAD", .base_ref = "" });
+    try root.surface_controller.enterReviewDiff(app.surfaceCtx(), .{ .head_ref = "HEAD", .base_ref = "" });
     try app.applyRefreshedFiles(try root.parser.parse(allocator, esc_close_diff));
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1845,7 +1845,7 @@ test "draw: a filter menu in a sidebar too short for it draws no box and does no
 }
 
 // =============================================================================
-// 6b: flip wiring
+// Flip wiring
 // =============================================================================
 
 test "comments store: every mutating method bumps revision" {
@@ -1918,7 +1918,7 @@ test "view: rows of PRs in sidebar.cached show the cache glyph" {
 }
 
 // -----------------------------------------------------------------------------
-// 6b: notes on a temp-file DB (pr_surface.saveNotes / restoreNotes)
+// Notes on a temp-file DB (pr_surface.saveNotes / restoreNotes)
 // -----------------------------------------------------------------------------
 
 test "saveNotes: inserts new comments with linenos and line content; note_ids filled" {
@@ -2016,7 +2016,7 @@ test "restoreNotes: an unanchorable note becomes an orphan and stays in the DB" 
 }
 
 // -----------------------------------------------------------------------------
-// 6b: App-level flip wiring (temp DB, no worker, no subprocess)
+// App-level flip wiring (temp DB, no worker, no subprocess)
 // -----------------------------------------------------------------------------
 
 test "installParsedFiles: a set with a displayed_key is parked in the LRU, and take returns the same pointer" {
@@ -2097,7 +2097,7 @@ test "installPrDiff: a failed install leaves the outgoing PR's saved notes untou
     try fx.store().db.exec("UPDATE local_note SET new_lineno = -1 WHERE number = 102");
 
     try testing.expectError(error.SqliteError, fx.install(.{ .number = 102 }));
-    app.tickPrSurface(0);
+    root.surface_controller.tick(app.surfaceCtx(), 0);
 
     var rows = try fx.store().listNotes(testing.allocator, .{ .repo_id = fx.repoId(), .number = 101 });
     defer rows.deinit();
@@ -2138,7 +2138,7 @@ test "a failed PR→PR miss keeps the displayed PR previewed with its notes, and
     try testing.expect(app.localWritesBlocked() == null);
     try testing.expectEqual(@as(usize, 1), app.state.comment_store.comments.items.len);
     _ = try app.state.comment_store.add(noteOnAddedA("note-a2"));
-    app.tickPrSurface(0);
+    root.surface_controller.tick(app.surfaceCtx(), 0);
     var rows = try fx.store().listNotes(testing.allocator, .{ .repo_id = fx.repoId(), .number = 101 });
     defer rows.deinit();
     try testing.expectEqual(@as(usize, 2), rows.items.len);
@@ -2165,7 +2165,7 @@ test "the dwell's markSeen clears the previewed PR's changed-since-seen marks" {
     root.flip.clearDiffState(&app.state.flip, testing.allocator, &app.state.collapsed_folds);
     app.state.flip.changed_files = try testing.allocator.dupe(bool, &.{true});
 
-    app.tickPrSurface(app.state.flip.preview_started_ms + root.flip.dwell_ms);
+    root.surface_controller.tick(app.surfaceCtx(), app.state.flip.preview_started_ms + root.flip.dwell_ms);
 
     try testing.expect(app.state.flip.dwell_done);
     try testing.expectEqual(@as(usize, 0), app.state.flip.changed_files.len);
@@ -2183,6 +2183,89 @@ test "installPrDiff: the whole-stack view hides review threads" {
     const refs = fx.app.state.diff_source.two_refs;
     try testing.expectEqualStrings("origin/main", refs.ref1);
     try testing.expectEqualStrings(oid_s2, refs.ref2);
+}
+
+test "the whole-stack view refuses a local note, which only a PR's own diff saves" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 202, .view = .whole_stack });
+    app.mode = .normal;
+    app.state.global_cursor_line = firstCodeRow(&app.state.line_map);
+
+    try root.comment_controller.CommentController.startCommentInput(app);
+
+    try testing.expect(app.state.active_comment_input == null);
+    try testing.expectEqualStrings("notes are only saved on a PR's own diff", app.state.status_message.?);
+}
+
+test "the since-seen view refuses local writes" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    surface.markSeen(&app.state.pr_surface, .{ .allocator = testing.allocator, .number = 101, .sidebar = &app.state.sidebar, .now = now });
+
+    try fx.install(.{ .number = 101, .view = .since_seen });
+
+    try testing.expectEqual(root.surface_controller.LocalWriteBlock.unsaved_view, app.localWritesBlocked().?);
+}
+
+test "the PR's own view accepts local writes" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+
+    try fx.install(.{ .number = 101 });
+
+    try testing.expectEqual(@as(?root.surface_controller.LocalWriteBlock, null), fx.app.localWritesBlocked());
+}
+
+test "installPrDiff: an open comment editor keeps the diff on screen and frees the incoming files" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    app.mode = .normal;
+    app.state.global_cursor_line = firstCodeRow(&app.state.line_map);
+    try root.comment_controller.CommentController.startCommentInput(app);
+    try testing.expect(app.state.active_comment_input != null);
+
+    try testing.expectError(error.CommentEditorOpen, fx.install(.{ .number = 102 }));
+
+    try testing.expectEqual(@as(?u32, 101), app.state.flip.previewed);
+    try testing.expect(app.state.active_comment_input != null);
+    try testing.expectEqualStrings("finish or cancel the open comment first", app.state.sidebar.messageText());
+}
+
+test "installPrDiff refuses while a comment editor is open, keeping the shown PR" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    app.mode = .normal;
+    app.state.global_cursor_line = firstCodeRow(&app.state.line_map);
+    try root.comment_controller.CommentController.startCommentInput(app);
+    try testing.expect(app.state.active_comment_input != null);
+
+    try testing.expectError(error.CommentEditorOpen, fx.install(.{ .number = 102 }));
+
+    try testing.expectEqual(@as(?u32, 101), app.state.flip.previewed);
+    try testing.expectEqualStrings("finish or cancel the open comment first", app.state.sidebar.messageText());
+}
+
+test "previewPr while a comment editor is open defers the flip until it closes" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    app.mode = .normal;
+    app.state.global_cursor_line = firstCodeRow(&app.state.line_map);
+    try root.comment_controller.CommentController.startCommentInput(app);
+
+    app.previewPr(102);
+
+    try testing.expectEqual(@as(u32, 102), app.state.flip.pending.?.number);
+    try testing.expectEqual(@as(?u32, 101), app.state.flip.previewed);
+    try testing.expectEqualStrings("finish or cancel the open comment first", app.state.sidebar.messageText());
 }
 
 test "installPrDiff: with fresh cached threads the session shows them without a refetch" {
@@ -2272,7 +2355,7 @@ test "the dwell's markSeen requests a render, so the changed marks clear without
     try fx.install(.{ .number = 101 });
     app.needs_render = false;
 
-    app.tickPrSurface(app.state.flip.preview_started_ms + root.flip.dwell_ms);
+    root.surface_controller.tick(app.surfaceCtx(), app.state.flip.preview_started_ms + root.flip.dwell_ms);
 
     try testing.expect(app.state.flip.dwell_done);
     try testing.expect(app.needs_render);
@@ -2354,7 +2437,7 @@ test "status line keeps a ref that is not a 40-hex oid whole" {
     var fx = try FlipApp.init();
     defer fx.deinit();
     const app = &fx.app;
-    try app.enterReviewDiff(.{ .head_ref = "refs/skim/pr-101", .base_ref = "main" });
+    try root.surface_controller.enterReviewDiff(app.surfaceCtx(), .{ .head_ref = "refs/skim/pr-101", .base_ref = "main" });
 
     const text = try statusText(app);
     defer testing.allocator.free(text);
@@ -2387,7 +2470,7 @@ test "a miss that fails after a whole-stack load started restores the shown PR: 
     try testing.expectEqualStrings(oid_s2, refs.ref2);
     try testing.expect(refs.use_merge_base);
     _ = try app.state.comment_store.add(noteOnAddedB("note-202b"));
-    app.tickPrSurface(0);
+    root.surface_controller.tick(app.surfaceCtx(), 0);
     var rows = try fx.store().listNotes(testing.allocator, .{ .repo_id = fx.repoId(), .number = 202 });
     defer rows.deinit();
     try testing.expectEqual(@as(usize, 2), rows.items.len);
@@ -2402,7 +2485,7 @@ test "a miss that fails while the previous entry's diff loads refuses writes unt
     app.state.review.git_bin = flip_missing_bin;
     app.previewPr(102);
     // An earlier entry landed: its diff is loading when this miss fails.
-    try app.enterReviewDiff(.{ .head_ref = "HEAD", .base_ref = "" });
+    try root.surface_controller.enterReviewDiff(app.surfaceCtx(), .{ .head_ref = "HEAD", .base_ref = "" });
 
     try fx.awaitEntryOutcome();
 
@@ -2418,7 +2501,7 @@ test "a miss that fails while the previous entry's diff loads refuses writes unt
     try testing.expectEqual(@as(?u32, 101), app.state.flip.previewed);
     try testing.expect(app.localWritesBlocked() == null);
     _ = try app.state.comment_store.add(noteOnAddedA("note-after"));
-    app.tickPrSurface(0);
+    root.surface_controller.tick(app.surfaceCtx(), 0);
     var rows = try fx.store().listNotes(testing.allocator, .{ .repo_id = fx.repoId(), .number = 101 });
     defer rows.deinit();
     try testing.expectEqual(@as(usize, 1), rows.items.len);
@@ -2915,7 +2998,7 @@ fn expectBumped(last: *u64, revision: u64) !void {
     last.* = revision;
 }
 
-// --- 6b fixtures ---------------------------------------------------------------
+// --- Flip fixtures -------------------------------------------------------------
 
 const flip_merge_base = "c" ** 40;
 const oid_a = "d" ** 40;
@@ -3143,7 +3226,7 @@ const FlipApp = struct {
         defer allocator.free(payload);
         const place = controller.stackPlace(sb, controller.recordIndex(sb, params.number).?);
         const whole_stack = params.view == .whole_stack;
-        try self.app.installPrDiff(.{
+        try root.surface_controller.installPrDiff(self.app.surfaceCtx(), .{
             .record = record,
             .files = try root.parser.parse(allocator, diff),
             .key = .{ .merge_base_oid = flip_merge_base.*, .head_oid = record.head_oid[0..40].* },

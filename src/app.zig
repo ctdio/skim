@@ -73,6 +73,7 @@ const pr_types = @import("pr/db/types.zig");
 const review_controller = @import("pr/review_controller.zig");
 const flip = @import("pr/flip.zig");
 const flip_controller = @import("pr/flip_controller.zig");
+const surface_controller = @import("pr/surface_controller.zig");
 const ParsedLru = @import("pr/prefetch/parsed_lru.zig").ParsedLru;
 const thread_anchor = @import("pr/thread_anchor.zig");
 const thread_placement = @import("pr/thread_placement.zig");
@@ -88,7 +89,6 @@ const DividerPosition = ui_components.DividerPosition;
 
 const Allocator = std.mem.Allocator;
 
-const discarded_comment_message = "unsent comment on the previous diff discarded";
 const Vaxis = vaxis.Vaxis;
 const Event = vaxis.Event;
 
@@ -150,26 +150,6 @@ const RenderProfileCounters = struct {
 /// prefix so a failed thread interaction never reads like a success.
 pub const StatusSeverity = enum { info, err };
 
-/// A landed PR entry for `App.enterReviewDiff`. `head_ref` is the head oid
-/// the entry's `git fetch` landed (its local ref when that cannot be
-/// resolved); `base_ref` is the base branch
-/// name (empty → diff against HEAD); `gh_error` is set when git succeeded but
-/// the review data fetch failed.
-pub const ReviewDiffEntry = struct {
-    head_ref: []const u8,
-    base_ref: []const u8,
-    gh_error: ?pr.github.GhErrorKind = null,
-};
-
-/// Why local comment writes are refused right now (`App.localWritesBlocked`).
-pub const LocalWriteBlock = enum {
-    /// A PR surface change is waiting for its diff to install.
-    diff_loading,
-    /// Another PR was selected from the PR surface and its entry has not
-    /// landed; `comment_store` is about to become that PR's.
-    pr_loading,
-};
-
 pub const App = struct {
     allocator: Allocator,
     vx: ?Vaxis, // null in headless mode (print command)
@@ -221,35 +201,6 @@ pub const App = struct {
         char: u8,
     };
 
-    /// The non-PR diff's local comments while the PR surface is up, and the
-    /// surface change in flight. Comments are parked when a PR diff source is
-    /// selected (`enterReviewDiff`) and restored when the next non-PR diff is
-    /// installed after `leavePrSurface` (`applyRefreshedFiles`), so `comments`
-    /// is non-null from PR entry until a non-PR diff is on screen again.
-    const PrSurfaceParking = struct {
-        comments: ?comments.CommentStore = null,
-        change: SurfaceChange = .none,
-        /// What a whole-stack or since-seen load (`startLocalPrLoad`)
-        /// replaced, so a load that will not land puts back the source of
-        /// the diff still on screen (`cancelLocalPrLoad`). Null otherwise.
-        local_load: ?LocalLoad = null,
-
-        /// A diff-source change between the PR surface and a non-PR diff that
-        /// `applyRefreshedFiles` completes once the new diff is installed, so
-        /// the outgoing diff never shows the incoming surface's comments or
-        /// threads.
-        const SurfaceChange = enum { none, enter_pr, leave_pr };
-
-        const LocalLoad = struct { source: DiffSource, change: SurfaceChange };
-
-        /// True while the diff on screen is not the one `comment_store` belongs
-        /// to. Local comment writes are refused then: they would land in the
-        /// wrong store, and on a leave be discarded with it.
-        pub fn pending(self: *const PrSurfaceParking) bool {
-            return self.change != .none;
-        }
-    };
-
     const State = struct {
         diff_source: DiffSource,
         pager_mode: bool, // True when the current diff comes from stdin and cannot be refreshed from git
@@ -269,7 +220,7 @@ pub const App = struct {
         viewport_width: usize,
         count_prefix: ?usize, // For vim-style count prefixes (e.g., 5j)
         comment_store: comments.CommentStore,
-        pr_surface_parking: PrSurfaceParking = .{},
+        pr_surface_parking: surface_controller.Parking = .{},
         active_comment_input: ?comment_editor.CommentEditor.State,
         search_state: SearchState,
         command_palette_state: command_palette.CommandPaletteState,
@@ -947,7 +898,7 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         // The previewed PR's notes are read against `state.files`, freed below.
-        self.persistNotesIfDirty();
+        surface_controller.persistNotesIfDirty(self.surfaceCtx());
         self.highlighter_jobs.deinit();
 
         // Join any in-flight streaming diff load before freeing state.files so
@@ -977,7 +928,7 @@ pub const App = struct {
         self.state.line_map.deinit();
         self.state.comment_store.deinit();
         if (self.state.pr_surface_parking.comments) |*parked| parked.deinit();
-        self.dropLocalLoad();
+        surface_controller.dropLocalLoad(self.surfaceCtx());
         if (self.state.status_message_owned) |owned| self.allocator.free(owned);
         self.state.search_state.deinit();
         self.state.command_palette_state.deinit();
@@ -1344,9 +1295,7 @@ pub const App = struct {
         // `changed_files` and the changed-only folds index the old files.
         flip.clearDiffState(&self.state.flip, self.allocator, &self.state.collapsed_folds);
 
-        if (self.state.pr_surface_parking.change == .leave_pr) self.restoreNonPrComments();
-        self.state.pr_surface_parking.change = .none;
-        self.dropLocalLoad();
+        surface_controller.completeSurfaceChange(self.surfaceCtx());
 
         // Re-derive review-thread anchors against the freshly parsed diff (AD-4)
         // before building the map that will emit their records.
@@ -1429,7 +1378,7 @@ pub const App = struct {
             var install_failed = false;
             if (dl.mode == .replace) {
                 if (self.applyReplaceLoad()) {
-                    self.finishPrLoad(failed);
+                    surface_controller.finishPrLoad(self.surfaceCtx(), failed);
                 } else |_| {
                     install_failed = true;
                     // A pending PR surface change completes only when a diff
@@ -1448,7 +1397,7 @@ pub const App = struct {
             diff_loader.finishAndJoin(dl, self.allocator);
             // A miss load that could not install will not land. Only OOM gets
             // here, so this path has no test without an allocator seam.
-            if (install_failed) self.abandonMissPreview();
+            if (install_failed) surface_controller.abandonMissPreview(self.surfaceCtx());
             self.needs_render = true;
             self.needs_async_highlight = true;
             if (failed and self.state.files.len == 0) {
@@ -2706,30 +2655,6 @@ pub const App = struct {
         prefetch_gh_bin: []const u8 = "gh",
     };
 
-    /// A cached PR diff to show without spawning anything (`installPrDiff`).
-    pub const PrInstall = struct {
-        /// From the sidebar snapshot; borrowed for the call.
-        record: *const pr_types.PrRecord,
-        /// Ownership moves in.
-        files: []parser.FileDiff,
-        key: pr_types.DiffKey,
-        view: flip.DiffView,
-        /// Raw review payload from thread_cache; borrowed. `.pr` view only.
-        threads_json: ?[]const u8,
-        threads_fresh: bool,
-        /// Whole-stack: the stack bottom's base branch; else the PR's.
-        stack_base_ref: []const u8,
-    };
-
-    /// What a PR diff source compares: `origin/<branch>...<head>`, or
-    /// `<commit> <head>` for the since-seen view. The head is the oid the
-    /// diff was cached or listed at, never `refs/skim/pr-<n>`: that ref can
-    /// lag a head that is already local, and `r` must re-diff what is shown.
-    const PrDiffRefs = struct {
-        base: union(enum) { branch: []const u8, commit: []const u8 },
-        head_oid: []const u8,
-    };
-
     /// Open the PR sidebar surface (`skim pr`, `:pr`) and focus it. Already
     /// open: only refocuses. `skim pr <n>` enters its boot PR once.
     pub fn openPrSurface(self: *App, options: PrSurfaceOptions) void {
@@ -2749,12 +2674,15 @@ pub const App = struct {
         pr_surface.shareOwnerRepo(&self.state.pr_surface, .{ .allocator = self.allocator, .review = &self.state.review });
         const number = sb.boot_number orelse return;
         sb.boot_number = null;
-        const listed = sidebar_controller.selectNumber(sb, self.allocator, number) catch false;
+        const listed = sidebar_controller.selectNumber(sb, self.allocator, number) catch |err| blk: {
+            std.log.warn("selecting boot PR #{d} in the sidebar failed: {any}", .{ number, err });
+            break :blk false;
+        };
         // The boot PR is the preview; the first paint's selection is not a
         // move, or the top row would replace it when <n> is not listed.
         _ = sidebar_controller.takeCursorChanged(sb);
-        const params = if (listed) enterParamsFor(sidebar_controller.selectedPr(sb).?) else review_controller.EnterParams{ .number = number };
-        self.selectPullRequest(params) catch |err| {
+        const params = if (listed) flip.enterParamsFor(sidebar_controller.selectedPr(sb).?) else review_controller.EnterParams{ .number = number };
+        surface_controller.selectPullRequest(self.surfaceCtx(), params) catch |err| {
             if (err != error.CommentEditorOpen) std.log.err("Failed to start PR entry: {any}", .{err});
             return;
         };
@@ -2771,51 +2699,14 @@ pub const App = struct {
     pub fn closePrSurface(self: *App) void {
         // The PR's notes are still in `comment_store` until the non-PR diff
         // installs, and the Store closes next.
-        self.persistNotesIfDirty();
+        surface_controller.persistNotesIfDirty(self.surfaceCtx());
         pr_surface.close(&self.state.pr_surface);
         flip.deinitState(&self.state.flip, self.allocator);
-        self.dropLocalLoad();
+        surface_controller.dropLocalLoad(self.surfaceCtx());
         self.state.sidebar.open = false;
         self.state.sidebar.visible = false;
         if (self.mode == .pr_review) self.mode = .normal;
         self.leavePrSurface();
-    }
-
-    /// Begin reviewing a PR selected in the sidebar. Kicks off the async entry
-    /// worker (git fetch + gh review fetch) off-thread and returns immediately —
-    /// the main loop's `pollReviewEntry` swaps the diff once the fetch lands, so
-    /// the sidebar never freezes. The sidebar shows "Loading…" until then.
-    /// `error.CommentEditorOpen` when an editor is open: nothing started.
-    pub fn selectPullRequest(self: *App, params: review_controller.EnterParams) !void {
-        const sb = &self.state.sidebar;
-        // An editor left open behind the sidebar (Ctrl-E from the editor keeps
-        // it) would otherwise be settled against the next PR's entry.
-        if (self.state.active_comment_input != null) {
-            sidebar_controller.setMessage(sb, "finish or cancel the open comment first");
-            self.needs_render = true;
-            return error.CommentEditorOpen;
-        }
-        var msg_buf: [64]u8 = undefined;
-        const loading = std.fmt.bufPrint(&msg_buf, "Loading PR #{d}…", .{params.number}) catch "Loading PR…";
-        sidebar_controller.setMessage(sb, loading);
-
-        review_controller.startEnterPr(&self.state.review, self.allocator, params) catch |err| {
-            sidebar_controller.setMessage(sb, "failed to start PR entry");
-            self.needs_render = true;
-            return err;
-        };
-        self.resetPerPrViewState();
-        self.needs_render = true;
-    }
-
-    /// On a PR→PR switch, drop the previous PR's local comments and view state
-    /// as soon as the next PR is selected. Off the PR surface this is a no-op:
-    /// the non-PR diff stays on screen with its comments until the PR diff is
-    /// installed (`enterReviewDiff` parks them), so a failed entry loses nothing.
-    pub fn resetPerPrViewState(self: *App) void {
-        if (self.state.pr_surface_parking.comments == null) return;
-        self.state.comment_store.clearAll();
-        self.resetDiffViewState();
     }
 
     /// Leave the PR surface for the non-PR diff source the caller just set.
@@ -2839,25 +2730,8 @@ pub const App = struct {
         self.rebuildReviewLineMap();
     }
 
-    /// Clear view state tied to the diff on screen, then rebuild the LineMap:
-    /// its comment rows index `comment_store` (deleteCommentUnderCursor acts on
-    /// that index) and its thread rows index `review.threads`, and the callers
-    /// have just replaced one or both.
-    fn resetDiffViewState(self: *App) void {
-        self.clearDiffViewState();
-        self.rebuildReviewLineMap();
-    }
-
-    /// Swap the parked non-PR comments back in as the non-PR diff is installed.
-    /// The caller rebuilds the LineMap.
-    fn restoreNonPrComments(self: *App) void {
-        const parked = self.state.pr_surface_parking.comments orelse return;
-        self.state.comment_store.deinit();
-        self.state.comment_store = parked;
-        self.state.pr_surface_parking.comments = null;
-        self.clearDiffViewState();
-    }
-
+    /// Clear view state tied to the diff on screen: folds, expanded comments,
+    /// search and the cursor.
     fn clearDiffViewState(self: *App) void {
         self.state.collapsed_folds.clearRetainingCapacity();
         self.state.expanded_comments.clearRetainingCapacity();
@@ -2876,131 +2750,12 @@ pub const App = struct {
         self.pollReviewMutations();
         self.pollReviewThreadMutations();
         self.pollReviewSubmit();
-        self.tickPrSurface(skim_io.milliTimestamp());
+        surface_controller.tick(self.surfaceCtx(), skim_io.milliTimestamp());
     }
 
-    /// One step of PR-surface work: drain the sync and prefetch workers, turn
-    /// sidebar cursor moves into debounced previews, mark a PR seen after the
-    /// dwell, and save the previewed PR's notes when they changed. The main
-    /// loop calls it every tick; the harness calls it with a virtual clock.
-    pub fn tickPrSurface(self: *App, now_ms: i64) void {
-        const sb = &self.state.sidebar;
-        if (pr_surface.poll(&self.state.pr_surface, .{ .allocator = self.allocator, .sidebar = sb })) self.needs_render = true;
-        if (!sb.open) return;
-        if (sidebar_controller.takeCursorChanged(sb)) {
-            const selected = sidebar_controller.selectedPr(sb);
-            flip.onCursorMoved(&self.state.flip, .{ .number = if (selected) |record| record.number else null, .now_ms = now_ms });
-            pr_surface.focusPrefetch(&self.state.pr_surface, sb);
-        }
-        // An open editor defers the preview (`previewPr`) until it closes.
-        const deferred = self.state.active_comment_input != null and self.state.flip.pending != null;
-        if (!deferred) if (flip.tick(&self.state.flip, now_ms)) |action| switch (action) {
-            .preview => |number| {
-                // A cursor move starts every PR in its own diff, unfocused.
-                self.state.flip.view = .pr;
-                self.state.flip.focus_diff = false;
-                self.previewPr(number);
-            },
-            .mark_seen => |number| {
-                flip_controller.markSeen(self.flipCtx(), number);
-                // The header and sidebar change-since-seen marks just cleared.
-                self.needs_render = true;
-            },
-        };
-        self.persistNotesIfDirty();
-    }
-
-    /// Show PR `number` in `flip.view`: install it from the cache when the
-    /// diff is there (no subprocess), else start a streaming load.
+    /// Show PR `number` in `flip.view` (`surface_controller.previewPr`).
     pub fn previewPr(self: *App, number: u32) void {
-        const sb = &self.state.sidebar;
-        const record = sidebar_controller.recordByNumber(sb, number) orelse return;
-        // The editor belongs to the diff on screen: the flip waits for it to
-        // close (`tickPrSurface`), then lands on the cursor's PR.
-        if (self.state.active_comment_input != null) {
-            sidebar_controller.setMessage(sb, "finish or cancel the open comment first");
-            self.state.flip.pending = .{ .number = number, .due_ms = 0 };
-            self.needs_render = true;
-            return;
-        }
-        var plan = pr_surface.planFlip(&self.state.pr_surface, .{
-            .allocator = self.allocator,
-            .sidebar = sb,
-            .record = record,
-            .view = self.state.flip.view,
-            .lru = if (self.state.flip.lru) |*lru| lru else null,
-            .now = skim_io.timestamp(),
-        }) catch |err| blk: {
-            std.log.warn("pr flip: cache lookup for #{d} failed: {any}", .{ number, err });
-            break :blk .miss;
-        };
-        switch (plan) {
-            .miss => self.previewMiss(record),
-            .hit => |*hit| {
-                defer if (hit.threads) |threads| threads.deinit(self.allocator);
-                self.installPrDiff(.{
-                    .record = record,
-                    .files = hit.files,
-                    .key = hit.key,
-                    .view = self.state.flip.view,
-                    .threads_json = if (hit.threads) |threads| threads.json else null,
-                    .threads_fresh = hit.threads_fresh,
-                    .stack_base_ref = hit.stack_base_ref,
-                }) catch |err| {
-                    std.log.warn("pr flip: installing cached #{d} failed: {any}", .{ number, err });
-                    self.previewMiss(record);
-                };
-            },
-        }
-    }
-
-    /// Show a pre-parsed, cached PR diff without spawning git: the diff source
-    /// is set to what a streamed load of the same PR would use (so `r` still
-    /// re-diffs), the session enters from the cached threads, and the PR's
-    /// notes come back. Focus stays where it is unless an explicit open asked
-    /// for the diff. Takes ownership of `install.files`.
-    pub fn installPrDiff(self: *App, install: PrInstall) !void {
-        var files_owned = true;
-        errdefer if (files_owned) freeParsedFiles(self.allocator, install.files);
-        if (self.state.active_comment_input != null) {
-            sidebar_controller.setMessage(&self.state.sidebar, "finish or cancel the open comment first");
-            return error.CommentEditorOpen;
-        }
-        const record = install.record;
-        self.cancelLocalPrLoad();
-        self.persistOutgoingPr();
-        // Saved; from here `comment_store` is cleared for the incoming PR, so a
-        // failure below must not save it again as the outgoing PR's notes.
-        self.state.flip.previewed = null;
-        try self.setPrDiffSource(prDiffRefs(.{ .record = record, .view = install.view, .stack_base_ref = install.stack_base_ref, .head_oid = &install.key.head_oid }));
-        switch (install.view) {
-            .pr => _ = try review_controller.enterFromCache(&self.state.review, self.allocator, .{
-                .number = record.number,
-                .pr_node_id = record.node_id,
-                .head_ref_oid = record.head_oid,
-                .head_ref = record.head_ref,
-                .base_ref = record.base_ref,
-                .title = record.title,
-                .author = record.author,
-                .is_draft = record.is_draft,
-                .threads_json = install.threads_json,
-                .threads_fresh = install.threads_fresh,
-            }),
-            .whole_stack, .since_seen => _ = review_controller.leaveSurface(&self.state.review, self.allocator),
-        }
-        self.takeCommentStoreForPr();
-        self.clearDiffViewState();
-        try flip_controller.restoreNotes(self.flipCtx(), .{ .number = record.number, .view = install.view, .files = install.files });
-        // Anchored in `install.files`: a set that fails to install takes them along.
-        errdefer self.state.comment_store.clearAll();
-        files_owned = false;
-        try self.installParsedFiles(install.files);
-        self.state.flip.displayed_key = install.key;
-        self.finishPreview(.{ .number = record.number, .view = install.view, .key = install.key, .already_seen = seenAtHead(record) });
-        sidebar_controller.setMessage(&self.state.sidebar, "");
-        self.state.pager_mode = false;
-        self.needs_render = true;
-        self.needs_async_highlight = true;
+        surface_controller.previewPr(self.surfaceCtx(), number);
     }
 
     /// Consume a completed PR entry/refetch from the review worker. On entry,
@@ -3014,7 +2769,7 @@ pub const App = struct {
             .entered => |info| {
                 defer self.allocator.free(info.head_ref);
                 defer self.allocator.free(info.base_ref);
-                self.enterReviewDiff(.{ .head_ref = info.head_ref, .base_ref = info.base_ref, .gh_error = info.gh_error }) catch |err| {
+                surface_controller.enterReviewDiff(self.surfaceCtx(), .{ .head_ref = info.head_ref, .base_ref = info.base_ref, .gh_error = info.gh_error }) catch |err| {
                     std.log.err("Failed to enter PR diff: {any}", .{err});
                     sidebar_controller.setMessage(&self.state.sidebar, "failed to open PR diff");
                     self.needs_render = true;
@@ -3034,7 +2789,7 @@ pub const App = struct {
                 self.needs_render = true;
             },
             .fetch_failed => |failure| {
-                self.abandonMissPreview();
+                surface_controller.abandonMissPreview(self.surfaceCtx());
                 var buf: [96]u8 = undefined;
                 sidebar_controller.setMessage(&self.state.sidebar, review_controller.fetchFailedMessage(&buf, failure));
                 // The switch already reset the session, so the previous PR's
@@ -3045,7 +2800,7 @@ pub const App = struct {
                 self.needs_render = true;
             },
             .start_failed => {
-                self.abandonMissPreview();
+                surface_controller.abandonMissPreview(self.surfaceCtx());
                 sidebar_controller.setMessage(&self.state.sidebar, "failed to start PR entry");
                 self.showStatusError("failed to start PR entry");
                 self.needs_render = true;
@@ -3225,309 +2980,93 @@ pub const App = struct {
         self.needs_render = true;
     }
 
-    /// Swap the diff to the fetched PR refs and refresh. Entering the PR surface
-    /// from a non-PR diff parks that diff's local comments until a non-PR diff is
-    /// installed after `leavePrSurface`.
-    pub fn enterReviewDiff(self: *App, entry: ReviewDiffEntry) !void {
-        const ref2 = try self.allocator.dupe(u8, entry.head_ref);
-        errdefer self.allocator.free(ref2);
-        const ref1 = if (entry.base_ref.len > 0)
-            try std.fmt.allocPrint(self.allocator, "origin/{s}", .{entry.base_ref})
-        else
-            try self.allocator.dupe(u8, "HEAD");
-        errdefer self.allocator.free(ref1);
-
-        self.replaceDiffSource(.{ .two_refs = .{
-            .ref1 = ref1,
-            .ref2 = ref2,
-            .use_merge_base = true,
-        } });
-        // After the fallible allocations: a failed entry leaves the editor open.
-        const discarded = self.settleCommentEditorForEntry();
-        self.takeCommentStoreForPr();
-        // The previous diff stays on screen until the PR diff installs; the
-        // session's threads anchor against that diff, not this one.
-        self.state.pr_surface_parking.change = .enter_pr;
-        self.resetDiffViewState();
-
-        sidebar_controller.setMessage(&self.state.sidebar, "");
-        self.state.pager_mode = false;
-        // A sidebar preview keeps focus on the sidebar; an explicit open
-        // (Enter, `skim pr <n>`) or a PR entered with no sidebar takes the diff.
-        if (!self.state.sidebar.open or self.state.flip.focus_diff) self.mode = .normal;
-        self.state.flip.focus_diff = false;
-        try self.refresh();
-        if (entry.gh_error) |kind| self.showEntryGhError(kind, discarded);
-    }
-
-    /// Point the diff source at a PR's refs. Joins any streaming load first:
-    /// its worker borrows the old source, which is freed here.
-    fn setPrDiffSource(self: *App, refs: PrDiffRefs) !void {
-        const source = try self.prDiffSource(refs);
-        diff_loader.cancel(&self.state.diff_load, self.allocator);
-        self.replaceDiffSource(source);
-    }
-
-    /// The `two_refs` source for `refs`. Caller owns.
-    fn prDiffSource(self: *App, refs: PrDiffRefs) !DiffSource {
-        const ref2 = try self.allocator.dupe(u8, refs.head_oid);
-        errdefer self.allocator.free(ref2);
-        const ref1 = switch (refs.base) {
-            .branch => |branch| try std.fmt.allocPrint(self.allocator, "origin/{s}", .{branch}),
-            .commit => |commit| try self.allocator.dupe(u8, commit),
-        };
-        return .{ .two_refs = .{
-            .ref1 = ref1,
-            .ref2 = ref2,
-            .use_merge_base = refs.base == .branch,
-        } };
-    }
-
-    /// Install `source` (ownership moves in) and free the previous one.
-    fn replaceDiffSource(self: *App, source: DiffSource) void {
-        const old_source = self.state.diff_source;
-        self.state.diff_source = source;
-        git.freeDiffSource(self.allocator, old_source);
-    }
-
-    /// Make `comment_store` the incoming PR's (empty) store: entering from a
-    /// non-PR diff parks that diff's comments; PR→PR drops the outgoing
-    /// PR's, which `persistOutgoingPr` already saved.
-    fn takeCommentStoreForPr(self: *App) void {
-        if (self.state.pr_surface_parking.comments == null) {
-            self.state.pr_surface_parking.comments = self.state.comment_store;
-            self.state.comment_store = comments.CommentStore.init(self.allocator);
-        } else {
-            // PR→PR: writes are refused while the entry is pending
-            // (`localWritesBlocked`), so this only guards against a gap there.
-            self.state.comment_store.clearAll();
-        }
-    }
-
-    /// Stream PR `record` in `flip.view`. The `.pr` view goes through the
-    /// review entry (fetch + review data); the whole-stack and since-seen
-    /// views diff refs the prefetch worker already fetched, without a session.
-    fn previewMiss(self: *App, record: *const pr_types.PrRecord) void {
-        if (self.state.active_comment_input != null) {
-            sidebar_controller.setMessage(&self.state.sidebar, "finish or cancel the open comment first");
-            self.needs_render = true;
-            return;
-        }
-        self.persistOutgoingPr();
-        self.state.flip.loading_number = record.number;
-        self.needs_render = true;
-        const view = self.state.flip.view;
-        if (view == .pr) {
-            // A streamed load still running (`r`, an earlier miss) would land
-            // under the entry; `startLocalPrLoad` cancels its own. A
-            // whole-stack or since-seen load also gives the shown PR its
-            // source back, for when this entry fails.
-            self.cancelLocalPrLoad();
-            diff_loader.cancel(&self.state.diff_load, self.allocator);
-            self.selectPullRequest(enterParamsFor(record)) catch |err| {
-                std.log.warn("pr flip: starting #{d} failed: {any}", .{ record.number, err });
-                self.abandonMissPreview();
-            };
-            return;
-        }
-        self.startLocalPrLoad(.{ .record = record, .view = view }) catch |err| {
-            std.log.warn("pr flip: streaming #{d} failed: {any}", .{ record.number, err });
-            self.abandonMissPreview();
-            self.showStatusError("failed to load the PR diff");
-        };
-    }
-
-    fn startLocalPrLoad(self: *App, params: struct { record: *const pr_types.PrRecord, view: flip.DiffView }) !void {
-        const sb = &self.state.sidebar;
-        const index = sidebar_controller.recordIndex(sb, params.record.number) orelse return error.UnknownPr;
-        const place = sidebar_controller.stackPlace(sb, index);
-        const items = sb.records.?.items;
-        const whole_stack = params.view == .whole_stack;
-        if (whole_stack and (place.bottom == null or place.tip == null)) return error.NotStacked;
-        const source = try self.prDiffSource(prDiffRefs(.{
-            .record = params.record,
-            .view = params.view,
-            .stack_base_ref = if (whole_stack) items[place.bottom.?].base_ref else params.record.base_ref,
-            .head_oid = if (whole_stack) items[place.tip.?].head_oid else params.record.head_oid,
-        }));
-        diff_loader.cancel(&self.state.diff_load, self.allocator);
-        self.parkSourceForLocalLoad(source);
-        _ = review_controller.leaveSurface(&self.state.review, self.allocator);
-        self.takeCommentStoreForPr();
-        self.state.pr_surface_parking.change = .enter_pr;
-        self.resetDiffViewState();
-        self.state.pager_mode = false;
-        try self.refresh();
-    }
-
-    /// Install `source` (ownership moves in) for a whole-stack or since-seen
-    /// load, keeping the source and surface change it replaces for
-    /// `cancelLocalPrLoad`. A second one before the first lands keeps the
-    /// first's: that is still the diff on screen.
-    fn parkSourceForLocalLoad(self: *App, source: DiffSource) void {
-        const parking = &self.state.pr_surface_parking;
-        if (parking.local_load != null) return self.replaceDiffSource(source);
-        parking.local_load = .{ .source = self.state.diff_source, .change = parking.change };
-        self.state.diff_source = source;
-    }
-
-    /// A whole-stack or since-seen load that will not land: stop it and put
-    /// back the source and surface change of the diff still on screen, so
-    /// `r` re-diffs what is shown and its notes can come back.
-    fn cancelLocalPrLoad(self: *App) void {
-        const parking = &self.state.pr_surface_parking;
-        const load = parking.local_load orelse return;
-        parking.local_load = null;
-        diff_loader.cancel(&self.state.diff_load, self.allocator);
-        self.replaceDiffSource(load.source);
-        parking.change = load.change;
-    }
-
-    /// The local load's diff installed (or the App is going away): the
-    /// source it replaced is not coming back.
-    fn dropLocalLoad(self: *App) void {
-        const load = self.state.pr_surface_parking.local_load orelse return;
-        self.state.pr_surface_parking.local_load = null;
-        git.freeDiffSource(self.allocator, load.source);
-    }
-
-    /// A replace load landed (`pollDiffLoad`). A miss load finishes the
-    /// preview it was for; a refresh of the previewed PR recomputes its
-    /// changed-since-seen marks; anything else (a stale entry) is ignored.
-    fn finishPrLoad(self: *App, load_failed: bool) void {
-        const number = self.state.flip.loading_number orelse {
-            // A refresh of the previewed PR: its marks indexed the old files.
-            if (self.state.flip.previewed) |previewed| flip_controller.refreshChangedFiles(self.flipCtx(), .{ .number = previewed, .view = self.state.flip.previewed_view });
-            return;
-        };
-        const view = self.state.flip.view;
-        if (view == .pr and self.state.review.number != number) return;
-        flip_controller.restoreNotes(self.flipCtx(), .{ .number = number, .view = view, .files = self.state.files }) catch |err| {
-            std.log.warn("pr flip: restoring #{d}'s notes failed: {any}", .{ number, err });
-        };
-        self.rebuildReviewLineMap();
-        // An unlisted PR (`skim pr <n>` filtered out) has no record to mark.
-        const record = sidebar_controller.recordByNumber(&self.state.sidebar, number);
-        self.finishPreview(.{
-            .number = number,
-            .view = view,
-            .key = null,
-            .already_seen = if (record) |listed| seenAtHead(listed) else true,
-            .load_failed = load_failed,
-        });
-    }
-
-    /// The miss load will not land (`flip_controller.abandonMissPreview`).
-    fn abandonMissPreview(self: *App) void {
-        if (self.state.flip.loading_number == null) return;
-        self.cancelLocalPrLoad();
-        const restored = flip_controller.abandonMissPreview(self.flipCtx(), .{ .surface_change_pending = self.state.pr_surface_parking.change != .none });
-        if (!restored) return;
-        self.rebuildReviewLineMap();
-        self.restorePrCursor(self.state.flip.previewed.?);
-        self.needs_render = true;
-    }
-
-    /// Common tail of a hit and a landed miss (`flip_controller.finishPreview`),
-    /// plus the App half: the PR's cursor, and focus for an explicit open.
-    fn finishPreview(self: *App, params: struct { number: u32, view: flip.DiffView, key: ?pr_types.DiffKey, already_seen: bool, load_failed: bool = false }) void {
-        const moves_focus = self.state.flip.focus_diff and self.state.files.len > 0;
-        flip_controller.finishPreview(self.flipCtx(), .{
-            .number = params.number,
-            .view = params.view,
-            .key = params.key,
-            .already_seen = params.already_seen,
-            .load_failed = params.load_failed,
-            .moves_focus = moves_focus and self.mode != .normal,
-        });
-        if (params.view == .pr) self.restorePrCursor(params.number);
-        if (moves_focus) self.mode = .normal;
-        self.needs_render = true;
-    }
-
-    fn persistOutgoingPr(self: *App) void {
-        flip_controller.persistOutgoing(self.flipCtx(), .{
+    /// The App slices the PR surface controller works on.
+    pub fn surfaceCtx(self: *App) surface_controller.Ctx {
+        return .{
+            .allocator = self.allocator,
+            .host = .{
+                .ptr = self,
+                .refresh = hostRefresh,
+                .install_files = hostInstallFiles,
+                .clear_view = hostClearView,
+                .rebuild_line_map = hostRebuildLineMap,
+                .clamp_scroll = hostClampScroll,
+                .show_error = hostShowError,
+                .save_open_comment = hostSaveOpenComment,
+            },
+            .parking = &self.state.pr_surface_parking,
+            .diff_source = &self.state.diff_source,
+            .diff_load = &self.state.diff_load,
+            .comment_store = &self.state.comment_store,
+            .review = &self.state.review,
+            .flip = &self.state.flip,
+            .surface = &self.state.pr_surface,
+            .sidebar = &self.state.sidebar,
+            .files = &self.state.files,
             .line_map = &self.state.line_map,
-            .cursor_line = self.state.global_cursor_line,
-            .scroll_offset = self.state.global_scroll_offset,
-        });
-    }
-
-    fn persistNotesIfDirty(self: *App) void {
-        flip_controller.persistNotesIfDirty(self.flipCtx());
+            .cursor_line = &self.state.global_cursor_line,
+            .scroll_offset = &self.state.global_scroll_offset,
+            .folds = &self.state.collapsed_folds,
+            .active_comment_input = &self.state.active_comment_input,
+            .mode = &self.mode,
+            .pager_mode = &self.state.pager_mode,
+            .needs_render = &self.needs_render,
+            .needs_async_highlight = &self.needs_async_highlight,
+        };
     }
 
     /// The App slices the flip controller works on.
     pub fn flipCtx(self: *App) flip_controller.Ctx {
-        return .{
-            .allocator = self.allocator,
-            .flip = &self.state.flip,
-            .surface = &self.state.pr_surface,
-            .sidebar = &self.state.sidebar,
-            .comments = &self.state.comment_store,
-            .files = self.state.files,
-            .folds = &self.state.collapsed_folds,
-        };
+        return surface_controller.flipCtx(self.surfaceCtx());
     }
 
-    fn restorePrCursor(self: *App, number: u32) void {
-        const recalled = flip.recallCursor(&self.state.flip, .{ .number = number, .files = self.state.files, .line_map = &self.state.line_map }) orelse return;
-        self.state.global_cursor_line = recalled.cursor_line;
-        self.state.global_scroll_offset = recalled.scroll_offset;
+    /// Null when local comment writes are allowed
+    /// (`surface_controller.localWritesBlocked`).
+    pub fn localWritesBlocked(self: *const App) ?surface_controller.LocalWriteBlock {
+        return surface_controller.localWritesBlocked(.{
+            .parking = &self.state.pr_surface_parking,
+            .review = &self.state.review,
+            .sidebar = &self.state.sidebar,
+            .flip = &self.state.flip,
+        });
+    }
+
+    fn hostRefresh(ptr: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(ptr));
+        self.refresh() catch |err| switch (err) {};
+    }
+
+    fn hostInstallFiles(ptr: *anyopaque, files: []parser.FileDiff) Allocator.Error!void {
+        const self: *App = @ptrCast(@alignCast(ptr));
+        return self.installParsedFiles(files);
+    }
+
+    fn hostClearView(ptr: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(ptr));
+        self.clearDiffViewState();
+    }
+
+    fn hostRebuildLineMap(ptr: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(ptr));
+        self.rebuildReviewLineMap();
+    }
+
+    fn hostClampScroll(ptr: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(ptr));
         Navigation.clampScrollOffset(self);
     }
 
-    /// A gh error from the entry, sharing the status line with the discard
-    /// notice when an open editor was dropped so neither hides the other.
-    fn showEntryGhError(self: *App, kind: pr.github.GhErrorKind, discarded: bool) void {
-        if (!discarded) {
-            self.showStatusError(pr.github.kindMessage(kind));
-            return;
-        }
-        var msg_buf: [160]u8 = undefined;
-        const msg = std.fmt.bufPrint(&msg_buf, "unsent comment discarded; {s}", .{pr.github.kindMessage(kind)}) catch discarded_comment_message;
-        self.showStatusError(msg);
+    fn hostShowError(ptr: *anyopaque, message: []const u8) void {
+        const self: *App = @ptrCast(@alignCast(ptr));
+        self.showStatusError(message);
     }
 
-    /// Local comment writes (editor open/save, local reply, MCP add/reply) are
-    /// refused while the diff on screen is not the one `comment_store` will
-    /// belong to. Null when writes are allowed.
-    pub fn localWritesBlocked(self: *const App) ?LocalWriteBlock {
-        if (self.state.pr_surface_parking.pending()) return .diff_loading;
-        // A first entry from a non-PR diff stays writable: `enterReviewDiff`
-        // parks whatever is written meanwhile with that diff.
-        if (self.state.pr_surface_parking.comments != null and review_controller.entryPending(&self.state.review)) return .pr_loading;
-        // On the PR surface `comment_store` is saved for `flip.previewed`;
-        // with none (a failed switch left no PR's notes on screen) a write
-        // would never be saved.
-        if (self.state.sidebar.open and self.state.pr_surface_parking.comments != null and self.state.flip.previewed == null) return .pr_loading;
-        return null;
-    }
-
-    /// Close a comment editor left open on the outgoing diff as a PR diff is
-    /// entered; returns whether its text was discarded. A local comment or
-    /// reply on a non-PR diff is saved into the outgoing store while
-    /// `state.files` is still the diff its anchors index. Everything else is
-    /// dropped: a GitHub draft or thread reply/edit belongs to the previous
-    /// PR's session and, saved later, would post to the entered PR; a local
-    /// comment on a PR diff (PR→PR) goes with that PR's store; and anything
-    /// open while an earlier surface change is pending has no store of its own.
-    fn settleCommentEditorForEntry(self: *App) bool {
-        const input = self.state.active_comment_input orelse return false;
-        const parking = &self.state.pr_surface_parking;
-        const saves_locally = parking.comments == null and !parking.pending() and switch (input.edit_context) {
-            .none => input.target == .local,
-            .local_reply => true,
-            .reply, .edit_own => false,
-        };
-        const saved = saves_locally and (CommentController.saveCurrentComment(self) catch |err| blk: {
+    fn hostSaveOpenComment(ptr: *anyopaque) bool {
+        const self: *App = @ptrCast(@alignCast(ptr));
+        return CommentController.saveCurrentComment(self) catch |err| {
             std.log.warn("Failed to save the open comment before entering the PR diff: {any}", .{err});
-            break :blk false;
-        });
-        self.state.active_comment_input = null;
-        if (saved) return false;
-        self.showStatusError(discarded_comment_message);
-        return true;
+            return false;
+        };
     }
 
     /// Anchored review threads for the active session, or null when no session
@@ -3600,7 +3139,7 @@ pub const App = struct {
     }
 
     /// Esc/Ctrl-C in the sidebar peel one layer at a time: the filter prompt,
-    /// then a custom query back to its preset, then leave — quit for `skim pr`,
+    /// then the filter menu, then a custom query back to its preset, then leave — quit for `skim pr`,
     /// else the working-tree diff (which closes the surface). Owns App
     /// mode/quit state; the peeling itself is the controller's.
     pub fn prSidebarBack(self: *App) !void {
@@ -4210,33 +3749,6 @@ fn initPagerModeAppFromWorkingDiff(allocator: Allocator) !App {
 
     parser.markUntrackedFiles(files, diff_result.untracked_paths);
     return App.initForRenderBench(allocator, files);
-}
-
-/// Entry parameters for a sidebar record. The strings borrow from the
-/// record; `startEnterPr` copies them.
-fn enterParamsFor(record: *const pr_types.PrRecord) review_controller.EnterParams {
-    return .{ .number = record.number, .base_ref = record.base_ref, .title = record.title, .url = record.url };
-}
-
-/// The diff source refs for showing `record` in `view`.
-/// `head_oid` is the diffed head: the stack tip's for the whole-stack view,
-/// else the PR's.
-fn prDiffRefs(params: struct { record: *const pr_types.PrRecord, view: flip.DiffView, stack_base_ref: []const u8, head_oid: []const u8 }) App.PrDiffRefs {
-    return switch (params.view) {
-        .pr, .whole_stack => .{ .base = .{ .branch = params.stack_base_ref }, .head_oid = params.head_oid },
-        .since_seen => .{ .base = .{ .commit = params.record.seen_head_oid orelse "" }, .head_oid = params.head_oid },
-    };
-}
-
-/// Seen at its current head already: no dwell needed.
-fn seenAtHead(record: *const pr_types.PrRecord) bool {
-    const seen = record.seen_head_oid orelse return false;
-    return std.mem.eql(u8, seen, record.head_oid);
-}
-
-fn freeParsedFiles(allocator: Allocator, files: []parser.FileDiff) void {
-    for (files) |*file| file.deinit(allocator);
-    allocator.free(files);
 }
 
 fn diffContainsLine(files: []const parser.FileDiff, expected: []const u8) bool {

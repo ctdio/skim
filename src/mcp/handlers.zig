@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const App = @import("../app.zig").App;
-const LocalWriteBlock = @import("../app.zig").LocalWriteBlock;
+const LocalWriteBlock = @import("../pr/surface_controller.zig").LocalWriteBlock;
 const tui_server = @import("tui_server.zig");
 const session_mgr = @import("session.zig");
 const line_map = @import("../line_map.zig");
@@ -441,12 +441,14 @@ fn userIsTyping(app: *App) bool {
     return app.mode == .comment and app.state.active_comment_input != null;
 }
 
-/// A PR surface change is installing its diff: the store on hand belongs to the
-/// outgoing diff, so a write now would be misplaced or discarded with it.
+/// A PR surface change is installing its diff (the store on hand belongs to the
+/// outgoing diff, so a write now would be misplaced or discarded with it), or
+/// the view on screen is one whose notes are never saved.
 fn writesBlockedResponse(block: LocalWriteBlock) tui_server.Response {
     return tui_server.errorResponse(tui_server.ErrorCode.INTERNAL_ERROR, switch (block) {
         .diff_loading => "Diff is loading; retry once it is on screen",
         .pr_loading => "PR is loading; retry once it is on screen",
+        .unsaved_view => "Notes are only saved on a PR's own diff",
     });
 }
 

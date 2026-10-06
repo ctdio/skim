@@ -2,8 +2,8 @@
 //! around a preview, on `FlipState` plus the narrow App slices it touches.
 //! `flip.zig` stays pure and Store-free (D4); everything here that reaches
 //! the Store goes through `pr_surface`, which the wasm build stubs out.
-//! App keeps the parts that swap the diff on screen (installPrDiff,
-//! previewMiss, swapFiles, tickPrSurface) and forwards the rest here.
+//! `surface_controller` swaps the diff on screen (installPrDiff,
+//! previewMiss, tick) and calls in here for the notes and seen half.
 
 const std = @import("std");
 const skim_io = @import("skim_io");
@@ -165,8 +165,8 @@ pub fn toggleChangedOnly(ctx: Ctx) !ChangedOnly {
 /// gets its notes back (the switch cleared `comment_store`), so writes keep
 /// persisting to it. With a surface change pending the screen is no PR's,
 /// so the preview is forgotten instead and writes are refused
-/// (`App.localWritesBlocked`). True when the notes came back: the caller
-/// rebuilds the LineMap and restores the cursor.
+/// (`surface_controller.localWritesBlocked`). True when the notes came
+/// back: the caller rebuilds the LineMap and restores the cursor.
 pub fn abandonMissPreview(ctx: Ctx, params: struct { surface_change_pending: bool }) bool {
     const state = ctx.flip;
     state.loading_number = null;

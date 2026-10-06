@@ -10,12 +10,22 @@ const line_map = @import("../line_map.zig");
 const types = @import("db/types.zig");
 const priority = @import("prefetch/priority.zig");
 const notes = @import("notes.zig");
+const review_controller = @import("review_controller.zig");
 const ParsedLru = @import("prefetch/parsed_lru.zig").ParsedLru;
 
 const Allocator = std.mem.Allocator;
 
 pub const DiffView = priority.View;
 pub const OrphanNote = notes.OrphanNote;
+
+/// What a PR diff source compares: `origin/<branch>...<head>`, or
+/// `<commit> <head>` for the since-seen view. The head is the oid the
+/// diff was cached or listed at, never `refs/skim/pr-<n>`: that ref can
+/// lag a head that is already local, and `r` must re-diff what is shown.
+pub const PrDiffRefs = struct {
+    base: union(enum) { branch: []const u8, commit: []const u8 },
+    head_oid: []const u8,
+};
 
 pub const CursorMemory = struct {
     /// Owned.
@@ -229,6 +239,28 @@ pub fn deinitState(state: *FlipState, allocator: Allocator) void {
     state.orphan_notes.deinit(allocator);
     state.note_ids.deinit(allocator);
     state.* = .{};
+}
+
+/// Entry parameters for a sidebar record. The strings borrow from the
+/// record; `startEnterPr` copies them.
+pub fn enterParamsFor(record: *const types.PrRecord) review_controller.EnterParams {
+    return .{ .number = record.number, .base_ref = record.base_ref, .title = record.title, .url = record.url };
+}
+
+/// The diff source refs for showing `record` in `view`.
+/// `head_oid` is the diffed head: the stack tip's for the whole-stack view,
+/// else the PR's.
+pub fn prDiffRefs(params: struct { record: *const types.PrRecord, view: DiffView, stack_base_ref: []const u8, head_oid: []const u8 }) PrDiffRefs {
+    return switch (params.view) {
+        .pr, .whole_stack => .{ .base = .{ .branch = params.stack_base_ref }, .head_oid = params.head_oid },
+        .since_seen => .{ .base = .{ .commit = params.record.seen_head_oid orelse "" }, .head_oid = params.head_oid },
+    };
+}
+
+/// Seen at its current head already: no dwell needed.
+pub fn seenAtHead(record: *const types.PrRecord) bool {
+    const seen = record.seen_head_oid orelse return false;
+    return std.mem.eql(u8, seen, record.head_oid);
 }
 
 /// The path a diff file is known by: new_path, or old_path for a deletion.

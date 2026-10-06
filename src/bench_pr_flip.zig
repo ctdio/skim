@@ -1,10 +1,10 @@
 //! PR sidebar + flip benchmark (NFR-1). Seeds a temp SQLite DB with
 //! SKIM_BENCH_PRS open PRs, synthetic diffs and fresh review threads, then
 //! measures what the user waits on: cold sidebar paint, flipping to a
-//! prefetched PR through the real `pr_surface.planFlip` + `App.installPrDiff`
-//! path (DB hit and in-memory LRU hit), sidebar reload + filter, and sidebar
-//! draw. `SKIM_BENCH_ENFORCE=1` exits 1 when any p95 is over its (scaled)
-//! budget.
+//! prefetched PR through the real `pr_surface.planFlip` +
+//! `surface_controller.installPrDiff` path (DB hit and in-memory LRU hit),
+//! sidebar reload + filter, and sidebar draw. `SKIM_BENCH_ENFORCE=1` exits 1
+//! when any p95 is over its (scaled) budget.
 //!
 //! Every timed sample ends in `frame.render` + `vaxis.render` where the user
 //! would see a frame. No subprocess runs: diffs, merge bases and threads are
@@ -19,6 +19,7 @@ const app_mod = @import("app.zig");
 const config = @import("config.zig");
 const frame = @import("rendering/frame.zig");
 const pr_surface = @import("pr/surface.zig");
+const surface_controller = @import("pr/surface_controller.zig");
 const store_mod = @import("pr/db/store.zig");
 const types = @import("pr/db/types.zig");
 const sidebar_controller = @import("pr/sidebar/controller.zig");
@@ -350,8 +351,8 @@ fn measureFlipLruHit(params: MeasureParams) !Samples {
     return samples;
 }
 
-/// `App.previewPr`'s hit path without the debounce: plan from the cache,
-/// then install. A miss means the fixture did not cache this PR; the bench
+/// `surface_controller.previewPr`'s hit path without the debounce: plan
+/// from the cache, then install. A miss means the fixture did not cache this PR; the bench
 /// fails rather than time (or spawn) the streaming fallback.
 fn flipTo(params: MeasureParams, target: *const PrRecord) !void {
     const app = params.app;
@@ -369,7 +370,7 @@ fn flipTo(params: MeasureParams, target: *const PrRecord) !void {
     };
     defer if (hit.threads) |threads| threads.deinit(params.allocator);
     if (!hit.threads_fresh) return error.BenchStaleThreads;
-    try app.installPrDiff(.{
+    try surface_controller.installPrDiff(app.surfaceCtx(), .{
         .record = target,
         .files = hit.files,
         .key = hit.key,

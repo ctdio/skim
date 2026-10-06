@@ -406,9 +406,9 @@ fn drawInfoBody(win: vaxis.Window, view: InfoView, top: u16, bottom: u16) void {
 
 /// Draw a scroll-position indicator right-aligned into the footer's trailing
 /// columns — arrows cue that content extends above (`↑`) / below (`↓`) the
-/// visible region, and `pos/total` mirrors the picker's `selected/total`
-/// readout. Right-aligned (rather than appended after the hint) so it renders
-/// independently of the hint length: on a narrow popup — e.g. the 64-col default
+/// visible region, and `pos/total` gives the scroll position. Right-aligned
+/// (rather than appended after the hint) so it renders independently of the
+/// hint length: on a narrow popup — e.g. the 64-col default
 /// on an 80-col terminal — appending would clip it off past the right edge.
 /// Drawn only when the body is actually taller than the visible region (nothing
 /// to scroll → no clutter).
