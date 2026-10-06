@@ -97,7 +97,7 @@ pub const Config = struct {
     }
 };
 
-const builtin_presets = [_]PrFilterPreset{.{ .name = "all", .query = "" }};
+const builtin_presets = [_]PrFilterPreset{.{ .name = "All open", .query = "" }};
 
 /// Upper bound on `~/.skim/config.json`. Generous: it only guards against
 /// reading something that is not a config file at all.
@@ -674,7 +674,7 @@ test "pr_filters default picks the named preset's index" {
     try std.testing.expectEqual(@as(usize, 1), config.pr_filters.defaultIndex());
 }
 
-test "missing pr_filters yields built-in all preset as default" {
+test "missing pr_filters yields the built-in All open preset as default" {
     const allocator = std.testing.allocator;
 
     const config = try parseConfig(allocator, "{}");
@@ -682,14 +682,14 @@ test "missing pr_filters yields built-in all preset as default" {
 
     const presets = config.pr_filters.effectivePresets();
     try std.testing.expectEqual(@as(usize, 1), presets.len);
-    try std.testing.expectEqualStrings("all", presets[0].name);
+    try std.testing.expectEqualStrings("All open", presets[0].name);
     try std.testing.expectEqualStrings("", presets[0].query);
     try std.testing.expectEqual(@as(usize, 0), config.pr_filters.defaultIndex());
 }
 
-test "default Config has the built-in all preset" {
+test "default Config has the built-in All open preset" {
     const config = Config{};
-    try std.testing.expectEqualStrings("all", config.pr_filters.effectivePresets()[0].name);
+    try std.testing.expectEqualStrings("All open", config.pr_filters.effectivePresets()[0].name);
 }
 
 test "empty presets object behaves like missing" {
@@ -700,7 +700,7 @@ test "empty presets object behaves like missing" {
 
     const presets = config.pr_filters.effectivePresets();
     try std.testing.expectEqual(@as(usize, 1), presets.len);
-    try std.testing.expectEqualStrings("all", presets[0].name);
+    try std.testing.expectEqualStrings("All open", presets[0].name);
     try std.testing.expectEqual(@as(usize, 0), config.pr_filters.defaultIndex());
 }
 
@@ -726,7 +726,7 @@ test "only non-string preset values behaves like missing" {
     const config = try parseConfig(allocator, "{\"pr_filters\": {\"presets\": {\"n\": 5}}}");
     defer config.deinit(allocator);
 
-    try std.testing.expectEqualStrings("all", config.pr_filters.effectivePresets()[0].name);
+    try std.testing.expectEqualStrings("All open", config.pr_filters.effectivePresets()[0].name);
 }
 
 test "non-object pr_filters is ignored" {

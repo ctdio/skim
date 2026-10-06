@@ -601,7 +601,10 @@ fn s2Presets(ctx: *Ctx) !void {
         }
 
         try h.pressChar('F');
-        if (sb.active_preset != 0) return ctx.fail("F: active_preset = {?d}, expected 0 (wraps to `ready`)", .{sb.active_preset});
+        if (sb.active_preset != null or sb.query_len != 0) return ctx.fail("F after `mine`: active_preset = {?d}, query '{s}', expected the built-in `All open`", .{ sb.active_preset, sb.query[0..sb.query_len] });
+        if (sb.rows.items.len != stacked31_rows) return ctx.fail("F to `All open`: {d} rows, expected {d}", .{ sb.rows.items.len, stacked31_rows });
+
+        try cycleToReady(ctx, &h);
         try expectRowRecords(ctx, sb, .{ .label = "ready", .expected = &ready_rows });
 
         try h.submitQuery("revew:x");
@@ -620,7 +623,7 @@ fn s2Presets(ctx: *Ctx) !void {
         var h = try Harness.boot(ctx, .{ .sync = .network });
         defer h.deinit();
         const sb = h.sidebar();
-        if (sb.presets.len != 1 or !std.mem.eql(u8, sb.presets[0].name, "all")) return ctx.fail("no config.json: {d} presets, expected the built-in `all`", .{sb.presets.len});
+        if (sb.presets.len != 1 or !std.mem.eql(u8, sb.presets[0].name, "All open")) return ctx.fail("no config.json: {d} presets, expected the built-in `All open`", .{sb.presets.len});
         if (sb.rows.items.len != stacked31_rows) return ctx.fail("no config.json: {d} rows, expected {d}", .{ sb.rows.items.len, stacked31_rows });
     }
 }
@@ -634,7 +637,7 @@ fn s3HydratePriority(ctx: *Ctx) !void {
     try expectPriorityMatchesView(ctx, &h, "mine (after boot)");
     try expectSortedEqual(ctx, .{ .label = "mine priority", .actual = try workerPriority(&h), .expected = &mine_rows });
 
-    try h.pressChar('F');
+    try cycleToReady(ctx, &h);
     try expectPriorityMatchesView(ctx, &h, "ready (after F)");
     try expectSortedEqual(ctx, .{ .label = "ready priority", .actual = try workerPriority(&h), .expected = &ready_visible });
 
@@ -1732,6 +1735,18 @@ fn countNotes(store: *const root.comments.CommentStore) usize {
         if (std.mem.eql(u8, comment.text, "WT-NOTE")) count += 1;
     }
     return count;
+}
+
+/// Press F until `ready` (configured preset 0) is active again. F walks the
+/// menu's list: the configured presets, then the built-ins they do not
+/// duplicate, so from `mine` it takes five presses.
+fn cycleToReady(ctx: *Ctx, h: *Harness) !void {
+    const sb = h.sidebar();
+    for (0..8) |_| {
+        try h.pressChar('F');
+        if (sb.active_preset == 0) return;
+    }
+    return ctx.fail("F never wrapped back to `ready` (active_preset = {?d})", .{sb.active_preset});
 }
 
 /// The sync worker's hydrate priority list, copied under its mutex. Caller frees.

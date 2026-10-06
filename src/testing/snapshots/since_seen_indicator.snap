@@ -1,24 +1,24 @@
- all · 31/31           ⟳ 2m ago │[since seen bbbbbbb · threads hidden · notes not saved]  File 1 of 2  src/bench/file_0.
+ All open · 31/31      ⟳ 2m ago │[since seen bbbbbbb · threads hidden · notes not saved]  File 1 of 2  src/bench/file_0.
  no filter                      │▼ src/bench/file_0.zig  +2 -2
 ────────────────────────────────│
  ▸ #813 [3] Backoff helper  ✓●Δ │┃       ▼ ↕ 1-6 → 1-6  bench hunk 0
- ▸ #790 [2] Split parser …  ✗   │┃   1   const value_0 = 0; if (value_0 > 3) { return "alpha"; } else { return "beta"; }
-   #750 Standalone change…  ✓   │┃   2+  const value_1 = 1; if (value_1 > 3) { return "alpha"; } else { return "beta"; }
-   #749 Standalone change…   ✓  │┃   2-  const value_2 = 2; if (value_2 > 3) { return "alpha"; } else { return "beta"; }
-   #748 Standalone change…      │┃   3   const value_3 = 3; if (value_3 > 3) { return "alpha"; } else { return "beta"; }
-   #747 Standalone change…  ✓   │┃   4+  const value_4 = 4; if (value_4 > 3) { return "alpha"; } else { return "beta"; }
-   #746 Standalone change…      │┃   4-  const value_5 = 5; if (value_5 > 3) { return "alpha"; } else { return "beta"; }
-   #745 Standalone change…   ✓  │
-   #744 Standalone change…  ✓   │
-   #743 Standalone change…      │
-   #742 Standalone change…      │▼ src/bench/file_1.zig  +2 -2
-   #741 Standalone change…  ✓✓  │
-   #740 Standalone change…      │┃       ▼ ↕ 1-6 → 1-6  bench hunk 0
-   #739 Standalone change…      │┃   1   const value_0 = 0; if (value_0 > 3) { return "alpha"; } else { return "beta"; }
-   #738 Standalone change…  ✓   │┃   2+  const value_1 = 1; if (value_1 > 3) { return "alpha"; } else { return "beta"; }
-   #737 Standalone change…   ✓  │┃   2-  const value_2 = 2; if (value_2 > 3) { return "alpha"; } else { return "beta"; }
-   #736 Standalone change…      │┃   3   const value_3 = 3; if (value_3 > 3) { return "alpha"; } else { return "beta"; }
-   #735 Standalone change…  ✓   │┃   4+  const value_4 = 4; if (value_4 > 3) { return "alpha"; } else { return "beta"; }
-   #734 Standalone change…      │┃   4-  const value_5 = 5; if (value_5 > 3) { return "alpha"; } else { return "beta"; }
+ ▸ #790 [2] Split parser …  ✗ • │┃   1   const value_0 = 0; if (value_0 > 3) { return "alpha"; } else { return "beta"; }
+   #750 Standalone change…  ✓ • │┃   2+  const value_1 = 1; if (value_1 > 3) { return "alpha"; } else { return "beta"; }
+   #749 Standalone change…   ✓• │┃   2-  const value_2 = 2; if (value_2 > 3) { return "alpha"; } else { return "beta"; }
+   #748 Standalone change…    • │┃   3   const value_3 = 3; if (value_3 > 3) { return "alpha"; } else { return "beta"; }
+   #747 Standalone change…  ✓ • │┃   4+  const value_4 = 4; if (value_4 > 3) { return "alpha"; } else { return "beta"; }
+   #746 Standalone change…    • │┃   4-  const value_5 = 5; if (value_5 > 3) { return "alpha"; } else { return "beta"; }
+   #745 Standalone change…   ✓• │
+   #744 Standalone change…  ✓ • │
+   #743 Standalone change…    • │
+   #742 Standalone change…    • │▼ src/bench/file_1.zig  +2 -2
+   #741 Standalone change…  ✓✓• │
+   #740 Standalone change…    • │┃       ▼ ↕ 1-6 → 1-6  bench hunk 0
+   #739 Standalone change…    • │┃   1   const value_0 = 0; if (value_0 > 3) { return "alpha"; } else { return "beta"; }
+   #738 Standalone change…  ✓ • │┃   2+  const value_1 = 1; if (value_1 > 3) { return "alpha"; } else { return "beta"; }
+   #737 Standalone change…   ✓• │┃   2-  const value_2 = 2; if (value_2 > 3) { return "alpha"; } else { return "beta"; }
+   #736 Standalone change…    • │┃   3   const value_3 = 3; if (value_3 > 3) { return "alpha"; } else { return "beta"; }
+   #735 Standalone change…  ✓ • │┃   4+  const value_4 = 4; if (value_4 > 3) { return "alpha"; } else { return "beta"; }
+   #734 Standalone change…    • │┃   4-  const value_5 = 5; if (value_5 > 3) { return "alpha"; } else { return "beta"; }
                                 │┃
 -- NORMAL -- [Unified] [Stdin]  PR #813 [+/-]  File 1/2  j/k:Move  |  Tab:PRs  |  ? for help

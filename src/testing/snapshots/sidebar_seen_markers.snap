@@ -1,0 +1,8 @@
+ All open · 3/3                   ⟳ 2m ago │
+ no filter                                 │
+───────────────────────────────────────────│
+▌  #3 Never opened              alice    • │
+   #2 Pushed since seen         alice    Δ │
+   #1 Seen at its head          alice      │
+                                           │
+ f:filter F:preset R:sync ^b:hide y/Y:yank │

@@ -1,20 +1,20 @@
- all · 31/31                      ⟳ 2m ago │
+ All open · 31/31                 ⟳ 2m ago │
  no filter                                 │
 ───────────────────────────────────────────│
 ▌▸ #813 [3] Backoff helper      alice  ✓●Δ │
- ▸ #790 [2] Split parser module alice  ✗   │
-   #750 Standalone change 750   bob    ✓   │
-   #749 Standalone change 749   me      ✓  │
-   #748 Standalone change 748   bob        │
-   #747 Standalone change 747   alice  ✓   │
-   #746 Standalone change 746   bob        │
-   #745 Standalone change 745   alice   ✓  │
-   #744 Standalone change 744   bob    ✓   │
-   #743 Standalone change 743   alice      │
-   #742 Standalone change 742   bob        │
-   #741 Standalone change 741   alice  ✓✓  │
-   #740 Standalone change 740   bob        │
-   #739 Standalone change 739   alice      │
-   #738 Standalone change 738   bob    ✓   │
-   #737 Standalone change 737   alice   ✓  │
- f:filter F:preset R:sync ^b:hide          │
+ ▸ #790 [2] Split parser module alice  ✗ • │
+   #750 Standalone change 750   bob    ✓ • │
+   #749 Standalone change 749   me      ✓• │
+   #748 Standalone change 748   bob      • │
+   #747 Standalone change 747   alice  ✓ • │
+   #746 Standalone change 746   bob      • │
+   #745 Standalone change 745   alice   ✓• │
+   #744 Standalone change 744   bob    ✓ • │
+   #743 Standalone change 743   alice    • │
+   #742 Standalone change 742   bob      • │
+   #741 Standalone change 741   alice  ✓✓• │
+   #740 Standalone change 740   bob      • │
+   #739 Standalone change 739   alice    • │
+   #738 Standalone change 738   bob    ✓ • │
+   #737 Standalone change 737   alice   ✓• │
+ f:filter F:preset R:sync ^b:hide y/Y:yank │

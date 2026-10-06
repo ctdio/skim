@@ -13,6 +13,7 @@ const types = @import("db/types.zig");
 const parser = @import("../git/parser.zig");
 const line_map = @import("../line_map.zig");
 const comments = @import("../comments/store.zig");
+const sidebar_controller = @import("sidebar/controller.zig");
 const SidebarState = @import("sidebar/state.zig").SidebarState;
 const pr_surface = if (@import("../platform.zig").is_web) @import("surface_stub.zig") else @import("surface.zig");
 
@@ -33,6 +34,9 @@ pub const Ctx = struct {
 
 /// What the changed-only toggle (`c` on rewritten history) did.
 pub const ChangedOnly = enum { folded, unfolded, no_seen_diff };
+
+/// What `m` did to the PR's seen row.
+pub const SeenToggle = enum { marked, cleared, unchanged };
 
 pub const CursorSnapshot = struct {
     line_map: *const line_map.LineMap,
@@ -140,10 +144,16 @@ pub fn markSeen(ctx: Ctx, number: u32) void {
     afterSeenChange(ctx, number);
 }
 
-/// `m`: seen at the head, or unseen when it already is.
-pub fn toggleSeen(ctx: Ctx, number: u32) void {
+/// `m`: seen at the head, or unseen when it already is. Says which, read
+/// back from the reloaded sidebar; `unchanged` when the PR is not listed or
+/// the write failed.
+pub fn toggleSeen(ctx: Ctx, number: u32) SeenToggle {
+    const before = recordSeenAt(ctx.sidebar, number) orelse return .unchanged;
     pr_surface.toggleSeen(ctx.surface, .{ .allocator = ctx.allocator, .number = number, .sidebar = ctx.sidebar, .now = skim_io.timestamp() });
     afterSeenChange(ctx, number);
+    const after = recordSeenAt(ctx.sidebar, number) orelse return .unchanged;
+    if (after == before) return .unchanged;
+    return if (after == .head) .marked else .cleared;
 }
 
 /// FR-8 on rewritten history: fold every file that did not change since
@@ -197,7 +207,7 @@ pub fn finishPreview(ctx: Ctx, params: PreviewDone) void {
         .view = params.view,
         .key = params.key,
         .now_ms = skim_io.milliTimestamp(),
-        .already_seen = params.already_seen or params.load_failed,
+        .seen = previewSeenAt(ctx.sidebar, params),
     });
     state.notes_saved_revision = ctx.comments.revision;
     state.focus_diff = false;
@@ -206,6 +216,18 @@ pub fn finishPreview(ctx: Ctx, params: PreviewDone) void {
         return;
     }
     refreshChangedFiles(ctx, .{ .number = params.number, .view = params.view });
+}
+
+/// A failed load gets no dwell (nothing was read), and neither does a PR
+/// the caller found seen at its head or unlisted.
+fn previewSeenAt(sidebar: *const SidebarState, params: PreviewDone) flip.SeenAt {
+    if (params.already_seen or params.load_failed) return .head;
+    return recordSeenAt(sidebar, params.number) orelse .head;
+}
+
+fn recordSeenAt(sidebar: *const SidebarState, number: u32) ?flip.SeenAt {
+    const record = sidebar_controller.recordByNumber(sidebar, number) orelse return null;
+    return flip.seenAt(.{ .seen_head_oid = record.seen_head_oid, .head_oid = record.head_oid });
 }
 
 fn afterSeenChange(ctx: Ctx, number: u32) void {

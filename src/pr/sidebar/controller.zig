@@ -41,6 +41,12 @@ pub const ViewParams = struct {
 pub const PromptKey = union(enum) {
     char: u21,
     backspace,
+    /// Ctrl-U: empty the prompt.
+    clear,
+    /// Ctrl-W: drop the last word and the spaces after it.
+    delete_word,
+    /// Right/End: keep the pre-filled text and edit it from its end.
+    keep,
     enter,
     escape,
 };
@@ -72,11 +78,16 @@ pub const MenuToggle = struct {
 
 pub const Edge = enum { top, bottom };
 
+/// What `y` / `Y` copy from the selected PR.
+pub const YankField = enum { branch, url };
+
 /// Where record `index` sits in its stack, as `records.items` indices.
 /// `bottom` and `tip` are null for a standalone PR.
 pub const StackPlace = struct {
     parent: ?usize = null,
     bottom: ?usize = null,
+    /// The deepest PR stacked on `index` (itself when nothing is), the first
+    /// in input order on a tie. On a forked stack each leaf is its own tip.
     tip: ?usize = null,
 };
 
@@ -272,30 +283,32 @@ pub fn applyQuery(state: *SidebarState, allocator: Allocator, text: []const u8) 
     }
 }
 
-/// Apply the next preset in config order, wrapping (`F`).
+/// Apply the next preset the `f` menu lists (configured, then the
+/// built-ins they do not cover), wrapping (`F`).
 pub fn cyclePreset(state: *SidebarState, allocator: Allocator) !void {
-    const presets = state.presets;
-    if (presets.len == 0) return;
-    const next = if (state.active_preset) |index| (index + 1) % presets.len else 0;
-    if (try applyQuery(state, allocator, presets[next].query)) selectPreset(state, next);
+    const next = if (activeMenuPreset(state)) |index| (index + 1) % menuPresetCount(state) else 0;
+    _ = try applyQuery(state, allocator, menuPreset(state, next).query);
 }
 
 /// Esc on a custom query: go back to the preset that was active before it.
-/// False when already on a preset (or none exist), so Esc peels further.
+/// False when already on a preset, configured or built-in (or none exist),
+/// so Esc peels further.
 pub fn restorePreset(state: *SidebarState, allocator: Allocator) !bool {
-    if (state.active_preset != null or state.presets.len == 0) return false;
+    if (activeMenuPreset(state) != null or state.presets.len == 0) return false;
     const index = @min(state.base_preset, state.presets.len - 1);
     if (!try applyQuery(state, allocator, state.presets[index].query)) return false;
     selectPreset(state, index);
     return true;
 }
 
-/// Open the `f` prompt pre-filled with the current query.
+/// Open the `/` query prompt pre-filled with the current query, selected so
+/// the first printable key replaces it.
 pub fn openPrompt(state: *SidebarState) void {
     var prompt = state_mod.Prompt{};
     const text = state.queryText();
     @memcpy(prompt.buf[0..text.len], text);
     prompt.len = text.len;
+    prompt.selected = text.len > 0;
     state.prompt = prompt;
 }
 
@@ -303,10 +316,13 @@ pub fn openPrompt(state: *SidebarState) void {
 /// push the new visible set to the workers (FR-5).
 pub fn promptKey(state: *SidebarState, allocator: Allocator, key: PromptKey) !PromptOutcome {
     const prompt = if (state.prompt) |*p| p else return .none;
+    const selected = prompt.selected;
+    prompt.selected = false;
     switch (key) {
         .char => |codepoint| {
             var encoded: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(codepoint, &encoded) catch return .none;
+            if (selected) prompt.len = 0;
             if (prompt.len + len > prompt.buf.len) return .none;
             @memcpy(prompt.buf[prompt.len..][0..len], encoded[0..len]);
             prompt.len += len;
@@ -317,6 +333,9 @@ pub fn promptKey(state: *SidebarState, allocator: Allocator, key: PromptKey) !Pr
             while (end > 0 and (prompt.buf[end] & 0xC0) == 0x80) end -= 1;
             prompt.len = end;
         },
+        .clear => prompt.len = 0,
+        .delete_word => prompt.len = wordStart(prompt.text()),
+        .keep => {},
         .escape => {
             state.prompt = null;
             state.parse_error = null;
@@ -399,6 +418,17 @@ pub fn selectedPr(state: *const SidebarState) ?*const PrRecord {
     return &state.records.?.items[row.record];
 }
 
+/// The selected PR's head branch or URL for the clipboard; null when no PR is
+/// selected or the field is empty.
+pub fn yankText(state: *const SidebarState, field: YankField) ?[]const u8 {
+    const record = selectedPr(state) orelse return null;
+    const text = switch (field) {
+        .branch => record.head_ref,
+        .url => record.url,
+    };
+    return if (text.len == 0) null else text;
+}
+
 /// Index into `records.items` of PR `number`, whether or not the filter shows it.
 pub fn recordIndex(state: *const SidebarState, number: u32) ?usize {
     const records = state.records orelse return null;
@@ -418,11 +448,11 @@ pub fn stackPlace(state: *const SidebarState, index: usize) StackPlace {
     var place: StackPlace = .{ .parent = analysis.parent_of[index] };
     if (!analysis.isStacked(index)) return place;
     const stack_id = analysis.stack_of[index];
-    const height = analysis.heights[stack_id];
     for (analysis.stack_of, analysis.depth_of, 0..) |member_stack, depth, member| {
         if (member_stack != stack_id) continue;
         if (depth == 0 and place.bottom == null) place.bottom = member;
-        if (depth == height - 1 and place.tip == null) place.tip = member;
+        if (!descendsFrom(&analysis, .{ .member = member, .ancestor = index })) continue;
+        if (place.tip == null or depth > analysis.depth_of[place.tip.?]) place.tip = member;
     }
     return place;
 }
@@ -525,6 +555,7 @@ pub fn view(state: *const SidebarState, params: ViewParams) render.View {
             .query = state.queryText(),
         },
         .prompt = if (state.prompt) |*prompt| prompt.text() else null,
+        .prompt_selected = if (state.prompt) |prompt| prompt.selected else false,
         .menu = if (state.menu != null) menuView(state, params.frame_allocator) catch null else null,
         .parse_error = if (state.parse_error) |*parse_error| parse_error.message() else null,
         .sync_line = sync.line,
@@ -746,6 +777,28 @@ fn presetLabel(state: *const SidebarState) []const u8 {
     return menuPreset(state, index).name;
 }
 
+/// `member` is `ancestor` or stacked somewhere above it. The walk is
+/// bounded by the record count, so a malformed parent cycle cannot hang it.
+fn descendsFrom(analysis: *const stack.Analysis, pair: struct { member: usize, ancestor: usize }) bool {
+    var current: ?usize = pair.member;
+    var steps: usize = 0;
+    while (current) |at| : (steps += 1) {
+        if (at == pair.ancestor) return true;
+        if (steps > analysis.parent_of.len) return false;
+        current = analysis.parent_of[at];
+    }
+    return false;
+}
+
+/// Where Ctrl-W cuts `text`: trailing spaces, then back to the space
+/// before the last word.
+fn wordStart(text: []const u8) usize {
+    var end = text.len;
+    while (end > 0 and text[end - 1] == ' ') end -= 1;
+    while (end > 0 and text[end - 1] != ' ') end -= 1;
+    return end;
+}
+
 fn activateMenuItem(state: *SidebarState, allocator: Allocator, item: MenuItem) !MenuOutcome {
     switch (item) {
         .preset => |index| {
@@ -858,6 +911,7 @@ fn buildRows(state: *const SidebarState, range: struct { allocator: Allocator, f
             .ci = record.ci,
             .review = reviewGlyphOf(record, ctx),
             .changed_since_seen = changedSinceSeen(record),
+            .unseen = record.seen_head_oid == null,
             .cache = if (state.cached.contains(record.number)) .cached else .unknown,
         };
     }
@@ -881,7 +935,7 @@ fn emptyState(state: *const SidebarState, row_count: usize) ?render.EmptyState {
     if (state.unavailable != .none) return .{ .unavailable = unavailableMessage(state.unavailable) };
     if (row_count > 0) return null;
     const total = if (state.records) |records| records.items.len else 0;
-    if (total > 0) return .{ .no_match = if (state.active_preset) |index| state.presets[index].name else state.queryText() };
+    if (total > 0) return .{ .no_match = if (activeMenuPreset(state)) |index| menuPreset(state, index).name else state.queryText() };
     if (state.sync.last_ok_at != null) return .no_prs;
     // Never synced: the list is empty because nothing has been fetched yet,
     // not because the repo has no open PRs.

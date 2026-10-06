@@ -2,11 +2,11 @@
  /› author:@me▏                            │
 ───────────────────────────────────────────│
 ▌▸ #813 [3] Backoff helper      alice  ✓●Δ │
- ▸ #790 [2] Split parser module alice  ✗   │
-   #750 Standalone change 750   bob    ✓   │
-   #749 Standalone change 749   me      ✓  │
-   #748 Standalone change 748   bob        │
-   #747 Standalone change 747   alice  ✓   │
-   #746 Standalone change 746   bob        │
-   #745 Standalone change 745   alice   ✓  │
- f:filter F:preset R:sync ^b:hide          │
+ ▸ #790 [2] Split parser module alice  ✗ • │
+   #750 Standalone change 750   bob    ✓ • │
+   #749 Standalone change 749   me      ✓• │
+   #748 Standalone change 748   bob      • │
+   #747 Standalone change 747   alice  ✓ • │
+   #746 Standalone change 746   bob      • │
+   #745 Standalone change 745   alice   ✓• │
+ enter:apply esc:cancel ^u:clear           │

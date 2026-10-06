@@ -1,6 +1,5 @@
  ready · 31/31                    ⟳ 2m ago │
- /› revew:requested▏                       │
- ✗ unknown qualifier "revew" in "revew:re… │
+ /› -is:draft▏                             │
 ───────────────────────────────────────────│
 ▌▸ #813 [3] Backoff helper      alice  ✓●Δ │
  ▸ #790 [2] Split parser module alice  ✗ • │
@@ -9,4 +8,5 @@
    #748 Standalone change 748   bob      • │
    #747 Standalone change 747   alice  ✓ • │
    #746 Standalone change 746   bob      • │
+   #745 Standalone change 745   alice   ✓• │
  enter:apply esc:cancel ^u:clear           │

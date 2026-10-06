@@ -42,6 +42,7 @@ const RecSpec = struct {
     my_review_state: []const u8 = "",
     my_review_oid: []const u8 = "",
     seen_head_oid: ?[]const u8 = null,
+    url: []const u8 = "",
 };
 
 const head_oid = "a" ** 40;
@@ -403,18 +404,16 @@ test "applyQuery: matching preset query re-selects that preset; other text → a
     try testing.expectEqual(@as(?usize, null), sb.active_preset);
 }
 
-test "cyclePreset: walks presets in config order and wraps" {
+test "cyclePreset: walks the configured presets in config order first" {
     var sb = try stacked31State();
     defer controller.deinitState(&sb, testing.allocator);
     try controller.setPresets(&sb, testing.allocator, &two_presets);
     try testing.expectEqual(@as(?usize, 0), sb.active_preset);
 
     try controller.cyclePreset(&sb, testing.allocator);
+
     try testing.expectEqual(@as(?usize, 1), sb.active_preset);
     try testing.expectEqualStrings("author:@me", sb.queryText());
-    try controller.cyclePreset(&sb, testing.allocator);
-    try testing.expectEqual(@as(?usize, 0), sb.active_preset);
-    try testing.expectEqualStrings("-is:draft", sb.queryText());
 }
 
 test "cyclePreset: from a custom query starts at the first preset" {
@@ -461,14 +460,14 @@ test "restorePreset: no presets installed → false" {
     try testing.expectEqualStrings("label:x", sb.queryText());
 }
 
-test "setPresets: no configured presets → built-in \"all\" (empty query) via effectivePresets()" {
+test "setPresets: no configured presets → built-in \"All open\" (empty query) via effectivePresets()" {
     var sb = try stacked31State();
     defer controller.deinitState(&sb, testing.allocator);
 
     try controller.setPresets(&sb, testing.allocator, &config.PrFilters{});
 
     try testing.expectEqual(@as(usize, 1), sb.presets.len);
-    try testing.expectEqualStrings("all", sb.presets[0].name);
+    try testing.expectEqualStrings("All open", sb.presets[0].name);
     try testing.expectEqual(@as(?usize, 0), sb.active_preset);
     try testing.expectEqual(@as(usize, stacked31_rows), sb.rows.items.len);
 }
@@ -650,12 +649,12 @@ test "menu presets: configured presets first, then the built-ins whose query is 
     try expectMenuPresetNames(&sb, &.{ "ready", "mine", "All open", "Needs my review", "Changed since seen" });
 }
 
-test "menu presets: with nothing configured the built-in all stands in for All open" {
+test "menu presets: with nothing configured the built-in All open heads the list once" {
     var sb = try stacked31State();
     defer controller.deinitState(&sb, testing.allocator);
     try controller.setPresets(&sb, testing.allocator, &config.PrFilters{});
 
-    try expectMenuPresetNames(&sb, &.{ "all", "Ready for review", "Needs my review", "Mine", "Changed since seen" });
+    try expectMenuPresetNames(&sb, &.{ "All open", "Ready for review", "Needs my review", "Mine", "Changed since seen" });
 }
 
 test "menu items: presets, then the toggles, then Custom query and Clear filter" {
@@ -937,14 +936,8 @@ test "view: menu checkboxes are derived from the parsed query" {
 
     const menu = controller.view(&sb, viewParams(frame.allocator())).menu.?;
 
-    var checked: std.ArrayList([]const u8) = .empty;
-    defer checked.deinit(testing.allocator);
-    for (menu.lines) |line| {
-        if (line.kind == .toggle and line.on) try checked.append(testing.allocator, line.label);
-    }
-    try testing.expectEqual(@as(usize, 2), checked.items.len);
-    try testing.expectEqualStrings("Authored by me", checked.items[0]);
-    try testing.expectEqualStrings("CI not failing", checked.items[1]);
+    // Hide drafts, Review requested, Authored by me, CI not failing, Changed since seen.
+    try testing.expectEqualSlices(bool, &.{ false, false, true, true, false }, &toggleStates(menu));
     try testing.expectEqualStrings("author:@me -ci:failure", menu.query);
 }
 
@@ -1682,6 +1675,7 @@ test "filter prompt: non-ASCII text is typed through" {
     var app = try sidebarApp();
     defer app.deinit();
     try app.handleKey(.{ .codepoint = '/' });
+    try app.handleKey(.{ .codepoint = Key.end });
     const before = app.state.sidebar.prompt.?.len;
 
     try app.handleKey(.{ .codepoint = 0xE9, .text = "\u{e9}" });
@@ -1777,6 +1771,7 @@ test "filter menu keys: / in the menu opens the prompt with the query, and typin
     try app.handleKey(.{ .codepoint = '/' });
     try testing.expect(app.state.sidebar.menu == null);
     try testing.expectEqualStrings("-is:draft", app.state.sidebar.prompt.?.text());
+    try app.handleKey(.{ .codepoint = Key.end });
     for (" author:bob") |c| try app.handleKey(.{ .codepoint = c, .text = &.{c} });
     try app.handleKey(.{ .codepoint = Key.enter });
 
@@ -2689,7 +2684,7 @@ fn records(allocator: Allocator, specs: []const RecSpec) !types.RecordList {
             .state = .open,
             .title = try a.dupe(u8, spec.title),
             .author = try a.dupe(u8, spec.author),
-            .url = "",
+            .url = try a.dupe(u8, spec.url),
             .is_draft = spec.draft,
             .head_ref = try a.dupe(u8, spec.head),
             .base_ref = try a.dupe(u8, spec.base),
@@ -3282,4 +3277,434 @@ fn firstCodeRow(map: *const root.line_map.LineMap) usize {
         if (record.line_type == .code_line) return idx;
     }
     unreachable;
+}
+
+// =============================================================================
+// Final-review UX fixes: presets, prompt editing, seen state, forked stacks
+// =============================================================================
+
+test "restorePreset: a built-in menu preset is not a custom query, so Esc does not reapply a configured one" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    _ = try controller.applyQuery(&sb, testing.allocator, "review:requested");
+
+    try testing.expect(!try controller.restorePreset(&sb, testing.allocator));
+    try testing.expectEqualStrings("review:requested", sb.queryText());
+}
+
+test "Esc after picking a built-in preset keeps its query, then peels to exit" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    const sb = &app.state.sidebar;
+    sb.pr_only = true;
+    try app.handleKey(.{ .codepoint = 'f' });
+    moveMenuTo(sb, .{ .preset = menuPresetIndex(sb, "Needs my review") });
+    try app.handleKey(.{ .codepoint = Key.enter });
+    try testing.expectEqualStrings("review:requested", sb.queryText());
+
+    try app.handleKey(.{ .codepoint = Key.escape });
+
+    try testing.expectEqualStrings("review:requested", sb.queryText());
+    try testing.expect(app.should_quit);
+}
+
+test "empty states: no match under a built-in preset names the preset" {
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+    var sb = try stateFrom(&.{.{ .number = 1, .head = "a" }}, recent_sync);
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    _ = try controller.applyQuery(&sb, testing.allocator, "is:changed");
+
+    try testing.expectEqualStrings("Changed since seen", controller.view(&sb, viewParams(frame.allocator())).empty.?.no_match);
+}
+
+test "cyclePreset: with no config F walks the built-in presets the menu shows, and wraps" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &config.PrFilters{});
+    const expected = [_][]const u8{ "-is:draft", "review:requested", "author:@me", "is:changed", "" };
+
+    for (expected) |query| {
+        try controller.cyclePreset(&sb, testing.allocator);
+        try testing.expectEqualStrings(query, sb.queryText());
+    }
+}
+
+test "cyclePreset: after the configured presets F continues into the built-ins they do not cover" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    const expected = [_][]const u8{ "author:@me", "", "review:requested", "is:changed", "-is:draft" };
+
+    for (expected) |query| {
+        try controller.cyclePreset(&sb, testing.allocator);
+        try testing.expectEqualStrings(query, sb.queryText());
+    }
+}
+
+test "F with no config cycles presets from the sidebar" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    try controller.setPresets(&app.state.sidebar, testing.allocator, &config.PrFilters{});
+
+    try app.handleKey(.{ .codepoint = 'F' });
+
+    try testing.expectEqualStrings("-is:draft", app.state.sidebar.queryText());
+}
+
+test "prompt: the first printable key replaces the pre-filled query" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:bob");
+    controller.openPrompt(&sb);
+
+    try typeText(&sb, "ci");
+
+    try testing.expectEqualStrings("ci", sb.prompt.?.text());
+}
+
+test "prompt: backspace on the pre-filled query edits its end instead of replacing it" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:bob");
+    controller.openPrompt(&sb);
+
+    _ = try controller.promptKey(&sb, testing.allocator, .backspace);
+    try typeText(&sb, "x");
+
+    try testing.expectEqualStrings("author:box", sb.prompt.?.text());
+}
+
+test "prompt: keep leaves the pre-filled query in place so typing appends" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:bob");
+    controller.openPrompt(&sb);
+
+    _ = try controller.promptKey(&sb, testing.allocator, .keep);
+    try typeText(&sb, " ci:success");
+
+    try testing.expectEqualStrings("author:bob ci:success", sb.prompt.?.text());
+}
+
+test "prompt: clear empties the text, pre-filled or typed" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:bob");
+    controller.openPrompt(&sb);
+
+    _ = try controller.promptKey(&sb, testing.allocator, .clear);
+    try testing.expectEqualStrings("", sb.prompt.?.text());
+    try typeText(&sb, "ci");
+    _ = try controller.promptKey(&sb, testing.allocator, .clear);
+    try testing.expectEqualStrings("", sb.prompt.?.text());
+}
+
+test "prompt: delete_word removes the last term and the spaces after it" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:bob label:x  ");
+    controller.openPrompt(&sb);
+
+    _ = try controller.promptKey(&sb, testing.allocator, .delete_word);
+    try testing.expectEqualStrings("author:bob ", sb.prompt.?.text());
+    _ = try controller.promptKey(&sb, testing.allocator, .delete_word);
+    try testing.expectEqualStrings("", sb.prompt.?.text());
+    _ = try controller.promptKey(&sb, testing.allocator, .delete_word);
+    try testing.expectEqualStrings("", sb.prompt.?.text());
+}
+
+test "prompt: the view marks pre-filled text as selected until it is edited" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:bob");
+    controller.openPrompt(&sb);
+    try testing.expect(controller.view(&sb, viewParams(frame.allocator())).prompt_selected);
+
+    _ = try controller.promptKey(&sb, testing.allocator, .backspace);
+
+    try testing.expect(!controller.view(&sb, viewParams(frame.allocator())).prompt_selected);
+}
+
+test "filter prompt keys: Ctrl-U clears and Ctrl-W deletes a word" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    const sb = &app.state.sidebar;
+    try app.handleKey(.{ .codepoint = '/' });
+    try app.handleKey(.{ .codepoint = Key.end });
+    for (" author:bob") |c| try app.handleKey(.{ .codepoint = c, .text = &.{c} });
+
+    try app.handleKey(.{ .codepoint = 'w', .mods = .{ .ctrl = true } });
+    try testing.expectEqualStrings("-is:draft ", sb.prompt.?.text());
+    try app.handleKey(.{ .codepoint = 'u', .mods = .{ .ctrl = true } });
+    try testing.expectEqualStrings("", sb.prompt.?.text());
+}
+
+test "snapshot: sidebar_filter_prompt_prefilled" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    controller.openPrompt(&sb);
+
+    try expectSidebarSnapshot(.{ .state = &sb, .name = "sidebar_filter_prompt_prefilled", .cols = 44, .rows = 12 });
+}
+
+test "view: a never-seen PR is unseen; seen at any head is not" {
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+    var sb = try stateFrom(&.{
+        .{ .number = 1, .head = "a", .seen_head_oid = other_oid },
+        .{ .number = 2, .head = "b", .seen_head_oid = head_oid },
+        .{ .number = 3, .head = "c" },
+    }, recent_sync);
+    defer controller.deinitState(&sb, testing.allocator);
+
+    const rows = controller.view(&sb, viewParams(frame.allocator())).rows;
+
+    try testing.expect(!rows[0].unseen);
+    try testing.expect(!rows[1].unseen);
+    try testing.expect(rows[2].unseen);
+}
+
+test "snapshot: sidebar_seen_markers" {
+    var sb = try stateFrom(&.{
+        .{ .number = 3, .title = "Never opened", .head = "a" },
+        .{ .number = 2, .title = "Pushed since seen", .head = "b", .seen_head_oid = other_oid },
+        .{ .number = 1, .title = "Seen at its head", .head = "c", .seen_head_oid = head_oid },
+    }, recent_sync);
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &config.PrFilters{});
+
+    try expectSidebarSnapshot(.{ .state = &sb, .name = "sidebar_seen_markers", .cols = 44, .rows = 8 });
+}
+
+test "m in the sidebar says whether it marked or cleared the PR's seen state" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try testing.expect(try controller.selectNumber(&app.state.sidebar, testing.allocator, 101));
+
+    try app.handleKey(.{ .codepoint = 'm' });
+    try testing.expectEqualStrings("marked #101 seen", app.state.status_message.?);
+    try app.handleKey(.{ .codepoint = 'm' });
+    try testing.expectEqualStrings("cleared seen for #101", app.state.status_message.?);
+}
+
+test "m on the diff says it marked the shown PR seen" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 102 });
+    app.mode = .normal;
+
+    try app.handleKey(.{ .codepoint = 'm' });
+
+    try testing.expectEqualStrings("marked #102 seen", app.state.status_message.?);
+}
+
+test "the dwell leaves a PR seen at an older head alone, so its Δ survives" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try seeAtOlderHead(&fx, 101);
+    try fx.install(.{ .number = 101 });
+
+    root.surface_controller.tick(app.surfaceCtx(), app.state.flip.preview_started_ms + 2 * root.flip.dwell_ms);
+
+    try testing.expectEqual(@as(?u32, 101), app.state.flip.previewed);
+    try testing.expect(!app.state.flip.dwell_done);
+    try testing.expectEqualStrings(oid_b, &(try fx.store().getSeen(fx.repoId(), 101)).?.head_oid);
+}
+
+test "l on a PR seen at an older head marks it seen at its head" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try seeAtOlderHead(&fx, 101);
+    try testing.expect(try controller.selectNumber(&app.state.sidebar, testing.allocator, 101));
+    try fx.install(.{ .number = 101 });
+
+    try app.handleKey(.{ .codepoint = 'l' });
+
+    try testing.expectEqual(root.App.Mode.normal, app.mode);
+    try testing.expectEqualStrings(oid_a, &(try fx.store().getSeen(fx.repoId(), 101)).?.head_oid);
+}
+
+test "Ctrl-w l focuses the diff and marks the shown PR seen, like l" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try testing.expect(try controller.selectNumber(&app.state.sidebar, testing.allocator, 102));
+    try fx.install(.{ .number = 102 });
+
+    try app.handleKey(.{ .codepoint = 'w', .mods = .{ .ctrl = true } });
+    try app.handleKey(.{ .codepoint = 'l' });
+
+    try testing.expectEqual(root.App.Mode.normal, app.mode);
+    try testing.expectEqualStrings(oid_b, &(try fx.store().getSeen(fx.repoId(), 102)).?.head_oid);
+}
+
+test "a filter that hides every PR replaces the previewed PR's diff with the placeholder" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    _ = try controller.applyQuery(&app.state.sidebar, testing.allocator, "label:nope");
+
+    const text = try frameText(app, .{ .cols = 100, .rows = 16 });
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "No pull request selected") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "a.txt") == null);
+}
+
+test "with the diff focused a filtered-out preview stays on screen" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    _ = try controller.applyQuery(&app.state.sidebar, testing.allocator, "label:nope");
+    app.mode = .normal;
+
+    const text = try frameText(app, .{ .cols = 100, .rows = 16 });
+    defer testing.allocator.free(text);
+
+    try testing.expect(std.mem.indexOf(u8, text, "a.txt") != null);
+}
+
+test "stackPlace: on a forked stack each leaf is its own tip and a fork point reaches its deepest leaf" {
+    var sb = try forkedState();
+    defer controller.deinitState(&sb, testing.allocator);
+
+    try expectTip(&sb, .{ .number = 902, .tip = 902 });
+    try expectTip(&sb, .{ .number = 904, .tip = 904 });
+    try expectTip(&sb, .{ .number = 903, .tip = 904 });
+    try expectTip(&sb, .{ .number = 901, .tip = 904 });
+    try testing.expectEqual(@as(u32, 901), sb.records.?.items[controller.stackPlace(&sb, controller.recordIndex(&sb, 902).?).bottom.?].number);
+}
+
+test "view: an expanded forked stack draws the top connector on its first row" {
+    var sb = try forkedState();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.toggleExpand(&sb, testing.allocator);
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+
+    const rows = controller.view(&sb, viewParams(frame.allocator())).rows;
+
+    try testing.expectEqual(@as(usize, 5), rows.len);
+    try testing.expectEqual(root.stack.Mark.top, rows[1].connector);
+    try testing.expectEqual(root.stack.Mark.middle, rows[2].connector);
+    try testing.expectEqual(root.stack.Mark.middle, rows[3].connector);
+    try testing.expectEqual(root.stack.Mark.bottom, rows[4].connector);
+}
+
+test "yankText: branch is the selected PR's head ref" {
+    var sb = try yankState();
+    defer controller.deinitState(&sb, testing.allocator);
+
+    try testing.expectEqualStrings("feat/x", controller.yankText(&sb, .branch).?);
+}
+
+test "yankText: url is the selected PR's URL" {
+    var sb = try yankState();
+    defer controller.deinitState(&sb, testing.allocator);
+
+    try testing.expectEqualStrings("https://github.com/o/r/pull/12", controller.yankText(&sb, .url).?);
+}
+
+test "yankText: follows the cursor to the next PR" {
+    var sb = try yankState();
+    defer controller.deinitState(&sb, testing.allocator);
+
+    controller.move(&sb, 1);
+
+    try testing.expectEqualStrings("fix/y", controller.yankText(&sb, .branch).?);
+    try testing.expectEqualStrings("https://github.com/o/r/pull/13", controller.yankText(&sb, .url).?);
+}
+
+test "yankText: nothing to yank when the filter hides every PR" {
+    var sb = try yankState();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:nobody");
+
+    try testing.expectEqual(@as(?[]const u8, null), controller.yankText(&sb, .branch));
+    try testing.expectEqual(@as(?[]const u8, null), controller.yankText(&sb, .url));
+}
+
+test "yankText: nothing to yank before the first load" {
+    const sb = SidebarState{};
+
+    try testing.expectEqual(@as(?[]const u8, null), controller.yankText(&sb, .branch));
+}
+
+test "yankText: no URL to yank for a PR synced without one" {
+    var sb = try stateFrom(&.{.{ .number = 12, .head = "feat/x" }}, recent_sync);
+    defer controller.deinitState(&sb, testing.allocator);
+
+    try testing.expectEqual(@as(?[]const u8, null), controller.yankText(&sb, .url));
+    try testing.expectEqualStrings("feat/x", controller.yankText(&sb, .branch).?);
+}
+
+fn menuPresetIndex(sb: *const SidebarState, name: []const u8) usize {
+    for (0..menuPresetCount(sb)) |index| {
+        if (std.mem.eql(u8, controller.menuPreset(sb, index).name, name)) return index;
+    }
+    @panic("no such menu preset");
+}
+
+/// Seen row for `number` at `oid_b`, an older head than #101's `oid_a`, and
+/// the sidebar reloaded so its record shows Δ.
+fn seeAtOlderHead(fx: *FlipApp, number: u32) !void {
+    try fx.store().setSeen(.{ .repo_id = fx.repoId(), .number = number, .head_oid = oid_b, .merge_base_oid = flip_merge_base, .now = now });
+    try surface.reload(&fx.app.state.pr_surface, .{ .allocator = testing.allocator, .sidebar = &fx.app.state.sidebar });
+}
+
+/// A whole App frame as text.
+fn frameText(app: *root.App, size: struct { cols: u16, rows: u16 }) ![]const u8 {
+    var ctx = try harness.createTestContext(testing.allocator, size.cols, size.rows);
+    defer ctx.deinit();
+    try root.frame.render(app, ctx.window());
+    return ctx.captureToText();
+}
+
+/// #901 ← #902 and #901 ← #903 ← #904: a stack that forks at #901.
+fn forkedState() !SidebarState {
+    return stateFrom(&.{
+        .{ .number = 901, .head = "f-base" },
+        .{ .number = 902, .head = "f-left", .base = "f-base" },
+        .{ .number = 903, .head = "f-right", .base = "f-base" },
+        .{ .number = 904, .head = "f-right2", .base = "f-right" },
+    }, recent_sync);
+}
+
+/// #12 (feat/x) above #13 (fix/y), both with URLs.
+fn yankState() !SidebarState {
+    const sb = try stateFrom(&.{
+        .{ .number = 12, .head = "feat/x", .url = "https://github.com/o/r/pull/12" },
+        .{ .number = 13, .head = "fix/y", .url = "https://github.com/o/r/pull/13" },
+    }, recent_sync);
+    try testing.expectEqual(@as(u32, 12), rowNumber(&sb, 0));
+    return sb;
+}
+
+fn expectTip(sb: *const SidebarState, params: struct { number: u32, tip: u32 }) !void {
+    const place = controller.stackPlace(sb, controller.recordIndex(sb, params.number).?);
+    try testing.expectEqual(params.tip, sb.records.?.items[place.tip.?].number);
+}
+
+/// The menu's toggle checkboxes in `menu_toggles` order.
+fn toggleStates(menu: root.sidebar_render.MenuView) [controller.menu_toggles.len]bool {
+    var states: [controller.menu_toggles.len]bool = undefined;
+    var index: usize = 0;
+    for (menu.lines) |line| {
+        if (line.kind != .toggle) continue;
+        states[index] = line.on;
+        index += 1;
+    }
+    return states;
 }

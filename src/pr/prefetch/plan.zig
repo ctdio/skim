@@ -10,6 +10,37 @@ const Allocator = std.mem.Allocator;
 /// parsed output.
 pub const MissingSet = std.StringHashMapUnmanaged(void);
 
+/// PRs whose `refs/pull/N/head` origin said it does not have, with the head
+/// and `updated_at` they had then. Every targets version starts a fresh
+/// round, so without this a PR whose pull ref is gone is fetched again on
+/// every sync. A push or any other change to the PR moves its stamp and lets
+/// it through once more.
+pub const FetchBackoff = struct {
+    failed: std.AutoHashMapUnmanaged(u32, Stamp) = .{},
+
+    pub const Stamp = struct {
+        head: u64,
+        updated: u64,
+
+        pub fn of(params: struct { head_oid: []const u8, updated_at: []const u8 }) Stamp {
+            return .{ .head = std.hash.Wyhash.hash(0, params.head_oid), .updated = std.hash.Wyhash.hash(0, params.updated_at) };
+        }
+    };
+
+    pub fn deinit(self: *FetchBackoff, allocator: Allocator) void {
+        self.failed.deinit(allocator);
+    }
+
+    pub fn record(self: *FetchBackoff, allocator: Allocator, params: struct { number: u32, stamp: Stamp }) !void {
+        try self.failed.put(allocator, params.number, params.stamp);
+    }
+
+    pub fn blocks(self: *const FetchBackoff, params: struct { number: u32, stamp: Stamp }) bool {
+        const stamp = self.failed.get(params.number) orelse return false;
+        return std.meta.eql(stamp, params.stamp);
+    }
+};
+
 /// argv prefix of every prefetch fetch. `--no-write-fetch-head` leaves the
 /// user's FETCH_HEAD alone; `--no-tags` keeps a PR fetch from pulling every tag;
 /// `--no-auto-maintenance` keeps a background fetch from starting a gc. The
@@ -102,6 +133,16 @@ pub fn missingRemoteRef(stderr: []const u8) ?[]const u8 {
         if (ref.len > 0) return ref;
     }
     return null;
+}
+
+/// N of a missing `refs/pull/N/head`; null for any other ref.
+pub fn missingPullNumber(remote_ref: []const u8) ?u32 {
+    const prefix = "refs/pull/";
+    const suffix = "/head";
+    if (!std.mem.startsWith(u8, remote_ref, prefix) or !std.mem.endsWith(u8, remote_ref, suffix)) return null;
+    if (remote_ref.len <= prefix.len + suffix.len) return null;
+    const digits = remote_ref[prefix.len .. remote_ref.len - suffix.len];
+    return std.fmt.parseUnsigned(u32, digits, 10) catch null;
 }
 
 /// Remove every refspec whose source (text between an optional leading '+'
@@ -324,4 +365,53 @@ test "dropLockedRefspecs keeps a spec whose lock is held by another git process"
     var specs = [_][]const u8{"+refs/heads/feat:refs/remotes/origin/feat"};
     const stderr = "error: cannot lock ref 'refs/remotes/origin/feat': Unable to create '/r/.git/refs/remotes/origin/feat.lock': File exists.\n";
     try testing.expectEqual(@as(usize, 1), dropLockedRefspecs(&specs, stderr));
+}
+
+test "missingPullNumber reads N from refs/pull/N/head and nothing else" {
+    try testing.expectEqual(@as(?u32, 98), missingPullNumber("refs/pull/98/head"));
+    try testing.expectEqual(@as(?u32, null), missingPullNumber("refs/heads/gone-base"));
+    try testing.expectEqual(@as(?u32, null), missingPullNumber("refs/pull/98/merge"));
+    try testing.expectEqual(@as(?u32, null), missingPullNumber("refs/pull//head"));
+    try testing.expectEqual(@as(?u32, null), missingPullNumber("refs/pull/x9/head"));
+    try testing.expectEqual(@as(?u32, null), missingPullNumber("refs/pull/99999999999/head"));
+}
+
+test "FetchBackoff blocks a PR at the head and updated_at it failed at" {
+    var backoff: FetchBackoff = .{};
+    defer backoff.deinit(testing.allocator);
+    const at = FetchBackoff.Stamp.of(.{ .head_oid = oid_a, .updated_at = "2026-01-01T00:00:09Z" });
+
+    try backoff.record(testing.allocator, .{ .number = 9, .stamp = at });
+
+    try testing.expect(backoff.blocks(.{ .number = 9, .stamp = at }));
+    try testing.expect(!backoff.blocks(.{ .number = 10, .stamp = at }));
+}
+
+test "FetchBackoff lets a PR through once its head or updated_at changes" {
+    var backoff: FetchBackoff = .{};
+    defer backoff.deinit(testing.allocator);
+    const at = FetchBackoff.Stamp.of(.{ .head_oid = oid_a, .updated_at = "2026-01-01T00:00:09Z" });
+    try backoff.record(testing.allocator, .{ .number = 9, .stamp = at });
+
+    try testing.expect(!backoff.blocks(.{ .number = 9, .stamp = FetchBackoff.Stamp.of(.{ .head_oid = oid_b, .updated_at = "2026-01-01T00:00:09Z" }) }));
+    try testing.expect(!backoff.blocks(.{ .number = 9, .stamp = FetchBackoff.Stamp.of(.{ .head_oid = oid_a, .updated_at = "2026-01-01T00:00:10Z" }) }));
+}
+
+test "FetchBackoff: a second failure at a new stamp replaces the first" {
+    var backoff: FetchBackoff = .{};
+    defer backoff.deinit(testing.allocator);
+    const first = FetchBackoff.Stamp.of(.{ .head_oid = oid_a, .updated_at = "t1" });
+    const second = FetchBackoff.Stamp.of(.{ .head_oid = oid_b, .updated_at = "t2" });
+    try backoff.record(testing.allocator, .{ .number = 9, .stamp = first });
+
+    try backoff.record(testing.allocator, .{ .number = 9, .stamp = second });
+
+    try testing.expect(backoff.blocks(.{ .number = 9, .stamp = second }));
+    try testing.expect(!backoff.blocks(.{ .number = 9, .stamp = first }));
+}
+
+test "FetchBackoff.Stamp does not confuse a shifted field boundary" {
+    const left = FetchBackoff.Stamp.of(.{ .head_oid = "ab", .updated_at = "c" });
+    const right = FetchBackoff.Stamp.of(.{ .head_oid = "a", .updated_at = "bc" });
+    try testing.expect(!std.meta.eql(left, right));
 }

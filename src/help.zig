@@ -174,11 +174,14 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
             .{ .key = "S", .desc = "Whole-stack diff ⇄ the PR's own" },
             .{ .key = "c", .desc = "Changes since seen (diff or folds)" },
             .{ .key = "m", .desc = "Mark seen / unseen" },
+            .{ .key = "Δ • ◆", .desc = "Pushed since seen · never seen · cached" },
+            .{ .key = "3s preview", .desc = "Marks a never-seen PR seen (Δ needs l/Enter/m)" },
             .{ .key = "f", .desc = "Filter menu (presets, toggles, clear)" },
             .{ .key = "/", .desc = "Filter query (author:@me -is:draft ...)" },
             .{ .key = "F", .desc = "Next filter preset" },
             .{ .key = "R", .desc = "Sync now" },
             .{ .key = "o", .desc = "Open the PR in the browser" },
+            .{ .key = "y / Y", .desc = "Yank the PR's branch / URL" },
             .{ .key = "Esc", .desc = "Back: menu/prompt, preset, then close" },
         };
         for (sidebar_bindings) |b| {

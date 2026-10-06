@@ -42,6 +42,14 @@ pub const FlipAction = union(enum) {
     mark_seen: u32,
 };
 
+/// Where a PR's seen row stands against its current head.
+pub const SeenAt = enum {
+    never,
+    head,
+    /// Seen, then pushed to: the sidebar shows Δ.
+    older_head,
+};
+
 pub const FlipState = struct {
     pending: ?struct { number: u32, due_ms: i64 } = null,
     /// PR whose diff `App.state.files` currently holds.
@@ -60,6 +68,9 @@ pub const FlipState = struct {
     preview_started_ms: i64 = 0,
     /// Seen already written for this preview (or the PR was seen at its head).
     dwell_done: bool = false,
+    /// The previewed PR was seen at an older head: the dwell must not clear
+    /// its Δ. Only an explicit focus or `m` marks it.
+    dwell_hold: bool = false,
     /// Requested view for the next preview (`S` / `c` toggle it).
     view: DiffView = .pr,
     cursor_memory: std.AutoHashMapUnmanaged(u32, CursorMemory) = .{},
@@ -124,26 +135,34 @@ pub fn tick(state: *FlipState, now_ms: i64) ?FlipAction {
         return .{ .preview = pending.number };
     }
     const number = state.previewed orelse return null;
-    if (state.dwell_done or state.loading_number != null) return null;
+    if (state.dwell_done or state.dwell_hold or state.loading_number != null) return null;
     if (now_ms - state.preview_started_ms < dwell_ms) return null;
     state.dwell_done = true;
     return .{ .mark_seen = number };
 }
 
-/// Record that `number` is now on screen; restarts the dwell clock.
+/// Record that `number` is now on screen; restarts the dwell clock. The
+/// dwell runs only for a PR never seen: one seen at its head needs nothing,
+/// and one seen at an older head keeps its Δ until an explicit focus.
 pub fn notePreviewed(state: *FlipState, params: struct {
     number: u32,
     view: DiffView,
     key: ?types.DiffKey,
     now_ms: i64,
-    already_seen: bool,
+    seen: SeenAt,
 }) void {
     state.previewed = params.number;
     state.previewed_view = params.view;
     state.displayed_key = params.key;
     state.loading_number = null;
     state.preview_started_ms = params.now_ms;
-    state.dwell_done = params.already_seen;
+    state.dwell_done = params.seen == .head;
+    state.dwell_hold = params.seen == .older_head;
+}
+
+pub fn seenAt(params: struct { seen_head_oid: ?[]const u8, head_oid: []const u8 }) SeenAt {
+    const seen = params.seen_head_oid orelse return .never;
+    return if (std.mem.eql(u8, seen, params.head_oid)) .head else .older_head;
 }
 
 /// FR-8 rewritten-history comparison. Two files are the same when their
@@ -516,7 +535,7 @@ test "onCursorMoved: each move re-arms the deadline (holding j previews nothing 
 
 test "onCursorMoved: moving back onto the previewed PR cancels the pending preview" {
     var state: FlipState = .{};
-    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 0, .already_seen = true });
+    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 0, .seen = .head });
     onCursorMoved(&state, .{ .number = 4, .now_ms = 1000 });
     onCursorMoved(&state, .{ .number = 3, .now_ms = 1010 });
     try testing.expectEqual(@as(?FlipAction, null), tick(&state, 2000));
@@ -524,7 +543,7 @@ test "onCursorMoved: moving back onto the previewed PR cancels the pending previ
 
 test "onCursorMoved: moving back onto the previewed PR while another loads is a real preview" {
     var state: FlipState = .{};
-    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 0, .already_seen = true });
+    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 0, .seen = .head });
     state.loading_number = 4;
     onCursorMoved(&state, .{ .number = 3, .now_ms = 1000 });
     try testing.expectEqual(@as(?FlipAction, .{ .preview = 3 }), tick(&state, 1040));
@@ -547,7 +566,7 @@ test "onCursorMoved: null selection (empty list) clears pending" {
 
 test "tick: mark_seen after dwell_ms of continuous preview, once" {
     var state: FlipState = .{};
-    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 1000, .already_seen = false });
+    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 1000, .seen = .never });
     try testing.expectEqual(@as(?FlipAction, null), tick(&state, 1000 + dwell_ms - 1));
     try testing.expectEqual(@as(?FlipAction, .{ .mark_seen = 3 }), tick(&state, 1000 + dwell_ms));
     try testing.expectEqual(@as(?FlipAction, null), tick(&state, 1000 + 2 * dwell_ms));
@@ -555,35 +574,57 @@ test "tick: mark_seen after dwell_ms of continuous preview, once" {
 
 test "tick: no mark_seen when the PR was already seen at its head" {
     var state: FlipState = .{};
-    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 1000, .already_seen = true });
+    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 1000, .seen = .head });
     try testing.expectEqual(@as(?FlipAction, null), tick(&state, 1000 + 10 * dwell_ms));
+}
+
+test "tick: no mark_seen ever for a PR seen at an older head" {
+    var state: FlipState = .{};
+    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 1000, .seen = .older_head });
+    try testing.expectEqual(@as(?FlipAction, null), tick(&state, 1000 + dwell_ms));
+    try testing.expectEqual(@as(?FlipAction, null), tick(&state, 1000 + 100 * dwell_ms));
+    try testing.expect(!state.dwell_done);
+}
+
+test "tick: the next preview of a never-seen PR dwells again after an older-head one" {
+    var state: FlipState = .{};
+    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 0, .seen = .older_head });
+    notePreviewed(&state, .{ .number = 4, .view = .pr, .key = null, .now_ms = 10, .seen = .never });
+    try testing.expectEqual(@as(?FlipAction, .{ .mark_seen = 4 }), tick(&state, 10 + dwell_ms));
+}
+
+test "seenAt: no seen row is never, the current head is head, any other is older_head" {
+    try testing.expectEqual(SeenAt.never, seenAt(.{ .seen_head_oid = null, .head_oid = "aa" }));
+    try testing.expectEqual(SeenAt.head, seenAt(.{ .seen_head_oid = "aa", .head_oid = "aa" }));
+    try testing.expectEqual(SeenAt.older_head, seenAt(.{ .seen_head_oid = "bb", .head_oid = "aa" }));
+    try testing.expectEqual(SeenAt.older_head, seenAt(.{ .seen_head_oid = "", .head_oid = "aa" }));
 }
 
 test "tick: no mark_seen while a miss load is in flight" {
     var state: FlipState = .{};
-    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 1000, .already_seen = false });
+    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 1000, .seen = .never });
     state.loading_number = 4;
     try testing.expectEqual(@as(?FlipAction, null), tick(&state, 1000 + dwell_ms));
 }
 
 test "tick: a new preview resets the dwell clock" {
     var state: FlipState = .{};
-    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 1000, .already_seen = false });
-    notePreviewed(&state, .{ .number = 4, .view = .pr, .key = null, .now_ms = 3000, .already_seen = false });
+    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 1000, .seen = .never });
+    notePreviewed(&state, .{ .number = 4, .view = .pr, .key = null, .now_ms = 3000, .seen = .never });
     try testing.expectEqual(@as(?FlipAction, null), tick(&state, 1000 + dwell_ms));
     try testing.expectEqual(@as(?FlipAction, .{ .mark_seen = 4 }), tick(&state, 3000 + dwell_ms));
 }
 
 test "tick: preview wins over dwell in the same tick" {
     var state: FlipState = .{};
-    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 0, .already_seen = false });
+    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 0, .seen = .never });
     onCursorMoved(&state, .{ .number = 4, .now_ms = dwell_ms - debounce_ms });
     try testing.expectEqual(@as(?FlipAction, .{ .preview = 4 }), tick(&state, dwell_ms));
 }
 
 test "tick: a pending move away holds the dwell back" {
     var state: FlipState = .{};
-    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 0, .already_seen = false });
+    notePreviewed(&state, .{ .number = 3, .view = .pr, .key = null, .now_ms = 0, .seen = .never });
     onCursorMoved(&state, .{ .number = 4, .now_ms = dwell_ms - 1 });
     try testing.expectEqual(@as(?FlipAction, null), tick(&state, dwell_ms));
 }
@@ -591,7 +632,7 @@ test "tick: a pending move away holds the dwell back" {
 test "notePreviewed clears the miss load it completes" {
     var state: FlipState = .{};
     state.loading_number = 3;
-    notePreviewed(&state, .{ .number = 3, .view = .since_seen, .key = null, .now_ms = 0, .already_seen = false });
+    notePreviewed(&state, .{ .number = 3, .view = .since_seen, .key = null, .now_ms = 0, .seen = .never });
     try testing.expectEqual(@as(?u32, null), state.loading_number);
     try testing.expectEqual(DiffView.since_seen, state.previewed_view);
 }

@@ -219,14 +219,20 @@ const Round = struct {
     stranded_checked: bool = false,
     /// The `wake_seq` that `recheckDone` last ran for.
     rechecked_wake: ?u32 = null,
+    /// Outlives every targets version: PRs origin has no pull ref for are
+    /// not fetched again until their head or `updated_at` moves.
+    backoff: plan.FetchBackoff = .{},
+    /// Owns `backoff`'s map.
+    allocator: Allocator,
 
     fn init(allocator: Allocator, threads_enabled: bool) Round {
-        return .{ .arena = .init(allocator), .scratch = .init(allocator), .threads_enabled = threads_enabled };
+        return .{ .arena = .init(allocator), .scratch = .init(allocator), .threads_enabled = threads_enabled, .allocator = allocator };
     }
 
     fn deinit(self: *Round) void {
         self.arena.deinit();
         self.scratch.deinit();
+        self.backoff.deinit(self.allocator);
     }
 
     fn noteError(self: *Round, err: LastError) void {
@@ -568,13 +574,15 @@ fn collectWanted(ctx: Ctx, capped: []const usize) ![]WantedOid {
     for (capped) |i| {
         if (ctx.round.states[i].fetch_attempted) continue;
         const target = ctx.round.targets[i];
-        try appendWanted(.{ .allocator = scratch, .list = &wanted, .item = .{ .oid = target.head_oid, .source = .{ .pull = target.number } } });
+        if (!pullBackedOff(ctx.round, target.number)) {
+            try appendWanted(.{ .allocator = scratch, .list = &wanted, .item = .{ .oid = target.head_oid, .source = .{ .pull = target.number } } });
+        }
         switch (target.base) {
             .trunk => |trunk| try appendWanted(.{ .allocator = scratch, .list = &wanted, .item = .{
                 .oid = trunk.oid,
                 .source = .{ .branch = .{ .name = target.base_ref, .index = i, .view = .pr } },
             } }),
-            .parent_pr => |parent| try appendWanted(.{ .allocator = scratch, .list = &wanted, .item = .{
+            .parent_pr => |parent| if (!pullBackedOff(ctx.round, parent.number)) try appendWanted(.{ .allocator = scratch, .list = &wanted, .item = .{
                 .oid = parent.head_oid,
                 .source = .{ .pull = parent.number },
             } }),
@@ -585,6 +593,34 @@ fn collectWanted(ctx: Ctx, capped: []const usize) ![]WantedOid {
         } });
     }
     return wanted.items;
+}
+
+/// PR `number`'s pull ref was missing on origin at its current stamp.
+fn pullBackedOff(round: *const Round, number: u32) bool {
+    const target = targetByNumber(round, number) orelse return false;
+    return round.backoff.blocks(.{ .number = number, .stamp = pullStamp(target) });
+}
+
+/// A failed fetch that blamed a missing `refs/pull/N/head` backs PR N off
+/// at its current stamp.
+fn notePullMissing(round: *Round, stderr: []const u8) void {
+    const remote_ref = plan.missingRemoteRef(stderr) orelse return;
+    const number = plan.missingPullNumber(remote_ref) orelse return;
+    const target = targetByNumber(round, number) orelse return;
+    round.backoff.record(round.allocator, .{ .number = number, .stamp = pullStamp(target) }) catch |err| {
+        std.log.warn("prefetch #{d}: recording the missing pull ref failed: {any}", .{ number, err });
+    };
+}
+
+fn targetByNumber(round: *const Round, number: u32) ?*const Target {
+    for (round.targets) |*target| {
+        if (target.number == number) return target;
+    }
+    return null;
+}
+
+fn pullStamp(target: *const Target) plan.FetchBackoff.Stamp {
+    return plan.FetchBackoff.Stamp.of(.{ .head_oid = target.head_oid, .updated_at = target.updated_at });
 }
 
 fn appendWanted(params: struct { allocator: Allocator, list: *std.ArrayList(WantedOid), item: WantedOid }) !void {
@@ -750,6 +786,7 @@ fn fetchWithFallback(ctx: Ctx, refspecs: [][]const u8) error{ GitMissing, Stoppe
     while (remaining.len > 0) {
         const result = try runFetch(ctx, remaining);
         if (result.ok) return if (drops == 0) .ok else .partial;
+        notePullMissing(ctx.round, result.stderr);
         const kept = dropFailedRefspecs(remaining, result.stderr) orelse {
             std.log.warn("prefetch: git fetch failed: {s}", .{trimOutput(result.stderr)});
             return .failed;
@@ -761,7 +798,9 @@ fn fetchWithFallback(ctx: Ctx, refspecs: [][]const u8) error{ GitMissing, Stoppe
     for (remaining) |spec| {
         if (ctx.worker.stop_requested.load(.acquire)) return error.Stopped;
         const result = try runFetch(ctx, &.{spec});
-        if (!result.ok) std.log.warn("prefetch: git fetch {s} failed: {s}", .{ spec, trimOutput(result.stderr) });
+        if (result.ok) continue;
+        notePullMissing(ctx.round, result.stderr);
+        std.log.warn("prefetch: git fetch {s} failed: {s}", .{ spec, trimOutput(result.stderr) });
     }
     return .partial;
 }
@@ -2169,6 +2208,39 @@ test "a pull ref missing on origin is dropped and the rest of the batch still fe
     try testing.expectEqual(@as(u32, 1), status.failures);
     try testing.expectEqual(@as(?LastError, null), status.last_error);
     try expectCachedEqualsGit(.{ .fx = &fx, .base_tip = &fx.main_tip, .head = &fx.heads[2] });
+}
+
+test "a pull ref missing on origin is not fetched again until the PR changes" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    const log_path = try fx.tmpPath("pull9.log");
+    defer testing.allocator.free(log_path);
+    const body = try std.fmt.allocPrint(testing.allocator, "for arg; do case \"$arg\" in *refs/pull/9/head*) echo fetch >> '{s}'; break;; esac; done\nexec git \"$@\"\n", .{log_path});
+    defer testing.allocator.free(body);
+    const git_bin = try fx.writeScript("pull9-logging-git", body);
+    defer testing.allocator.free(git_bin);
+    const worker = try fx.startWorker(.{ .git_bin = git_bin });
+    defer worker.stop();
+    const base = fx.targets();
+    var targets = [_]Target{ base[0], base[1], base[2], .{
+        .number = 9,
+        .head_ref = "feat-9",
+        .base_ref = "main",
+        .head_oid = "abababababababababababababababababababab",
+        .updated_at = "2026-01-01T00:00:09Z",
+        .base = .{ .trunk = .{ .oid = &fx.main_tip } },
+    } };
+    _ = try waitForIdle(worker, try worker.setTargets(&targets));
+    const first = try countLines(log_path);
+
+    const resynced = try waitForIdle(worker, try worker.setTargets(&targets));
+    try testing.expectEqual(first, try countLines(log_path));
+    try testing.expectEqual(@as(u32, 3), resynced.diffs_ready);
+
+    targets[3].updated_at = "2026-01-01T00:00:10Z";
+    _ = try waitForIdle(worker, try worker.setTargets(&targets));
+    try testing.expect(first > 0);
+    try testing.expect(try countLines(log_path) > first);
 }
 
 test "unreachable origin records fetch_failed and still goes idle" {

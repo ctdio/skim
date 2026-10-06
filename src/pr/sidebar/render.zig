@@ -20,7 +20,7 @@ const RowKind = state_mod.RowKind;
 
 pub const ReviewGlyph = enum { none, requested_me, approved_by_me, approved, changes_requested };
 
-/// 6a: always `.unknown`; 6b fills it from the prefetch cache.
+/// Whether the prefetch cache holds the PR's diff (`◆`).
 pub const CacheState = enum { unknown, cached };
 
 pub const SyncTone = enum { ok, busy, stale, err };
@@ -55,6 +55,8 @@ pub const RowView = struct {
     ci: CiStatus,
     review: ReviewGlyph,
     changed_since_seen: bool,
+    /// No seen row at all (`•`); `changed_since_seen` wins when both apply.
+    unseen: bool = false,
     cache: CacheState = .unknown,
 };
 
@@ -101,6 +103,9 @@ pub const View = struct {
     header: HeaderView,
     /// Prompt text while the query prompt is open.
     prompt: ?[]const u8 = null,
+    /// The prompt still holds the untouched pre-filled query, which the
+    /// first printable key replaces: drawn highlighted.
+    prompt_selected: bool = false,
     /// Non-null while the filter menu is open.
     menu: ?MenuView = null,
     /// `ParseError.format` text of the last rejected query.
@@ -121,7 +126,7 @@ pub const Columns = struct {
     divider: u16,
 };
 
-// Semantic roles mapped onto the shared palette (moved from the picker).
+// Semantic roles mapped onto the shared palette.
 const meta_fg = Color.syntax_comment;
 const author_fg = Color.syntax_number;
 const title_fg = Color.chat_content;
@@ -137,8 +142,9 @@ const max_author_cols: u16 = 10;
 const author_min_inner: u16 = 40;
 const min_title_cols: u16 = 6;
 /// Footer key hints in priority order; trailing ones are dropped when narrow.
-const hints = [_][]const u8{ " f:filter", " F:preset", " R:sync", " ^b:hide" };
+const hints = [_][]const u8{ " f:filter", " F:preset", " R:sync", " ^b:hide", " y/Y:yank" };
 const menu_hints = [_][]const u8{ " space:toggle", " enter:apply", " esc:close", " /:query" };
+const prompt_hints = [_][]const u8{ " enter:apply", " esc:cancel", " ^u:clear" };
 /// Box rows besides the items: top border, rule, query, counts, bottom border.
 const menu_chrome_rows: u16 = 5;
 const menu_bg = Color.dialog_bg;
@@ -239,7 +245,8 @@ fn drawQueryRow(win: vaxis.Window, v: View) void {
     if (v.prompt) |text| {
         writer.styledText(" /› ", .{ .fg = accent_fg });
         // The cursor sits at the end of the text, so a long query keeps its tail.
-        writeTail(.{ .writer = &writer, .text = text, .cols = win.width -| (writer.col + 1), .style = .{ .fg = Color.bright_white } });
+        const style: Style = if (v.prompt_selected) .{ .fg = Color.bright_white, .bg = selected_bg } else .{ .fg = Color.bright_white };
+        writeTail(.{ .writer = &writer, .text = text, .cols = win.width -| (writer.col + 1), .style = style });
         writer.styledText("▏", .{ .fg = accent_fg });
         return;
     }
@@ -280,7 +287,7 @@ fn drawEmpty(params: struct { win: vaxis.Window, top: u16, rows: usize, empty: E
             writer.text(prefix);
             writer.text(subject);
             writer.text("`");
-            if (params.rows > 1) drawCentered(win, row + 1, "f: filter menu · F: next preset");
+            if (params.rows > 1) drawCentered(win, row + 1, "f: change filter");
         },
     }
 }
@@ -364,7 +371,11 @@ fn drawTail(params: struct { win: vaxis.Window, row: u16, col: u16, bg: ?vaxis.C
     writer.styledText(if (item.is_draft) "D" else " ", .{ .fg = Color.dim_gray });
     writer.styledText(ciGlyph(item.ci), .{ .fg = ciColor(item.ci) });
     writer.styledText(reviewGlyph(item.review), .{ .fg = reviewColor(item.review) });
-    writer.styledText(if (item.changed_since_seen) "Δ" else " ", .{ .fg = Color.yellow });
+    if (item.changed_since_seen) {
+        writer.styledText("Δ", .{ .fg = Color.yellow });
+    } else {
+        writer.styledText(if (item.unseen) "•" else " ", .{ .fg = accent_fg });
+    }
     writer.styledText(if (item.cache == .cached) "◆" else " ", .{ .fg = meta_fg });
 }
 
@@ -486,7 +497,8 @@ fn drawFooter(win: vaxis.Window, v: View) void {
         return;
     }
     if (!v.focused) return;
-    for (if (v.menu != null) &menu_hints else &hints) |segment| {
+    const segments: []const []const u8 = if (v.prompt != null) &prompt_hints else if (v.menu != null) &menu_hints else &hints;
+    for (segments) |segment| {
         if (writer.col + win.gwidth(segment) > win.width) return;
         writer.text(segment);
     }
@@ -859,13 +871,10 @@ test "draw: the unavailable message wraps instead of losing its end at 32 cols" 
     v.empty = .{ .unavailable = "gh not authenticated — run `gh auth login`" };
     draw(ts.window(), v);
 
-    var found_end = false;
-    var row: u16 = 3;
-    while (row < 11) : (row += 1) {
-        if (rowContains(ts.screen, row, "`gh auth login`")) found_end = true;
-    }
-    try testing.expect(found_end);
-    try testing.expect(!rowContains(ts.screen, 4, "…"));
+    try testing.expect(rowContains(ts.screen, 5, "gh not authenticated"));
+    try testing.expect(rowContains(ts.screen, 6, "`gh auth login`"));
+    try testing.expect(!rowContains(ts.screen, 5, "…"));
+    try testing.expect(!rowContains(ts.screen, 6, "…"));
 }
 
 test "draw: a failed first sync shows its message instead of an empty list" {
@@ -875,13 +884,65 @@ test "draw: a failed first sync shows its message instead of an empty list" {
     v.empty = .{ .sync_failed = "network error reaching GitHub" };
     draw(ts.window(), v);
 
-    var found = false;
-    var row: u16 = 3;
-    while (row < 11) : (row += 1) {
-        if (rowContains(ts.screen, row, "network error reaching GitHub")) found = true;
-        try testing.expect(!rowContains(ts.screen, row, "No open pull requests"));
-    }
-    try testing.expect(found);
+    try testing.expect(rowContains(ts.screen, 5, "network error reaching GitHub"));
+    try testing.expect(!rowContains(ts.screen, 5, "No open pull requests"));
+}
+
+test "draw: no match names the filter and points at f to change it" {
+    var ts = try TestScreen.init(44, 12);
+    defer ts.deinit();
+    var v = testView(&.{}, .{ .cursor = null });
+    v.empty = .{ .no_match = "Needs my review" };
+    draw(ts.window(), v);
+
+    try testing.expect(rowContains(ts.screen, 5, "No PRs match `Needs my review`"));
+    try testing.expect(rowContains(ts.screen, 6, "f: change filter"));
+}
+
+test "draw: Δ for changed since seen, • for never seen, blank for seen at the head" {
+    var ts = try TestScreen.init(50, 8);
+    defer ts.deinit();
+    var changed = testRow(.{ .number = 1 });
+    changed.changed_since_seen = true;
+    var unseen = testRow(.{ .number = 2 });
+    unseen.unseen = true;
+    const rows = [_]RowView{ changed, unseen, testRow(.{ .number = 3 }) };
+    draw(ts.window(), testView(&rows, .{ .cursor = null }));
+    const col = rowColumns(50, 5).tail + 3;
+
+    try testing.expectEqualStrings("Δ", cellAt(&ts, col, 3));
+    try testing.expectEqualStrings("•", cellAt(&ts, col, 4));
+    try testing.expectEqualStrings(" ", cellAt(&ts, col, 5));
+}
+
+test "draw: an open prompt swaps the footer for its editing hints" {
+    var ts = try TestScreen.init(50, 8);
+    defer ts.deinit();
+    const rows = [_]RowView{testRow(.{})};
+    var v = testView(&rows, .{});
+    v.prompt = "author:alice";
+    draw(ts.window(), v);
+
+    try testing.expect(rowContains(ts.screen, 7, " enter:apply esc:cancel ^u:clear"));
+    try testing.expect(!rowContains(ts.screen, 7, "f:filter"));
+}
+
+test "draw: a selected pre-filled prompt is highlighted, an edited one is not" {
+    var selected = try TestScreen.init(44, 8);
+    defer selected.deinit();
+    var edited = try TestScreen.init(44, 8);
+    defer edited.deinit();
+    const rows = [_]RowView{testRow(.{})};
+    var v = testView(&rows, .{});
+    v.prompt = "author:alice";
+    v.prompt_selected = true;
+    draw(selected.window(), v);
+    v.prompt_selected = false;
+    draw(edited.window(), v);
+
+    try testing.expect(rowContains(selected.screen, 1, " /› author:alice▏"));
+    try testing.expect(std.meta.eql(Color.list_selected_bg, selected.screen.readCell(4, 1).?.style.bg));
+    try testing.expect(!std.meta.eql(Color.list_selected_bg, edited.screen.readCell(4, 1).?.style.bg));
 }
 
 test "draw: a prompt wider than the sidebar shows its tail after …" {

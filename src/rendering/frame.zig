@@ -90,7 +90,7 @@ pub fn render(app: *App, win: vaxis.Window) !void {
         // Beside the PR sidebar the status bar still draws below it.
         loading.renderLoadingScreen(main_win);
         if (!app.state.sidebar.open) return;
-    } else if (app.state.files.len == 0 and app.state.sidebar.open) {
+    } else if (app.state.sidebar.open and (app.state.files.len == 0 or filterHidesPreview(app))) {
         // The working-tree "no changes" menu makes no sense beside a PR list.
         sidebar_render.drawDiffPlaceholder(main_win, .{
             .message = app.state.sidebar.messageText(),
@@ -592,6 +592,15 @@ pub fn scrollColumns(app: *const App, width: u16) ?scroll_region.Columns {
     const surface_split = surfaceSplit(app, width);
     if (surface_split.sidebar_cols == 0) return null;
     return .{ .x = surface_split.main_x, .width = surface_split.main_cols };
+}
+
+/// The sidebar has focus and its filter matches nothing, so no row is
+/// selected: the PR still loaded would read as one the filter shows. With
+/// the diff focused it stays, since the user is reading it.
+fn filterHidesPreview(app: *const App) bool {
+    const sb = &app.state.sidebar;
+    const listed = if (sb.records) |records| records.items.len else 0;
+    return app.mode == .pr_review and listed > 0 and sb.rows.items.len == 0 and app.state.flip.previewed != null;
 }
 
 fn surfaceSplit(app: *const App, width: u16) sidebar_layout.Split {

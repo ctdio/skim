@@ -307,6 +307,7 @@ fn printPrHelp() !void {
         \\    F                    next filter preset
         \\    R                    sync now
         \\    o                    open the selected PR in the browser
+        \\    y / Y                yank the selected PR's branch / URL
         \\    ctrl-b               hide / show the sidebar
         \\    esc / ctrl-c         back: menu or prompt, then preset, then exit
         \\

@@ -43,6 +43,9 @@ pub const query_cap = 256;
 pub const Prompt = struct {
     buf: [query_cap]u8 = undefined,
     len: usize = 0,
+    /// The text is the pre-filled query, untouched: the first printable key
+    /// replaces it; backspace, Ctrl-W, Right or End keep it for editing.
+    selected: bool = false,
 
     pub fn text(self: *const Prompt) []const u8 {
         return self.buf[0..self.len];

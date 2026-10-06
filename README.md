@@ -130,27 +130,38 @@ the next run (a corrupt file is moved aside as `prs.db.corrupt-*`). The old
 
 #### Sidebar Keys
 
-| Key                      | Action                                                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `j` / `k`                | Move down / up (the diff previews the PR under the cursor)                                              |
-| `J` / `K`                | Next / previous PR in the stack                                                                         |
-| `Ctrl-n` / `Ctrl-p`      | Next / previous stack                                                                                   |
-| `Ctrl-d` / `Ctrl-u`      | Half-page down / up                                                                                     |
-| `gg` / `G`               | Top / bottom                                                                                            |
-| `Space` / `za`           | Expand / collapse a stack                                                                               |
-| `h`                      | Collapse the stack                                                                                      |
-| `Enter`                  | Open the selected PR and focus the diff                                                                 |
-| `l` / `Tab` / `Ctrl-w l` | Focus the diff (marks the shown PR seen)                                                                |
-| `S`                      | Toggle the whole stack's diff ⇄ the PR's own                                                            |
-| `c`                      | Changes since seen: the new commits, or fold the unchanged files                                        |
-| `m`                      | Mark seen / unseen                                                                                      |
-| `f`                      | Filter menu: presets, quick toggles, custom query, clear                                                |
-| `/`                      | Filter query prompt (see below)                                                                         |
-| `F`                      | Next filter preset                                                                                      |
-| `R`                      | Sync now                                                                                                |
-| `o`                      | Open the selected PR in the browser                                                                     |
-| `Ctrl-b`                 | Hide / show the sidebar                                                                                 |
+| Key                      | Action                                                                                                          |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `j` / `k`                | Move down / up (the diff previews the PR under the cursor)                                                      |
+| `J` / `K`                | Next / previous PR in the stack                                                                                 |
+| `Ctrl-n` / `Ctrl-p`      | Next / previous stack                                                                                           |
+| `Ctrl-d` / `Ctrl-u`      | Half-page down / up                                                                                             |
+| `gg` / `G`               | Top / bottom                                                                                                    |
+| `Space` / `za`           | Expand / collapse a stack                                                                                       |
+| `h`                      | Collapse the stack                                                                                              |
+| `Enter`                  | Open the selected PR and focus the diff                                                                         |
+| `l` / `Tab` / `Ctrl-w l` | Focus the diff (marks the shown PR seen)                                                                        |
+| `S`                      | Toggle the whole stack's diff ⇄ the PR's own                                                                    |
+| `c`                      | Changes since seen: the new commits, or fold the unchanged files                                                |
+| `m`                      | Mark seen / unseen                                                                                              |
+| `f`                      | Filter menu: presets, quick toggles, custom query, clear                                                        |
+| `/`                      | Filter query prompt (see below)                                                                                 |
+| `F`                      | Next filter preset                                                                                              |
+| `R`                      | Sync now                                                                                                        |
+| `o`                      | Open the selected PR in the browser                                                                             |
+| `y`                      | Yank the selected PR's head branch name                                                                         |
+| `Y`                      | Yank the selected PR's URL                                                                                      |
+| `Ctrl-b`                 | Hide / show the sidebar                                                                                         |
 | `Esc` / `Ctrl-c`         | Back: close the menu or prompt, restore the preset, then exit (`skim pr`) or return to the working diff (`:pr`) |
+
+In the row's marker column, `Δ` means the PR was pushed to since you saw it,
+`•` that you have never seen it, and `◆` that its diff is cached. A PR you have
+never seen counts as seen after 3s of preview; one showing `Δ` keeps it until
+you focus its diff (`Enter`, `l`, `Tab`, `Ctrl-w l`) or press `m`.
+
+In the `/` prompt the current query starts selected, so typing replaces it;
+`Backspace`, `Right` or `End` keep it for editing. `Ctrl-u` clears the prompt
+and `Ctrl-w` deletes the last word.
 
 #### Diff Keys While the Sidebar Is Open
 
@@ -198,7 +209,9 @@ the stack matches. Name presets in `~/.skim/config.json` and cycle them with
 }
 ```
 
-Presets cycle in file order. `default` names the preset applied when the
+`F` cycles the presets in file order, then the built-ins the `f` menu adds
+(All open, Ready for review, Needs my review, Mine, Changed since seen) whose
+query none of yours already has. `default` names the preset applied when the
 sidebar opens; without it the first preset is used, and with no presets the
 sidebar starts unfiltered.
 
@@ -275,16 +288,16 @@ Navigate files and position cursor with vim-style movements:
 
 #### Comments
 
-| Key                | Action                                            |
-| ------------------ | ------------------------------------------------- |
-| `Enter`            | Add/edit comment on cursor line                   |
-| `r` _(on comment)_ | Reply to the comment under the cursor             |
-| `d`                | Delete comment under cursor (with its replies)    |
-| `D`                | Clear all comments                                |
+| Key                | Action                                             |
+| ------------------ | -------------------------------------------------- |
+| `Enter`            | Add/edit comment on cursor line                    |
+| `r` _(on comment)_ | Reply to the comment under the cursor              |
+| `d`                | Delete comment under cursor (with its replies)     |
+| `D`                | Clear all comments                                 |
 | `o`                | Toggle comment expand/collapse (incl. its replies) |
-| `y`                | Yank (copy) current comment to clipboard          |
-| `Y`                | Yank (copy) all comments to clipboard             |
-| `gY`               | Yank all comments to agent input                  |
+| `y`                | Yank (copy) current comment to clipboard           |
+| `Y`                | Yank (copy) all comments to clipboard              |
+| `gY`               | Yank all comments to agent input                   |
 
 A comment with replies renders as a thread. Collapsed, it shows a `▸ N replies`
 summary; `o` expands it to show every reply with its author, each marked `↳`.
@@ -711,16 +724,16 @@ For AI agents that support MCP (Model Context Protocol), add skim to your agent'
 
 **Available MCP Tools:**
 
-| Tool               | Description                                        |
-| ------------------ | -------------------------------------------------- |
+| Tool               | Description                                         |
+| ------------------ | --------------------------------------------------- |
 | `get_skill`        | Read the guide for driving skim (no session needed) |
-| `list_sessions`    | List all running skim TUI sessions                 |
-| `get_context`      | Get diff metadata (files, stats, mode)             |
-| `get_diff`         | Get diff content with line numbers                 |
-| `add_comment`      | Add a review comment to a specific line            |
-| `reply_to_comment` | Append a reply to an existing comment's thread     |
-| `list_comments`    | List every comment with its author and its replies |
-| `delete_comment`   | Delete a comment and its whole thread              |
+| `list_sessions`    | List all running skim TUI sessions                  |
+| `get_context`      | Get diff metadata (files, stats, mode)              |
+| `get_diff`         | Get diff content with line numbers                  |
+| `add_comment`      | Add a review comment to a specific line             |
+| `reply_to_comment` | Append a reply to an existing comment's thread      |
+| `list_comments`    | List every comment with its author and its replies  |
+| `delete_comment`   | Delete a comment and its whole thread               |
 
 Every tool takes an optional `session_id` (the PID from `list_sessions`); with
 one session running you can omit it. `add_comment` and `reply_to_comment` take an

@@ -36,6 +36,10 @@ pub const Analysis = struct {
     depth_of: []usize,
     /// Number of PRs in each stack, indexed by stack id.
     heights: []usize,
+    /// Each stack's tip, indexed by stack id: its deepest member, the first
+    /// in input order on a tie, which is the member `displayOrderOf` puts
+    /// first. A forked stack has other leaves; only this one draws `top`.
+    tip_of: []usize,
     /// Index of the PR this one is stacked on (its base is that PR's head), or
     /// null when its base is trunk / an unlisted branch.
     parent_of: []?usize,
@@ -44,6 +48,7 @@ pub const Analysis = struct {
         allocator.free(self.stack_of);
         allocator.free(self.depth_of);
         allocator.free(self.heights);
+        allocator.free(self.tip_of);
         allocator.free(self.parent_of);
     }
 
@@ -55,11 +60,10 @@ pub const Analysis = struct {
     /// The connector glyph this PR should show, assuming the stack is rendered
     /// contiguously tip-first.
     pub fn markOf(self: *const Analysis, index: usize) Mark {
-        const height = self.heights[self.stack_of[index]];
-        if (height <= 1) return .none;
-        const depth = self.depth_of[index];
-        if (depth == height - 1) return .top;
-        if (depth == 0) return .bottom;
+        const stack_id = self.stack_of[index];
+        if (self.heights[stack_id] <= 1) return .none;
+        if (self.tip_of[stack_id] == index) return .top;
+        if (self.depth_of[index] == 0) return .bottom;
         return .middle;
     }
 };
@@ -161,11 +165,14 @@ pub fn analyzeEdges(allocator: std.mem.Allocator, edges: []const Edge) !Analysis
             try heights.append(allocator, 0);
         }
     }
+    const tip_of = try allocator.alloc(usize, heights.items.len);
+    errdefer allocator.free(tip_of);
     for (0..n) |i| {
         const root = rootOf(parent_of, i);
         const id = root_id.get(root).?;
         stack_of[i] = id;
         depth_of[i] = depthFromRoot(parent_of, i);
+        if (heights.items[id] == 0 or depth_of[i] > depth_of[tip_of[id]]) tip_of[id] = i;
         heights.items[id] += 1;
     }
 
@@ -173,6 +180,7 @@ pub fn analyzeEdges(allocator: std.mem.Allocator, edges: []const Edge) !Analysis
         .stack_of = stack_of,
         .depth_of = depth_of,
         .heights = try heights.toOwnedSlice(allocator),
+        .tip_of = tip_of,
         .parent_of = parent_of,
     };
 }
@@ -468,6 +476,38 @@ test "displayOrderOf keeps stacks contiguous and tip-first on a forked stack" {
     defer testing.allocator.free(order);
     // Deepest first; equal depths keep input order (left before right).
     try testing.expectEqualSlices(usize, &.{ 4, 1, 2, 0, 3 }, order);
+}
+
+test "markOf: a forked stack draws one top, on the deepest member displayOrderOf puts first" {
+    // base (0) ← left (1), base ← right (2) ← right2 (3).
+    const edges = [_]Edge{
+        .{ .head_ref = "base", .base_ref = "main" },
+        .{ .head_ref = "left", .base_ref = "base" },
+        .{ .head_ref = "right", .base_ref = "base" },
+        .{ .head_ref = "right2", .base_ref = "right" },
+    };
+    var a = try analyzeEdges(testing.allocator, &edges);
+    defer a.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), a.tip_of[a.stack_of[0]]);
+    try testing.expectEqual(Mark.top, a.markOf(3));
+    try testing.expectEqual(Mark.middle, a.markOf(1));
+    try testing.expectEqual(Mark.middle, a.markOf(2));
+    try testing.expectEqual(Mark.bottom, a.markOf(0));
+}
+
+test "markOf: two leaves at the same depth give the top to the first in input order" {
+    const edges = [_]Edge{
+        .{ .head_ref = "base", .base_ref = "main" },
+        .{ .head_ref = "left", .base_ref = "base" },
+        .{ .head_ref = "right", .base_ref = "base" },
+    };
+    var a = try analyzeEdges(testing.allocator, &edges);
+    defer a.deinit(testing.allocator);
+
+    try testing.expectEqual(Mark.top, a.markOf(1));
+    try testing.expectEqual(Mark.middle, a.markOf(2));
+    try testing.expectEqual(Mark.bottom, a.markOf(0));
 }
 
 test "displayOrderOf on 3000 standalone entries returns identity order" {

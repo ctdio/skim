@@ -5,8 +5,10 @@
 //! owns focus, the PR view toggles (`S`, `c`, `m`) and hands previews,
 //! sync and close to App.
 
+const std = @import("std");
 const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
+const clipboard = @import("../clipboard.zig");
 const flip = @import("../pr/flip.zig");
 const flip_controller = @import("../pr/flip_controller.zig");
 const Layout = @import("../rendering/common.zig").Layout;
@@ -76,7 +78,7 @@ pub fn handleKey(app: *App, key: Key) !void {
         Key.enter => openSelected(app),
         'S' => toggleWholeStack(app),
         'c' => try toggleSinceSeen(app),
-        'm' => if (sidebar_controller.selectedPr(sb)) |record| flip_controller.toggleSeen(app.flipCtx(), record.number),
+        'm' => if (sidebar_controller.selectedPr(sb)) |record| toggleSeen(app, record.number),
         'f' => sidebar_controller.openMenu(sb),
         '/' => sidebar_controller.openPrompt(sb),
         'F' => {
@@ -85,6 +87,8 @@ pub fn handleKey(app: *App, key: Key) !void {
         },
         'R' => pr_surface.requestSync(&app.state.pr_surface),
         'o' => pr_surface.openInBrowser(&app.state.pr_surface, sb),
+        'y' => yank(app, .branch),
+        'Y' => yank(app, .url),
         Key.escape => try app.prSidebarBack(),
         else => {},
     }
@@ -113,7 +117,7 @@ pub fn handleDiffFocusKey(app: *App, key: Key) !bool {
     switch (key.codepoint) {
         'S' => toggleWholeStack(app),
         'c' => try toggleSinceSeen(app),
-        'm' => if (app.state.flip.previewed) |number| flip_controller.toggleSeen(app.flipCtx(), number),
+        'm' => if (app.state.flip.previewed) |number| toggleSeen(app, number),
         else => return false,
     }
     app.needs_render = true;
@@ -146,7 +150,13 @@ fn handlePromptKey(app: *App, key: Key) !void {
         Key.enter => .enter,
         Key.escape => .escape,
         Key.backspace => .backspace,
+        Key.right, Key.end => .keep,
+        // Raw control characters: Ctrl-U and Ctrl-W on terminals that send them.
+        21 => .clear,
+        23 => .delete_word,
         else => blk: {
+            if (key.mods.ctrl and key.codepoint == 'u') break :blk .clear;
+            if (key.mods.ctrl and key.codepoint == 'w') break :blk .delete_word;
             if (key.mods.ctrl or key.mods.alt) return;
             // Named keys (arrows, F-keys) carry no text; plain ASCII may come
             // without it from synthetic input.
@@ -265,7 +275,33 @@ fn focusRightOfSidebar(app: *App) void {
         app.mode = .agent;
         return;
     }
-    focusDiff(app);
+    enterPreviewed(app);
+}
+
+/// `m`: toggle PR `number`'s seen state and say which way it went.
+fn toggleSeen(app: *App, number: u32) void {
+    var buf: [48]u8 = undefined;
+    const message = switch (flip_controller.toggleSeen(app.flipCtx(), number)) {
+        .marked => std.fmt.bufPrint(&buf, "marked #{d} seen", .{number}),
+        .cleared => std.fmt.bufPrint(&buf, "cleared seen for #{d}", .{number}),
+        .unchanged => return app.showStatusError("seen state not saved"),
+    } catch unreachable;
+    app.showStatusMessage(message);
+}
+
+/// `y` / `Y`: copy the selected PR's head branch or URL and say what was copied.
+fn yank(app: *App, field: sidebar_controller.YankField) void {
+    const text = sidebar_controller.yankText(&app.state.sidebar, field) orelse return app.showStatusError(switch (field) {
+        .branch => "no branch to yank",
+        .url => "no PR URL to yank",
+    });
+    clipboard.copyToClipboard(app.allocator, text) catch return app.showStatusError("clipboard copy failed");
+    const message = switch (field) {
+        .branch => std.fmt.allocPrint(app.allocator, "yanked branch {s}", .{text}),
+        .url => std.fmt.allocPrint(app.allocator, "yanked {s}", .{text}),
+    } catch return app.showStatusMessage("yanked");
+    defer app.allocator.free(message);
+    app.showStatusMessage(message);
 }
 
 fn showAndFocusSidebar(app: *App) void {
