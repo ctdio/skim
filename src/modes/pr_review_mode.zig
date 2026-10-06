@@ -2,13 +2,15 @@
 //! AD-8), plus the few diff-focus keys that change meaning while the PR
 //! surface is open (`handleDiffFocusKey`), so every PR-surface key lives here.
 //! Navigation, filtering and presets are the sidebar controller's; this file
-//! owns focus and hands entry/sync/close to App.
+//! owns focus, the PR view toggles (`S`, `c`, `m`) and hands previews,
+//! sync and close to App.
 
 const vaxis = @import("vaxis");
 const App = @import("../app.zig").App;
+const flip = @import("../pr/flip.zig");
+const flip_controller = @import("../pr/flip_controller.zig");
 const Layout = @import("../rendering/common.zig").Layout;
 const pr_surface = if (@import("../platform.zig").is_web) @import("../pr/surface_stub.zig") else @import("../pr/surface.zig");
-const review_controller = @import("../pr/review_controller.zig");
 const sidebar_controller = @import("../pr/sidebar/controller.zig");
 const sidebar_render = @import("../pr/sidebar/render.zig");
 const sidebar_layout = @import("../pr/sidebar/layout.zig");
@@ -69,8 +71,11 @@ pub fn handleKey(app: *App, key: Key) !void {
         'z' => sb.pending_z = true,
         ' ' => try sidebar_controller.toggleExpand(sb, app.allocator),
         'h' => try sidebar_controller.collapse(sb, app.allocator),
-        'l', Key.tab => if (!key.mods.shift) focusDiff(app),
-        Key.enter => try openSelected(app),
+        'l', Key.tab => if (!key.mods.shift) enterPreviewed(app),
+        Key.enter => openSelected(app),
+        'S' => toggleWholeStack(app),
+        'c' => try toggleSinceSeen(app),
+        'm' => if (sidebar_controller.selectedPr(sb)) |record| flip_controller.toggleSeen(app.flipCtx(), record.number),
         'f' => sidebar_controller.openPrompt(sb),
         'F' => {
             try sidebar_controller.cyclePreset(sb, app.allocator);
@@ -102,7 +107,26 @@ pub fn handleDiffFocusKey(app: *App, key: Key) !bool {
         showAndFocusSidebar(app);
         return true;
     }
-    return false;
+    if (key.mods.ctrl or key.mods.alt or normalPrefixPending(app)) return false;
+    switch (key.codepoint) {
+        'S' => toggleWholeStack(app),
+        'c' => try toggleSinceSeen(app),
+        'm' => if (app.state.flip.previewed) |number| flip_controller.toggleSeen(app.flipCtx(), number),
+        else => return false,
+    }
+    app.needs_render = true;
+    return true;
+}
+
+/// FR-8 on rewritten history: fold every file that did not change since
+/// seen, or unfold exactly those again.
+pub fn toggleChangedOnly(app: *App) !void {
+    switch (try flip_controller.toggleChangedOnly(app.flipCtx())) {
+        .no_seen_diff => return app.showStatusError("no seen diff to compare"),
+        .folded, .unfolded => {},
+    }
+    app.rebuildReviewLineMap();
+    app.needs_render = true;
 }
 
 /// `Ctrl-w h` from the diff or a right-hand agent: the sidebar, when shown.
@@ -134,21 +158,72 @@ fn handlePromptKey(app: *App, key: Key) !void {
     }
 }
 
-/// Enter: start entry for the selected PR unless it is already on screen (or
-/// on its way), then hand focus to the diff.
-fn openSelected(app: *App) !void {
+/// Enter: open the selected PR in the diff. Already previewed: focus it and
+/// mark it seen. On its way: focus it when it lands. Else preview it now
+/// (no debounce) with the diff taking focus.
+fn openSelected(app: *App) void {
     const record = sidebar_controller.selectedPr(&app.state.sidebar) orelse return;
-    if (shownOrEntering(&app.state.review, record.number)) {
-        focusDiff(app);
+    const state = &app.state.flip;
+    if (state.loading_number == record.number) {
+        state.focus_diff = true;
         return;
     }
-    try app.reviewSelectedPr();
+    if (state.previewed == record.number) {
+        enterPreviewed(app);
+        return;
+    }
+    state.pending = null;
+    state.view = .pr;
+    state.focus_diff = true;
+    app.previewPr(record.number);
 }
 
-fn shownOrEntering(review: *const review_controller.ReviewSession, number: u32) bool {
-    if (review.next_entry) |next| return next.number == number;
-    if (review_controller.entryPending(review)) return review.entering_number == number;
-    return review_controller.isActive(review) and review.number == number;
+/// `l`/Tab: focus the diff; when it shows the selected PR, that is reading
+/// it, so it is marked seen.
+fn enterPreviewed(app: *App) void {
+    focusDiff(app);
+    const record = sidebar_controller.selectedPr(&app.state.sidebar) orelse return;
+    const state = &app.state.flip;
+    if (app.mode != .normal or state.previewed != record.number or state.loading_number != null) return;
+    flip_controller.markSeen(app.flipCtx(), record.number);
+}
+
+/// `S` (FR-7): the whole stack's diff for the shown PR, or back to its own.
+fn toggleWholeStack(app: *App) void {
+    const number = app.state.flip.previewed orelse return app.showStatusMessage("no PR shown");
+    if (app.state.flip.previewed_view == .whole_stack) return switchView(app, .{ .number = number, .view = .pr });
+    const sb = &app.state.sidebar;
+    const index = sidebar_controller.recordIndex(sb, number) orelse return;
+    if (sidebar_controller.stackPlace(sb, index).tip == null) return app.showStatusMessage("not a stacked PR");
+    switchView(app, .{ .number = number, .view = .whole_stack });
+}
+
+/// `c` (FR-8): back to the PR's own diff from the since-seen view; else the
+/// seen..head diff when the PR fast-forwarded, or the changed-files-only
+/// folds when its history was rewritten.
+fn toggleSinceSeen(app: *App) !void {
+    const number = app.state.flip.previewed orelse return app.showStatusMessage("no PR shown");
+    if (app.state.flip.previewed_view == .since_seen) return switchView(app, .{ .number = number, .view = .pr });
+    switch (pr_surface.seenComparison(&app.state.pr_surface, .{ .sidebar = &app.state.sidebar, .number = number })) {
+        .unchanged => app.showStatusMessage("no changes since seen"),
+        .pending => app.showStatusMessage("still comparing with the seen version"),
+        .fast_forward => switchView(app, .{ .number = number, .view = .since_seen }),
+        .rewritten => try toggleChangedOnly(app),
+    }
+}
+
+/// Re-preview PR `number` in `view` right away, keeping focus where it is.
+fn switchView(app: *App, params: struct { number: u32, view: flip.DiffView }) void {
+    app.state.flip.view = params.view;
+    app.state.flip.focus_diff = app.mode != .pr_review;
+    app.previewPr(params.number);
+}
+
+/// A normal-mode chord is waiting for its second key, which `S`/`c`/`m`
+/// must reach (`zc` folds, `]c` …).
+fn normalPrefixPending(app: *const App) bool {
+    const state = &app.state;
+    return state.pending_z or state.pending_g or state.pending_bracket or state.pending_close_bracket or state.pending_find != null or state.pending_ctrl_w;
 }
 
 /// Focus the diff. A no-op with nothing loaded: normal mode would drive the

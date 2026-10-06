@@ -296,8 +296,12 @@ fn printPrHelp() !void {
         \\    gg / G               top / bottom
         \\    space / za           expand or collapse a stack
         \\    h                    collapse the stack
-        \\    enter                open the selected PR
+        \\    enter                open the selected PR (moving the cursor previews it)
         \\    l / tab              focus the diff
+        \\    S                    toggle the whole stack's diff
+        \\    c                    changes since seen: the new commits, or fold
+        \\                         the files that did not change
+        \\    m                    mark seen / unseen
         \\    f                    filter (e.g. author:@me -is:draft)
         \\    F                    next filter preset
         \\    R                    sync now
@@ -308,6 +312,7 @@ fn printPrHelp() !void {
         \\DIFF KEYS (while the sidebar is open):
         \\    tab / ctrl-w h       focus the sidebar
         \\    ctrl-b               hide / show the sidebar
+        \\    S / c / m            as in the sidebar, for the PR shown
         \\
         \\Requires the GitHub CLI (`gh`) on PATH, authenticated for the repo.
         \\

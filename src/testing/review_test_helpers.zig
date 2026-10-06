@@ -1127,7 +1127,7 @@ test "selectPullRequest: refused while a comment editor is still open" {
     // Ctrl-E from the editor opens the agent panel and leaves the editor set.
     app.mode = .agent;
 
-    try selectNextPr(&app);
+    try testing.expectError(error.CommentEditorOpen, selectNextPr(&app));
 
     try testing.expect(!app.state.review.entry_in_flight);
     try testing.expect(app.state.active_comment_input != null);

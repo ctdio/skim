@@ -78,7 +78,7 @@ pub const FileHeader = struct {
         else
             .{ .fg = Color.diff_sign_delete };
 
-        // Style for untracked indicator (yellow/warning color)
+        // Style for the untracked and changed-since-seen marks (yellow/warning color)
         const untracked_style: vaxis.Style = if (is_cursor)
             .{ .fg = Color.yellow, .bg = Color.cursor_bg }
         else
@@ -95,6 +95,13 @@ pub const FileHeader = struct {
         else
             "";
 
+        // FR-8: this file's own edits differ from the diff last marked seen.
+        const changed = app.state.flip.changed_files;
+        const changed_text = if (file_idx < changed.len and changed[file_idx])
+            try RenderUtils.copyFrameText(app, " Δ changed since seen")
+        else
+            "";
+
         if (file.is_untracked) {
             var segments = [_]vaxis.Cell.Segment{
                 .{ .text = fold_copy, .style = fold_style },
@@ -102,6 +109,7 @@ pub const FileHeader = struct {
                 .{ .text = add_copy, .style = add_style },
                 .{ .text = del_copy, .style = del_style },
                 .{ .text = untracked_text, .style = untracked_style },
+                .{ .text = changed_text, .style = untracked_style },
                 .{ .text = lines_copy, .style = lines_style },
             };
             _ = cells.print(win, &segments, .{
@@ -114,6 +122,7 @@ pub const FileHeader = struct {
                 .{ .text = path_copy, .style = path_style },
                 .{ .text = add_copy, .style = add_style },
                 .{ .text = del_copy, .style = del_style },
+                .{ .text = changed_text, .style = untracked_style },
                 .{ .text = lines_copy, .style = lines_style },
             };
             _ = cells.print(win, &segments, .{

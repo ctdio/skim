@@ -5,6 +5,7 @@
 //! Plain data types live in `types.zig` (no SQLite) and are re-exported here.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const skim_io = @import("skim_io");
 const config = @import("../../config.zig");
 const parse = @import("../parse.zig");
@@ -133,7 +134,7 @@ pub const Store = struct {
 
     pub const default_file_name = "prs.db";
 
-    /// Open (creating if needed) the DB at absolute `path`, chmod 0600, apply
+    /// Open (creating if needed) the DB at absolute `path` at mode 0600, apply
     /// connection pragmas, migrate. A file SQLite reports as corrupt / not a
     /// database is renamed to `<path>.corrupt-<unix secs>` and replaced by a
     /// fresh DB (`quarantined_path` says where it went). A file written by a
@@ -762,13 +763,19 @@ pub fn defaultPath(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, Store.default_file_name });
 }
 
-/// Create the file if missing and force mode 0600 (an existing file may have
-/// been created looser). SQLite gives `-wal`/`-shm` the main file's mode.
+/// Force an existing file to mode 0600 (it may have been created looser);
+/// SQLite creates a missing one at 0600 (`SQLITE_DEFAULT_FILE_PERMISSIONS` in
+/// build.zig) and gives `-wal`/`-shm` the main file's mode. Path-based on
+/// purpose: closing any fd on the file drops every POSIX lock this process
+/// holds on it, including those of the other threads' open connections.
 fn ensureFileMode(path: []const u8) !void {
     const io = skim_io.get();
-    const file = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = false, .permissions = .fromMode(0o600) });
-    defer file.close(io);
-    try file.setPermissions(io, .fromMode(0o600));
+    std.Io.Dir.cwd().setFilePermissions(io, path, .fromMode(0o600), .{}) catch |err| switch (err) {
+        // A missing directory is `error.FileNotFound` here, not SQLite's
+        // generic CANTOPEN.
+        error.FileNotFound => try std.Io.Dir.cwd().access(io, std.fs.path.dirname(path) orelse ".", .{}),
+        else => return err,
+    };
 }
 
 /// Open `path` with the connection pragmas and bring the schema up to date.
@@ -980,6 +987,32 @@ fn writeGarbage(path: []const u8, bytes: []const u8) !void {
     try file.writeStreamingAll(skim_io.get(), bytes);
 }
 
+/// Lines of /proc/locks held (not waited on) by this process on `inode`.
+fn posixLocksHeld(inode: std.Io.File.INode) !usize {
+    const io = skim_io.get();
+    const file = try std.Io.Dir.openFileAbsolute(io, "/proc/locks", .{});
+    defer file.close(io);
+    const text = try skim_io.readAllAlloc(file, testing.allocator, 1 << 20);
+    defer testing.allocator.free(text);
+
+    const pid = std.os.linux.getpid();
+    var held: usize = 0;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "->") != null) continue;
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        // `<id>: POSIX ADVISORY READ <pid> <maj>:<min>:<inode> <start> <end>`
+        var values: [6][]const u8 = undefined;
+        for (&values) |*value| value.* = fields.next() orelse return error.MalformedProcLocks;
+        const owner = std.fmt.parseInt(std.os.linux.pid_t, values[4], 10) catch continue;
+        if (owner != pid) continue;
+        const device_inode = values[5];
+        const inode_text = device_inode[(std.mem.lastIndexOfScalar(u8, device_inode, ':') orelse continue) + 1 ..];
+        if (try std.fmt.parseInt(std.Io.File.INode, inode_text, 10) == inode) held += 1;
+    }
+    return held;
+}
+
 fn expectFileContents(path: []const u8, expected: []const u8) !void {
     const actual = try std.Io.Dir.cwd().readFileAlloc(skim_io.get(), path, testing.allocator, .limited(1 << 20));
     defer testing.allocator.free(actual);
@@ -1037,6 +1070,36 @@ test "Store.open tightens an existing 0644 file to 0600" {
 
     const stat = try std.Io.Dir.cwd().statFile(skim_io.get(), t.path, .{});
     try testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+}
+
+test "Store.open creates the WAL with mode 0600" {
+    var t = try TestDb.init();
+    defer t.deinit();
+    var store = try t.open();
+    defer store.close();
+
+    const wal_path = try std.fmt.allocPrint(testing.allocator, "{s}-wal", .{t.path});
+    defer testing.allocator.free(wal_path);
+    const stat = try std.Io.Dir.cwd().statFile(skim_io.get(), wal_path, .{});
+    try testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+}
+
+test "Store.open of a second connection keeps the first connection's lock on the DB file" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var t = try TestDb.init();
+    defer t.deinit();
+    var first = try t.open();
+    defer first.close();
+    try first.db.exec("BEGIN");
+    _ = try queryInt(&first, "SELECT count(*) FROM sqlite_master");
+    const inode = (try std.Io.Dir.cwd().statFile(skim_io.get(), t.path, .{})).inode;
+    try testing.expect(try posixLocksHeld(inode) > 0);
+
+    var second = try t.open();
+    defer second.close();
+
+    try testing.expect(try posixLocksHeld(inode) > 0);
+    try first.db.exec("COMMIT");
 }
 
 test "Store.open quarantines a corrupt file and starts fresh" {

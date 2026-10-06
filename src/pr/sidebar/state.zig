@@ -87,6 +87,10 @@ pub const SidebarState = struct {
     rows: std.ArrayList(Row) = .empty,
     /// Expanded stacks, keyed by tip PR number so expansion survives reloads.
     expanded: std.AutoHashMapUnmanaged(u32, void) = .{},
+    /// PRs whose diff is in the prefetch cache (the `◆` glyph). Filled by
+    /// `surface.zig` when the prefetch worker commits; keyed by number so it
+    /// survives reloads.
+    cached: std.AutoHashMapUnmanaged(u32, void) = .{},
 
     // Cursor. `selected_number` is the identity the cursor follows across
     // reloads; `cursor_on_header` keeps it on a header row rather than the

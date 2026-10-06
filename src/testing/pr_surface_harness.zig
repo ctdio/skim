@@ -1,17 +1,25 @@
-//! Offline harness for the PR sidebar surface (Phase 6a). Drives the real
-//! `App` (no tty: `initForRenderBench`), the real `SyncWorker` against Phase
-//! 3's fake `gh`, and the real review entry worker against Phase 5's review
-//! fake and a local bare origin. Scenario ids match verification-harness.md.
+//! Offline harness for the PR sidebar surface (Phases 6a and 6b). Drives the
+//! real `App` (no tty: `initForRenderBench`), the real `SyncWorker` against
+//! Phase 3's fake `gh`, the real `PrefetchWorker` and review entry worker
+//! against Phase 5's review fake and a local bare origin. Scenario ids match
+//! the 6a and 6b verification-harness.md.
 //!
 //! Run through scripts/test-infra/pr-sidebar/surface-harness.sh, which builds
 //! the git world, the fake `gh` launchers and a temp HOME, exports the
 //! SKIM_HARNESS_* environment and runs this binary from the clone:
 //!
-//!   pr_surface_harness [all|S1|...|S14]   PASS/FAIL line per scenario, exit 1 on any FAIL
+//!   pr_surface_harness [all|S1|...|S14|H0|...|H6]   PASS/FAIL line per scenario, exit 1 on any FAIL
 //!   pr_surface_harness seed-only <stacked31|origin14>   seed $HOME/.skim/prs.db and exit (S12)
 //!
 //! Every scenario runs under its own `DebugAllocator`; a leak is a FAIL.
-//! 6b appends its flip scenarios to `scenarios` and reuses `Harness`.
+//!
+//! 6b (H*, M2, R1) counts subprocesses with two logs: `GIT_TRACE` (git appends
+//! a line per invocation anywhere in the process tree) and the review fake's
+//! `FAKE_GH_LOG`. "No spawn" = both byte-identical across the step, always
+//! with the workers stopped. Each no-spawn window also touches
+//! `$WORK/exec-marks/<id>-<n>-begin|end` (an `access` call), so the script's
+//! optional strace audit can fail any execve inside the window. 6b scenarios
+//! run only after H0 proved the review fake intercepts gh.
 
 const std = @import("std");
 const skim_io = @import("skim_io");
@@ -26,6 +34,10 @@ const sidebar_layout = root.sidebar_layout;
 const review_controller = root.review_controller;
 const SidebarState = root.sidebar_state.SidebarState;
 const SidebarView = root.sidebar_render.View;
+const flip = root.flip;
+const pr_surface = root.surface;
+const DiffKey = types.DiffKey;
+const FileDiff = root.parser.FileDiff;
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const Key = vaxis.Key;
@@ -48,6 +60,12 @@ const Env = struct {
     gh_log: []const u8,
     /// File count of PR 9's diff, computed by the script from the origin.
     pr9_files: usize,
+    /// `GIT_TRACE`: one block per git invocation in the process tree (6b).
+    git_trace: []const u8,
+    /// `FAKE_GH_FIXTURES`: review-N.json and the optional sleep-N files (H6).
+    fixtures: []const u8,
+    /// scripts/test-infra/pr-sidebar/flip-world.sh (H3, H4a, H4b, H5).
+    flip_world: []const u8,
 };
 
 /// `slow` holds every call for 8s, so a sync is in flight while a scenario acts.
@@ -89,12 +107,29 @@ const Scenario = struct {
     id: []const u8,
     what: []const u8,
     run: *const fn (ctx: *Ctx) anyerror!void,
+    /// Runs only after H0 passed: its no-gh assertions are vacuous otherwise.
+    requires_gh_intercept: bool = false,
+};
+
+/// Log sizes at a point in time; `expectNoSpawn` compares against them.
+const SpawnMark = struct {
+    git: u64,
+    gh: u64,
+    seq: u32,
+};
+
+const WarmParams = struct {
+    /// `PrefetchWorker.setFocus` before waiting; null keeps the App's focus.
+    focus: ?u32 = null,
 };
 
 /// Per-scenario context. `fail` records the reason the runner prints.
 const Ctx = struct {
     allocator: Allocator,
     env: Env,
+    /// Scenario id, for exec-audit marker names.
+    id: []const u8 = "",
+    mark_seq: u32 = 0,
     reason_buf: [512]u8 = undefined,
     reason_len: usize = 0,
 
@@ -115,6 +150,12 @@ const Harness = struct {
     app: *App,
     sync_launcher: []u8,
     booted_at: i64,
+    params: BootParams,
+    /// Virtual clock for `tickPrSurface` (ms). Starts at the real clock and
+    /// only moves forward; see `flipTo` for why it tracks real time.
+    now_ms: i64,
+    /// False after `deinit`, so a failed `restart` is not torn down twice.
+    alive: bool = true,
 
     /// `initForRenderBench` (no tty), review entry routed to the review fake,
     /// optional `skim pr <n>` boot number, then `openPrSurface` with the sync
@@ -129,13 +170,22 @@ const Harness = struct {
         app.state.review.gh_bin = ctx.env.review_gh;
         app.state.sidebar.boot_number = params.boot_number;
         const booted_at = skim_io.timestamp();
-        app.openPrSurface(.{ .gh_bin = launcher });
-        return .{ .ctx = ctx, .app = app, .sync_launcher = launcher, .booted_at = booted_at };
+        app.openPrSurface(.{ .gh_bin = launcher, .prefetch_gh_bin = ctx.env.review_gh });
+        return .{
+            .ctx = ctx,
+            .app = app,
+            .sync_launcher = launcher,
+            .booted_at = booted_at,
+            .params = params,
+            .now_ms = skim_io.milliTimestamp(),
+        };
     }
 
     /// `App.deinit` closes the surface (stops the worker, closes the store)
     /// and frees the sidebar; the runner's allocator check catches leaks.
     fn deinit(self: *Harness) void {
+        if (!self.alive) return;
+        self.alive = false;
         self.app.deinit();
         self.ctx.allocator.destroy(self.app);
         self.ctx.allocator.free(self.sync_launcher);
@@ -165,7 +215,8 @@ const Harness = struct {
         return self.ctx.fail("sync worker did not settle within {d}s", .{sync_deadline_ns / std.time.ns_per_s});
     }
 
-    /// Step background work until no review entry and no diff load is in flight.
+    /// Step background work until no review entry, no diff load and no
+    /// debounced preview is in flight.
     fn settle(self: *Harness) !void {
         var timer = try skim_io.Timer.start();
         while (timer.read() < settle_deadline_ns) {
@@ -178,7 +229,7 @@ const Harness = struct {
 
     fn busy(self: *Harness) bool {
         const review = &self.app.state.review;
-        return self.app.state.diff_load.isLoading() or review.entry_in_flight or review_controller.entryPending(review);
+        return self.app.state.diff_load.isLoading() or review.entry_in_flight or review_controller.entryPending(review) or self.app.state.flip.pending != null;
     }
 
     /// Step background work for `ms` milliseconds regardless of state.
@@ -231,6 +282,158 @@ const Harness = struct {
         }
         if (selectedNumber(self.sidebar()) != number) return self.ctx.fail("j never reached #{d}", .{number});
     }
+
+    // --- 6b -------------------------------------------------------------
+
+    /// `boot`, then stop both workers before they cache anything and empty
+    /// diff_cache (pinned seen rows stay): every flip is a miss.
+    fn bootCold(ctx: *Ctx, params: BootParams) !Harness {
+        var h = try boot(ctx, params);
+        errdefer h.deinit();
+        pr_surface.stopWorkers(&h.app.state.pr_surface);
+        _ = try (try h.uiStore()).evictDiffs(h.app.state.pr_surface.repo_id, 0);
+        return h;
+    }
+
+    /// `deinit` (final notes save, surface close) then `boot` again with the
+    /// same params on the same HOME and DB. The virtual clock restarts at the
+    /// real clock.
+    fn restart(self: *Harness) !void {
+        const ctx = self.ctx;
+        const params = self.params;
+        self.deinit();
+        self.* = try boot(ctx, params);
+    }
+
+    /// Step background work until the PrefetchWorker is idle for the current
+    /// target list (and ordered by `params.focus` when given), then stop both
+    /// workers. Afterwards nothing spawns unless the App itself does.
+    fn warmCache(self: *Harness, params: WarmParams) !void {
+        const worker = self.app.state.pr_surface.prefetch orelse return self.ctx.fail("warmCache: no prefetch worker running", .{});
+        self.app.pollBackgroundWork();
+        if (params.focus) |number| worker.setFocus(number);
+        var timer = try skim_io.Timer.start();
+        var status = worker.status();
+        while (timer.read() < warm_deadline_ns) {
+            self.app.pollBackgroundWork();
+            status = worker.status();
+            if (status.phase == .failed) return self.ctx.fail("warmCache: prefetch failed ({?s})", .{optTag(status.last_error)});
+            const version = targetsVersion(worker);
+            const focused = if (params.focus) |number| status.focus == number else true;
+            if (version > 0 and status.targets_version == version and status.phase == .idle and focused) {
+                self.app.pollBackgroundWork();
+                pr_surface.stopWorkers(&self.app.state.pr_surface);
+                return;
+            }
+            skim_io.sleep(poll_interval_ns);
+        }
+        return self.ctx.fail("warmCache: prefetch not idle after {d}s (phase {s}, version {d}/{d}, focus {d}, diffs {d}/{d}, failures {d})", .{
+            warm_deadline_ns / std.time.ns_per_s, @tagName(status.phase), status.targets_version, targetsVersion(worker),
+            status.focus,                         status.diffs_ready,     status.targets,         status.failures,
+        });
+    }
+
+    /// Select `number` the way `j`/`k` would (sets `cursor_changed`), tick to
+    /// arm the debounce, move the clock past it and tick again to fire the
+    /// preview, then one `pollBackgroundWork`. A hit is installed on return; a
+    /// miss is in flight (`settle` to land it).
+    ///
+    /// The fire is split from the arm because `tickPrSurface` consumes the
+    /// cursor change and runs `flip.tick` in one call, and the debounce is
+    /// measured from the arm. After the fire, wait until the real clock
+    /// reaches the virtual one: `installPrDiff` stamps the preview with the
+    /// real clock, and a virtual clock far ahead of it would read as a 3s
+    /// dwell on the next tick.
+    fn flipTo(self: *Harness, number: u32) !void {
+        if (!try sidebar_controller.selectNumber(self.sidebar(), self.ctx.allocator, number))
+            return self.ctx.fail("flipTo: selectNumber(#{d}) found no row", .{number});
+        self.tick();
+        self.advance(flip.debounce_ms + 1);
+        self.tick();
+        self.app.pollBackgroundWork();
+        self.catchUp();
+    }
+
+    /// Advance past the 3s dwell and tick: `.mark_seen` for the previewed PR.
+    /// The virtual clock is then 3s ahead of the real one, so `restart` (which
+    /// resets it) must come before the next `flipTo`.
+    fn dwell(self: *Harness) void {
+        self.advance(flip.dwell_ms + 1);
+        self.tick();
+    }
+
+    fn tick(self: *Harness) void {
+        self.app.tickPrSurface(self.now_ms);
+    }
+
+    fn advance(self: *Harness, ms: i64) void {
+        self.now_ms = @max(self.now_ms, skim_io.milliTimestamp()) + ms;
+    }
+
+    fn catchUp(self: *Harness) void {
+        while (skim_io.milliTimestamp() < self.now_ms) skim_io.sleep(std.time.ns_per_ms);
+    }
+
+    /// The App's UI-thread Store connection.
+    fn uiStore(self: *Harness) !*Store {
+        if (self.app.state.pr_surface.store) |*s| return s;
+        return self.ctx.fail("the PR surface has no store open", .{});
+    }
+
+    fn repoId(self: *Harness) i64 {
+        return self.app.state.pr_surface.repo_id;
+    }
+
+    /// The `.pr` view DiffKey of trunk PR `number` from targets.tsv and the
+    /// worker's merge_base_cache (no git). Stacked PRs are not supported.
+    fn diffKeyFor(self: *Harness, number: u32) !DiffKey {
+        var arena_state = std.heap.ArenaAllocator.init(self.ctx.allocator);
+        defer arena_state.deinit();
+        const spec = try specFor(self.ctx, .{ .arena = arena_state.allocator(), .number = number });
+        const merge_base = try (try self.uiStore()).getMergeBase(self.repoId(), .{ .base_tip_oid = spec.base_oid, .head_oid = spec.head_oid }) orelse
+            return self.ctx.fail("no merge base cached for #{d} ({s}...{s})", .{ number, spec.base_oid[0..8], spec.head_oid[0..8] });
+        return .{ .merge_base_oid = merge_base, .head_oid = try oidArray(self.ctx, spec.head_oid) };
+    }
+
+    /// Delete every diff_cache row except `keys` (pinned seen rows also stay).
+    fn keepOnly(self: *Harness, keys: []const DiffKey) !void {
+        const deleted = try (try self.uiStore()).evictDiffsRanked(self.ctx.allocator, .{
+            .repo_id = self.repoId(),
+            .budget_bytes = 0,
+            .ranked = keys,
+            .keep_nearest = keys.len,
+        });
+        self.ctx.allocator.free(deleted);
+        for (keys) |key| {
+            if (!try (try self.uiStore()).hasDiff(self.repoId(), key)) return self.ctx.fail("keepOnly: a kept key is not cached", .{});
+        }
+    }
+
+    fn lruContains(self: *Harness, key: DiffKey) bool {
+        if (self.app.state.flip.lru) |*lru| return lru.contains(key);
+        return false;
+    }
+
+    /// Clear the status bar so a later error check sees only the next step.
+    fn clearStatus(self: *Harness) void {
+        self.app.state.status_message = null;
+        self.app.state.status_message_severity = .info;
+    }
+
+    /// An error the user can see: a sidebar message other than the
+    /// "Loading PR #N…" placeholder, or an error-severity status bar message.
+    fn errorVisible(self: *Harness) bool {
+        const message = self.sidebar().messageText();
+        if (message.len > 0 and !std.mem.startsWith(u8, message, "Loading")) return true;
+        return self.app.state.status_message != null and self.app.state.status_message_severity == .err;
+    }
+
+    fn hasThread(self: *Harness, id: []const u8) bool {
+        for (self.app.state.review.threads.items) |thread| {
+            if (std.mem.eql(u8, thread.data.id, id)) return true;
+        }
+        return false;
+    }
 };
 
 const viewer_login = "me";
@@ -242,6 +445,16 @@ const settle_deadline_ns = 15 * std.time.ns_per_s;
 /// S14: closing must not wait out the 8s gh call. Esc also reloads the
 /// working-tree diff, so the budget covers a small git diff too.
 const close_budget_ms = 1000;
+/// 6b: the PrefetchWorker caches all 14 origin14 PRs (diffs, merge bases,
+/// threads for the nearest 10) well inside this.
+const warm_deadline_ns = 30 * std.time.ns_per_s;
+/// H6: the review fake holds its PR 9 answer this long (fixtures/sleep-9).
+const slow_gh_secs = "2";
+const stale_thread_id = "PRRT_STALE_10";
+const stale_updated_at = "2000-01-01T00:00:00Z";
+const orphan_heading = "Notes not anchored in this diff";
+/// H2: A→B→A round trips after the asserted one.
+const round_trips = 50;
 
 /// S2/S3 presets: `ready` first, `mine` the configured default (index 1).
 const presets_config =
@@ -259,6 +472,9 @@ const ready_rows = [_]u32{ 710, 712, 813 };
 /// `visibleNumbers` for `ready`, sorted: collapsed stack members count.
 const ready_visible = [_]u32{ 710, 712, 812, 813, 814 };
 
+/// Runs first for any 6b target (see `main`).
+const h0_scenario: Scenario = .{ .id = "H0", .what = "GIT_TRACE and the review fake's log see the miss path's subprocesses", .run = h0LogsSeeSubprocesses };
+
 const scenarios = [_]Scenario{
     .{ .id = "S1", .what = "sidebar paints from the DB before any network", .run = s1PaintsBeforeNetwork },
     .{ .id = "S2", .what = "presets come from config.json; bad query keeps the last good rows", .run = s2Presets },
@@ -272,6 +488,20 @@ const scenarios = [_]Scenario{
     .{ .id = "S10", .what = "`skim pr <n>` boot selects and enters; unknown number degrades", .run = s10BootNumber },
     .{ .id = "S13", .what = "switching to the working tree closes the surface and restores comments", .run = s13LeaveForWorkingTree },
     .{ .id = "S14", .what = "Esc close and quit during an in-flight sync kill gh instead of waiting", .run = s14CloseDuringSync },
+    // 6b. The world mutators (H3, H4a, H4b, H5) run last: they rewrite PRs 5,
+    // 9 and 14 in the shared origin.
+    h0_scenario,
+    .{ .id = "H1", .what = "a cache hit spawns no git or gh; `r` re-diffs the refs", .run = h1HitSpawnsNothing, .requires_gh_intercept = true },
+    .{ .id = "H2", .what = "A->B->A takes A's set back out of the LRU and restores the cursor; no aliasing", .run = h2RoundTrip, .requires_gh_intercept = true },
+    .{ .id = "R1", .what = "rapid flips install only the last PR (hit and miss)", .run = r1RapidFlips, .requires_gh_intercept = true },
+    .{ .id = "M2", .what = "a miss is written back by prefetch and the second visit is a hit", .run = m2MissWriteBack, .requires_gh_intercept = true },
+    .{ .id = "H6", .what = "stale-thread hit during an in-flight miss refetches with gh only; gh failures degrade", .run = h6RefetchAfterJoin, .requires_gh_intercept = true },
+    .{ .id = "H7", .what = "a miss whose diff load fails is never marked seen by the dwell", .run = h7FailedMissNotSeen, .requires_gh_intercept = true },
+    .{ .id = "H8", .what = "a flip while a comment editor is open waits for it, then lands on the cursor's PR", .run = h8EditorDefersFlip, .requires_gh_intercept = true },
+    .{ .id = "H3", .what = "notes stay per PR across flips and restarts; orphans go to the export", .run = h3NotesPerPr, .requires_gh_intercept = true },
+    .{ .id = "H4a", .what = "force-push marks only the files whose own edits changed", .run = h4aForcePush, .requires_gh_intercept = true },
+    .{ .id = "H4b", .what = "fast-forward shows the incremental diff with no UI git", .run = h4bFastForward, .requires_gh_intercept = true },
+    .{ .id = "H5", .what = "the seen diff survives eviction; the sentinel merge base is backfilled", .run = h5SeenPin, .requires_gh_intercept = true },
 };
 
 pub const std_options: std.Options = .{ .log_level = .warn };
@@ -308,9 +538,25 @@ pub fn main(process_init: std.process.Init) !u8 {
 
     var ran: usize = 0;
     var failed: usize = 0;
+    // null until H0 ran; H0 runs once, before the first scenario that needs it.
+    var gh_intercepted: ?bool = null;
     for (scenarios) |scenario| {
         if (!std.mem.eql(u8, target, "all") and !std.mem.eql(u8, target, scenario.id)) continue;
         ran += 1;
+        const is_h0 = std.mem.eql(u8, scenario.id, h0_scenario.id);
+        if (is_h0 or scenario.requires_gh_intercept) {
+            if (gh_intercepted == null) {
+                gh_intercepted = try runScenario(.{ .scenario = h0_scenario, .env = env, .out = out });
+                if (!gh_intercepted.?) failed += 1;
+            }
+            if (is_h0) continue;
+            if (!gh_intercepted.?) {
+                try out.print("FAIL {s}: not run: H0 failed, so gh is not intercepted and no-spawn checks would pass vacuously\n", .{scenario.id});
+                try out.flush();
+                failed += 1;
+                continue;
+            }
+        }
         if (!try runScenario(.{ .scenario = scenario, .env = env, .out = out })) failed += 1;
     }
     if (ran == 0) {
@@ -561,13 +807,9 @@ fn s9EnterAndFocus(ctx: *Ctx) !void {
     if (!try logHasSince(ctx, .{ .path = ctx.env.gh_log, .offset = gh_log_before, .needle = "number=9" }))
         return ctx.fail("review fake log has no number=9 call: the entry worker did not use gh_bin", .{});
     if (sb.message_len != 0) return ctx.fail("sidebar.message = '{s}' after a good entry", .{sb.message[0..sb.message_len]});
-    switch (app.state.diff_source) {
-        .two_refs => |refs| {
-            if (!std.mem.eql(u8, refs.ref1, "origin/main") or !std.mem.eql(u8, refs.ref2, "refs/skim/pr-9") or !refs.use_merge_base)
-                return ctx.fail("diff_source two_refs{{{s}, {s}, {}}}", .{ refs.ref1, refs.ref2, refs.use_merge_base });
-        },
-        else => return ctx.fail("diff_source is {s}, expected two_refs", .{@tagName(app.state.diff_source)}),
-    }
+    const head9 = try headOidOwned(ctx, 9);
+    defer ctx.allocator.free(head9);
+    try expectTwoRefs(&h, .{ .ref1 = "origin/main", .ref2 = head9, .use_merge_base = true });
 
     try h.pressChar(Key.tab);
     if (app.mode != .pr_review) return ctx.fail("Tab from the diff: mode {s}, expected pr_review", .{@tagName(app.mode)});
@@ -702,6 +944,455 @@ fn s14CloseDuringSync(ctx: *Ctx) !void {
     }
 }
 
+// --- 6b ------------------------------------------------------------------
+
+fn h0LogsSeeSubprocesses(ctx: *Ctx) !void {
+    try seed(ctx, .{ .fixture = .origin14 });
+    var h = try Harness.bootCold(ctx, .{ .sync = .network });
+    defer h.deinit();
+    const git_before = try fileSizeOrZero(ctx.env.git_trace);
+    const gh_before = try fileSizeOrZero(ctx.env.gh_log);
+
+    try h.flipTo(9);
+    try h.settle();
+
+    if (try fileSizeOrZero(ctx.env.git_trace) == git_before) return ctx.fail("git-trace.log did not grow on a miss: GIT_TRACE is not reaching git", .{});
+    if (try fileSizeOrZero(ctx.env.gh_log) == gh_before or !try logHasSince(ctx, .{ .path = ctx.env.gh_log, .offset = gh_before, .needle = "number=9" }))
+        return ctx.fail("gh not intercepted: the review fake logged no number=9 call for the miss", .{});
+    // The miss diffs the oid its fetch landed, not the movable refs/skim/pr-9.
+    const head = try headOidOwned(ctx, 9);
+    defer ctx.allocator.free(head);
+    try expectTwoRefs(&h, .{ .ref1 = "origin/main", .ref2 = head, .use_merge_base = true });
+}
+
+fn h1HitSpawnsNothing(ctx: *Ctx) !void {
+    try seed(ctx, .{ .fixture = .origin14 });
+    var h = try Harness.boot(ctx, .{ .sync = .network });
+    defer h.deinit();
+    try h.warmCache(.{ .focus = 10 });
+    const app = h.app;
+    const record10 = try recordFor(&h, 10);
+    if (!try (try h.uiStore()).threadsFresh(h.repoId(), .{ .number = 10, .pr_updated_at = record10.updated_at }))
+        return ctx.fail("setup: warm-up left no fresh thread_cache row for #10", .{});
+
+    try h.flipTo(9);
+    try h.settle();
+
+    const mark = try spawnMark(ctx);
+    try h.flipTo(10);
+    try expectNoSpawn(ctx, .{ .mark = mark, .step = "flip to cached #10" });
+    try expectFiles(&h, .{ .label = "hit #10", .number = 10 });
+    const state = &app.state.flip;
+    if (state.previewed != 10) return ctx.fail("flip.previewed = {?d}, expected 10", .{state.previewed});
+    if (state.displayed_key == null) return ctx.fail("flip.displayed_key is null after a hit", .{});
+    if (app.state.review.number != 10) return ctx.fail("review.number = {d}, expected 10", .{app.state.review.number});
+    if (app.state.review.data_unavailable) return ctx.fail("review.data_unavailable after a hit with fresh cached threads", .{});
+    if (app.mode != .pr_review) return ctx.fail("mode {s} after a preview, expected pr_review (focus stays on the sidebar)", .{@tagName(app.mode)});
+    // The cached diff's own head, not refs/skim/pr-10: `r` re-diffs exactly
+    // what is on screen even when the ref lags a locally present head.
+    try expectTwoRefs(&h, .{ .ref1 = "origin/main", .ref2 = (try recordFor(&h, 10)).head_oid, .use_merge_base = true });
+
+    const git_before = try fileSizeOrZero(ctx.env.git_trace);
+    app.mode = .normal;
+    try h.pressChar('r');
+    app.mode = .pr_review;
+    try h.settle();
+    if (try fileSizeOrZero(ctx.env.git_trace) == git_before) return ctx.fail("`r` ran no git: refresh did not re-diff the refs", .{});
+    try expectFiles(&h, .{ .label = "after `r`", .number = 10 });
+    if (state.displayed_key != null) return ctx.fail("flip.displayed_key still set after `r` (a streamed set has no key)", .{});
+}
+
+fn h2RoundTrip(ctx: *Ctx) !void {
+    try seed(ctx, .{ .fixture = .origin14 });
+    var h = try Harness.boot(ctx, .{ .sync = .network });
+    defer h.deinit();
+    try h.warmCache(.{ .focus = 4 });
+    const app = h.app;
+    try h.flipTo(4);
+    const key4 = try h.diffKeyFor(4);
+    if (app.state.flip.displayed_key == null) return ctx.fail("setup: #4 was not a hit after warm-up", .{});
+
+    const shared_idx = try fileIndex(&h, "shared.txt");
+    const target = try firstAddLine(&h, shared_idx);
+    if (target.global_line < 5) return ctx.fail("setup: shared.txt's add line is at {d}, need >= 5 rows above", .{target.global_line});
+    app.state.global_cursor_line = target.global_line;
+    app.state.global_scroll_offset = target.global_line - 5;
+    const parked = app.state.files.ptr;
+
+    try h.flipTo(11);
+    if (!h.lruContains(key4)) return ctx.fail("#4's set was not parked in the LRU on the flip to #11", .{});
+
+    const mark = try spawnMark(ctx);
+    try h.flipTo(4);
+    try expectNoSpawn(ctx, .{ .mark = mark, .step = "flip back to #4" });
+    if (app.state.files.ptr != parked) return ctx.fail("#4's files came back at a different address: re-parsed, not taken from the LRU", .{});
+    if (h.lruContains(key4)) return ctx.fail("#4's set is installed and still in the LRU (aliased)", .{});
+    const at = try cursorLine(&h);
+    if (!std.mem.eql(u8, at.path, "shared.txt") or at.new_lineno != target.new_lineno)
+        return ctx.fail("cursor restored to {s}:{?d}, expected shared.txt:{?d}", .{ at.path, at.new_lineno, target.new_lineno });
+    const rows_from_top = app.state.global_cursor_line -| app.state.global_scroll_offset;
+    if (rows_from_top != 5) return ctx.fail("cursor is {d} rows from the top, expected 5", .{rows_from_top});
+
+    for (0..round_trips) |i| {
+        try h.flipTo(11);
+        for (0..3) |_| app.pollBackgroundWork();
+        try h.flipTo(4);
+        for (0..3) |_| app.pollBackgroundWork();
+        if (app.state.flip.previewed != 4 or app.state.flip.displayed_key == null)
+            return ctx.fail("round trip {d}: previewed #{?d}, displayed_key set={}", .{ i, app.state.flip.previewed, app.state.flip.displayed_key != null });
+    }
+}
+
+fn r1RapidFlips(ctx: *Ctx) !void {
+    {
+        try seed(ctx, .{ .fixture = .origin14 });
+        var h = try Harness.boot(ctx, .{ .sync = .network });
+        defer h.deinit();
+        try h.warmCache(.{ .focus = 11 });
+        const app = h.app;
+        try h.flipTo(9);
+        const key9 = try h.diffKeyFor(9);
+        if (app.state.flip.previewed != 9) return ctx.fail("setup: #9 not previewed after warm-up", .{});
+
+        for ([_]u32{ 10, 11, 12, 13 }) |number| {
+            if (!try sidebar_controller.selectNumber(h.sidebar(), ctx.allocator, number)) return ctx.fail("selectNumber(#{d}) found no row", .{number});
+            h.advance(10);
+            h.tick();
+            if (app.state.flip.previewed != 9) return ctx.fail("#{?d} previewed 10ms after moving to #{d}, inside the debounce", .{ app.state.flip.previewed, number });
+        }
+        h.advance(flip.debounce_ms + 1);
+        h.tick();
+        h.catchUp();
+        if (app.state.flip.previewed != 13) return ctx.fail("after the debounce: previewed #{?d}, expected 13", .{app.state.flip.previewed});
+        if (app.state.review.number != 13) return ctx.fail("review.number = {d}, expected 13", .{app.state.review.number});
+        if (!h.lruContains(key9)) return ctx.fail("#9's set is not parked in the LRU", .{});
+        for ([_]u32{ 10, 11, 12 }) |number| {
+            if (h.lruContains(try h.diffKeyFor(number))) return ctx.fail("#{d} was installed during the burst (its set is in the LRU)", .{number});
+        }
+    }
+    {
+        try seed(ctx, .{ .fixture = .origin14 });
+        var h = try Harness.bootCold(ctx, .{ .sync = .network });
+        defer h.deinit();
+        try h.settle();
+        const io = skim_io.get();
+        var sleep_paths: [2][]u8 = undefined;
+        for ([_]u32{ 9, 10 }, &sleep_paths) |number, *path| {
+            path.* = try std.fmt.allocPrint(ctx.allocator, "{s}/sleep-{d}", .{ ctx.env.fixtures, number });
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path.*, .data = slow_gh_secs });
+        }
+        defer for (sleep_paths) |path| {
+            std.Io.Dir.cwd().deleteFile(io, path) catch |err| std.log.err("removing {s}: {}", .{ path, err });
+            ctx.allocator.free(path);
+        };
+        const gh_before = try fileSizeOrZero(ctx.env.gh_log);
+        try h.flipTo(9);
+        try waitLogLine(ctx, .{ .path = ctx.env.gh_log, .offset = gh_before, .needle = "number=9" });
+        try h.flipTo(10);
+        try h.flipTo(11);
+        const review = &h.app.state.review;
+        if (!review.entry_in_flight or review.entering_number != 9) return ctx.fail("miss burst: #9's slow entry is not in flight while #11 is selected (in flight: {}, #{d})", .{ review.entry_in_flight, review.entering_number });
+        const parked = review.next_entry orelse return ctx.fail("miss burst: no entry parked behind #9's", .{});
+        if (parked.number != 11) return ctx.fail("miss burst: #{d} parked behind #9, expected 11 (latest wins)", .{parked.number});
+        try h.settle();
+        if (h.app.state.review.number != 11) return ctx.fail("miss burst: review.number = {d}, expected 11", .{h.app.state.review.number});
+        try expectFiles(&h, .{ .label = "miss burst", .number = 11 });
+        const threads = h.app.state.review.threads.items;
+        if (threads.len != 1 or !h.hasThread("PRRT_11")) return ctx.fail("miss burst: {d} session threads, expected exactly PRRT_11 (9's or 10's result leaked)", .{threads.len});
+    }
+}
+
+fn m2MissWriteBack(ctx: *Ctx) !void {
+    try seed(ctx, .{ .fixture = .origin14 });
+    var h = try Harness.bootCold(ctx, .{ .sync = .network });
+    defer h.deinit();
+    const app = h.app;
+    const git_before = try fileSizeOrZero(ctx.env.git_trace);
+    try h.flipTo(12);
+    try h.settle();
+    if (try fileSizeOrZero(ctx.env.git_trace) == git_before) return ctx.fail("first visit to #12 ran no git: not a miss", .{});
+    if (app.state.flip.displayed_key != null) return ctx.fail("a miss-loaded set has a displayed_key", .{});
+
+    const db_path = try dbPath(ctx.allocator, ctx.env);
+    defer ctx.allocator.free(db_path);
+    pr_surface.startPrefetch(&app.state.pr_surface, .{
+        .allocator = app.allocator,
+        .sidebar = h.sidebar(),
+        .repo_root = ctx.env.repo,
+        .db_path = db_path,
+        .owner = fixture_owner,
+        .name = fixture_name,
+        .gh_bin = ctx.env.review_gh,
+    });
+    try h.warmCache(.{ .focus = 12 });
+
+    try h.flipTo(13);
+    try h.settle();
+    const key12 = try h.diffKeyFor(12);
+    if (h.lruContains(key12)) return ctx.fail("#12's miss-loaded set was parked in the LRU (it has no key)", .{});
+    const mark = try spawnMark(ctx);
+    try h.flipTo(12);
+    try expectNoSpawn(ctx, .{ .mark = mark, .step = "second visit to #12" });
+    if (app.state.flip.displayed_key == null) return ctx.fail("second visit to #12 was not a hit", .{});
+    try expectFiles(&h, .{ .label = "second visit", .number = 12 });
+}
+
+fn h6RefetchAfterJoin(ctx: *Ctx) !void {
+    const io = skim_io.get();
+    try seed(ctx, .{ .fixture = .origin14 });
+    var h = try Harness.boot(ctx, .{ .sync = .network });
+    defer h.deinit();
+    const app = h.app;
+    try h.warmCache(.{ .focus = 10 });
+    const key10 = try h.diffKeyFor(10);
+    try h.keepOnly(&.{key10});
+    const stale_path = try std.fmt.allocPrint(ctx.allocator, "{s}/stale/review-10.json", .{ctx.env.work});
+    defer ctx.allocator.free(stale_path);
+    const stale_json = try std.Io.Dir.cwd().readFileAlloc(io, stale_path, ctx.allocator, .limited(1 << 20));
+    defer ctx.allocator.free(stale_json);
+    try (try h.uiStore()).putThreads(.{ .repo_id = h.repoId(), .number = 10, .pr_updated_at = stale_updated_at, .json = stale_json, .now = skim_io.timestamp() });
+
+    const sleep_path = try std.fmt.allocPrint(ctx.allocator, "{s}/sleep-9", .{ctx.env.fixtures});
+    defer ctx.allocator.free(sleep_path);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = sleep_path, .data = slow_gh_secs });
+    defer std.Io.Dir.cwd().deleteFile(io, sleep_path) catch |err| std.log.err("removing sleep-9: {}", .{err});
+
+    {
+        const gh_before = try fileSizeOrZero(ctx.env.gh_log);
+        try h.flipTo(9);
+        try waitLogLine(ctx, .{ .path = ctx.env.gh_log, .offset = gh_before, .needle = "number=9" });
+
+        const mark = try spawnMark(ctx);
+        try h.flipTo(10);
+        try expectNoSpawn(ctx, .{ .mark = mark, .step = "stale-thread hit on #10 while #9 is in flight" });
+        const review = &app.state.review;
+        if (!review.refetch_after_join) return ctx.fail("review.refetch_after_join not set by a stale hit during an in-flight entry", .{});
+        if (review.number != 10 or review.data_unavailable) return ctx.fail("stale threads not applied: number {d}, data_unavailable {}", .{ review.number, review.data_unavailable });
+        if (!h.hasThread(stale_thread_id)) return ctx.fail("{s} not in the session after the stale hit", .{stale_thread_id});
+
+        try awaitSupersededDrop(&h);
+        try h.settle();
+        const gh_lines = try countLinesSince(ctx, .{ .path = ctx.env.gh_log, .offset = mark.gh });
+        if (gh_lines != 1 or !try logHasSince(ctx, .{ .path = ctx.env.gh_log, .offset = mark.gh, .needle = "number=10" }))
+            return ctx.fail("gh.log gained {d} lines after the hit, expected exactly the number=10 refetch", .{gh_lines});
+        if (try fileSizeOrZero(ctx.env.git_trace) != mark.git) return ctx.fail("git ran after the hit: the refetch must be gh only (see Test Environment Setup: refetch git config)", .{});
+        if (review.number != 10) return ctx.fail("after settle review.number = {d}, expected 10", .{review.number});
+        if (h.hasThread(stale_thread_id) or review.threads.items.len != 0)
+            return ctx.fail("refetch did not replace the stale threads ({d} threads, stale present {})", .{ review.threads.items.len, h.hasThread(stale_thread_id) });
+    }
+    {
+        const gh_before = try fileSizeOrZero(ctx.env.gh_log);
+        try h.flipTo(9);
+        try waitLogLine(ctx, .{ .path = ctx.env.gh_log, .offset = gh_before, .needle = "number=9" });
+        try h.flipTo(11);
+        try h.flipTo(10);
+        try h.settle();
+        try h.pollFor(200);
+        if (try logHasSince(ctx, .{ .path = ctx.env.gh_log, .offset = gh_before, .needle = "number=11" }))
+            return ctx.fail("parked entry for #11 started after the hit on #10 (next_entry not cleared)", .{});
+        if (app.state.review.number != 10) return ctx.fail("parked variant: review.number = {d}, expected 10", .{app.state.review.number});
+    }
+    {
+        const review12 = try std.fmt.allocPrint(ctx.allocator, "{s}/review-12.json", .{ctx.env.fixtures});
+        defer ctx.allocator.free(review12);
+        const review13 = try std.fmt.allocPrint(ctx.allocator, "{s}/review-13.json", .{ctx.env.fixtures});
+        defer ctx.allocator.free(review13);
+        const original12 = try std.Io.Dir.cwd().readFileAlloc(io, review12, ctx.allocator, .limited(1 << 20));
+        defer ctx.allocator.free(original12);
+        const original13 = try std.Io.Dir.cwd().readFileAlloc(io, review13, ctx.allocator, .limited(1 << 20));
+        defer ctx.allocator.free(original13);
+        try std.Io.Dir.cwd().deleteFile(io, review12);
+        defer std.Io.Dir.cwd().writeFile(io, .{ .sub_path = review12, .data = original12 }) catch |err| std.log.err("restoring review-12.json: {}", .{err});
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = review13, .data = "{not json" });
+        defer std.Io.Dir.cwd().writeFile(io, .{ .sub_path = review13, .data = original13 }) catch |err| std.log.err("restoring review-13.json: {}", .{err});
+        const rows = h.sidebar().rows.items.len;
+
+        for ([_]u32{ 12, 13 }) |number| {
+            h.clearStatus();
+            try h.flipTo(number);
+            try h.settle();
+            const review = &app.state.review;
+            if (review.number == number and !review.data_unavailable) return ctx.fail("#{d}: review data shown although gh failed", .{number});
+            if (!h.errorVisible()) return ctx.fail("#{d}: gh failed and no error is visible (sidebar message and status bar empty)", .{number});
+            if (h.sidebar().rows.items.len != rows) return ctx.fail("#{d}: sidebar has {d} rows after the failure, expected {d}", .{ number, h.sidebar().rows.items.len, rows });
+        }
+        try expectFiles(&h, .{ .label = "#13 with unparseable review JSON", .number = 13 });
+
+        try h.flipTo(10);
+        try h.settle();
+        if (app.state.review.number != 10 or app.state.review.data_unavailable)
+            return ctx.fail("hit on #10 after the failures: number {d}, data_unavailable {}", .{ app.state.review.number, app.state.review.data_unavailable });
+    }
+}
+
+fn h3NotesPerPr(ctx: *Ctx) !void {
+    const io = skim_io.get();
+    try seed(ctx, .{ .fixture = .origin14 });
+    var h = try Harness.boot(ctx, .{ .sync = .network });
+    defer h.deinit();
+    try h.warmCache(.{ .focus = 9 });
+
+    try h.flipTo(9);
+    const note9 = try addNote(&h, "note-9");
+    h.tick();
+    try h.flipTo(12);
+    if (h.app.state.comment_store.comments.items.len != 0) return ctx.fail("#12 shows {d} comments right after the flip from #9", .{h.app.state.comment_store.comments.items.len});
+    const note12 = try addNote(&h, "note-12");
+    h.tick();
+
+    try h.flipTo(9);
+    try expectOnlyNote(&h, .{ .label = "back on #9", .text = "note-9", .new_lineno = note9.new_lineno });
+
+    try h.restart();
+    try h.flipTo(12);
+    try h.settle();
+    try expectOnlyNote(&h, .{ .label = "#12 after restart", .text = "note-12", .new_lineno = note12.new_lineno });
+    try expectNoteRow(&h, .{ .number = 9, .text = "note-9", .line_content = note9.line_content });
+    try expectNoteRow(&h, .{ .number = 12, .text = "note-12", .line_content = note12.line_content });
+    ctx.allocator.free(note9.line_content);
+    ctx.allocator.free(note12.line_content);
+
+    try runFlipWorld(ctx, "drop-file-pr9");
+    try reseedOrigin14(&h);
+    try h.restart();
+    try h.warmCache(.{ .focus = 9 });
+    try h.flipTo(9);
+    try h.settle();
+    const app = h.app;
+    if (app.state.comment_store.comments.items.len != 0) return ctx.fail("orphan: #9 shows {d} comments after its file was dropped", .{app.state.comment_store.comments.items.len});
+    if (app.state.flip.orphan_notes.items.len != 1) return ctx.fail("orphan: flip.orphan_notes has {d} entries, expected 1", .{app.state.flip.orphan_notes.items.len});
+    var rows = try (try h.uiStore()).listNotes(ctx.allocator, .{ .repo_id = h.repoId(), .number = 9 });
+    defer rows.deinit();
+    if (rows.items.len != 1) return ctx.fail("orphan: the DB has {d} notes for #9, expected the row kept", .{rows.items.len});
+
+    const clipboard_path = try std.fmt.allocPrint(ctx.allocator, "{s}/clipboard.txt", .{ctx.env.work});
+    defer ctx.allocator.free(clipboard_path);
+    std.Io.Dir.cwd().deleteFile(io, clipboard_path) catch {};
+    try root.comment_controller.CommentController.yankAllCommentsToClipboard(app);
+    const exported = try std.Io.Dir.cwd().readFileAlloc(io, clipboard_path, ctx.allocator, .limited(1 << 20));
+    defer ctx.allocator.free(exported);
+    const heading = std.mem.indexOf(u8, exported, orphan_heading) orelse return ctx.fail("export lacks '{s}'", .{orphan_heading});
+    if (std.mem.indexOf(u8, exported[heading..], "note-9") == null) return ctx.fail("export has no note-9 under '{s}'", .{orphan_heading});
+}
+
+fn h4aForcePush(ctx: *Ctx) !void {
+    try seed(ctx, .{ .fixture = .origin14 });
+    var h = try Harness.boot(ctx, .{ .sync = .network });
+    defer h.deinit();
+    const seen = try markSeenByDwell(&h, 5);
+
+    try runFlipWorld(ctx, "rewrite-pr5");
+    try reseedOrigin14(&h);
+    try h.restart();
+    try h.warmCache(.{ .focus = 5 });
+
+    const mark = try spawnMark(ctx);
+    try h.flipTo(5);
+    try expectNoSpawn(ctx, .{ .mark = mark, .step = "flip to rewritten #5" });
+    const app = h.app;
+    const feat_idx = try fileIndex(&h, "feat_5.txt");
+    const shared_idx = try fileIndex(&h, "shared.txt");
+    const changed = app.state.flip.changed_files;
+    if (changed.len != app.state.files.len) return ctx.fail("flip.changed_files has {d} entries for {d} files", .{ changed.len, app.state.files.len });
+    if (!changed[feat_idx] or changed[shared_idx]) return ctx.fail("changed_files feat_5.txt={} shared.txt={}, expected true/false", .{ changed[feat_idx], changed[shared_idx] });
+
+    const spec = try headOidOwned(ctx, 5);
+    defer ctx.allocator.free(spec);
+    const merge_base = try (try h.uiStore()).getMergeBase(h.repoId(), .{ .base_tip_oid = &seen.head_oid, .head_oid = spec }) orelse
+        return ctx.fail("no .since_seen merge base for #5 after warm-up", .{});
+    if (std.mem.eql(u8, &merge_base, &seen.head_oid)) return ctx.fail("merge base equals the seen head: the rewrite looks like a fast-forward", .{});
+
+    try h.pressChar('c');
+    const folds = &app.state.collapsed_folds;
+    if (folds.count() != 1 or !folds.contains(root.line_map.LineMap.FoldKey.fileKey(shared_idx)))
+        return ctx.fail("`c`: {d} folds, expected exactly shared.txt's file fold", .{folds.count()});
+    try h.pressChar('c');
+    if (folds.count() != 0) return ctx.fail("second `c` left {d} folds", .{folds.count()});
+}
+
+fn h4bFastForward(ctx: *Ctx) !void {
+    try seed(ctx, .{ .fixture = .origin14 });
+    var h = try Harness.boot(ctx, .{ .sync = .network });
+    defer h.deinit();
+    const seen = try markSeenByDwell(&h, 14);
+
+    try runFlipWorld(ctx, "ff-pr14");
+    try reseedOrigin14(&h);
+    try h.restart();
+    // #14 is the boot row: previewed during the warm-up, the real-clock
+    // dwell would mark it seen at its new head before `c` compares.
+    if (!try sidebar_controller.selectNumber(h.sidebar(), ctx.allocator, 13)) return ctx.fail("selectNumber(#13) found no row", .{});
+    try h.warmCache(.{ .focus = 14 });
+    const head = try headOidOwned(ctx, 14);
+    defer ctx.allocator.free(head);
+    const db = try h.uiStore();
+    const merge_base = try db.getMergeBase(h.repoId(), .{ .base_tip_oid = &seen.head_oid, .head_oid = head }) orelse
+        return ctx.fail("no .since_seen merge base for #14 after warm-up", .{});
+    if (!std.mem.eql(u8, &merge_base, &seen.head_oid)) return ctx.fail("merge base {s} != seen head {s}: not detected as a fast-forward", .{ merge_base[0..8], seen.head_oid[0..8] });
+    if (!try db.hasDiff(h.repoId(), .{ .merge_base_oid = seen.head_oid, .head_oid = try oidArray(ctx, head) }))
+        return ctx.fail("the worker did not cache the seen..head diff", .{});
+
+    try h.flipTo(14);
+    const still_seen = try db.getSeen(h.repoId(), 14) orelse return ctx.fail("#14's seen row vanished", .{});
+    if (!std.mem.eql(u8, &still_seen.head_oid, &seen.head_oid)) return ctx.fail("#14 was re-marked seen at {s} before `c`", .{still_seen.head_oid[0..8]});
+    const mark = try spawnMark(ctx);
+    try h.pressChar('c');
+    try expectNoSpawn(ctx, .{ .mark = mark, .step = "`c` on fast-forwarded #14" });
+    const app = h.app;
+    if (app.state.flip.previewed_view != .since_seen) return ctx.fail("previewed_view = {s}, expected since_seen", .{@tagName(app.state.flip.previewed_view)});
+    try expectPaths(&h, .{ .label = "since seen", .expected = &.{"inc.txt"} });
+    try expectTwoRefs(&h, .{ .ref1 = &seen.head_oid, .ref2 = head, .use_merge_base = false });
+
+    try h.pressChar('c');
+    if (app.state.flip.previewed_view != .pr) return ctx.fail("second `c`: previewed_view = {s}, expected pr", .{@tagName(app.state.flip.previewed_view)});
+    try expectFiles(&h, .{ .label = "back to the PR view", .number = 14 });
+}
+
+fn h5SeenPin(ctx: *Ctx) !void {
+    try seed(ctx, .{ .fixture = .origin14 });
+    {
+        var h = try Harness.boot(ctx, .{ .sync = .network });
+        defer h.deinit();
+        const seen = try markSeenByDwell(&h, 5);
+        const seen_key: DiffKey = .{ .merge_base_oid = seen.merge_base_oid, .head_oid = seen.head_oid };
+        try runFlipWorld(ctx, "rewrite-pr5");
+        try reseedOrigin14(&h);
+
+        const db = try h.uiStore();
+        _ = try db.evictDiffs(h.repoId(), 1);
+        if (!try db.hasDiff(h.repoId(), seen_key)) return ctx.fail("the seen diff of #5 was evicted under a 1-byte budget", .{});
+        const bytes = try db.getDiff(ctx.allocator, .{ .repo_id = h.repoId(), .key = seen_key, .now = skim_io.timestamp() }) orelse
+            return ctx.fail("getDiff(seen key) returned null after hasDiff", .{});
+        defer ctx.allocator.free(bytes);
+        const size = try db.diffCacheSize(h.repoId());
+        if (size != bytes.len) return ctx.fail("diff_cache holds {d} bytes after eviction, expected only the seen row ({d})", .{ size, bytes.len });
+
+        h.deinit();
+        h = try Harness.bootCold(ctx, .{ .sync = .network });
+        try h.flipTo(5);
+        try h.settle();
+        const changed = h.app.state.flip.changed_files;
+        const feat_idx = try fileIndex(&h, "feat_5.txt");
+        const shared_idx = try fileIndex(&h, "shared.txt");
+        if (changed.len != h.app.state.files.len) return ctx.fail("miss on #5: changed_files has {d} entries for {d} files (seen side not read from the pinned row)", .{ changed.len, h.app.state.files.len });
+        if (!changed[feat_idx] or changed[shared_idx]) return ctx.fail("miss on #5: changed_files feat_5.txt={} shared.txt={}", .{ changed[feat_idx], changed[shared_idx] });
+    }
+    {
+        var h = try Harness.boot(ctx, .{ .sync = .network });
+        defer h.deinit();
+        const head13 = try headOidOwned(ctx, 13);
+        defer ctx.allocator.free(head13);
+        try (try h.uiStore()).setSeen(.{ .repo_id = h.repoId(), .number = 13, .head_oid = head13, .merge_base_oid = &pr_surface.unknown_merge_base, .now = skim_io.timestamp() });
+        try h.restart();
+        try h.warmCache(.{ .focus = 13 });
+        const db = try h.uiStore();
+        const row = try db.getSeen(h.repoId(), 13) orelse return ctx.fail("sentinel seen row for #13 disappeared", .{});
+        const key13 = try h.diffKeyFor(13);
+        if (!std.mem.eql(u8, &row.merge_base_oid, &key13.merge_base_oid))
+            return ctx.fail("seen merge base for #13 is {s}, expected the backfilled {s}", .{ row.merge_base_oid[0..8], key13.merge_base_oid[0..8] });
+    }
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -710,7 +1401,7 @@ fn s14CloseDuringSync(ctx: *Ctx) !void {
 fn runScenario(params: struct { scenario: Scenario, env: Env, out: *Writer }) !bool {
     const scenario = params.scenario;
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    var ctx: Ctx = .{ .allocator = debug_allocator.allocator(), .env = params.env };
+    var ctx: Ctx = .{ .allocator = debug_allocator.allocator(), .env = params.env, .id = scenario.id };
     const result = scenario.run(&ctx);
     const leaked = debug_allocator.deinit() == .leak;
 
@@ -744,6 +1435,9 @@ fn loadEnv() !Env {
         .sync_dir = try requireEnv("SKIM_HARNESS_SYNC_DIR"),
         .gh_log = try requireEnv("FAKE_GH_LOG"),
         .pr9_files = std.fmt.parseInt(usize, pr9, 10) catch return error.BadPr9Files,
+        .git_trace = try requireEnv("GIT_TRACE"),
+        .fixtures = try requireEnv("FAKE_GH_FIXTURES"),
+        .flip_world = try requireEnv("SKIM_HARNESS_FLIP_WORLD"),
     };
 }
 
@@ -781,6 +1475,13 @@ fn seed(ctx: *Ctx, params: SeedParams) !void {
         .stacked31 => try stacked31Specs(arena),
         .origin14 => try origin14Specs(arena, ctx.env),
     };
+    try upsertSpecs(.{ .arena = arena, .store = &store, .repo_id = repo_id, .specs = specs });
+}
+
+/// Index + hydrate rows for `specs`: what a sync that saw them would write.
+fn upsertSpecs(params: struct { arena: Allocator, store: *Store, repo_id: i64, specs: []const PrSpec }) !void {
+    const arena = params.arena;
+    const specs = params.specs;
     const index_rows = try arena.alloc(types.IndexRow, specs.len);
     const hydrate_rows = try arena.alloc(types.HydrateRow, specs.len);
     for (specs, index_rows, hydrate_rows) |spec, *index_row, *hydrate_row| {
@@ -812,8 +1513,8 @@ fn seed(ctx: *Ctx, params: SeedParams) !void {
             .my_review_oid = spec.my_review_oid,
         };
     }
-    try store.upsertIndex(repo_id, index_rows);
-    try store.applyHydrate(repo_id, hydrate_rows);
+    try params.store.upsertIndex(params.repo_id, index_rows);
+    try params.store.applyHydrate(params.repo_id, hydrate_rows);
 }
 
 /// 3-PR stack #812 <- #813 <- #814 (tip #814), 2-PR stack #790 <- #791, and
@@ -909,7 +1610,7 @@ fn origin14Specs(arena: Allocator, env: Env) ![]PrSpec {
             .updated_at = fields[5],
         });
     }
-    if (specs.items.len != 14) return error.BadTargets;
+    if (specs.items.len < 14) return error.BadTargets;
     return specs.items;
 }
 
@@ -1072,4 +1773,337 @@ fn expectCursor(ctx: *Ctx, h: *Harness, params: struct { step: []const u8, numbe
     const selected = selectedNumber(sb);
     if (selected != params.number) return ctx.fail("{s}: selected #{?d}, expected #{d}", .{ params.step, selected, params.number });
     if (sb.rows.items.len != params.rows) return ctx.fail("{s}: {d} rows, expected {d}", .{ params.step, sb.rows.items.len, params.rows });
+}
+
+// --- 6b helpers -----------------------------------------------------------
+
+/// Snapshot both subprocess logs and open an exec-audit window.
+fn spawnMark(ctx: *Ctx) !SpawnMark {
+    ctx.mark_seq += 1;
+    touchExecMarker(ctx, .{ .seq = ctx.mark_seq, .edge = "begin" });
+    return .{
+        .git = try fileSizeOrZero(ctx.env.git_trace),
+        .gh = try fileSizeOrZero(ctx.env.gh_log),
+        .seq = ctx.mark_seq,
+    };
+}
+
+/// Close the exec-audit window; FAIL when either log grew since `mark`.
+fn expectNoSpawn(ctx: *Ctx, params: struct { mark: SpawnMark, step: []const u8 }) !void {
+    touchExecMarker(ctx, .{ .seq = params.mark.seq, .edge = "end" });
+    const git = try fileSizeOrZero(ctx.env.git_trace);
+    const gh = try fileSizeOrZero(ctx.env.gh_log);
+    if (git != params.mark.git or gh != params.mark.gh)
+        return ctx.fail("{s}: spawned a subprocess (git-trace.log +{d} bytes, gh.log +{d} bytes)", .{ params.step, git -| params.mark.git, gh -| params.mark.gh });
+}
+
+/// `access()` on a path that never exists: strace logs it with the path, so
+/// the audit can bracket the window. The result is irrelevant.
+fn touchExecMarker(ctx: *Ctx, params: struct { seq: u32, edge: []const u8 }) void {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/exec-marks/{s}-{d}-{s}", .{ ctx.env.work, ctx.id, params.seq, params.edge }) catch return;
+    _ = fileExists(path);
+}
+
+fn fileSizeOrZero(path: []const u8) !u64 {
+    return fileSize(path) catch |err| switch (err) {
+        error.FileNotFound => 0,
+        else => err,
+    };
+}
+
+/// Lines appended to `path` after byte `offset`.
+fn countLinesSince(ctx: *Ctx, params: struct { path: []const u8, offset: u64 }) !usize {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(skim_io.get(), params.path, ctx.allocator, .limited(16 << 20));
+    defer ctx.allocator.free(bytes);
+    if (params.offset > bytes.len) return 0;
+    return std.mem.count(u8, bytes[@intCast(params.offset)..], "\n");
+}
+
+/// Wait until a line containing `needle` lands after `offset` (the review
+/// fake logs before it sleeps, so this means "the call is in flight").
+fn waitLogLine(ctx: *Ctx, params: struct { path: []const u8, offset: u64, needle: []const u8 }) !void {
+    var timer = try skim_io.Timer.start();
+    while (timer.read() < settle_deadline_ns) {
+        if (try fileSizeOrZero(params.path) > params.offset and
+            try logHasSince(ctx, .{ .path = params.path, .offset = params.offset, .needle = params.needle })) return;
+        skim_io.sleep(poll_interval_ns);
+    }
+    return ctx.fail("no '{s}' line in {s} within {d}s", .{ params.needle, params.path, settle_deadline_ns / std.time.ns_per_s });
+}
+
+fn targetsVersion(worker: *root.prefetch.PrefetchWorker) u64 {
+    worker.targets_mutex.lockUncancelable(skim_io.get());
+    defer worker.targets_mutex.unlock(skim_io.get());
+    return worker.targets_version;
+}
+
+/// `bash flip-world.sh <op>`; the script finds the world via SKIM_HARNESS_WORK.
+fn runFlipWorld(ctx: *Ctx, op: []const u8) !void {
+    const result = try std.process.run(ctx.allocator, skim_io.get(), .{ .argv = &.{ "bash", ctx.env.flip_world, op } });
+    defer ctx.allocator.free(result.stdout);
+    defer ctx.allocator.free(result.stderr);
+    const ok = switch (result.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (!ok) return ctx.fail("flip-world.sh {s} failed: {s}", .{ op, result.stderr[0..@min(result.stderr.len, 200)] });
+}
+
+/// Re-apply targets.tsv to the App's DB without resetting it (what a sync
+/// after a push would write). Seen rows, notes and caches stay.
+fn reseedOrigin14(h: *Harness) !void {
+    var arena_state = std.heap.ArenaAllocator.init(h.ctx.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try upsertSpecs(.{ .arena = arena, .store = try h.uiStore(), .repo_id = h.repoId(), .specs = try origin14Specs(arena, h.ctx.env) });
+}
+
+fn specFor(ctx: *Ctx, params: struct { arena: Allocator, number: u32 }) !PrSpec {
+    for (try origin14Specs(params.arena, ctx.env)) |spec| {
+        if (spec.number == params.number) return spec;
+    }
+    return ctx.fail("#{d} is not in targets.tsv", .{params.number});
+}
+
+/// PR `number`'s current head oid from targets.tsv. Caller frees.
+fn headOidOwned(ctx: *Ctx, number: u32) ![]u8 {
+    var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena_state.deinit();
+    const spec = try specFor(ctx, .{ .arena = arena_state.allocator(), .number = number });
+    return ctx.allocator.dupe(u8, spec.head_oid);
+}
+
+fn oidArray(ctx: *Ctx, oid: []const u8) ![40]u8 {
+    if (oid.len != 40) return ctx.fail("oid '{s}' is not 40 chars", .{oid});
+    return oid[0..40].*;
+}
+
+fn recordFor(h: *Harness, number: u32) !*const types.PrRecord {
+    const records = h.sidebar().records orelse return h.ctx.fail("sidebar has no records", .{});
+    for (records.items) |*record| {
+        if (record.number == number) return record;
+    }
+    return h.ctx.fail("#{d} is not in the sidebar records", .{number});
+}
+
+/// Warm with focus on `number`, preview it and dwell 3s: the App writes the
+/// seen row. Returns it after checking it is at the current head with a
+/// resolved merge base. Leaves the virtual clock ahead: restart next.
+fn h7FailedMissNotSeen(ctx: *Ctx) !void {
+    try seed(ctx, .{ .fixture = .origin14 });
+    var h = try Harness.bootCold(ctx, .{ .sync = .network });
+    defer h.deinit();
+    try h.settle();
+    const db = try h.uiStore();
+    try db.db.exec("UPDATE pr SET base_ref = '-evil' WHERE number = 12");
+    try pr_surface.reload(&h.app.state.pr_surface, .{ .allocator = h.app.allocator, .sidebar = h.sidebar() });
+    if (!std.mem.eql(u8, (try recordFor(&h, 12)).base_ref, "-evil")) return ctx.fail("setup: #12's base_ref is not '-evil'", .{});
+
+    try h.flipTo(12);
+    try h.settle();
+    if (h.app.state.flip.previewed != 12) return ctx.fail("previewed #{?d} after the failed load, expected 12", .{h.app.state.flip.previewed});
+    if (h.app.state.files.len != 0) return ctx.fail("{d} files loaded for a diff against origin/-evil", .{h.app.state.files.len});
+    h.dwell();
+    if (try db.getSeen(h.repoId(), 12)) |row| return ctx.fail("#12 marked seen at {s} after a failed load", .{row.head_oid[0..8]});
+}
+
+fn h8EditorDefersFlip(ctx: *Ctx) !void {
+    try seed(ctx, .{ .fixture = .origin14 });
+    var h = try Harness.boot(ctx, .{ .sync = .network });
+    defer h.deinit();
+    const app = h.app;
+    try h.warmCache(.{ .focus = 9 });
+    try h.settle();
+    try h.flipTo(9);
+    try h.settle();
+    if (app.state.flip.previewed != 9) return ctx.fail("setup: #9 not previewed", .{});
+    app.mode = .normal;
+    app.state.global_cursor_line = (try firstAddLine(&h, 0)).global_line;
+    try root.comment_controller.CommentController.startCommentInput(app);
+    if (app.state.active_comment_input == null) return ctx.fail("setup: no comment editor opened on #9", .{});
+
+    try h.flipTo(10);
+    if (app.state.flip.previewed != 9) return ctx.fail("previewed #{?d} with the editor open, expected 9", .{app.state.flip.previewed});
+    if (app.state.flip.loading_number != null) return ctx.fail("a miss for #{?d} started with the editor open", .{app.state.flip.loading_number});
+    if (app.state.flip.pending == null) return ctx.fail("the deferred preview was dropped", .{});
+    if (!try sidebar_controller.selectNumber(h.sidebar(), ctx.allocator, 11)) return ctx.fail("selectNumber(#11) found no row", .{});
+    h.tick();
+
+    try h.pressCtrl('w');
+    if (app.state.active_comment_input != null) return ctx.fail("Ctrl-w did not close the editor", .{});
+    h.advance(flip.debounce_ms + 1);
+    h.tick();
+    try h.settle();
+    if (app.state.flip.previewed != 11) return ctx.fail("after the editor closed: previewed #{?d}, expected the cursor's #11", .{app.state.flip.previewed});
+    try expectFiles(&h, .{ .label = "deferred flip", .number = 11 });
+}
+
+/// Poll the review entry alone until the superseded one in flight is
+/// dropped, then require that drop to have requested a render: the status
+/// line's 'refreshing…' depends on it.
+fn awaitSupersededDrop(h: *Harness) !void {
+    const app = h.app;
+    const review = &app.state.review;
+    if (!(review.entry_in_flight and review.entry.generation != review.generation))
+        return h.ctx.fail("superseded entry already dropped before the check", .{});
+    var timer = try skim_io.Timer.start();
+    while (review.entry_in_flight and review.entry.generation != review.generation) {
+        if (timer.read() >= settle_deadline_ns) return h.ctx.fail("superseded entry still in flight after {d}s", .{settle_deadline_ns / std.time.ns_per_s});
+        skim_io.sleep(poll_interval_ns);
+        app.needs_render = false;
+        app.pollReviewEntry();
+    }
+    if (!app.needs_render) return h.ctx.fail("dropping the superseded entry did not request a render", .{});
+}
+
+fn markSeenByDwell(h: *Harness, number: u32) !root.store.SeenRow {
+    const ctx = h.ctx;
+    try h.warmCache(.{ .focus = number });
+    // The boot preview may be this very row, loaded before the cache was
+    // warm: flip away and back so the dwell runs on a settled cache hit.
+    try h.settle();
+    try h.flipTo(if (number == 13) 12 else 13);
+    try h.settle();
+    try h.flipTo(number);
+    try h.settle();
+    const state = &h.app.state.flip;
+    if (state.previewed != number or state.loading_number != null or state.displayed_key == null)
+        return ctx.fail("setup: #{d} not previewed from the cache after warm-up (previewed #{?d}, loading #{?d})", .{ number, state.previewed, state.loading_number });
+    h.app.needs_render = false;
+    h.dwell();
+    // The Δ markers clear on this tick; without a render they stay until a key.
+    if (!h.app.needs_render) return ctx.fail("the dwell marked #{d} seen without requesting a render", .{number});
+    const row = try (try h.uiStore()).getSeen(h.repoId(), number) orelse return ctx.fail("no seen row for #{d} after a 3s dwell", .{number});
+    const head = try headOidOwned(ctx, number);
+    defer ctx.allocator.free(head);
+    if (!std.mem.eql(u8, &row.head_oid, head)) return ctx.fail("seen head for #{d} is {s}, expected {s}", .{ number, row.head_oid[0..8], head[0..8] });
+    if (std.mem.eql(u8, &row.merge_base_oid, &pr_surface.unknown_merge_base)) return ctx.fail("seen row for #{d} kept the sentinel merge base after warm-up", .{number});
+    return row;
+}
+
+/// Path a file is shown under (new path; old path for a deletion).
+fn diffPath(file: FileDiff) []const u8 {
+    if (file.new_path.len == 0 or std.mem.eql(u8, file.new_path, "/dev/null")) return file.old_path;
+    return file.new_path;
+}
+
+fn fileIndex(h: *Harness, path: []const u8) !usize {
+    for (h.app.state.files, 0..) |file, i| {
+        if (std.mem.eql(u8, diffPath(file), path)) return i;
+    }
+    return h.ctx.fail("{s} is not in the installed diff ({d} files)", .{ path, h.app.state.files.len });
+}
+
+/// `app.state.files` paths equal `$WORK/files-<number>.txt` (git's order).
+fn expectFiles(h: *Harness, params: struct { label: []const u8, number: u32 }) !void {
+    const ctx = h.ctx;
+    const path = try std.fmt.allocPrint(ctx.allocator, "{s}/files-{d}.txt", .{ ctx.env.work, params.number });
+    defer ctx.allocator.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(skim_io.get(), path, ctx.allocator, .limited(1 << 20));
+    defer ctx.allocator.free(bytes);
+    var expected: std.ArrayList([]const u8) = .empty;
+    defer expected.deinit(ctx.allocator);
+    var lines = std.mem.tokenizeScalar(u8, bytes, '\n');
+    while (lines.next()) |line| try expected.append(ctx.allocator, line);
+    try expectPaths(h, .{ .label = params.label, .expected = expected.items });
+}
+
+fn expectPaths(h: *Harness, params: struct { label: []const u8, expected: []const []const u8 }) !void {
+    const files = h.app.state.files;
+    var matches = files.len == params.expected.len;
+    for (files, 0..) |file, i| {
+        if (i < params.expected.len and !std.mem.eql(u8, diffPath(file), params.expected[i])) matches = false;
+    }
+    if (matches) return;
+    var shown: [256]u8 = undefined;
+    var writer: Writer = .fixed(&shown);
+    for (files) |file| writer.print("{s} ", .{diffPath(file)}) catch break;
+    return h.ctx.fail("{s}: installed files [{s}], expected {d}: {s}", .{ params.label, writer.buffered(), params.expected.len, if (params.expected.len > 0) params.expected[0] else "" });
+}
+
+fn expectTwoRefs(h: *Harness, params: struct { ref1: []const u8, ref2: []const u8, use_merge_base: bool }) !void {
+    switch (h.app.state.diff_source) {
+        .two_refs => |refs| {
+            if (!std.mem.eql(u8, refs.ref1, params.ref1) or !std.mem.eql(u8, refs.ref2, params.ref2) or refs.use_merge_base != params.use_merge_base)
+                return h.ctx.fail("diff_source two_refs{{{s}, {s}, {}}}, expected {{{s}, {s}, {}}}", .{ refs.ref1, refs.ref2, refs.use_merge_base, params.ref1, params.ref2, params.use_merge_base });
+        },
+        else => return h.ctx.fail("diff_source is {s}, expected two_refs", .{@tagName(h.app.state.diff_source)}),
+    }
+}
+
+const LinePosition = struct { global_line: usize, new_lineno: ?u32 };
+
+/// The first `+` line of file `file_idx` in the LineMap.
+fn firstAddLine(h: *Harness, file_idx: usize) !LinePosition {
+    const file = h.app.state.files[file_idx];
+    for (h.app.state.line_map.records) |record| {
+        if (record.file_idx != file_idx) continue;
+        switch (record.line_type) {
+            .code_line => |code| {
+                const line = file.hunks[code.hunk_idx].lines[code.line_idx_in_hunk];
+                if (line.line_type == .add) return .{ .global_line = record.global_line, .new_lineno = line.new_lineno };
+            },
+            else => {},
+        }
+    }
+    return h.ctx.fail("{s} has no added line in the LineMap", .{diffPath(file)});
+}
+
+/// File path and new line number under the diff cursor.
+fn cursorLine(h: *Harness) !struct { path: []const u8, new_lineno: ?u32 } {
+    const record = h.app.state.line_map.getLineRecord(h.app.state.global_cursor_line) orelse
+        return h.ctx.fail("cursor line {d} has no LineMap record", .{h.app.state.global_cursor_line});
+    const file = h.app.state.files[record.file_idx];
+    return switch (record.line_type) {
+        .code_line => |code| .{ .path = diffPath(file), .new_lineno = file.hunks[code.hunk_idx].lines[code.line_idx_in_hunk].new_lineno },
+        else => h.ctx.fail("cursor line {d} is a {s}, not a code line", .{ h.app.state.global_cursor_line, @tagName(record.line_type) }),
+    };
+}
+
+const AddedNote = struct {
+    new_lineno: ?u32,
+    /// Owned by ctx.allocator.
+    line_content: []u8,
+};
+
+/// A local comment on the first `+` line of the first file, added the way
+/// `saveCurrentComment` adds one.
+fn addNote(h: *Harness, text: []const u8) !AddedNote {
+    const app = h.app;
+    if (app.state.files.len == 0) return h.ctx.fail("addNote: no diff installed", .{});
+    const file = app.state.files[0];
+    for (file.hunks, 0..) |hunk, hunk_idx| {
+        for (hunk.lines, 0..) |line, line_idx| {
+            if (line.line_type != .add) continue;
+            _ = try app.state.comment_store.add(.{
+                .file_path = diffPath(file),
+                .hunk_idx = hunk_idx,
+                .line_idx = line_idx,
+                .text = text,
+                .line_type = .add,
+                .line_content = line.content,
+                .old_lineno = line.old_lineno,
+                .new_lineno = line.new_lineno,
+            });
+            return .{ .new_lineno = line.new_lineno, .line_content = try h.ctx.allocator.dupe(u8, line.content) };
+        }
+    }
+    return h.ctx.fail("addNote: {s} has no added line", .{diffPath(file)});
+}
+
+fn expectOnlyNote(h: *Harness, params: struct { label: []const u8, text: []const u8, new_lineno: ?u32 }) !void {
+    const items = h.app.state.comment_store.comments.items;
+    if (items.len != 1) return h.ctx.fail("{s}: {d} comments, expected only {s}", .{ params.label, items.len, params.text });
+    if (!std.mem.eql(u8, items[0].text, params.text)) return h.ctx.fail("{s}: comment '{s}', expected {s}", .{ params.label, items[0].text, params.text });
+    if (items[0].new_lineno != params.new_lineno) return h.ctx.fail("{s}: {s} anchored at line {?d}, expected {?d}", .{ params.label, params.text, items[0].new_lineno, params.new_lineno });
+}
+
+fn expectNoteRow(h: *Harness, params: struct { number: u32, text: []const u8, line_content: []const u8 }) !void {
+    var rows = try (try h.uiStore()).listNotes(h.ctx.allocator, .{ .repo_id = h.repoId(), .number = params.number });
+    defer rows.deinit();
+    if (rows.items.len != 1) return h.ctx.fail("#{d}: {d} local_note rows, expected 1", .{ params.number, rows.items.len });
+    const row = rows.items[0];
+    if (!std.mem.eql(u8, row.text, params.text) or !std.mem.eql(u8, row.line_content, params.line_content))
+        return h.ctx.fail("#{d}: note row '{s}' on '{s}', expected '{s}' on '{s}'", .{ params.number, row.text, row.line_content, params.text, params.line_content });
 }

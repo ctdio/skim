@@ -24,6 +24,8 @@ pub const Target = struct {
     base: Base,
     /// Set on the tip of a stack of >= 2 PRs.
     whole_stack: ?WholeStack = null,
+    /// Head the user last marked seen, when it differs from `head_oid`.
+    seen_head_oid: ?[]const u8 = null,
 };
 
 pub const Base = union(enum) {
@@ -36,12 +38,12 @@ pub const Base = union(enum) {
 /// `merge-base(trunk_oid, tip_head)..tip_head`.
 pub const WholeStack = struct { trunk_ref: []const u8, trunk_oid: []const u8 };
 
-pub const View = enum { pr, whole_stack };
+pub const View = enum { pr, whole_stack, since_seen };
 
 /// The two commits whose merge base, together with `head_oid`, is the DiffKey.
 pub const KeyInputs = struct { base_tip_oid: []const u8, head_oid: []const u8 };
 
-pub const JobKind = enum { diff, threads, whole_stack };
+pub const JobKind = enum { diff, threads, whole_stack, since_seen };
 
 // Every diff view other than `.pr` (which runs as `.diff`) is scheduled by a
 // job of the same name and tracked by a JobState field of the same name.
@@ -69,9 +71,11 @@ pub const JobState = struct {
     diff: Outcome = .pending,
     threads: Outcome = .pending,
     whole_stack: Outcome = .pending,
+    since_seen: Outcome = .pending,
 };
 
-/// PRs nearest the cursor that get thread payloads and whole-stack diffs.
+/// PRs nearest the cursor that get thread payloads, whole-stack and
+/// since-seen diffs.
 pub const thread_window = 10;
 /// Most PRs whose commits one `git fetch` batch asks for.
 pub const fetch_cap = 100;
@@ -103,6 +107,7 @@ pub fn targetFor(params: struct {
         .updated_at = rec.updated_at,
         .base = base,
         .whole_stack = whole_stack,
+        .seen_head_oid = seenHead(rec),
     };
 }
 
@@ -152,6 +157,7 @@ pub fn diffKeyFor(target: Target, view: View) ?KeyInputs {
             .parent_pr => |parent| parent.head_oid,
         },
         .whole_stack => if (target.whole_stack) |stack| stack.trunk_oid else return null,
+        .since_seen => target.seen_head_oid orelse return null,
     };
     if (base_tip_oid.len == 0) return null;
     return .{ .base_tip_oid = base_tip_oid, .head_oid = target.head_oid };
@@ -161,7 +167,7 @@ pub fn diffKeyFor(target: Target, view: View) ?KeyInputs {
 ///   1. a fetch batch while any target in the first `fetch_cap` of `ordered`
 ///      hasn't had a fetch attempt this version;
 ///   2. diffs for the nearest `thread_window`, then their threads, then their
-///      whole-stack diffs;
+///      whole-stack diffs, then their since-seen diffs;
 ///   3. diffs for everything else, nearest first.
 /// Diff jobs wait for the target's fetch attempt: a target past the cap would
 /// only fail on objects that were never asked for. It gets its fetch once the
@@ -192,6 +198,10 @@ pub fn nextJob(params: struct {
         if (!states[i].fetch_attempted or params.targets[i].whole_stack == null) continue;
         if (states[i].whole_stack == .pending) return runJob(.whole_stack, i);
     }
+    for (near) |i| {
+        if (!states[i].fetch_attempted or params.targets[i].seen_head_oid == null) continue;
+        if (states[i].since_seen == .pending) return runJob(.since_seen, i);
+    }
     for (params.ordered[near.len..]) |i| {
         if (states[i].fetch_attempted and states[i].diff == .pending) return runJob(.diff, i);
     }
@@ -200,6 +210,17 @@ pub fn nextJob(params: struct {
 
 fn runJob(kind: JobKind, index: usize) Job {
     return .{ .run = .{ .kind = kind, .index = index } };
+}
+
+/// A seen head worth diffing against: set, not the current head, and not the
+/// all-zero merge-base sentinel a corrupt row could carry into this column.
+fn seenHead(rec: *const types.PrRecord) ?[]const u8 {
+    const seen = rec.seen_head_oid orelse return null;
+    if (seen.len == 0 or std.mem.eql(u8, seen, rec.head_oid)) return null;
+    for (seen) |c| {
+        if (c != '0') return seen;
+    }
+    return null;
 }
 
 // =============================================================================
@@ -229,7 +250,7 @@ fn trunkTargets(comptime n: usize) [n]Target {
     return targets;
 }
 
-fn record(params: struct { number: u32, head_ref: []const u8, base_ref: []const u8, head_oid: []const u8, base_oid: []const u8 }) types.PrRecord {
+fn record(params: struct { number: u32, head_ref: []const u8, base_ref: []const u8, head_oid: []const u8, base_oid: []const u8, seen_head_oid: ?[]const u8 = null }) types.PrRecord {
     return .{
         .number = params.number,
         .node_id = "PR_x",
@@ -254,7 +275,7 @@ fn record(params: struct { number: u32, head_ref: []const u8, base_ref: []const 
         .requested_teams = "",
         .my_review_state = "",
         .my_review_oid = "",
-        .seen_head_oid = null,
+        .seen_head_oid = params.seen_head_oid,
         .seen_merge_base_oid = null,
     };
 }
@@ -513,4 +534,79 @@ test "nextJob follows a moved focus without any state reset" {
     const moved = try order(.{ .allocator = testing.allocator, .targets = &targets, .focus_number = 18 });
     defer testing.allocator.free(moved);
     try expectRun(.{ .kind = .diff, .index = 17, .job = nextJob(.{ .targets = &targets, .ordered = moved, .states = &states, .threads_enabled = true }) });
+}
+
+const oid_seen = "5" ** 40;
+
+test "diffKeyFor since_seen with a seen head keys off the seen head" {
+    var target = trunkTarget(1);
+    target.seen_head_oid = oid_seen;
+    const inputs = diffKeyFor(target, .since_seen).?;
+    try testing.expectEqualStrings(oid_seen, inputs.base_tip_oid);
+    try testing.expectEqualStrings(oid_head, inputs.head_oid);
+}
+
+test "diffKeyFor since_seen without a seen head is null" {
+    try testing.expectEqual(@as(?KeyInputs, null), diffKeyFor(trunkTarget(1), .since_seen));
+}
+
+test "targetFor copies a seen head that differs from the current head" {
+    const rec = record(.{ .number = 1, .head_ref = "a", .base_ref = "main", .head_oid = oid_head, .base_oid = oid_base, .seen_head_oid = oid_seen });
+    try testing.expectEqualStrings(oid_seen, targetFor(.{ .rec = &rec }).seen_head_oid.?);
+}
+
+test "targetFor drops a seen head equal to the current head" {
+    const rec = record(.{ .number = 1, .head_ref = "a", .base_ref = "main", .head_oid = oid_head, .base_oid = oid_base, .seen_head_oid = oid_head });
+    try testing.expectEqual(@as(?[]const u8, null), targetFor(.{ .rec = &rec }).seen_head_oid);
+}
+
+test "targetFor never turns the 40-zero sentinel into a seen head" {
+    const rec = record(.{ .number = 1, .head_ref = "a", .base_ref = "main", .head_oid = oid_head, .base_oid = oid_base, .seen_head_oid = "0" ** 40 });
+    try testing.expectEqual(@as(?[]const u8, null), targetFor(.{ .rec = &rec }).seen_head_oid);
+}
+
+test "targetFor drops an empty seen head" {
+    const rec = record(.{ .number = 1, .head_ref = "a", .base_ref = "main", .head_oid = oid_head, .base_oid = oid_base, .seen_head_oid = "" });
+    try testing.expectEqual(@as(?[]const u8, null), targetFor(.{ .rec = &rec }).seen_head_oid);
+}
+
+test "nextJob runs since_seen after whole_stack within thread_window" {
+    var targets = trunkTargets(12);
+    targets[3].whole_stack = .{ .trunk_ref = "main", .trunk_oid = oid_base };
+    targets[3].seen_head_oid = oid_seen;
+    targets[2].seen_head_oid = oid_seen;
+    var states = [_]JobState{.{ .fetch_attempted = true, .diff = .done, .threads = .done }} ** 12;
+    const ordered = identityOrder(12);
+    try expectRun(.{ .kind = .whole_stack, .index = 3, .job = nextJob(.{ .targets = &targets, .ordered = &ordered, .states = &states, .threads_enabled = true }) });
+
+    states[3].whole_stack = .done;
+    try expectRun(.{ .kind = .since_seen, .index = 2, .job = nextJob(.{ .targets = &targets, .ordered = &ordered, .states = &states, .threads_enabled = true }) });
+
+    states[2].since_seen = .done;
+    try expectRun(.{ .kind = .since_seen, .index = 3, .job = nextJob(.{ .targets = &targets, .ordered = &ordered, .states = &states, .threads_enabled = true }) });
+}
+
+test "nextJob runs since_seen before far diffs" {
+    var targets = trunkTargets(12);
+    targets[0].seen_head_oid = oid_seen;
+    var states = [_]JobState{.{ .fetch_attempted = true }} ** 12;
+    for (states[0..10]) |*state| state.* = .{ .fetch_attempted = true, .diff = .done, .threads = .done };
+    const ordered = identityOrder(12);
+    try expectRun(.{ .kind = .since_seen, .index = 0, .job = nextJob(.{ .targets = &targets, .ordered = &ordered, .states = &states, .threads_enabled = true }) });
+}
+
+test "nextJob never schedules since_seen beyond thread_window" {
+    var targets = trunkTargets(12);
+    targets[11].seen_head_oid = oid_seen;
+    const states = [_]JobState{.{ .fetch_attempted = true, .diff = .done, .threads = .done }} ** 12;
+    const ordered = identityOrder(12);
+    try testing.expectEqual(@as(?Job, null), nextJob(.{ .targets = &targets, .ordered = &ordered, .states = &states, .threads_enabled = true }));
+}
+
+test "nextJob never schedules since_seen without a fetch attempt" {
+    var targets = trunkTargets(1);
+    targets[0].seen_head_oid = oid_seen;
+    const states = [_]JobState{.{ .fetch_attempted = false, .diff = .done, .threads = .done }};
+    const ordered = identityOrder(1);
+    try testing.expect(nextJob(.{ .targets = &targets, .ordered = &ordered, .states = &states, .threads_enabled = true }).? == .fetch_batch);
 }

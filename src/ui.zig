@@ -10,6 +10,7 @@ const platform = @import("platform.zig");
 const App = @import("app.zig").App;
 const graphite = @import("git/graphite.zig");
 const pr = @import("pr/pr.zig");
+const sidebar_controller = @import("pr/sidebar/controller.zig");
 const menu_stats = @import("menu_stats.zig");
 const Color = rendering_common.Color;
 const Layout = rendering_common.Layout;
@@ -40,14 +41,25 @@ fn formatDiffSource(allocator: std.mem.Allocator, diff_source: DiffSource) ![]co
             }
         },
         .two_refs => |tr| blk: {
+            const ref1 = shortRef(tr.ref1);
+            const ref2 = shortRef(tr.ref2);
             if (tr.use_merge_base) {
-                break :blk try std.fmt.allocPrint(allocator, "[{s}...{s}]", .{ tr.ref1, tr.ref2 });
+                break :blk try std.fmt.allocPrint(allocator, "[{s}...{s}]", .{ ref1, ref2 });
             } else {
-                break :blk try std.fmt.allocPrint(allocator, "[{s}..{s}]", .{ tr.ref1, tr.ref2 });
+                break :blk try std.fmt.allocPrint(allocator, "[{s}..{s}]", .{ ref1, ref2 });
             }
         },
         .stdin => try allocator.dupe(u8, "[Stdin]"),
     };
+}
+
+/// A full 40-hex commit oid as its 7-char abbreviation; any other ref whole.
+fn shortRef(ref: []const u8) []const u8 {
+    if (ref.len != 40) return ref;
+    for (ref) |c| {
+        if (!std.ascii.isHex(c)) return ref;
+    }
+    return ref[0..7];
 }
 
 pub const UI = struct {
@@ -805,7 +817,7 @@ pub const UI = struct {
             .scroll = review.info_scroll,
             .total_lines = pr.review_controller.infoLineCount(review, content_width),
             .data_unavailable = review.data_unavailable,
-            .refreshing = review.entry_in_flight,
+            .refreshing = pr.review_controller.refreshInFlight(review),
             .bg = Color.dialog_bg,
         });
     }
@@ -1491,9 +1503,13 @@ pub const UI = struct {
         const deletions_copy = try RenderUtils.copyFrameText(app, deletions_text);
         const spacer = try RenderUtils.copyFrameText(app, "  ");
         const focus_copy = try RenderUtils.copyFrameText(app, focus_suffix);
+        const view_copy = try prViewIndicator(app);
 
         // Create segments with different colors
+        // The PR view goes first: in a narrow diff pane the row is cut at
+        // the right, and the file is also named by its own header line.
         var segments = [_]vaxis.Cell.Segment{
+            .{ .text = view_copy, .style = .{ .fg = Color.yellow } },
             .{ .text = file_info_copy, .style = .{ .fg = Color.white } },
             .{ .text = file_path_copy, .style = .{ .fg = Color.white, .bold = true } },
             .{ .text = spacer, .style = .{ .fg = Color.white } },
@@ -1503,6 +1519,34 @@ pub const UI = struct {
         };
 
         _ = win.print(&segments, .{ .row_offset = 0, .col_offset = @intCast(0) });
+    }
+
+    /// The PR view the diff shows when it is not the PR's own (FR-7/FR-8):
+    /// `since seen <sha>` or the whole stack, with what that view leaves out.
+    /// Frame-allocated; empty for the PR's own diff.
+    fn prViewIndicator(app: *App) ![]const u8 {
+        const state = &app.state.flip;
+        const sb = &app.state.sidebar;
+        if (!sb.open) return "";
+        const number = state.previewed orelse return "";
+        var buf: [128]u8 = undefined;
+        const text = switch (state.previewed_view) {
+            .pr => return "",
+            .since_seen => blk: {
+                const record = sidebar_controller.recordByNumber(sb, number) orelse return "";
+                const seen = record.seen_head_oid orelse return "";
+                break :blk try std.fmt.bufPrint(&buf, "[since seen {s} · threads hidden · notes not saved]  ", .{seen[0..@min(seen.len, 7)]});
+            },
+            .whole_stack => blk: {
+                const index = sidebar_controller.recordIndex(sb, number) orelse return "";
+                const place = sidebar_controller.stackPlace(sb, index);
+                const items = sb.records.?.items;
+                const bottom = items[place.bottom orelse return ""].number;
+                const tip = items[place.tip orelse return ""].number;
+                break :blk try std.fmt.bufPrint(&buf, "[stack #{d}→#{d} · threads hidden · notes not saved]  ", .{ bottom, tip });
+            },
+        };
+        return RenderUtils.copyFrameText(app, text);
     }
 
     pub fn renderStatus(app: *App, win: vaxis.Window) !void {
@@ -1647,7 +1691,7 @@ pub const UI = struct {
             .permission_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .agent_selection => "j/k:Move  |  Enter:Select  |  ESC:Cancel",
             .session_picker => "j/k:Move  |  Enter:Load  |  ESC:Cancel",
-            .pr_review => "j/k:Move  |  J/K:In stack  |  space:Expand  |  Enter:Open  |  f:Filter  |  F:Preset  |  R:Sync  |  ^b:Hide",
+            .pr_review => "j/k:Move  |  J/K:In stack  |  space:Expand  |  Enter:Open  |  S:Stack  |  c:Changed  |  m:Seen  |  f:Filter  |  F:Preset  |  R:Sync  |  ^b:Hide",
             .review_submit => "Tab:Verdict  |  ^S/Enter:Submit  |  ^D:Discard  |  ESC:Cancel",
             .pr_info => "j/k:Scroll  |  ^d/^u:Page  |  i/ESC/q:Close",
             .agent => blk: {
@@ -1863,8 +1907,12 @@ pub const UI = struct {
         // any in-flight draft posts.
         const thread_hint_active = if (pr.review_controller.isActive(&app.state.review))
             try appendReviewSessionStatus(app, segments)
-        else
-            false;
+        else blk: {
+            // Whole-stack and since-seen views run without a session but
+            // still show one PR.
+            if (app.state.sidebar.open) if (app.state.flip.previewed) |number| try appendPrNumber(app, segments, number);
+            break :blk false;
+        };
 
         // Only show hunk view mode indicator in unified view (where filtering applies)
         if (app.state.view_mode == .unified) {
@@ -1937,9 +1985,7 @@ pub const UI = struct {
     fn appendReviewSessionStatus(app: *App, segments: *std.ArrayList(vaxis.Cell.Segment)) !bool {
         var thread_hint_active = false;
 
-        var pr_buf: [48]u8 = undefined;
-        const pr_seg = try std.fmt.bufPrint(&pr_buf, "  PR #{d}", .{app.state.review.number});
-        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, pr_seg), .style = .{ .fg = Color.cyan, .bold = true } });
+        try appendPrNumber(app, segments, app.state.review.number);
 
         // CI rollup glyph for the PR head (FR-6 final summary).
         const ci_glyph: []const u8 = switch (app.state.review.rollup) {
@@ -2026,11 +2072,17 @@ pub const UI = struct {
         }
 
         // In-flight refetch (`r`): mirror the picker's muted loading note.
-        if (app.state.review.entry_in_flight) {
+        if (pr.review_controller.refreshInFlight(&app.state.review)) {
             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " │ refreshing…"), .style = .{ .fg = Color.dim } });
         }
 
         return thread_hint_active;
+    }
+
+    fn appendPrNumber(app: *App, segments: *std.ArrayList(vaxis.Cell.Segment), number: u32) !void {
+        var pr_buf: [48]u8 = undefined;
+        const pr_seg = try std.fmt.bufPrint(&pr_buf, "  PR #{d}", .{number});
+        try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, pr_seg), .style = .{ .fg = Color.cyan, .bold = true } });
     }
 
     pub fn printHeaderLine(app: *App, win: vaxis.Window, row: usize, text: []const u8, style: vaxis.Style) !void {

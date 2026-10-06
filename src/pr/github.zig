@@ -48,7 +48,15 @@ pub fn fetchRef(allocator: std.mem.Allocator, params: struct {
     const refspec = try buildPullRefspec(allocator, params.number);
     defer allocator.free(refspec);
 
-    try runGit(allocator, &.{ params.git_bin, "fetch", "--quiet", "origin", refspec });
+    const argv = [_][]const u8{ params.git_bin, "fetch", "--quiet", "origin", refspec };
+    runGit(allocator, &argv) catch |err| {
+        if (err != error.RefLocked) return err;
+        // The prefetch worker fetches the same refspec; whichever finishes
+        // second sees the ref moved under it. The ref is fine, so try again
+        // once the other fetch has released it (this runs on a worker thread).
+        skim_io.sleep(ref_locked_retry_ns);
+        try fetchAgain(allocator, &argv);
+    };
 
     if (params.base_ref.len > 0) {
         // Land the base in its remote-tracking ref so `origin/<base>...head`
@@ -64,7 +72,17 @@ pub fn fetchRef(allocator: std.mem.Allocator, params: struct {
     return head_ref;
 }
 
+/// The commit `ref` points at (`git rev-parse --verify --quiet <ref>^{commit}`),
+/// or null when git cannot resolve it. Caller owns.
+pub fn resolveCommit(allocator: std.mem.Allocator, params: struct { ref: []const u8, git_bin: []const u8 = "git" }) ?[]u8 {
+    const spec = std.fmt.allocPrint(allocator, "{s}^{{commit}}", .{params.ref}) catch return null;
+    defer allocator.free(spec);
+    return git.line(allocator, &.{ params.git_bin, "rev-parse", "--verify", "--quiet", spec });
+}
+
 pub const RefNameError = error{InvalidRefName};
+
+const ref_locked_retry_ns = 100 * std.time.ns_per_ms;
 
 /// `refs/skim/pr-<number>`: where a PR head lands locally. Caller owns.
 pub fn localPullRef(allocator: std.mem.Allocator, number: u32) ![]u8 {
@@ -716,7 +734,7 @@ fn runGhCapture(allocator: std.mem.Allocator, argv: []const []const u8, label: [
         else => 1,
     };
     if (code != 0) {
-        std.log.err("{s} failed ({d}): {s}", .{ label, code, result.stderr });
+        std.log.warn("{s} failed ({d}): {s}", .{ label, code, result.stderr });
         allocator.free(result.stdout);
         return .{ .failed = classifyGhFailure(code, result.stderr) };
     }
@@ -747,7 +765,7 @@ fn runGhCaptureAllowErrorBody(allocator: std.mem.Allocator, argv: []const []cons
         else => 1,
     };
     if (code != 0) {
-        std.log.err("{s} failed ({d}): {s}", .{ label, code, result.stderr });
+        std.log.warn("{s} failed ({d}): {s}", .{ label, code, result.stderr });
         if (std.mem.indexOf(u8, result.stdout, "\"errors\"") != null) {
             return .{ .ok = result.stdout };
         }
@@ -792,6 +810,15 @@ fn replaceBin(allocator: std.mem.Allocator, argv: [][]const u8, bin: []const u8)
     argv[0] = owned;
 }
 
+/// The second and last fetch after a `RefLocked`: still locked fails the
+/// entry rather than spinning.
+fn fetchAgain(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    runGit(allocator, argv) catch |err| switch (err) {
+        error.RefLocked => return Error.GhCommandFailed,
+        else => return err,
+    };
+}
+
 fn runGit(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const result = std.process.run(allocator, skim_io.get(), .{
         .argv = argv,
@@ -806,7 +833,8 @@ fn runGit(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 
     switch (result.term) {
         .exited => |code| if (code != 0) {
-            std.log.err("git fetch failed ({d}): {s}", .{ code, result.stderr });
+            std.log.warn("git fetch failed ({d}): {s}", .{ code, result.stderr });
+            if (std.mem.indexOf(u8, result.stderr, "cannot lock ref") != null) return error.RefLocked;
             return Error.GhCommandFailed;
         },
         else => return Error.GhCommandFailed,
@@ -1263,3 +1291,148 @@ test "buildBaseRefspec refuses an option-looking base name" {
 test "buildBaseRefspec refuses a name that would smuggle a second refspec side" {
     try testing.expectError(error.InvalidRefName, buildBaseRefspec(testing.allocator, "main:refs/heads/evil"));
 }
+
+test "fetchRef retries once when a concurrent fetch moved the local ref under it" {
+    var fake = try FakeGit.init(
+        \\if [ "$n" = 1 ]; then
+        \\  echo "error: cannot lock ref 'refs/skim/pr-7': is at 1111111111111111111111111111111111111111 but expected 2222222222222222222222222222222222222222" >&2
+        \\  exit 1
+        \\fi
+        \\exit 0
+    );
+    defer fake.deinit();
+
+    const head_ref = try fetchRef(testing.allocator, .{ .number = 7, .base_ref = "", .git_bin = fake.script });
+    defer testing.allocator.free(head_ref);
+
+    try testing.expectEqualStrings("refs/skim/pr-7", head_ref);
+    try testing.expectEqual(@as(u32, 2), try fake.calls());
+}
+
+test "fetchRef does not retry a fetch that failed for any other reason" {
+    var fake = try FakeGit.init(
+        \\echo "fatal: couldn't find remote ref refs/pull/7/head" >&2
+        \\exit 128
+    );
+    defer fake.deinit();
+
+    try testing.expectError(Error.GhCommandFailed, fetchRef(testing.allocator, .{ .number = 7, .base_ref = "", .git_bin = fake.script }));
+    try testing.expectEqual(@as(u32, 1), try fake.calls());
+}
+
+test "resolveCommit returns the 40-hex oid a branch points at" {
+    var fake = try FakeGit.init(repo_git_body);
+    defer fake.deinit();
+    const head = try initRepoWithCommit(fake.dir);
+
+    const oid = resolveCommit(testing.allocator, .{ .ref = "main", .git_bin = fake.script }) orelse return error.Unresolved;
+    defer testing.allocator.free(oid);
+
+    try testing.expectEqual(@as(usize, 40), oid.len);
+    for (oid) |c| try testing.expect(std.ascii.isHex(c));
+    try testing.expectEqualStrings(&head, oid);
+}
+
+test "resolveCommit peels an annotated tag to its commit" {
+    var fake = try FakeGit.init(repo_git_body);
+    defer fake.deinit();
+    const head = try initRepoWithCommit(fake.dir);
+    try runRepoGit(fake.dir, &.{ "tag", "-a", "-m", "v1", "v1" });
+
+    const oid = resolveCommit(testing.allocator, .{ .ref = "v1", .git_bin = fake.script }) orelse return error.Unresolved;
+    defer testing.allocator.free(oid);
+
+    try testing.expectEqualStrings(&head, oid);
+}
+
+test "resolveCommit returns null for a ref the repo does not have" {
+    var fake = try FakeGit.init(repo_git_body);
+    defer fake.deinit();
+    _ = try initRepoWithCommit(fake.dir);
+
+    try testing.expectEqual(@as(?[]u8, null), resolveCommit(testing.allocator, .{ .ref = "refs/skim/pr-404", .git_bin = fake.script }));
+}
+
+/// `FakeGit` body that runs the real git in `<dir>/repo` (`initRepoWithCommit`).
+const repo_git_body =
+    \\exec git -C "$(dirname "$0")/repo" "$@"
+;
+
+/// `git init` `<dir>/repo` on `main` with one commit; returns its oid.
+fn initRepoWithCommit(dir: []const u8) ![40]u8 {
+    const repo = try std.fmt.allocPrint(testing.allocator, "{s}/repo", .{dir});
+    defer testing.allocator.free(repo);
+    try std.Io.Dir.cwd().createDirPath(skim_io.get(), repo);
+    try runRepoGit(dir, &.{ "init", "-q", "-b", "main" });
+    try runRepoGit(dir, &.{ "commit", "-q", "--allow-empty", "-m", "init" });
+
+    const head = git.line(testing.allocator, &.{ "git", "-C", repo, "rev-parse", "HEAD" }) orelse return error.GitFailed;
+    defer testing.allocator.free(head);
+    if (head.len != 40) return error.GitFailed;
+    return head[0..40].*;
+}
+
+/// `git <args>` in `<dir>/repo` with a fixed identity and no user config.
+fn runRepoGit(dir: []const u8, args: []const []const u8) !void {
+    const repo = try std.fmt.allocPrint(testing.allocator, "{s}/repo", .{dir});
+    defer testing.allocator.free(repo);
+    var env = try skim_io.environ().createMap(testing.allocator);
+    defer env.deinit();
+    try env.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try env.put("GIT_CONFIG_NOSYSTEM", "1");
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(testing.allocator);
+    try argv.appendSlice(testing.allocator, &.{ "git", "-C", repo, "-c", "user.name=skim", "-c", "user.email=skim@test" });
+    try argv.appendSlice(testing.allocator, args);
+    const result = try std.process.run(testing.allocator, skim_io.get(), .{ .argv = argv.items, .environ_map = &env });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.GitFailed,
+        else => return error.GitFailed,
+    }
+}
+
+/// A `git` stand-in that counts its calls in `<dir>/calls` (`$n` is this
+/// call's number) and then runs `body`.
+const FakeGit = struct {
+    tmp: testing.TmpDir,
+    dir: []u8,
+    script: []u8,
+
+    fn init(body: []const u8) !FakeGit {
+        var tmp = testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const relative = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        defer testing.allocator.free(relative);
+        const dir = try skim_io.absolutePathAlloc(testing.allocator, relative);
+        errdefer testing.allocator.free(dir);
+        const script = try std.fmt.allocPrint(testing.allocator, "{s}/git", .{dir});
+        errdefer testing.allocator.free(script);
+        const contents = try std.fmt.allocPrint(testing.allocator,
+            \\#!/bin/sh
+            \\n=$(( $(cat '{s}/calls' 2>/dev/null || echo 0) + 1 ))
+            \\echo "$n" > '{s}/calls'
+            \\{s}
+            \\
+        , .{ dir, dir, body });
+        defer testing.allocator.free(contents);
+        try std.Io.Dir.cwd().writeFile(skim_io.get(), .{ .sub_path = script, .data = contents, .flags = .{ .permissions = .executable_file } });
+        return .{ .tmp = tmp, .dir = dir, .script = script };
+    }
+
+    fn deinit(self: *FakeGit) void {
+        testing.allocator.free(self.script);
+        testing.allocator.free(self.dir);
+        self.tmp.cleanup();
+    }
+
+    fn calls(self: *FakeGit) !u32 {
+        const path = try std.fmt.allocPrint(testing.allocator, "{s}/calls", .{self.dir});
+        defer testing.allocator.free(path);
+        const text = try std.Io.Dir.cwd().readFileAlloc(skim_io.get(), path, testing.allocator, .limited(64));
+        defer testing.allocator.free(text);
+        return std.fmt.parseInt(u32, std.mem.trim(u8, text, " \n"), 10);
+    }
+};

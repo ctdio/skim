@@ -12,7 +12,7 @@
 #   zig build
 #   bash scripts/test-infra/pr-review/switch-isolation.sh [scenario...] 2>&1 | tee /tmp/p1-harness.log
 #
-#   Scenarios (default: all): latest-wins gh-fail-on-switch queued-post-binding
+#   Scenarios (default: all): latest-wins latest-wins-miss gh-fail-on-switch queued-post-binding
 #   queued-post-after-failed-create rapid-switch-stress view-state-reset
 #   stale-post-failure non-pr-comments-restored failed-entry-keeps-comments
 #   leave-during-entry post-on-both leave-while-post-drains
@@ -35,6 +35,7 @@ EDITOR_RE='^-- [A-Z]+ \(comment\) --'
 
 ALL_SCENARIOS=(
   latest-wins
+  latest-wins-miss
   gh-fail-on-switch
   queued-post-binding
   queued-post-after-failed-create
@@ -80,14 +81,56 @@ scenario_latest_wins() {
   fake_gh_set FAKE_GH_DELAY_1 4
   skim_start pr
   wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  # Both heads are local, so prefetch caches both diffs: wait for the ◆ glyphs
+  # so A's entry is deterministically a hit whose thread fetch is the slow part.
+  wait_for_pane "#1 Alpha change.*◆" 10 || { REASON="prefetch never cached PR 1"; return 1; }
+  wait_for_pane "#2 Bravo change.*◆" 10 || { REASON="prefetch never cached PR 2"; return 1; }
   send Enter
   wait_for_log '^review.*number=1' 1 5 || { REASON="no gh review call for PR 1"; return 1; }
+  wait_for_pane "a_only.txt" 5 || { REASON="A's cached diff (a_only.txt) never appeared"; return 1; }
+  send Tab
+  wait_for_pane "-- PRS --" 3 || { REASON="Tab did not return focus to the PR list: $(status_line)"; return 1; }
   send j
   sleep 0.2
   send Enter
   wait_for_pane "b_only.txt" 10 || { REASON="B's diff (b_only.txt) never appeared"; return 1; }
   # A's fake gh sleeps 4s; wait past it so a late A result would have landed.
   sleep 5
+  pane_has "b_only.txt" || { REASON="B's diff was replaced after A's late result"; return 1; }
+  pane_has "a_only.txt" && { REASON="A's diff (a_only.txt) is on screen"; return 1; }
+  pane_has "ALPHA-THREAD-MARKER" && { REASON="A's thread is on screen"; return 1; }
+  status_line | grep -q "PR #2" || { REASON="status line does not name PR #2: $(status_line)"; return 1; }
+  return 0
+}
+
+# Risk 1 (miss path): neither head is local and the prefetch worker's fetches
+# are refused, so both entries fetch. B's Enter while A's gh sleeps parks B
+# behind A's entry; A's late result is discarded and B's entry runs after it.
+scenario_latest_wins_miss() {
+  drop_local_pr_heads
+  block_prefetch_fetches
+  fake_gh_set FAKE_GH_DELAY_1 6
+  skim_start pr
+  wait_for_pane "Alpha change" 10 || { REASON="picker never showed PRs"; return 1; }
+  # A miss entry fetches A's threads before its diff streams in, so the list
+  # keeps focus while it is in flight. The two number=1 calls are the boot
+  # row's entry and the prefetch worker's thread fetch; the worker fetches
+  # PR 2's threads only after its (equally slow) PR 1 call, so until then
+  # any number=2 call is B's entry.
+  wait_for_log '^review.*number=1' 2 10 || { REASON="no gh review calls for PR 1"; return 1; }
+  assert_prefetch_blocked || return 1
+  send Enter
+  sleep 0.2
+  in_picker || { REASON="Enter on PR 1 left the list before its entry landed: $(status_line)"; return 1; }
+  send j
+  sleep 0.2
+  send Enter
+  sleep 1
+  (($(log_count '^review.*number=2') == 0)) || { REASON="PR 2's entry ran while PR 1's was in flight (not parked)"; return 1; }
+  in_picker || { REASON="the list lost focus while B's entry was parked: $(status_line)"; return 1; }
+  wait_for_log '^review.*number=2' 2 15 || { REASON="PR 2's parked entry never ran"; return 1; }
+  wait_for_pane "b_only.txt" 10 || { REASON="B's diff (b_only.txt) never appeared"; return 1; }
+  sleep 1
   pane_has "b_only.txt" || { REASON="B's diff was replaced after A's late result"; return 1; }
   pane_has "a_only.txt" && { REASON="A's diff (a_only.txt) is on screen"; return 1; }
   pane_has "ALPHA-THREAD-MARKER" && { REASON="A's thread is on screen"; return 1; }
@@ -176,7 +219,7 @@ scenario_rapid_switch_stress() {
     if ((i % 2 == 0)); then send j; else send k; fi
     sleep 0.05
     send Enter
-    if ((i % 3 == 0)) && wait_for_pane "refs/skim/pr-" 4; then
+    if ((i % 3 == 0)) && wait_for_pane "PR #[12]( |$)" 4; then
       dismiss_editor
       send C-d
       sleep 0.1
@@ -203,12 +246,14 @@ scenario_rapid_switch_stress() {
 
   local mine theirs
   if [ "$target" = "1" ]; then mine=a_only.txt theirs=b_only.txt; else mine=b_only.txt theirs=a_only.txt; fi
-  wait_for_pane "refs/skim/pr-$target\\]" 15 || { REASON="final screen never showed PR #$target (last Enter): $(status_line)"; return 1; }
+  # A cache hit's diff source names the head oid, not refs/skim/pr-N, so the
+  # status line's PR number identifies the PR.
+  wait_for_pane "PR #$target( |$)" 15 || { REASON="final screen never showed PR #$target (last Enter): $(status_line)"; return 1; }
   # Outlast every earlier switch's fake-gh delay.
   sleep 3
   skim_alive || { REASON="skim exited after the switches"; return 1; }
   stderr_has_crash && { REASON="crash text in stderr.log"; return 1; }
-  status_line | grep -q "refs/skim/pr-$target\\]" || { REASON="screen moved off PR #$target after the last Enter: $(status_line)"; return 1; }
+  status_line | grep -qE "PR #$target( |$)" || { REASON="screen moved off PR #$target after the last Enter: $(status_line)"; return 1; }
   send g g
   sleep 0.5
   pane_has "$mine" || { REASON="PR #$target's diff ($mine) not shown"; return 1; }
@@ -307,6 +352,11 @@ scenario_non_pr_comments_restored() {
 scenario_failed_entry_keeps_comments() {
   sed -i 's/^base line 2$/WT-DIRTY-LINE/' "$WORK/clone/base.txt"
   world_git -C "$WORK/origin.git" update-ref -d refs/pull/1/head
+  # Drop A's head from the clone too: a local head would make the entry a
+  # prefetch cache hit that never fetches.
+  world_git -C "$WORK/clone" update-ref -d refs/remotes/origin/feat-a
+  world_git -C "$WORK/clone" reflog expire --expire=now --all
+  world_git -C "$WORK/clone" gc --quiet --prune=now
   skim_start
   add_wt_note || return 1
   palette_run "pr"
@@ -501,9 +551,51 @@ in_picker() {
   status_line | grep -q -- "-- PRS --"
 }
 
+# Remove both PR heads from the clone, so a PR entry has to fetch.
+drop_local_pr_heads() {
+  world_git -C "$WORK/clone" update-ref -d refs/remotes/origin/feat-a
+  world_git -C "$WORK/clone" update-ref -d refs/remotes/origin/feat-b
+  world_git -C "$WORK/clone" reflog expire --expire=now --all
+  world_git -C "$WORK/clone" gc --quiet --prune=now
+}
+
+# A `git` first on skim's PATH that refuses the prefetch worker's fetches (the
+# only ones passing --no-auto-maintenance) and runs everything else, so the
+# worker caches no diff and every entry stays a miss. Each refusal is logged
+# to $PREFETCH_BLOCKED_LOG so a scenario can prove the block fired.
+block_prefetch_fetches() {
+  local real_git
+  real_git="$(command -v git)"
+  PREFETCH_BLOCKED_LOG="$WORK/prefetch-blocked.log"
+  : >"$PREFETCH_BLOCKED_LOG"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'for arg in "$@"; do'
+    echo "  [ \"\$arg\" = \"--no-auto-maintenance\" ] && { echo \"\$*\" >>$(printf '%q' "$PREFETCH_BLOCKED_LOG"); echo \"fatal: prefetch fetch blocked by switch-isolation\" >&2; exit 128; }"
+    echo 'done'
+    echo "exec $(printf '%q' "$real_git") \"\$@\""
+  } >"$WORK/bin/git"
+  chmod +x "$WORK/bin/git"
+}
+
+# The miss scenario only tests parking if B's head is still absent when B is
+# entered: the prefetch worker must have tried (and been refused) and left
+# neither refs/skim/pr-2 nor B's commit in the clone.
+assert_prefetch_blocked() {
+  local i
+  for ((i = 0; i < 100; i++)); do
+    [ -s "$PREFETCH_BLOCKED_LOG" ] && break
+    sleep 0.1
+  done
+  [ -s "$PREFETCH_BLOCKED_LOG" ] || { REASON="the prefetch worker's fetch never reached the blocking git wrapper"; return 1; }
+  world_git -C "$WORK/clone" show-ref --verify --quiet refs/skim/pr-2 && { REASON="refs/skim/pr-2 exists before B's entry: prefetch was not blocked"; return 1; }
+  world_git -C "$WORK/clone" cat-file -e "$SHA_B^{commit}" 2>/dev/null && { REASON="B's head is local before B's entry: the entry would not miss"; return 1; }
+  return 0
+}
+
 open_picker() {
   palette_run "pr"
-  wait_for_pane "Bravo change" 5 && in_picker
+  wait_for_pane "Bravo change" 5 && wait_for_pane "-- PRS --" 3
 }
 
 dismiss_editor() {

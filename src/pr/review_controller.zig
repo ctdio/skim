@@ -33,6 +33,25 @@ pub const EnterParams = struct {
     url: []const u8 = "",
 };
 
+/// A PR entered from the local cache (6b flip): the metadata the sidebar row
+/// carries, plus the review payload `thread_cache` holds for it, if any.
+pub const CacheEnterParams = struct {
+    number: u32,
+    pr_node_id: []const u8,
+    head_ref_oid: []const u8,
+    head_ref: []const u8,
+    base_ref: []const u8,
+    title: []const u8,
+    author: []const u8,
+    is_draft: bool,
+    /// Raw review payload from thread_cache.
+    threads_json: ?[]const u8,
+    /// thread_cache.pr_updated_at == the PR's updated_at.
+    threads_fresh: bool,
+};
+
+pub const CacheEnterOutcome = enum { applied, applied_refreshing, metadata_only_refreshing };
+
 const PendingKind = enum { none, enter, refetch };
 
 /// Where new comments go while a session is active (AD-7). Defaults to GitHub
@@ -273,7 +292,7 @@ pub const PendingEntry = struct {
     mutex: std.Io.Mutex = .init,
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     git_ok: bool = false, // fetchRef succeeded (a local head ref exists)
-    fetched_head_ref: ?[]u8 = null, // local ref from fetchRef (refs/skim/pr-N)
+    fetched_head_ref: ?[]u8 = null, // oid fetchRef landed (else its refs/skim/pr-N)
     fetched_base_ref: ?[]u8 = null, // base branch name used for the diff
     gh_ok: bool = false, // review payload fetched successfully
     raw_json: ?[]u8 = null, // gh review payload (when gh_ok)
@@ -286,6 +305,7 @@ pub const PendingEntry = struct {
 /// after building the diff source.
 pub const EntryOutcome = union(enum) {
     none,
+    superseded, // a switch made the result stale: dropped, nothing applied
     entered: struct {
         head_ref: []const u8,
         base_ref: []const u8,
@@ -408,6 +428,13 @@ pub const ReviewSession = struct {
     // only before the first spawn, so the workers' unsynchronised reads are safe.
     gh_bin: []const u8 = "gh",
     git_bin: []const u8 = "git",
+    // The repo's GitHub owner/name when the caller already knows it (the PR
+    // surface does), so entry/refetch workers never run git to resolve it.
+    // Allocator-owned; workers get their own copy at spawn.
+    owner_repo: ?github.OwnerRepo = null,
+    // A refetch requested while another PR's worker was still in flight;
+    // `pollPending` starts it once that stale result is discarded.
+    refetch_after_join: bool = false,
 };
 
 /// Drop everything that belongs to the current PR and bump `generation`, so
@@ -441,6 +468,7 @@ pub fn resetForSwitch(self: *ReviewSession, allocator: Allocator) void {
     self.info_scroll = 0;
     self.data_unavailable = false;
     self.number = 0;
+    self.refetch_after_join = false;
 }
 
 /// Begin an async PR entry: git ref fetch + review-data fetch off-thread. Resets
@@ -476,6 +504,38 @@ pub fn startRefetch(self: *ReviewSession, allocator: Allocator) !void {
     self.entering_base_ref = "";
     self.entry.generation = self.generation;
     try spawnWorker(self, allocator);
+}
+
+/// Enter a PR synchronously from cached data: no worker, and no subprocess
+/// when the cached threads are fresh. Bumps the session generation first, so
+/// any in-flight entry/post/thread result for the previous PR is discarded,
+/// and drops a parked entry so it cannot start after this one.
+pub fn enterFromCache(self: *ReviewSession, allocator: Allocator, params: CacheEnterParams) !CacheEnterOutcome {
+    resetForSwitch(self, allocator);
+    clearNextEntry(self, allocator);
+    if (params.threads_json) |raw| applied: {
+        var data = review_parse.parsePrDetails(allocator, raw) catch break :applied;
+        defer data.deinit();
+        if (data.details.number != params.number) break :applied;
+        try applyFetchedData(self, allocator, &data);
+        self.data_unavailable = false;
+        if (params.threads_fresh) return .applied;
+        requestRefetch(self, allocator);
+        return .applied_refreshing;
+    }
+    try applyMetadata(self, allocator, params);
+    requestRefetch(self, allocator);
+    return .metadata_only_refreshing;
+}
+
+/// Remember the repo's owner/name so workers skip `git config` (and thus run
+/// no git at all on a refetch).
+pub fn setOwnerRepo(self: *ReviewSession, allocator: Allocator, owner_repo: github.OwnerRepo) !void {
+    const owner = try allocator.dupe(u8, owner_repo.owner);
+    errdefer allocator.free(owner);
+    const repo = try allocator.dupe(u8, owner_repo.repo);
+    freeOwnerRepo(self, allocator);
+    self.owner_repo = .{ .owner = owner, .repo = repo };
 }
 
 /// Consume a completed entry/refetch, if ready. Joins the worker, parses +
@@ -517,7 +577,11 @@ pub fn pollPending(self: *ReviewSession, allocator: Allocator) EntryOutcome {
         if (head_ref) |h| ca.free(h);
         if (base_ref) |b| ca.free(b);
         startNextEntry(self, allocator) catch return .start_failed;
-        return .none;
+        if (self.refetch_after_join and !self.entry_in_flight) {
+            self.refetch_after_join = false;
+            startRefetch(self, allocator) catch |err| std.log.warn("review refetch failed to start: {any}", .{err});
+        }
+        return .superseded;
     }
 
     var gh_error: ?github.GhErrorKind = if (gh_ok) null else gh_kind orelse .other;
@@ -710,9 +774,19 @@ pub fn isActive(self: *const ReviewSession) bool {
 }
 
 /// Whether a PR entry is running or parked behind one. A refetch does not
-/// count: it keeps the PR on screen.
+/// count: it keeps the PR on screen. Neither does an entry a later switch
+/// superseded (`enterFromCache`): its result is discarded when it lands.
 pub fn entryPending(self: *const ReviewSession) bool {
-    return (self.entry_in_flight and self.pending_kind == .enter) or self.next_entry != null;
+    const current_entry = self.entry_in_flight and self.pending_kind == .enter and self.entry.generation == self.generation;
+    return current_entry or self.next_entry != null;
+}
+
+/// Whether the shown PR's review data is being refetched: a refetch of this
+/// session, or one queued behind a superseded worker (`refetch_after_join`).
+/// A superseded entry still draining is not: its result is dropped.
+pub fn refreshInFlight(self: *const ReviewSession) bool {
+    const current_refetch = self.entry_in_flight and self.pending_kind == .refetch and self.entry.generation == self.generation;
+    return current_refetch or self.refetch_after_join;
 }
 
 /// Replace the derived anchor slice (transfers ownership of `anchored`). The
@@ -1395,6 +1469,7 @@ pub fn deinitState(self: *ReviewSession, allocator: Allocator) void {
 
     clearData(self, allocator);
     freeAnchored(self, allocator);
+    freeOwnerRepo(self, allocator);
     self.expanded_threads.deinit(allocator);
     self.threads.deinit(allocator);
     self.reviews.deinit(allocator);
@@ -1426,6 +1501,60 @@ fn clearNextEntry(self: *ReviewSession, allocator: Allocator) void {
     self.next_entry = null;
 }
 
+/// Refetch the current PR's review data now, or once the previous PR's worker
+/// still in flight is joined (`startRefetch` refuses while one runs).
+fn requestRefetch(self: *ReviewSession, allocator: Allocator) void {
+    if (self.entry_in_flight) {
+        self.refetch_after_join = true;
+        return;
+    }
+    startRefetch(self, allocator) catch |err| std.log.warn("review refetch failed to start: {any}", .{err});
+}
+
+/// The session fields a cached sidebar row can fill before the review payload
+/// arrives: enough for `startPostThread` to resolve the PR (node id, head oid).
+fn applyMetadata(self: *ReviewSession, allocator: Allocator, params: CacheEnterParams) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+    self.pr_node_id = try a.dupe(u8, params.pr_node_id);
+    self.head_ref_oid = try a.dupe(u8, params.head_ref_oid);
+    self.base_ref = try a.dupe(u8, params.base_ref);
+    self.head_ref = try a.dupe(u8, params.head_ref);
+    self.title = try a.dupe(u8, params.title);
+    self.author = try a.dupe(u8, params.author);
+    self.is_draft = params.is_draft;
+    self.number = params.number;
+    self.data_arena = arena;
+    self.active = true;
+    self.data_unavailable = true;
+}
+
+fn freeOwnerRepo(self: *ReviewSession, allocator: Allocator) void {
+    const owner_repo = self.owner_repo orelse return;
+    allocator.free(owner_repo.owner);
+    allocator.free(owner_repo.repo);
+    self.owner_repo = null;
+}
+
+/// A c_allocator copy of the session's owner/repo for one worker; null when
+/// unknown or out of memory (the worker then resolves it itself).
+fn workerOwnerRepo(self: *const ReviewSession) ?github.OwnerRepo {
+    const ca = std.heap.c_allocator;
+    const owner_repo = self.owner_repo orelse return null;
+    const owner = ca.dupe(u8, owner_repo.owner) catch return null;
+    const repo = ca.dupe(u8, owner_repo.repo) catch {
+        ca.free(owner);
+        return null;
+    };
+    return .{ .owner = owner, .repo = repo };
+}
+
+fn freeWorkerOwnerRepo(owner_repo: github.OwnerRepo) void {
+    std.heap.c_allocator.free(owner_repo.owner);
+    std.heap.c_allocator.free(owner_repo.repo);
+}
+
 /// Start the entry parked by `startEnterPr` while another was in flight. The
 /// generation was already bumped by that `startEnterPr`.
 fn startNextEntry(self: *ReviewSession, allocator: Allocator) !void {
@@ -1441,7 +1570,9 @@ fn startNextEntry(self: *ReviewSession, allocator: Allocator) !void {
 fn spawnWorker(self: *ReviewSession, allocator: Allocator) !void {
     self.entry.ready.store(false, .release);
     self.entry_in_flight = true;
-    self.entry_thread = std.Thread.spawn(.{}, entryWorker, .{self}) catch {
+    const owner_repo = workerOwnerRepo(self);
+    self.entry_thread = std.Thread.spawn(.{}, entryWorker, .{ self, owner_repo }) catch {
+        if (owner_repo) |known| freeWorkerOwnerRepo(known);
         self.entry_in_flight = false;
         self.pending_kind = .none;
         if (self.entering_base_ref.len > 0) {
@@ -1452,8 +1583,11 @@ fn spawnWorker(self: *ReviewSession, allocator: Allocator) !void {
     };
 }
 
-fn entryWorker(self: *ReviewSession) void {
+/// `known` is the session's owner/repo copied at spawn (c_allocator-owned,
+/// freed here); null means resolve it from the origin remote.
+fn entryWorker(self: *ReviewSession, known: ?github.OwnerRepo) void {
     const ca = std.heap.c_allocator;
+    defer if (known) |owner_repo| freeWorkerOwnerRepo(owner_repo);
     const number = self.entering_number;
     const kind = self.pending_kind;
 
@@ -1471,7 +1605,7 @@ fn entryWorker(self: *ReviewSession) void {
         }
         if (github.fetchRef(ca, .{ .number = number, .base_ref = base_ref, .git_bin = self.git_bin })) |hr| {
             git_ok = true;
-            head_ref = hr;
+            head_ref = pinFetchedHead(.{ .ref = hr, .git_bin = self.git_bin });
             base_ref_out = ca.dupe(u8, base_ref) catch null;
         } else |_| {
             git_ok = false;
@@ -1484,9 +1618,9 @@ fn entryWorker(self: *ReviewSession) void {
     var gh_ok = false;
     var raw_json: ?[]u8 = null;
     if (git_ok) {
-        if (github.getOriginOwnerRepo(ca, self.git_bin)) |owner_repo| {
-            defer ca.free(owner_repo.owner);
-            defer ca.free(owner_repo.repo);
+        const resolved_owner_repo: anyerror!github.OwnerRepo = if (known) |owner_repo| owner_repo else github.getOriginOwnerRepo(ca, self.git_bin);
+        if (resolved_owner_repo) |owner_repo| {
+            defer if (known == null) freeWorkerOwnerRepo(owner_repo);
             if (github.fetchReviewData(ca, .{ .owner_repo = owner_repo, .number = number, .gh_bin = self.gh_bin })) |fetch| {
                 switch (fetch) {
                     .ok => |raw| {
@@ -1535,6 +1669,19 @@ fn resolveBaseRef(ca: Allocator, params: github.PrByNumberParams) ResolvedBase {
         },
         .failed => |kind| return .{ .gh_error = kind },
     }
+}
+
+/// The commit `fetchRef` just landed in `ref` (c_allocator-owned; replaces
+/// `ref`), so the entered diff and `r` name that commit rather than a ref a
+/// later fetch can move or rewind. Keeps `ref` when git cannot resolve it.
+fn pinFetchedHead(params: struct { ref: []u8, git_bin: []const u8 }) []u8 {
+    const ca = std.heap.c_allocator;
+    const oid = github.resolveCommit(ca, .{ .ref = params.ref, .git_bin = params.git_bin }) orelse {
+        std.log.warn("review entry: {s} did not resolve to a commit; diffing the ref", .{params.ref});
+        return params.ref;
+    };
+    ca.free(params.ref);
+    return oid;
 }
 
 /// Tear down the current review-data arena and reset all payload-backed fields.
@@ -3535,6 +3682,7 @@ const fake_gh_script =
     \\#!/bin/sh
     \\d=$(dirname "$0")
     \\echo "$*" >> "$d/gh.log"
+    \\[ -f "$d/sleep" ] && sleep "$(cat "$d/sleep")"
     \\case "$*" in
     \\  *number=42*) cat "$d/review-42.json" ;;
     \\  *number=7*)  cat "$d/review-7.json" ;;
@@ -3550,10 +3698,14 @@ const fake_git_script =
     \\case "$1" in
     \\  fetch) exit 0 ;;
     \\  config) echo https://github.com/fake/repo.git ;;
+    \\  rev-parse) echo 7777777777777777777777777777777777777777 ;;
     \\  *) exit 1 ;;
     \\esac
     \\
 ;
+
+/// What `fake_git_script` answers to `rev-parse`.
+const fake_rev_parse_oid = "7" ** 40;
 
 test "resetForSwitch: clears per-PR state and bumps generation" {
     const a = testing.allocator;
@@ -3633,7 +3785,7 @@ test "review_controller: startEnterPr while in flight enters latest" {
     try testing.expectEqual(@as(u32, 7), session.next_entry.?.number);
 
     try waitReady(&session.entry.ready);
-    try testing.expect(pollPending(&session, a) == .none);
+    try testing.expect(pollPending(&session, a) == .superseded);
     try testing.expect(session.entry_in_flight);
     try testing.expect(session.next_entry == null);
 
@@ -3642,7 +3794,7 @@ test "review_controller: startEnterPr while in flight enters latest" {
     try testing.expect(outcome == .entered);
     defer a.free(outcome.entered.head_ref);
     defer a.free(outcome.entered.base_ref);
-    try testing.expectEqualStrings("refs/skim/pr-7", outcome.entered.head_ref);
+    try testing.expectEqualStrings(fake_rev_parse_oid, outcome.entered.head_ref);
     try testing.expectEqualStrings("develop", outcome.entered.base_ref);
     try testing.expect(outcome.entered.gh_error == null);
     try testing.expectEqual(@as(u32, 7), session.number);
@@ -3672,7 +3824,7 @@ test "review_controller: stale-generation entry result discarded" {
     session.entry.raw_json = try ca.dupe(u8, canned_payload);
     session.entry.ready.store(true, .release);
 
-    try testing.expect(pollPending(&session, a) == .none);
+    try testing.expect(pollPending(&session, a) == .superseded);
     try testing.expect(!isActive(&session));
     try testing.expectEqual(@as(usize, 0), session.threads.items.len);
     try testing.expect(!session.entry_in_flight);
@@ -3798,7 +3950,7 @@ test "leaveSurface: an in-flight entry is discarded and the parked one never sta
     session.entry.fetched_head_ref = try ca.dupe(u8, "refs/skim/pr-42");
     session.entry.fetched_base_ref = try ca.dupe(u8, "main");
     session.entry.ready.store(true, .release);
-    try testing.expect(pollPending(&session, a) == .none);
+    try testing.expect(pollPending(&session, a) == .superseded);
     try testing.expect(!session.entry_in_flight);
     try testing.expect(!isActive(&session));
 }
@@ -3912,7 +4064,7 @@ test "startRefetch: a refetch superseded by a switch is discarded" {
     session.entry.raw_json = try ca.dupe(u8, canned_payload);
     session.entry.ready.store(true, .release);
 
-    try testing.expect(pollPending(&session, a) == .none);
+    try testing.expect(pollPending(&session, a) == .superseded);
     try testing.expect(!isActive(&session));
     try testing.expectEqual(@as(usize, 0), session.threads.items.len);
 
@@ -4192,6 +4344,326 @@ test "pollSubmit: stale submit result does not touch the new PR" {
     try testing.expect(submitError(&session) == null);
     try testing.expect(session.submit.submitting);
     try testing.expect(!session.submit_in_flight);
+}
+
+// --- enterFromCache (cache-hit flips) ----------------------------------------
+
+fn cacheParams(params: struct { number: u32 = 42, threads_json: ?[]const u8 = canned_payload, threads_fresh: bool = true }) CacheEnterParams {
+    return .{
+        .number = params.number,
+        .pr_node_id = "PR_cached",
+        .head_ref_oid = "cafe00",
+        .head_ref = "feat-cached",
+        .base_ref = "main",
+        .title = "Cached title",
+        .author = "cacher",
+        .is_draft = false,
+        .threads_json = params.threads_json,
+        .threads_fresh = params.threads_fresh,
+    };
+}
+
+/// An entry/refetch worker that is "in flight" without a thread: the test
+/// fills `entry` and sets `ready` itself.
+fn fakeInFlight(session: *ReviewSession, params: struct { kind: PendingKind = .enter, number: u32 = 7 }) void {
+    session.entry_in_flight = true;
+    session.pending_kind = params.kind;
+    session.entering_number = params.number;
+    session.entry.generation = session.generation;
+}
+
+fn landFakeEntry(session: *ReviewSession, payload: []const u8) !void {
+    const ca = std.heap.c_allocator;
+    session.entry.git_ok = true;
+    session.entry.fetched_head_ref = try ca.dupe(u8, "refs/skim/pr-7");
+    session.entry.fetched_base_ref = try ca.dupe(u8, "develop");
+    session.entry.gh_ok = true;
+    session.entry.raw_json = try ca.dupe(u8, payload);
+    session.entry.ready.store(true, .release);
+}
+
+test "enterFromCache: fresh thread JSON applies threads synchronously and returns .applied" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+
+    try testing.expectEqual(CacheEnterOutcome.applied, try enterFromCache(&session, a, cacheParams(.{})));
+
+    try testing.expect(isActive(&session));
+    try testing.expectEqual(@as(u32, 42), session.number);
+    try testing.expectEqualStrings("Widget", session.title);
+    try testing.expectEqual(@as(usize, 1), session.threads.items.len);
+    try testing.expectEqualStrings("PRRT_1", session.threads.items[0].data.id);
+    try testing.expect(!session.data_unavailable);
+    try testing.expect(!session.entry_in_flight);
+}
+
+test "enterFromCache: bumps generation, so the previous PR's pending entry is discarded" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    fakeInFlight(&session, .{});
+    const before = session.generation;
+
+    _ = try enterFromCache(&session, a, cacheParams(.{}));
+    try testing.expect(session.generation > before);
+
+    try landFakeEntry(&session, second_payload);
+    try testing.expect(pollPending(&session, a) == .superseded);
+    try testing.expectEqual(@as(u32, 42), session.number);
+    try testing.expectEqualStrings("Widget", session.title);
+}
+
+test "enterFromCache: payload for a different PR number is not applied" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{.{ .name = "review-7.json", .bytes = second_payload }});
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+
+    try testing.expectEqual(CacheEnterOutcome.metadata_only_refreshing, try enterFromCache(&session, a, cacheParams(.{ .number = 7 })));
+    try testing.expectEqual(@as(u32, 7), session.number);
+    try testing.expectEqualStrings("Cached title", session.title);
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+
+    try waitReady(&session.entry.ready);
+    try testing.expect(pollPending(&session, a) == .refreshed);
+    try testing.expectEqualStrings("Second", session.title);
+}
+
+test "enterFromCache: no JSON → metadata only, enough for a post to resolve" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{.{ .name = "review-42.json", .bytes = canned_payload }});
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+
+    try testing.expectEqual(CacheEnterOutcome.metadata_only_refreshing, try enterFromCache(&session, a, cacheParams(.{ .threads_json = null })));
+
+    try testing.expect(isActive(&session));
+    try testing.expect(session.data_unavailable);
+    try testing.expectEqualStrings("PR_cached", session.pr_node_id);
+    try testing.expectEqualStrings("cafe00", session.head_ref_oid);
+    try testing.expectEqualStrings("feat-cached", session.head_ref);
+    try testing.expectEqualStrings("main", session.base_ref);
+    try testing.expectEqualStrings("cacher", session.author);
+
+    try waitReady(&session.entry.ready);
+    const outcome = pollPending(&session, a);
+    try testing.expectEqual(@as(?github.GhErrorKind, null), outcome.refreshed);
+    try testing.expect(!session.data_unavailable);
+    try testing.expectEqualStrings("PR_1", session.pr_node_id);
+}
+
+test "enterFromCache: stale JSON applies and requests a refetch" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{.{ .name = "review-42.json", .bytes = pending_review_payload }});
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+
+    try testing.expectEqual(CacheEnterOutcome.applied_refreshing, try enterFromCache(&session, a, cacheParams(.{ .threads_fresh = false })));
+    try testing.expectEqual(@as(usize, 1), session.threads.items.len);
+    try testing.expect(session.entry_in_flight);
+
+    try waitReady(&session.entry.ready);
+    try testing.expect(pollPending(&session, a) == .refreshed);
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+    try testing.expectEqualStrings("PRR_mine", session.pending_review_id.?);
+}
+
+test "requestRefetch: while an entry worker is in flight it runs once the stale result is discarded" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{.{ .name = "review-42.json", .bytes = pending_review_payload }});
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+    fakeInFlight(&session, .{});
+
+    _ = try enterFromCache(&session, a, cacheParams(.{ .threads_fresh = false }));
+    try testing.expect(session.refetch_after_join);
+
+    try landFakeEntry(&session, second_payload);
+    try testing.expect(pollPending(&session, a) == .superseded);
+    try testing.expect(!session.refetch_after_join);
+    try testing.expect(session.entry_in_flight);
+    try testing.expectEqual(PendingKind.refetch, session.pending_kind);
+
+    try waitReady(&session.entry.ready);
+    try testing.expect(pollPending(&session, a) == .refreshed);
+    try testing.expectEqual(@as(u32, 42), session.number);
+    try testing.expectEqualStrings("PRR_mine", session.pending_review_id.?);
+}
+
+test "enterFromCache: clears the previous PR's threads, anchors and expanded set" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try applyPayload(&session, canned_payload);
+    try toggleThreadExpanded(&session, a, 0);
+    const anchored = try a.alloc(AnchoredThread, 1);
+    anchored[0] = .{ .thread_idx = 0, .placement = .unplaced };
+    setAnchored(&session, a, anchored, 1);
+
+    _ = try enterFromCache(&session, a, cacheParams(.{ .number = 7, .threads_json = second_payload }));
+
+    try testing.expectEqual(@as(u32, 7), session.number);
+    try testing.expectEqual(@as(usize, 0), session.threads.items.len);
+    try testing.expectEqual(@as(usize, 0), session.anchored.len);
+    try testing.expectEqual(@as(usize, 0), session.expanded_threads.count());
+}
+
+test "enterFromCache: clears a parked next_entry, so a parked miss never starts after a hit" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    fakeInFlight(&session, .{});
+    try startEnterPr(&session, a, .{ .number = 9, .base_ref = "main" });
+    try testing.expect(session.next_entry != null);
+
+    _ = try enterFromCache(&session, a, cacheParams(.{}));
+    try testing.expect(session.next_entry == null);
+
+    try landFakeEntry(&session, second_payload);
+    try testing.expect(pollPending(&session, a) == .superseded);
+    try testing.expect(!session.entry_in_flight);
+    try testing.expectEqual(@as(u32, 42), session.number);
+}
+
+test "entryPending: a cache hit supersedes a slow entry still in flight" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{
+        .{ .name = "review-7.json", .bytes = second_payload },
+        .{ .name = "sleep", .bytes = "1" },
+    });
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+    try startEnterPr(&session, a, .{ .number = 7, .base_ref = "develop" });
+    try testing.expect(entryPending(&session));
+
+    _ = try enterFromCache(&session, a, cacheParams(.{}));
+
+    try testing.expect(session.entry_in_flight);
+    try testing.expect(!entryPending(&session));
+    try waitReady(&session.entry.ready);
+    try testing.expect(pollPending(&session, a) == .superseded);
+    try testing.expect(!entryPending(&session));
+}
+
+test "refreshInFlight: a superseded entry still in flight is not a refresh of the shown PR" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    fakeInFlight(&session, .{});
+
+    _ = try enterFromCache(&session, a, cacheParams(.{}));
+
+    try testing.expect(session.entry_in_flight);
+    try testing.expect(!refreshInFlight(&session));
+    try landFakeEntry(&session, second_payload);
+    try testing.expect(pollPending(&session, a) == .superseded);
+}
+
+test "refreshInFlight: a stale-thread hit is refreshing while the superseded entry drains and while its refetch runs" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{.{ .name = "review-42.json", .bytes = canned_payload }});
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+    fakeInFlight(&session, .{});
+
+    _ = try enterFromCache(&session, a, cacheParams(.{ .threads_fresh = false }));
+    try testing.expect(refreshInFlight(&session));
+
+    try landFakeEntry(&session, second_payload);
+    try testing.expect(pollPending(&session, a) == .superseded);
+    try testing.expect(refreshInFlight(&session));
+    try waitReady(&session.entry.ready);
+    try testing.expect(pollPending(&session, a) == .refreshed);
+    try testing.expect(!refreshInFlight(&session));
+}
+
+test "refreshInFlight: an entry of the next PR is not a refresh" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    fakeInFlight(&session, .{ .kind = .enter });
+
+    try testing.expect(!refreshInFlight(&session));
+}
+
+test "pollPending: an entry lands as the head oid the fetch put in refs/skim/pr-N" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{.{ .name = "review-7.json", .bytes = second_payload }});
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+
+    try startEnterPr(&session, a, .{ .number = 7, .base_ref = "develop" });
+    try waitReady(&session.entry.ready);
+    const outcome = pollPending(&session, a);
+
+    try testing.expect(outcome == .entered);
+    defer a.free(outcome.entered.head_ref);
+    defer a.free(outcome.entered.base_ref);
+    try testing.expectEqualStrings(fake_rev_parse_oid, outcome.entered.head_ref);
+}
+
+test "pollPending stale path: refetch_after_join does not run when a newer entry started" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{.{ .name = "review-7.json", .bytes = second_payload }});
+    defer fakes.deinit();
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = fakes.git };
+    defer deinitState(&session, a);
+    fakeInFlight(&session, .{ .number = 3 });
+
+    _ = try enterFromCache(&session, a, cacheParams(.{ .threads_fresh = false }));
+    try testing.expect(session.refetch_after_join);
+    try startEnterPr(&session, a, .{ .number = 7, .base_ref = "develop" });
+    try testing.expect(!session.refetch_after_join);
+
+    try landFakeEntry(&session, canned_payload);
+    try testing.expect(pollPending(&session, a) == .superseded);
+    try testing.expectEqual(PendingKind.enter, session.pending_kind);
+
+    try waitReady(&session.entry.ready);
+    const outcome = pollPending(&session, a);
+    try testing.expect(outcome == .entered);
+    a.free(outcome.entered.head_ref);
+    a.free(outcome.entered.base_ref);
+    try testing.expectEqual(@as(u32, 7), session.number);
+    const log = try fakes.ghLog();
+    defer a.free(log);
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, log, "number=42"));
+}
+
+test "startRefetch: a known owner/repo spawns gh only, never git" {
+    const a = testing.allocator;
+    var fakes = try FakeBins.init(&.{.{ .name = "review-42.json", .bytes = canned_payload }});
+    defer fakes.deinit();
+    // A git that cannot run: resolving owner/repo through it would fail the refetch.
+    var session = ReviewSession{ .gh_bin = fakes.gh, .git_bin = "/nonexistent/skim-test-git" };
+    defer deinitState(&session, a);
+    try setOwnerRepo(&session, a, .{ .owner = "fake", .repo = "repo" });
+    try applyPayload(&session, canned_payload);
+
+    try startRefetch(&session, a);
+    try waitReady(&session.entry.ready);
+    const outcome = pollPending(&session, a);
+    try testing.expectEqual(@as(?github.GhErrorKind, null), outcome.refreshed);
+    const log = try fakes.ghLog();
+    defer a.free(log);
+    try testing.expect(std.mem.indexOf(u8, log, "owner=fake") != null);
+}
+
+test "setOwnerRepo: replacing the owner/repo frees the previous copy" {
+    const a = testing.allocator;
+    var session = ReviewSession{};
+    defer deinitState(&session, a);
+    try setOwnerRepo(&session, a, .{ .owner = "one", .repo = "r1" });
+    try setOwnerRepo(&session, a, .{ .owner = "two", .repo = "r2" });
+    try testing.expectEqualStrings("two", session.owner_repo.?.owner);
 }
 
 /// Fake `gh` and `git` executables in a temp dir for one test. The REAL

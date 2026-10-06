@@ -78,6 +78,9 @@ pub const CommentStore = struct {
     /// Monotonic source of `Comment.id`. Never decremented, so a deleted
     /// comment's id cannot be handed to a later one.
     next_id: u64,
+    /// Bumped by every successful mutation, so a persister can tell the store
+    /// changed without hooking each call site.
+    revision: u64 = 0,
 
     pub fn init(allocator: Allocator) CommentStore {
         return .{
@@ -113,6 +116,7 @@ pub const CommentStore = struct {
         };
         try self.comments.append(self.allocator, comment);
         self.next_id += 1;
+        self.revision += 1;
         return self.comments.items.len - 1;
     }
 
@@ -138,6 +142,7 @@ pub const CommentStore = struct {
         const text = try self.allocator.dupe(u8, new_text);
         self.allocator.free(comment.text);
         comment.text = text;
+        self.revision += 1;
     }
 
     /// Append a reply to a comment's thread. Returns the reply's index.
@@ -151,6 +156,7 @@ pub const CommentStore = struct {
         };
         errdefer reply.deinit(self.allocator);
         try comment.replies.append(self.allocator, reply);
+        self.revision += 1;
         return comment.replies.items.len - 1;
     }
 
@@ -164,6 +170,7 @@ pub const CommentStore = struct {
         const text = try self.allocator.dupe(u8, new_text);
         self.allocator.free(reply.text);
         reply.text = text;
+        self.revision += 1;
     }
 
     /// Delete a reply from a comment's thread
@@ -174,6 +181,7 @@ pub const CommentStore = struct {
 
         const reply = comment.replies.orderedRemove(reply_idx);
         reply.deinit(self.allocator);
+        self.revision += 1;
     }
 
     /// Number of replies threaded under a comment
@@ -188,6 +196,7 @@ pub const CommentStore = struct {
 
         var comment = self.comments.orderedRemove(comment_idx);
         comment.deinit(self.allocator);
+        self.revision += 1;
     }
 
     /// Clear all comments
@@ -196,6 +205,7 @@ pub const CommentStore = struct {
             comment.deinit(self.allocator);
         }
         self.comments.clearRetainingCapacity();
+        self.revision += 1;
     }
 
     /// Find comment at specific location (returns index or null)

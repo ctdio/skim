@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Phase 6a offline harness for the PR sidebar surface. Builds a disposable,
+# Phase 6a/6b offline harness for the PR sidebar surface. Builds a disposable,
 # fully offline world, then runs zig-out/bin/pr_surface_harness (the real App,
-# SyncWorker and review entry worker, in-process) and the optional tmux smoke
-# test S12 against the real zig-out/bin/skim.
+# SyncWorker, PrefetchWorker and review entry worker, in-process) and the
+# optional tmux smoke test S12 against the real zig-out/bin/skim.
 #
 # World (under $WORK):
 #   origin.git, clone/, bin/gh, fixtures/review-N.json, targets.tsv, gh.log
@@ -18,12 +18,21 @@
 #                       `slow` holds every call for 8s (S14)
 #   bin/gt              stub Graphite CLI that always fails
 #   home/.skim/         HOME for the harness and S12 (prs.db, config.json)
+# 6b additions:
+#   files-N.txt         paths in main...refs/pull/N/head (flip-world.sh files)
+#   stale/review-10.json  review-10.json plus one thread PRRT_STALE_10 (H6)
+#   bin/{xclip,xsel,wl-copy,pbcopy}  clipboard fakes writing clipboard.txt (H3)
+#   exec-marks/         target dir of the harness's no-spawn window markers
+#   exec.log            strace execve audit, when strace is usable (see below)
 #
 # Usage:
 #   scripts/test-infra/pr-sidebar/surface-harness.sh [all|S1..S14|seed-only <fixture>] 2>&1 | tee /tmp/p6a-harness.log
 #   scripts/test-infra/pr-sidebar/surface-harness.sh --check-world   # verify the world only (no harness binary)
 #   KEEP_WORK=1   keep $WORK after the run (always kept when something failed)
 #   SKIM_HARNESS_NO_BUILD=1   skip `zig build pr-surface-harness` / `zig build`
+#   SKIM_HARNESS_EXEC_AUDIT=0 do not run the harness under strace (default: on
+#                             when strace works). The audit fails any execve
+#                             inside a no-spawn window the harness marked.
 #
 # Output: PASS/FAIL/SKIP lines; exit 1 on any FAIL. `grep -c '^FAIL'` must be 0.
 set -uo pipefail
@@ -38,7 +47,8 @@ SKIM_BIN="$ROOT/zig-out/bin/skim"
 
 REPO_URL="https://github.com/skim-fixture/repo.git"
 # In-process scenarios; S12 runs from this script.
-IN_PROCESS="S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S13 S14"
+IN_PROCESS="S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S13 S14 H0 H1 H2 H3 H4a H4b H5 M2 R1 H6 H7 H8"
+FLIP_WORLD="$HERE/flip-world.sh"
 FAILS=0
 
 main() {
@@ -102,6 +112,22 @@ build_world() {
   write_sync_kind unauthenticated "$SYNC_DIR/captured/auth-failure" || return 1
   mkdir -p "$WORK/sync/missing"
   write_slow_kind
+  write_flip_world
+}
+
+# 6b: expected file lists, the stale thread payload for H6, clipboard fakes
+# for the H3 export check, and the marker directory for the exec audit.
+write_flip_world() {
+  WORK="$WORK" "$FLIP_WORLD" files || return 1
+  mkdir -p "$WORK/stale" "$WORK/exec-marks"
+  sed 's/"reviewThreads":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":\[\]}/"reviewThreads":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PRRT_STALE_10","isResolved":false,"isOutdated":false,"line":1,"startLine":null,"originalLine":1,"diffSide":"RIGHT","startDiffSide":null,"path":"feat_10.txt","subjectType":"LINE","comments":{"pageInfo":{"hasNextPage":false},"nodes":[{"id":"PRRC_STALE_10","databaseId":9010,"author":{"login":"alice"},"body":"STALE-THREAD-10","createdAt":"2000-01-01T00:00:00Z","diffHunk":"@@ -0,0 +1 @@","pullRequestReview":{"id":"PRR_STALE_10","state":"COMMENTED"},"replyTo":null}]}}]}/' \
+    "$WORK/fixtures/review-10.json" >"$WORK/stale/review-10.json" || return 1
+  grep -q PRRT_STALE_10 "$WORK/stale/review-10.json" || return 1
+  local tool
+  for tool in xclip xsel wl-copy pbcopy; do
+    printf '#!/bin/sh\ncat >%q\n' "$WORK/clipboard.txt" >"$WORK/bin/$tool"
+    chmod +x "$WORK/bin/$tool"
+  done
 }
 
 # sync/slow/gh: logs each call, then holds it for 8s before answering, so a
@@ -153,6 +179,7 @@ export_env() {
   export SKIM_HARNESS_SYNC_FAKE="$SYNC_FAKE"
   export SKIM_HARNESS_SYNC_DIR="$WORK/sync"
   export SKIM_HARNESS_TARGETS="$WORK/targets.tsv"
+  export SKIM_HARNESS_FLIP_WORLD="$FLIP_WORLD"
   SKIM_HARNESS_PR9_FILES="$(pr_file_count 9)"
   export SKIM_HARNESS_PR9_FILES
   # Belt and braces: a gh call that bypasses both gh_bin options still hits a
@@ -185,12 +212,54 @@ build_binaries() {
 
 run_in_process() {
   [ -x "$HARNESS_BIN" ] || { fail setup "$HARNESS_BIN missing (run: zig build pr-surface-harness)"; return; }
-  (cd "$WORK/clone" && "$HARNESS_BIN" "$1") 2>"$WORK/harness-stderr.log"
+  local tracer=()
+  if exec_audit_enabled; then
+    tracer=(strace -f -qq --seccomp-bpf -e trace=execve,execveat,access,faccessat,faccessat2 -o "$WORK/exec.log")
+  fi
+  (cd "$WORK/clone" && "${tracer[@]}" "$HARNESS_BIN" "$1") 2>"$WORK/harness-stderr.log"
   local code=$?
   if ((code != 0)); then
     FAILS=$((FAILS + 1))
     echo "  (harness exit $code; stderr: $WORK/harness-stderr.log)"
   fi
+  # Handled failures log at warn; an error-level line is a failure nothing
+  # surfaced to the user.
+  if grep -aq '^error:' "$WORK/harness-stderr.log"; then
+    fail stderr "error-level log lines in $WORK/harness-stderr.log:"
+    grep -a '^error:' "$WORK/harness-stderr.log" | sort | uniq -c | sed 's/^/    /'
+  fi
+  ((${#tracer[@]} > 0)) && check_exec_audit
+}
+
+# Exec audit (6b H-scenarios): the harness touches
+# exec-marks/<id>-<n>-begin / -end around every no-spawn window. Any execve in
+# the trace between a begin and its end is a subprocess the GIT_TRACE / gh.log
+# accounting could miss (a binary other than git or gh, or git with GIT_TRACE
+# stripped from its env).
+check_exec_audit() {
+  local windows bad flagged
+  windows="$(grep -c 'exec-marks/.*-begin' "$WORK/exec.log" || true)"
+  # Successful execs only: PATH lookup also logs one failed execve per
+  # directory tried.
+  bad="$(awk '
+    /exec-marks\/.*-begin"/ { match($0, /exec-marks\/[^"]*-begin/); open_mark = substr($0, RSTART + 11, RLENGTH - 17); next }
+    /exec-marks\/.*-end"/ { open_mark = ""; next }
+    open_mark != "" && /execve(at)?\(/ && / = 0$/ { print open_mark ": " $0 }
+  ' "$WORK/exec.log")"
+  if [ -n "$bad" ]; then
+    flagged="$(cut -d: -f1 <<<"$bad" | uniq | tr '\n' ' ')"
+    fail exec-audit "execve inside no-spawn window(s): $flagged(see $WORK/exec.log)"
+    awk -F': ' '!seen[$1]++' <<<"$bad" | cut -c1-200 | sed 's/^/    /'
+  elif ((windows > 0)); then
+    pass exec-audit "no execve inside $windows no-spawn window(s) (strace)"
+  fi
+}
+
+# strace with seccomp-bpf, and ptrace of our own children allowed.
+exec_audit_enabled() {
+  [ "${SKIM_HARNESS_EXEC_AUDIT:-1}" != 0 ] || return 1
+  command -v strace >/dev/null || return 1
+  strace -f -qq --seccomp-bpf -e trace=execve -o /dev/null true 2>/dev/null
 }
 
 # Every sync call must go through gh_bin (the sync launchers), never through
@@ -300,6 +369,93 @@ check_world() {
 
   [ "$(grep -vc '^#' "$SKIM_HARNESS_TARGETS")" = 14 ] && pass W12 "targets.tsv lists 14 PRs (origin14 fixture)" ||
     fail W12 "targets.tsv does not list 14 PRs"
+
+  check_flip_world
+}
+
+# W13+ (6b). The flip-world ops run last: they mutate origin and targets.tsv.
+check_flip_world() {
+  local n missing="" started elapsed out old new mb
+
+  for n in $(tsv_numbers_of "$SKIM_HARNESS_TARGETS"); do
+    [ "$n" = 6 ] && continue
+    [ -s "$WORK/files-$n.txt" ] || missing+=" $n"
+  done
+  [ -z "$missing" ] && [ ! -e "$WORK/files-6.txt" ] && [ "$(cat "$WORK/files-9.txt" | tr '\n' ' ')" = "feat_9.txt shared.txt " ] &&
+    pass W13 "files-N.txt written for every PR with a ref (none for PR 6); files-9 = feat_9.txt shared.txt" ||
+    fail W13 "files-N.txt missing for:$missing (files-9: $(tr '\n' ' ' <"$WORK/files-9.txt" 2>/dev/null))"
+
+  echo 1 >"$FAKE_GH_FIXTURES/sleep-9"
+  started="$(date +%s%N)"
+  out="$("$SKIM_HARNESS_REVIEW_GH" api graphql -f query=x -F number=9 2>&1)"
+  elapsed=$((($(date +%s%N) - started) / 1000000))
+  rm -f "$FAKE_GH_FIXTURES/sleep-9"
+  ((elapsed >= 900)) && grep -q '"number":9' <<<"$out" &&
+    pass W14 "fixtures/sleep-9 delays the fake gh answer for PR 9 (${elapsed}ms) (H6)" ||
+    fail W14 "sleep-9 answer took ${elapsed}ms, output ${out:0:80}"
+  started="$(date +%s%N)"
+  "$SKIM_HARNESS_REVIEW_GH" api graphql -f query=x -F number=10 >/dev/null 2>&1
+  elapsed=$((($(date +%s%N) - started) / 1000000))
+  ((elapsed < 900)) && pass W15 "without a sleep file the fake answers at once (${elapsed}ms)" ||
+    fail W15 "fake gh took ${elapsed}ms with no sleep file"
+
+  grep -q '"id":"PRRT_STALE_10"' "$WORK/stale/review-10.json" &&
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); t=d["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]; assert [x["id"] for x in t]==["PRRT_STALE_10"]' \
+      "$WORK/stale/review-10.json" 2>/dev/null &&
+    pass W16 "stale/review-10.json parses and carries exactly one thread PRRT_STALE_10 (H6)" ||
+    fail W16 "stale/review-10.json malformed or missing PRRT_STALE_10"
+
+  rm -f "$WORK/clipboard.txt"
+  echo "clip-probe" | xclip -selection clipboard
+  [ "$(command -v xclip)" = "$WORK/bin/xclip" ] && [ "$(cat "$WORK/clipboard.txt" 2>/dev/null)" = clip-probe ] &&
+    pass W17 "clipboard fakes (xclip/xsel/wl-copy/pbcopy) write clipboard.txt (H3 export)" ||
+    fail W17 "clipboard fake: $(command -v xclip), clipboard.txt='$(cat "$WORK/clipboard.txt" 2>/dev/null)'"
+  rm -f "$WORK/clipboard.txt"
+
+  out="$("$SKIM_HARNESS_FLIP_WORLD" rewrite-pr5)" || out=""
+  old="$(sed -n 's/^old=\([0-9a-f]*\) .*/\1/p' <<<"$out")"
+  new="$(sed -n 's/.* new=\([0-9a-f]*\)$/\1/p' <<<"$out")"
+  mb="$(git -C "$WORK/origin.git" merge-base "$old" "$new" 2>/dev/null)"
+  [ -n "$new" ] && [ "$mb" != "$old" ] && [ "$(tsv_field 5 head_oid)" = "$new" ] &&
+    [ "$(tsv_field 5 base_oid)" = "$(git -C "$WORK/origin.git" rev-parse main)" ] &&
+    [ "$(git -C "$WORK/origin.git" rev-parse refs/pull/5/head)" = "$new" ] &&
+    [ "$(tr '\n' ' ' <"$WORK/files-5.txt")" = "feat_5.txt shared.txt " ] &&
+    grep -q '"headRefOid":"'"$new"'"' "$FAKE_GH_FIXTURES/review-5.json" &&
+    pass W18 "flip-world rewrite-pr5: history rewritten (merge-base(old,new) != old), tsv/ref/fixture/files-5 updated (H4a, H5)" ||
+    fail W18 "rewrite-pr5: out='$out' mb=$mb"
+
+  out="$("$SKIM_HARNESS_FLIP_WORLD" ff-pr14)" || out=""
+  old="$(sed -n 's/^old=\([0-9a-f]*\) .*/\1/p' <<<"$out")"
+  new="$(sed -n 's/.* new=\([0-9a-f]*\)$/\1/p' <<<"$out")"
+  [ -n "$new" ] && [ "$(git -C "$WORK/origin.git" merge-base "$old" "$new")" = "$old" ] &&
+    [ "$(git -C "$WORK/origin.git" diff --name-only "$old" "$new")" = inc.txt ] &&
+    [ "$(tsv_field 14 head_oid)" = "$new" ] &&
+    pass W19 "flip-world ff-pr14: fast-forward, old..new touches inc.txt only (H4b)" ||
+    fail W19 "ff-pr14: out='$out'"
+
+  out="$("$SKIM_HARNESS_FLIP_WORLD" drop-file-pr9)" || out=""
+  [ -n "$out" ] && [ "$(tr '\n' ' ' <"$WORK/files-9.txt")" = "shared.txt " ] &&
+    [ "$(tsv_field 9 head_oid)" = "$(git -C "$WORK/origin.git" rev-parse refs/pull/9/head)" ] &&
+    pass W20 "flip-world drop-file-pr9: PR 9 now touches shared.txt only (H3 orphan)" ||
+    fail W20 "drop-file-pr9: out='$out' files-9='$(tr '\n' ' ' <"$WORK/files-9.txt")'"
+
+  if exec_audit_enabled; then
+    pass W21 "strace --seccomp-bpf works: the exec audit will run (SKIM_HARNESS_EXEC_AUDIT=0 disables)"
+  else
+    echo "SKIP W21: strace unavailable or disabled; H-scenarios rely on GIT_TRACE + gh.log only"
+  fi
+}
+
+# tsv_field <number> <column>: one cell of targets.tsv (column names from its header).
+tsv_field() {
+  awk -F'\t' -v n="$1" -v col="$2" '
+    NR == 1 { sub(/^# /, ""); for (i = 1; i <= NF; i++) idx[$i] = i; next }
+    $1 == n { print $idx[col] }
+  ' "$SKIM_HARNESS_TARGETS"
+}
+
+tsv_numbers_of() {
+  awk -F'\t' '!/^#/ { print $1 }' "$1"
 }
 
 # check_sync_kind <id> <kind> <exit-code> <stderr-needle>: every SkimSync*
@@ -338,7 +494,7 @@ check_prerequisites() {
 }
 
 cleanup() {
-  if ((FAILS == 0)) && [ -z "${KEEP_WORK:-}" ]; then
+  if ((FAILS == 0)) && [ "${KEEP_WORK:-0}" != 1 ]; then
     rm -rf "$WORK"
   else
     echo "kept WORK=$WORK"

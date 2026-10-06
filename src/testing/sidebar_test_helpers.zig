@@ -1169,6 +1169,18 @@ test "snapshot: pr_surface_with_agent" {
     try expectAppSnapshot(.{ .name = "pr_surface_with_agent", .cols = 140, .rows = 30, .agent_panel = true });
 }
 
+test "snapshot: diff_header_changed_since_seen" {
+    try expectAppSnapshot(.{ .name = "diff_header_changed_since_seen", .cols = 120, .rows = 24, .file_count = 3, .changed_files = &.{ false, true, false } });
+}
+
+test "snapshot: since_seen_indicator" {
+    try expectAppSnapshot(.{ .name = "since_seen_indicator", .cols = 120, .rows = 24, .previewed = 813, .previewed_view = .since_seen });
+}
+
+test "snapshot: whole_stack_indicator" {
+    try expectAppSnapshot(.{ .name = "whole_stack_indicator", .cols = 120, .rows = 24, .previewed = 813, .previewed_view = .whole_stack });
+}
+
 test "help: with the sidebar open, the diff's hunk filter and page up list the keys that still reach them" {
     var app = try diffFocusedApp();
     defer app.deinit();
@@ -1329,6 +1341,715 @@ test "filter prompt: non-ASCII text is typed through" {
     try app.handleKey(.{ .codepoint = 0xE9, .text = "\u{e9}" });
 
     try testing.expectEqual(before + 2, app.state.sidebar.prompt.?.len);
+}
+
+// =============================================================================
+// 6b: flip wiring
+// =============================================================================
+
+test "comments store: every mutating method bumps revision" {
+    var store = root.comments.CommentStore.init(testing.allocator);
+    defer store.deinit();
+    var last = store.revision;
+
+    _ = try store.add(.{ .file_path = "a.txt", .hunk_idx = 0, .line_idx = 0, .text = "t", .line_type = .add, .line_content = "x" });
+    try expectBumped(&last, store.revision);
+    try store.updateComment(0, "t2");
+    try expectBumped(&last, store.revision);
+    _ = try store.addReply(0, "you", "r");
+    try expectBumped(&last, store.revision);
+    try store.updateReply(0, 0, "r2");
+    try expectBumped(&last, store.revision);
+    try store.deleteReply(0, 0);
+    try expectBumped(&last, store.revision);
+    try store.deleteComment(0);
+    try expectBumped(&last, store.revision);
+    store.clearAll();
+    try expectBumped(&last, store.revision);
+
+    // A rejected mutation changes nothing, so it does not count.
+    try testing.expectError(error.InvalidCommentIndex, store.updateComment(5, "x"));
+    try testing.expectEqual(last, store.revision);
+}
+
+test "recordByNumber: finds a PR hidden by the filter; unknown number is null" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "is:draft");
+
+    try testing.expectEqual(@as(u32, 812), controller.recordByNumber(&sb, 812).?.number);
+    try testing.expect(controller.recordByNumber(&sb, 1) == null);
+}
+
+test "stackPlace: a middle member has its parent, the stack's bottom and tip" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    const items = sb.records.?.items;
+
+    const place = controller.stackPlace(&sb, controller.recordIndex(&sb, 813).?);
+
+    try testing.expectEqual(@as(u32, 812), items[place.parent.?].number);
+    try testing.expectEqual(@as(u32, 812), items[place.bottom.?].number);
+    try testing.expectEqual(@as(u32, 814), items[place.tip.?].number);
+}
+
+test "stackPlace: a standalone PR has no parent, bottom or tip" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+
+    const place = controller.stackPlace(&sb, controller.recordIndex(&sb, first_standalone).?);
+
+    try testing.expect(place.parent == null and place.bottom == null and place.tip == null);
+}
+
+test "view: rows of PRs in sidebar.cached show the cache glyph" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try sb.cached.put(testing.allocator, first_standalone, {});
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const v = controller.view(&sb, viewParams(arena.allocator()));
+
+    try testing.expectEqual(first_standalone, v.rows[2].number);
+    try testing.expectEqual(sidebar_render.CacheState.cached, v.rows[2].cache);
+    try testing.expectEqual(sidebar_render.CacheState.unknown, v.rows[3].cache);
+}
+
+// -----------------------------------------------------------------------------
+// 6b: notes on a temp-file DB (pr_surface.saveNotes / restoreNotes)
+// -----------------------------------------------------------------------------
+
+test "saveNotes: inserts new comments with linenos and line content; note_ids filled" {
+    var nx = try NotesFixture.init();
+    defer nx.deinit();
+    _ = try nx.comments.add(noteOnAddedA("first"));
+
+    try nx.save(101);
+
+    var rows = try nx.listNotes(101);
+    defer rows.deinit();
+    try testing.expectEqual(@as(usize, 1), rows.items.len);
+    try testing.expectEqualStrings("a.txt", rows.items[0].file_path);
+    try testing.expectEqualStrings("add", rows.items[0].line_type);
+    try testing.expectEqual(@as(?u32, 2), rows.items[0].new_lineno);
+    try testing.expectEqualStrings("added-a", rows.items[0].line_content);
+    try testing.expectEqualStrings("first", rows.items[0].text);
+    try testing.expectEqual(rows.items[0].id, nx.note_ids.get(nx.comments.comments.items[0].id).?);
+}
+
+test "saveNotes: edited text and a new reply update the row in place" {
+    var nx = try NotesFixture.init();
+    defer nx.deinit();
+    _ = try nx.comments.add(noteOnAddedA("first"));
+    try nx.save(101);
+
+    try nx.comments.updateComment(0, "edited");
+    _ = try nx.comments.addReply(0, "you", "agreed");
+    try nx.save(101);
+
+    var rows = try nx.listNotes(101);
+    defer rows.deinit();
+    try testing.expectEqual(@as(usize, 1), rows.items.len);
+    try testing.expectEqualStrings("edited", rows.items[0].text);
+    try testing.expect(std.mem.indexOf(u8, rows.items[0].replies, "agreed") != null);
+}
+
+test "saveNotes: a deleted comment deletes its row" {
+    var nx = try NotesFixture.init();
+    defer nx.deinit();
+    _ = try nx.comments.add(noteOnAddedA("first"));
+    try nx.save(101);
+
+    try nx.comments.deleteComment(0);
+    try nx.save(101);
+
+    var rows = try nx.listNotes(101);
+    defer rows.deinit();
+    try testing.expectEqual(@as(usize, 0), rows.items.len);
+}
+
+test "saveNotes: a row not in note_ids (an orphan) survives a save" {
+    var nx = try NotesFixture.init();
+    defer nx.deinit();
+    _ = try nx.store().insertNote(nx.fx.surface.repo_id, orphanRow(101));
+
+    try nx.save(101);
+
+    var rows = try nx.listNotes(101);
+    defer rows.deinit();
+    try testing.expectEqual(@as(usize, 1), rows.items.len);
+    try testing.expectEqualStrings("lost note", rows.items[0].text);
+}
+
+test "restoreNotes: PR A's notes land in the store; PR B's do not" {
+    var nx = try NotesFixture.init();
+    defer nx.deinit();
+    _ = try nx.comments.add(noteOnAddedA("for-101"));
+    try nx.save(101);
+    nx.comments.clearAll();
+    _ = try nx.comments.add(noteOnAddedA("for-102"));
+    try nx.save(102);
+    nx.comments.clearAll();
+
+    try nx.restore(101);
+
+    try testing.expectEqual(@as(usize, 1), nx.comments.comments.items.len);
+    try testing.expectEqualStrings("for-101", nx.comments.comments.items[0].text);
+    try testing.expectEqual(@as(u32, 1), nx.note_ids.count());
+}
+
+test "restoreNotes: an unanchorable note becomes an orphan and stays in the DB" {
+    var nx = try NotesFixture.init();
+    defer nx.deinit();
+    _ = try nx.store().insertNote(nx.fx.surface.repo_id, orphanRow(101));
+
+    try nx.restore(101);
+
+    try testing.expectEqual(@as(usize, 0), nx.comments.comments.items.len);
+    try testing.expectEqual(@as(usize, 1), nx.orphans.items.len);
+    try testing.expectEqualStrings("lost note", nx.orphans.items[0].text);
+    var rows = try nx.listNotes(101);
+    defer rows.deinit();
+    try testing.expectEqual(@as(usize, 1), rows.items.len);
+}
+
+// -----------------------------------------------------------------------------
+// 6b: App-level flip wiring (temp DB, no worker, no subprocess)
+// -----------------------------------------------------------------------------
+
+test "installParsedFiles: a set with a displayed_key is parked in the LRU, and take returns the same pointer" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try app.installParsedFiles(try root.parser.parse(testing.allocator, flip_diff_a));
+    const parked = app.state.files.ptr;
+    app.state.flip.displayed_key = key_a;
+
+    try app.installParsedFiles(try root.parser.parse(testing.allocator, flip_diff_b));
+
+    try testing.expect(app.state.flip.displayed_key == null);
+    const lru = &app.state.flip.lru.?;
+    const taken = lru.take(key_a).?;
+    try testing.expectEqual(parked, taken.ptr);
+    lru.put(key_a, taken);
+}
+
+test "installParsedFiles: a set without a displayed_key is freed, not parked" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try app.installParsedFiles(try root.parser.parse(testing.allocator, flip_diff_a));
+
+    try app.installParsedFiles(try root.parser.parse(testing.allocator, flip_diff_b));
+
+    try testing.expect(!app.state.flip.lru.?.contains(key_a));
+    try testing.expectEqualStrings("b.txt", app.state.files[0].new_path);
+}
+
+test "installPrDiff: keeps the sidebar focused" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+
+    try fx.install(.{ .number = 101 });
+
+    try testing.expectEqual(root.App.Mode.pr_review, fx.app.mode);
+    try testing.expectEqual(@as(?u32, 101), fx.app.state.flip.previewed);
+    try testing.expectEqual(@as(u32, 101), fx.app.state.review.number);
+}
+
+test "installPrDiff: diff_source is origin/<base>...<cached head oid> with the merge base" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+
+    try fx.install(.{ .number = 101 });
+
+    const refs = fx.app.state.diff_source.two_refs;
+    try testing.expectEqualStrings("origin/main", refs.ref1);
+    try testing.expectEqualStrings(oid_a, refs.ref2);
+    try testing.expect(refs.use_merge_base);
+}
+
+test "installPrDiff: after A then B the comment store holds only B's notes, and A's are saved" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    _ = try app.state.comment_store.add(noteOnAddedA("note-a"));
+
+    try fx.install(.{ .number = 102 });
+
+    try testing.expectEqual(@as(usize, 0), app.state.comment_store.comments.items.len);
+    _ = try app.state.comment_store.add(noteOnAddedB("note-b"));
+    try fx.install(.{ .number = 101 });
+    try testing.expectEqual(@as(usize, 1), app.state.comment_store.comments.items.len);
+    try testing.expectEqualStrings("note-a", app.state.comment_store.comments.items[0].text);
+}
+
+test "installPrDiff: a failed install leaves the outgoing PR's saved notes untouched" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    _ = try app.state.comment_store.add(noteOnAddedA("note-a"));
+    _ = try fx.store().insertNote(fx.repoId(), orphanRow(102));
+    try fx.store().db.exec("UPDATE local_note SET new_lineno = -1 WHERE number = 102");
+
+    try testing.expectError(error.SqliteError, fx.install(.{ .number = 102 }));
+    app.tickPrSurface(0);
+
+    var rows = try fx.store().listNotes(testing.allocator, .{ .repo_id = fx.repoId(), .number = 101 });
+    defer rows.deinit();
+    try testing.expectEqual(@as(usize, 1), rows.items.len);
+    try testing.expectEqualStrings("note-a", rows.items[0].text);
+}
+
+test "previewMiss cancels a streaming load of the outgoing PR" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    app.state.review.gh_bin = flip_missing_bin;
+    app.state.review.git_bin = flip_missing_bin;
+    try app.refresh();
+    try testing.expect(app.state.diff_load.isLoading());
+
+    app.previewPr(102);
+
+    try testing.expect(!app.state.diff_load.isLoading());
+    try testing.expectEqual(@as(?u32, 102), app.state.flip.loading_number);
+}
+
+test "a failed PR→PR miss keeps the displayed PR previewed with its notes, and writes persist to it" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    _ = try app.state.comment_store.add(noteOnAddedA("note-a"));
+    app.state.review.gh_bin = flip_missing_bin;
+    app.state.review.git_bin = flip_missing_bin;
+
+    app.previewPr(102);
+    try fx.awaitEntryOutcome();
+
+    try testing.expectEqual(@as(?u32, null), app.state.flip.loading_number);
+    try testing.expectEqual(@as(?u32, 101), app.state.flip.previewed);
+    try testing.expect(app.localWritesBlocked() == null);
+    try testing.expectEqual(@as(usize, 1), app.state.comment_store.comments.items.len);
+    _ = try app.state.comment_store.add(noteOnAddedA("note-a2"));
+    app.tickPrSurface(0);
+    var rows = try fx.store().listNotes(testing.allocator, .{ .repo_id = fx.repoId(), .number = 101 });
+    defer rows.deinit();
+    try testing.expectEqual(@as(usize, 2), rows.items.len);
+}
+
+test "an explicit open that installs from the cache marks the PR seen" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    fx.app.state.flip.focus_diff = true;
+
+    try fx.install(.{ .number = 102 });
+
+    try testing.expectEqual(root.App.Mode.normal, fx.app.mode);
+    const row = (try fx.store().getSeen(fx.repoId(), 102)).?;
+    try testing.expectEqualStrings(oid_b, &row.head_oid);
+    try testing.expect(fx.app.state.flip.dwell_done);
+}
+
+test "the dwell's markSeen clears the previewed PR's changed-since-seen marks" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    root.flip.clearDiffState(&app.state.flip, testing.allocator, &app.state.collapsed_folds);
+    app.state.flip.changed_files = try testing.allocator.dupe(bool, &.{true});
+
+    app.tickPrSurface(app.state.flip.preview_started_ms + root.flip.dwell_ms);
+
+    try testing.expect(app.state.flip.dwell_done);
+    try testing.expectEqual(@as(usize, 0), app.state.flip.changed_files.len);
+}
+
+test "installPrDiff: the whole-stack view hides review threads" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+
+    try fx.install(.{ .number = 202, .view = .whole_stack });
+
+    try testing.expect(fx.app.reviewAnchored() == null);
+    try testing.expect(!fx.app.state.review.active);
+    try testing.expectEqual(root.flip.DiffView.whole_stack, fx.app.state.flip.previewed_view);
+    const refs = fx.app.state.diff_source.two_refs;
+    try testing.expectEqualStrings("origin/main", refs.ref1);
+    try testing.expectEqualStrings(oid_s2, refs.ref2);
+}
+
+test "installPrDiff: with fresh cached threads the session shows them without a refetch" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+
+    try fx.install(.{ .number = 101 });
+
+    try testing.expect(!fx.app.state.review.entry_in_flight);
+    try testing.expect(!fx.app.state.review.data_unavailable);
+    try testing.expectEqualStrings("Flip 101", fx.app.state.review.title);
+}
+
+test "refresh after a hit clears displayed_key, so the refreshed set is not parked" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    try testing.expect(app.state.flip.displayed_key != null);
+
+    try app.applyRefreshedFiles(try root.parser.parse(testing.allocator, flip_diff_a));
+
+    try testing.expect(app.state.flip.displayed_key == null);
+}
+
+test "changed-only toggle collapses exactly the unchanged files and restores them" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101, .diff = flip_diff_two_files });
+    root.flip.clearDiffState(&app.state.flip, testing.allocator, &app.state.collapsed_folds);
+    app.state.flip.changed_files = try testing.allocator.dupe(bool, &.{ false, true });
+
+    try root.pr_review_mode.toggleChangedOnly(app);
+
+    try testing.expectEqual(@as(u32, 1), app.state.collapsed_folds.count());
+    try testing.expect(app.state.collapsed_folds.contains(root.line_map.LineMap.FoldKey.fileKey(0)));
+    try root.pr_review_mode.toggleChangedOnly(app);
+    try testing.expectEqual(@as(u32, 0), app.state.collapsed_folds.count());
+}
+
+test "a refresh drops the changed-only folds, so the next toggle folds again" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101, .diff = flip_diff_two_files });
+    root.flip.clearDiffState(&app.state.flip, testing.allocator, &app.state.collapsed_folds);
+    app.state.flip.changed_files = try testing.allocator.dupe(bool, &.{ false, true });
+    try root.pr_review_mode.toggleChangedOnly(app);
+
+    try app.applyRefreshedFiles(try root.parser.parse(testing.allocator, flip_diff_two_files));
+
+    try testing.expectEqual(@as(u32, 0), app.state.collapsed_folds.count());
+}
+
+test "flip_controller.toggleChangedOnly folds the unchanged files, then unfolds exactly those" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101, .diff = flip_diff_two_files });
+    root.flip.clearDiffState(&app.state.flip, testing.allocator, &app.state.collapsed_folds);
+    app.state.flip.changed_files = try testing.allocator.dupe(bool, &.{ false, true });
+
+    try testing.expectEqual(root.flip_controller.ChangedOnly.folded, try root.flip_controller.toggleChangedOnly(app.flipCtx()));
+    try testing.expectEqual(@as(u32, 1), app.state.collapsed_folds.count());
+    try testing.expect(app.state.collapsed_folds.contains(root.line_map.LineMap.FoldKey.fileKey(0)));
+
+    try testing.expectEqual(root.flip_controller.ChangedOnly.unfolded, try root.flip_controller.toggleChangedOnly(app.flipCtx()));
+    try testing.expectEqual(@as(u32, 0), app.state.collapsed_folds.count());
+}
+
+test "flip_controller.toggleChangedOnly with no seen diff folds nothing" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101, .diff = flip_diff_two_files });
+    root.flip.clearDiffState(&app.state.flip, testing.allocator, &app.state.collapsed_folds);
+
+    try testing.expectEqual(root.flip_controller.ChangedOnly.no_seen_diff, try root.flip_controller.toggleChangedOnly(app.flipCtx()));
+    try testing.expectEqual(@as(u32, 0), app.state.collapsed_folds.count());
+}
+
+test "the dwell's markSeen requests a render, so the changed marks clear without a keypress" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    app.needs_render = false;
+
+    app.tickPrSurface(app.state.flip.preview_started_ms + root.flip.dwell_ms);
+
+    try testing.expect(app.state.flip.dwell_done);
+    try testing.expect(app.needs_render);
+}
+
+test "a superseded miss entry dropped after a cache hit requests a render" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    app.state.review.gh_bin = flip_missing_bin;
+    app.state.review.git_bin = flip_missing_bin;
+    app.previewPr(102);
+    try testing.expect(app.state.review.entry_in_flight);
+
+    try fx.install(.{ .number = 101 });
+
+    try fx.awaitEntrySettled();
+    try testing.expect(app.needs_render);
+    try testing.expectEqual(@as(?u32, 101), app.state.flip.previewed);
+}
+
+test "a superseded miss entry still in flight is not shown as refreshing the displayed PR" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    app.state.review.gh_bin = flip_missing_bin;
+    app.state.review.git_bin = flip_missing_bin;
+    app.previewPr(102);
+
+    try fx.install(.{ .number = 101 });
+
+    try testing.expect(app.state.review.entry_in_flight);
+    try testing.expect(!root.review_controller.refreshInFlight(&app.state.review));
+    const text = try statusText(app);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "refreshing") == null);
+    try fx.awaitEntrySettled();
+}
+
+test "snapshot: status_line_pr_hit" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    try fx.install(.{ .number = 101 });
+
+    const text = try statusText(&fx.app);
+    defer testing.allocator.free(text);
+    try snapshot.expectSnapshot(testing.allocator, "status_line_pr_hit", text);
+}
+
+test "status line in the since-seen view names the PR and shows both oids short" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    surface.markSeen(&app.state.pr_surface, .{ .allocator = testing.allocator, .number = 101, .sidebar = &app.state.sidebar, .now = now });
+
+    try fx.install(.{ .number = 101, .view = .since_seen });
+
+    const text = try statusText(app);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "[ddddddd..ddddddd]") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "PR #101") != null);
+}
+
+test "status line in the whole-stack view names the PR and shows the tip short" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+
+    try fx.install(.{ .number = 202, .view = .whole_stack });
+
+    const text = try statusText(&fx.app);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "[origin/main...2222222]") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "PR #202") != null);
+}
+
+test "status line keeps a ref that is not a 40-hex oid whole" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try app.enterReviewDiff(.{ .head_ref = "refs/skim/pr-101", .base_ref = "main" });
+
+    const text = try statusText(app);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "[origin/main...refs/skim/pr-101]") != null);
+}
+
+test "a miss that fails after a whole-stack load started restores the shown PR: notes back, writes allowed, its own diff source" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 202 });
+    _ = try app.state.comment_store.add(noteOnAddedB("note-202"));
+    app.state.review.gh_bin = flip_missing_bin;
+    app.state.review.git_bin = flip_missing_bin;
+    try app.handleKey(.{ .codepoint = 'S' });
+    try testing.expect(app.state.diff_load.isLoading());
+    try testing.expectEqual(@as(?u32, 202), app.state.flip.loading_number);
+
+    app.state.flip.view = .pr;
+    app.previewPr(101);
+    try fx.awaitEntryOutcome();
+
+    try testing.expectEqual(@as(?u32, null), app.state.flip.loading_number);
+    try testing.expectEqual(@as(?u32, 202), app.state.flip.previewed);
+    try testing.expect(app.localWritesBlocked() == null);
+    try testing.expectEqual(@as(usize, 1), app.state.comment_store.comments.items.len);
+    try testing.expectEqualStrings("note-202", app.state.comment_store.comments.items[0].text);
+    const refs = app.state.diff_source.two_refs;
+    try testing.expectEqualStrings("origin/s-1", refs.ref1);
+    try testing.expectEqualStrings(oid_s2, refs.ref2);
+    try testing.expect(refs.use_merge_base);
+    _ = try app.state.comment_store.add(noteOnAddedB("note-202b"));
+    app.tickPrSurface(0);
+    var rows = try fx.store().listNotes(testing.allocator, .{ .repo_id = fx.repoId(), .number = 202 });
+    defer rows.deinit();
+    try testing.expectEqual(@as(usize, 2), rows.items.len);
+}
+
+test "a miss that fails while the previous entry's diff loads refuses writes until a cached PR is previewed" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    app.state.review.gh_bin = flip_missing_bin;
+    app.state.review.git_bin = flip_missing_bin;
+    app.previewPr(102);
+    // An earlier entry landed: its diff is loading when this miss fails.
+    try app.enterReviewDiff(.{ .head_ref = "HEAD", .base_ref = "" });
+
+    try fx.awaitEntryOutcome();
+
+    try testing.expectEqual(@as(?u32, null), app.state.flip.previewed);
+    try testing.expect(app.localWritesBlocked() != null);
+    try fx.awaitDiffLoad();
+    try testing.expect(app.localWritesBlocked().? == .pr_loading);
+
+    try fx.store().putMergeBase(fx.repoId(), .{ .base_tip_oid = other_oid, .head_oid = oid_a, .merge_base_oid = flip_merge_base });
+    try fx.store().putDiff(.{ .repo_id = fx.repoId(), .key = key_a, .bytes = flip_diff_a, .now = now });
+    app.previewPr(101);
+
+    try testing.expectEqual(@as(?u32, 101), app.state.flip.previewed);
+    try testing.expect(app.localWritesBlocked() == null);
+    _ = try app.state.comment_store.add(noteOnAddedA("note-after"));
+    app.tickPrSurface(0);
+    var rows = try fx.store().listNotes(testing.allocator, .{ .repo_id = fx.repoId(), .number = 101 });
+    defer rows.deinit();
+    try testing.expectEqual(@as(usize, 1), rows.items.len);
+    try testing.expectEqualStrings("note-after", rows.items[0].text);
+    try fx.awaitEntrySettled();
+}
+
+test "openPrSurface with a comment editor open leaves no boot PR loading" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 101 });
+    app.mode = .normal;
+    app.state.global_cursor_line = firstCodeRow(&app.state.line_map);
+    try root.comment_controller.CommentController.startCommentInput(app);
+    try testing.expect(app.state.active_comment_input != null);
+    app.state.sidebar.boot_number = 102;
+
+    app.openPrSurface(.{});
+
+    try testing.expectEqual(@as(?u32, null), app.state.flip.loading_number);
+    try testing.expectEqual(@as(?u32, 101), app.state.flip.previewed);
+    try testing.expect(!app.state.review.entry_in_flight);
+}
+
+test "markSeen before the merge base is known writes the 40-zero sentinel, which getSeen reads back" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+
+    surface.markSeen(&fx.app.state.pr_surface, .{ .allocator = testing.allocator, .number = 102, .sidebar = &fx.app.state.sidebar, .now = now });
+
+    const row = (try fx.store().getSeen(fx.repoId(), 102)).?;
+    try testing.expectEqualStrings(&surface.unknown_merge_base, &row.merge_base_oid);
+    try testing.expectEqualStrings(oid_b, &row.head_oid);
+}
+
+test "prefetch-generation poll backfills the sentinel once the merge base resolves" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    surface.markSeen(&fx.app.state.pr_surface, .{ .allocator = testing.allocator, .number = 102, .sidebar = &fx.app.state.sidebar, .now = now });
+    try fx.store().putMergeBase(fx.repoId(), .{ .base_tip_oid = other_oid, .head_oid = oid_b, .merge_base_oid = flip_merge_base });
+
+    try surface.backfillSeen(&fx.app.state.pr_surface, .{ .allocator = testing.allocator, .sidebar = &fx.app.state.sidebar });
+
+    const row = (try fx.store().getSeen(fx.repoId(), 102)).?;
+    try testing.expectEqualStrings(flip_merge_base, &row.merge_base_oid);
+}
+
+test "markSeen reloads the sidebar: the record's seen head equals its head" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const sb = &fx.app.state.sidebar;
+
+    surface.markSeen(&fx.app.state.pr_surface, .{ .allocator = testing.allocator, .number = 101, .sidebar = sb, .now = now });
+
+    const record = controller.recordByNumber(sb, 101).?;
+    try testing.expectEqualStrings(record.head_oid, record.seen_head_oid.?);
+}
+
+test "planFlip: no merge base → miss; merge base without a diff row → miss; both → hit with parsed files" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const sb = &fx.app.state.sidebar;
+    const s = &fx.app.state.pr_surface;
+    const lru = &fx.app.state.flip.lru.?;
+    const plan_params: surface.PlanParams = .{ .allocator = testing.allocator, .sidebar = sb, .record = controller.recordByNumber(sb, 101).?, .view = .pr, .lru = lru, .now = now };
+
+    try testing.expect(try surface.planFlip(s, plan_params) == .miss);
+    try fx.store().putMergeBase(fx.repoId(), .{ .base_tip_oid = other_oid, .head_oid = oid_a, .merge_base_oid = flip_merge_base });
+    try testing.expect(try surface.planFlip(s, plan_params) == .miss);
+    try fx.store().putDiff(.{ .repo_id = fx.repoId(), .key = key_a, .bytes = flip_diff_a, .now = now });
+
+    var plan = try surface.planFlip(s, plan_params);
+    defer plan.deinit(testing.allocator);
+    try testing.expectEqualStrings("a.txt", plan.hit.files[0].new_path);
+    try testing.expectEqualSlices(u8, &key_a.head_oid, &plan.hit.key.head_oid);
+}
+
+test "closePrSurface saves the PR's notes before leavePrSurface restores the working-tree comments" {
+    const allocator = testing.allocator;
+    var fx = try FlipApp.initWithFiles(try root.parser.parse(allocator, esc_close_diff));
+    defer fx.deinit();
+    const app = &fx.app;
+    _ = try app.state.comment_store.add(.{ .file_path = "src/x.zig", .hunk_idx = 0, .line_idx = 2, .text = "WT-NOTE", .line_type = .add, .line_content = "line10", .new_lineno = 10 });
+    try fx.install(.{ .number = 101 });
+    _ = try app.state.comment_store.add(noteOnAddedA("pr-note"));
+    const repo_id = fx.repoId();
+
+    try app.switchDiffMode(.working);
+    try app.applyRefreshedFiles(try root.parser.parse(allocator, esc_close_diff));
+
+    var db = try root.store.Store.open(allocator, fx.path);
+    defer db.close();
+    var rows = try db.listNotes(allocator, .{ .repo_id = repo_id, .number = 101 });
+    defer rows.deinit();
+    try testing.expectEqual(@as(usize, 1), rows.items.len);
+    try testing.expectEqualStrings("pr-note", rows.items[0].text);
+    try testing.expectEqual(@as(usize, 1), app.state.comment_store.comments.items.len);
+    try testing.expectEqualStrings("WT-NOTE", app.state.comment_store.comments.items[0].text);
+}
+
+test "closing the PR surface during a whole-stack load drops the saved source, so a later cancel cannot restore it" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const app = &fx.app;
+    try fx.install(.{ .number = 202 });
+    app.state.review.gh_bin = flip_missing_bin;
+    app.state.review.git_bin = flip_missing_bin;
+    try app.handleKey(.{ .codepoint = 'S' });
+    try testing.expect(app.state.pr_surface_parking.local_load != null);
+
+    try app.switchDiffMode(.working);
+
+    try testing.expect(app.state.pr_surface_parking.local_load == null);
+    try testing.expectEqual(.leave_pr, app.state.pr_surface_parking.change);
+    try testing.expect(app.state.diff_source == .working_dir);
+}
+
+test "applyQuery + pushVisible rebuilds the prefetch targets to the visible numbers in row order" {
+    var fx = try FlipApp.init();
+    defer fx.deinit();
+    const sb = &fx.app.state.sidebar;
+    _ = try controller.applyQuery(sb, testing.allocator, "101");
+
+    surface.pushVisible(&fx.app.state.pr_surface, .{ .allocator = testing.allocator, .sidebar = sb });
+
+    const visible = try controller.visibleNumbers(sb, testing.allocator);
+    defer testing.allocator.free(visible);
+    const targets = fx.app.state.pr_surface.targets.items;
+    try testing.expectEqual(visible.len, targets.len);
+    for (visible, targets) |number, target| try testing.expectEqual(number, target.number);
+    try testing.expect(targets.len < 4);
 }
 
 // =============================================================================
@@ -1520,9 +2241,13 @@ fn expectAppSnapshot(params: struct {
     rows: u16,
     sidebar_visible: bool = true,
     agent_panel: bool = false,
+    file_count: usize = 2,
+    changed_files: []const bool = &.{},
+    previewed: ?u32 = null,
+    previewed_view: root.flip.DiffView = .pr,
 }) !void {
     const allocator = testing.allocator;
-    const diff = try root.bench_support.buildDiffText(allocator, .{ .file_count = 2, .hunks_per_file = 1, .lines_per_hunk = 6 });
+    const diff = try root.bench_support.buildDiffText(allocator, .{ .file_count = params.file_count, .hunks_per_file = 1, .lines_per_hunk = 6 });
     defer allocator.free(diff);
     var app = try root.App.initForRenderBench(allocator, try root.parser.parse(allocator, diff));
     defer app.deinit();
@@ -1543,6 +2268,9 @@ fn expectAppSnapshot(params: struct {
         app.tab_manager.?.full_screen = false;
         _ = try app.tab_manager.?.createTab("Agent Tab");
     }
+    app.state.flip.changed_files = try allocator.dupe(bool, params.changed_files);
+    app.state.flip.previewed = params.previewed;
+    app.state.flip.previewed_view = params.previewed_view;
 
     var ctx = try harness.createTestContext(allocator, params.cols, params.rows);
     defer ctx.deinit();
@@ -1647,4 +2375,295 @@ fn writeGarbage(path: []const u8) !void {
     defer file.close(skim_io.get());
     const garbage = [_]u8{0xAB} ** 4096;
     try file.writeStreamingAll(skim_io.get(), &garbage);
+}
+
+fn expectBumped(last: *u64, revision: u64) !void {
+    try testing.expect(revision > last.*);
+    last.* = revision;
+}
+
+// --- 6b fixtures ---------------------------------------------------------------
+
+const flip_merge_base = "c" ** 40;
+const oid_a = "d" ** 40;
+const oid_b = "e" ** 40;
+const oid_s1 = "1" ** 40;
+const oid_s2 = "2" ** 40;
+const key_a: types.DiffKey = .{ .merge_base_oid = flip_merge_base.*, .head_oid = oid_a.* };
+const flip_updated_at = "2026-01-01T00:00:00Z";
+
+const flip_diff_a =
+    \\diff --git a/a.txt b/a.txt
+    \\index 1111111..2222222 100644
+    \\--- a/a.txt
+    \\+++ b/a.txt
+    \\@@ -1,2 +1,3 @@
+    \\ one
+    \\+added-a
+    \\ two
+    \\
+;
+
+const flip_diff_b =
+    \\diff --git a/b.txt b/b.txt
+    \\index 1111111..2222222 100644
+    \\--- a/b.txt
+    \\+++ b/b.txt
+    \\@@ -1,2 +1,3 @@
+    \\ one
+    \\+added-b
+    \\ two
+    \\
+;
+
+const flip_diff_two_files = flip_diff_a ++ flip_diff_b;
+
+/// A CommentStore, its note_ids/orphans and a SurfaceFixture store, over
+/// `flip_diff_a`.
+const NotesFixture = struct {
+    fx: SurfaceFixture,
+    files: []root.parser.FileDiff,
+    comments: root.comments.CommentStore,
+    note_ids: std.AutoHashMapUnmanaged(u64, i64) = .{},
+    orphans: std.ArrayList(root.notes.OrphanNote) = .empty,
+
+    fn init() !NotesFixture {
+        var fx = try SurfaceFixture.init();
+        errdefer fx.deinit();
+        return .{
+            .fx = fx,
+            .files = try root.parser.parse(testing.allocator, flip_diff_a),
+            .comments = root.comments.CommentStore.init(testing.allocator),
+        };
+    }
+
+    fn deinit(self: *NotesFixture) void {
+        root.notes.clearOrphans(testing.allocator, &self.orphans);
+        self.orphans.deinit(testing.allocator);
+        self.note_ids.deinit(testing.allocator);
+        self.comments.deinit();
+        for (self.files) |*file| file.deinit(testing.allocator);
+        testing.allocator.free(self.files);
+        self.fx.deinit();
+    }
+
+    fn store(self: *NotesFixture) *root.store.Store {
+        return &self.fx.surface.store.?;
+    }
+
+    fn save(self: *NotesFixture, number: u32) !void {
+        try surface.saveNotes(&self.fx.surface, .{
+            .allocator = testing.allocator,
+            .number = number,
+            .comments = &self.comments,
+            .files = self.files,
+            .note_ids = &self.note_ids,
+            .now = now,
+        });
+    }
+
+    fn restore(self: *NotesFixture, number: u32) !void {
+        try surface.restoreNotes(&self.fx.surface, .{
+            .allocator = testing.allocator,
+            .number = number,
+            .files = self.files,
+            .comments = &self.comments,
+            .orphans = &self.orphans,
+            .note_ids = &self.note_ids,
+        });
+    }
+
+    fn listNotes(self: *NotesFixture, number: u32) !types.NoteList {
+        return self.store().listNotes(testing.allocator, .{ .repo_id = self.fx.surface.repo_id, .number = number });
+    }
+};
+
+fn noteOnAddedA(text: []const u8) root.comments.AddParams {
+    return .{ .file_path = "a.txt", .hunk_idx = 0, .line_idx = 1, .text = text, .line_type = .add, .line_content = "added-a", .new_lineno = 2 };
+}
+
+fn noteOnAddedB(text: []const u8) root.comments.AddParams {
+    return .{ .file_path = "b.txt", .hunk_idx = 0, .line_idx = 1, .text = text, .line_type = .add, .line_content = "added-b", .new_lineno = 2 };
+}
+
+fn orphanRow(number: u32) types.NoteRow {
+    return .{
+        .id = 0,
+        .number = number,
+        .file_path = "gone.txt",
+        .line_type = "add",
+        .old_lineno = null,
+        .new_lineno = 7,
+        .end_old_lineno = null,
+        .end_new_lineno = null,
+        .line_content = "vanished line",
+        .author = "you",
+        .text = "lost note",
+        .replies = "[]",
+        .created_at = now,
+    };
+}
+
+/// A gh/git that cannot run: a miss entry spawns it and fails harmlessly.
+const flip_missing_bin = "/nonexistent/skim-test-bin";
+
+/// An App (no tty) with the PR surface open on a temp-file store holding
+/// #101, #102 (trunk PRs) and the stack #201 ← #202, a ParsedLru, and no
+/// worker: nothing it does spawns.
+const FlipApp = struct {
+    tmp: testing.TmpDir,
+    path: [:0]u8,
+    app: root.App,
+
+    const InstallParams = struct {
+        number: u32,
+        view: root.flip.DiffView = .pr,
+        diff: []const u8 = "",
+    };
+
+    fn init() !FlipApp {
+        return initWithFiles(try testing.allocator.alloc(root.parser.FileDiff, 0));
+    }
+
+    fn initWithFiles(files: []root.parser.FileDiff) !FlipApp {
+        const allocator = testing.allocator;
+        var app = try root.App.initForRenderBench(allocator, files);
+        errdefer app.deinit();
+        var tmp = testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const path = try tmpDbPath(&tmp);
+        errdefer allocator.free(path);
+        {
+            var db = try root.store.Store.open(allocator, path);
+            defer db.close();
+            const repo_id = try db.ensureRepo(.{ .key = "k", .owner = "o", .name = "r" });
+            try db.upsertIndex(repo_id, &.{
+                flipRow(.{ .number = 101, .head = "feat-a", .head_oid = oid_a }),
+                flipRow(.{ .number = 102, .head = "feat-b", .head_oid = oid_b }),
+                flipRow(.{ .number = 201, .head = "s-1", .head_oid = oid_s1 }),
+                flipRow(.{ .number = 202, .head = "s-2", .base = "s-1", .head_oid = oid_s2, .base_oid = oid_s1 }),
+            });
+        }
+        surface.openAt(&app.state.pr_surface, .{ .allocator = allocator, .sidebar = &app.state.sidebar, .db_path = path, .repo_key = "k", .owner = "o", .name = "r", .filters = &no_config_filters });
+        app.state.flip.lru = root.ParsedLru.init(allocator);
+        app.state.sidebar.open = true;
+        app.state.sidebar.visible = true;
+        app.mode = .pr_review;
+        return .{ .tmp = tmp, .path = path, .app = app };
+    }
+
+    fn deinit(self: *FlipApp) void {
+        self.app.deinit();
+        testing.allocator.free(self.path);
+        self.tmp.cleanup();
+    }
+
+    fn store(self: *FlipApp) *root.store.Store {
+        return &self.app.state.pr_surface.store.?;
+    }
+
+    fn repoId(self: *FlipApp) i64 {
+        return self.app.state.pr_surface.repo_id;
+    }
+
+    /// Drive the review worker until its entry lands (`pollReviewEntry`).
+    fn awaitEntryOutcome(self: *FlipApp) !void {
+        var waited_ms: usize = 0;
+        while (self.app.state.review.entry_in_flight) : (waited_ms += 1) {
+            if (waited_ms >= 5000) return error.Timeout;
+            skim_io.sleep(std.time.ns_per_ms);
+            self.app.pollReviewEntry();
+        }
+    }
+
+    /// Drive the review worker until nothing is in flight, clearing
+    /// `needs_render` before every poll: afterwards it says whether the poll
+    /// that consumed the last result asked for a frame.
+    fn awaitEntrySettled(self: *FlipApp) !void {
+        var waited_ms: usize = 0;
+        while (self.app.state.review.entry_in_flight) : (waited_ms += 1) {
+            if (waited_ms >= 5000) return error.Timeout;
+            skim_io.sleep(std.time.ns_per_ms);
+            self.app.needs_render = false;
+            self.app.pollReviewEntry();
+        }
+    }
+
+    /// Drive background work until the streaming diff load has landed.
+    fn awaitDiffLoad(self: *FlipApp) !void {
+        var waited_ms: usize = 0;
+        while (self.app.state.diff_load.isLoading()) : (waited_ms += 1) {
+            if (waited_ms >= 5000) return error.Timeout;
+            skim_io.sleep(std.time.ns_per_ms);
+            self.app.pollBackgroundWork();
+        }
+    }
+
+    /// `installPrDiff` with the PR's own diff (a.txt for #101, b.txt
+    /// otherwise, or `params.diff`) and fresh cached threads in the .pr view.
+    fn install(self: *FlipApp, params: InstallParams) !void {
+        const allocator = testing.allocator;
+        const sb = &self.app.state.sidebar;
+        const record = controller.recordByNumber(sb, params.number).?;
+        const diff = if (params.diff.len > 0) params.diff else if (params.number == 101) flip_diff_a else flip_diff_b;
+        const payload = try threadsPayload(allocator, params.number);
+        defer allocator.free(payload);
+        const place = controller.stackPlace(sb, controller.recordIndex(sb, params.number).?);
+        const whole_stack = params.view == .whole_stack;
+        try self.app.installPrDiff(.{
+            .record = record,
+            .files = try root.parser.parse(allocator, diff),
+            .key = .{ .merge_base_oid = flip_merge_base.*, .head_oid = record.head_oid[0..40].* },
+            .view = params.view,
+            .threads_json = if (params.view == .pr) payload else null,
+            .threads_fresh = true,
+            .stack_base_ref = if (whole_stack) sb.records.?.items[place.bottom.?].base_ref else record.base_ref,
+        });
+    }
+};
+
+fn flipRow(params: struct { number: u32, head: []const u8, base: []const u8 = "main", head_oid: []const u8, base_oid: []const u8 = other_oid }) types.IndexRow {
+    return .{
+        .number = params.number,
+        .node_id = "node",
+        .title = "title",
+        .author = "alice",
+        .url = "https://github.com/o/r/pull/1",
+        .is_draft = false,
+        .head_ref = params.head,
+        .base_ref = params.base,
+        .head_oid = params.head_oid,
+        .base_oid = params.base_oid,
+        .updated_at = flip_updated_at,
+        .labels = "",
+    };
+}
+
+/// A review payload for PR `number` with no threads, titled "Flip <number>".
+fn threadsPayload(allocator: Allocator, number: u32) ![]u8 {
+    return std.fmt.allocPrint(allocator,
+        \\{{"data":{{"viewer":{{"login":"me"}},"repository":{{"pullRequest":{{
+        \\"id":"PR_{d}","number":{d},"title":"Flip {d}","body":"","author":{{"login":"alice"}},
+        \\"isDraft":false,"baseRefName":"main","headRefName":"feat","headRefOid":"abc","reviewDecision":"",
+        \\"statusCheckRollup":null,"commits":{{"nodes":[]}},
+        \\"reviews":{{"pageInfo":{{"hasNextPage":false}},"nodes":[]}},
+        \\"reviewThreads":{{"totalCount":0,"pageInfo":{{"hasNextPage":false}},"nodes":[]}}
+        \\}}}}}}}}
+    , .{ number, number, number });
+}
+
+/// The status bar `app` renders, as text.
+fn statusText(app: *root.App) ![]const u8 {
+    var ctx = try harness.createTestContext(testing.allocator, 160, 1);
+    defer ctx.deinit();
+    try root.ui.UI.renderStatus(app, ctx.window());
+    return ctx.captureToText();
+}
+
+/// Index of the first code line in `map`.
+fn firstCodeRow(map: *const root.line_map.LineMap) usize {
+    for (map.records, 0..) |record, idx| {
+        if (record.line_type == .code_line) return idx;
+    }
+    unreachable;
 }

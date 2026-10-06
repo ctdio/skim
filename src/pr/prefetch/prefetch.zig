@@ -404,6 +404,10 @@ fn runWorker(self: *PrefetchWorker) void {
         failUntilStopped(self, null);
         return;
     };
+    sweepStaleTmpPacks(ctx) catch |err| switch (err) {
+        error.Stopped => return,
+        else => std.log.warn("prefetch: sweeping stale tmp packs failed: {any}", .{err}),
+    };
 
     while (!self.stop_requested.load(.acquire)) {
         const seen_wake = self.wake_seq.load(.acquire);
@@ -494,6 +498,11 @@ fn executeJob(ctx: Ctx, job: priority.Job) error{ GitMissing, Stopped }!void {
                     state.whole_stack = try diffJob(ctx, .{ .index = run.index, .view = .whole_stack });
                     break :outcome state.whole_stack;
                 },
+                .since_seen => outcome: {
+                    publishStatus(ctx, .diffing);
+                    state.since_seen = try diffJob(ctx, .{ .index = run.index, .view = .since_seen });
+                    break :outcome state.since_seen;
+                },
                 .threads => outcome: {
                     publishStatus(ctx, .threads);
                     state.threads = try threadsJob(ctx, run.index);
@@ -532,6 +541,12 @@ fn fetchBatch(ctx: Ctx, ordered: []const usize) error{ GitMissing, Stopped }!voi
         },
     };
     defer missing.deinit(ctx.scratch());
+
+    pinPresentHeads(ctx, .{ .wanted = wanted, .missing = &missing }) catch |err| switch (err) {
+        error.GitMissing => return error.GitMissing,
+        error.Stopped => return error.Stopped,
+        else => std.log.warn("prefetch: pinning local PR refs failed: {any}", .{err}),
+    };
 
     const refspecs = buildRefspecs(ctx, .{ .wanted = wanted, .missing = &missing }) catch |err| {
         std.log.warn("prefetch: refspec planning failed: {any}", .{err});
@@ -601,6 +616,108 @@ fn buildRefspecs(ctx: Ctx, params: struct { wanted: []const WantedOid, missing: 
         }
     }
     return refspecs.items;
+}
+
+/// A PR head that is already local is never fetched, so nothing would create
+/// or advance its `refs/skim/pr-<n>`, which keeps the head reachable and is
+/// what the review entry diffs. Create the absent refs at the target's head,
+/// and move an existing one forward when its commit is an ancestor of that
+/// head. Any other existing ref is left alone: the review path may have just
+/// fetched a newer head than this round's snapshot, and moving the ref back
+/// would show a stale diff. `create` and the old-oid check of `update` refuse
+/// a ref another fetch moved in the meantime instead of overwriting it.
+fn pinPresentHeads(ctx: Ctx, params: struct { wanted: []const WantedOid, missing: *const plan.MissingSet }) !void {
+    const listed = try runGit(ctx, .{ .argv = &.{ "git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/skim/" } });
+    if (!listed.ok) {
+        std.log.warn("prefetch: git for-each-ref failed: {s}", .{trimOutput(listed.stderr)});
+        return error.ListRefsFailed;
+    }
+    var commands: std.ArrayList([]const u8) = .empty;
+    var pinned: std.ArrayList(u32) = .empty;
+    for (params.wanted) |item| {
+        if (params.missing.contains(item.oid)) continue;
+        const number = switch (item.source) {
+            .pull => |number| number,
+            .branch => continue,
+        };
+        if (std.mem.indexOfScalar(u32, pinned.items, number) != null) continue;
+        try pinned.append(ctx.scratch(), number);
+        const ref = try github.localPullRef(ctx.scratch(), number);
+        const command = if (listedOid(listed.stdout, ref)) |old| blk: {
+            if (std.ascii.eqlIgnoreCase(old, item.oid)) continue;
+            if (!try isAncestor(ctx, .{ .ancestor = old, .descendant = item.oid })) continue;
+            break :blk try std.fmt.allocPrint(ctx.scratch(), "update {s} {s} {s}\n", .{ ref, item.oid, old });
+        } else try std.fmt.allocPrint(ctx.scratch(), "create {s} {s}\n", .{ ref, item.oid });
+        try commands.append(ctx.scratch(), command);
+    }
+    if (commands.items.len == 0) return;
+    if (try updateRefs(ctx, try std.mem.concat(ctx.scratch(), u8, commands.items))) return;
+    if (commands.items.len == 1) return error.UpdateRefFailed;
+    // One raced or locked ref fails the whole transaction: pin the rest one
+    // ref at a time.
+    var failed = false;
+    for (commands.items) |command| {
+        if (!try updateRefs(ctx, command)) failed = true;
+    }
+    if (failed) return error.UpdateRefFailed;
+}
+
+/// `git update-ref --stdin` with `commands` as one transaction. False (and
+/// logged) when git refused it.
+fn updateRefs(ctx: Ctx, commands: []const u8) !bool {
+    const result = try runGit(ctx, .{ .argv = &.{ "git", "update-ref", "--stdin" }, .stdin = commands });
+    if (!result.ok) std.log.warn("prefetch: git update-ref failed: {s}", .{trimOutput(result.stderr)});
+    return result.ok;
+}
+
+/// `git merge-base --is-ancestor`: exit 1 is a plain no; anything else
+/// failed and is logged as one.
+fn isAncestor(ctx: Ctx, pair: struct { ancestor: []const u8, descendant: []const u8 }) !bool {
+    const result = try runGit(ctx, .{ .argv = &.{ "git", "merge-base", "--is-ancestor", pair.ancestor, pair.descendant } });
+    if (result.ok) return true;
+    if (result.exit_code != 1) std.log.warn("prefetch: git merge-base --is-ancestor {s} {s} failed: {s}", .{ pair.ancestor, pair.descendant, trimOutput(result.stderr) });
+    return false;
+}
+
+/// The oid `ref` points at in a `%(refname) %(objectname)` listing.
+fn listedOid(listing: []const u8, ref: []const u8) ?[]const u8 {
+    var lines = std.mem.tokenizeScalar(u8, listing, '\n');
+    while (lines.next()) |line| {
+        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        if (std.mem.eql(u8, line[0..space], ref)) return line[space + 1 ..];
+    }
+    return null;
+}
+
+/// Delete the `tmp_pack_*` files fetches killed mid-transfer left in the
+/// pack directory (`plan.isStaleTmpPack`); they are never cleaned otherwise
+/// while auto maintenance is off.
+fn sweepStaleTmpPacks(ctx: Ctx) !void {
+    const result = try runGit(ctx, .{ .argv = &.{ "git", "rev-parse", "--git-path", "objects/pack" } });
+    if (!result.ok) {
+        std.log.warn("prefetch: git rev-parse --git-path failed: {s}", .{trimOutput(result.stderr)});
+        return error.PackDirUnknown;
+    }
+    const reported = trimOutput(result.stdout);
+    const pack_dir = if (std.fs.path.isAbsolute(reported)) reported else try std.fs.path.join(ctx.scratch(), &.{ ctx.config().repo_root, reported });
+    const io = skim_io.get();
+    var dir = std.Io.Dir.cwd().openDir(io, pack_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close(io);
+    const now_ns = skim_io.nanoTimestamp();
+    var stale: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        const stat = dir.statFile(io, entry.name, .{}) catch continue;
+        if (!plan.isStaleTmpPack(.{ .name = entry.name, .mtime_ns = stat.mtime.toNanoseconds(), .now_ns = now_ns })) continue;
+        try stale.append(ctx.scratch(), try ctx.scratch().dupe(u8, entry.name));
+    }
+    for (stale.items) |name| {
+        dir.deleteFile(io, name) catch |err| std.log.warn("prefetch: removing {s} failed: {any}", .{ name, err });
+    }
 }
 
 /// `git cat-file --batch-check` over the wanted oids. Input is at most
@@ -708,6 +825,8 @@ fn diffJob(ctx: Ctx, params: struct { index: usize, view: priority.View }) error
 /// `git diff` bytes in diff_cache, unless that key is already cached. A hit
 /// leaves last_used_at alone: prefetch is not use. A row that eviction
 /// deletes as soon as it is written is `.evicted`: it lies past the boundary.
+/// `.since_seen` is diffed only on a fast-forward (merge base == seen head);
+/// for rewritten history the merge_base_cache row is the whole answer.
 fn cacheDiff(ctx: Ctx, params: struct { target: Target, view: priority.View }) !priority.Outcome {
     const target = params.target;
     const inputs = priority.diffKeyFor(target, params.view) orelse return .skipped;
@@ -716,6 +835,10 @@ fn cacheDiff(ctx: Ctx, params: struct { target: Target, view: priority.View }) !
         return .skipped;
     }
     const resolved = try resolveKey(ctx, inputs);
+    if (params.view == .since_seen and !std.ascii.eqlIgnoreCase(&resolved.key.merge_base_oid, inputs.base_tip_oid)) {
+        if (resolved.computed) ctx.bumpGeneration();
+        return .skipped;
+    }
     const repo_id = ctx.config().repo_id;
     if (try ctx.store.hasDiff(repo_id, resolved.key)) {
         // A new merge_base_cache row is enough to flip `isCached` for this PR.
@@ -973,6 +1096,7 @@ fn viewOutcome(state: *priority.JobState, view: priority.View) *priority.Outcome
     return switch (view) {
         .pr => &state.diff,
         .whole_stack => &state.whole_stack,
+        .since_seen => &state.since_seen,
     };
 }
 
@@ -1185,6 +1309,7 @@ fn cloneTargets(arena: Allocator, targets: []const Target) ![]Target {
                 .trunk_ref = try arena.dupe(u8, stack.trunk_ref),
                 .trunk_oid = try arena.dupe(u8, stack.trunk_oid),
             } else null,
+            .seen_head_oid = if (source.seen_head_oid) |seen| try arena.dupe(u8, seen) else null,
         };
     }
     return copy;
@@ -1655,6 +1780,99 @@ test "fetched heads land in refs/skim/pr-N" {
     }
 }
 
+test "fetched objects land as a pack, so a killed fetch cannot leave a commit without its tree" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    const worker = try fx.startWorker(.{});
+    defer worker.stop();
+    const targets = fx.targets();
+    _ = try waitForIdle(worker, try worker.setTargets(&targets));
+
+    try testing.expectEqualStrings(&fx.heads[0], &(try fx.revParse(fx.clone_path, "refs/skim/pr-1")));
+    const counts = try fx.git(fx.clone_path, &.{ "count-objects", "-v" });
+    defer testing.allocator.free(counts);
+    try testing.expect(std.mem.startsWith(u8, counts, "count: 0\n"));
+}
+
+test "a head already present locally still gets refs/skim/pr-N" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    try fx.gitIgnore(fx.clone_path, &.{ "fetch", "-q", "origin", "feat-1:refs/remotes/origin/feat-1" });
+    const worker = try fx.startWorker(.{});
+    defer worker.stop();
+    const targets = fx.targets();
+    _ = try waitForIdle(worker, try worker.setTargets(&targets));
+
+    try testing.expectEqualStrings(&fx.heads[0], &(try fx.revParse(fx.clone_path, "refs/skim/pr-1")));
+}
+
+test "an existing refs/skim/pr-N is never moved to the target's head" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    try fx.gitIgnore(fx.clone_path, &.{ "fetch", "-q", "origin", "feat-1:refs/remotes/origin/feat-1", "feat-3:refs/skim/pr-1" });
+    const worker = try fx.startWorker(.{});
+    defer worker.stop();
+    const targets = fx.targets();
+    _ = try waitForIdle(worker, try worker.setTargets(&targets));
+
+    try testing.expectEqualStrings(&fx.heads[2], &(try fx.revParse(fx.clone_path, "refs/skim/pr-1")));
+}
+
+test "an existing refs/skim/pr-N behind the target's head advances to it" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    try fx.gitIgnore(fx.clone_path, &.{ "fetch", "-q", "origin", "feat-2:refs/remotes/origin/feat-2", "feat-1:refs/skim/pr-2" });
+    const worker = try fx.startWorker(.{});
+    defer worker.stop();
+    const targets = fx.targets();
+    _ = try waitForIdle(worker, try worker.setTargets(&targets));
+
+    try testing.expectEqualStrings(&fx.heads[1], &(try fx.revParse(fx.clone_path, "refs/skim/pr-2")));
+}
+
+test "a ref git cannot lock does not stop the other heads from being pinned" {
+    const io = skim_io.get();
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    try fx.gitIgnore(fx.clone_path, &.{ "fetch", "-q", "origin", "feat-1:refs/remotes/origin/feat-1", "feat-2:refs/remotes/origin/feat-2" });
+    const refs_dir = try std.fmt.allocPrint(testing.allocator, "{s}/.git/refs/skim", .{fx.clone_path});
+    defer testing.allocator.free(refs_dir);
+    try std.Io.Dir.cwd().createDirPath(io, refs_dir);
+    const lock = try std.fmt.allocPrint(testing.allocator, "{s}/pr-2.lock", .{refs_dir});
+    defer testing.allocator.free(lock);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = lock, .data = "" });
+    const worker = try fx.startWorker(.{});
+    defer worker.stop();
+    const targets = fx.targets();
+    _ = try waitForIdle(worker, try worker.setTargets(&targets));
+
+    try testing.expectEqualStrings(&fx.heads[0], &(try fx.revParse(fx.clone_path, "refs/skim/pr-1")));
+}
+
+test "worker start removes tmp_pack_ files a killed fetch left behind, and keeps fresh ones" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    const pack_dir = try std.fmt.allocPrint(testing.allocator, "{s}/.git/objects/pack", .{fx.clone_path});
+    defer testing.allocator.free(pack_dir);
+    const stale = try std.fmt.allocPrint(testing.allocator, "{s}/tmp_pack_stale1", .{pack_dir});
+    defer testing.allocator.free(stale);
+    const fresh = try std.fmt.allocPrint(testing.allocator, "{s}/tmp_pack_fresh1", .{pack_dir});
+    defer testing.allocator.free(fresh);
+    try std.Io.Dir.cwd().createDirPath(skim_io.get(), pack_dir);
+    try std.Io.Dir.cwd().writeFile(skim_io.get(), .{ .sub_path = stale, .data = "partial" });
+    try std.Io.Dir.cwd().writeFile(skim_io.get(), .{ .sub_path = fresh, .data = "partial" });
+    const touched = try std.process.run(testing.allocator, skim_io.get(), .{ .argv = &.{ "touch", "-d", "20 minutes ago", stale } });
+    testing.allocator.free(touched.stdout);
+    testing.allocator.free(touched.stderr);
+    const worker = try fx.startWorker(.{});
+    defer worker.stop();
+    const targets = fx.targets();
+    _ = try waitForIdle(worker, try worker.setTargets(&targets));
+
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(skim_io.get(), stale, .{}));
+    try std.Io.Dir.cwd().access(skim_io.get(), fresh, .{});
+}
+
 test "stacked PR is keyed on its parent's head" {
     var fx = try Fixture.init();
     defer fx.deinit();
@@ -1717,6 +1935,49 @@ test "generation increases after diffs are written" {
     const targets = fx.targets();
     _ = try waitForIdle(worker, try worker.setTargets(&targets));
     try testing.expect(worker.generation() >= 4);
+}
+
+test "fast-forwarded seen PR caches the seen-head..head diff" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    const worker = try fx.startWorker(.{});
+    defer worker.stop();
+    const all = fx.targets();
+    var target = all[1];
+    target.base = .{ .trunk = .{ .oid = &fx.main_tip } };
+    target.whole_stack = null;
+    target.seen_head_oid = &fx.heads[0];
+    const final = try waitForIdle(worker, try worker.setTargets(&.{target}));
+
+    try testing.expectEqual(@as(u32, 0), final.failures);
+    const merge_base = (try fx.store.getMergeBase(fx.repo_id, .{ .base_tip_oid = &fx.heads[0], .head_oid = &fx.heads[1] })).?;
+    try testing.expectEqualStrings(&fx.heads[0], &merge_base);
+    try expectCachedEqualsGit(.{ .fx = &fx, .base_tip = &fx.heads[0], .head = &fx.heads[1] });
+    const cached = (try fx.cachedDiff(&fx.heads[0], &fx.heads[1])).?;
+    defer testing.allocator.free(cached.bytes);
+    try testing.expect(std.mem.indexOf(u8, cached.bytes, "f2.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, cached.bytes, "f1.txt") == null);
+}
+
+test "rewritten seen PR records the merge base and caches no since-seen diff" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    const worker = try fx.startWorker(.{});
+    defer worker.stop();
+    const all = fx.targets();
+    var rewritten = all[2];
+    // Unknown base: the PR's own diff is skipped, so any diff row for this
+    // head could only come from the since-seen job.
+    rewritten.base = .{ .trunk = .{ .oid = "" } };
+    rewritten.seen_head_oid = &fx.heads[0];
+    const final = try waitForIdle(worker, try worker.setTargets(&.{ all[0], rewritten }));
+
+    try testing.expectEqual(Phase.idle, final.phase);
+    try testing.expectEqual(@as(u32, 0), final.failures);
+    const merge_base = (try fx.store.getMergeBase(fx.repo_id, .{ .base_tip_oid = &fx.heads[0], .head_oid = &fx.heads[2] })).?;
+    try testing.expect(!std.mem.eql(u8, &fx.heads[0], &merge_base));
+    try testing.expect(!try fx.store.hasDiff(fx.repo_id, .{ .merge_base_oid = merge_base, .head_oid = fx.heads[2] }));
+    try testing.expectEqual(@as(i64, 1), try fx.diffRowCount());
 }
 
 test "eviction keeps pinned seen rows" {

@@ -14,11 +14,23 @@ pub const MissingSet = std.StringHashMapUnmanaged(void);
 /// user's FETCH_HEAD alone; `--no-tags` keeps a PR fetch from pulling every tag;
 /// `--no-auto-maintenance` keeps a background fetch from starting a gc. The
 /// low-speed limit aborts an HTTP transfer that stalls below 1 KB/s for 30s.
+/// `fetch.unpackLimit=1` keeps every fetch a pack that index-pack renames into
+/// place when complete: below the default limit git unpacks loose objects one
+/// by one, commits first, so a fetch killed by `stop` would leave commits
+/// without their trees that `cat-file --batch-check` then reports as present.
+/// The cost: every fetch adds a pack, and with auto maintenance off nothing
+/// repacks them until the user's own `git gc`/`git maintenance` runs. A fetch
+/// killed mid-transfer also leaves its `tmp_pack_*` behind, which the worker
+/// sweeps at start (`isStaleTmpPack`).
 pub const fetch_flags = [_][]const u8{
-    "git",                   "-c",      "http.lowSpeedLimit=1000", "-c",                    "http.lowSpeedTime=30",
-    "fetch",                 "--quiet", "--no-tags",               "--no-write-fetch-head", "--no-recurse-submodules",
-    "--no-auto-maintenance", "origin",
+    "git",                   "-c",                      "http.lowSpeedLimit=1000", "-c",      "http.lowSpeedTime=30",
+    "-c",                    "fetch.unpackLimit=1",     "fetch",                   "--quiet", "--no-tags",
+    "--no-write-fetch-head", "--no-recurse-submodules", "--no-auto-maintenance",   "origin",
 };
+
+/// A `tmp_pack_*` this old belongs to no running fetch: a fetch that slow
+/// trips `http.lowSpeedTime` or the child timeout long before.
+pub const stale_tmp_pack_ns: i96 = 10 * std.time.ns_per_min;
 
 const missing_ref_prefix = "fatal: couldn't find remote ref ";
 const locked_ref_prefix = "error: cannot lock ref '";
@@ -38,6 +50,14 @@ pub fn isOid(text: []const u8) bool {
 pub fn parseOid(text: []const u8) ?[40]u8 {
     if (!isOid(text)) return null;
     return text[0..40].*;
+}
+
+/// Whether `name` in the pack directory is the partial pack of a fetch that
+/// was killed (`index-pack` renames a complete one), old enough that no
+/// running fetch can still be writing it.
+pub fn isStaleTmpPack(params: struct { name: []const u8, mtime_ns: i96, now_ns: i96 }) bool {
+    if (!std.mem.startsWith(u8, params.name, "tmp_pack_")) return false;
+    return params.now_ns - params.mtime_ns >= stale_tmp_pack_ns;
 }
 
 /// Oids that `git cat-file --batch-check` reported as `<oid> missing`.
@@ -163,6 +183,22 @@ const oid_a = "a" ** 40;
 const oid_b = "b" ** 40;
 const oid_c = "c" ** 40;
 
+test "isStaleTmpPack: a tmp_pack_ file older than the cutoff is stale" {
+    const now: i96 = 100 * std.time.ns_per_min;
+    try std.testing.expect(isStaleTmpPack(.{ .name = "tmp_pack_Ab12Cd", .mtime_ns = now - stale_tmp_pack_ns, .now_ns = now }));
+}
+
+test "isStaleTmpPack: a fresh tmp_pack_ file may belong to a running fetch" {
+    const now: i96 = 100 * std.time.ns_per_min;
+    try std.testing.expect(!isStaleTmpPack(.{ .name = "tmp_pack_Ab12Cd", .mtime_ns = now - stale_tmp_pack_ns + 1, .now_ns = now }));
+}
+
+test "isStaleTmpPack: finished packs and other files are never stale" {
+    const now: i96 = 100 * std.time.ns_per_min;
+    try std.testing.expect(!isStaleTmpPack(.{ .name = "pack-0123abcd.pack", .mtime_ns = 0, .now_ns = now }));
+    try std.testing.expect(!isStaleTmpPack(.{ .name = "tmp_idx_Ab12Cd", .mtime_ns = 0, .now_ns = now }));
+}
+
 test "isOid accepts 40 lowercase hex" {
     try testing.expect(isOid("0123456789abcdef0123456789abcdef01234567"));
 }
@@ -205,9 +241,10 @@ test "buildFetchArgv prefixes the fixed flags and dedupes refspecs" {
     const argv = try buildFetchArgv(testing.allocator, &.{ "s1", "s2", "s1" });
     defer testing.allocator.free(argv);
     const expected = [_][]const u8{
-        "git",                   "-c",      "http.lowSpeedLimit=1000", "-c",                    "http.lowSpeedTime=30",
-        "fetch",                 "--quiet", "--no-tags",               "--no-write-fetch-head", "--no-recurse-submodules",
-        "--no-auto-maintenance", "origin",  "s1",                      "s2",
+        "git",                   "-c",                      "http.lowSpeedLimit=1000", "-c",      "http.lowSpeedTime=30",
+        "-c",                    "fetch.unpackLimit=1",     "fetch",                   "--quiet", "--no-tags",
+        "--no-write-fetch-head", "--no-recurse-submodules", "--no-auto-maintenance",   "origin",  "s1",
+        "s2",
     };
     try testing.expectEqual(expected.len, argv.len);
     for (expected, argv) |want, got| try testing.expectEqualStrings(want, got);

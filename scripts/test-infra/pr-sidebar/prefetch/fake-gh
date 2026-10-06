@@ -3,6 +3,10 @@
 # per call (the query text is elided so each call is exactly one line) and
 # serves $FAKE_GH_FIXTURES/review-N.json. A missing fixture fails like gh does
 # for an unknown PR.
+#
+# Slow answers (Phase 6b H6): FAKE_GH_SLEEP_<N>=<secs>, or a file
+# $FAKE_GH_FIXTURES/sleep-<N> holding <secs>, delays the answer for PR N. The
+# call is logged before the sleep, so the log shows it in flight.
 log="${FAKE_GH_LOG:?FAKE_GH_LOG not set}"
 fixtures="${FAKE_GH_FIXTURES:?FAKE_GH_FIXTURES not set}"
 
@@ -17,9 +21,22 @@ for arg in "$@"; do
 done
 printf '%s\n' "${logged[*]}" >>"$log"
 
+case "$num" in
+  '' | *[!0-9]*) ;;
+  *)
+    # Builtins only after the log line ($(<file), read -t on an empty pipe):
+    # no execve while the call is in flight, so the harness's strace exec
+    # audit has nothing to flag.
+    sleep_var="FAKE_GH_SLEEP_$num"
+    secs="${!sleep_var:-}"
+    [ -z "$secs" ] && [ -f "$fixtures/sleep-$num" ] && secs="$(<"$fixtures/sleep-$num")"
+    [ -n "$secs" ] && { read -rt "$secs" <> <(:) || :; }
+    ;;
+esac
+
 fixture="$fixtures/review-$num.json"
 if [ -n "$num" ] && [ -f "$fixture" ]; then
-  cat "$fixture"
+  printf '%s\n' "$(<"$fixture")"
   exit 0
 fi
 echo "GraphQL: Could not resolve to a PullRequest with the number of $num. (repository.pullRequest)" >&2

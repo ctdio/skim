@@ -677,6 +677,27 @@ pub fn build(b: *std.Build) void {
     const run_pr_prefetch_tests = b.addRunArtifact(pr_prefetch_tests);
     test_step.dependOn(&run_pr_prefetch_tests.step);
 
+    // Pure PR flip modules (src/pr/flip.zig, src/pr/notes.zig): debounce,
+    // dwell, cursor memory, notes anchoring/reconcile. Needs tree-sitter
+    // (git/parser.zig); no SQLite (D4: both are reachable from the wasm App).
+    const pr_flip_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pr_flip_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    pr_flip_tests.root_module.addImport("vaxis", vaxis);
+    pr_flip_tests.root_module.addImport("tree-sitter", tree_sitter);
+    pr_flip_tests.root_module.addImport("build_options", build_options_module);
+    pr_flip_tests.root_module.addImport("skim_io", skim_io_module);
+    for (grammars) |grammar| {
+        pr_flip_tests.root_module.linkLibrary(grammar);
+    }
+    pr_flip_tests.root_module.link_libc = true;
+    const run_pr_flip_tests = b.addRunArtifact(pr_flip_tests);
+    test_step.dependOn(&run_pr_flip_tests.step);
+
     // Web (wasm) session tests. Rooted at src/web/session.zig so its own tests are
     // collected, reaching production code through the src/-rooted `web_core` NAMED
     // module — a named import keeps app.zig's and its neighbours' test blocks out
@@ -1088,6 +1109,9 @@ pub fn build(b: *std.Build) void {
 // across threads, so SQLite skips its per-connection mutexes.
 const sqlite_flags = [_][]const u8{
     "-DSQLITE_THREADSAFE=2",
+    // prs.db holds private PR data; `Store.open` relies on SQLite creating it
+    // (and its -wal/-shm) owner-only.
+    "-DSQLITE_DEFAULT_FILE_PERMISSIONS=0600",
     "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
     "-DSQLITE_OMIT_LOAD_EXTENSION",
     "-DSQLITE_OMIT_DEPRECATED",

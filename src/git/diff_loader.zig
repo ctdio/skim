@@ -196,6 +196,19 @@ pub fn start(self: *DiffLoad, allocator: Allocator, source: DiffSource, mode: Lo
     };
 }
 
+/// Abandon the in-flight load: cancel and join the worker, then free every
+/// file it parsed that the main thread has not drained. The state stays
+/// reusable for the next `start`. Used when a cache hit supersedes a pending
+/// miss load.
+pub fn cancel(self: *DiffLoad, allocator: Allocator) void {
+    cancelAndJoin(self, allocator);
+    freeUnconsumed(self, allocator);
+    self.files.clearRetainingCapacity();
+    self.consumed = 0;
+    self.iparser.deinit(allocator);
+    self.pending_start = false;
+}
+
 /// Cancel any in-flight worker, join it, and free everything it produced.
 /// Called from `App.deinit`.
 pub fn deinitState(self: *DiffLoad, allocator: Allocator) void {
@@ -254,9 +267,18 @@ pub fn finishAndJoin(self: *DiffLoad, allocator: Allocator) void {
 
 fn workerMain(self: *DiffLoad) void {
     diff.streamDiff(self.worker_allocator, self.worker_source, self, onChunk, shouldCancel) catch |err| {
-        if (err != error.Canceled) {
-            self.failed.store(true, .release);
-            std.log.err("diff load failed: {any}", .{err});
+        switch (err) {
+            error.Canceled => {},
+            // git ran and refused (streamDiff logged its stderr); the App
+            // reports the failed load in the status bar.
+            error.GitCommandFailed => {
+                self.failed.store(true, .release);
+                std.log.warn("diff load failed: {any}", .{err});
+            },
+            else => {
+                self.failed.store(true, .release);
+                std.log.err("diff load failed: {any}", .{err});
+            },
         }
         self.done.store(true, .release);
         self.ready.store(true, .release);
@@ -423,6 +445,32 @@ fn freeFiles(allocator: Allocator, files: *std.ArrayListUnmanaged(parser.FileDif
         owned.deinit(allocator);
     }
     files.deinit(allocator);
+}
+
+test "cancel joins an in-flight load and leaves nothing to drain" {
+    const allocator = std.testing.allocator;
+    var load: DiffLoad = .{};
+    defer deinitState(&load, allocator);
+
+    start(&load, allocator, .{ .working_dir = .{ .staged = false } }, .incremental);
+    cancel(&load, allocator);
+
+    try std.testing.expect(!load.isLoading());
+    var out: std.ArrayListUnmanaged(parser.FileDiff) = .empty;
+    defer out.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), try drainNewFiles(&load, &out, allocator));
+}
+
+test "cancel with no load in flight is a no-op that clears a requested start" {
+    const allocator = std.testing.allocator;
+    var load: DiffLoad = .{};
+    defer deinitState(&load, allocator);
+
+    requestStart(&load, .incremental);
+    cancel(&load, allocator);
+
+    try std.testing.expect(!load.isLoading());
+    try std.testing.expect(!load.pending_start);
 }
 
 test "incremental parse yields all files regardless of chunking" {

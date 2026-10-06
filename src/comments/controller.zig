@@ -15,6 +15,7 @@ const navigation = @import("../navigation.zig");
 const hunk_view = @import("../hunk_view.zig");
 const thread_anchor = @import("../pr/thread_anchor.zig");
 const review_controller = @import("../pr/review_controller.zig");
+const notes = @import("../pr/notes.zig");
 const parser = @import("../git/parser.zig");
 const platform = @import("../platform.zig");
 
@@ -443,7 +444,13 @@ pub const CommentController = struct {
         );
         defer app.allocator.free(output);
 
-        try clipboard.copyToClipboard(app.allocator, output);
+        // The previewed PR's notes that anchor nowhere in its diff (FR-9).
+        var export_text: std.Io.Writer.Allocating = .init(app.allocator);
+        defer export_text.deinit();
+        try export_text.writer.writeAll(output);
+        try notes.writeOrphanSection(&export_text.writer, app.state.flip.orphan_notes.items);
+
+        try clipboard.copyToClipboard(app.allocator, export_text.written());
     }
 
     /// Yank all comments and send to agent panel input

@@ -224,8 +224,9 @@ check_tui_smoke() {
     return
   fi
   send Enter
-  if wait_for_pane "ALPHA-THREAD-MARKER" 10 && pane_has "refs/skim/pr-1\]"; then
-    pass "tui: Enter on PR 1 fetches refs/skim/pr-1 and renders A's thread"
+  # The diff names the head oid the fetch landed, shown abbreviated.
+  if wait_for_pane "ALPHA-THREAD-MARKER" 10 && pane_has "\.\.\.${SHA_A:0:7}\]"; then
+    pass "tui: Enter on PR 1 fetches its head and renders A's thread"
   else
     fail "tui: PR 1 never rendered: $(pane | tail -2)"
   fi

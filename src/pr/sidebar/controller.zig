@@ -49,6 +49,14 @@ pub const PromptOutcome = enum { none, query_changed };
 
 pub const Edge = enum { top, bottom };
 
+/// Where record `index` sits in its stack, as `records.items` indices.
+/// `bottom` and `tip` are null for a standalone PR.
+pub const StackPlace = struct {
+    parent: ?usize = null,
+    bottom: ?usize = null,
+    tip: ?usize = null,
+};
+
 /// Seconds after the last good sync at which the list counts as stale.
 const stale_after_secs: i64 = 5 * 60;
 
@@ -292,6 +300,34 @@ pub fn selectedPr(state: *const SidebarState) ?*const PrRecord {
     return &state.records.?.items[row.record];
 }
 
+/// Index into `records.items` of PR `number`, whether or not the filter shows it.
+pub fn recordIndex(state: *const SidebarState, number: u32) ?usize {
+    const records = state.records orelse return null;
+    for (records.items, 0..) |record, index| {
+        if (record.number == number) return index;
+    }
+    return null;
+}
+
+pub fn recordByNumber(state: *const SidebarState, number: u32) ?*const PrRecord {
+    const index = recordIndex(state, number) orelse return null;
+    return &state.records.?.items[index];
+}
+
+pub fn stackPlace(state: *const SidebarState, index: usize) StackPlace {
+    const analysis = state.analysis orelse return .{};
+    var place: StackPlace = .{ .parent = analysis.parent_of[index] };
+    if (!analysis.isStacked(index)) return place;
+    const stack_id = analysis.stack_of[index];
+    const height = analysis.heights[stack_id];
+    for (analysis.stack_of, analysis.depth_of, 0..) |member_stack, depth, member| {
+        if (member_stack != stack_id) continue;
+        if (depth == 0 and place.bottom == null) place.bottom = member;
+        if (depth == height - 1 and place.tip == null) place.tip = member;
+    }
+    return place;
+}
+
 /// Put the cursor on PR `number`, expanding its stack (`skim pr <n>`).
 /// False when the PR is not in the filtered view.
 pub fn selectNumber(state: *SidebarState, allocator: Allocator, number: u32) !bool {
@@ -404,6 +440,8 @@ pub fn deinitState(state: *SidebarState, allocator: Allocator) void {
     releaseSnapshot(state, allocator);
     state.expanded.deinit(allocator);
     state.expanded = .{};
+    state.cached.deinit(allocator);
+    state.cached = .{};
     if (state.active_query) |*query| query.deinit(allocator);
     state.active_query = null;
     freePresets(state, allocator);
@@ -614,6 +652,7 @@ fn buildRows(state: *const SidebarState, range: struct { allocator: Allocator, f
             .ci = record.ci,
             .review = reviewGlyphOf(record, ctx),
             .changed_since_seen = changedSinceSeen(record),
+            .cache = if (state.cached.contains(record.number)) .cached else .unknown,
         };
     }
     return out;
