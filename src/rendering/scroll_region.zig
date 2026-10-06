@@ -15,6 +15,14 @@
 //! The rewrite of `screen_last` is exact for any shift, so a frame with many
 //! changed rows stays correct. The match count below is only a test of whether
 //! the scroll saves bytes.
+//!
+//! A scroll moves whole rows. A left/right margin (DECSLRM) would confine it to
+//! the diff pane, but support cannot be detected: vaxis drops the DECRQM reply
+//! for mode 69 before skim sees it. So while the PR sidebar is drawn beside the
+//! diff, every frame is a plain cell diff. Scrolling there moved the sidebar
+//! with the diff and left the terminal showing it shifted until the repaint,
+//! which flickers on any terminal that ignores synchronized output (tmux among
+//! them).
 
 const std = @import("std");
 const vaxis = @import("vaxis");
@@ -53,11 +61,11 @@ const max_candidates = 8;
 /// to most of a page.
 const anchor_offsets = [_]u16{ 2, 4, 3 };
 
-pub const ApplyParams = struct {
+pub const RenderParams = struct {
     vx: *vaxis.Vaxis,
     writer: *std.Io.Writer,
-    /// Columns a scroll is detected on: the main pane beside the PR sidebar.
-    /// Null compares whole rows.
+    /// Columns the diff occupies: the main pane beside the PR sidebar. Null
+    /// means whole rows. A range narrower than the screen never scrolls.
     columns: ?Columns = null,
 };
 
@@ -79,13 +87,29 @@ pub const Scroller = struct {
         self.scratch = &.{};
     }
 
-    /// Turns a scrolled frame into a terminal scroll. Call after the frame is
-    /// built into `vx.screen` and before `vx.render`.
+    /// Draws the frame built into `vx.screen`: a terminal scroll plus the rows
+    /// it exposed when the frame is a shift of the frame on screen, otherwise a
+    /// plain `vx.render`.
     ///
     /// Returns the number of rows scrolled, negative for a scroll toward the
-    /// top of the screen, or 0 when the frame is not a shift of the frame on
-    /// screen.
-    pub fn apply(self: *Scroller, params: ApplyParams) !i32 {
+    /// top of the screen, or 0 when the frame was drawn without a scroll.
+    pub fn render(self: *Scroller, params: RenderParams) !i32 {
+        const shift = try self.apply(params);
+        try params.vx.render(params.writer);
+        // The scroll opened synchronized output, and `vx.render` closes it only
+        // when it finds a cell to redraw. A scroll that exposed nothing new
+        // would leave the terminal holding the frame until its own timeout.
+        if (shift != 0) {
+            try params.writer.writeAll(ctlseqs.sync_reset);
+            try params.writer.flush();
+        }
+        return shift;
+    }
+
+    /// Writes the scroll for a frame that is a shift of the frame on screen and
+    /// rewrites `screen_last` to match. Returns the shift, or 0 when nothing
+    /// was written.
+    fn apply(self: *Scroller, params: RenderParams) !i32 {
         const vx = params.vx;
         const writer = params.writer;
         if (vx.refresh) return 0;
@@ -131,33 +155,26 @@ pub const Scroller = struct {
 /// The rows a scroll may move: everything between the file header and the
 /// status bar. Both sit outside the scroll region, so the terminal leaves them
 /// alone and `screen_last` keeps them unchanged.
-///
-/// `left` to `right` are the columns compared to find the shift. The scroll
-/// itself still moves whole rows - a left/right margin (DECSLRM) is not widely
-/// supported - so cells outside them (the PR sidebar) move with the diff and
-/// `vaxis.render` repaints them from the rotated `screen_last`.
 const Band = struct {
     top: u16,
     bottom: u16,
-    left: u16,
-    right: u16,
 
     fn height(self: Band) u16 {
         return self.bottom - self.top;
     }
 };
 
+/// The band to scroll, or null when the screen is too short or the diff does
+/// not span the full width. A scroll beside the sidebar would move it too.
 fn bandOf(vx: *const vaxis.Vaxis, columns: ?Columns) ?Band {
     const reserved = Layout.header_height + Layout.status_height;
     if (vx.screen.height <= reserved + min_overlap) return null;
-    const range = columns orelse Columns{ .x = 0, .width = vx.screen.width };
-    if (range.width == 0) return null;
-    if (@as(u32, range.x) + range.width > vx.screen.width) return null;
+    if (columns) |range| {
+        if (range.x != 0 or range.width != vx.screen.width) return null;
+    }
     return .{
         .top = Layout.header_height,
         .bottom = vx.screen.height - Layout.status_height,
-        .left = range.x,
-        .right = range.x + range.width,
     };
 }
 
@@ -176,13 +193,13 @@ fn detectShift(vx: *const vaxis.Vaxis, band: Band) i32 {
         const anchor = anchorRow(vx, band, band.top + band.height() / offset) orelse continue;
 
         // The first anchor still sits where it was, so the band did not scroll.
-        if (first_anchor and rowsMatch(vx, .{ .band = band, .new_row = anchor, .last_row = anchor })) return 0;
+        if (first_anchor and rowsMatch(vx, .{ .new_row = anchor, .last_row = anchor })) return 0;
         first_anchor = false;
 
         var last_row = band.top;
         while (last_row < band.bottom) : (last_row += 1) {
             if (last_row == anchor) continue;
-            if (!rowsMatch(vx, .{ .band = band, .new_row = anchor, .last_row = last_row })) continue;
+            if (!rowsMatch(vx, .{ .new_row = anchor, .last_row = last_row })) continue;
             const shift = @as(i32, last_row) - @as(i32, anchor);
             if (std.mem.indexOfScalar(i32, candidates[0..candidate_count], shift) != null) continue;
             if (candidate_count == max_candidates) return 0;
@@ -231,7 +248,7 @@ fn countMatches(vx: *const vaxis.Vaxis, band: Band, shift: i32) ?u16 {
     while (offset < overlap) : (offset += sample_stride) {
         const new_row = first_new_row + offset;
         const last_row: u16 = @intCast(@as(i32, new_row) + shift);
-        if (rowsMatch(vx, .{ .band = band, .new_row = new_row, .last_row = last_row })) {
+        if (rowsMatch(vx, .{ .new_row = new_row, .last_row = last_row })) {
             matches += 1;
         } else {
             misses += 1;
@@ -320,17 +337,17 @@ fn anchorRow(vx: *const vaxis.Vaxis, band: Band, start: u16) ?u16 {
     var step: u16 = 0;
     while (step < band.height()) : (step += 1) {
         const below = start + step;
-        if (below < band.bottom and rowIsDistinctive(vx, .{ .band = band, .row = below })) return below;
+        if (below < band.bottom and rowIsDistinctive(vx, below)) return below;
         if (start >= band.top + step) {
             const above = start - step;
-            if (rowIsDistinctive(vx, .{ .band = band, .row = above })) return above;
+            if (rowIsDistinctive(vx, above)) return above;
         }
     }
     return null;
 }
 
-fn rowIsDistinctive(vx: *const vaxis.Vaxis, at: struct { band: Band, row: u16 }) bool {
-    const cells = bandCells(vx.screen.buf, .{ .width = vx.screen.width, .band = at.band, .row = at.row });
+fn rowIsDistinctive(vx: *const vaxis.Vaxis, row: u16) bool {
+    const cells = rowCells(vx.screen.buf, .{ .width = vx.screen.width, .row = row });
     var painted: usize = 0;
     for (cells) |cell| {
         if (cell.default) continue;
@@ -340,9 +357,9 @@ fn rowIsDistinctive(vx: *const vaxis.Vaxis, at: struct { band: Band, row: u16 })
     return false;
 }
 
-fn rowsMatch(vx: *const vaxis.Vaxis, rows: struct { band: Band, new_row: u16, last_row: u16 }) bool {
-    const new_cells = bandCells(vx.screen.buf, .{ .width = vx.screen.width, .band = rows.band, .row = rows.new_row });
-    const last_cells = bandCells(vx.screen_last.buf, .{ .width = vx.screen.width, .band = rows.band, .row = rows.last_row });
+fn rowsMatch(vx: *const vaxis.Vaxis, rows: struct { new_row: u16, last_row: u16 }) bool {
+    const new_cells = rowCells(vx.screen.buf, .{ .width = vx.screen.width, .row = rows.new_row });
+    const last_cells = rowCells(vx.screen_last.buf, .{ .width = vx.screen.width, .row = rows.last_row });
     // Iterate by pointer: an InternalCell is 104 bytes, and taking it by value
     // copied one for every column of every row compared.
     for (new_cells, last_cells) |*new_cell, *last_cell| {
@@ -352,11 +369,11 @@ fn rowsMatch(vx: *const vaxis.Vaxis, rows: struct { band: Band, new_row: u16, la
     return true;
 }
 
-/// The cells of `row` between the band's compared columns. `buf` is either
-/// screen's cell buffer; the two use different cell types.
-fn bandCells(buf: anytype, at: struct { width: u16, band: Band, row: u16 }) @TypeOf(buf) {
+/// The cells of `row`. `buf` is either screen's cell buffer; the two use
+/// different cell types.
+fn rowCells(buf: anytype, at: struct { width: u16, row: u16 }) @TypeOf(buf) {
     const row_start = @as(usize, at.row) * at.width;
-    return buf[row_start + at.band.left .. row_start + at.band.right];
+    return buf[row_start..][0..at.width];
 }
 
 const testing = std.testing;
@@ -412,23 +429,26 @@ const TestScreen = struct {
         const win = self.vx.window();
         win.clear();
         var row: u16 = 0;
-        while (row < win.height) : (row += 1) {
-            const line = base + row;
-            const text = std.fmt.bufPrint(&self.labels[row], "line{d:0>6}", .{line}) catch unreachable;
-            for (text, 0..) |byte, col| {
-                win.writeCell(@intCast(col), row, .{
-                    .char = .{ .grapheme = text[col .. col + 1], .width = 1 },
-                    .style = .{ .fg = .{ .index = @intCast(byte % 8) } },
-                });
-            }
-            var col: u16 = label_width;
-            while (col < win.width) : (col += 1) {
-                const pick = (@as(usize, line) * 7 + col * 3) % alphabet.len;
-                win.writeCell(col, row, .{
-                    .char = .{ .grapheme = alphabet[pick .. pick + 1], .width = 1 },
-                    .style = .{ .fg = .{ .index = @intCast(pick % 8) } },
-                });
-            }
+        while (row < win.height) : (row += 1) self.paintLine(row, base + row);
+    }
+
+    /// Paints `row` with the content of `line`.
+    fn paintLine(self: *TestScreen, row: u16, line: u16) void {
+        const win = self.vx.window();
+        const text = std.fmt.bufPrint(&self.labels[row], "line{d:0>6}", .{line}) catch unreachable;
+        for (text, 0..) |byte, col| {
+            win.writeCell(@intCast(col), row, .{
+                .char = .{ .grapheme = text[col .. col + 1], .width = 1 },
+                .style = .{ .fg = .{ .index = @intCast(byte % 8) } },
+            });
+        }
+        var col: u16 = label_width;
+        while (col < win.width) : (col += 1) {
+            const pick = (@as(usize, line) * 7 + col * 3) % alphabet.len;
+            win.writeCell(col, row, .{
+                .char = .{ .grapheme = alphabet[pick .. pick + 1], .width = 1 },
+                .style = .{ .fg = .{ .index = @intCast(pick % 8) } },
+            });
         }
     }
 
@@ -658,7 +678,7 @@ test "misses a scroll beside a static left column when comparing whole rows" {
     try testing.expectEqual(@as(i32, 0), try screen.scroller.apply(.{ .vx = &screen.vx, .writer = &screen.out.writer }));
 }
 
-test "finds a scroll beside a static left column when given the main pane's columns" {
+test "reports no scroll beside a static left column" {
     var screen = try TestScreen.init(40, 20);
     defer screen.deinit();
 
@@ -666,29 +686,29 @@ test "finds a scroll beside a static left column when given the main pane's colu
     try screen.commit();
     screen.paintBeside(1, 12);
 
-    try testing.expectEqual(@as(i32, 1), try screen.scroller.apply(.{
+    try testing.expectEqual(@as(i32, 0), try screen.scroller.apply(.{
         .vx = &screen.vx,
         .writer = &screen.out.writer,
         .columns = .{ .x = 12, .width = 28 },
     }));
 }
 
-test "ignores a static left column's blank rows when picking an anchor" {
+test "draws a frame beside a static left column without a scroll region" {
     var screen = try TestScreen.init(40, 20);
     defer screen.deinit();
 
     screen.paintBeside(0, 12);
     try screen.commit();
-    screen.paintBeside(9, 12);
+    screen.paintBeside(1, 12);
+    _ = try screen.scroller.render(.{ .vx = &screen.vx, .writer = &screen.out.writer, .columns = .{ .x = 12, .width = 28 } });
 
-    try testing.expectEqual(@as(i32, 9), try screen.scroller.apply(.{
-        .vx = &screen.vx,
-        .writer = &screen.out.writer,
-        .columns = .{ .x = 12, .width = 28 },
-    }));
+    const written = screen.out.written();
+    try testing.expect(std.mem.indexOf(u8, written, "\x1b[2;19r") == null);
+    try testing.expect(std.mem.indexOf(u8, written, "\x1b[r") == null);
+    try testing.expect(std.mem.indexOf(u8, written, ctlseqs.ind) == null);
 }
 
-test "redraws the static left column after a scroll beside it" {
+test "leaves the static left column where the terminal shows it" {
     var screen = try TestScreen.init(40, 20);
     defer screen.deinit();
 
@@ -697,15 +717,79 @@ test "redraws the static left column after a scroll beside it" {
     screen.paintBeside(1, 12);
     _ = try screen.scroller.apply(.{ .vx = &screen.vx, .writer = &screen.out.writer, .columns = .{ .x = 12, .width = 28 } });
 
-    // The terminal moved the sidebar's band rows with the diff, so vaxis must
-    // believe they moved too and repaint them where they differ.
+    // The sidebar did not change between the frames, so a scroll that moved
+    // it would leave every band row of it different from the new frame.
     const width: usize = screen.vx.screen.width;
     var row: u16 = 1;
-    while (row < 18) : (row += 1) {
+    while (row < 19) : (row += 1) {
         const expected = screen.vx.screen.buf[@as(usize, row) * width];
         const shown = screen.vx.screen_last.buf[@as(usize, row) * width];
-        try testing.expect(!shown.eql(expected));
+        try testing.expect(shown.eql(expected));
     }
+}
+
+test "draws a full-width scrolled frame inside one synchronized update" {
+    var screen = try TestScreen.init(30, 20);
+    defer screen.deinit();
+
+    screen.paint(0);
+    try screen.commit();
+    screen.paint(1);
+    try testing.expectEqual(@as(i32, 1), try screen.scroller.render(.{ .vx = &screen.vx, .writer = &screen.out.writer }));
+
+    const written = screen.out.written();
+    try testing.expect(std.mem.startsWith(u8, written, ctlseqs.sync_set));
+    try testing.expect(std.mem.indexOf(u8, written, "\x1b[2;19r") != null);
+    try testing.expect(std.mem.endsWith(u8, written, ctlseqs.sync_reset));
+}
+
+test "closes synchronized output after a scroll that exposes nothing to redraw" {
+    var screen = try TestScreen.init(30, 20);
+    defer screen.deinit();
+
+    screen.paint(0);
+    try screen.commit();
+    // Rows 1-17 move up one line; the header, the status bar, and the exposed
+    // row 18 (blank) already match what the scroll leaves on screen.
+    const win = screen.vx.window();
+    win.clear();
+    screen.paintLine(0, 0);
+    var row: u16 = 1;
+    while (row < 18) : (row += 1) screen.paintLine(row, row + 1);
+    screen.paintLine(19, 19);
+
+    try testing.expectEqual(@as(i32, 1), try screen.scroller.render(.{ .vx = &screen.vx, .writer = &screen.out.writer }));
+
+    const written = screen.out.written();
+    try testing.expect(std.mem.indexOf(u8, written, "\x1b[2;19r") != null);
+    try testing.expect(std.mem.endsWith(u8, written, ctlseqs.sync_reset));
+}
+
+test "reports a scroll when the given columns span the whole screen" {
+    var screen = try TestScreen.init(40, 20);
+    defer screen.deinit();
+
+    screen.paint(0);
+    try screen.commit();
+    screen.paint(1);
+
+    try testing.expectEqual(@as(i32, 1), try screen.scroller.apply(.{
+        .vx = &screen.vx,
+        .writer = &screen.out.writer,
+        .columns = .{ .x = 0, .width = 40 },
+    }));
+}
+
+test "writes nothing for a frame that matches the screen" {
+    var screen = try TestScreen.init(30, 20);
+    defer screen.deinit();
+
+    screen.paint(3);
+    try screen.commit();
+    screen.paint(3);
+
+    try testing.expectEqual(@as(i32, 0), try screen.scroller.render(.{ .vx = &screen.vx, .writer = &screen.out.writer }));
+    try testing.expectEqual(@as(usize, 0), screen.out.written().len);
 }
 
 test "rejects a column range that leaves the screen" {

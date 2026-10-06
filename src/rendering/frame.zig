@@ -584,10 +584,10 @@ pub fn render(app: *App, win: vaxis.Window) !void {
     }
 }
 
-/// The columns the diff scrolls in, for `scroll_region.Scroller.apply`: the
+/// The columns the diff occupies, for `scroll_region.Scroller.render`: the
 /// main pane beside the PR sidebar, or null for whole rows when no sidebar is
-/// drawn. The sidebar does not scroll with the diff, so comparing it would
-/// hide every scroll.
+/// drawn. A terminal scroll would move the sidebar with the diff, so a range
+/// narrower than the screen turns the scroll off.
 pub fn scrollColumns(app: *const App, width: u16) ?scroll_region.Columns {
     const surface_split = surfaceSplit(app, width);
     if (surface_split.sidebar_cols == 0) return null;

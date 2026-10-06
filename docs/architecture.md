@@ -157,11 +157,12 @@ vaxis diffs a new frame against the frame on screen cell by cell. A scroll moves
 every content row, so that diff reports the whole screen as changed and
 re-encodes it — about 28 KB for one `j` on a 190x60 terminal.
 
-`scroll_region.apply` runs between `frame.render` and `vaxis.render`. It finds
-the frames that are the previous frame shifted by whole rows, writes a `DECSTBM`
-region plus `IND`/`RI`, and rewrites `vaxis.screen_last` to what the terminal
-now shows. The render that follows then draws only the rows the scroll exposed.
-That cuts a real diff from about 7000 to about 880 bytes per keystroke.
+`Scroller.render` draws each frame after `frame.render`. It finds the frames
+that are the previous frame shifted by whole rows, writes a `DECSTBM` region
+plus `IND`/`RI`, and rewrites `vaxis.screen_last` to what the terminal now
+shows. The `vaxis.render` that follows then draws only the rows the scroll
+exposed, and the synchronized update the scroll opened is always closed. That
+cuts a real diff from about 7000 to about 880 bytes per keystroke.
 
 Two properties keep it safe:
 
@@ -171,8 +172,13 @@ Two properties keep it safe:
 - The file header and the status bar sit outside the scroll region, so the
   terminal leaves them alone and the normal cell diff redraws them.
 
-`apply` does nothing when a full redraw is queued, when the terminal is not on
-the alt screen, when the screen is too short, or when no shift matches.
+The scroll is skipped when a full redraw is queued, when the terminal is not on
+the alt screen, when the screen is too short, when no shift matches, or when the
+PR sidebar is drawn beside the diff. A scroll moves whole rows, so beside the
+sidebar it would move the sidebar too, and a terminal that ignores synchronized
+output (tmux) shows it shifted until the repaint. A left/right margin
+(`DECSLRM`) would avoid that, but vaxis discards the mode-69 `DECRQM` reply, so
+support cannot be detected and the sidebar layout takes the plain cell diff.
 
 ---
 

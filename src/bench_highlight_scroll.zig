@@ -184,8 +184,7 @@ pub fn main(process_init: std.process.Init) !void {
             stats.build_ns += build_timer.read();
 
             out.clearRetainingCapacity();
-            _ = try scroller.apply(.{ .vx = &vx, .writer = &out.writer });
-            try vx.render(&out.writer);
+            _ = try scroller.render(.{ .vx = &vx, .writer = &out.writer });
             try out.writer.flush();
             const payload = out.written();
 

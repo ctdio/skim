@@ -180,8 +180,7 @@ fn runView(
         const build_ns = timer.read();
 
         out.clearRetainingCapacity();
-        _ = try scroller.apply(.{ .vx = &vx, .writer = &out.writer, .columns = frame.scrollColumns(app, width) });
-        try vx.render(&out.writer);
+        _ = try scroller.render(.{ .vx = &vx, .writer = &out.writer, .columns = frame.scrollColumns(app, width) });
         try out.writer.flush();
         const total_ns = timer.read();
 

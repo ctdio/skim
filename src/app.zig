@@ -1867,8 +1867,7 @@ pub const App = struct {
                         const render_ns: u64 = if (render_timer_opt) |*timer| timer.read() else 0;
 
                         var vx_timer_opt: ?skim_io.Timer = skim_io.Timer.start() catch null;
-                        const shifted = try scroller.apply(.{ .vx = vx, .writer = tty.writer(), .columns = frame.scrollColumns(self, win.width) });
-                        try vx.render(tty.writer());
+                        const shifted = try scroller.render(.{ .vx = vx, .writer = tty.writer(), .columns = frame.scrollColumns(self, win.width) });
                         const vx_ns: u64 = if (vx_timer_opt) |*timer| timer.read() else 0;
                         write_ns = vx_ns;
 
@@ -1879,8 +1878,7 @@ pub const App = struct {
                     } else {
                         try frame.render(self, win);
                         var write_timer = try skim_io.Timer.start();
-                        _ = try scroller.apply(.{ .vx = vx, .writer = tty.writer(), .columns = frame.scrollColumns(self, win.width) });
-                        try vx.render(tty.writer());
+                        _ = try scroller.render(.{ .vx = vx, .writer = tty.writer(), .columns = frame.scrollColumns(self, win.width) });
                         write_ns = write_timer.read();
                     }
 
@@ -1888,8 +1886,7 @@ pub const App = struct {
                 } else {
                     try frame.render(self, win);
                     var write_timer = try skim_io.Timer.start();
-                    _ = try scroller.apply(.{ .vx = vx, .writer = tty.writer(), .columns = frame.scrollColumns(self, win.width) });
-                    try vx.render(tty.writer());
+                    _ = try scroller.render(.{ .vx = vx, .writer = tty.writer(), .columns = frame.scrollColumns(self, win.width) });
                     write_ns = write_timer.read();
                 }
                 // Don't clear needs_render if we're about to suspend for editor
