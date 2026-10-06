@@ -4,7 +4,7 @@
                                            │
                                            │
          No PRs match `label:nope`         │
-         F: next preset · f: edit          │
+      f: filter menu · F: next preset      │
                                            │
                                            │
  f:filter F:preset R:sync ^b:hide          │

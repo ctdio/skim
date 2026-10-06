@@ -1,0 +1,16 @@
+ ready · 31/31        ⟳ 2m ago │
+ -is:draft                     │
+───────────────────────────────│
+╭─ Filter ────────────────────╮│
+│ [ ] Review requested        ││
+│ [ ] Authored by me          ││
+│ [ ] CI not failing          ││
+│ [ ] Changed since seen      ││
+│                             ││
+│   Custom query…           / ││
+│▌  Clear filter              ││
+├─────────────────────────────┤│
+│ query -is:draft             ││
+│ 31/31 PRs · 2 stacks        ││
+╰─────────────────────────────╯│
+ space:toggle enter:apply      │

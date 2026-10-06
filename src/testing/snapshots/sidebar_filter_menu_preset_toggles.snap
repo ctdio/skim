@@ -1,0 +1,30 @@
+ triage · 3/31                    ⟳ 2m ago │
+ -is:draft review:requested                │
+───────────────────────────────────────────│
+▌▸ #813 [3] Backoff helper      alice  ✓●Δ │
+                                           │
+                                           │
+                                           │
+                                           │
+╭─ Filter ────────────────────────────────╮│
+│ Presets                                 ││
+│▌● triage     -is:draft review:requested ││
+│ ○ all                                   ││
+│ ○ Ready for review            -is:draft ││
+│ ○ Needs my review      review:requested ││
+│ ○ Mine                       author:@me ││
+│ ○ Changed since seen         is:changed ││
+│ Quick toggles                           ││
+│ [x] Hide drafts               -is:draft ││
+│ [x] Review requested   review:requested ││
+│ [ ] Authored by me           author:@me ││
+│ [ ] CI not failing          ci:!failure ││
+│ [ ] Changed since seen       is:changed ││
+│                                         ││
+│   Custom query…                       / ││
+│   Clear filter                          ││
+├─────────────────────────────────────────┤│
+│ query -is:draft review:requested        ││
+│ 3/31 PRs · 1 stack                      ││
+╰─────────────────────────────────────────╯│
+ space:toggle enter:apply esc:close /:query│

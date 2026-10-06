@@ -3609,6 +3609,10 @@ pub const App = struct {
             _ = try sidebar_controller.promptKey(sb, self.allocator, .escape);
             return;
         }
+        if (sb.menu != null) {
+            _ = try sidebar_controller.menuKey(sb, self.allocator, .close);
+            return;
+        }
         if (try sidebar_controller.restorePreset(sb, self.allocator)) {
             pr_surface.pushVisible(&self.state.pr_surface, .{ .allocator = self.allocator, .sidebar = sb });
             return;

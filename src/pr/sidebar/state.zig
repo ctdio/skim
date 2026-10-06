@@ -49,6 +49,12 @@ pub const Prompt = struct {
     }
 };
 
+/// The `f` filter menu. Its items are derived from the presets and the
+/// query each frame (`controller.menuItemAt`); only the cursor is kept.
+pub const FilterMenu = struct {
+    cursor: usize = 0,
+};
+
 pub const ParseErrorView = struct {
     reason: filter_query.ParseErrorReason,
     /// `ParseError.format` output, rendered when the query was applied because
@@ -109,8 +115,10 @@ pub const SidebarState = struct {
     query_len: usize = 0,
     active_query: ?filter_query.Query = null,
     parse_error: ?ParseErrorView = null,
-    /// Non-null while the `f` prompt is open.
+    /// Non-null while the query prompt (`/`, or the menu's custom query) is open.
     prompt: ?Prompt = null,
+    /// Non-null while the `f` filter menu is open.
+    menu: ?FilterMenu = null,
     presets: []Preset = &.{},
     /// Null = custom query.
     active_preset: ?usize = null,

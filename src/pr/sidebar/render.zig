@@ -15,6 +15,7 @@ const CiStatus = parse.CiStatus;
 const Style = vaxis.Cell.Style;
 const LineWriter = line_writer.LineWriter;
 const Color = common.Color;
+const FrameChars = common.FrameChars;
 const RowKind = state_mod.RowKind;
 
 pub const ReviewGlyph = enum { none, requested_me, approved_by_me, approved, changes_requested };
@@ -66,6 +67,30 @@ pub const HeaderView = struct {
     query: []const u8,
 };
 
+pub const MenuLineKind = enum { section, preset, toggle, action };
+
+pub const MenuLine = struct {
+    kind: MenuLineKind,
+    /// Section heading ("" = a blank spacer row) or item label.
+    label: []const u8,
+    /// Query text the item stands for, drawn dim on the right when it fits.
+    detail: []const u8 = "",
+    /// Preset: it is the applied query. Toggle: its term is in the query.
+    on: bool = false,
+    selected: bool = false,
+};
+
+/// The `f` filter menu, drawn as a box over the bottom of the list.
+pub const MenuView = struct {
+    lines: []const MenuLine,
+    query: []const u8,
+    /// PRs in the filtered view, as in `HeaderView`.
+    visible: usize,
+    total: usize,
+    /// Visible stacks of more than one PR.
+    stacks: usize,
+};
+
 /// One frame of the sidebar. `rows` holds the rows on screen, from the scroll
 /// offset down; `draw` drops any that do not fit the window.
 pub const View = struct {
@@ -74,8 +99,10 @@ pub const View = struct {
     cursor: ?usize,
     focused: bool,
     header: HeaderView,
-    /// Prompt text while the `f` prompt is open.
+    /// Prompt text while the query prompt is open.
     prompt: ?[]const u8 = null,
+    /// Non-null while the filter menu is open.
+    menu: ?MenuView = null,
     /// `ParseError.format` text of the last rejected query.
     parse_error: ?[]const u8 = null,
     sync_line: []const u8,
@@ -111,6 +138,10 @@ const author_min_inner: u16 = 40;
 const min_title_cols: u16 = 6;
 /// Footer key hints in priority order; trailing ones are dropped when narrow.
 const hints = [_][]const u8{ " f:filter", " F:preset", " R:sync", " ^b:hide" };
+const menu_hints = [_][]const u8{ " space:toggle", " enter:apply", " esc:close", " /:query" };
+/// Box rows besides the items: top border, rule, query, counts, bottom border.
+const menu_chrome_rows: u16 = 5;
+const menu_bg = Color.dialog_bg;
 
 pub fn draw(win: vaxis.Window, v: View) void {
     if (win.width < 2 or win.height == 0) return;
@@ -132,6 +163,9 @@ pub fn draw(win: vaxis.Window, v: View) void {
         drawEmpty(.{ .win = body, .top = row, .rows = list_rows, .empty = empty });
     } else {
         drawList(.{ .win = body, .top = row, .rows = list_rows, .view = v });
+    }
+    if (v.menu) |menu| {
+        if (win.height > row + 1) drawMenu(.{ .win = body, .top = row, .bottom = win.height - 1, .menu = menu });
     }
     if (win.height > row) drawFooter(body, v);
     drawDivider(win);
@@ -203,7 +237,7 @@ fn drawHeaderRow(win: vaxis.Window, v: View) void {
 fn drawQueryRow(win: vaxis.Window, v: View) void {
     var writer = LineWriter.init(.{ .win = win, .row = 1 });
     if (v.prompt) |text| {
-        writer.styledText(" f› ", .{ .fg = accent_fg });
+        writer.styledText(" /› ", .{ .fg = accent_fg });
         // The cursor sits at the end of the text, so a long query keeps its tail.
         writeTail(.{ .writer = &writer, .text = text, .cols = win.width -| (writer.col + 1), .style = .{ .fg = Color.bright_white } });
         writer.styledText("▏", .{ .fg = accent_fg });
@@ -246,7 +280,7 @@ fn drawEmpty(params: struct { win: vaxis.Window, top: u16, rows: usize, empty: E
             writer.text(prefix);
             writer.text(subject);
             writer.text("`");
-            if (params.rows > 1) drawCentered(win, row + 1, "F: next preset · f: edit");
+            if (params.rows > 1) drawCentered(win, row + 1, "f: filter menu · F: next preset");
         },
     }
 }
@@ -334,6 +368,115 @@ fn drawTail(params: struct { win: vaxis.Window, row: u16, col: u16, bg: ?vaxis.C
     writer.styledText(if (item.cache == .cached) "◆" else " ", .{ .fg = meta_fg });
 }
 
+/// The filter menu as a box over the bottom of the list, between `top` and
+/// the footer row `bottom`, so the list it filters stays in view above it.
+/// Items scroll to keep the selected one visible; a sidebar too short for
+/// one item draws no box.
+fn drawMenu(params: struct { win: vaxis.Window, top: u16, bottom: u16, menu: MenuView }) void {
+    const win = params.win;
+    const menu = params.menu;
+    const available = params.bottom -| params.top;
+    if (win.width < 3 or available <= menu_chrome_rows or menu.lines.len == 0) return;
+    const item_rows: u16 = @intCast(@min(menu.lines.len, available - menu_chrome_rows));
+    const box_top = params.bottom - (item_rows + menu_chrome_rows);
+    var row = box_top;
+    while (row < params.bottom) : (row += 1) {
+        fillRow(win, row, .{ .bg = menu_bg });
+        drawMenuSides(win, row);
+    }
+
+    drawMenuBorder(.{ .win = win, .row = box_top, .left = "╭", .right = "╮", .title = " Filter " });
+    const inner = win.child(.{ .x_off = 1, .y_off = 0, .width = win.width - 2, .height = win.height });
+    const first = menuScroll(menu.lines, item_rows);
+    for (menu.lines[first..][0..item_rows], 0..) |line, index| {
+        drawMenuLine(inner, box_top + 1 + @as(u16, @intCast(index)), line);
+    }
+    row = box_top + 1 + item_rows;
+    drawMenuBorder(.{ .win = win, .row = row, .left = "├", .right = "┤" });
+    drawMenuQuery(inner, row + 1, menu.query);
+    drawMenuCounts(inner, row + 2, menu);
+    drawMenuBorder(.{ .win = win, .row = row + 3, .left = "╰", .right = "╯" });
+}
+
+/// First line to draw so the selected line is among the `rows` drawn.
+fn menuScroll(lines: []const MenuLine, rows: u16) usize {
+    for (lines, 0..) |line, index| {
+        if (line.selected) return (index + 1) -| rows;
+    }
+    return 0;
+}
+
+fn drawMenuSides(win: vaxis.Window, row: u16) void {
+    const style = Style{ .fg = rule_fg, .bg = menu_bg };
+    var left = LineWriter.init(.{ .win = win, .row = row, .style = style });
+    left.text(FrameChars.vertical);
+    var right = LineWriter.init(.{ .win = win, .row = row, .col = win.width - 1, .style = style });
+    right.text(FrameChars.vertical);
+}
+
+fn drawMenuBorder(params: struct { win: vaxis.Window, row: u16, left: []const u8, right: []const u8, title: []const u8 = "" }) void {
+    const win = params.win;
+    var writer = LineWriter.init(.{ .win = win, .row = params.row, .style = .{ .fg = rule_fg }, .bg = menu_bg });
+    writer.text(params.left);
+    if (params.title.len > 0) {
+        writer.text(FrameChars.horizontal);
+        writer.styledText(params.title, .{ .fg = accent_fg, .bold = true });
+    }
+    while (writer.col < win.width - 1) writer.text(FrameChars.horizontal);
+    writer.text(params.right);
+}
+
+/// `▌○ Ready for review      -is:draft`: the cursor bar, the radio or
+/// checkbox, the label, and the item's query text right-aligned when it fits.
+fn drawMenuLine(win: vaxis.Window, row: u16, line: MenuLine) void {
+    const bg = if (line.selected) selected_bg else menu_bg;
+    if (line.selected) fillRow(win, row, .{ .bg = bg });
+    var writer = LineWriter.init(.{ .win = win, .row = row, .bg = bg });
+    if (line.kind == .section) {
+        writer.text(" ");
+        writer.styledText(line.label, .{ .fg = meta_fg, .bold = true });
+        return;
+    }
+    writer.styledText(if (line.selected) "▌" else " ", .{ .fg = accent_fg });
+    const mark_style = Style{ .fg = if (line.on) accent_fg else meta_fg };
+    switch (line.kind) {
+        .preset => writer.styledText(if (line.on) "● " else "○ ", mark_style),
+        .toggle => writer.styledText(if (line.on) "[x] " else "[ ] ", mark_style),
+        .action, .section => writer.text("  "),
+    }
+    const label_style = Style{ .fg = title_fg, .bold = line.selected };
+    const detail_cols = line_writer.displayWidth(win, line.detail);
+    // Label, one space, detail, one space before the border.
+    const room = win.width -| writer.col;
+    const label_cols = line_writer.displayWidth(win, line.label);
+    if (detail_cols == 0 or label_cols + 1 + detail_cols + 1 > room) {
+        writeTruncated(.{ .writer = &writer, .text = line.label, .cols = room -| 1, .style = label_style });
+        return;
+    }
+    writer.styledText(line.label, label_style);
+    writer.col = win.width - 1 - detail_cols;
+    writer.styledText(line.detail, .{ .fg = meta_fg });
+}
+
+fn drawMenuQuery(win: vaxis.Window, row: u16, query: []const u8) void {
+    var writer = LineWriter.init(.{ .win = win, .row = row, .style = .{ .fg = meta_fg }, .bg = menu_bg });
+    writer.text(" query ");
+    if (query.len == 0) return writer.text("none");
+    writeTruncated(.{ .writer = &writer, .text = query, .cols = win.width -| (writer.col + 1), .style = .{ .fg = Color.bright_white } });
+}
+
+/// ` 12/31 PRs · 2 stacks`.
+fn drawMenuCounts(win: vaxis.Window, row: u16, menu: MenuView) void {
+    var writer = LineWriter.init(.{ .win = win, .row = row, .style = .{ .fg = meta_fg }, .bg = menu_bg });
+    writer.text(" ");
+    writer.unsigned(menu.visible);
+    writer.text("/");
+    writer.unsigned(menu.total);
+    writer.text(if (menu.total == 1) " PR · " else " PRs · ");
+    writer.unsigned(menu.stacks);
+    writer.text(if (menu.stacks == 1) " stack" else " stacks");
+}
+
 fn drawFooter(win: vaxis.Window, v: View) void {
     const row = win.height - 1;
     var writer = LineWriter.init(.{ .win = win, .row = row, .style = .{ .fg = meta_fg } });
@@ -343,7 +486,7 @@ fn drawFooter(win: vaxis.Window, v: View) void {
         return;
     }
     if (!v.focused) return;
-    for (hints) |segment| {
+    for (if (v.menu != null) &menu_hints else &hints) |segment| {
         if (writer.col + win.gwidth(segment) > win.width) return;
         writer.text(segment);
     }
@@ -749,7 +892,7 @@ test "draw: a prompt wider than the sidebar shows its tail after …" {
     v.prompt = "author:alice label:backend is:draft";
     draw(ts.window(), v);
 
-    try testing.expect(rowContains(ts.screen, 1, " f› …"));
+    try testing.expect(rowContains(ts.screen, 1, " /› …"));
     try testing.expect(rowContains(ts.screen, 1, "is:draft▏"));
     try testing.expect(!rowContains(ts.screen, 1, "author"));
 }
@@ -762,7 +905,7 @@ test "draw: a prompt that fits is drawn whole" {
     v.prompt = "author:alice";
     draw(ts.window(), v);
 
-    try testing.expect(rowContains(ts.screen, 1, " f› author:alice▏"));
+    try testing.expect(rowContains(ts.screen, 1, " /› author:alice▏"));
 }
 
 test "draw: a preset name too long for 32 cols is cut with … and the count still fits" {

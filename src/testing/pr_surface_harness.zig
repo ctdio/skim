@@ -259,10 +259,10 @@ const Harness = struct {
         for (text, 0..) |c, i| try self.press(.{ .codepoint = c, .text = text[i .. i + 1] });
     }
 
-    /// Open the `f` prompt and replace its pre-filled text with `text`, then Enter.
+    /// Open the `/` prompt and replace its pre-filled text with `text`, then Enter.
     fn submitQuery(self: *Harness, text: []const u8) !void {
-        try self.pressChar('f');
-        const prompt = &(self.sidebar().prompt orelse return self.ctx.fail("`f` did not open the filter prompt", .{}));
+        try self.pressChar('/');
+        const prompt = &(self.sidebar().prompt orelse return self.ctx.fail("`/` did not open the filter prompt", .{}));
         var guard: usize = 0;
         while (prompt.len > 0 and guard < root.sidebar_state.query_cap) : (guard += 1) {
             try self.pressChar(Key.backspace);

@@ -144,12 +144,13 @@ the next run (a corrupt file is moved aside as `prs.db.corrupt-*`). The old
 | `S`                      | Toggle the whole stack's diff ⇄ the PR's own                                                            |
 | `c`                      | Changes since seen: the new commits, or fold the unchanged files                                        |
 | `m`                      | Mark seen / unseen                                                                                      |
-| `f`                      | Filter prompt (see below)                                                                               |
+| `f`                      | Filter menu: presets, quick toggles, custom query, clear                                                |
+| `/`                      | Filter query prompt (see below)                                                                         |
 | `F`                      | Next filter preset                                                                                      |
 | `R`                      | Sync now                                                                                                |
 | `o`                      | Open the selected PR in the browser                                                                     |
 | `Ctrl-b`                 | Hide / show the sidebar                                                                                 |
-| `Esc` / `Ctrl-c`         | Back: close the prompt, restore the preset, then exit (`skim pr`) or return to the working diff (`:pr`) |
+| `Esc` / `Ctrl-c`         | Back: close the menu or prompt, restore the preset, then exit (`skim pr`) or return to the working diff (`:pr`) |
 
 #### Diff Keys While the Sidebar Is Open
 
@@ -165,7 +166,7 @@ Every other diff key works as usual, including the [PR Review](#pr-review) keys.
 
 #### Filters
 
-The `f` prompt takes a space-separated query; all terms must match. Prefix a
+The `/` prompt (or `f` → Custom query…) takes a space-separated query; all terms must match. Prefix a
 term with `-` to negate it.
 
 | Term                                                         | Matches                                                      |

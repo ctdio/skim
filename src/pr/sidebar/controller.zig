@@ -47,6 +47,29 @@ pub const PromptKey = union(enum) {
 
 pub const PromptOutcome = enum { none, query_changed };
 
+pub const MenuKey = enum { up, down, top, bottom, activate, custom, close };
+
+/// `.too_long`: a toggle would push the query past `state_mod.query_cap`.
+pub const MenuOutcome = enum { none, query_changed, too_long };
+
+/// One selectable line of the filter menu, in display order.
+pub const MenuItem = union(enum) {
+    /// Index for `menuPreset`.
+    preset: usize,
+    /// Index into `menu_toggles`.
+    toggle: usize,
+    custom,
+    clear,
+};
+
+pub const MenuToggle = struct {
+    label: []const u8,
+    /// The term the toggle adds to and removes from the query.
+    text: []const u8,
+    /// `text` parsed; the checkbox is on while the query holds an equivalent term.
+    term: filter_query.Term,
+};
+
 pub const Edge = enum { top, bottom };
 
 /// Where record `index` sits in its stack, as `records.items` indices.
@@ -62,6 +85,26 @@ const stale_after_secs: i64 = 5 * 60;
 
 /// Matches every PR; used while no query has been applied.
 const match_all = filter_query.Query{ .source = "", .terms = &.{} };
+
+/// The filter menu's quick toggles: single terms worth one keystroke.
+pub const menu_toggles = [_]MenuToggle{
+    .{ .label = "Hide drafts", .text = "-is:draft", .term = menuTerm(true, .{ .is = .draft }) },
+    .{ .label = "Review requested", .text = "review:requested", .term = menuTerm(false, .{ .review = .requested }) },
+    .{ .label = "Authored by me", .text = "author:@me", .term = menuTerm(false, .{ .author = .me }) },
+    .{ .label = "CI not failing", .text = "ci:!failure", .term = menuTerm(false, .{ .ci = .{ .value = .failure, .negated = true } }) },
+    .{ .label = "Changed since seen", .text = "is:changed", .term = menuTerm(false, .{ .is = .changed }) },
+};
+
+/// Offered by the menu after the configured presets, unless one of those
+/// already has the same query. Not part of `state.presets`, so `F` keeps
+/// cycling only what the user configured.
+const builtin_menu_presets = [_]state_mod.Preset{
+    .{ .name = "All open", .query = "" },
+    .{ .name = "Ready for review", .query = "-is:draft" },
+    .{ .name = "Needs my review", .query = "review:requested" },
+    .{ .name = "Mine", .query = "author:@me" },
+    .{ .name = "Changed since seen", .query = "is:changed" },
+};
 
 /// Install a DB snapshot: recompute stack analysis and re-run the filter. The
 /// cursor follows `selected_number`; the prompt and expanded set survive.
@@ -293,6 +336,62 @@ pub fn promptKey(state: *SidebarState, allocator: Allocator, key: PromptKey) !Pr
     return .none;
 }
 
+/// Open the `f` filter menu with the cursor on the active preset, else on
+/// the first item.
+pub fn openMenu(state: *SidebarState) void {
+    state.menu = .{ .cursor = activeMenuPreset(state) orelse 0 };
+}
+
+/// One key while the menu is open. Presets, Clear and Custom close the menu;
+/// toggles keep it open so several can be flipped in a row.
+pub fn menuKey(state: *SidebarState, allocator: Allocator, key: MenuKey) !MenuOutcome {
+    const menu = if (state.menu) |*menu| menu else return .none;
+    const last = menuItemCount(state) - 1;
+    menu.cursor = @min(menu.cursor, last);
+    switch (key) {
+        .up => menu.cursor -|= 1,
+        .down => menu.cursor = @min(menu.cursor + 1, last),
+        .top => menu.cursor = 0,
+        .bottom => menu.cursor = last,
+        .close => state.menu = null,
+        .custom => openPromptFromMenu(state),
+        .activate => return activateMenuItem(state, allocator, menuItemAt(state, menu.cursor)),
+    }
+    return .none;
+}
+
+/// Presets, toggles, then Custom query and Clear filter.
+pub fn menuItemCount(state: *const SidebarState) usize {
+    return menuPresetCount(state) + menu_toggles.len + 2;
+}
+
+pub fn menuItemAt(state: *const SidebarState, index: usize) MenuItem {
+    std.debug.assert(index < menuItemCount(state));
+    const presets = menuPresetCount(state);
+    if (index < presets) return .{ .preset = index };
+    if (index < presets + menu_toggles.len) return .{ .toggle = index - presets };
+    return if (index == presets + menu_toggles.len) .custom else .clear;
+}
+
+/// Menu preset `index`: the configured presets, then the built-ins whose
+/// query none of them already has.
+pub fn menuPreset(state: *const SidebarState, index: usize) state_mod.Preset {
+    if (index < state.presets.len) return state.presets[index];
+    var remaining = index - state.presets.len;
+    for (builtin_menu_presets) |preset| {
+        if (presetIndexOf(state, preset.query) != null) continue;
+        if (remaining == 0) return preset;
+        remaining -= 1;
+    }
+    unreachable;
+}
+
+/// Toggle `index` is checked: the applied query holds its term.
+pub fn toggleChecked(state: *const SidebarState, index: usize) bool {
+    const query = state.active_query orelse return false;
+    return filter_query.hasTerm(query, menu_toggles[index].term);
+}
+
 /// The PR under the cursor. A header row yields the stack's review target
 /// (AD-10), whose title the collapsed header shows.
 pub fn selectedPr(state: *const SidebarState) ?*const PrRecord {
@@ -399,6 +498,7 @@ pub fn setPresets(state: *SidebarState, allocator: Allocator, filters: *const co
     }
     freePresets(state, allocator);
     state.presets = presets;
+    if (state.menu) |*menu| menu.cursor = @min(menu.cursor, menuItemCount(state) - 1);
 
     const index = filters.defaultIndex();
     if (try applyQuery(state, allocator, presets[index].query)) selectPreset(state, index);
@@ -419,12 +519,13 @@ pub fn view(state: *const SidebarState, params: ViewParams) render.View {
         .cursor = if (state.cursor >= first and state.cursor < end) state.cursor - first else null,
         .focused = params.focused,
         .header = .{
-            .label = if (state.active_preset) |index| state.presets[index].name else "custom",
+            .label = presetLabel(state),
             .visible = visibleCount(state),
             .total = if (state.records) |records| records.items.len else 0,
             .query = state.queryText(),
         },
         .prompt = if (state.prompt) |*prompt| prompt.text() else null,
+        .menu = if (state.menu != null) menuView(state, params.frame_allocator) catch null else null,
         .parse_error = if (state.parse_error) |*parse_error| parse_error.message() else null,
         .sync_line = sync.line,
         .sync_tone = sync.tone,
@@ -614,6 +715,111 @@ fn presetIndexOf(state: *const SidebarState, text: []const u8) ?usize {
         if (std.mem.eql(u8, std.mem.trim(u8, preset.query, " \t"), wanted)) return index;
     }
     return null;
+}
+
+fn menuTerm(negated: bool, qualifier: filter_query.Qualifier) filter_query.Term {
+    return .{ .negated = negated, .qualifier = qualifier, .span = .{ .start = 0, .len = 0 } };
+}
+
+fn menuPresetCount(state: *const SidebarState) usize {
+    var count = state.presets.len;
+    for (builtin_menu_presets) |preset| {
+        if (presetIndexOf(state, preset.query) == null) count += 1;
+    }
+    return count;
+}
+
+/// The menu preset whose query is the applied one.
+fn activeMenuPreset(state: *const SidebarState) ?usize {
+    if (state.active_preset) |index| return index;
+    const current = std.mem.trim(u8, state.queryText(), " \t");
+    for (state.presets.len..menuPresetCount(state)) |index| {
+        if (std.mem.eql(u8, menuPreset(state, index).query, current)) return index;
+    }
+    return null;
+}
+
+/// The header's name for the applied query: its preset (configured or
+/// built-in), else "custom".
+fn presetLabel(state: *const SidebarState) []const u8 {
+    const index = activeMenuPreset(state) orelse return "custom";
+    return menuPreset(state, index).name;
+}
+
+fn activateMenuItem(state: *SidebarState, allocator: Allocator, item: MenuItem) !MenuOutcome {
+    switch (item) {
+        .preset => |index| {
+            state.menu = null;
+            if (!try applyQuery(state, allocator, menuPreset(state, index).query)) return .none;
+            return .query_changed;
+        },
+        .toggle => |index| return toggleMenuTerm(state, allocator, menu_toggles[index].text),
+        .custom => {
+            openPromptFromMenu(state);
+            return .none;
+        },
+        .clear => {
+            state.menu = null;
+            _ = try applyQuery(state, allocator, "");
+            return .query_changed;
+        },
+    }
+}
+
+fn toggleMenuTerm(state: *SidebarState, allocator: Allocator, term: []const u8) !MenuOutcome {
+    const next = filter_query.toggleTerm(allocator, .{ .source = state.queryText(), .term = term }) catch |err| switch (err) {
+        // The kept query only fails to parse when `applyQuery` cut it at the cap.
+        error.InvalidQuery => return .too_long,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer allocator.free(next);
+    if (next.len > state_mod.query_cap) return .too_long;
+    if (!try applyQuery(state, allocator, next)) return .none;
+    return .query_changed;
+}
+
+fn openPromptFromMenu(state: *SidebarState) void {
+    state.menu = null;
+    openPrompt(state);
+}
+
+fn menuView(state: *const SidebarState, allocator: Allocator) !render.MenuView {
+    const count = menuItemCount(state);
+    const cursor = @min(state.menu.?.cursor, count - 1);
+    const presets = menuPresetCount(state);
+    const active = activeMenuPreset(state);
+    const sections = 3;
+    const lines = try allocator.alloc(render.MenuLine, count + sections);
+    var out: usize = 0;
+    for (0..count) |index| {
+        const section: ?[]const u8 = if (index == 0) "Presets" else if (index == presets) "Quick toggles" else if (index == presets + menu_toggles.len) "" else null;
+        if (section) |label| {
+            lines[out] = .{ .kind = .section, .label = label };
+            out += 1;
+        }
+        const selected = index == cursor;
+        lines[out] = switch (menuItemAt(state, index)) {
+            .preset => |i| .{ .kind = .preset, .label = menuPreset(state, i).name, .detail = menuPreset(state, i).query, .on = active == i, .selected = selected },
+            .toggle => |i| .{ .kind = .toggle, .label = menu_toggles[i].label, .detail = menu_toggles[i].text, .on = toggleChecked(state, i), .selected = selected },
+            .custom => .{ .kind = .action, .label = "Custom query…", .detail = "/", .selected = selected },
+            .clear => .{ .kind = .action, .label = "Clear filter", .selected = selected },
+        };
+        out += 1;
+    }
+    return .{
+        .lines = lines[0..out],
+        .query = state.queryText(),
+        .visible = visibleCount(state),
+        .total = if (state.records) |records| records.items.len else 0,
+        .stacks = stackCount(state),
+    };
+}
+
+/// Visible stacks of more than one PR.
+fn stackCount(state: *const SidebarState) usize {
+    var count: usize = 0;
+    for (state.stacks.views) |sv| count += @intFromBool(sv.members.len > 1);
+    return count;
 }
 
 /// Longest prefix of `text` no longer than `max` bytes that ends on a UTF-8

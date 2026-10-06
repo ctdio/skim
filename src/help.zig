@@ -174,11 +174,12 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
             .{ .key = "S", .desc = "Whole-stack diff ⇄ the PR's own" },
             .{ .key = "c", .desc = "Changes since seen (diff or folds)" },
             .{ .key = "m", .desc = "Mark seen / unseen" },
-            .{ .key = "f", .desc = "Filter (author:@me -is:draft ...)" },
+            .{ .key = "f", .desc = "Filter menu (presets, toggles, clear)" },
+            .{ .key = "/", .desc = "Filter query (author:@me -is:draft ...)" },
             .{ .key = "F", .desc = "Next filter preset" },
             .{ .key = "R", .desc = "Sync now" },
             .{ .key = "o", .desc = "Open the PR in the browser" },
-            .{ .key = "Esc", .desc = "Back: prompt, preset, then close" },
+            .{ .key = "Esc", .desc = "Back: menu/prompt, preset, then close" },
         };
         for (sidebar_bindings) |b| {
             try content_lines.append(app.allocator, .{ .key = b.key, .desc = b.desc, .key_style = key_style, .desc_style = desc_style });

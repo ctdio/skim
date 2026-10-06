@@ -1,0 +1,30 @@
+ all · 31/31                      ⟳ 2m ago │
+ no filter                                 │
+───────────────────────────────────────────│
+▌▸ #813 [3] Backoff helper      alice  ✓●Δ │
+ ▸ #790 [2] Split parser module alice  ✗   │
+   #750 Standalone change 750   bob    ✓   │
+   #749 Standalone change 749   me      ✓  │
+   #748 Standalone change 748   bob        │
+   #747 Standalone change 747   alice  ✓   │
+╭─ Filter ────────────────────────────────╮│
+│ Presets                                 ││
+│▌● all                                   ││
+│ ○ Ready for review            -is:draft ││
+│ ○ Needs my review      review:requested ││
+│ ○ Mine                       author:@me ││
+│ ○ Changed since seen         is:changed ││
+│ Quick toggles                           ││
+│ [ ] Hide drafts               -is:draft ││
+│ [ ] Review requested   review:requested ││
+│ [ ] Authored by me           author:@me ││
+│ [ ] CI not failing          ci:!failure ││
+│ [ ] Changed since seen       is:changed ││
+│                                         ││
+│   Custom query…                       / ││
+│   Clear filter                          ││
+├─────────────────────────────────────────┤│
+│ query none                              ││
+│ 31/31 PRs · 2 stacks                    ││
+╰─────────────────────────────────────────╯│
+ space:toggle enter:apply esc:close /:query│

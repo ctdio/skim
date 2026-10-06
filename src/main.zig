@@ -302,12 +302,13 @@ fn printPrHelp() !void {
         \\    c                    changes since seen: the new commits, or fold
         \\                         the files that did not change
         \\    m                    mark seen / unseen
-        \\    f                    filter (e.g. author:@me -is:draft)
+        \\    f                    filter menu: presets, toggles, custom query, clear
+        \\    /                    filter query (e.g. author:@me -is:draft)
         \\    F                    next filter preset
         \\    R                    sync now
         \\    o                    open the selected PR in the browser
         \\    ctrl-b               hide / show the sidebar
-        \\    esc / ctrl-c         back: prompt, then preset, then exit
+        \\    esc / ctrl-c         back: menu or prompt, then preset, then exit
         \\
         \\DIFF KEYS (while the sidebar is open):
         \\    tab / ctrl-w h       focus the sidebar

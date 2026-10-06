@@ -118,6 +118,8 @@ pub const ParseResult = union(enum) {
     err: ParseError,
 };
 
+pub const ToggleError = std.mem.Allocator.Error || error{InvalidQuery};
+
 /// Viewer identity for `@me` and review-request terms. Seen state is not
 /// here: it is on each `PrRecord` (`seen_head_oid`), joined in by the store.
 pub const EvalContext = struct {
@@ -320,6 +322,42 @@ pub fn isMineApproved(r: *const PrRecord) bool {
     return std.mem.eql(u8, r.my_review_state, "APPROVED") and
         r.my_review_oid.len > 0 and
         std.mem.eql(u8, r.my_review_oid, r.head_oid);
+}
+
+/// Whether `query` holds a term that filters the same way as `term`.
+pub fn hasTerm(query: Query, term: Term) bool {
+    for (query.terms) |candidate| {
+        if (termsEquivalent(candidate, term)) return true;
+    }
+    return false;
+}
+
+/// `source` with `term` (one term of query text) switched: every equivalent
+/// term removed when one is present, else `term` appended, replacing any
+/// term that is its exact opposite. The kept terms keep their own text.
+/// Caller owns the result.
+pub fn toggleTerm(allocator: std.mem.Allocator, params: struct { source: []const u8, term: []const u8 }) ToggleError![]u8 {
+    var term_query = try parseValid(allocator, params.term);
+    defer term_query.deinit(allocator);
+    if (term_query.terms.len != 1) return error.InvalidQuery;
+    const term = term_query.terms[0];
+    var query = try parseValid(allocator, params.source);
+    defer query.deinit(allocator);
+
+    const present = hasTerm(query, term);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (query.terms) |candidate| {
+        if (present and termsEquivalent(candidate, term)) continue;
+        if (!present and termsOpposite(candidate, term)) continue;
+        if (out.items.len > 0) try out.append(allocator, ' ');
+        try out.appendSlice(allocator, query.source[candidate.span.start..][0..candidate.span.len]);
+    }
+    if (!present) {
+        if (out.items.len > 0) try out.append(allocator, ' ');
+        try out.appendSlice(allocator, term_query.source[term.span.start..][0..term.span.len]);
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 // =============================================================================
@@ -628,6 +666,49 @@ fn listContainsIgnoreCase(joined: []const u8, needle: []const u8) bool {
         if (item.len > 0 and std.ascii.eqlIgnoreCase(item, needle)) return true;
     }
     return false;
+}
+
+fn parseValid(allocator: std.mem.Allocator, text: []const u8) ToggleError!Query {
+    return switch (try parse(allocator, text)) {
+        .ok => |query| query,
+        .err => error.InvalidQuery,
+    };
+}
+
+fn termsEquivalent(a: Term, b: Term) bool {
+    return sameSubject(a.qualifier, b.qualifier) and effectiveNegated(a) == effectiveNegated(b);
+}
+
+fn termsOpposite(a: Term, b: Term) bool {
+    return sameSubject(a.qualifier, b.qualifier) and effectiveNegated(a) != effectiveNegated(b);
+}
+
+/// `ci:!x` already negates its value, so `-ci:!x` means `ci:x`.
+fn effectiveNegated(term: Term) bool {
+    return switch (term.qualifier) {
+        .ci => |ci| term.negated != ci.negated,
+        else => term.negated,
+    };
+}
+
+/// Same qualifier and value, ignoring negation. Compares the way `termMatches`
+/// evaluates: case-insensitively except for `base:`.
+fn sameSubject(a: Qualifier, b: Qualifier) bool {
+    if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+    return switch (a) {
+        .is => |value| value == b.is,
+        .author => |author| switch (author) {
+            .me => b.author == .me,
+            .login => |login| b.author == .login and std.ascii.eqlIgnoreCase(login, b.author.login),
+        },
+        .review => |value| value == b.review,
+        .ci => |ci| ci.value == b.ci.value,
+        .label => |label| std.ascii.eqlIgnoreCase(label, b.label),
+        .base => |base| std.mem.eql(u8, base, b.base),
+        .size => |range| range.min == b.size.min and range.max == b.size.max,
+        .stack => |value| value == b.stack,
+        .text => |text| std.ascii.eqlIgnoreCase(text, b.text),
+    };
 }
 
 fn anyListIntersects(joined_a: []const u8, joined_b: []const u8) bool {
@@ -1659,4 +1740,111 @@ test "visibleStacks on zero records returns zero views" {
     const visible = try visibleNumbers(.{ .records = &.{}, .query_text = "is:draft" });
     defer freeNumbers(visible);
     try expectVisible(&.{}, visible);
+}
+
+test "hasTerm finds a negated term among others" {
+    var query = try expectParseOk("author:@me -is:draft label:x");
+    defer query.deinit(testing.allocator);
+    var term = try expectParseOk("-is:draft");
+    defer term.deinit(testing.allocator);
+    try testing.expect(hasTerm(query, term.terms[0]));
+}
+
+test "hasTerm tells a negated term from its positive form" {
+    var query = try expectParseOk("is:draft");
+    defer query.deinit(testing.allocator);
+    var term = try expectParseOk("-is:draft");
+    defer term.deinit(testing.allocator);
+    try testing.expect(!hasTerm(query, term.terms[0]));
+}
+
+test "hasTerm treats -ci:failure and ci:!failure as the same term" {
+    var query = try expectParseOk("-ci:failure");
+    defer query.deinit(testing.allocator);
+    var term = try expectParseOk("ci:!failure");
+    defer term.deinit(testing.allocator);
+    try testing.expect(hasTerm(query, term.terms[0]));
+}
+
+test "hasTerm compares author logins and labels case-insensitively" {
+    var query = try expectParseOk("author:Alice label:Backend");
+    defer query.deinit(testing.allocator);
+    var author = try expectParseOk("author:alice");
+    defer author.deinit(testing.allocator);
+    var label = try expectParseOk("label:backend");
+    defer label.deinit(testing.allocator);
+    try testing.expect(hasTerm(query, author.terms[0]));
+    try testing.expect(hasTerm(query, label.terms[0]));
+}
+
+test "hasTerm: author:@me is not the login \"me\"" {
+    var query = try expectParseOk("author:me");
+    defer query.deinit(testing.allocator);
+    var term = try expectParseOk("author:@me");
+    defer term.deinit(testing.allocator);
+    try testing.expect(!hasTerm(query, term.terms[0]));
+}
+
+test "toggleTerm appends a missing term after the existing ones" {
+    const out = try toggleTerm(testing.allocator, .{ .source = "label:x \"two words\"", .term = "-is:draft" });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("label:x \"two words\" -is:draft", out);
+}
+
+test "toggleTerm on an empty query yields the term alone" {
+    const out = try toggleTerm(testing.allocator, .{ .source = "  ", .term = "review:requested" });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("review:requested", out);
+}
+
+test "toggleTerm round-trip leaves the other terms untouched" {
+    const source = "author:Bob \"two words\" ci:!pending size:<100";
+    const added = try toggleTerm(testing.allocator, .{ .source = source, .term = "-is:draft" });
+    defer testing.allocator.free(added);
+    const removed = try toggleTerm(testing.allocator, .{ .source = added, .term = "-is:draft" });
+    defer testing.allocator.free(removed);
+    try testing.expectEqualStrings(source, removed);
+}
+
+test "toggleTerm removes a negated term from the middle" {
+    const out = try toggleTerm(testing.allocator, .{ .source = "a -is:draft b", .term = "-is:draft" });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("a b", out);
+}
+
+test "toggleTerm removes every copy of the term" {
+    const out = try toggleTerm(testing.allocator, .{ .source = "-is:draft x -is:draft", .term = "-is:draft" });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("x", out);
+}
+
+test "toggleTerm removes an equivalent spelling of the term" {
+    const out = try toggleTerm(testing.allocator, .{ .source = "-ci:failure author:@me", .term = "ci:!failure" });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("author:@me", out);
+}
+
+test "toggleTerm replaces the opposite term instead of contradicting it" {
+    const out = try toggleTerm(testing.allocator, .{ .source = "is:draft label:x", .term = "-is:draft" });
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("label:x -is:draft", out);
+}
+
+test "toggleTerm rejects an unparsable source" {
+    try testing.expectError(error.InvalidQuery, toggleTerm(testing.allocator, .{ .source = "reviw:x", .term = "-is:draft" }));
+}
+
+test "toggleTerm rejects a term that is not exactly one term" {
+    try testing.expectError(error.InvalidQuery, toggleTerm(testing.allocator, .{ .source = "", .term = "a b" }));
+    try testing.expectError(error.InvalidQuery, toggleTerm(testing.allocator, .{ .source = "", .term = "" }));
+}
+
+test "toggleTerm leaks nothing under allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, toggleAndFree, .{ "a -is:draft \"b c\"", "-is:draft" });
+    try testing.checkAllAllocationFailures(testing.allocator, toggleAndFree, .{ "a \"b c\"", "-is:draft" });
+}
+
+fn toggleAndFree(allocator: std.mem.Allocator, source: []const u8, term: []const u8) !void {
+    const out = try toggleTerm(allocator, .{ .source = source, .term = term });
+    allocator.free(out);
 }

@@ -627,6 +627,352 @@ test "selectNumber: unknown number returns false and leaves the cursor" {
 }
 
 // =============================================================================
+// Filter menu
+// =============================================================================
+
+test "menu toggles: each toggle's text parses to the term its checkbox looks for" {
+    for (controller.menu_toggles) |toggle| {
+        var query = switch (try root.filter_query.parse(testing.allocator, toggle.text)) {
+            .ok => |query| query,
+            .err => return error.TestUnexpectedResult,
+        };
+        defer query.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 1), query.terms.len);
+        try testing.expect(root.filter_query.hasTerm(query, toggle.term));
+    }
+}
+
+test "menu presets: configured presets first, then the built-ins whose query is not configured" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+
+    try expectMenuPresetNames(&sb, &.{ "ready", "mine", "All open", "Needs my review", "Changed since seen" });
+}
+
+test "menu presets: with nothing configured the built-in all stands in for All open" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &config.PrFilters{});
+
+    try expectMenuPresetNames(&sb, &.{ "all", "Ready for review", "Needs my review", "Mine", "Changed since seen" });
+}
+
+test "menu items: presets, then the toggles, then Custom query and Clear filter" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+
+    const count = controller.menuItemCount(&sb);
+    try testing.expectEqual(@as(usize, 5 + controller.menu_toggles.len + 2), count);
+    try testing.expectEqual(controller.MenuItem{ .preset = 4 }, controller.menuItemAt(&sb, 4));
+    try testing.expectEqual(controller.MenuItem{ .toggle = 0 }, controller.menuItemAt(&sb, 5));
+    try testing.expectEqual(controller.MenuItem.custom, controller.menuItemAt(&sb, count - 2));
+    try testing.expectEqual(controller.MenuItem.clear, controller.menuItemAt(&sb, count - 1));
+}
+
+test "openMenu: the cursor starts on the active preset" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    try controller.cyclePreset(&sb, testing.allocator);
+
+    controller.openMenu(&sb);
+
+    try testing.expectEqual(controller.MenuItem{ .preset = 1 }, menuCursorItem(&sb));
+}
+
+test "openMenu: a query equal to a built-in preset puts the cursor on that preset" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    _ = try controller.applyQuery(&sb, testing.allocator, "is:changed");
+
+    controller.openMenu(&sb);
+
+    try testing.expectEqualStrings("Changed since seen", controller.menuPreset(&sb, menuCursorItem(&sb).preset).name);
+}
+
+test "openMenu: a custom query that matches no preset puts the cursor on the first item" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    _ = try controller.applyQuery(&sb, testing.allocator, "label:x");
+
+    controller.openMenu(&sb);
+
+    try testing.expectEqual(@as(usize, 0), sb.menu.?.cursor);
+}
+
+test "menuKey: up and down move the cursor and clamp at both ends" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    controller.openMenu(&sb);
+
+    _ = try controller.menuKey(&sb, testing.allocator, .up);
+    try testing.expectEqual(@as(usize, 0), sb.menu.?.cursor);
+    for (0..100) |_| _ = try controller.menuKey(&sb, testing.allocator, .down);
+    try testing.expectEqual(controller.menuItemCount(&sb) - 1, sb.menu.?.cursor);
+    _ = try controller.menuKey(&sb, testing.allocator, .up);
+    try testing.expectEqual(controller.menuItemCount(&sb) - 2, sb.menu.?.cursor);
+}
+
+test "menuKey: activating a toggle adds its term, keeps the menu open and filters the list" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .{ .toggle = toggleIndex("Authored by me") });
+
+    try testing.expectEqual(controller.MenuOutcome.query_changed, try controller.menuKey(&sb, testing.allocator, .activate));
+
+    try testing.expectEqualStrings("-is:draft author:@me", sb.queryText());
+    try testing.expect(sb.menu != null);
+    try testing.expect(controller.toggleChecked(&sb, toggleIndex("Authored by me")));
+    try testing.expectEqual(@as(usize, 1), sb.rows.items.len);
+    try testing.expectEqual(@as(u32, 749), rowNumber(&sb, 0));
+    try testing.expectEqual(@as(?usize, null), sb.active_preset);
+}
+
+test "menuKey: activating a checked toggle removes only its term" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:bob -is:draft label:x");
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .{ .toggle = toggleIndex("Hide drafts") });
+    try testing.expect(controller.toggleChecked(&sb, toggleIndex("Hide drafts")));
+
+    _ = try controller.menuKey(&sb, testing.allocator, .activate);
+
+    try testing.expectEqualStrings("author:bob label:x", sb.queryText());
+    try testing.expect(!controller.toggleChecked(&sb, toggleIndex("Hide drafts")));
+}
+
+test "menuKey: toggling back to a preset's query re-selects that preset" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .{ .toggle = toggleIndex("CI not failing") });
+
+    _ = try controller.menuKey(&sb, testing.allocator, .activate);
+    try testing.expectEqual(@as(?usize, null), sb.active_preset);
+    _ = try controller.menuKey(&sb, testing.allocator, .activate);
+
+    try testing.expectEqualStrings("-is:draft", sb.queryText());
+    try testing.expectEqual(@as(?usize, 0), sb.active_preset);
+}
+
+test "menuKey: activating a preset applies it and closes the menu" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .{ .preset = 1 });
+
+    try testing.expectEqual(controller.MenuOutcome.query_changed, try controller.menuKey(&sb, testing.allocator, .activate));
+
+    try testing.expect(sb.menu == null);
+    try testing.expectEqualStrings("author:@me", sb.queryText());
+    try testing.expectEqual(@as(?usize, 1), sb.active_preset);
+}
+
+test "menuKey: activating a built-in preset applies its query and the header names it" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .{ .preset = 4 });
+
+    _ = try controller.menuKey(&sb, testing.allocator, .activate);
+
+    try testing.expectEqualStrings("is:changed", sb.queryText());
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+    try testing.expectEqualStrings("Changed since seen", controller.view(&sb, viewParams(frame.allocator())).header.label);
+}
+
+test "menuKey: Custom query closes the menu and opens the prompt pre-filled with the query" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:bob");
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .custom);
+
+    try testing.expectEqual(controller.MenuOutcome.none, try controller.menuKey(&sb, testing.allocator, .activate));
+
+    try testing.expect(sb.menu == null);
+    try testing.expectEqualStrings("author:bob", sb.prompt.?.text());
+}
+
+test "menuKey: the custom key opens the prompt from any item" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    controller.openMenu(&sb);
+
+    _ = try controller.menuKey(&sb, testing.allocator, .custom);
+
+    try testing.expect(sb.menu == null);
+    try testing.expect(sb.prompt != null);
+}
+
+test "menuKey: Clear filter empties the query, shows every PR and closes the menu" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:bob");
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .clear);
+
+    try testing.expectEqual(controller.MenuOutcome.query_changed, try controller.menuKey(&sb, testing.allocator, .activate));
+
+    try testing.expect(sb.menu == null);
+    try testing.expectEqualStrings("", sb.queryText());
+    try testing.expectEqual(@as(usize, stacked31_rows), sb.rows.items.len);
+}
+
+test "menuKey: close leaves the query alone" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:bob");
+    controller.openMenu(&sb);
+
+    try testing.expectEqual(controller.MenuOutcome.none, try controller.menuKey(&sb, testing.allocator, .close));
+
+    try testing.expect(sb.menu == null);
+    try testing.expectEqualStrings("author:bob", sb.queryText());
+}
+
+test "menuKey: a toggle that would overflow the query cap is refused" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    const long_query = "x" ** (root.sidebar_state.query_cap - 4);
+    _ = try controller.applyQuery(&sb, testing.allocator, long_query);
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .{ .toggle = toggleIndex("Hide drafts") });
+
+    try testing.expectEqual(controller.MenuOutcome.too_long, try controller.menuKey(&sb, testing.allocator, .activate));
+
+    try testing.expectEqualStrings(long_query, sb.queryText());
+    try testing.expect(sb.menu != null);
+}
+
+test "menuKey: a toggle over a stored query cut mid-term at the cap is refused, not applied" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    // 250 + 13 bytes: kept as its first 256, which ends inside the quotes.
+    _ = try controller.applyQuery(&sb, testing.allocator, "x" ** 250 ++ " \"abcdefghij\"");
+    const kept = try testing.allocator.dupe(u8, sb.queryText());
+    defer testing.allocator.free(kept);
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .{ .toggle = toggleIndex("Hide drafts") });
+
+    try testing.expectEqual(controller.MenuOutcome.too_long, try controller.menuKey(&sb, testing.allocator, .activate));
+
+    try testing.expectEqualStrings(kept, sb.queryText());
+    try testing.expect(sb.parse_error == null);
+}
+
+test "menuKey: a preset whose query does not parse closes the menu and shows the parse error" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &config.PrFilters{ .presets = &.{
+        .{ .name = "ok", .query = "author:bob" },
+        .{ .name = "broken", .query = "revew:requested" },
+    } });
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .{ .preset = 1 });
+
+    try testing.expectEqual(controller.MenuOutcome.none, try controller.menuKey(&sb, testing.allocator, .activate));
+
+    try testing.expect(sb.menu == null);
+    try testing.expect(sb.parse_error != null);
+    try testing.expectEqualStrings("author:bob", sb.queryText());
+}
+
+test "menu: a re-applied snapshot (sync reload) keeps the menu open on the same item" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .{ .toggle = 1 });
+
+    const specs = stacked31Specs();
+    try reapply(&sb, &specs);
+
+    try testing.expectEqual(controller.MenuItem{ .toggle = 1 }, menuCursorItem(&sb));
+}
+
+test "menuKey: with the menu closed every key is a no-op" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+
+    try testing.expectEqual(controller.MenuOutcome.none, try controller.menuKey(&sb, testing.allocator, .activate));
+    try testing.expect(sb.menu == null);
+    try testing.expect(sb.prompt == null);
+}
+
+test "menu cursor: a shorter preset list after setPresets clamps the cursor onto the last item" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &config.PrFilters{ .presets = &.{
+        .{ .name = "a", .query = "label:a" },
+        .{ .name = "b", .query = "label:b" },
+        .{ .name = "c", .query = "label:c" },
+    } });
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .clear);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+
+    try testing.expectEqual(controller.MenuItem.clear, menuCursorItem(&sb));
+}
+
+test "view: menu checkboxes are derived from the parsed query" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "author:@me -ci:failure");
+    controller.openMenu(&sb);
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+
+    const menu = controller.view(&sb, viewParams(frame.allocator())).menu.?;
+
+    var checked: std.ArrayList([]const u8) = .empty;
+    defer checked.deinit(testing.allocator);
+    for (menu.lines) |line| {
+        if (line.kind == .toggle and line.on) try checked.append(testing.allocator, line.label);
+    }
+    try testing.expectEqual(@as(usize, 2), checked.items.len);
+    try testing.expectEqualStrings("Authored by me", checked.items[0]);
+    try testing.expectEqualStrings("CI not failing", checked.items[1]);
+    try testing.expectEqualStrings("author:@me -ci:failure", menu.query);
+}
+
+test "view: the menu counts the matching PRs and stacks" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    _ = try controller.applyQuery(&sb, testing.allocator, "stack:any");
+    controller.openMenu(&sb);
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+
+    const menu = controller.view(&sb, viewParams(frame.allocator())).menu.?;
+
+    try testing.expectEqual(@as(usize, 5), menu.visible);
+    try testing.expectEqual(@as(usize, 31), menu.total);
+    try testing.expectEqual(@as(usize, 2), menu.stacks);
+}
+
+test "view: no menu while it is closed" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+
+    try testing.expect(controller.view(&sb, viewParams(frame.allocator())).menu == null);
+}
+
+// =============================================================================
 // View
 // =============================================================================
 
@@ -1214,7 +1560,7 @@ test "help: with the sidebar closed, Tab and Ctrl-b are listed for the diff" {
 test "Esc in the sidebar: an open filter prompt is cancelled before anything else" {
     var app = try sidebarApp();
     defer app.deinit();
-    try app.handleKey(.{ .codepoint = 'f' });
+    try app.handleKey(.{ .codepoint = '/' });
     try app.handleKey(.{ .codepoint = 'x', .text = "x" });
 
     try app.handleKey(.{ .codepoint = Key.escape });
@@ -1323,7 +1669,7 @@ test "diff keys: Ctrl-b below 72 cols with the sidebar hidden shows and focuses 
 test "filter prompt: named keys without text (arrows) insert nothing" {
     var app = try sidebarApp();
     defer app.deinit();
-    try app.handleKey(.{ .codepoint = 'f' });
+    try app.handleKey(.{ .codepoint = '/' });
     const before = app.state.sidebar.prompt.?.len;
 
     try app.handleKey(.{ .codepoint = Key.up });
@@ -1335,12 +1681,167 @@ test "filter prompt: named keys without text (arrows) insert nothing" {
 test "filter prompt: non-ASCII text is typed through" {
     var app = try sidebarApp();
     defer app.deinit();
-    try app.handleKey(.{ .codepoint = 'f' });
+    try app.handleKey(.{ .codepoint = '/' });
     const before = app.state.sidebar.prompt.?.len;
 
     try app.handleKey(.{ .codepoint = 0xE9, .text = "\u{e9}" });
 
     try testing.expectEqual(before + 2, app.state.sidebar.prompt.?.len);
+}
+
+test "filter menu keys: f, j to a toggle and Space filter the list live behind the open menu" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    const sb = &app.state.sidebar;
+    try testing.expectEqual(@as(usize, stacked31_rows), sb.rows.items.len);
+
+    try app.handleKey(.{ .codepoint = 'f' });
+    try testing.expect(sb.menu != null);
+    for (0..menuPresetCount(sb) + toggleIndex("Authored by me")) |_| try app.handleKey(.{ .codepoint = 'j' });
+    try app.handleKey(.{ .codepoint = ' ', .text = " " });
+
+    try testing.expect(sb.menu != null);
+    try testing.expectEqualStrings("-is:draft author:@me", sb.queryText());
+    const visible = try controller.visibleNumbers(sb, testing.allocator);
+    defer testing.allocator.free(visible);
+    try testing.expectEqualSlices(u32, &.{749}, visible);
+}
+
+test "filter menu keys: Esc closes the menu and keeps the surface and the filter" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    try app.handleKey(.{ .codepoint = 'f' });
+
+    try app.handleKey(.{ .codepoint = Key.escape });
+
+    try testing.expect(app.state.sidebar.menu == null);
+    try testing.expect(app.state.sidebar.open);
+    try testing.expectEqual(root.App.Mode.pr_review, app.mode);
+    try testing.expectEqualStrings("-is:draft", app.state.sidebar.queryText());
+}
+
+test "filter menu keys: f again closes the menu" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    try app.handleKey(.{ .codepoint = 'f' });
+
+    try app.handleKey(.{ .codepoint = 'f' });
+
+    try testing.expect(app.state.sidebar.menu == null);
+}
+
+test "filter menu keys: Ctrl-c closes the menu before peeling the preset or the surface" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    _ = try controller.applyQuery(&app.state.sidebar, testing.allocator, "label:x");
+    try app.handleKey(.{ .codepoint = 'f' });
+
+    try app.handleKey(.{ .codepoint = 'c', .mods = .{ .ctrl = true } });
+
+    try testing.expect(app.state.sidebar.menu == null);
+    try testing.expectEqualStrings("label:x", app.state.sidebar.queryText());
+    try testing.expect(app.state.sidebar.open);
+}
+
+test "filter menu keys: Down to a preset and Enter applies it and closes the menu" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    try app.handleKey(.{ .codepoint = 'f' });
+
+    try app.handleKey(.{ .codepoint = Key.down });
+    try app.handleKey(.{ .codepoint = Key.enter });
+
+    try testing.expect(app.state.sidebar.menu == null);
+    try testing.expectEqualStrings("author:@me", app.state.sidebar.queryText());
+    try testing.expectEqual(@as(usize, 1), app.state.sidebar.rows.items.len);
+}
+
+test "filter menu keys: G then Enter on Clear filter shows every PR" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    _ = try controller.applyQuery(&app.state.sidebar, testing.allocator, "author:bob");
+    try app.handleKey(.{ .codepoint = 'f' });
+
+    try app.handleKey(.{ .codepoint = 'G' });
+    try app.handleKey(.{ .codepoint = Key.enter });
+
+    try testing.expectEqualStrings("", app.state.sidebar.queryText());
+    try testing.expectEqual(@as(usize, stacked31_rows), app.state.sidebar.rows.items.len);
+}
+
+test "filter menu keys: / in the menu opens the prompt with the query, and typing filters on Enter" {
+    var app = try sidebarApp();
+    defer app.deinit();
+    try app.handleKey(.{ .codepoint = 'f' });
+
+    try app.handleKey(.{ .codepoint = '/' });
+    try testing.expect(app.state.sidebar.menu == null);
+    try testing.expectEqualStrings("-is:draft", app.state.sidebar.prompt.?.text());
+    for (" author:bob") |c| try app.handleKey(.{ .codepoint = c, .text = &.{c} });
+    try app.handleKey(.{ .codepoint = Key.enter });
+
+    try testing.expectEqualStrings("-is:draft author:bob", app.state.sidebar.queryText());
+    try testing.expectEqual(@as(usize, standalone_count / 2), app.state.sidebar.rows.items.len);
+}
+
+test "filter menu keys: F still cycles presets without opening the menu" {
+    var app = try sidebarApp();
+    defer app.deinit();
+
+    try app.handleKey(.{ .codepoint = 'F' });
+
+    try testing.expect(app.state.sidebar.menu == null);
+    try testing.expectEqual(@as(?usize, 1), app.state.sidebar.active_preset);
+}
+
+test "snapshot: sidebar_filter_menu" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &config.PrFilters{});
+    controller.openMenu(&sb);
+
+    try expectSidebarSnapshot(.{ .state = &sb, .name = "sidebar_filter_menu", .cols = 44, .rows = 30 });
+}
+
+test "snapshot: sidebar_filter_menu_preset_toggles" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &config.PrFilters{ .presets = &.{
+        .{ .name = "triage", .query = "-is:draft review:requested" },
+        .{ .name = "all", .query = "" },
+    } });
+    controller.openMenu(&sb);
+
+    try expectSidebarSnapshot(.{ .state = &sb, .name = "sidebar_filter_menu_preset_toggles", .cols = 44, .rows = 30 });
+}
+
+test "snapshot: sidebar_filter_menu_short scrolls the items to keep the cursor visible" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    try controller.setPresets(&sb, testing.allocator, &two_presets);
+    controller.openMenu(&sb);
+    moveMenuTo(&sb, .clear);
+
+    try expectSidebarSnapshot(.{ .state = &sb, .name = "sidebar_filter_menu_short", .cols = 32, .rows = 16 });
+}
+
+test "draw: a filter menu in a sidebar too short for it draws no box and does not crash" {
+    var sb = try stacked31State();
+    defer controller.deinitState(&sb, testing.allocator);
+    controller.openMenu(&sb);
+    var ctx = try harness.createTestContext(testing.allocator, 30, 6);
+    defer ctx.deinit();
+
+    sidebar_render.draw(ctx.window(), controller.view(&sb, .{
+        .focused = true,
+        .now_secs = now,
+        .frame_allocator = ctx.frameAllocator(),
+        .visible_rows = sidebar_render.listRows(6, false),
+    }));
+
+    const text = try ctx.captureToText();
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "╭") == null);
 }
 
 // =============================================================================
@@ -2162,6 +2663,38 @@ fn rowNumber(sb: *const SidebarState, index: usize) u32 {
 
 fn expectRowNumbers(sb: *const SidebarState, start: usize, expected: []const u32) !void {
     for (expected, start..) |number, index| try testing.expectEqual(number, rowNumber(sb, index));
+}
+
+fn expectMenuPresetNames(sb: *const SidebarState, expected: []const []const u8) !void {
+    try testing.expectEqual(expected.len, menuPresetCount(sb));
+    for (expected, 0..) |name, index| try testing.expectEqualStrings(name, controller.menuPreset(sb, index).name);
+}
+
+fn menuPresetCount(sb: *const SidebarState) usize {
+    var count: usize = 0;
+    for (0..controller.menuItemCount(sb)) |index| {
+        if (controller.menuItemAt(sb, index) == .preset) count += 1;
+    }
+    return count;
+}
+
+fn menuCursorItem(sb: *const SidebarState) controller.MenuItem {
+    return controller.menuItemAt(sb, sb.menu.?.cursor);
+}
+
+/// Put the open menu's cursor on `item` the way the keys do: from the top, down.
+fn moveMenuTo(sb: *SidebarState, item: controller.MenuItem) void {
+    sb.menu.?.cursor = 0;
+    while (!std.meta.eql(menuCursorItem(sb), item) and sb.menu.?.cursor + 1 < controller.menuItemCount(sb)) {
+        _ = controller.menuKey(sb, testing.allocator, .down) catch unreachable;
+    }
+}
+
+fn toggleIndex(label: []const u8) usize {
+    for (controller.menu_toggles, 0..) |toggle, index| {
+        if (std.mem.eql(u8, toggle.label, label)) return index;
+    }
+    @panic("no such toggle");
 }
 
 fn typeText(sb: *SidebarState, text: []const u8) !void {

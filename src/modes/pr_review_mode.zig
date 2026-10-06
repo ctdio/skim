@@ -21,6 +21,7 @@ pub fn handleKey(app: *App, key: Key) !void {
     const sb = &app.state.sidebar;
     app.needs_render = true;
     if (sb.prompt != null) return handlePromptKey(app, key);
+    if (sb.menu != null) return handleMenuKey(app, key);
 
     if (app.state.pending_ctrl_w) {
         app.state.pending_ctrl_w = false;
@@ -76,7 +77,8 @@ pub fn handleKey(app: *App, key: Key) !void {
         'S' => toggleWholeStack(app),
         'c' => try toggleSinceSeen(app),
         'm' => if (sidebar_controller.selectedPr(sb)) |record| flip_controller.toggleSeen(app.flipCtx(), record.number),
-        'f' => sidebar_controller.openPrompt(sb),
+        'f' => sidebar_controller.openMenu(sb),
+        '/' => sidebar_controller.openPrompt(sb),
         'F' => {
             try sidebar_controller.cyclePreset(sb, app.allocator);
             pr_surface.pushVisible(&app.state.pr_surface, .{ .allocator = app.allocator, .sidebar = sb });
@@ -155,6 +157,29 @@ fn handlePromptKey(app: *App, key: Key) !void {
     };
     if (try sidebar_controller.promptKey(sb, app.allocator, prompt_key) == .query_changed) {
         pr_surface.pushVisible(&app.state.pr_surface, .{ .allocator = app.allocator, .sidebar = sb });
+    }
+}
+
+/// `f` menu: j/k, arrows and g/G move, Space/Enter activate, `/` jumps to
+/// the query prompt, Esc, `f` or `q` close. Other keys are swallowed so a
+/// stray one cannot act on the list behind the menu.
+fn handleMenuKey(app: *App, key: Key) !void {
+    if (key.mods.ctrl or key.mods.alt) return;
+    const menu_key: sidebar_controller.MenuKey = switch (key.codepoint) {
+        'j', Key.down => .down,
+        'k', Key.up => .up,
+        'g' => .top,
+        'G' => .bottom,
+        ' ', Key.enter => .activate,
+        '/' => .custom,
+        'f', 'q', Key.escape => .close,
+        else => return,
+    };
+    const sb = &app.state.sidebar;
+    switch (try sidebar_controller.menuKey(sb, app.allocator, menu_key)) {
+        .none => {},
+        .query_changed => pr_surface.pushVisible(&app.state.pr_surface, .{ .allocator = app.allocator, .sidebar = sb }),
+        .too_long => app.showStatusError("filter too long for another term"),
     }
 }
 
