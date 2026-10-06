@@ -1,21 +1,17 @@
 //! Pure reconstruction of stacked-PR groups from the open PR list. A PR is
 //! "stacked on" another exactly when its base branch is that other PR's head
 //! branch (`B.base_ref == A.head_ref`) — so the whole stack DAG falls out of
-//! data we already have from `gh pr list`, with no `gt` dependency. Graphite
-//! enrichment (restack status, ordering) layers on top elsewhere; this is the
-//! forge-native core, and it works for anyone using stacked PRs.
+//! the synced PR rows, with no `gt` dependency. This is the forge-native core,
+//! and it works for anyone using stacked PRs.
 //!
-//! Bytes in (the loaded PRs), owned analysis out — so stack grouping is a tested
-//! unit, independent of any rendering or the picker.
+//! Edges in (one per PR), owned analysis out — so stack grouping is a tested
+//! unit, independent of the sidebar that draws it.
 
 const std = @import("std");
-const parse = @import("parse.zig");
-
-const PullRequest = parse.PullRequest;
 
 /// Where a PR sits in its stack, for drawing the connector glyph in the list.
 /// `none` = standalone (a single-PR "stack"); the rest assume stack members are
-/// rendered contiguously tip-first (see `displayOrder`).
+/// rendered contiguously tip-first (see `displayOrderOf`).
 pub const Mark = enum {
     none,
     top, // the tip of the stack
@@ -25,7 +21,8 @@ pub const Mark = enum {
 
 /// One PR's branch relationship: it is stacked on the PR whose `head_ref`
 /// equals its `base_ref`. Callers that know better parentage (Graphite) put
-/// the authoritative parent branch in `base_ref`.
+/// the authoritative parent branch in `base_ref`, which avoids the false
+/// chains a shared base branch creates in the forge-native heuristic.
 pub const Edge = struct {
     head_ref: []const u8,
     base_ref: []const u8,
@@ -67,19 +64,13 @@ pub const Analysis = struct {
     }
 };
 
-/// A display order over `prs` that keeps each stack's members contiguous and
-/// tip-first (highest depth first), with stacks appearing at the position of
-/// their earliest member in the input. Standalone PRs keep their relative
-/// order. Caller owns the returned slice. This is what makes the connector
-/// glyphs read as a connected stack.
-pub fn displayOrder(allocator: std.mem.Allocator, prs: []const PullRequest, analysis: Analysis) ![]usize {
-    std.debug.assert(prs.len == analysis.stack_of.len);
-    return displayOrderOf(allocator, analysis);
-}
-
-/// `displayOrder` over an analysis alone (it never needed the PRs). Members are
-/// bucketed per stack and stably sorted deepest-first, so equal depths keep
-/// input order and the whole pass is O(n log n).
+/// A display order that keeps each stack's members contiguous and tip-first
+/// (highest depth first), with stacks appearing at the position of their
+/// earliest member in the input. Standalone PRs keep their relative order.
+/// Caller owns the returned slice. This is what makes the connector glyphs
+/// read as a connected stack. Members are bucketed per stack and stably sorted
+/// deepest-first, so equal depths keep input order and the whole pass is
+/// O(n log n).
 pub fn displayOrderOf(allocator: std.mem.Allocator, analysis: Analysis) ![]usize {
     const n = analysis.stack_of.len;
     const stack_count = analysis.heights.len;
@@ -118,34 +109,6 @@ pub fn displayOrderOf(allocator: std.mem.Allocator, analysis: Analysis) ![]usize
         w += bucket.len;
     }
     return out;
-}
-
-/// Group `prs` into stacks by their base->head relationships. Caller owns the
-/// returned analysis. Robust to cycles (a malformed base/head loop degrades to
-/// each involved PR being its own root rather than looping forever).
-pub fn analyze(allocator: std.mem.Allocator, prs: []const PullRequest) !Analysis {
-    return analyzeWith(allocator, prs, null);
-}
-
-/// Like `analyze`, but when `parent_branches` is supplied (one optional parent
-/// branch name per PR, in lockstep with `prs`) that authoritative name drives
-/// parentage instead of the PR's `base_ref`. Graphite's own stack metadata flows
-/// in this way, which avoids the false chains a shared base branch creates in the
-/// forge-native heuristic (many PRs sharing a base that is also some PR's head
-/// would otherwise collapse into one giant stack). A null entry falls back to
-/// that PR's `base_ref`, so PRs Graphite doesn't track still group forge-natively.
-pub fn analyzeWith(
-    allocator: std.mem.Allocator,
-    prs: []const PullRequest,
-    parent_branches: ?[]const ?[]const u8,
-) !Analysis {
-    const edges = try allocator.alloc(Edge, prs.len);
-    defer allocator.free(edges);
-    for (prs, edges, 0..) |pr, *edge, i| {
-        const parent = if (parent_branches) |pb| pb[i] else null;
-        edge.* = .{ .head_ref = pr.head_ref, .base_ref = parent orelse pr.base_ref };
-    }
-    return analyzeEdges(allocator, edges);
 }
 
 /// Group PRs, given as edges in input order, into stacks. Caller owns the
@@ -264,26 +227,12 @@ fn isAncestor(parent_of: []const ?usize, candidate_parent: usize, child: usize) 
 
 const testing = std.testing;
 
-fn samplePr(params: struct { number: u32, head: []const u8, base: []const u8 }) PullRequest {
-    return .{
-        .number = params.number,
-        .title = "t",
-        .author = "a",
-        .head_ref = params.head,
-        .base_ref = params.base,
-        .is_draft = false,
-        .updated_at = "",
-        .url = "",
-        .ci = .none,
+test "analyzeEdges: standalone PRs each form their own single-PR stack" {
+    const edges = [_]Edge{
+        .{ .head_ref = "feat-a", .base_ref = "main" },
+        .{ .head_ref = "feat-b", .base_ref = "main" },
     };
-}
-
-test "analyze: standalone PRs each form their own single-PR stack" {
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 1, .head = "feat-a", .base = "main" }),
-        samplePr(.{ .number = 2, .head = "feat-b", .base = "main" }),
-    };
-    var a = try analyze(testing.allocator, &prs);
+    var a = try analyzeEdges(testing.allocator, &edges);
     defer a.deinit(testing.allocator);
 
     try testing.expect(!a.isStacked(0));
@@ -293,55 +242,31 @@ test "analyze: standalone PRs each form their own single-PR stack" {
     try testing.expectEqual(@as(?usize, null), a.parent_of[1]);
 }
 
-test "analyze: a base matching another PR's head links them into one stack" {
-    // #10 main<-feat ; #11 feat<-feat2 ; #12 feat2<-feat3 (bottom -> tip)
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 10, .head = "feat", .base = "main" }),
-        samplePr(.{ .number = 11, .head = "feat2", .base = "feat" }),
-        samplePr(.{ .number = 12, .head = "feat3", .base = "feat2" }),
+test "analyzeEdges: stack detection is independent of input order" {
+    // A three-PR stack listed tip-first.
+    const edges = [_]Edge{
+        .{ .head_ref = "feat3", .base_ref = "feat2" },
+        .{ .head_ref = "feat2", .base_ref = "feat" },
+        .{ .head_ref = "feat", .base_ref = "main" },
     };
-    var a = try analyze(testing.allocator, &prs);
-    defer a.deinit(testing.allocator);
-
-    try testing.expectEqual(a.stack_of[0], a.stack_of[1]);
-    try testing.expectEqual(a.stack_of[1], a.stack_of[2]);
-    try testing.expectEqual(@as(usize, 3), a.heights[a.stack_of[0]]);
-    try testing.expect(a.isStacked(0));
-
-    try testing.expectEqual(@as(?usize, null), a.parent_of[0]);
-    try testing.expectEqual(@as(?usize, 0), a.parent_of[1]);
-    try testing.expectEqual(@as(?usize, 1), a.parent_of[2]);
-
-    try testing.expectEqual(@as(usize, 0), a.depth_of[0]);
-    try testing.expectEqual(@as(usize, 1), a.depth_of[1]);
-    try testing.expectEqual(@as(usize, 2), a.depth_of[2]);
-}
-
-test "analyze: stack detection is independent of input order" {
-    // Same stack as above but listed tip-first.
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 12, .head = "feat3", .base = "feat2" }),
-        samplePr(.{ .number = 11, .head = "feat2", .base = "feat" }),
-        samplePr(.{ .number = 10, .head = "feat", .base = "main" }),
-    };
-    var a = try analyze(testing.allocator, &prs);
+    var a = try analyzeEdges(testing.allocator, &edges);
     defer a.deinit(testing.allocator);
 
     try testing.expectEqual(a.stack_of[0], a.stack_of[2]);
     try testing.expectEqual(@as(usize, 3), a.heights[a.stack_of[0]]);
-    // #10 (index 2) is the bottom.
+    // `feat` (index 2) is the bottom.
     try testing.expectEqual(@as(usize, 0), a.depth_of[2]);
     try testing.expectEqual(@as(usize, 2), a.depth_of[0]);
     try testing.expectEqual(@as(?usize, 2), a.parent_of[1]);
 }
 
-test "analyze: separate stacks get distinct ids" {
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 1, .head = "a2", .base = "a1" }),
-        samplePr(.{ .number = 2, .head = "a1", .base = "main" }),
-        samplePr(.{ .number = 3, .head = "b1", .base = "main" }),
+test "analyzeEdges: separate stacks get distinct ids" {
+    const edges = [_]Edge{
+        .{ .head_ref = "a2", .base_ref = "a1" },
+        .{ .head_ref = "a1", .base_ref = "main" },
+        .{ .head_ref = "b1", .base_ref = "main" },
     };
-    var a = try analyze(testing.allocator, &prs);
+    var a = try analyzeEdges(testing.allocator, &edges);
     defer a.deinit(testing.allocator);
 
     try testing.expectEqual(a.stack_of[0], a.stack_of[1]);
@@ -350,11 +275,9 @@ test "analyze: separate stacks get distinct ids" {
     try testing.expect(!a.isStacked(2));
 }
 
-test "analyze: a base==head self-loop is treated as a root, not a cycle" {
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 1, .head = "x", .base = "x" }),
-    };
-    var a = try analyze(testing.allocator, &prs);
+test "analyzeEdges: a base==head self-loop is treated as a root, not a cycle" {
+    const edges = [_]Edge{.{ .head_ref = "x", .base_ref = "x" }};
+    var a = try analyzeEdges(testing.allocator, &edges);
     defer a.deinit(testing.allocator);
 
     try testing.expectEqual(@as(?usize, null), a.parent_of[0]);
@@ -362,36 +285,21 @@ test "analyze: a base==head self-loop is treated as a root, not a cycle" {
     try testing.expect(!a.isStacked(0));
 }
 
-test "analyze: a two-PR cycle does not loop forever" {
-    // Malformed: A's base is B's head and B's base is A's head.
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 1, .head = "p", .base = "q" }),
-        samplePr(.{ .number = 2, .head = "q", .base = "p" }),
-    };
-    var a = try analyze(testing.allocator, &prs);
-    defer a.deinit(testing.allocator);
-
-    // One edge is kept, the back-edge is dropped to break the cycle, so the two
-    // still land in one stack with a clear bottom.
-    try testing.expectEqual(a.stack_of[0], a.stack_of[1]);
-    try testing.expectEqual(@as(usize, 2), a.heights[a.stack_of[0]]);
-}
-
-test "analyze: empty list yields empty analysis" {
-    var a = try analyze(testing.allocator, &.{});
+test "analyzeEdges: empty list yields empty analysis" {
+    var a = try analyzeEdges(testing.allocator, &.{});
     defer a.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), a.stack_of.len);
     try testing.expectEqual(@as(usize, 0), a.heights.len);
 }
 
 test "markOf: tip/middle/bottom for a stack, none for standalone" {
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 10, .head = "feat", .base = "main" }), // bottom
-        samplePr(.{ .number = 11, .head = "feat2", .base = "feat" }), // middle
-        samplePr(.{ .number = 12, .head = "feat3", .base = "feat2" }), // tip
-        samplePr(.{ .number = 7, .head = "solo", .base = "main" }), // standalone
+    const edges = [_]Edge{
+        .{ .head_ref = "feat", .base_ref = "main" }, // bottom
+        .{ .head_ref = "feat2", .base_ref = "feat" }, // middle
+        .{ .head_ref = "feat3", .base_ref = "feat2" }, // tip
+        .{ .head_ref = "solo", .base_ref = "main" }, // standalone
     };
-    var a = try analyze(testing.allocator, &prs);
+    var a = try analyzeEdges(testing.allocator, &edges);
     defer a.deinit(testing.allocator);
 
     try testing.expectEqual(Mark.bottom, a.markOf(0));
@@ -400,17 +308,16 @@ test "markOf: tip/middle/bottom for a stack, none for standalone" {
     try testing.expectEqual(Mark.none, a.markOf(3));
 }
 
-test "analyzeWith: graphite parents override a misleading base_ref" {
-    // Both feature PRs list `shared` as their base, and a PR's head is `shared`,
-    // so the forge-native heuristic would chain all three into one stack. Graphite
-    // says both features branch off trunk (`main`), so they must stay standalone.
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 1, .head = "shared", .base = "main" }),
-        samplePr(.{ .number = 2, .head = "feat-a", .base = "shared" }),
-        samplePr(.{ .number = 3, .head = "feat-b", .base = "shared" }),
+test "analyzeEdges: an authoritative parent in base_ref overrides a shared base" {
+    // GitHub lists both features on `shared`, which is also a PR's head, so
+    // their GitHub bases would chain all three into one stack. Graphite says
+    // both branch off trunk; with that parent as base_ref they stay standalone.
+    const edges = [_]Edge{
+        .{ .head_ref = "shared", .base_ref = "main" },
+        .{ .head_ref = "feat-a", .base_ref = "main" },
+        .{ .head_ref = "feat-b", .base_ref = "main" },
     };
-    const parents = [_]?[]const u8{ "main", "main", "main" };
-    var a = try analyzeWith(testing.allocator, &prs, &parents);
+    var a = try analyzeEdges(testing.allocator, &edges);
     defer a.deinit(testing.allocator);
 
     try testing.expect(!a.isStacked(0));
@@ -420,65 +327,50 @@ test "analyzeWith: graphite parents override a misleading base_ref" {
     try testing.expectEqual(@as(?usize, null), a.parent_of[2]);
 }
 
-test "analyzeWith: a null parent entry falls back to base_ref" {
-    // #1 is untracked by graphite (null) so it links via base_ref; #2 is tracked
-    // and points at #1's head. The two form one stack.
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 1, .head = "feat", .base = "main" }),
-        samplePr(.{ .number = 2, .head = "feat2", .base = "feat" }),
-    };
-    const parents = [_]?[]const u8{ null, "feat" };
-    var a = try analyzeWith(testing.allocator, &prs, &parents);
-    defer a.deinit(testing.allocator);
-
-    try testing.expectEqual(a.stack_of[0], a.stack_of[1]);
-    try testing.expectEqual(@as(?usize, 0), a.parent_of[1]);
-}
-
-test "displayOrder: groups a stack contiguously, tip first" {
+test "displayOrderOf: groups a stack contiguously, tip first" {
     // Input is bottom->tip; display should be tip->bottom and contiguous.
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 10, .head = "feat", .base = "main" }),
-        samplePr(.{ .number = 11, .head = "feat2", .base = "feat" }),
-        samplePr(.{ .number = 12, .head = "feat3", .base = "feat2" }),
+    const edges = [_]Edge{
+        .{ .head_ref = "feat", .base_ref = "main" },
+        .{ .head_ref = "feat2", .base_ref = "feat" },
+        .{ .head_ref = "feat3", .base_ref = "feat2" },
     };
-    var a = try analyze(testing.allocator, &prs);
+    var a = try analyzeEdges(testing.allocator, &edges);
     defer a.deinit(testing.allocator);
 
-    const order = try displayOrder(testing.allocator, &prs, a);
+    const order = try displayOrderOf(testing.allocator, a);
     defer testing.allocator.free(order);
     try testing.expectEqualSlices(usize, &.{ 2, 1, 0 }, order);
 }
 
-test "displayOrder: standalone PRs keep their relative order" {
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 1, .head = "a", .base = "main" }),
-        samplePr(.{ .number = 2, .head = "b", .base = "main" }),
-        samplePr(.{ .number = 3, .head = "c", .base = "main" }),
+test "displayOrderOf: standalone PRs keep their relative order" {
+    const edges = [_]Edge{
+        .{ .head_ref = "a", .base_ref = "main" },
+        .{ .head_ref = "b", .base_ref = "main" },
+        .{ .head_ref = "c", .base_ref = "main" },
     };
-    var a = try analyze(testing.allocator, &prs);
+    var a = try analyzeEdges(testing.allocator, &edges);
     defer a.deinit(testing.allocator);
 
-    const order = try displayOrder(testing.allocator, &prs, a);
+    const order = try displayOrderOf(testing.allocator, a);
     defer testing.allocator.free(order);
     try testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, order);
 }
 
-test "displayOrder: a stack surfaces at its earliest member, standalone interleaved" {
-    // #9 standalone, then a 2-PR stack whose earliest member (the base) is at
+test "displayOrderOf: a stack surfaces at its earliest member, standalone interleaved" {
+    // A standalone PR, then a 2-PR stack whose earliest member (the base) is at
     // index 1; the tip at index 2 is pulled up under it.
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 9, .head = "solo", .base = "main" }),
-        samplePr(.{ .number = 10, .head = "feat", .base = "main" }),
-        samplePr(.{ .number = 11, .head = "feat2", .base = "feat" }),
-        samplePr(.{ .number = 8, .head = "solo2", .base = "main" }),
+    const edges = [_]Edge{
+        .{ .head_ref = "solo", .base_ref = "main" },
+        .{ .head_ref = "feat", .base_ref = "main" },
+        .{ .head_ref = "feat2", .base_ref = "feat" },
+        .{ .head_ref = "solo2", .base_ref = "main" },
     };
-    var a = try analyze(testing.allocator, &prs);
+    var a = try analyzeEdges(testing.allocator, &edges);
     defer a.deinit(testing.allocator);
 
-    const order = try displayOrder(testing.allocator, &prs, a);
+    const order = try displayOrderOf(testing.allocator, a);
     defer testing.allocator.free(order);
-    // 9 (solo), then stack tip 11 then base 10, then 8 (solo).
+    // solo, then stack tip then base, then solo2.
     try testing.expectEqualSlices(usize, &.{ 0, 2, 1, 3 }, order);
 }
 
@@ -533,32 +425,6 @@ test "analyzeEdges ignores empty head_ref and base_ref" {
 
     try testing.expectEqualSlices(?usize, &.{ null, null }, a.parent_of);
     try testing.expectEqualSlices(usize, &.{ 1, 1 }, a.heights);
-}
-
-test "analyzeWith parent override equals analyzeEdges on edges built from the override" {
-    const prs = [_]PullRequest{
-        samplePr(.{ .number = 1, .head = "shared", .base = "main" }),
-        samplePr(.{ .number = 2, .head = "feat-a", .base = "shared" }),
-        samplePr(.{ .number = 3, .head = "feat-b", .base = "shared" }),
-        samplePr(.{ .number = 4, .head = "feat-c", .base = "feat-b" }),
-    };
-    const parents = [_]?[]const u8{ null, "main", null, "feat-b" };
-    var via_prs = try analyzeWith(testing.allocator, &prs, &parents);
-    defer via_prs.deinit(testing.allocator);
-
-    const edges = [_]Edge{
-        .{ .head_ref = "shared", .base_ref = "main" },
-        .{ .head_ref = "feat-a", .base_ref = "main" },
-        .{ .head_ref = "feat-b", .base_ref = "shared" },
-        .{ .head_ref = "feat-c", .base_ref = "feat-b" },
-    };
-    var via_edges = try analyzeEdges(testing.allocator, &edges);
-    defer via_edges.deinit(testing.allocator);
-
-    try testing.expectEqualSlices(usize, via_edges.stack_of, via_prs.stack_of);
-    try testing.expectEqualSlices(usize, via_edges.depth_of, via_prs.depth_of);
-    try testing.expectEqualSlices(usize, via_edges.heights, via_prs.heights);
-    try testing.expectEqualSlices(?usize, via_edges.parent_of, via_prs.parent_of);
 }
 
 test "displayOrderOf on an empty analysis returns an empty order" {

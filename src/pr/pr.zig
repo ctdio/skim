@@ -1,22 +1,23 @@
-//! PR data for skim: `gh` listing/review IO, parsing, stack detection and
-//! the native review session.
+//! PR data for skim that stays free of SQLite: `gh`/`git` shell-outs, stack
+//! detection and the native review session.
 //!
 //! Layering mirrors the rest of skim — a pure data core with a thin IO shell:
-//!   - `parse`   : `gh pr list` JSON -> domain PullRequest values (pure)
-//!   - `github`  : `gh`/`git` shell-outs (the only PR-layer IO)
-//!   - `cache`   : on-disk stale-while-revalidate cache of the raw listing
-//!   - `filter`  : live text filtering (pure)
+//!   - `parse`   : `CiStatus`, shared by the store, sync and the sidebar (pure)
+//!   - `github`  : `gh`/`git` shell-outs
+//!   - `filter`  : case-insensitive substring match (pure)
 //!   - `stack`   : forge-native stacked-PR detection from base->head edges (pure)
+//!   - `review_*`, `thread_hint` : the review session and its threads
 //!
-//! The PR list itself is the sidebar beside the diff (`sidebar/`, driven by
-//! `surface.zig` and `modes/pr_review_mode.zig`). It is not re-exported here:
-//! the surface links SQLite, which this module must stay free of.
+//! The PR list is the sidebar beside the diff: sync -> DB -> sidebar, and
+//! prefetch -> diff cache -> flip, all driven by `surface.zig` (see
+//! `db/`, `sync/`, `prefetch/`, `sidebar/`, `flip.zig`). None of it is
+//! re-exported here: the store links SQLite, which this module and the wasm
+//! build must stay free of. Those modules have their own test roots.
 
 const std = @import("std");
 
 pub const parse = @import("parse.zig");
 pub const github = @import("github.zig");
-pub const cache = @import("cache.zig");
 pub const filter = @import("filter.zig");
 pub const stack = @import("stack.zig");
 pub const review_render = @import("review_render.zig");
@@ -24,8 +25,6 @@ pub const review_parse = @import("review_parse.zig");
 pub const review_controller = @import("review_controller.zig");
 pub const thread_hint = @import("thread_hint.zig");
 
-pub const PullRequest = parse.PullRequest;
-pub const PullRequestList = parse.PullRequestList;
 pub const CiStatus = parse.CiStatus;
 
 // =============================================================================

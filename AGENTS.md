@@ -62,6 +62,11 @@ zig build bench-render-content -Doptimize=ReleaseFast
 # Whole paging session: live highlight worker, real frame pacer, optional
 # rate-limited terminal. Use this for anything about scrolling *smoothness*.
 zig build bench-highlight-scroll -Doptimize=ReleaseFast
+
+# PR surface against the NFR-1 budgets: cold paint, reload+filter, sidebar
+# draw, flip from the DB and from the parsed LRU. SKIM_BENCH_ENFORCE=1 exits 1
+# when any p95 is over budget.
+zig build bench-pr-flip -Doptimize=ReleaseFast
 ```
 
 `bench_scroll` is also installed to `./zig-out/bin/bench_scroll` so knobs can be
@@ -71,7 +76,7 @@ synchronous highlighting, stats) lives in `src/testing/bench_support.zig`.
 | Env var | Default | Meaning |
 | --- | --- | --- |
 | `SKIM_BENCH_DIFF_PATH` | — | Bench a real `git diff` file instead of a synthetic one |
-| `SKIM_BENCH_FILES` / `_HUNKS` / `_LINES` | 10 / 6 / 60 | Synthetic diff shape |
+| `SKIM_BENCH_FILES` / `_HUNKS` / `_LINES` | 10 / 6 / 60 | Synthetic diff shape (pr-flip: 10 / 4 / 50 per PR) |
 | `SKIM_BENCH_WIDTH` / `_HEIGHT` | 190 / 60 | Terminal size |
 | `SKIM_BENCH_VIEW` | `unified` | `unified`, `side_by_side`, or `both` |
 | `SKIM_BENCH_MOTION` | `line` | `line` (`j`), `half_page`, `page`, `file` — scroll only |
@@ -79,10 +84,14 @@ synchronous highlighting, stats) lives in `src/testing/bench_support.zig`.
 | `SKIM_BENCH_SIDEBAR` | `0` | Open the PR sidebar (80 PRs) beside the diff — scroll only |
 | `SKIM_BENCH_SHIFT` | `0` | Rows per step, overriding `_MOTION`: models coalesced keystrokes — scroll only |
 | `SKIM_BENCH_UP` | `0` | Scroll toward the top of the diff instead of the bottom |
-| `SKIM_BENCH_ITERS` / `_WARMUP` | 200 / 20 | Sample counts |
+| `SKIM_BENCH_ITERS` / `_WARMUP` | 200 / 20 | Sample counts (all benches) |
 | `SKIM_BENCH_PAGES` / `_PAGE_MS` | 120 / 40 | Keystroke count and repeat interval — highlight-scroll only |
 | `SKIM_BENCH_SBS` | `0` | Side-by-side view — highlight-scroll only |
 | `SKIM_BENCH_DRAIN_KBPS` | `0` | Terminal consumption rate; `0` writes to memory — highlight-scroll only |
+| `SKIM_BENCH_PRS` | 300 | Open PRs seeded into the fixture DB (min 10) — pr-flip only |
+| `SKIM_BENCH_DIFFS` | 32 | Distinct synthetic diffs, reused round-robin across PRs — pr-flip only |
+| `SKIM_BENCH_ENFORCE` | `0` | Exit 1 when any p95 is over budget (ReleaseFast only) — pr-flip only |
+| `SKIM_BENCH_BUDGET_SCALE` | 100 | Percent applied to every budget, e.g. 150 on a slow box — pr-flip only |
 
 `bench_highlight_scroll` exists because the other two cannot see smoothness:
 they render against a writer that never blocks, with highlighting either fully
@@ -92,6 +101,13 @@ at a fixed rate, so a write blocks the way it does against a slow terminal or an
 ssh link — which is what puts `FramePacer` under load. It reports pop-in (share
 of visible rows still unstyled when a frame is drawn), the spread of frame gaps,
 and keystroke-to-frame lag. **A p99 frame gap far above p50 is the stutter.**
+
+`bench_pr_flip` seeds a throwaway SQLite store under `/tmp` (no `gh`, no git,
+`~/.skim` untouched) and drives the real paths: `pr_surface.openAt`, the
+sidebar reload and filter, `sidebar/render.draw`, and `pr_surface.planFlip` +
+`App.installPrDiff` for a flip. Its p50/p95/p99 math and budget checks live in
+the unit-tested `src/testing/bench_budget.zig`. Cold paint excludes process
+exec, and the sync and prefetch workers are not running while it measures.
 
 **`bytes/frame` is the number to watch.** It is what the terminal emulator has
 to parse, and on a slow terminal or over SSH it dominates everything measured
@@ -129,6 +145,9 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 - **Agent UI** (`agent/`): Chat panel, markdown rendering, message history
 - **MCP Server** (`mcp/`): Model Context Protocol for external agent integration
 - **Sockets** (`net.zig`): Non-blocking loopback TCP for the MCP server/clients
+- **PR Review** (`pr/`): `skim pr` sidebar — SQLite store (`db/`), background
+  GitHub sync (`sync/`), diff prefetch + parsed LRU (`prefetch/`), sidebar
+  state/controller/render (`sidebar/`), and the flip between PR diffs (`flip.zig`)
 - **CLI Commands** (`cli/`): Session management, comment operations
 - **Logging** (`logging.zig`): File logging to `~/.skim/*.log`
 
@@ -334,7 +353,7 @@ See [docs/architecture.md](docs/architecture.md).
 
 ### Modal State Machine
 
-- Modes: normal, comment, search, visual, command_palette, help, branch_selection, commit_selection, graphite_stack, agent, model_selection, agent_selection, session_picker
+- Modes: normal, comment, search, visual, command_palette, help, branch_selection, commit_selection, graphite_stack, agent, model_selection, agent_selection, session_picker, pr_review
 - Mode handlers in `src/modes/`
 - When adding modes: update `Mode` enum, create handler file, update status bar
 

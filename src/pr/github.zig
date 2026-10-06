@@ -1,6 +1,6 @@
-//! GitHub backend: shells out to the `gh` CLI and hands the raw JSON to the
-//! pure parser in `parse.zig`. This is the imperative shell — the only IO in
-//! the PR data layer lives here.
+//! GitHub backend: shells out to `gh` and `git` for the sync worker's GraphQL
+//! queries, prefetch fetches, PR review data and pending-review mutations. The
+//! imperative shell; parsing lives in `review_parse.zig` and `sync/`.
 
 const std = @import("std");
 const review_parse = @import("review_parse.zig");
@@ -11,26 +11,10 @@ const skim_io = @import("skim_io");
 
 pub const Error = error{ GhCommandFailed, GhNotFound };
 
-const default_limit = 50;
 /// stdout/stderr cap for one `gh` call.
 const max_gh_output_bytes = 16 * 1024 * 1024;
 
 const json_fields = "number,title,author,headRefName,baseRefName,isDraft,updatedAt,url,statusCheckRollup";
-
-/// List open PRs as the raw JSON `gh` emits, so callers can persist it verbatim
-/// (e.g. to the on-disk cache) before parsing. On success the `.ok` bytes are
-/// owned by the caller; on failure the error is classified into a `GhErrorKind`
-/// (AD-8) so callers surface an actionable message via `kindMessage`.
-pub fn listPullRequestsRaw(allocator: std.mem.Allocator) !GhFetch {
-    var buf: [16]u8 = undefined;
-    const limit = std.fmt.bufPrint(&buf, "{d}", .{default_limit}) catch unreachable;
-
-    const argv = [_][]const u8{
-        "gh", "pr", "list", "--limit", limit, "--json", json_fields,
-    };
-
-    return runGhCapture(allocator, &argv, "gh pr list");
-}
 
 /// Fetch a PR's head into a stable local ref (`refs/skim/pr-<number>`) without
 /// touching the working tree, and fetch its base branch so `base...head` can be

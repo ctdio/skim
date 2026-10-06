@@ -161,11 +161,12 @@ pub fn renderHelpPopup(app: *App, win: vaxis.Window) !void {
         try content_lines.append(app.allocator, .{ .section = "PR SIDEBAR" });
         const sidebar_bindings = [_]Binding{
             .{ .key = "Tab / ^w h", .desc = "Focus the sidebar (from the diff)" },
-            .{ .key = "l / Tab", .desc = "Focus the diff (from the sidebar)" },
+            .{ .key = "l / Tab / ^w l", .desc = "Focus the diff (from the sidebar)" },
             .{ .key = "^b", .desc = "Hide / show the sidebar" },
             .{ .key = "j / k", .desc = "Move between rows" },
             .{ .key = "J / K", .desc = "Next / previous PR in the stack" },
             .{ .key = "^n / ^p", .desc = "Next / previous stack" },
+            .{ .key = "^d / ^u", .desc = "Half-page down / up" },
             .{ .key = "gg / G", .desc = "Top / bottom" },
             .{ .key = "Space / za", .desc = "Expand / collapse a stack" },
             .{ .key = "h", .desc = "Collapse the stack" },

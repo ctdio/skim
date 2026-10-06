@@ -2071,7 +2071,7 @@ pub const UI = struct {
             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, post_seg), .style = .{ .fg = Color.magenta } });
         }
 
-        // In-flight refetch (`r`): mirror the picker's muted loading note.
+        // In-flight refetch (`r`): a muted loading note.
         if (pr.review_controller.refreshInFlight(&app.state.review)) {
             try segments.append(app.allocator, .{ .text = try RenderUtils.copyFrameText(app, " │ refreshing…"), .style = .{ .fg = Color.dim } });
         }

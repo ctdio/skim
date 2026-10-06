@@ -49,7 +49,7 @@ pub fn migrate(db: *sqlite.Db) MigrateError!void {
 const migration_1 =
     \\CREATE TABLE repo (
     \\  id               INTEGER PRIMARY KEY,
-    \\  key              TEXT NOT NULL UNIQUE,      -- cache.keyFor(): origin URL or repo root
+    \\  key              TEXT NOT NULL UNIQUE,      -- git.repoKey(): origin URL or repo root
     \\  owner            TEXT NOT NULL,
     \\  name             TEXT NOT NULL,
     \\  viewer_login     TEXT,                      -- from GraphQL viewer.login

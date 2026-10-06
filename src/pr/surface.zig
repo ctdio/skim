@@ -12,7 +12,7 @@ const store = @import("db/store.zig");
 const types = @import("db/types.zig");
 const sync = @import("sync/sync.zig");
 const github = @import("github.zig");
-const cache = @import("cache.zig");
+const git = @import("git.zig");
 const config = @import("../config.zig");
 const sidebar_controller = @import("sidebar/controller.zig");
 const sidebar_state = @import("sidebar/state.zig");
@@ -215,7 +215,7 @@ pub fn open(surface: *Surface, params: OpenParams) void {
     const sidebar = params.sidebar;
     sidebar.unavailable = .none;
 
-    const url = cache.keyFor(allocator) orelse {
+    const url = git.repoKey(allocator) orelse {
         sidebar.unavailable = .not_github;
         return;
     };
@@ -624,8 +624,7 @@ pub fn requestSync(surface: *Surface) void {
     worker.requestSync();
 }
 
-/// `gh pr view <n> --web` for the selected PR. Blocks until `gh` exits
-/// (moved unchanged from the picker).
+/// `gh pr view <n> --web` for the selected PR. Blocks until `gh` exits.
 pub fn openInBrowser(sidebar: *const SidebarState) void {
     const record = sidebar_controller.selectedPr(sidebar) orelse return;
     var buf: [16]u8 = undefined;

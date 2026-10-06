@@ -1,8 +1,8 @@
 //! A tiny left-to-right cell writer over a `vaxis.Window` row, shared by the PR
-//! picker (`render.zig`) and the review overlays (`review_render.zig`). It clips
-//! at the window's right edge and, when `bg` is set, forces that background onto
-//! every cell so a popup layers cleanly over the diff underneath. Pure drawing —
-//! it only writes cells.
+//! sidebar (`sidebar/render.zig`) and the review overlays (`review_render.zig`).
+//! It clips at the window's right edge and, when `bg` is set, forces that
+//! background onto every cell so a popup layers cleanly over the diff
+//! underneath. Pure drawing — it only writes cells.
 
 const std = @import("std");
 const vaxis = @import("vaxis");

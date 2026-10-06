@@ -105,19 +105,101 @@ skim HEAD~5
 
 ### Reviewing Pull Requests
 
-Boot directly into a PR review, or browse open PRs interactively. Requires the
-GitHub CLI (`gh`) on PATH, authenticated for the repo.
+`skim pr` opens a sidebar of the repository's open PRs, grouped into stacks,
+beside the diff. Moving the cursor previews the PR under it; `Enter` opens it.
+From a running session, `:pr` in the command palette opens the same sidebar.
+Requires the GitHub CLI (`gh`) on PATH, authenticated for the repo.
 
 ```bash
-# Review PR #42 of the CWD repo's origin
+# Browse open PRs in the sidebar
+skim pr
+
+# Open the sidebar with PR #42 selected and opened
 skim pr 42
 
-# Review a PR by URL (must match the origin remote's repository)
+# Same, by URL (must match the origin remote's repository)
 skim pr https://github.com/<owner>/<repo>/pull/42
-
-# Open the interactive PR picker (lists open PRs to choose from)
-skim pr
 ```
+
+The list is read from a local SQLite cache, `~/.skim/prs.db`, so it paints
+immediately and is kept in sync with GitHub in the background. Diffs for the
+PRs near the cursor are fetched ahead of time, so flipping between them does
+not wait on git. The cache is safe to delete at any time; skim rebuilds it on
+the next run (a corrupt file is moved aside as `prs.db.corrupt-*`). The old
+`~/.skim/cache/` directory is no longer used and can be deleted.
+
+#### Sidebar Keys
+
+| Key                      | Action                                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `j` / `k`                | Move down / up (the diff previews the PR under the cursor)                                              |
+| `J` / `K`                | Next / previous PR in the stack                                                                         |
+| `Ctrl-n` / `Ctrl-p`      | Next / previous stack                                                                                   |
+| `Ctrl-d` / `Ctrl-u`      | Half-page down / up                                                                                     |
+| `gg` / `G`               | Top / bottom                                                                                            |
+| `Space` / `za`           | Expand / collapse a stack                                                                               |
+| `h`                      | Collapse the stack                                                                                      |
+| `Enter`                  | Open the selected PR and focus the diff                                                                 |
+| `l` / `Tab` / `Ctrl-w l` | Focus the diff (marks the shown PR seen)                                                                |
+| `S`                      | Toggle the whole stack's diff ⇄ the PR's own                                                            |
+| `c`                      | Changes since seen: the new commits, or fold the unchanged files                                        |
+| `m`                      | Mark seen / unseen                                                                                      |
+| `f`                      | Filter prompt (see below)                                                                               |
+| `F`                      | Next filter preset                                                                                      |
+| `R`                      | Sync now                                                                                                |
+| `o`                      | Open the selected PR in the browser                                                                     |
+| `Ctrl-b`                 | Hide / show the sidebar                                                                                 |
+| `Esc` / `Ctrl-c`         | Back: close the prompt, restore the preset, then exit (`skim pr`) or return to the working diff (`:pr`) |
+
+#### Diff Keys While the Sidebar Is Open
+
+| Key                | Action                                                                                                                       |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `Tab` / `Ctrl-w h` | Focus the sidebar (`Tab` also shows it if hidden)                                                                            |
+| `Shift-Tab`        | Cycle the hunk filter (`Tab` is taken by sidebar focus)                                                                      |
+| `Ctrl-b`           | Hide / show the sidebar                                                                                                      |
+| `b` / `PageUp`     | Page up (`Ctrl-b` is taken by the sidebar toggle)                                                                            |
+| `S` / `c` / `m`    | As in the sidebar, for the PR shown (replaces their usual diff meanings, e.g. `S` no longer opens the Graphite stack picker) |
+
+Every other diff key works as usual, including the [PR Review](#pr-review) keys.
+
+#### Filters
+
+The `f` prompt takes a space-separated query; all terms must match. Prefix a
+term with `-` to negate it.
+
+| Term                                                         | Matches                                                      |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| `is:draft` / `ready` / `stacked` / `seen` / `changed`        | Draft state, stack membership, seen state, pushed since seen |
+| `author:@me` / `author:<login>`                              | PR author                                                    |
+| `review:requested` / `requested-me` / `requested-team`       | Review requested from you or one of your teams               |
+| `review:approved` / `changes` / `none` / `mine-approved`     | Review decision, or your approval of the current head        |
+| `ci:success` / `failure` / `pending` / `none`, `ci:!failure` | CI rollup (`!` negates the value)                            |
+| `label:<name>`, `base:<branch>`                              | Label, base branch                                           |
+| `size:<n>`, `size:<100`, `size:10..200`                      | Additions + deletions                                        |
+| `stack:any` / `top` / `bottom`                               | Position in a stack                                          |
+| `word`, `"quoted text"`                                      | Title, author, head or base branch of any PR in the stack    |
+
+Qualifiers apply to the stack's review target; text terms match when any PR in
+the stack matches. Name presets in `~/.skim/config.json` and cycle them with
+`F`:
+
+```json
+{
+  "pr_filters": {
+    "default": "ready",
+    "presets": {
+      "ready": "-is:draft review:requested ci:!failure",
+      "mine": "author:@me",
+      "all": ""
+    }
+  }
+}
+```
+
+Presets cycle in file order. `default` names the preset applied when the
+sidebar opens; without it the first preset is used, and with no presets the
+sidebar starts unfiltered.
 
 ### As a Git Pager
 
@@ -210,7 +292,7 @@ conversation rather than a pile of notes.
 
 #### PR Review
 
-Available when reviewing a pull request (`skim` launched against a PR). Keys marked _(on thread)_ act on the review thread under the cursor.
+Available when a pull request is open in the diff (`skim pr`). Keys marked _(on thread)_ act on the review thread under the cursor.
 
 | Key                   | Action                                                    |
 | --------------------- | --------------------------------------------------------- |

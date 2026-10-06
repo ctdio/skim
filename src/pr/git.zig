@@ -1,9 +1,18 @@
-//! Shared git shell-out for the PR data layer. The disk cache (`cache.zig`) and
-//! the GitHub backend (`github.zig`) both need to resolve repo identity from a
-//! single line of `git` stdout, so the helper lives here rather than in either.
+//! Shared git shell-out for the PR data layer. The PR surface (`surface.zig`)
+//! and the GitHub backend (`github.zig`) both need to resolve repo identity
+//! from a single line of `git` stdout, so the helper lives here rather than in
+//! either.
 
 const std = @import("std");
 const skim_io = @import("skim_io");
+
+/// Stable identity for the repo in the process cwd: the origin remote URL when
+/// present, else the repo root path. Null outside a git repo. Caller owns.
+/// Used as `repo.key` in the PR database.
+pub fn repoKey(allocator: std.mem.Allocator) ?[]u8 {
+    if (line(allocator, &.{ "git", "config", "--get", "remote.origin.url" })) |url| return url;
+    return line(allocator, &.{ "git", "rev-parse", "--show-toplevel" });
+}
 
 /// Run a git command and return its single trimmed line of stdout, or null on
 /// any failure/empty output. Caller owns the result.

@@ -43,9 +43,9 @@ world_setup() {
   : >"$WORK/fake-gh.conf"
   cp "$WORLD_LIB_DIR/fake-gh" "$WORK/bin/gh"
   chmod +x "$WORK/bin/gh"
-  # Shadow a real Graphite CLI: the PR picker runs `gt state` synchronously on
-  # every list load, which stalls the UI for ~0.5s and breaks key timing.
-  # Failing makes skim fall back to base_ref stacking, as without gt.
+  # Shadow a real Graphite CLI so a user's gt never runs inside the world (the
+  # Graphite stack view and diff refreshes shell out to it synchronously).
+  # Failing reads as "gt not installed".
   printf '#!/bin/sh\nexit 1\n' >"$WORK/bin/gt"
   chmod +x "$WORK/bin/gt"
 

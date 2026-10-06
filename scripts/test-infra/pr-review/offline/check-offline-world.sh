@@ -9,7 +9,7 @@
 #      `pr-anchor`, `pr-comment`), and the failure path classifies as network
 #   5. the Zig lane-test fakes planned in testing-strategy.md (fake_gh_script /
 #      fake_git_script) dispatch correctly on the argv skim really sends
-#   6. (tmux present) `skim pr` renders the picker and enters PR 1 offline
+#   6. (tmux present) `skim pr` renders the PR sidebar and enters PR 1 offline
 #
 # Usage:  bash scripts/test-infra/pr-review/offline/check-offline-world.sh
 # Exit 0 = PASS (or SKIP lines for missing tmux/skim); Exit 1 = FAIL.
@@ -219,7 +219,7 @@ check_tui_smoke() {
   if wait_for_pane "Alpha change" 10 && pane_has "Bravo change"; then
     pass "tui: skim pr lists both fake PRs"
   else
-    fail "tui: picker never showed the fake PRs: $(pane | head -5)"
+    fail "tui: sidebar never showed the fake PRs: $(pane | head -5)"
     skim_stop
     return
   fi

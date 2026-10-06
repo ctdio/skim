@@ -11,8 +11,9 @@ This document provides a comprehensive overview of Skim's codebase architecture,
 5. [Adding New Features](#adding-new-features)
 6. [Code Organization Principles](#code-organization-principles)
 7. [AI Integration Architecture](#ai-integration-architecture)
-8. [Logging System](#logging-system)
-9. [Performance Benchmarks](#performance-benchmarks)
+8. [PR Review Surface](#pr-review-surface)
+9. [Logging System](#logging-system)
+10. [Performance Benchmarks](#performance-benchmarks)
 
 ---
 
@@ -191,6 +192,11 @@ src/
 ├── rendering/         - Diff view rendering (unified, side-by-side)
 ├── highlighting/      - Syntax highlighting (tree-sitter)
 ├── comments/          - Comment storage and editing
+├── pr/                - `skim pr`: PR sidebar, review threads, flip
+│   ├── db/            - SQLite store over ~/.skim/prs.db (schema, migrations, types)
+│   ├── sync/          - Background GitHub sync worker (pure planner + gh shell)
+│   ├── prefetch/      - Background head fetch + diff_cache, priority, parsed LRU
+│   └── sidebar/       - Sidebar state, controller, layout, render
 ├── testing/           - Snapshot testing infrastructure
 └── queries/           - Tree-sitter query files (.scm)
 ```
@@ -232,6 +238,7 @@ const Mode = enum {
     model_selection,   // AI model picker
     agent_selection,   // Agent application picker
     session_picker,    // Session resumption picker
+    pr_review,         // PR sidebar has focus (`skim pr`)
 };
 ```
 
@@ -907,6 +914,72 @@ skim session comment list   # List all comments
 
 ---
 
+## PR Review Surface
+
+`skim pr` opens a sidebar of the repository's open PRs beside the diff. The
+sidebar paints from a local SQLite cache and never waits on the network;
+flipping between PRs installs a pre-fetched, usually pre-parsed diff without
+spawning git.
+
+### Data flow
+
+```
+gh (GraphQL) ──► SyncWorker ──► prs.db (repo, pr, pr_seen) ──► surface.reload ──► sidebar snapshot ──► filter ──► rows
+                                                                       ▲
+sidebar cursor ─► priority targets ─► PrefetchWorker ─► git fetch refs/skim/pr-N ─► merge_base_cache + diff_cache + thread_cache
+                                                                       │
+                                     flip: planFlip ─► ParsedLru hit | parse diff_cache bytes ─► App.installPrDiff
+```
+
+- **Sync** (`pr/sync/`): `planner.zig` makes every decision as pure functions
+  (paging, watermarks, reconcile and hydrate order); `sync.zig` moves bytes
+  between `gh` and the store. Each write commits on its own; no transaction
+  spans a `gh` call.
+- **Sidebar** (`pr/sidebar/`): `state.zig` is pure data on `App.state.sidebar`;
+  `controller.zig` is free functions over it (cursor, stacks, filter prompt,
+  presets); `render.zig` draws; `layout.zig` splits the screen. The query
+  language (`pr/filter_query.zig`) evaluates qualifiers on a stack's review
+  target and text terms on any member.
+- **Prefetch** (`pr/prefetch/`): the UI pushes the PRs nearest the cursor as
+  targets; the worker fetches their heads in batches, writes `git diff` bytes
+  into `diff_cache`, refreshes review threads for the nearest PRs and evicts by
+  cursor distance to stay under budget.
+- **Flip** (`pr/flip.zig`, `pr/flip_controller.zig`, `App.previewPr`): cursor
+  moves are debounced into previews. `pr_surface.planFlip` resolves a hit from
+  `ParsedLru` (the last 8 parsed sets) or by parsing cached bytes;
+  `App.installPrDiff` swaps the files in, enters the review session from the
+  cached threads and restores local notes. An outgoing set that came from the
+  cache is parked in the LRU. A miss streams the diff with git as before; the prefetch worker fills
+  the cache for the next visit.
+
+### DiffKey
+
+A cached diff is identified by `DiffKey{ merge_base_oid, head_oid }`
+(`db/types.zig`), not by PR number, so a force-push or a base change is a new
+key and a stale diff is never shown. `priority.diffKeyFor` gives the
+(base tip, head) pair for a view (the PR's own diff, the whole stack, or since
+seen); `merge_base_cache` maps that pair to the merge base that completes the
+key.
+
+### Threads and the store (AD-2)
+
+`prs.db` is opened once per thread: the UI (`pr/surface.zig`), the sync worker
+and the prefetch worker each own a `Store` connection, with SQLite in WAL mode
+so readers never block the writers. Workers never touch UI state. Each worker
+bumps an atomic generation counter after it commits; `App.tickPrSurface` polls
+`surface.poll`, which reloads the sidebar snapshot only when a generation
+moved. Git and gh children run in their own process group
+(`pr/child_group.zig`) so shutdown can cancel them without waiting.
+
+### Web build (D4)
+
+The wasm build has no SQLite. Everything the App imports for the PR surface is
+SQLite-free (`flip.zig`, `sidebar/state.zig`, `sidebar/controller.zig`,
+`db/types.zig`), and `pr/surface_stub.zig` replaces `surface.zig` on web, so
+the store, the workers and `github.zig` are never analyzed there.
+
+---
+
 ## Logging System
 
 ### Architecture
@@ -991,6 +1064,33 @@ SKIM_BENCH_VIEW=unified \
 SKIM_BENCH_SEARCH="return" \
 zig build bench-render-content -Doptimize=ReleaseFast
 ```
+
+### PR flip benchmark
+
+`bench-pr-flip` seeds a throwaway SQLite store in `/tmp` (300 PRs by default,
+no `gh`, no git, `~/.skim` untouched) and measures the PR surface against the
+NFR-1 budgets (p95):
+
+| Measurement     | What is timed                                                  | Budget  |
+| --------------- | -------------------------------------------------------------- | ------- |
+| `cold paint`    | `pr_surface.openAt` (store open + reload + filter) + first paint | < 50 ms |
+| `flip (db hit)` | `planFlip` parsing cached bytes + `App.installPrDiff` + paint  | < 30 ms |
+| `flip (lru hit)`| `planFlip` from `ParsedLru` + `App.installPrDiff` + paint      | < 5 ms  |
+| `reload+filter` | `pr_surface.reload` + applying the "ready" query               | < 2 ms  |
+| `sidebar draw`  | `sidebar/render.draw` for one cursor move                      | < 1 ms  |
+
+```bash
+zig build bench-pr-flip -Doptimize=ReleaseFast
+
+# Exit 1 when any p95 is over budget; scale every budget by a percentage
+SKIM_BENCH_ENFORCE=1 SKIM_BENCH_BUDGET_SCALE=150 zig build bench-pr-flip -Doptimize=ReleaseFast
+```
+
+Cold paint excludes process exec and terminal setup, and the sync and prefetch
+workers are not running while it measures. Knobs: `SKIM_BENCH_PRS`,
+`SKIM_BENCH_DIFFS`, `SKIM_BENCH_ITERS` / `_WARMUP`, `SKIM_BENCH_WIDTH` /
+`_HEIGHT`, `SKIM_BENCH_FILES` / `_HUNKS` / `_LINES` (10 / 4 / 50 per PR).
+The percentile math and budget checks are in `src/testing/bench_budget.zig`.
 
 ### Performance Techniques
 

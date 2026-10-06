@@ -297,7 +297,7 @@ fn printPrHelp() !void {
         \\    space / za           expand or collapse a stack
         \\    h                    collapse the stack
         \\    enter                open the selected PR (moving the cursor previews it)
-        \\    l / tab              focus the diff
+        \\    l / tab / ctrl-w l   focus the diff
         \\    S                    toggle the whole stack's diff
         \\    c                    changes since seen: the new commits, or fold
         \\                         the files that did not change
@@ -311,7 +311,9 @@ fn printPrHelp() !void {
         \\
         \\DIFF KEYS (while the sidebar is open):
         \\    tab / ctrl-w h       focus the sidebar
+        \\    shift-tab            cycle the hunk filter (tab is taken)
         \\    ctrl-b               hide / show the sidebar
+        \\    b / page-up          page up (ctrl-b is taken)
         \\    S / c / m            as in the sidebar, for the PR shown
         \\
         \\Requires the GitHub CLI (`gh`) on PATH, authenticated for the repo.
@@ -500,7 +502,7 @@ const Config = struct {
     mcp_port: ?u16, // Port to connect to MCP server
     serve_port: ?u16, // Port to run MCP server on
     agent_only: bool, // Start in agent-only mode (no diff view)
-    pr_only: bool = false, // Start in PR picker mode (`skim pr`)
+    pr_only: bool = false, // Start on the PR sidebar (`skim pr`)
     pr_request: ?u32 = null, // Boot directly into this PR number (`skim pr <n|url>`)
 
     fn deinit(self: *const Config) void {

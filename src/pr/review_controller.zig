@@ -22,10 +22,10 @@ const skim_io = @import("skim_io");
 pub const AnchoredThread = thread_placement.AnchoredThread;
 
 /// Params for entering a PR. `base_ref`/`title`/`url` are known when entering
-/// from the picker (the PullRequest row carries them). For `skim pr <number>`
-/// boot they are not — `base_ref == ""` signals the worker to resolve it via
+/// from the sidebar (the PR's DB row carries them). For `skim pr <number>`
+/// boot they may not be — `base_ref == ""` signals the worker to resolve it via
 /// `gh pr view` first (a three-call chain: fetchPrByNumber -> fetchRef ->
-/// fetchReviewData). Picker entry skips the first call.
+/// fetchReviewData). Sidebar entry skips the first call.
 pub const EnterParams = struct {
     number: u32,
     base_ref: []const u8 = "",

@@ -209,6 +209,30 @@ pub fn build(b: *std.Build) void {
     const highlight_scroll_step = b.step("bench-highlight-scroll", "Run highlight paging benchmark");
     highlight_scroll_step.dependOn(&highlight_scroll_run.step);
 
+    // PR sidebar + flip benchmark (NFR-1). SKIM_BENCH_ENFORCE=1 fails the
+    // step when a p95 is over budget.
+    const pr_flip_exe = b.addExecutable(.{
+        .name = "bench_pr_flip",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_pr_flip.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    pr_flip_exe.root_module.addImport("vaxis", vaxis);
+    pr_flip_exe.root_module.addImport("tree-sitter", tree_sitter);
+    pr_flip_exe.root_module.addImport("build_options", build_options_module);
+    pr_flip_exe.root_module.addImport("skim_io", skim_io_module);
+    for (grammars) |grammar| {
+        pr_flip_exe.root_module.linkLibrary(grammar);
+    }
+    linkSqlite(pr_flip_exe.root_module, sqlite);
+    pr_flip_exe.root_module.link_libc = true;
+    b.installArtifact(pr_flip_exe);
+    const pr_flip_run = b.addRunArtifact(pr_flip_exe);
+    const pr_flip_step = b.step("bench-pr-flip", "Run PR sidebar + flip benchmark");
+    pr_flip_step.dependOn(&pr_flip_run.step);
+
     // Agent render benchmark executable
     const agent_render_exe = b.addExecutable(.{
         .name = "bench_agent_render",
@@ -792,6 +816,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_frame_pacer_tests = b.addRunArtifact(frame_pacer_tests);
     test_step.dependOn(&run_frame_pacer_tests.step);
+
+    // Percentile + budget math for bench_pr_flip. Pure, unlike
+    // bench_support.zig (which imports app.zig), so it roots its own step.
+    const bench_budget_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testing/bench_budget.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_bench_budget_tests = b.addRunArtifact(bench_budget_tests);
+    test_step.dependOn(&run_bench_budget_tests.step);
 
     // The event loop's timed queue wait. Roots its own step because a test
     // block reachable only through src/main.zig is not collected.
